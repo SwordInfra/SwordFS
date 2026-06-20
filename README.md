@@ -1,4 +1,4 @@
-<p align="center"><a href="https://github.com/MetanoiaLab/SwordFS"><img alt="SwordFS Logo" src="docs/en/images/swordfs-logo.png" width="50%" /></a></p>
+<p align="center"><a href="https://github.com/MetanoiaLab/SwordFS"><img alt="SwordFS Logo" src="docs/en/images/swordfs-logo.svg" width="80%" /></a></p>
 <p align="center">
 
 # SwordFS
