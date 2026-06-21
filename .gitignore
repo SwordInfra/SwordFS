@@ -52,11 +52,16 @@ Makefile
 install_manifest.txt
 compile_commands.json
 
+# Third Party
+third_party/
+third_party/*
+
 # Temporary files
 *.tmp
 *.log
 *.bak
 *.swp
+.DS_Store
 
 # vcpkg
 vcpkg_installed/
@@ -67,3 +72,6 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# git
+.gitmessage
