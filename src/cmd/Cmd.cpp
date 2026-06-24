@@ -10,7 +10,7 @@
 
 namespace swordfs::cmd {
 
-// ── Global options (applied before the subcommand name) ───────────────
+// Global options (applied before the subcommand name) 
 static const std::vector<OptionDef> kGlobalOptions = {
   {"-h, --help",        "",    "Show this help message"},
   {"-V, --version",     "",    "Show version information"},

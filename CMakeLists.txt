@@ -17,8 +17,8 @@ find_path(FUSE3_INCLUDE_DIR fuse.h PATH_SUFFIXES fuse3)
 # ── Version header ─────────────────────────────────────────────────────
 
 configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/swordfs_version.h.in
-  ${CMAKE_CURRENT_BINARY_DIR}/swordfs_version.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/SwordfsVersion.h.in
+  ${CMAKE_CURRENT_BINARY_DIR}/SwordfsVersion.h
 )
 
 # ── SwordFS binary ─────────────────────────────────────────────────────
