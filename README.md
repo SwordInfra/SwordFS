@@ -1,4 +1,4 @@
-<p align="center"><a href="https://github.com/MetanoiaLab/SwordFS"><img alt="SwordFS Logo" src="docs/en/images/swordfs-logo.svg" width="80%" /></a></p>
+<p align="center"><a href="https://github.com/SwordInfra/SwordFS"><img alt="SwordFS Logo" src="docs/en/images/swordfs-logo.svg" width="80%" /></a></p>
 
 # SwordFS
 
@@ -89,7 +89,7 @@ All file-system consistency semantics (atomic `rename`, `fsync` durability, dire
 ### Clone
 
 ```bash
-git clone --recurse-submodules https://github.com/MetanoiaLab/SwordFS.git
+git clone --recurse-submodules https://github.com/SwordInfra/SwordFS.git
 cd SwordFS
 ```
 
