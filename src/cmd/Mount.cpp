@@ -2,167 +2,162 @@
 // Licensed under the Apache License, Version 2.0.
 
 // SwordFS mount subcommand
-//
-// Usage: swordfs mount [options] <mountpoint>
-//
-// Modeled after JuiceFS cmd/mount.go and cmd/mount_unix.go.
-// Orchestrates: argument parsing → mountpoint validation → daemon mode →
-//               FUSE mount & event loop (via libfuse low-level API).
 
-#include "cmd/Cmd.hpp"
-#include "fuse/Fs.hpp"
-#include "utils/Logging.hpp"
-#include "utils/Config.hpp"
-#include <swordfs_version.h>
-
-#define FUSE_USE_VERSION 31
-#include <fuse_opt.h>
-
+#include <fcntl.h>
+#include <folly/portability/Filesystem.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include <fcntl.h>
 #include <unistd.h>
-#include <signal.h>
 
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <system_error>
 
-#include <folly/Format.h>
+#define FUSE_USE_VERSION 31
+#include <fuse_lowlevel.h>
+#include <fuse_opt.h>
+#include <swordfs_version.h>
+
+#include "cmd/Cmd.hpp"
+#include "fuse/Vfs.hpp"
+#include "utils/Config.hpp"
+#include "utils/Fuse.hpp"
+#include "utils/Logging.hpp"
+
+using namespace swordfs::utils;
 
 namespace swordfs::cmd::mount {
 
-// ── Mount-specific option flags ────────────────────────────────────────
+// Mount-specific option flags
+#define MOUNT_OPT(t, p, v) {t, offsetof(struct MountFlags, p), v}
+
+enum {
+  kHelp = 0,
+  kForeground = 1,
+  kVersion = 2,
+};
 
 struct MountFlags {
-  int help{0};
-  int foreground{0};   // -f, --foreground: stay in foreground (default: daemonize)
+  bool action_processed{
+      false};  // true if MountOptProc handled --help or --version
+  int foreground{
+      0};  // -f, --foreground: stay in foreground (default: daemonize)
   char* mountpoint{};
 };
 
-enum {
-  kHelp       = 0,
-  kForeground = 1,
-  kVersion    = 2,
-};
-
-#define MOUNT_OPT(t, p, v) { t, offsetof(struct MountFlags, p), v }
-
 static struct fuse_opt mount_opts[] = {
-  MOUNT_OPT("-h",            help,       kHelp),
-  MOUNT_OPT("--help",        help,       kHelp),
-  MOUNT_OPT("-f",            foreground, kForeground),
-  MOUNT_OPT("--foreground",  foreground, kForeground),
-  FUSE_OPT_KEY("-V",         kVersion),
-  FUSE_OPT_KEY("--version",  kVersion),
-  FUSE_OPT_END
-};
+    FUSE_OPT_KEY("-h", kHelp),
+    FUSE_OPT_KEY("--help", kHelp),
+    MOUNT_OPT("-f", foreground, kForeground),
+    MOUNT_OPT("--foreground", foreground, kForeground),
+    FUSE_OPT_KEY("-V", kVersion),
+    FUSE_OPT_KEY("--version", kVersion),
+    FUSE_OPT_END};
 
-// ── Mountpoint validation ──────────────────────────────────────────────
-
-static bool IsFuseMounted(const std::string& mp) {
-  // Check /proc/mounts for an existing FUSE mount
-  FILE* f = std::fopen("/proc/mounts", "r");
-  if (!f) return false;
-  char line[4096];
-  while (std::fgets(line, sizeof(line), f)) {
-    // Each line: device mountpoint fstype ...
-    char dev[256], path[256], fstype[32];
-    if (std::sscanf(line, "%255s %255s %31s", dev, path, fstype) == 3) {
-      if (mp == path) {
-        std::fclose(f);
-        return true;
-      }
-    }
+static int ValidateMountpoint(const std::string& mountpoint) {
+  if (mountpoint[0] == '-') {
+    SWORDFS_PROMPT_INFO << "Error: mountpoint must not start with '-'";
+    return -1;
   }
-  std::fclose(f);
-  return false;
-}
-
-static bool IsStaleMount(const std::string& mp) {
-  // Check if the mountpoint is listed but the FUSE connection is dead.
-  // A simple heuristic: try to stat the mountpoint; if it returns ENOTCONN
-  // the FUSE daemon is gone but the kernel still holds the mount.
-  struct stat st;
-  if (::stat(mp.c_str(), &st) == -1 && errno == ENOTCONN) {
-    return true;
-  }
-  return false;
-}
-
-static int ValidateMountpoint(const std::string& mp) {
   // Refuse to mount at the root directory — would break the OS
-  if (mp == "/") {
-    SWORDFS_PROMPT << "Error: refusing to mount at root directory '/'. "
-                      "Mounting at root would render the system unusable.";
+  if (mountpoint == "/") {
+    SWORDFS_PROMPT_INFO << "Error: refusing to mount at root directory '/'. "
+                           "Mounting at root would render the system unusable.";
     return -1;
   }
 
-  struct stat st;
-
-  // Create the mountpoint if it does not exist (like JuiceFS)
-  if (::stat(mp.c_str(), &st) == -1) {
-    if (errno == ENOENT) {
-      if (::mkdir(mp.c_str(), 0755) == 0) {
-        SWORDFS_LOG_INFO << "Created mountpoint '" << mp << "'";
-        return 0;
-      }
-      SWORDFS_PROMPT << "Error: failed to create mountpoint '"
-                     << mp << "': " << std::strerror(errno);
+  if (!folly::fs::exists(mountpoint)) {
+    // Create the mountpoint (and all missing parent directories)
+    std::error_code ec;
+    folly::fs::create_directories(mountpoint, ec);
+    if (ec) {
+      SWORDFS_PROMPT_INFO << "Error: failed to create mountpoint '"
+                          << mountpoint << "': " << ec.message();
       return -1;
     }
-    SWORDFS_PROMPT << "Error: cannot stat mountpoint '"
-                   << mp << "': " << std::strerror(errno);
-    return -1;
-  }
-
-  if (!S_ISDIR(st.st_mode)) {
-    SWORDFS_PROMPT << "Error: mountpoint '" << mp << "' is not a directory";
+  } else if (!folly::fs::is_directory(mountpoint)) {
+    SWORDFS_PROMPT_INFO << "Error: mountpoint '" << mountpoint
+                        << "' is not a directory";
     return -1;
   }
 
   // Must not already be mounted
-  if (IsFuseMounted(mp)) {
-    SWORDFS_PROMPT << "Error: mountpoint '" << mp << "' is already mounted";
+  if (IsFuseMounted(mountpoint)) {
+    SWORDFS_PROMPT_INFO << "Error: mountpoint '" << mountpoint
+                        << "' is already mounted";
     return -1;
   }
 
   // Detect stale mount
-  if (IsStaleMount(mp)) {
-    SWORDFS_PROMPT << "Warning: stale FUSE mount detected at '" << mp << "'. "
-                      "You may need to run 'fusermount3 -u " << mp << "' first.";
+  if (IsStaleMount(mountpoint)) {
+    SWORDFS_PROMPT_INFO << "Warning: stale FUSE mount detected at '"
+                        << mountpoint
+                        << "'. You may need to run 'fusermount3 -u "
+                        << mountpoint << "' first.";
+    return -1;
   }
 
   return 0;
 }
 
-// ── Daemon mode ────────────────────────────────────────────────────────
-
+// Daemon mode
+//
+// Standard double-fork daemonization with pipe-based mount-failure detection.
+// The parent blocks on a pipe: receiving a byte means the mount succeeded.
+// The intermediate child exits immediately so the grandchild is re-parented
+// to PID 1, preventing zombie processes.
+//
+// Returns the write end of the pipe in the grandchild so MountCmd can signal
+// after the mount succeeds; returns -1 on error.
 static int Daemonize() {
+  int pipefd[2];
+  if (::pipe(pipefd) == -1) {
+    SWORDFS_PROMPT_FMT("Error: pipe failed: {}", std::strerror(errno));
+    return -1;
+  }
+
   pid_t pid = ::fork();
   if (pid < 0) {
-    SWORDFS_PROMPT << "Error: fork() failed: " << std::strerror(errno);
+    SWORDFS_PROMPT_FMT("Error: daemonization failed: {}", std::strerror(errno));
+    ::close(pipefd[0]);
+    ::close(pipefd[1]);
     return -1;
   }
 
   if (pid > 0) {
-    // Parent: wait briefly for child to mount, then exit.
-    // The child will exit if mount fails, parent detects via waitpid.
+    // Grandparent: wait for the intermediate child to exit.
+    ::close(pipefd[1]);
+    char buf;
+    ssize_t n = ::read(pipefd[0], &buf, 1);
+    ::close(pipefd[0]);
+    // Reap the intermediate child to avoid a zombie.
     int status;
-    // Sleep a short time for child to either succeed (Daemonize) or fail (exit)
-    ::sleep(1);
-    pid_t w = ::waitpid(pid, &status, WNOHANG);
-    if (w == pid) {
-      // Child exited quickly → mount failed
-      SWORDFS_PROMPT << "Error: daemon failed to mount";
-      return -1;
+    ::waitpid(pid, &status, 0);
+    if (n == 1) {
+      ::_exit(0);
     }
+    SWORDFS_PROMPT_INFO << "Error: daemon failed to mount";
+    return -1;
+  }
+
+  // Intermediate child: fork again and exit to make grandchild an orphan.
+  ::close(pipefd[0]);
+
+  pid = ::fork();
+  if (pid < 0) {
+    ::_exit(1);  // close the pipe (EOF) to signal failure
+  }
+  if (pid > 0) {
+    // Still the intermediate child — exit immediately so grandchild is
+    // adopted by PID 1.
     ::_exit(0);
   }
 
-  // Child: detach from terminal
+  // Grandchild (the actual daemon)
   ::setsid();
   ::signal(SIGHUP, SIG_IGN);
 
@@ -175,92 +170,114 @@ static int Daemonize() {
     if (fd > 2) ::close(fd);
   }
 
-  return 0;
+  return pipefd[1];
 }
 
-// ── FUSE option processor callback ─────────────────────────────────────
-
-static int MountOptProc(void* /*data*/, const char* /*arg*/, int key,
+// --help and --version are FUSE_OPT_KEY entries: they don't map to a
+// MountFlags field but instead trigger an immediate action. MountOptProc
+// handles them and sets flags->action_processed so MountCmd can exit cleanly.
+static int MountOptProc(void* data, const char* /*arg*/, int key,
                         struct fuse_args* /*outargs*/) {
+  auto* flags = static_cast<MountFlags*>(data);
+  if (key == kHelp) {
+    ::swordfs::cmd::CommandCenter::Instance().ShowHelp("mount");
+    flags->action_processed = true;
+    return 0;
+  }
   if (key == kVersion) {
-    fmt::print("SwordFS version {}.{}.{}\n",
-               SWORDFS_VERSION_MAJOR, SWORDFS_VERSION_MINOR,
-               SWORDFS_VERSION_PATCH);
-    return -1;
+    SWORDFS_PROMPT_FMT("SwordFS version {}.{}.{} (libfuse {}.{})",
+                       SWORDFS_VERSION_MAJOR, SWORDFS_VERSION_MINOR,
+                       SWORDFS_VERSION_PATCH, FUSE_MAJOR_VERSION,
+                       FUSE_MINOR_VERSION);
+    flags->action_processed = true;
+    return 0;
   }
   return 1;
 }
 
-// ── Command handler ────────────────────────────────────────────────────
+// Mount the filesystem via libfuse low-level API. Blocks until unmounted.
+int Mount(int argc, char* argv[], int signal_fd) {
+  FuseArgsGuard args(argc, argv);
 
-int MountCmd(const ::swordfs::cmd::CmdArgs& args) {
-  const char* prog = "swordfs";
-
-  // ── Parse mount-specific options ─────────────────────────────────
-
-  MountFlags flags{};
-  struct fuse_args fargs = FUSE_ARGS_INIT(args.argc, args.argv);
-
-  if (fuse_opt_parse(&fargs, &flags, mount_opts, MountOptProc) == -1) {
-    fuse_opt_free_args(&fargs);
+  FuseSessionGuard se(fuse_session_new(
+      args.get(), &::swordfs::fuse::swordfs_ll_ops,
+      sizeof(::swordfs::fuse::swordfs_ll_ops), nullptr));
+  if (!se) {
     return 1;
   }
 
-  if (flags.help) {
-    ::swordfs::cmd::CommandCenter::Instance().ShowHelp(prog, "mount");
-    fuse_opt_free_args(&fargs);
+  char* mountpoint = nullptr;
+  if (args->argc != 1 || args->argv[0][0] == '-') {
+    SWORDFS_PROMPT_INFO << "Error: no mountpoint specified";
+    return 1;
+  } else {
+    mountpoint = args->argv[0];
+  }
+
+  if (fuse_set_signal_handlers(se.get()) != 0) {
+    return 1;
+  }
+
+  if (fuse_session_mount(se.get(), mountpoint) != 0) {
+    return 1;
+  }
+
+  // Signal the parent that the mount succeeded (daemon mode).
+  if (signal_fd >= 0) {
+    char ok = 0;
+    ::write(signal_fd, &ok, 1);
+    ::close(signal_fd);
+  }
+
+  return fuse_session_loop(se.get());
+}
+
+int MountCmd(const ::swordfs::cmd::CmdArgs& args) {
+  // Parse mount-specific options
+  MountFlags flags{};
+  FuseArgsGuard fargs(args.argc, args.argv);
+
+  int ret = fuse_opt_parse(fargs.get(), &flags, mount_opts, MountOptProc);
+  if (ret == -1) {
+    SWORDFS_PROMPT_INFO << "Error: mount options parsing failed";
+    ::swordfs::cmd::CommandCenter::Instance().ShowHelp("mount");
+    return 1;
+  }
+  if (flags.action_processed) {
+    // MountOptProc already handled --help or --version
     return 0;
   }
 
-  // ── Extract mountpoint (last positional argument) ─────────────────
-
-  std::string mountpoint;
-  for (int i = 1; i < fargs.argc; ++i) {
-    if (fargs.argv[i][0] != '-') {
-      mountpoint = fargs.argv[i];
-    }
-  }
-
-  if (mountpoint.empty()) {
-    SWORDFS_PROMPT << "Error: missing mountpoint";
-    ::swordfs::cmd::CommandCenter::Instance().ShowHelp(prog, "mount");
-    fuse_opt_free_args(&fargs);
-    return 1;
-  }
-
-  // ── Validate mountpoint ──────────────────────────────────────────
-
+  // Extract mountpoint (last positional argument)
+  std::string mountpoint = fargs->argv[fargs->argc - 1];
   if (ValidateMountpoint(mountpoint) != 0) {
-    fuse_opt_free_args(&fargs);
     return 1;
   }
 
-  // ── Daemonize ────────────────────────────────────────────────────
-
+  // Daemonize
   // Default: fork to background (like libfuse fuse_main).
   // -f / --foreground is parsed globally and stored in Config;
   // mount_opts still consumes "-f" so it doesn't leak to libfuse.
-  if (!::swordfs::config::ConfigCenter::Instance().foreground()) {
-    if (Daemonize() != 0) {
-      fuse_opt_free_args(&fargs);
+  int signal_fd = -1;  // pipe fd for child to signal mount success
+  if (!::swordfs::utils::ConfigCenter::Instance().foreground()) {
+    signal_fd = Daemonize();
+    if (signal_fd < 0) {
       return 1;
     }
   }
 
-  // ── Mount via libfuse low-level API ──────────────────────────────
-
+  // Mount via libfuse low-level API
+  //
   // Signal handling is managed by fuse_set_signal_handlers() inside
   // swordfs::fuse::Mount(). The low-level session loop will exit cleanly
   // on SIGINT/SIGTERM or when the filesystem is unmounted externally.
   //
   // Skip argv[0] (the subcommand name "mount") — only pass
   // remaining options + mountpoint to libfuse for layered parsing.
-  int ret = ::swordfs::fuse::Mount(fargs.argc - 1, fargs.argv + 1);
-
-  fuse_opt_free_args(&fargs);
+  ret = Mount(fargs->argc - 1, fargs->argv + 1, signal_fd);
 
   if (ret != 0) {
-    SWORDFS_PROMPT << "Error: mount failed (code " << ret << ")";
+    SWORDFS_PROMPT_FMT("Error: mount failed (code {})", ret);
   }
 
   return ret;
@@ -268,27 +285,32 @@ int MountCmd(const ::swordfs::cmd::CmdArgs& args) {
 
 }  // namespace swordfs::cmd::mount
 
-// ── Auto-registration ──────────────────────────────────────────────────
-
+// Auto-registration
 namespace {
 struct AutoRegister {
   AutoRegister() {
     swordfs::cmd::CommandCenter::Instance().Register({
-      .name = "mount",
-      .description = "Mount a filesystem with SwordFS",
-      .usage = "mount [options] <mountpoint>",
-      .options = {
-        {"-f, --foreground", "",   "Run in foreground (default: daemonize)"},
-        {"-o,",              "opt[,opt...]", "FUSE mount options (see mount.fuse3(8))"},
-        {"-h, --help",       "",   "Show this help message"},
-        {"-V, --version",    "",   "Show version information"},
-      },
-      .examples = {
-        {"# Mount in background (default)",  "swordfs mount /mnt/swordfs"},
-        {"# Mount in foreground",            "swordfs mount -f /mnt/swordfs"},
-        {"# Mount with FUSE options",        "swordfs mount -o allow_other,ro /mnt/swordfs"},
-      },
-      .handler = swordfs::cmd::mount::MountCmd,
+        .name = "mount",
+        .description = "Mount a filesystem with SwordFS",
+        .usage = "mount [options] <mountpoint>",
+        .options =
+            {
+                {"-f, --foreground", "",
+                 "Run in foreground (default: daemonize)"},
+                {"-o,", "opt[,opt...]",
+                 "FUSE mount options (see mount.fuse3(8))"},
+                {"-h, --help", "", "Show this help message"},
+                {"-V, --version", "", "Show version information"},
+            },
+        .examples =
+            {
+                {"# Mount in background (default)",
+                 "swordfs mount /mnt/swordfs"},
+                {"# Mount in foreground", "swordfs mount -f /mnt/swordfs"},
+                {"# Mount with FUSE options",
+                 "swordfs mount -o allow_other,ro /mnt/swordfs"},
+            },
+        .handler = swordfs::cmd::mount::MountCmd,
     });
   }
 };

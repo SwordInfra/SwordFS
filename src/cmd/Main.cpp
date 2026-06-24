@@ -1,11 +1,11 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include "cmd/Cmd.hpp"
-#include "utils/Logging.hpp"
-#include "utils/Config.hpp"
-
 #include <folly/init/Init.h>
+
+#include "cmd/Cmd.hpp"
+#include "utils/Config.hpp"
+#include "utils/Logging.hpp"
 
 int main(int argc, char* argv[]) {
   // Initialize folly but skip gflags parsing entirely — SwordFS does its
@@ -14,10 +14,10 @@ int main(int argc, char* argv[]) {
   folly::Init folly_init(&argc, &argv, folly::InitOptions().useGFlags(false));
 
   // Parse global flags before dispatch.
-  swordfs::config::ConfigCenter::Instance().ParseFromArgs(argc, argv);
+  swordfs::utils::ConfigCenter::Instance().ParseFromArgs(argc, argv);
 
   // Initialize logging
-  swordfs::logging::Init();
+  swordfs::utils::Init();
 
   return swordfs::cmd::CommandCenter::Instance().Dispatch(argc, argv);
 }

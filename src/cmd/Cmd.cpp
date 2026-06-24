@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "cmd/Cmd.hpp"
+
 #include <swordfs_version.h>
 
 #include <cstring>
@@ -10,13 +11,14 @@
 
 namespace swordfs::cmd {
 
-// Global options (applied before the subcommand name) 
+// Global options (applied before the subcommand name)
 static const std::vector<OptionDef> kGlobalOptions = {
-  {"-h, --help",        "",    "Show this help message"},
-  {"-V, --version",     "",    "Show version information"},
-  {"-f, --foreground",  "",    "Run in foreground (default: daemonize)"},
-  {"--log-file",        "<path>", "Log file path (default: /var/log/swordfs.log)"},
-  {"--log-level",       "<lvl>",  "Log level: INFO, DBG0, WARN, ERR (default: INFO)"},
+    {"-h, --help", "", "Show this help message"},
+    {"-V, --version", "", "Show version information"},
+    {"-f, --foreground", "", "Run in foreground (default: daemonize)"},
+    {"--log-file", "<path>", "Log file path (default: /var/log/swordfs.log)"},
+    {"--log-level", "<lvl>",
+     "Log level: INFO, DBG0, WARN, ERR (default: INFO)"},
 };
 
 void OptionDef::Print() const {
@@ -39,10 +41,10 @@ void CommandCenter::Register(Command cmd) {
   commands_.emplace(std::string(cmd.name), std::move(cmd));
 }
 
-void CommandCenter::PrintUsage(const char* prog) const {
+void CommandCenter::PrintUsage() const {
   // Build the global-options portion of the usage line from kGlobalOptions.
   // e.g. "swordfs [-h] [-V] [-f] [--log-file <path>] [--log-level <lvl>]"
-  std::cout << "Usage: " << prog;
+  std::cout << "Usage: swordfs";
   for (const auto& opt : kGlobalOptions) {
     std::cout << " [" << opt.flags;
     if (!opt.value.empty()) {
@@ -67,12 +69,12 @@ void CommandCenter::PrintUsage(const char* prog) const {
     opt.Print();
   }
 
-  std::cout << "\nRun '" << prog << " command --help' for more information on a command.\n";
+  std::cout
+      << "\nRun 'swordfs command --help' for more information on a command.\n";
 }
 
-void CommandCenter::PrintCommandHelp(const char* prog,
-                                     const Command& cmd) const {
-  std::cout << "Usage: " << prog << " " << cmd.usage << "\n\n"
+void CommandCenter::PrintCommandHelp(const Command& cmd) const {
+  std::cout << "Usage: swordfs " << cmd.usage << "\n\n"
             << cmd.description << "\n";
 
   if (!cmd.options.empty()) {
@@ -91,14 +93,13 @@ void CommandCenter::PrintCommandHelp(const char* prog,
   }
 }
 
-void CommandCenter::ShowHelp(const char* prog,
-                             std::string_view cmd_name) const {
+void CommandCenter::ShowHelp(std::string_view cmd_name) const {
   auto it = commands_.find(std::string(cmd_name));
   if (it != commands_.end()) {
-    PrintCommandHelp(prog, it->second);
+    PrintCommandHelp(it->second);
     return;
   }
-  PrintUsage(prog);
+  PrintUsage();
 }
 
 int CommandCenter::Dispatch(int argc, char* argv[]) {
@@ -107,12 +108,13 @@ int CommandCenter::Dispatch(int argc, char* argv[]) {
   while (cmd_index < argc) {
     const char* arg = argv[cmd_index];
     if (std::strcmp(arg, "-h") == 0 || std::strcmp(arg, "--help") == 0) {
-      PrintUsage(argv[0]);
+      PrintUsage();
       return 0;
     }
     if (std::strcmp(arg, "-V") == 0 || std::strcmp(arg, "--version") == 0) {
       std::cout << "SwordFS version " << SWORDFS_VERSION_MAJOR << "."
-                << SWORDFS_VERSION_MINOR << "." << SWORDFS_VERSION_PATCH << "\n";
+                << SWORDFS_VERSION_MINOR << "." << SWORDFS_VERSION_PATCH
+                << "\n";
       return 0;
     }
     if (std::strcmp(arg, "-f") == 0 || std::strcmp(arg, "--foreground") == 0) {
@@ -129,7 +131,7 @@ int CommandCenter::Dispatch(int argc, char* argv[]) {
   }
 
   if (cmd_index >= argc) {
-    PrintUsage(argv[0]);
+    PrintUsage();
     return 1;
   }
 
@@ -137,13 +139,13 @@ int CommandCenter::Dispatch(int argc, char* argv[]) {
 
   auto it = commands_.find(std::string(subcmd));
   if (it != commands_.end()) {
-    CmdArgs cmdArgs{ argc - cmd_index, argv + cmd_index };
+    CmdArgs cmdArgs{argc - cmd_index, argv + cmd_index};
     return it->second.handler(cmdArgs);
   }
 
   std::cerr << "Error: unknown command '" << subcmd << "'\n";
-  PrintUsage(argv[0]);
+  PrintUsage();
   return 1;
 }
 
-} // namespace swordfs::cmd
+}  // namespace swordfs::cmd

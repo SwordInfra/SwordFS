@@ -2,17 +2,15 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "utils/Logging.hpp"
-#include "utils/Config.hpp"
-
-#include <folly/logging/Init.h>
-#include <folly/logging/LoggerDB.h>
-#include <folly/logging/FileHandlerFactory.h>
-#include <folly/logging/StandardLogHandlerFactory.h>
-#include <folly/logging/LogLevel.h>
-#include <folly/logging/xlog.h>
-#include <folly/FileUtil.h>
 
 #include <fcntl.h>
+#include <folly/FileUtil.h>
+#include <folly/logging/FileHandlerFactory.h>
+#include <folly/logging/Init.h>
+#include <folly/logging/LogLevel.h>
+#include <folly/logging/LoggerDB.h>
+#include <folly/logging/StandardLogHandlerFactory.h>
+#include <folly/logging/xlog.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -20,7 +18,9 @@
 #include <stdexcept>
 #include <string>
 
-namespace swordfs::logging {
+#include "utils/Config.hpp"
+
+namespace swordfs::utils {
 
 void checkLogLevel(const std::string& level) {
   try {
@@ -35,11 +35,10 @@ void checkLogFilePath(const std::string& path) {
     SWORDFS_PROMPT_EXIT << "Error: log file path is empty";
   }
   // Verify the log file is accessible (create if missing).
-  int fd = folly::openNoInt(path.c_str(),
-                               O_WRONLY | O_CREAT | O_APPEND, 0644);
+  int fd = folly::openNoInt(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
   if (fd < 0) {
-    SWORDFS_PROMPT_EXIT << "Error: cannot open log file '"
-                        << path << "': " << std::strerror(errno);
+    SWORDFS_PROMPT_EXIT << "Error: cannot open log file '" << path
+                        << "': " << std::strerror(errno);
   }
   ::close(fd);
 }
@@ -48,7 +47,7 @@ void Init() {
   folly::LoggerDB::get().registerHandlerFactory(
       std::make_unique<folly::FileHandlerFactory>());
 
-  auto& cfg = config::ConfigCenter::Instance();
+  auto& cfg = utils::ConfigCenter::Instance();
   checkLogLevel(cfg.log().level);
 
   if (cfg.foreground()) {
@@ -56,11 +55,11 @@ void Init() {
   } else {
     checkLogFilePath(cfg.log().path);
     std::string config = ".=" + cfg.log().level +
-                         ":default; default=file:path=" +
-                         cfg.log().path;
+                         ":default; default=file:path=" + cfg.log().path;
     folly::initLogging(config.c_str());
-    SWORDFS_LOG_INFO << "Logging to " << cfg.log().path << " at level " << cfg.log().level;
+    SWORDFS_LOG_INFO << "Logging to " << cfg.log().path << " at level "
+                     << cfg.log().level;
   }
 }
 
-}  // namespace swordfs::logging
+}  // namespace swordfs::utils

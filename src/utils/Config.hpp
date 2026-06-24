@@ -8,7 +8,7 @@
 
 #include <string>
 
-namespace swordfs::config {
+namespace swordfs::utils {
 
 /// Logging-related configuration.
 struct LogConfig {
@@ -45,4 +45,4 @@ class ConfigCenter {
   bool foreground_ = false;  // -f / --foreground: run in foreground
 };
 
-}  // namespace swordfs::config
+}  // namespace swordfs::utils

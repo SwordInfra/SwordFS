@@ -5,7 +5,7 @@
 
 #include <cstring>
 
-namespace swordfs::config {
+namespace swordfs::utils {
 
 ConfigCenter& ConfigCenter::Instance() {
   static ConfigCenter instance;
@@ -25,4 +25,4 @@ void ConfigCenter::ParseFromArgs(int argc, char* argv[]) {
   }
 }
 
-}  // namespace swordfs::config
+}  // namespace swordfs::utils

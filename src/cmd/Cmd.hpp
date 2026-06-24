@@ -4,10 +4,10 @@
 // SwordFS subcommand framework
 #pragma once
 
-#include <string_view>
 #include <functional>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -21,18 +21,19 @@ struct CmdArgs {
 
 /// Describes a single command-line option.
 struct OptionDef {
-  std::string_view flags;       // e.g. "-f, --foreground"
-  std::string_view value;       // e.g. "<path>" or "" if boolean flag
-  std::string_view description; // e.g. "Run in foreground"
+  std::string_view flags;        // e.g. "-f, --foreground"
+  std::string_view value;        // e.g. "<path>" or "" if boolean flag
+  std::string_view description;  // e.g. "Run in foreground"
 
-  /// Print this option as a help entry (e.g. "  -f, --foreground  Run in foreground").
+  /// Print this option as a help entry (e.g. "  -f, --foreground  Run in
+  /// foreground").
   void Print() const;
 };
 
 /// Describes a usage example.
 struct Example {
-  std::string_view description; // e.g. "# Mount in background"
-  std::string_view command;     // e.g. "swordfs mount /mnt/swordfs"
+  std::string_view description;  // e.g. "# Mount in background"
+  std::string_view command;      // e.g. "swordfs mount /mnt/swordfs"
 };
 
 /// Each subcommand registers itself with a name, description, options,
@@ -40,7 +41,7 @@ struct Example {
 struct Command {
   std::string_view name;
   std::string_view description;
-  std::string_view usage;                // e.g. "mount [options] <mountpoint>"
+  std::string_view usage;  // e.g. "mount [options] <mountpoint>"
   std::vector<OptionDef> options;
   std::vector<Example> examples;
   std::function<int(const CmdArgs&)> handler;
@@ -60,15 +61,15 @@ class CommandCenter {
 
   /// Print help for a specific subcommand by name.
   /// If the name is not found, prints the top-level usage.
-  void ShowHelp(const char* prog, std::string_view cmd_name) const;
+  void ShowHelp(std::string_view cmd_name) const;
 
  private:
   CommandCenter() = default;
   CommandCenter(const CommandCenter&) = delete;
   CommandCenter& operator=(const CommandCenter&) = delete;
 
-  void PrintUsage(const char* prog) const;
-  void PrintCommandHelp(const char* prog, const Command& cmd) const;
+  void PrintUsage() const;
+  void PrintCommandHelp(const Command& cmd) const;
 
  private:
   std::mutex mutex_;
