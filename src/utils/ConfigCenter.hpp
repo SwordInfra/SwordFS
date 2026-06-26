@@ -8,7 +8,22 @@
 
 #include <string>
 
+#include "utils/Status.hpp"
+
 namespace swordfs::utils {
+
+/// Virtual file system backend type.
+enum class VfsBackend {
+  kMemory,  ///< In-memory MetaStore (default).
+  kInvalid, ///< Invalid backend type.
+};
+
+inline VfsBackend VfsBackendFromString(const std::string& str) {
+  if (str == "memory") {
+    return VfsBackend::kMemory;
+  }
+  return VfsBackend::kInvalid;
+}
 
 /// Logging-related configuration.
 struct LogConfig {
@@ -27,13 +42,18 @@ class ConfigCenter {
   ///   -f, --foreground      run in foreground (log to stderr)
   ///   --log-file <path>     override log file path
   ///   --log-level <lvl>     override folly log level (INFO, DBG0, WARN, etc.)
-  void ParseFromArgs(int argc, char* argv[]);
+  ///   --backend <type>      VFS backend (memory, default: memory)
+  ///   --fuse-threads <n>   number of FUSE worker threads (0 = single-thread)
+  Status ParseFromArgs(int argc, char* argv[]);
 
   /// Returns the log configuration.
   LogConfig& log() { return log_; }
-
   /// Returns the foreground mode.
   bool foreground() { return foreground_; }
+  /// Returns the VFS backend.
+  VfsBackend vfs_backend() { return vfs_backend_; }
+  /// Returns the number of FUSE worker threads (0 = legacy single-thread loop).
+  int fuse_threads() { return fuse_threads_; }
 
  private:
   ConfigCenter() = default;
@@ -42,7 +62,12 @@ class ConfigCenter {
 
  private:
   LogConfig log_;
-  bool foreground_ = false;  // -f / --foreground: run in foreground
+  // -f / --foreground: run in foreground
+  bool foreground_ = false;
+  // --backend: set vfs backend
+  VfsBackend vfs_backend_ = VfsBackend::kMemory;
+  // --fuse-threads: number of FUSE worker threads (default: single-thread)
+  int fuse_threads_ = 1;
 };
 
 }  // namespace swordfs::utils

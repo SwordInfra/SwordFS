@@ -18,7 +18,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "utils/Config.hpp"
+#include "utils/ConfigCenter.hpp"
 
 namespace swordfs::utils {
 

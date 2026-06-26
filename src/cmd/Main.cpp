@@ -4,8 +4,10 @@
 #include <folly/init/Init.h>
 
 #include "cmd/Cmd.hpp"
-#include "utils/Config.hpp"
+#include "utils/ConfigCenter.hpp"
 #include "utils/Logging.hpp"
+#include "utils/Status.hpp"
+
 
 int main(int argc, char* argv[]) {
   // Initialize folly but skip gflags parsing entirely — SwordFS does its
@@ -14,7 +16,10 @@ int main(int argc, char* argv[]) {
   folly::Init folly_init(&argc, &argv, folly::InitOptions().useGFlags(false));
 
   // Parse global flags before dispatch.
-  swordfs::utils::ConfigCenter::Instance().ParseFromArgs(argc, argv);
+  swordfs::utils::Status status = swordfs::utils::ConfigCenter::Instance().ParseFromArgs(argc, argv);
+  if (!status.ok()) {
+    return status.code();
+  }
 
   // Initialize logging
   swordfs::utils::Init();

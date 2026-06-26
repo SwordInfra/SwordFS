@@ -3,7 +3,7 @@
 
 #include "cmd/Cmd.hpp"
 
-#include <swordfs_version.h>
+#include <SwordfsVersion.h>
 
 #include <cstring>
 #include <iostream>

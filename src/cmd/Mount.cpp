@@ -14,17 +14,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <system_error>
 
-#define FUSE_USE_VERSION 31
+#define FUSE_USE_VERSION 312
+#include <SwordfsVersion.h>
 #include <fuse_lowlevel.h>
 #include <fuse_opt.h>
-#include <swordfs_version.h>
 
 #include "cmd/Cmd.hpp"
 #include "fuse/Vfs.hpp"
-#include "utils/Config.hpp"
+#include "utils/ConfigCenter.hpp"
 #include "utils/Fuse.hpp"
 #include "utils/Logging.hpp"
 
@@ -200,8 +201,8 @@ int Mount(int argc, char* argv[], int signal_fd) {
   FuseArgsGuard args(argc, argv);
 
   FuseSessionGuard se(fuse_session_new(
-      args.get(), &::swordfs::fuse::swordfs_ll_ops,
-      sizeof(::swordfs::fuse::swordfs_ll_ops), nullptr));
+      args.get(), &::swordfs::fuse::VfsHookFactory::GetOps(),
+      sizeof(struct fuse_lowlevel_ops), nullptr));
   if (!se) {
     return 1;
   }
@@ -229,7 +230,11 @@ int Mount(int argc, char* argv[], int signal_fd) {
     ::close(signal_fd);
   }
 
-  return fuse_session_loop(se.get());
+  struct fuse_loop_config* loop_cfg = fuse_loop_cfg_create();
+  fuse_loop_cfg_set_max_threads(loop_cfg, ConfigCenter::Instance().fuse_threads());
+  int ret = fuse_session_loop_mt(se.get(), loop_cfg);
+  fuse_loop_cfg_destroy(loop_cfg);
+  return ret;
 }
 
 int MountCmd(const ::swordfs::cmd::CmdArgs& args) {
