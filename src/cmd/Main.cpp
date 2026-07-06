@@ -3,20 +3,24 @@
 
 #include <folly/init/Init.h>
 
-#include "cmd/Cmd.hpp"
+#include <CLI/CLI.hpp>
+#include <iostream>
+
 #include "utils/ConfigCenter.hpp"
 #include "utils/Logging.hpp"
-#include "utils/Status.hpp"
 
+using namespace swordfs::utils;
 
 int main(int argc, char* argv[]) {
-  // Initialize folly but skip gflags parsing entirely — SwordFS does its
-  // own CLI parsing and subcommand dispatch.  Using useGFlags(false) prevents
-  // gflags from erroring on flags it doesn't recognize (e.g. -f, mount).
+  // Initialize folly but skip gflags parsing.
   folly::Init folly_init(&argc, &argv, folly::InitOptions().useGFlags(false));
 
-  // Parse global flags before dispatch.
-  swordfs::utils::Status status = swordfs::utils::ConfigCenter::Instance().ParseFromArgs(argc, argv);
+  CLI::App app{"SwordFS - A modern high-performance distributed file system"};
+
+  // Bind and parse CLI options directly to ConfigCenter members
+  auto& cfg = swordfs::utils::ConfigCenter::Instance();
+  cfg.ConfigureOptions(app);
+  Status status = cfg.ParseOptions(app, argc, argv);
   if (!status.ok()) {
     return status.code();
   }
@@ -24,5 +28,12 @@ int main(int argc, char* argv[]) {
   // Initialize logging
   swordfs::utils::Init();
 
-  return swordfs::cmd::CommandCenter::Instance().Dispatch(argc, argv);
+  // Dispatch the selected subcommand
+  auto sub_command = cfg.SelectedSubCommand();
+  if (sub_command) {
+    return sub_command->run();
+  }
+  // No subcommand given, show help
+  std::cout << app.help();
+  return 0;
 }

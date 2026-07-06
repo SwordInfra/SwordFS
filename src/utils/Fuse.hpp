@@ -17,7 +17,12 @@ namespace swordfs::utils {
 // RAII wrapper that frees fuse_args on scope exit.
 class FuseArgsGuard {
  public:
-  FuseArgsGuard(int argc, char** argv) : args_(FUSE_ARGS_INIT(argc, argv)) {}
+  FuseArgsGuard(int argc, char** argv) {
+    args_ = FUSE_ARGS_INIT(0, nullptr);
+    for (int i = 0; i < argc; i++) {
+      fuse_opt_add_arg(&args_, argv[i]);
+    }
+  }
   ~FuseArgsGuard() { fuse_opt_free_args(&args_); }
   FuseArgsGuard(const FuseArgsGuard&) = delete;
   FuseArgsGuard& operator=(const FuseArgsGuard&) = delete;
