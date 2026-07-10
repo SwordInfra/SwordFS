@@ -664,6 +664,11 @@ Status MemMetaStore::StatFs(struct statvfs* stbuf) {
   stbuf->f_namemax = 255;
   stbuf->f_frsize = 4096;
   stbuf->f_bsize = 4096;
+  // Report a large virtual capacity so df shows this mount.
+  // 1 TiB = 1 * 1024 * 1024 * 1024 * 1024 / 4096 blocks
+  stbuf->f_blocks = 268435456;  // ~1 TiB
+  stbuf->f_bfree = 268435456;
+  stbuf->f_bavail = 268435456;
   stbuf->f_files = inodes_.size();
   stbuf->f_ffree = UINT64_MAX;  // unlimited for in-memory store
   return Status::OK();

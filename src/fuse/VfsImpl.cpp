@@ -3,8 +3,10 @@
 
 #include "fuse/VfsImpl.hpp"
 
+#include "fuse/Limits.hpp"
 #include "metadata/MemMetaStore.hpp"
 #include "metadata/MetaStore.hpp"
+#include "utils/ConfigCenter.hpp"
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
 
@@ -15,13 +17,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
-
-#include "fuse/Limits.hpp"
-#include "metadata/MemMetaStore.hpp"
-#include "metadata/MetaStore.hpp"
-#include "utils/ConfigCenter.hpp"
-#include "utils/Logging.hpp"
-#include "utils/Status.hpp"
 
 using namespace swordfs::utils;
 

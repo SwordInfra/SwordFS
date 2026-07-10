@@ -8,7 +8,6 @@
 #include "metadata/MetaStore.hpp"
 
 #include <mutex>
-#include <set>
 #include <string>
 #include <unordered_map>
 

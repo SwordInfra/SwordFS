@@ -9,8 +9,6 @@
 #include <folly/logging/Init.h>
 #include <folly/logging/LogLevel.h>
 #include <folly/logging/LoggerDB.h>
-#include <folly/logging/StandardLogHandlerFactory.h>
-#include <folly/logging/xlog.h>
 #include <unistd.h>
 
 #include <cerrno>

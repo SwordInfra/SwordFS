@@ -2,44 +2,63 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "utils/ConfigCenter.hpp"
-
-#include <cstdlib>
-#include <cstring>
-#include <thread>
+#include "cmd/Mount.hpp"
 
 namespace swordfs::utils {
 
-ConfigCenter& ConfigCenter::Instance() {
-  static ConfigCenter instance;
-  return instance;
+void ConfigCenter::ConfigureOptions(CLI::App& app) {
+  static const std::unordered_map<std::string, VfsBackend> kBackendMap = {
+      {"memory", VfsBackend::kMemory},
+  };
+
+  static const std::unordered_map<std::string, std::string> kLogLevelMap = {
+      {"info", "INFO"}, {"debug", "DBG0"}, {"warn", "WARN"}, {"error", "ERR"},
+  };
+
+  // Global options
+  app.add_flag("-f,--foreground", foreground_, "Run in foreground");
+  app.add_option("--log-file", log_.path, "Log file path");
+  app.add_option("--log-level", log_.level, "Log level (info, debug, warn, error)")
+      ->transform(CLI::CheckedTransformer(kLogLevelMap, CLI::ignore_case));
+  app.add_option("--backend", vfs_backend_, "VFS backend type")
+      ->transform(CLI::CheckedTransformer(kBackendMap, CLI::ignore_case));
+  app.add_option("--fuse-threads", fuse_threads_, "FUSE worker thread count")
+      ->check(CLI::PositiveNumber)
+      ->check(CLI::Range(1, static_cast<int>(std::thread::hardware_concurrency())));
+  app.add_flag_callback("-V,--version", PrintVersion, "Show version information");
+
+  // Mount options
+  RegisterMountOptions(app);
 }
 
-Status ConfigCenter::ParseFromArgs(int argc, char* argv[]) {
-  for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "-f") == 0 ||
-        std::strcmp(argv[i], "--foreground") == 0) {
-      foreground_ = true;
-    } else if (std::strcmp(argv[i], "--log-file") == 0 && i + 1 < argc) {
-      log_.path = argv[++i];
-    } else if (std::strcmp(argv[i], "--log-level") == 0 && i + 1 < argc) {
-      log_.level = argv[++i];
-    } else if (std::strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
-      vfs_backend_ = VfsBackendFromString(argv[++i]);
-      if (vfs_backend_ == VfsBackend::kInvalid) {
-        return Status::InvalidArgument("backend must be memory");
-      }
-    } else if (std::strcmp(argv[i], "--fuse-threads") == 0 && i + 1 < argc) {
-      fuse_threads_ = std::atoi(argv[++i]);
-      if (fuse_threads_ <= 0) {
-        return Status::InvalidArgument("fuse-threads must be greater than 0");
-      }
-      if (fuse_threads_ > static_cast<int>(std::thread::hardware_concurrency())) {
-        return Status::InvalidArgument(
-            "fuse-threads exceeds CPU core count");
-      }
-    }
+Status ConfigCenter::ParseOptions(CLI::App& app, int argc, char* argv[]) {
+  try {
+    app.parse(argc, argv);
+  } catch (const CLI::ParseError& e) {
+    return Status::InvalidArgument(e.what());
   }
   return Status::OK();
+}
+
+void ConfigCenter::RegisterMountOptions(CLI::App& app) {
+  auto cmd = app.add_subcommand("mount", "Mount a filesystem");
+  cmd->add_option("mountpoint", mountpoint_, "Mount point directory (created if needed)")
+      ->required();
+  cmd->allow_extras();  // -o allow_other,ro etc. through to FUSE
+
+  SubCommand sc;
+  sc.cmd = cmd;
+  sc.run = swordfs::cmd::RunMount;
+  sub_commands_.push_back(sc);
+}
+
+std::optional<SubCommand> ConfigCenter::SelectedSubCommand() const {
+  for (const auto& cmd : sub_commands_) {
+    if (cmd.cmd->parsed()) {
+      return cmd;
+    }
+  }
+  return {};
 }
 
 }  // namespace swordfs::utils

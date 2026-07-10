@@ -6,7 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# ── Third-party dependencies ────────────────────────────────────────────
+# ============================================================
+# Third-party dependencies
+# ============================================================
+
 # folly (git submodule)
 add_subdirectory(third_party/folly EXCLUDE_FROM_ALL)
 
@@ -14,14 +17,18 @@ add_subdirectory(third_party/folly EXCLUDE_FROM_ALL)
 find_library(FUSE3_LIBRARY fuse3 REQUIRED)
 find_path(FUSE3_INCLUDE_DIR fuse.h PATH_SUFFIXES fuse3)
 
-# ── Version header ─────────────────────────────────────────────────────
+# ============================================================
+# Version header
+# ============================================================
 
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/include/SwordfsVersion.h.in
   ${CMAKE_CURRENT_BINARY_DIR}/SwordfsVersion.h
 )
 
-# ── SwordFS binary ─────────────────────────────────────────────────────
+# ============================================================
+# SwordFS binary
+# ============================================================
 
 file(GLOB_RECURSE SWORDFS_SOURCES
   src/*.cpp
@@ -34,5 +41,6 @@ target_include_directories(swordfs PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}
   ${FUSE3_INCLUDE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/CLI11
 )
 target_compile_definitions(swordfs PRIVATE _FILE_OFFSET_BITS=64)

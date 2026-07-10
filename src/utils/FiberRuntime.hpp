@@ -12,7 +12,6 @@
 #include <folly/io/async/EventBase.h>
 
 #include <functional>
-#include <thread>
 
 namespace swordfs::utils {
 
