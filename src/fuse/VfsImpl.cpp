@@ -10,6 +10,9 @@
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
 
+using swordfs::metadata::DirEntry;
+using swordfs::metadata::InodeID;
+
 #define FUSE_USE_VERSION 312
 #include <fuse_lowlevel.h>
 
@@ -55,7 +58,7 @@ void VfsImpl::Destroy(void* userdata) {
 // Lookup
 
 void VfsImpl::Lookup(fuse_req_t req, fuse_ino_t parent, const char* name) {
-  uint64_t child_ino;
+  InodeID child_ino;
   struct stat attr;
   Status st = meta_store_->Lookup(parent, name, &child_ino, &attr);
   if (!st.ok()) {
@@ -127,7 +130,7 @@ void VfsImpl::Mknod(fuse_req_t req, fuse_ino_t parent, const char* name,
 
 void VfsImpl::Mkdir(fuse_req_t req, fuse_ino_t parent, const char* name,
                     mode_t mode) {
-  uint64_t child_ino;
+  InodeID child_ino;
   struct stat attr;
   Status st = meta_store_->MkDir(parent, name, mode, &child_ino, &attr);
   if (!st.ok()) {
@@ -386,7 +389,7 @@ void VfsImpl::Access(fuse_req_t req, fuse_ino_t ino, int mask) {
 
 void VfsImpl::Create(fuse_req_t req, fuse_ino_t parent, const char* name,
                      mode_t mode, struct fuse_file_info* fi) {
-  uint64_t child_ino;
+  InodeID child_ino;
   struct stat attr;
   Status st = meta_store_->Create(parent, name, mode, &child_ino, &attr);
   if (!st.ok()) {

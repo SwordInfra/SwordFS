@@ -4,11 +4,10 @@
 #include "metadata/MemMetaStore.hpp"
 
 #define FUSE_USE_VERSION 312
+#include <dirent.h>
 #include <fuse_lowlevel.h>
-
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <dirent.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -23,11 +22,11 @@ namespace {
 
 time_t NowSec() {
   return std::chrono::duration_cast<std::chrono::seconds>(
-      std::chrono::system_clock::now().time_since_epoch())
+             std::chrono::system_clock::now().time_since_epoch())
       .count();
 }
 
-struct stat MakeStat(uint64_t ino, mode_t mode, time_t now) {
+struct stat MakeStat(InodeID ino, mode_t mode, time_t now) {
   struct stat st;
   std::memset(&st, 0, sizeof(st));
   st.st_ino = ino;
@@ -68,15 +67,15 @@ MemMetaStore::MemMetaStore() {
 
 // Helpers (called under lock)
 
-uint64_t MemMetaStore::AllocIno() { return next_ino_++; }
+InodeID MemMetaStore::AllocIno() { return next_ino_++; }
 uint64_t MemMetaStore::AllocFh() { return next_fh_++; }
 
-bool MemMetaStore::IsDir(uint64_t ino) const {
+bool MemMetaStore::IsDir(InodeID ino) const {
   auto it = inodes_.find(ino);
   return it != inodes_.end() && S_ISDIR(it->second.attr.st_mode);
 }
 
-void MemMetaStore::TouchParent(uint64_t parent_ino) {
+void MemMetaStore::TouchParent(InodeID parent_ino) {
   auto it = inodes_.find(parent_ino);
   if (it == inodes_.end()) return;
   time_t now = NowSec();
@@ -84,13 +83,13 @@ void MemMetaStore::TouchParent(uint64_t parent_ino) {
   it->second.attr.st_ctime = now;
 }
 
-void MemMetaStore::TouchCtime(uint64_t ino) {
+void MemMetaStore::TouchCtime(InodeID ino) {
   auto it = inodes_.find(ino);
   if (it == inodes_.end()) return;
   it->second.attr.st_ctime = NowSec();
 }
 
-void MemMetaStore::TouchAtime(uint64_t ino) {
+void MemMetaStore::TouchAtime(InodeID ino) {
   auto it = inodes_.find(ino);
   if (it == inodes_.end()) return;
   it->second.attr.st_atime = NowSec();
@@ -128,8 +127,8 @@ int MemMetaStore::Access(const struct stat* st, int mask) const {
 
 // MetaStore interface
 
-Status MemMetaStore::Lookup(uint64_t parent, std::string_view name,
-                            uint64_t* child_ino, struct stat* attr) {
+Status MemMetaStore::Lookup(InodeID parent, std::string_view name,
+                            InodeID* child_ino, struct stat* attr) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   // Parent must be a directory
@@ -150,7 +149,7 @@ Status MemMetaStore::Lookup(uint64_t parent, std::string_view name,
     return Status::NotFound("entry not found");  // normal negative lookup, not an error
   }
 
-  uint64_t ino = it->second;
+  InodeID ino = it->second;
 
   auto in_it = inodes_.find(ino);
   if (in_it == inodes_.end()) {
@@ -171,7 +170,7 @@ Status MemMetaStore::Lookup(uint64_t parent, std::string_view name,
   return Status::OK();
 }
 
-Status MemMetaStore::GetAttr(uint64_t ino, struct stat* attr) {
+Status MemMetaStore::GetAttr(InodeID ino, struct stat* attr) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = inodes_.find(ino);
@@ -186,7 +185,7 @@ Status MemMetaStore::GetAttr(uint64_t ino, struct stat* attr) {
   return Status::OK();
 }
 
-Status MemMetaStore::ReadDir(uint64_t ino,
+Status MemMetaStore::ReadDir(InodeID ino,
                              std::vector<DirEntry>* entries) {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -213,8 +212,8 @@ Status MemMetaStore::ReadDir(uint64_t ino,
   return Status::OK();
 }
 
-Status MemMetaStore::Create(uint64_t parent, std::string_view name,
-                            mode_t mode, uint64_t* child_ino,
+Status MemMetaStore::Create(InodeID parent, std::string_view name,
+                            mode_t mode, InodeID* child_ino,
                             struct stat* attr) {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -242,7 +241,7 @@ Status MemMetaStore::Create(uint64_t parent, std::string_view name,
   }
 
   time_t now = NowSec();
-  uint64_t ino = AllocIno();
+  InodeID ino = AllocIno();
 
   // Regular file: strip type bits, force S_IFREG, respect umask
   mode_t file_mode = (S_IFREG | (mode & 0777));
@@ -266,8 +265,8 @@ Status MemMetaStore::Create(uint64_t parent, std::string_view name,
   return Status::OK();
 }
 
-Status MemMetaStore::MkDir(uint64_t parent, std::string_view name,
-                           mode_t mode, uint64_t* child_ino,
+Status MemMetaStore::MkDir(InodeID parent, std::string_view name,
+                           mode_t mode, InodeID* child_ino,
                            struct stat* attr) {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -294,7 +293,7 @@ Status MemMetaStore::MkDir(uint64_t parent, std::string_view name,
   }
 
   time_t now = NowSec();
-  uint64_t ino = AllocIno();
+  InodeID ino = AllocIno();
 
   mode_t dir_mode = (S_IFDIR | (mode & 0777));
   struct stat st = MakeStat(ino, dir_mode, now);
@@ -323,7 +322,7 @@ Status MemMetaStore::MkDir(uint64_t parent, std::string_view name,
   return Status::OK();
 }
 
-Status MemMetaStore::Unlink(uint64_t parent, std::string_view name) {
+Status MemMetaStore::Unlink(InodeID parent, std::string_view name) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (!IsDir(parent)) {
@@ -371,7 +370,7 @@ Status MemMetaStore::Unlink(uint64_t parent, std::string_view name) {
     return Status::NotFound("entry not found");
   }
 
-  uint64_t ino = it->second;
+  InodeID ino = it->second;
   auto in_it = inodes_.find(ino);
   if (in_it != inodes_.end() && S_ISDIR(in_it->second.attr.st_mode)) {
     return Status::InvalidArgument("cannot unlink directory");
@@ -387,7 +386,7 @@ Status MemMetaStore::Unlink(uint64_t parent, std::string_view name) {
   return Status::OK();
 }
 
-Status MemMetaStore::RmDir(uint64_t parent, std::string_view name) {
+Status MemMetaStore::RmDir(InodeID parent, std::string_view name) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (!IsDir(parent)) {
@@ -422,7 +421,7 @@ Status MemMetaStore::RmDir(uint64_t parent, std::string_view name) {
     return Status::NotFound("entry not found");
   }
 
-  uint64_t ino = it->second;
+  InodeID ino = it->second;
 
   auto in_it = inodes_.find(ino);
   if (in_it == inodes_.end() || !S_ISDIR(in_it->second.attr.st_mode)) {
@@ -457,9 +456,9 @@ namespace {
 // Walk up the parent chain to determine whether `child` is a descendant of
 // `ancestor`. Requires that dirs_ contains a complete parent→children map.
 bool IsDescendantOf(
-    uint64_t ancestor, uint64_t child,
-    const std::unordered_map<uint64_t,
-                             std::unordered_map<std::string, uint64_t>>& dirs) {
+    InodeID ancestor, InodeID child,
+    const std::unordered_map<InodeID,
+                             std::unordered_map<std::string, InodeID>>& dirs) {
   if (ancestor == child) return true;
   // Walk all children of ancestor; if any child is a directory, recurse.
   auto it = dirs.find(ancestor);
@@ -474,8 +473,8 @@ bool IsDescendantOf(
 
 }  // namespace
 
-Status MemMetaStore::Rename(uint64_t old_parent, std::string_view old_name,
-                            uint64_t new_parent,
+Status MemMetaStore::Rename(InodeID old_parent, std::string_view old_name,
+                            InodeID new_parent,
                             std::string_view new_name) {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -529,7 +528,7 @@ Status MemMetaStore::Rename(uint64_t old_parent, std::string_view old_name,
     return Status::NotFound("new parent dir map not found");
   }
 
-  uint64_t ino = old_entry->second;
+  InodeID ino = old_entry->second;
   auto moved_in = inodes_.find(ino);
   if (moved_in == inodes_.end()) {
     SWORDFS_LOG_ERROR << "Rename: inode " << ino << " for '" << old_name
@@ -595,7 +594,7 @@ Status MemMetaStore::Rename(uint64_t old_parent, std::string_view old_name,
   return Status::OK();
 }
 
-Status MemMetaStore::SetAttr(uint64_t ino, const struct stat* attr,
+Status MemMetaStore::SetAttr(InodeID ino, const struct stat* attr,
                              int to_set, struct stat* out_attr) {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -674,7 +673,7 @@ Status MemMetaStore::StatFs(struct statvfs* stbuf) {
   return Status::OK();
 }
 
-Status MemMetaStore::Access(uint64_t ino, int mask) {
+Status MemMetaStore::Access(InodeID ino, int mask) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = inodes_.find(ino);
@@ -687,7 +686,7 @@ Status MemMetaStore::Access(uint64_t ino, int mask) {
   return Status::OK();
 }
 
-Status MemMetaStore::Open(uint64_t ino, uint64_t* fh) {
+Status MemMetaStore::Open(InodeID ino, uint64_t* fh) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = inodes_.find(ino);
@@ -731,7 +730,7 @@ Status MemMetaStore::Release(uint64_t fh) {
   return Status::OK();
 }
 
-Status MemMetaStore::OpenDir(uint64_t ino, uint64_t* fh) {
+Status MemMetaStore::OpenDir(InodeID ino, uint64_t* fh) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (!IsDir(ino)) {
@@ -761,17 +760,18 @@ Status MemMetaStore::ReleaseDir(uint64_t fh) {
   return Status::OK();
 }
 
-void MemMetaStore::Forget(uint64_t ino, uint64_t nlookup) {
+Status MemMetaStore::Forget(InodeID ino, uint64_t nlookup) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = inodes_.find(ino);
-  if (it == inodes_.end()) return;
+  if (it == inodes_.end()) return Status::OK();
 
   if (nlookup >= it->second.nlookup) {
     it->second.nlookup = 0;
   } else {
     it->second.nlookup -= nlookup;
   }
+  return Status::OK();
 }
 
 }  // namespace swordfs::metadata

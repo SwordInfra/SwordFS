@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "utils/ConfigCenter.hpp"
+
 #include "cmd/Mount.hpp"
 
 namespace swordfs::utils {
@@ -12,7 +13,10 @@ void ConfigCenter::ConfigureOptions(CLI::App& app) {
   };
 
   static const std::unordered_map<std::string, std::string> kLogLevelMap = {
-      {"info", "INFO"}, {"debug", "DBG0"}, {"warn", "WARN"}, {"error", "ERR"},
+      {"info", "INFO"},
+      {"debug", "DBG0"},
+      {"warn", "WARN"},
+      {"error", "ERR"},
   };
 
   // Global options
@@ -31,13 +35,12 @@ void ConfigCenter::ConfigureOptions(CLI::App& app) {
   RegisterMountOptions(app);
 }
 
-Status ConfigCenter::ParseOptions(CLI::App& app, int argc, char* argv[]) {
+void ConfigCenter::ParseOptions(CLI::App& app, int argc, char* argv[]) {
   try {
     app.parse(argc, argv);
   } catch (const CLI::ParseError& e) {
-    return Status::InvalidArgument(e.what());
+    app.exit(e);
   }
-  return Status::OK();
 }
 
 void ConfigCenter::RegisterMountOptions(CLI::App& app) {

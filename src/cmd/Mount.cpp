@@ -158,7 +158,7 @@ static FuseArgsGuard BuildFuseArgs(const std::vector<std::string>& extras) {
 
 // Mount the filesystem via libfuse low-level API. Blocks until unmounted.
 static int Mount(const std::string& mountpoint,
-                   const std::vector<std::string>& extras, int signal_fd) {
+                 const std::vector<std::string>& extras, int signal_fd) {
   FuseArgsGuard args(BuildFuseArgs(extras));
 
   FuseSessionGuard se(fuse_session_new(
@@ -222,7 +222,6 @@ int RunMount() {
   if (ret != 0) {
     SWORDFS_PROMPT_FMT("Error: mount failed (code {})", ret);
   }
-
   return ret;
 }
 

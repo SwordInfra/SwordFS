@@ -41,6 +41,6 @@ target_include_directories(swordfs PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}
   ${FUSE3_INCLUDE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/CLI11
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/CLI11/include
 )
 target_compile_definitions(swordfs PRIVATE _FILE_OFFSET_BITS=64)

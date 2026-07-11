@@ -9,14 +9,15 @@
 #include <SwordfsVersion.h>
 #define FUSE_USE_VERSION 312
 #include <fuse_lowlevel.h>
-#include "Status.hpp"
 
 #include <CLI/CLI.hpp>
+#include <optional>
 #include <string>
 #include <thread>
-#include <optional>
 #include <unordered_map>
 #include <vector>
+
+#include "Status.hpp"
 
 namespace swordfs::utils {
 
@@ -37,8 +38,8 @@ struct SubCommand {
 
 /// Virtual file system backend type.
 enum class VfsBackend {
-  kMemory,  ///< In-memory MetaStore (default).
-  kInvalid, ///< Invalid backend type.
+  kMemory,   ///< In-memory MetaStore (default).
+  kInvalid,  ///< Invalid backend type.
 };
 
 /// Logging-related configuration.
@@ -57,8 +58,8 @@ class ConfigCenter {
 
   /// Bind CLI options directly to ConfigCenter members.
   void ConfigureOptions(CLI::App& app);
-  /// Parse the CLI options.
-  Status ParseOptions(CLI::App& app, int argc, char* argv[]);
+  /// Parse the CLI options, will exit the program if parse failed
+  void ParseOptions(CLI::App& app, int argc, char* argv[]);
   /// Returns the selected subcommand.
   std::optional<SubCommand> SelectedSubCommand() const;
 
