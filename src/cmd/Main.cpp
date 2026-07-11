@@ -20,12 +20,9 @@ int main(int argc, char* argv[]) {
   // Bind and parse CLI options directly to ConfigCenter members
   auto& cfg = swordfs::utils::ConfigCenter::Instance();
   cfg.ConfigureOptions(app);
-  Status status = cfg.ParseOptions(app, argc, argv);
-  if (!status.ok()) {
-    return status.code();
-  }
+  cfg.ParseOptions(app, argc, argv);
 
-  // Initialize logging
+  // Initialize logging etc
   swordfs::utils::Init();
 
   // Dispatch the selected subcommand
