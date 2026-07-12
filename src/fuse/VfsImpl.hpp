@@ -15,7 +15,7 @@
 namespace swordfs {
 
 namespace metadata {
-class MetaStore;
+class Meta;
 }  // namespace metadata
 
 namespace fuse {
@@ -94,7 +94,7 @@ class VfsImpl {
              struct fuse_file_info* fi);
 
  private:
-  std::unique_ptr<swordfs::metadata::MetaStore> meta_store_;
+  std::unique_ptr<swordfs::metadata::Meta> meta_;
 };
 
 }  // namespace fuse

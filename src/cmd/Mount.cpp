@@ -42,6 +42,15 @@ static int ValidateMountpoint(const std::string& mountpoint) {
     return -1;
   }
 
+  // Detect stale mount
+  if (IsStaleMount(mountpoint)) {
+    SWORDFS_PROMPT_INFO << "Warning: stale FUSE mount detected at '"
+                        << mountpoint
+                        << "'. Run 'fusermount3 -u " << mountpoint
+                        << "' first.";
+    return -1;
+  }
+
   if (!folly::fs::exists(mountpoint)) {
     // Create the mountpoint (and all missing parent directories)
     std::error_code ec;
@@ -61,15 +70,6 @@ static int ValidateMountpoint(const std::string& mountpoint) {
   if (IsFuseMounted(mountpoint)) {
     SWORDFS_PROMPT_INFO << "Error: mountpoint '" << mountpoint
                         << "' is already mounted";
-    return -1;
-  }
-
-  // Detect stale mount
-  if (IsStaleMount(mountpoint)) {
-    SWORDFS_PROMPT_INFO << "Warning: stale FUSE mount detected at '"
-                        << mountpoint
-                        << "'. You may need to run 'fusermount3 -u "
-                        << mountpoint << "' first.";
     return -1;
   }
 

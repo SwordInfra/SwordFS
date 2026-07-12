@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Generic status/error type for internal APIs.
-// Each internal layer (MetaStore, VfsImpl) returns Status;
+// Each internal layer (Meta, VfsImpl) returns Status;
 // only the FUSE callback layer (VfsHookFactory) translates
 // the Status into fuse_reply_err / fuse_reply_*.
 

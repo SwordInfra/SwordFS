@@ -38,7 +38,7 @@ struct SubCommand {
 
 /// Virtual file system backend type.
 enum class VfsBackend {
-  kMemory,   ///< In-memory MetaStore (default).
+  kMemory,   ///< In-memory Meta (default).
   kInvalid,  ///< Invalid backend type.
 };
 

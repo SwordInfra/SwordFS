@@ -3,24 +3,55 @@
 
 #include "utils/FiberRuntime.hpp"
 
+#include <mutex>
+#include <vector>
+
 namespace swordfs::utils {
 
 namespace {
-thread_local folly::EventBase* t_evb = nullptr;
+
+std::mutex g_mutex;
+std::vector<FiberRuntime*> g_runtimes;
+bool g_shutdown = false;
+
 }  // namespace
 
-void InitFiberRuntime() {
-  if (t_evb != nullptr) {
-    return;
+thread_local FiberRuntime* t_runtime = nullptr;
+
+FiberRuntime::FiberRuntime() : evb_(std::make_unique<folly::EventBase>()) {
+  driver_thread_ = std::thread([this] { evb_->loopForever(); });
+}
+
+FiberRuntime::~FiberRuntime() {
+  evb_->terminateLoopSoon();
+  if (driver_thread_.joinable()) {
+    driver_thread_.join();
   }
-  t_evb = new folly::EventBase();
+}
+
+void InitFiberRuntime() {
+  if (t_runtime != nullptr) return;
+
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (t_runtime != nullptr || g_shutdown) return;
+
+  t_runtime = new FiberRuntime();
+  g_runtimes.push_back(t_runtime);
 }
 
 void ShutdownFiberRuntime() {
-  delete t_evb;
-  t_evb = nullptr;
+  std::vector<FiberRuntime*> runtimes;
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_shutdown = true;
+    runtimes.swap(g_runtimes);
+  }
+
+  for (auto* rt : runtimes) {
+    delete rt;
+  }
 }
 
-folly::EventBase* ThreadEventBase() { return t_evb; }
+FiberRuntime* ThisFiberRuntime() { return t_runtime; }
 
 }  // namespace swordfs::utils
