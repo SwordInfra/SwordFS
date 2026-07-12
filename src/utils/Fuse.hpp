@@ -78,14 +78,14 @@ bool IsFuseMounted(const std::string& mp) {
 }
 
 bool IsStaleMount(const std::string& mp) {
-  // Check if the mountpoint is listed but the FUSE connection is dead.
-  // A simple heuristic: try to stat the mountpoint; if it returns ENOTCONN
-  // the FUSE daemon is gone but the kernel still holds the mount.
+  // A stale FUSE mount can be detected in two ways:
+  // 1. stat returns ENOTCONN — kernel holds the mount but daemon is gone
+  // 2. stat succeeds but st_ino == 0 — dead FUSE mount returns zero inode
   struct stat st;
-  if (::stat(mp.c_str(), &st) == -1 && errno == ENOTCONN) {
-    return true;
+  if (::stat(mp.c_str(), &st) == -1) {
+    return errno == ENOTCONN;
   }
-  return false;
+  return st.st_ino == 0;
 }
 
 }  // namespace swordfs::utils
