@@ -29,20 +29,18 @@ class Meta {
   virtual ~Meta() = default;
 
   /// Look up a child entry by name.
-  virtual Status Lookup(InodeID parent,
+  virtual Status Lookup(InodeID parent_ino,
                         std::string_view name, InodeID* child_ino,
                         struct stat* attr) = 0;
 
   /// Get attributes for an inode.
-  virtual Status GetAttr(InodeID ino,
-                         struct stat* attr) = 0;
+  virtual Status GetAttr(InodeID ino, struct stat* attr) = 0;
 
   /// List all entries in a directory.
-  virtual Status ReadDir(InodeID ino,
-                         std::vector<SwordFsEntry>* entries) = 0;
+  virtual Status ReadDir(InodeID ino, std::vector<SwordFsEntry>* entries) = 0;
 
   /// Create a regular file.
-  virtual Status Create(InodeID parent,
+  virtual Status Create(InodeID parent_ino,
                         std::string_view name, mode_t mode,
                         InodeID* child_ino, struct stat* attr) = 0;
 
@@ -52,16 +50,14 @@ class Meta {
                        InodeID* child_ino, struct stat* attr) = 0;
 
   /// Remove a regular file.
-  virtual Status Unlink(InodeID parent,
-                        std::string_view name) = 0;
+  virtual Status Unlink(InodeID parent_ino, std::string_view name) = 0;
 
   /// Remove an empty directory. Decrements parent nlink.
-  virtual Status RmDir(InodeID parent,
-                       std::string_view name) = 0;
+  virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;
 
   /// Rename (move) an entry between directories.
-  virtual Status Rename(InodeID old_parent,
-                        std::string_view old_name, InodeID new_parent,
+  virtual Status Rename(InodeID old_parent_ino,
+                        std::string_view old_name, InodeID new_parent_ino,
                         std::string_view new_name) = 0;
 
   /// Set attributes for an inode.
@@ -73,13 +69,11 @@ class Meta {
   virtual Status StatFs(struct statvfs* stbuf) = 0;
 
   /// Check access permissions.
-  virtual Status Access(InodeID ino,
-                        int mask) = 0;
+  virtual Status Access(InodeID ino, int mask) = 0;
 
   /// Open a regular file. Allocates a handle (*fh) that is passed to
   /// subsequent read/write/flush calls.
-  virtual Status Open(InodeID ino,
-                      uint64_t* fh) = 0;
+  virtual Status Open(InodeID ino, uint64_t* fh) = 0;
 
   /// Release a file handle. Called when the last reference to this open
   /// instance is closed.
@@ -87,8 +81,7 @@ class Meta {
 
   /// Open a directory for reading. Allocates a handle (*fh) that is passed
   /// to subsequent readdir calls.
-  virtual Status OpenDir(InodeID ino,
-                         uint64_t* fh) = 0;
+  virtual Status OpenDir(InodeID ino, uint64_t* fh) = 0;
 
   /// Release a directory handle.
   virtual Status ReleaseDir(uint64_t fh) = 0;
@@ -96,8 +89,7 @@ class Meta {
   /// Decrement the inode's lookup count by nlookup. Called in response to
   /// FUSE forget requests. The caller may free or reuse the inode's backend
   /// resources when the count reaches zero.
-  virtual Status Forget(InodeID ino,
-                        uint64_t nlookup) = 0;
+  virtual Status Forget(InodeID ino, uint64_t nlookup) = 0;
 };
 
 }  // namespace swordfs::metadata

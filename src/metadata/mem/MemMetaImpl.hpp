@@ -14,40 +14,54 @@
 
 namespace swordfs::metadata {
 
+// ────────────────────────────────────────────────────────────────
+// HandleTable — thread-safe handle-to-inode mapping.
+// ────────────────────────────────────────────────────────────────
+
+class HandleTable {
+ public:
+  // Allocate a new handle and map it to the given inode.
+  uint64_t Alloc(InodeID ino);
+
+  // Release a handle. Returns true if the handle was found and removed.
+  bool Release(uint64_t fh);
+
+ private:
+  mutable std::mutex mutex_;
+  uint64_t next_fh_{1};
+  folly::F14FastMap<uint64_t, InodeID> handles_;
+};
+
 class MemMetaImpl : public Meta {
  public:
   MemMetaImpl();
   ~MemMetaImpl() override;
 
   // Entry operations
-  Status Lookup(InodeID parent,
+  Status Lookup(InodeID parent_ino,
                 std::string_view name, InodeID* child_ino,
                 struct stat* attr) override;
-  Status GetAttr(InodeID ino,
-                 struct stat* attr) override;
-  Status Create(InodeID parent,
+  Status GetAttr(InodeID ino, struct stat* attr) override;
+  Status Create(InodeID parent_ino,
                 std::string_view name, mode_t mode, InodeID* child_ino,
                 struct stat* attr) override;
-  Status Unlink(InodeID parent,
-                std::string_view name) override;
-  Status Rename(InodeID old_parent,
-                std::string_view old_name, InodeID new_parent,
+  Status Unlink(InodeID parent_ino, std::string_view name) override;
+  Status Rename(InodeID old_parent_ino,
+                std::string_view old_name, InodeID new_parent_ino,
                 std::string_view new_name) override;
   Status SetAttr(InodeID ino,
                  const struct stat* attr, int to_set,
                  struct stat* out_attr) override;
   Status Access(InodeID ino, int mask) override;
-  Status Open(InodeID ino,
-              uint64_t* fh) override;
+  Status Open(InodeID ino, uint64_t* fh) override;
   Status Release(uint64_t fh) override;
 
   // Directory operations
-  Status ReadDir(InodeID ino,
-                 std::vector<SwordFsEntry>* entries) override;
-  Status MkDir(InodeID parent,
+  Status ReadDir(InodeID ino, std::vector<SwordFsEntry>* entries) override;
+  Status MkDir(InodeID parent_ino,
                std::string_view name, mode_t mode, InodeID* child_ino,
                struct stat* attr) override;
-  Status RmDir(InodeID parent, std::string_view name) override;
+  Status RmDir(InodeID parent_ino, std::string_view name) override;
   Status OpenDir(InodeID ino, uint64_t* fh) override;
   Status ReleaseDir(uint64_t fh) override;
   Status Forget(InodeID ino, uint64_t nlookup) override;
@@ -56,21 +70,13 @@ class MemMetaImpl : public Meta {
   Status StatFs(struct statvfs* stbuf) override;
 
  private:
-  uint64_t AllocFh();
-
   // Helpers
   void KillSUID(struct stat* st);
-  int Access(const struct stat* st, int mask) const;
 
  private:
-  std::mutex mutex_;
   MemMetaStore store_;
-  uint64_t next_fh_{1};
-
-  // File handle accounting: fh -> ino
-  folly::F14FastMap<uint64_t, InodeID> file_handles_;
-  // Directory handle accounting: fh -> ino
-  folly::F14FastMap<uint64_t, InodeID> dir_handles_;
+  HandleTable file_handles_;
+  HandleTable dir_handles_;
 };
 
 }  // namespace swordfs::metadata

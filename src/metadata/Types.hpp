@@ -48,6 +48,26 @@ struct SwordFsInode {
   }
 
   bool IsDir() const { return S_ISDIR(attr.st_mode); }
+
+  // POSIX access check. Returns true if uid/gid has the requested permissions
+  // on this inode. Root (uid == 0) always has full access.
+  bool CheckAccess(uid_t uid, gid_t gid, int mask) const {
+    if (uid == 0) return true;
+
+    unsigned int access_bits;
+    if (uid == attr.st_uid) {
+      access_bits = (attr.st_mode & S_IRWXU) >> 6;
+    } else if (gid == attr.st_gid) {
+      access_bits = (attr.st_mode & S_IRWXG) >> 3;
+    } else {
+      access_bits = attr.st_mode & S_IRWXO;
+    }
+
+    if ((mask & R_OK) && !(access_bits & R_OK)) return false;
+    if ((mask & W_OK) && !(access_bits & W_OK)) return false;
+    if ((mask & X_OK) && !(access_bits & X_OK)) return false;
+    return true;
+  }
 };
 
 }  // namespace swordfs::metadata

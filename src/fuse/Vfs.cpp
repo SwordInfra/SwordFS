@@ -15,9 +15,9 @@ namespace swordfs::fuse {
 
 VfsImpl* VfsHookFactory::vfs_ = new VfsImpl();
 
-// ======================================================================
+// ────────────────────────────────────────────────────────────────
 // FUSE callbacks: forward to `VfsImpl`.
-// ======================================================================
+// ────────────────────────────────────────────────────────────────
 
 void VfsHookFactory::SwordfsInit(void* userdata,
                                  struct fuse_conn_info* conn) {

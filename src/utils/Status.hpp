@@ -37,8 +37,10 @@ class Status {
   bool ok() const { return code_ == kOk; }
   bool IsNotFound() const { return code_ == kNotFound; }
   bool IsAlreadyExists() const { return code_ == kAlreadyExists; }
+  bool IsBusy() const { return code_ == kBusy; }
   bool IsNotDirectory() const { return code_ == kNotDirectory; }
   bool IsNotSupported() const { return code_ == kNotSupported; }
+  bool IsPermission() const { return code_ == kPermission; }
 
   Code code() const { return code_; }
   const std::string& message() const { return msg_; }
@@ -87,4 +89,4 @@ class Status {
   std::string msg_;
 };
 
-}  // namespace swordfs
+}  // namespace swordfs::utils

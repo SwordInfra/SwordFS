@@ -179,7 +179,9 @@ static int Mount(const std::string& mountpoint,
   // Signal the parent that the mount succeeded (daemon mode).
   if (signal_fd >= 0) {
     char ok = 0;
-    ::write(signal_fd, &ok, 1);
+    if (::write(signal_fd, &ok, 1) < 0) {
+      // Best-effort: parent already exited or pipe broken, nothing to do.
+    }
     ::close(signal_fd);
   }
 
