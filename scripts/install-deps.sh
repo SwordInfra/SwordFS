@@ -21,7 +21,7 @@ FOLLY_VER="v2026.07.20.00"
 
 echo "==> Checking system packages..."
 
-SYSTEM_PKGS="libfuse3-dev libfmt-dev libboost-all-dev libssl-dev libevent-dev libdouble-conversion-dev libgoogle-glog-dev libgtest-dev libcli11-dev curl g++ cmake ninja-build git"
+SYSTEM_PKGS="libfuse3-dev libfmt-dev libboost-all-dev libssl-dev libevent-dev libdouble-conversion-dev libgoogle-glog-dev libgtest-dev libcli11-dev software-properties-common curl g++ cmake ninja-build git"
 
 TO_INSTALL=""
 for pkg in $SYSTEM_PKGS; do
@@ -40,6 +40,29 @@ if [ -n "$TO_INSTALL" ]; then
   apt-get install -y -qq $TO_INSTALL
 else
   echo "==> All system packages already installed."
+fi
+
+# fast_float: folly v2026.07.20.00 requires fast_float >= 7.0.0
+# (needs chars_format::allow_leading_plus). If the default apt version
+# is too old, pull from ubuntu resolute (25.04) which has 8.1.0.
+echo "==> Checking fast_float version..."
+FAST_FLOAT_OK=0
+if dpkg-query -W -f='${Version}' libfast-float-dev 2>/dev/null | grep -qE '^([89]|[1-9][0-9])\.'; then
+  echo "  [ok] libfast-float-dev >= 8.0.0 already installed"
+  FAST_FLOAT_OK=1
+fi
+
+if [ "$FAST_FLOAT_OK" -eq 0 ]; then
+  echo "  ==> Installing libfast-float-dev..."
+  apt-get install -y -qq libfast-float-dev 2>/dev/null || true
+  if dpkg-query -W -f='${Version}' libfast-float-dev 2>/dev/null | grep -qE '^([89]|[1-9][0-9])\.'; then
+    echo "  [ok] libfast-float-dev installed from default repo"
+  else
+    echo "  ==> Default libfast-float-dev too old, pulling from ubuntu resolute..."
+    add-apt-repository -y "deb http://archive.ubuntu.com/ubuntu resolute universe" 2>/dev/null || true
+    apt-get update -qq
+    apt-get install -y -qq libfast-float-dev
+  fi
 fi
 
 # ────────────────────────────────────────────────────────────────
