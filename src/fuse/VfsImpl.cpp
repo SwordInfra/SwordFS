@@ -246,43 +246,66 @@ void VfsImpl::Opendir(fuse_req_t req, fuse_ino_t ino,
   fuse_reply_open(req, fi);
 }
 
+// Common implementation for Readdir and Readdirplus.
+// 1. Read directory entries + prepend "." / ".."
+// 2. Two-pass buffer construction: pass 1 calculates sizes,
+//    pass 2 fills the buffer with correct `off` values.
+// The `add_entry` callback is the only difference: fuse_add_direntry
+// for Readdir, fuse_add_direntry_plus for Readdirplus.
+template <typename F>
+static void ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
+                          off_t off,
+                          std::unique_ptr<swordfs::metadata::Meta>& meta,
+                          F&& add_entry) {
+  using swordfs::metadata::SwordFsEntry;
+
+  std::vector<SwordFsEntry> entries;
+  Status st = meta->ReadDir(ino, &entries);
+  if (!st.ok()) { fuse_reply_err(req, st.ToErrno()); return; }
+
+  // "." and ".." required by FUSE low-level API.
+  entries.insert(entries.begin(), {".", DT_DIR, ino});
+  entries.insert(entries.begin() + 1,
+                 {"..", DT_DIR, (ino == FUSE_ROOT_ID) ? ino : 0});
+
+  std::vector<size_t> sizes(entries.size());
+  size_t cap = 0;
+  for (size_t i = 0; i < entries.size(); ++i) {
+    sizes[i] = add_entry(req, nullptr, 0, entries[i], 0);
+    cap += sizes[i];
+  }
+
+  char* buf = static_cast<char*>(std::malloc(cap));
+  if (!buf) { fuse_reply_err(req, ENOMEM); return; }
+
+  size_t pos = 0;
+  for (size_t i = 0; i < entries.size() && pos < cap; ++i) {
+    size_t n = add_entry(req, buf + pos, cap - pos,
+                         entries[i], pos + sizes[i]);
+    if (n > cap - pos) break;
+    pos += n;
+  }
+
+  if (static_cast<size_t>(off) < pos)
+    fuse_reply_buf(req, buf + off, std::min(pos - off, size));
+  else
+    fuse_reply_buf(req, nullptr, 0);
+  std::free(buf);
+}
+
 void VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
                       off_t off, struct fuse_file_info* fi) {
   (void)fi;
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
-  std::vector<swordfs::metadata::SwordFsEntry> entries;
-  Status status = meta_->ReadDir(ino, &entries);
-  if (!status.ok()) {
-    fuse_reply_err(req, status.ToErrno());
-    return;
-  }
-  // Build dirent buffer
-  size_t cap = 0;
-  for (const auto& e : entries) {
-    cap += fuse_add_direntry(req, nullptr, 0, e.name.c_str(), nullptr, 0);
-  }
-  char* buf = static_cast<char*>(std::malloc(cap));
-  if (!buf) {
-    fuse_reply_err(req, ENOMEM);
-    return;
-  }
-  size_t pos = 0;
-  struct stat stbuf;
-  for (const auto& e : entries) {
-    std::memset(&stbuf, 0, sizeof(stbuf));
-    stbuf.st_ino = e.ino;
-    stbuf.st_mode = e.type << 12;
-    pos += fuse_add_direntry(req, buf + pos, cap - pos, e.name.c_str(),
-                             &stbuf, cap);
-  }
-  if (static_cast<size_t>(off) < pos) {
-    size_t remain = pos - static_cast<size_t>(off);
-    size_t reply_sz = remain < size ? remain : size;
-    fuse_reply_buf(req, buf + static_cast<size_t>(off), reply_sz);
-  } else {
-    fuse_reply_buf(req, nullptr, 0);
-  }
-  std::free(buf);
+
+  ReaddirCommon(req, ino, size, off, meta_,
+                [](fuse_req_t req, char* buf, size_t bufsize,
+                   const swordfs::metadata::SwordFsEntry& e, off_t off) {
+      struct stat st = {};
+      st.st_ino = e.ino;
+      st.st_mode = e.type << 12;
+      return fuse_add_direntry(req, buf, bufsize, e.name.c_str(), &st, off);
+    });
 }
 
 void VfsImpl::Releasedir(fuse_req_t req, fuse_ino_t ino,
@@ -427,65 +450,22 @@ void VfsImpl::Readdirplus(fuse_req_t req, fuse_ino_t ino, size_t size,
                           off_t off, struct fuse_file_info* fi) {
   (void)fi;
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
-  SWORDFS_LOG_DEBUG << "Readdirplus: ino=" << ino << " size=" << size << " off=" << off;
-  std::vector<swordfs::metadata::SwordFsEntry> entries;
-  Status status = meta_->ReadDir(ino, &entries);
-  if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "Readdirplus failed: ino=" << ino << " errno=" << status.ToErrno();
-    fuse_reply_err(req, status.ToErrno());
-    return;
-  }
-  SWORDFS_LOG_DEBUG << "Readdirplus: got " << entries.size() << " entries";
 
-  // First pass: calculate total buffer size and per-entry sizes
-  std::vector<size_t> entry_sizes;
-  entry_sizes.reserve(entries.size());
-  size_t cap = 0;
-  for (const auto& e : entries) {
-    struct fuse_entry_param ep = {};
-    size_t sz = fuse_add_direntry_plus(req, nullptr, 0, e.name.c_str(), &ep, 0);
-    entry_sizes.push_back(sz);
-    cap += sz;
-  }
-  char* buf = static_cast<char*>(std::malloc(cap));
-  if (!buf) {
-    fuse_reply_err(req, ENOMEM);
-    return;
-  }
-
-  // Second pass: fill buffer with full attrs
-  size_t pos = 0;
-  for (size_t i = 0; i < entries.size(); i++) {
-    const auto& e = entries[i];
-    struct stat attr;
-    Status status = meta_->GetAttr(e.ino, &attr);
-    if (!status.ok()) {
-      std::memset(&attr, 0, sizeof(attr));
-    }
-    attr.st_ino = e.ino;
-    attr.st_mode = e.type << 12;
-
-    struct fuse_entry_param ep = {};
-    ep.ino = e.ino;
-    ep.attr = attr;
-    ep.attr_timeout = 1.0;
-    ep.entry_timeout = 1.0;
-
-    size_t entsize = fuse_add_direntry_plus(req, buf + pos, cap - pos,
-                                            e.name.c_str(), &ep,
-                                            pos + entry_sizes[i]);
-    if (entsize > cap - pos) break;
-    pos += entsize;
-  }
-
-  if (static_cast<size_t>(off) < pos) {
-    size_t remain = pos - static_cast<size_t>(off);
-    size_t reply_sz = remain < size ? remain : size;
-    fuse_reply_buf(req, buf + static_cast<size_t>(off), reply_sz);
-  } else {
-    fuse_reply_buf(req, nullptr, 0);
-  }
-  std::free(buf);
+  ReaddirCommon(req, ino, size, off, meta_,
+                [this](fuse_req_t req, char* buf, size_t bufsize,
+                       const swordfs::metadata::SwordFsEntry& e, off_t off) {
+      struct stat attr = {};
+      if (e.ino != 0) meta_->GetAttr(e.ino, &attr);
+      struct fuse_entry_param ep = {};
+      ep.ino = e.ino;
+      ep.attr = attr;
+      ep.attr.st_ino = e.ino;
+      ep.attr.st_mode = e.type << 12;
+      ep.attr_timeout = 1.0;
+      ep.entry_timeout = 1.0;
+      return fuse_add_direntry_plus(req, buf, bufsize,
+                                    e.name.c_str(), &ep, off);
+    });
 }
 
 void VfsImpl::Lseek(fuse_req_t req, fuse_ino_t ino, off_t off, int whence,
