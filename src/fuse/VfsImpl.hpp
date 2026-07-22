@@ -121,7 +121,8 @@ class VfsImpl {
   std::unique_ptr<swordfs::storage::IDataEngine> data_;
 
   // Per-handle write buffer.  base_offset is the absolute file offset
-  // of the first buffered byte; flushed entries are erased.
+  // of the first buffered byte; flushed entries are erased so the next
+  // write starts a fresh buffer at its own offset.
   struct WriteBuf {
     size_t base_offset = 0;
     std::string data;

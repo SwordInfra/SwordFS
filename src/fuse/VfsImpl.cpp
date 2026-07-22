@@ -253,19 +253,25 @@ void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
 
   // Accumulate writes in the per-handle buffer.  Data is flushed to the
   // storage engine on Flush / Release.
-  auto& wbuf = write_buf_[fi->fh];
+  WriteBuf& wb = write_buf_[fi->fh];
 
-  // Append: write always starts at off; padding fills any gap.
-  size_t needed = static_cast<size_t>(off) + size;
-  if (wbuf.size() < needed) {
-    wbuf.resize(needed, '\0');
+  // First write (or first after flush): record the absolute base offset.
+  if (wb.data.empty()) {
+    wb.base_offset = static_cast<size_t>(off);
   }
 
-  std::memcpy(wbuf.data() + off, buf, size);
+  // Append: pad any gap between the end of the buffer and off.
+  size_t rel_off = static_cast<size_t>(off) - wb.base_offset;
+  size_t needed = rel_off + size;
+  if (wb.data.size() < needed) {
+    wb.data.resize(needed, '\0');
+  }
+
+  std::memcpy(wb.data.data() + rel_off, buf, size);
 
   // Auto-flush if the buffer has grown beyond the chunk size limit.
   // This prevents unbounded memory growth for large files.
-  if (wbuf.size() >= data_->Limits().max_chunk_size) {
+  if (wb.data.size() >= data_->Limits().max_chunk_size) {
     Status s = FlushChunked(ino, fi->fh);
     if (!s.ok()) {
       fuse_reply_err(req, s.ToErrno());
@@ -577,19 +583,26 @@ void VfsImpl::Statx(fuse_req_t req, fuse_ino_t ino, int flags, int mask,
 
 Status VfsImpl::FlushChunked(InodeID ino, uint64_t fh) {
   auto it = write_buf_.find(fh);
-  if (it == write_buf_.end() || it->second.empty()) {
+  if (it == write_buf_.end() || it->second.data.empty()) {
     return Status::OK();
   }
 
-  const std::string& buf = it->second;
+  WriteBuf& entry = it->second;
+  const std::string& buf = entry.data;
+  size_t base_off = entry.base_offset;
 
-  // Upload the buffer in chunk-sized segments.  Segment N starts at
-  // file offset N*max_chunk_size and is stored under chunks/{ino}/{N}.
-  for (size_t seg_off = 0; seg_off < buf.size(); seg_off += data_->Limits().max_chunk_size) {
-    size_t seg_size = std::min(data_->Limits().max_chunk_size, buf.size() - seg_off);
-    std::string key = ChunkKey(ino, seg_off);
+  // Upload the buffer in chunk-sized segments.  Each segment's absolute
+  // file offset is base_off + seg_off, and its chunk key is derived from
+  // that absolute offset.
+  for (size_t seg_off = 0; seg_off < buf.size();
+       seg_off += data_->Limits().max_chunk_size) {
+    size_t seg_size =
+        std::min(data_->Limits().max_chunk_size, buf.size() - seg_off);
+    size_t file_off = base_off + seg_off;
+    std::string key = ChunkKey(ino, file_off);
 
-    Status s = data_->Put(key, std::string_view(buf.data() + seg_off, seg_size));
+    Status s = data_->Put(
+        key, std::string_view(buf.data() + seg_off, seg_size));
     if (!s.ok()) {
       SWORDFS_LOG_ERROR << "FlushChunked: ino=" << ino << " key=" << key
                         << " seg_off=" << seg_off << " size=" << seg_size
@@ -598,15 +611,14 @@ Status VfsImpl::FlushChunked(InodeID ino, uint64_t fh) {
     }
   }
 
-  it->second.clear();
+  // Erase so the next write starts a fresh buffer at its own offset.
+  write_buf_.erase(it);
 
   // Update the inode's file size after a successful flush.
-  // Per JuiceFS convention, attr.length is updated once on Flush,
-  // not on every Write.
   struct stat attr;
   Status s = meta_->GetAttr(ino, &attr);
   if (s.ok()) {
-    off_t new_size = static_cast<off_t>(buf.size());
+    off_t new_size = static_cast<off_t>(base_off + buf.size());
     if (new_size > attr.st_size) {
       attr.st_size = new_size;
       meta_->SetAttr(ino, &attr, FUSE_SET_ATTR_SIZE, &attr);
