@@ -122,4 +122,26 @@ else
   cmake --install .
 fi
 
+# libfuse3-dev: SwordFS README requires >= 3.18 (for no_interrupt, tmpfile).
+# Ubuntu 24.04 ships 3.14.1 which is too old.
+echo "==> Checking libfuse3-dev version..."
+FUSE_OK=0
+if dpkg-query -W -f='${Version}' libfuse3-dev 2>/dev/null | grep -qE '^3\.(1[89]|[2-9][0-9])'; then
+  echo "  [ok] libfuse3-dev >= 3.18 already installed"
+  FUSE_OK=1
+fi
+
+if [ "$FUSE_OK" -eq 0 ]; then
+  echo "  ==> Installing libfuse3-dev >= 3.18..."
+  apt-get install -y -qq libfuse3-dev 2>/dev/null || true
+  if dpkg-query -W -f='${Version}' libfuse3-dev 2>/dev/null | grep -qE '^3\.(1[89]|[2-9][0-9])'; then
+    echo "  [ok] libfuse3-dev installed from default repo"
+  else
+    echo "  ==> Default libfuse3-dev too old, pulling from ubuntu resolute..."
+    add-apt-repository -y "deb http://archive.ubuntu.com/ubuntu resolute universe" 2>/dev/null || true
+    apt-get update -qq
+    apt-get install -y -qq libfuse3-dev
+  fi
+fi
+
 echo "==> Done. You can now build SwordFS."
