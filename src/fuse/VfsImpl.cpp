@@ -200,16 +200,19 @@ void VfsImpl::Open(fuse_req_t req, fuse_ino_t ino,
 
 void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                    struct fuse_file_info* fi) {
+  (void)fi;
   if (!data_) {
     fuse_reply_err(req, ENOSYS);
     return;
   }
 
-  std::string key = ChunkKey(ino);
+  size_t file_off = static_cast<size_t>(off);
+  std::string key = ChunkKey(ino, file_off);
+  size_t chunk_off = file_off % kChunkSize;
+
   std::string data;
-  Status status = data_->Get(key, &data, static_cast<size_t>(off), size);
+  Status status = data_->Get(key, &data, chunk_off, size);
   if (status.IsNotFound()) {
-    // File exists in metadata but has no data yet (never written).
     fuse_reply_buf(req, nullptr, 0);
     return;
   }
@@ -266,6 +269,16 @@ void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
     meta_->SetAttr(ino, &attr, FUSE_SET_ATTR_SIZE, &attr);
   }
 
+  // Auto-flush if the buffer has grown beyond the chunk size limit.
+  // This prevents unbounded memory growth for large files.
+  if (wbuf.size() >= kChunkSize) {
+    Status s = FlushChunked(ino, fi->fh);
+    if (!s.ok()) {
+      fuse_reply_err(req, s.ToErrno());
+      return;
+    }
+  }
+
   fuse_reply_write(req, size);
 }
 
@@ -276,23 +289,11 @@ void VfsImpl::Flush(fuse_req_t req, fuse_ino_t ino,
     return;
   }
 
-  auto it = write_buf_.find(fi->fh);
-  if (it == write_buf_.end() || it->second.empty()) {
-    fuse_reply_err(req, 0);
-    return;
-  }
-
-  std::string key = ChunkKey(ino);
-  Status status = data_->Put(key, it->second);
+  Status status = FlushChunked(ino, fi->fh);
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Flush: ino=" << ino << " key=" << key
-                      << " size=" << it->second.size()
-                      << " failed: " << status.message();
     fuse_reply_err(req, status.ToErrno());
     return;
   }
-
-  it->second.clear();
   fuse_reply_err(req, 0);
 }
 
@@ -578,11 +579,43 @@ void VfsImpl::Statx(fuse_req_t req, fuse_ino_t ino, int flags, int mask,
   fuse_reply_err(req, ENOSYS);
 }
 
-std::string VfsImpl::ChunkKey(InodeID ino) {
-  // Phase 1: single-chunk-per-file model.  Multi-chunk with sequence
-  // numbers (chunks/{ino}/{seq}) will be introduced in Phase 2 when the
-  // metadata layer gains slice/chunk tracking.
-  return "chunks/" + std::to_string(ino) + "/0";
+// Maximum chunk size (64 MiB).  Writes that would exceed this limit are
+// auto-flushed to S3 and a new chunk is started.
+static constexpr size_t kChunkSize = 64ULL << 20;
+
+Status VfsImpl::FlushChunked(InodeID ino, uint64_t fh) {
+  auto it = write_buf_.find(fh);
+  if (it == write_buf_.end() || it->second.empty()) {
+    return Status::OK();
+  }
+
+  const std::string& buf = it->second;
+
+  // Upload the buffer in kChunkSize segments.  Segment N starts at
+  // file offset N*kChunkSize and is stored under chunks/{ino}/{N}.
+  for (size_t seg_off = 0; seg_off < buf.size(); seg_off += kChunkSize) {
+    size_t seg_size = std::min(kChunkSize, buf.size() - seg_off);
+    std::string key = ChunkKey(ino, seg_off);
+
+    Status s = data_->Put(key, std::string_view(buf.data() + seg_off, seg_size));
+    if (!s.ok()) {
+      SWORDFS_LOG_ERROR << "FlushChunked: ino=" << ino << " key=" << key
+                        << " seg_off=" << seg_off << " size=" << seg_size
+                        << " failed: " << s.message();
+      return s;
+    }
+  }
+
+  it->second.clear();
+  return Status::OK();
+}
+
+std::string VfsImpl::ChunkKey(InodeID ino, size_t file_offset) {
+  // Chunk N contains file offsets [N*kChunkSize, (N+1)*kChunkSize).
+  // The chunk key is deterministic from the offset — no metadata lookup
+  // is needed to locate the chunk for a Read.
+  uint64_t chunk_seq = file_offset / kChunkSize;
+  return "chunks/" + std::to_string(ino) + "/" + std::to_string(chunk_seq);
 }
 
 }  // namespace swordfs::fuse

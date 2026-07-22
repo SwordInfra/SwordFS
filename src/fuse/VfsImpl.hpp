@@ -110,10 +110,11 @@ class VfsImpl {
 
  private:
   // Derive the chunk key from inode + file offset.  Chunk N contains
-  // file offsets [N*kChunkSize, (N+1)*kChunkSize).
+  // file offsets [N*chunk_size, (N+1)*chunk_size).  The mapping is
+  // deterministic so Read can locate chunks without metadata lookups.
   std::string ChunkKey(InodeID ino, size_t file_offset);
 
-  // Auto-flush the current write buffer if it has grown beyond kChunkSize.
+  // Flush the write buffer to the data engine in chunk-sized segments.
   Status FlushChunked(InodeID ino, uint64_t fh);
 
   std::unique_ptr<swordfs::metadata::Meta> meta_;
