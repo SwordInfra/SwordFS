@@ -35,7 +35,8 @@ option(ENABLE_S3 "Enable S3 object storage backend" OFF)
 if(ENABLE_S3)
   find_package(AWSSDK REQUIRED COMPONENTS s3)
   add_library(swordfs_storage OBJECT
-    src/storage/S3DataEngine.cpp
+    src/storage/StorageRegistry.cpp
+    src/storage/s3/S3DataEngine.cpp
   )
   target_link_libraries(swordfs_storage PUBLIC
     ${AWSSDK_LINK_LIBRARIES}

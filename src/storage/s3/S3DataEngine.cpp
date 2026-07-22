@@ -1,13 +1,14 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include "storage/S3DataEngine.hpp"
+#include "storage/s3/S3DataEngine.hpp"
 
 #include <aws/core/Aws.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
 #include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/PutObjectRequest.h>
 
+#include "storage/StorageRegistry.hpp"
 #include "utils/Logging.hpp"
 
 namespace swordfs::storage {
@@ -88,5 +89,22 @@ std::string S3DataEngine::ObjectKey(std::string_view key) const {
   if (cfg_.prefix.empty()) return std::string(key);
   return cfg_.prefix + "/" + std::string(key);
 }
+
+// ── Backend registration ───────────────────────────────────────────────
+
+namespace {
+
+// Register "s3" backend.  ConfigCenter can use this to validate the
+// user's choice and to create the engine at mount time.
+static swordfs::storage::RegisterBackend kS3Backend(
+    "s3", []() -> std::unique_ptr<swordfs::storage::IDataEngine> {
+      // The actual S3Config is populated from ConfigCenter before
+      // calling Create(), so this factory returns a placeholder.
+      // Real instantiation happens in VfsImpl/Vfs constructor with
+      // the full config.
+      return nullptr;
+    });
+
+}  // anonymous namespace
 
 }  // namespace swordfs::storage
