@@ -55,6 +55,7 @@ else
   # ── Step 1: Download ─────────────────────────────────────────
 
   FOLLY_TARBALL="$PROJECT_DIR/build/folly-${FOLLY_VER}.tar.gz"
+  mkdir -p "$PROJECT_DIR/build"
   if [ -f "$FOLLY_TARBALL" ]; then
     echo "==> folly tarball already downloaded, skipping."
   else
