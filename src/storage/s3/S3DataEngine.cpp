@@ -75,6 +75,10 @@ Status S3DataEngine::Get(std::string_view key, std::string* out,
 
   auto outcome = client_->GetObject(req);
   if (!outcome.IsSuccess()) {
+    if (outcome.GetError().GetResponseCode() ==
+        Aws::Http::HttpResponseCode::NOT_FOUND) {
+      return Status::NotFound("chunk not found");
+    }
     SWORDFS_LOG_ERROR << "S3 GetObject failed: "
                       << outcome.GetError().GetMessage();
     return Status::Internal("S3 GetObject failed");
