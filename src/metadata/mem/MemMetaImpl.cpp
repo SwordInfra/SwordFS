@@ -292,7 +292,7 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
 
 Status MemMetaImpl::Rename(InodeID old_parent_ino,
                            std::string_view old_name, InodeID new_parent_ino,
-                           std::string_view new_name) {
+                           std::string_view new_name, unsigned int flags) {
   std::string old_key(old_name);
   std::string new_key(new_name);
 
@@ -341,9 +341,64 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
     return Status::InvalidArgument("cannot move directory into itself");
   }
 
-  // Handle overwrite of an existing target
+  // ── RENAME flags handling ──────────────────────────────────────────
+
   SwordFsInode* existing = nullptr;
-  if (store_.LookupEntry(new_parent_ino, new_name, &existing).ok()) {
+  bool target_exists = store_.LookupEntry(new_parent_ino, new_name, &existing).ok();
+
+  // RENAME_NOREPLACE (1): fail if target already exists.
+  if (flags & RENAME_NOREPLACE) {
+    if (target_exists) {
+      return Status::AlreadyExists("target exists and RENAME_NOREPLACE was set");
+    }
+  }
+
+  // RENAME_EXCHANGE (2): atomically swap the two entries.
+  if (flags & RENAME_EXCHANGE) {
+    if (!target_exists) {
+      return Status::NotFound("target does not exist for RENAME_EXCHANGE");
+    }
+
+    bool existing_is_dir = S_ISDIR(existing->attr.st_mode);
+    if (existing_is_dir != is_dir) {
+      return Status::InvalidArgument(
+          "cannot exchange directory with non-directory");
+    }
+
+    Status status = store_.SwapEntries(old_parent_ino, old_name,
+                                       new_parent_ino, new_name);
+    if (!status.ok()) return status;
+
+    // Adjust parent nlinks for cross-directory directory exchange.
+    if (is_dir && old_parent_ino != new_parent_ino) {
+      // Same net effect: src dir loses one parent, gains another;
+      // dst dir vice versa.  Since both are directories moving between
+      // different parents, both src and dst parent nlinks are unchanged
+      // overall (each loses a subdirectory and gains one).
+      // But each directory's own ".." entry must be updated:
+      // The exchanged dirs now point to each other's parent.
+      // In a pointer-based in-memory model this isn't tracked in nlink,
+      // so no nlink adjustment is needed.
+    }
+
+    // Update timestamps.
+    moved->Touch(kCtime);
+    existing->Touch(kCtime);
+    if (op) op->Touch(kMtime | kCtime);
+    if (np) np->Touch(kMtime | kCtime);
+    if (old_parent_ino != new_parent_ino && np != op) {
+      // If new parent is different, and also different from old parent,
+      // both parents' timestamps have already been touched above.
+    }
+
+    SWORDFS_LOG_DEBUG << "Rename EXCHANGE: " << old_parent_ino << "/'"
+                      << old_key << "' <-> " << new_parent_ino << "/'"
+                      << new_key << "'";
+    return Status::OK();
+  }
+
+  // Handle overwrite of an existing target (normal rename)
+  if (target_exists) {
     bool existing_is_dir = S_ISDIR(existing->attr.st_mode);
 
     // Cannot replace a directory with a file or vice versa
@@ -352,7 +407,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
           "cannot replace directory with non-directory");
     }
 
-    status = store_.RemoveEntry(new_parent_ino, new_name);
+    Status status = store_.RemoveEntry(new_parent_ino, new_name);
     if (!status.ok()) return status;
 
     if (existing_is_dir) {

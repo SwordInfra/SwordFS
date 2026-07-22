@@ -164,10 +164,9 @@ void VfsImpl::Symlink(fuse_req_t req, const char* link, fuse_ino_t parent,
 void VfsImpl::Rename(fuse_req_t req, fuse_ino_t parent, const char* name,
                      fuse_ino_t newparent, const char* newname,
                      unsigned int flags) {
-  (void)flags;
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
   Status status = meta_->Rename(parent, name, newparent,
-                                  newname);
+                                  newname, flags);
   fuse_reply_err(req, status.ToErrno());
 }
 
