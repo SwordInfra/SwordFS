@@ -463,7 +463,7 @@ TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
 
   // RENAME_EXCHANGE: file ↔ dir → EINVAL.
   Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RENAME_EXCHANGE);
-  EXPECT_TRUE(st.IsInvalidArgument()) << st.message();
+  EXPECT_EQ(st.code(), swordfs::utils::Status::kInvalidArgument) << st.message();
 }
 
 // ────────────────────────────────────────────────────────────────

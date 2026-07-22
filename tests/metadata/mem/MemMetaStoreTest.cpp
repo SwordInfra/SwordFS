@@ -222,10 +222,11 @@ TEST_F(MemMetaStoreTest, RemoveEntryNonEmptyDirectory) {
 TEST_F(MemMetaStoreTest, RemoveEntryEmptyDirectory) {
   SwordFsInode* sub = nullptr;
   store_->AddEntry(kRoot, "sub", kDir, 0, &sub);
+  InodeID sub_ino = sub->ino;  // save before RemoveEntry frees the pointer
 
   EXPECT_TRUE(store_->RemoveEntry(kRoot, "sub").ok());
   // Both sub and its dir entry table freed
-  EXPECT_TRUE(store_->LookupInode(sub->ino, nullptr).IsNotFound());
+  EXPECT_TRUE(store_->LookupInode(sub_ino, nullptr).IsNotFound());
   EXPECT_EQ(store_->InodeCount(), 1);
 }
 

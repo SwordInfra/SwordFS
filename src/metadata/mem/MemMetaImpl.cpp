@@ -494,7 +494,7 @@ Status MemMetaImpl::SetAttr(InodeID ino,
     st.st_ctime = ::time(nullptr);
   }
 
-  *out_attr = st;
+  if (out_attr) *out_attr = st;
   return Status::OK();
 }
 

@@ -75,3 +75,5 @@ Testing/
 
 # git
 .gitmessage
+.claude/
+.clangd
