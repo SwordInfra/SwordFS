@@ -10,6 +10,7 @@
 #include "utils/Context.hpp"
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
+#include <dirent.h>
 #include <folly/fibers/FiberManagerInternal.h>
 
 #define FUSE_USE_VERSION 312
