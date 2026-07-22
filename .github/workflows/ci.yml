@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Cache folly build
+        uses: actions/cache@v4
+        with:
+          path: /usr/local
+          key: folly-${{ runner.os }}-${{ hashFiles('scripts/install-deps.sh') }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          if [ ! -f /usr/local/lib/libfolly.a ]; then
+            sudo bash scripts/install-deps.sh
+          fi
+          sudo rm -rf build
+
+      - name: Configure
+        run: cmake --preset default
+
+      - name: Build
+        run: cmake --build build --target swordfs_test
+
+      - name: Test
+        run: build/swordfs_test --gtest_color=no
