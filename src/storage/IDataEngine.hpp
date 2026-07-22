@@ -10,11 +10,8 @@
 //
 //   Object Storage Engine (open-source) — chunks stored as immutable
 //       objects in S3-compatible storage.
-//   USE Engine (enterprise) — in-place random overwrite via NVMe-oF.
 //
-// The two engines share the same chunk-level metadata representation.
-// The difference — immutable slices vs in-place overwrites — is
-// encapsulated within each engine's implementation.
+// Additional backends implement the same interface.
 
 #pragma once
 
@@ -35,10 +32,6 @@ struct DataEngineLimits {
 
   /// Whether the engine supports multipart uploads.
   bool supports_multipart = false;
-
-  /// Whether the engine supports random overwrite (in-place mutation).
-  /// Object storage does not; USE does.
-  bool supports_overwrite = false;
 };
 
 /// Abstract data-plane engine.
@@ -59,9 +52,7 @@ class IDataEngine {
   /// @return true if the chunk exists.
   virtual bool Head(std::string_view key, size_t* size) = 0;
 
-  /// Write a chunk.  Returns the key that can be used to read it back.
-  /// For object-storage engines the key is the object path; for USE it
-  /// is a chunk locator.
+  /// Write a chunk to the storage backend.
   virtual Status Put(std::string_view key, std::string_view data) = 0;
 
   /// Read all or part of a chunk.
