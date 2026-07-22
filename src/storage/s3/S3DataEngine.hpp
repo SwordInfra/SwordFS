@@ -33,9 +33,12 @@ struct S3Config {
 ///
 /// Authentication is handled by the SDK's default credential chain
 /// (environment, ~/.aws/credentials, IAM role).
+///
+/// Concurrency: a small pool of S3Client instances (default 4) with
+/// round-robin selection, so concurrent reads are not serialised.
 class S3DataEngine : public IDataEngine {
  public:
-  explicit S3DataEngine(const S3Config& config);
+  explicit S3DataEngine(const S3Config& config, size_t pool_size = 4);
   ~S3DataEngine() override = default;
 
   DataEngineLimits Limits() const override;
@@ -50,9 +53,19 @@ class S3DataEngine : public IDataEngine {
   std::string ObjectKey(std::string_view key) const;
 
  private:
+  /// A client slot with its own mutex.
+  struct Slot {
+    std::unique_ptr<Aws::S3::S3Client> client;
+    mutable std::mutex mu;
+  };
+
+  /// Return the next slot in round-robin order.
+  Slot& NextSlot() const;
+
   S3Config cfg_;
-  std::unique_ptr<Aws::S3::S3Client> client_;
-  mutable std::mutex mu_;  // S3Client is not thread-safe
+  std::vector<Slot> slots_;
+  mutable std::atomic<size_t> next_slot_{0};
+  static constexpr size_t kDefaultPoolSize = 4;
 };
 
 }  // namespace swordfs::storage
