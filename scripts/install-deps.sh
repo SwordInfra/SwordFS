@@ -21,7 +21,7 @@ FOLLY_VER="v2026.07.20.00"
 
 echo "==> Checking system packages..."
 
-SYSTEM_PKGS="libfuse3-dev libfmt-dev libboost-all-dev libssl-dev libevent-dev libdouble-conversion-dev libgoogle-glog-dev libfast-float-dev libgtest-dev libcli11-dev curl g++ cmake ninja-build git"
+SYSTEM_PKGS="libfuse3-dev libfmt-dev libboost-all-dev libssl-dev libevent-dev libdouble-conversion-dev libgoogle-glog-dev libgtest-dev libcli11-dev curl g++ cmake ninja-build git"
 
 TO_INSTALL=""
 for pkg in $SYSTEM_PKGS; do
