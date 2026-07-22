@@ -100,9 +100,14 @@ class VfsImpl {
              struct fuse_file_info* fi);
 
  private:
-  // Helper: derive the chunk key for an inode.  The initial (milestone-3)
-  // implementation maps each file to a single chunk keyed by inode number.
-  static std::string ChunkKey(InodeID ino);
+  // Derive the chunk key from inode + file offset.  Chunk N contains
+  // file offsets [N*kChunkSize, (N+1)*kChunkSize).  The mapping is
+  // deterministic so Read can locate chunks without metadata lookups.
+  static std::string ChunkKey(InodeID ino, size_t file_offset);
+
+  // Auto-flush the current write buffer if it has grown beyond kChunkSize.
+  // Splits the buffer into chunk-sized segments and uploads each to S3.
+  Status FlushChunked(InodeID ino, uint64_t fh);
 
   std::unique_ptr<swordfs::metadata::Meta> meta_;
   std::unique_ptr<swordfs::storage::IDataEngine> data_;
