@@ -21,7 +21,7 @@ FOLLY_VER="v2026.07.20.00"
 
 echo "==> Checking system packages..."
 
-SYSTEM_PKGS="libfuse3-dev libfmt-dev libboost-all-dev libssl-dev libevent-dev libdouble-conversion-dev libgoogle-glog-dev libgtest-dev libcli11-dev software-properties-common curl g++ cmake ninja-build git"
+SYSTEM_PKGS="libfuse3-dev libfmt-dev libboost-all-dev libssl-dev libevent-dev libdouble-conversion-dev libgoogle-glog-dev libgtest-dev libcli11-dev curl g++ cmake ninja-build git"
 
 TO_INSTALL=""
 for pkg in $SYSTEM_PKGS; do
@@ -43,41 +43,32 @@ else
 fi
 
 # Some packages on Ubuntu 24.04 are too old for our dependencies.
-# Add ubuntu resolute (26.04) as a fallback source for newer versions.
-# Use a dedicated list file to avoid add-apt-repository modifying existing sources.
-echo "==> Setting up resolute fallback for newer packages..."
-if [ ! -f /etc/apt/sources.list.d/resolute.list ]; then
-  echo "deb http://archive.ubuntu.com/ubuntu resolute main universe" \
-    > /etc/apt/sources.list.d/resolute.list
-  apt-get update -qq
-fi
+# Add ubuntu resolute (25.04) via a dedicated .list file so we can
+# pin specific packages with -t resolute.  Using a new file avoids
+# mutating the system's existing sources.list.
+echo "==> Adding resolute source for newer packages..."
+echo "deb http://archive.ubuntu.com/ubuntu resolute main universe" \
+  > /etc/apt/sources.list.d/resolute.list
+apt-get update -qq
 
 # fast_float: folly v2026.07.20.00 requires fast_float >= 7.0.0
 # (needs chars_format::allow_leading_plus). Ubuntu 24.04 ships 6.1.0.
 echo "==> Checking fast_float version..."
-FAST_FLOAT_OK=0
-if dpkg-query -W -f='${Version}' libfast-float-dev 2>/dev/null | grep -qE '^([89]|[1-9][0-9])\.'; then
-  echo "  [ok] libfast-float-dev >= 8.0.0 already installed"
-  FAST_FLOAT_OK=1
-fi
-
-if [ "$FAST_FLOAT_OK" -eq 0 ]; then
+if ! dpkg-query -W -f='${Version}' libfast-float-dev 2>/dev/null | grep -qE '^([89]|[1-9][0-9])\.'; then
   echo "  ==> Installing libfast-float-dev from resolute..."
   apt-get install -y -qq -t resolute libfast-float-dev
+else
+  echo "  [ok] libfast-float-dev >= 8.0.0"
 fi
 
 # libfuse3-dev: SwordFS README requires >= 3.18 (for no_interrupt, tmpfile).
 # Ubuntu 24.04 ships 3.14.1 which is too old.
 echo "==> Checking libfuse3-dev version..."
-FUSE_OK=0
-if dpkg-query -W -f='${Version}' libfuse3-dev 2>/dev/null | grep -qE '^3\.(1[89]|[2-9][0-9])'; then
-  echo "  [ok] libfuse3-dev >= 3.18 already installed"
-  FUSE_OK=1
-fi
-
-if [ "$FUSE_OK" -eq 0 ]; then
+if ! dpkg-query -W -f='${Version}' libfuse3-dev 2>/dev/null | grep -qE '^3\.(1[89]|[2-9])'; then
   echo "  ==> Installing libfuse3-dev from resolute..."
   apt-get install -y -qq -t resolute libfuse3-dev
+else
+  echo "  [ok] libfuse3-dev >= 3.18"
 fi
 
 # ────────────────────────────────────────────────────────────────
