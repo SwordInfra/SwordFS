@@ -143,8 +143,8 @@ TEST_F(MemMetaImplTest, CreateGroupMemberWithWriteExecSucceeds) {
 
 TEST_F(MemMetaImplTest, CreateGroupMemberWithoutWriteFails) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0750);  // group has r-x only
-  SetDirOwner(dir_ino, kOther, kGroup);
-  SetContext(kOther, kGroup);
+  // Caller is in kGroup but is NOT the owner (kOwner=1000).
+  SetContext(3000, kGroup);
 
   InodeID ino = 0;
   Status st = impl_->Create(dir_ino, "f", 0644, &ino, nullptr);
@@ -220,7 +220,8 @@ TEST_F(MemMetaImplTest, AccessOwnerReadOnly) {
 TEST_F(MemMetaImplTest, AccessGroupPermissions) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0070);  // group rwx
   SetDirOwner(dir_ino, kOther, kGroup);
-  SetContext(kOther, kGroup);
+  // Caller is NOT the owner (kOther=2000), but IS in kGroup (100).
+  SetContext(3000, kGroup);
 
   EXPECT_TRUE(impl_->Access(dir_ino, R_OK).ok());
   EXPECT_TRUE(impl_->Access(dir_ino, W_OK).ok());
