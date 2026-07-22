@@ -294,11 +294,13 @@ void VfsImpl::Release(fuse_req_t req, fuse_ino_t ino,
   // fuse_reply_err and each FUSE request can only be replied once.
   if (data_) {
     Status s = FlushChunked(ino, fi->fh);
-    write_buf_.erase(fi->fh);
     if (!s.ok()) {
+      write_buf_.erase(fi->fh);   // clean up on failure
+      meta_->Release(fi->fh);     // still release the handle
       fuse_reply_err(req, s.ToErrno());
       return;
     }
+    write_buf_.erase(fi->fh);     // clean up on success
   }
 
   Status status = meta_->Release(fi->fh);
