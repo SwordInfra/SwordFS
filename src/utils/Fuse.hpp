@@ -5,7 +5,7 @@
 
 #pragma once
 
-#define FUSE_USE_VERSION 31
+#define FUSE_USE_VERSION 312
 #include <fuse_lowlevel.h>
 #include <fuse_opt.h>
 #include <sys/stat.h>
@@ -17,7 +17,12 @@ namespace swordfs::utils {
 // RAII wrapper that frees fuse_args on scope exit.
 class FuseArgsGuard {
  public:
-  FuseArgsGuard(int argc, char** argv) : args_(FUSE_ARGS_INIT(argc, argv)) {}
+  FuseArgsGuard(int argc, char** argv) {
+    args_ = FUSE_ARGS_INIT(0, nullptr);
+    for (int i = 0; i < argc; i++) {
+      fuse_opt_add_arg(&args_, argv[i]);
+    }
+  }
   ~FuseArgsGuard() { fuse_opt_free_args(&args_); }
   FuseArgsGuard(const FuseArgsGuard&) = delete;
   FuseArgsGuard& operator=(const FuseArgsGuard&) = delete;
@@ -73,14 +78,14 @@ bool IsFuseMounted(const std::string& mp) {
 }
 
 bool IsStaleMount(const std::string& mp) {
-  // Check if the mountpoint is listed but the FUSE connection is dead.
-  // A simple heuristic: try to stat the mountpoint; if it returns ENOTCONN
-  // the FUSE daemon is gone but the kernel still holds the mount.
+  // A stale FUSE mount can be detected in two ways:
+  // 1. stat returns ENOTCONN — kernel holds the mount but daemon is gone
+  // 2. stat succeeds but st_ino == 0 — dead FUSE mount returns zero inode
   struct stat st;
-  if (::stat(mp.c_str(), &st) == -1 && errno == ENOTCONN) {
-    return true;
+  if (::stat(mp.c_str(), &st) == -1) {
+    return errno == ENOTCONN;
   }
-  return false;
+  return st.st_ino == 0;
 }
 
 }  // namespace swordfs::utils

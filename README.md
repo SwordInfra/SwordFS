@@ -93,6 +93,15 @@ git clone --recurse-submodules https://github.com/SwordInfra/SwordFS.git
 cd SwordFS
 ```
 
+### Install Dependencies
+
+Installs all required system packages (libfuse3-dev, build tools, folly build deps)
+and downloads + builds folly. Already-installed components are skipped:
+
+```bash
+./scripts/install-deps.sh
+```
+
 ### Build
 
 ```bash
@@ -110,6 +119,23 @@ Or invoke Ninja directly:
 ```bash
 cmake --preset default && ninja -C build
 cmake --preset release && ninja -C build
+```
+
+### Run Tests
+
+Test dependencies (gtest) are fetched automatically via CMake's `FetchContent` — no manual
+installation required.
+
+```bash
+# Configure, build, and run all tests in one go:
+cmake --preset default && ninja -C build swordfs_test && ./build/swordfs_test
+```
+
+Or use CTest to run with filtering and parallel execution:
+
+```bash
+cmake --preset default && ninja -C build
+cd build && ctest --test-dir . -V
 ```
 
 ## Acknowledgements
