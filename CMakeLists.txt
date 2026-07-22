@@ -28,8 +28,11 @@ file(GLOB_RECURSE SWORDFS_SOURCES
   src/*.h
 )
 
+# Metadata engine library (separate target for testability)
+add_subdirectory(src/meta)
+
 add_executable(swordfs ${SWORDFS_SOURCES})
-target_link_libraries(swordfs PRIVATE ${CMAKE_DL_LIBS} folly ${FUSE3_LIBRARY})
+target_link_libraries(swordfs PRIVATE ${CMAKE_DL_LIBS} folly ${FUSE3_LIBRARY} swordfs_meta)
 target_include_directories(swordfs PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}
