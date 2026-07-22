@@ -208,7 +208,7 @@ void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
 
   size_t file_off = static_cast<size_t>(off);
   std::string key = ChunkKey(ino, file_off);
-  size_t chunk_off = file_off % kChunkSize;
+  size_t chunk_off = file_off % data_->Limits().max_chunk_size;
 
   std::string data;
   Status status = data_->Get(key, &data, chunk_off, size);
@@ -271,7 +271,7 @@ void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
 
   // Auto-flush if the buffer has grown beyond the chunk size limit.
   // This prevents unbounded memory growth for large files.
-  if (wbuf.size() >= kChunkSize) {
+  if (wbuf.size() >= data_->Limits().max_chunk_size) {
     Status s = FlushChunked(ino, fi->fh);
     if (!s.ok()) {
       fuse_reply_err(req, s.ToErrno());
@@ -579,10 +579,6 @@ void VfsImpl::Statx(fuse_req_t req, fuse_ino_t ino, int flags, int mask,
   fuse_reply_err(req, ENOSYS);
 }
 
-// Maximum chunk size (64 MiB).  Writes that would exceed this limit are
-// auto-flushed to S3 and a new chunk is started.
-static constexpr size_t kChunkSize = 64ULL << 20;
-
 Status VfsImpl::FlushChunked(InodeID ino, uint64_t fh) {
   auto it = write_buf_.find(fh);
   if (it == write_buf_.end() || it->second.empty()) {
@@ -591,10 +587,10 @@ Status VfsImpl::FlushChunked(InodeID ino, uint64_t fh) {
 
   const std::string& buf = it->second;
 
-  // Upload the buffer in kChunkSize segments.  Segment N starts at
-  // file offset N*kChunkSize and is stored under chunks/{ino}/{N}.
-  for (size_t seg_off = 0; seg_off < buf.size(); seg_off += kChunkSize) {
-    size_t seg_size = std::min(kChunkSize, buf.size() - seg_off);
+  // Upload the buffer in data_->Limits().max_chunk_size segments.  Segment N starts at
+  // file offset N*data_->Limits().max_chunk_size and is stored under chunks/{ino}/{N}.
+  for (size_t seg_off = 0; seg_off < buf.size(); seg_off += data_->Limits().max_chunk_size) {
+    size_t seg_size = std::min(data_->Limits().max_chunk_size, buf.size() - seg_off);
     std::string key = ChunkKey(ino, seg_off);
 
     Status s = data_->Put(key, std::string_view(buf.data() + seg_off, seg_size));
@@ -611,10 +607,10 @@ Status VfsImpl::FlushChunked(InodeID ino, uint64_t fh) {
 }
 
 std::string VfsImpl::ChunkKey(InodeID ino, size_t file_offset) {
-  // Chunk N contains file offsets [N*kChunkSize, (N+1)*kChunkSize).
+  // Chunk N contains file offsets [N*data_->Limits().max_chunk_size, (N+1)*data_->Limits().max_chunk_size).
   // The chunk key is deterministic from the offset — no metadata lookup
   // is needed to locate the chunk for a Read.
-  uint64_t chunk_seq = file_offset / kChunkSize;
+  uint64_t chunk_seq = file_offset / data_->Limits().max_chunk_size;
   return "chunks/" + std::to_string(ino) + "/" + std::to_string(chunk_seq);
 }
 
