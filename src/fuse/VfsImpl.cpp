@@ -6,6 +6,7 @@
 #include "fuse/Limits.hpp"
 #include "metadata/Meta.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
+#include "storage/IDataEngine.hpp"
 #include "utils/ConfigCenter.hpp"
 #include "utils/Context.hpp"
 #include "utils/Logging.hpp"
@@ -19,6 +20,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 using namespace swordfs::utils;
@@ -193,33 +195,97 @@ void VfsImpl::Open(fuse_req_t req, fuse_ino_t ino,
 
 void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                    struct fuse_file_info* fi) {
-  (void)ino;
-  (void)size;
-  (void)off;
-  (void)fi;
-  fuse_reply_err(req, ENOSYS);
+  if (!data_) {
+    fuse_reply_err(req, ENOSYS);
+    return;
+  }
+
+  std::string key = ChunkKey(ino);
+  std::string data;
+  Status status = data_->Get(key, &data, static_cast<size_t>(off), size);
+  if (status.IsNotFound()) {
+    // File exists in metadata but has no data yet (never written).
+    fuse_reply_buf(req, nullptr, 0);
+    return;
+  }
+  if (!status.ok()) {
+    SWORDFS_LOG_ERROR << "Read: ino=" << ino << " key=" << key
+                      << " off=" << off << " size=" << size
+                      << " failed: " << status.message();
+    fuse_reply_err(req, status.ToErrno());
+    return;
+  }
+
+  fuse_reply_buf(req, data.data(), data.size());
 }
 
 void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
                     size_t size, off_t off, struct fuse_file_info* fi) {
-  (void)ino;
-  (void)buf;
-  (void)size;
-  (void)off;
-  (void)fi;
-  fuse_reply_err(req, ENOSYS);
+  if (!data_) {
+    fuse_reply_err(req, ENOSYS);
+    return;
+  }
+
+  // Accumulate writes in the per-handle buffer.  Data is flushed to the
+  // storage engine on Flush / Release.
+  auto& wbuf = write_buf_[fi->fh];
+
+  // If the write extends beyond the current buffer size, grow it.
+  size_t needed = static_cast<size_t>(off) + size;
+  if (wbuf.size() < needed) {
+    wbuf.resize(needed, '\0');
+  }
+
+  std::memcpy(wbuf.data() + off, buf, size);
+
+  // Update the inode's file size if this write extends it.
+  struct stat attr;
+  Status status = meta_->GetAttr(ino, &attr);
+  if (status.ok() && static_cast<off_t>(needed) > attr.st_size) {
+    attr.st_size = static_cast<off_t>(needed);
+    meta_->SetAttr(ino, &attr, FUSE_SET_ATTR_SIZE, &attr);
+  }
+
+  fuse_reply_write(req, size);
 }
 
 void VfsImpl::Flush(fuse_req_t req, fuse_ino_t ino,
                     struct fuse_file_info* fi) {
-  (void)ino;
-  (void)fi;
+  if (!data_) {
+    fuse_reply_err(req, 0);
+    return;
+  }
+
+  auto it = write_buf_.find(fi->fh);
+  if (it == write_buf_.end() || it->second.empty()) {
+    fuse_reply_err(req, 0);
+    return;
+  }
+
+  std::string key = ChunkKey(ino);
+  Status status = data_->Put(key, it->second);
+  if (!status.ok()) {
+    SWORDFS_LOG_ERROR << "Flush: ino=" << ino << " key=" << key
+                      << " size=" << it->second.size()
+                      << " failed: " << status.message();
+    fuse_reply_err(req, status.ToErrno());
+    return;
+  }
+
+  it->second.clear();
   fuse_reply_err(req, 0);
 }
 
 void VfsImpl::Release(fuse_req_t req, fuse_ino_t ino,
                       struct fuse_file_info* fi) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+
+  // Flush any buffered writes before releasing the handle.
+  if (data_) {
+    Flush(req, ino, fi);
+    write_buf_.erase(fi->fh);
+  }
+
   Status status = meta_->Release(fi->fh);
   (void)ino;
   fuse_reply_err(req, status.ToErrno());
@@ -227,10 +293,8 @@ void VfsImpl::Release(fuse_req_t req, fuse_ino_t ino,
 
 void VfsImpl::Fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
                     struct fuse_file_info* fi) {
-  (void)ino;
-  (void)datasync;
-  (void)fi;
-  fuse_reply_err(req, ENOSYS);
+  // Fsync delegates to Flush for data persistence.
+  return Flush(req, ino, fi);
 }
 
 void VfsImpl::Opendir(fuse_req_t req, fuse_ino_t ino,
@@ -492,6 +556,10 @@ void VfsImpl::Statx(fuse_req_t req, fuse_ino_t ino, int flags, int mask,
   (void)mask;
   (void)fi;
   fuse_reply_err(req, ENOSYS);
+}
+
+std::string VfsImpl::ChunkKey(InodeID ino) {
+  return "inode/" + std::to_string(ino);
 }
 
 }  // namespace swordfs::fuse

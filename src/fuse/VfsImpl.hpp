@@ -8,15 +8,21 @@
 #pragma once
 
 #define FUSE_USE_VERSION 312
+#include <folly/container/F14Map.h>
 #include <fuse_lowlevel.h>
 
 #include <memory>
+#include <string>
 
 namespace swordfs {
 
 namespace metadata {
 class Meta;
 }  // namespace metadata
+
+namespace storage {
+class IDataEngine;
+}  // namespace storage
 
 namespace fuse {
 
@@ -94,7 +100,15 @@ class VfsImpl {
              struct fuse_file_info* fi);
 
  private:
+  // Helper: derive the chunk key for an inode.  The initial (milestone-3)
+  // implementation maps each file to a single chunk keyed by inode number.
+  static std::string ChunkKey(InodeID ino);
+
   std::unique_ptr<swordfs::metadata::Meta> meta_;
+  std::unique_ptr<swordfs::storage::IDataEngine> data_;
+
+  // Write buffer: file handle → accumulated bytes not yet flushed.
+  folly::F14FastMap<uint64_t, std::string> write_buf_;
 };
 
 }  // namespace fuse
