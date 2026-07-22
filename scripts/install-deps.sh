@@ -43,10 +43,14 @@ else
 fi
 
 # Some packages on Ubuntu 24.04 are too old for our dependencies.
-# Add ubuntu resolute (25.04) as a fallback source for newer versions.
+# Add ubuntu resolute (26.04) as a fallback source for newer versions.
+# Use a dedicated list file to avoid add-apt-repository modifying existing sources.
 echo "==> Setting up resolute fallback for newer packages..."
-add-apt-repository -y "deb http://archive.ubuntu.com/ubuntu resolute universe" 2>/dev/null || true
-apt-get update -qq
+if [ ! -f /etc/apt/sources.list.d/resolute.list ]; then
+  echo "deb http://archive.ubuntu.com/ubuntu resolute main universe" \
+    > /etc/apt/sources.list.d/resolute.list
+  apt-get update -qq
+fi
 
 # fast_float: folly v2026.07.20.00 requires fast_float >= 7.0.0
 # (needs chars_format::allow_leading_plus). Ubuntu 24.04 ships 6.1.0.
