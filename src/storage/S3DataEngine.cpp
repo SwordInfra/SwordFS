@@ -3,106 +3,90 @@
 
 #include "storage/S3DataEngine.hpp"
 
-#include <ctime>
-#include <iomanip>
-#include <sstream>
-
-#include <openssl/hmac.h>
-#include <openssl/sha.h>
+#include <aws/core/Aws.h>
+#include <aws/s3/model/DeleteObjectRequest.h>
+#include <aws/s3/model/GetObjectRequest.h>
+#include <aws/s3/model/PutObjectRequest.h>
 
 #include "utils/Logging.hpp"
 
 namespace swordfs::storage {
 
-// ── S3DataEngine ───────────────────────────────────────────────────────────
+S3DataEngine::S3DataEngine(const S3Config& config) : cfg_(config) {
+  Aws::Client::ClientConfiguration aws_cfg;
+  aws_cfg.endpointOverride = cfg_.endpoint;
+  aws_cfg.region = cfg_.region;
 
-S3DataEngine::S3DataEngine(const S3Config& config)
-    : cfg_(config), curl_(curl_easy_init()) {
+  client_ = std::make_unique<Aws::S3::S3Client>(std::move(aws_cfg));
+
   SWORDFS_LOG_INFO << "S3DataEngine: endpoint=" << cfg_.endpoint
                    << " bucket=" << cfg_.bucket;
 }
 
-S3DataEngine::~S3DataEngine() {
-  if (curl_) curl_easy_cleanup(curl_);
-}
-
 Status S3DataEngine::Put(std::string_view key, std::string_view data) {
-  std::string url = BuildUrl(key);
-  return DoPut(url, data);
+  Aws::S3::Model::PutObjectRequest req;
+  req.SetBucket(cfg_.bucket);
+  req.SetKey(ObjectKey(key));
+
+  auto body = Aws::MakeShared<Aws::StringStream>("PutObject",
+      std::string(data.data(), data.size()));
+  req.SetBody(body);
+
+  std::lock_guard<std::mutex> lock(mu_);
+  auto outcome = client_->PutObject(req);
+  if (!outcome.IsSuccess()) {
+    SWORDFS_LOG_ERROR << "S3 PutObject failed: "
+                      << outcome.GetError().GetMessage();
+    return Status::Internal("S3 PutObject failed");
+  }
+  return Status::OK();
 }
 
 Status S3DataEngine::Get(std::string_view key, std::string* out,
                          size_t offset, size_t size) {
-  std::string url = BuildUrl(key);
-  return DoGet(url, out, offset, size);
+  Aws::S3::Model::GetObjectRequest req;
+  req.SetBucket(cfg_.bucket);
+  req.SetKey(ObjectKey(key));
+
+  if (offset > 0 || size > 0) {
+    std::string range = "bytes=" + std::to_string(offset) + "-";
+    if (size > 0) range += std::to_string(offset + size - 1);
+    req.SetRange(range);
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  auto outcome = client_->GetObject(req);
+  if (!outcome.IsSuccess()) {
+    SWORDFS_LOG_ERROR << "S3 GetObject failed: "
+                      << outcome.GetError().GetMessage();
+    return Status::Internal("S3 GetObject failed");
+  }
+
+  auto& stream = outcome.GetResult().GetBody();
+  std::string result((std::istreambuf_iterator<char>(stream)),
+                     std::istreambuf_iterator<char>());
+  *out = std::move(result);
+  return Status::OK();
 }
 
 Status S3DataEngine::Delete(std::string_view key) {
-  std::string url = BuildUrl(key);
-  return DoDelete(url);
-}
+  Aws::S3::Model::DeleteObjectRequest req;
+  req.SetBucket(cfg_.bucket);
+  req.SetKey(ObjectKey(key));
 
-// ── URL helpers ────────────────────────────────────────────────────────────
-
-std::string S3DataEngine::BuildUrl(std::string_view key) const {
-  // Build: https://<endpoint>/<bucket>/<prefix>/<key>
-  std::string url = cfg_.endpoint;
-  if (url.find("https://") != 0 && url.find("http://") != 0) {
-    url = "https://" + url;
+  std::lock_guard<std::mutex> lock(mu_);
+  auto outcome = client_->DeleteObject(req);
+  if (!outcome.IsSuccess()) {
+    SWORDFS_LOG_ERROR << "S3 DeleteObject failed: "
+                      << outcome.GetError().GetMessage();
+    return Status::Internal("S3 DeleteObject failed");
   }
-  url += "/" + cfg_.bucket;
-  if (!cfg_.prefix.empty()) {
-    url += "/" + cfg_.prefix;
-  }
-  url += "/";
-  url += key;
-  return url;
-}
-
-std::string S3DataEngine::BuildHost() const {
-  // Strip scheme from endpoint to get host.
-  std::string host = cfg_.endpoint;
-  if (host.find("https://") == 0) host = host.substr(8);
-  else if (host.find("http://") == 0) host = host.substr(7);
-  return host;
-}
-
-// ── AWS Signature V4 ───────────────────────────────────────────────────────
-
-void S3DataEngine::SignRequest(const std::string& /*method*/,
-                               const std::string& /*url_path*/,
-                               const std::string& /*query_string*/,
-                               const std::string& /*payload_hash*/,
-                               struct curl_slist** /*headers*/) const {
-  // TODO(#18): AWS SigV4 signing implementation.
-  //
-  // Steps:
-  //   1. Build canonical request.
-  //   2. Build string-to-sign.
-  //   3. Calculate signing key.
-  //   4. Add Authorization header.
-}
-
-// ── HTTP operations ────────────────────────────────────────────────────────
-
-Status S3DataEngine::DoPut(const std::string& url, std::string_view data) {
-  // TODO(#18): S3 PutObject with SigV4 auth.
-  SWORDFS_LOG_DEBUG << "S3 Put: " << url << " (" << data.size() << " bytes)";
   return Status::OK();
 }
 
-Status S3DataEngine::DoGet(const std::string& url, std::string* out,
-                           size_t offset, size_t size) {
-  // TODO(#18): S3 GetObject with optional Range header.
-  SWORDFS_LOG_DEBUG << "S3 Get: " << url
-                    << " offset=" << offset << " size=" << size;
-  return Status::OK();
-}
-
-Status S3DataEngine::DoDelete(const std::string& url) {
-  // TODO(#18): S3 DeleteObject with SigV4 auth.
-  SWORDFS_LOG_DEBUG << "S3 Delete: " << url;
-  return Status::OK();
+std::string S3DataEngine::ObjectKey(std::string_view key) const {
+  if (cfg_.prefix.empty()) return std::string(key);
+  return cfg_.prefix + "/" + std::string(key);
 }
 
 }  // namespace swordfs::storage

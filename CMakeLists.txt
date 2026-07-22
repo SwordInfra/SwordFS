@@ -27,6 +27,30 @@ configure_file(
 )
 
 # ============================================================
+# S3 data engine (optional)
+# ============================================================
+
+option(ENABLE_S3 "Enable S3 object storage backend" OFF)
+
+if(ENABLE_S3)
+  find_package(AWSSDK REQUIRED COMPONENTS s3)
+  add_library(swordfs_storage OBJECT
+    src/storage/S3DataEngine.cpp
+  )
+  target_link_libraries(swordfs_storage PUBLIC
+    ${AWSSDK_LINK_LIBRARIES}
+    Aws::aws-cpp-sdk-s3
+  )
+  target_include_directories(swordfs_storage PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+  target_compile_definitions(swordfs_storage PRIVATE
+    SWORDFS_ENABLE_S3
+    _FILE_OFFSET_BITS=64
+  )
+endif()
+
+# ============================================================
 # SwordFS library (all sources except main)
 # ============================================================
 
@@ -37,6 +61,9 @@ file(GLOB_RECURSE SWORDFS_SOURCES
 list(FILTER SWORDFS_SOURCES EXCLUDE REGEX "src/cmd/Main\.cpp$")
 
 add_library(swordfs_lib OBJECT ${SWORDFS_SOURCES})
+if(ENABLE_S3)
+  target_link_libraries(swordfs_lib PUBLIC swordfs_storage)
+endif()
 target_link_libraries(swordfs_lib PUBLIC ${CMAKE_DL_LIBS} Folly::folly ${FUSE3_LIBRARY})
 target_include_directories(swordfs_lib PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
