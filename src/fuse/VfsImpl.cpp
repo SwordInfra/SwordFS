@@ -231,11 +231,28 @@ void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
     return;
   }
 
+  // Phase 1: append-only — writes must start at or beyond the current
+  // file size.  Random overwrites are deferred to Phase 2 (slice model).
+  struct stat attr;
+  Status status = meta_->GetAttr(ino, &attr);
+  if (!status.ok()) {
+    fuse_reply_err(req, status.ToErrno());
+    return;
+  }
+
+  if (off < attr.st_size) {
+    SWORDFS_LOG_DEBUG << "Write: ino=" << ino << " off=" << off
+                      << " < st_size=" << attr.st_size
+                      << " — random overwrite not supported in Phase 1";
+    fuse_reply_err(req, EOPNOTSUPP);
+    return;
+  }
+
   // Accumulate writes in the per-handle buffer.  Data is flushed to the
   // storage engine on Flush / Release.
   auto& wbuf = write_buf_[fi->fh];
 
-  // If the write extends beyond the current buffer size, grow it.
+  // Append: write always starts at off; padding fills any gap.
   size_t needed = static_cast<size_t>(off) + size;
   if (wbuf.size() < needed) {
     wbuf.resize(needed, '\0');
@@ -244,9 +261,7 @@ void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
   std::memcpy(wbuf.data() + off, buf, size);
 
   // Update the inode's file size if this write extends it.
-  struct stat attr;
-  Status status = meta_->GetAttr(ino, &attr);
-  if (status.ok() && static_cast<off_t>(needed) > attr.st_size) {
+  if (static_cast<off_t>(needed) > attr.st_size) {
     attr.st_size = static_cast<off_t>(needed);
     meta_->SetAttr(ino, &attr, FUSE_SET_ATTR_SIZE, &attr);
   }
@@ -564,7 +579,10 @@ void VfsImpl::Statx(fuse_req_t req, fuse_ino_t ino, int flags, int mask,
 }
 
 std::string VfsImpl::ChunkKey(InodeID ino) {
-  return "inode/" + std::to_string(ino);
+  // Phase 1: single-chunk-per-file model.  Multi-chunk with sequence
+  // numbers (chunks/{ino}/{seq}) will be introduced in Phase 2 when the
+  // metadata layer gains slice/chunk tracking.
+  return "chunks/" + std::to_string(ino) + "/0";
 }
 
 }  // namespace swordfs::fuse
