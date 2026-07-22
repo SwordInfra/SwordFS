@@ -292,7 +292,7 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
 
 Status MemMetaImpl::Rename(InodeID old_parent_ino,
                            std::string_view old_name, InodeID new_parent_ino,
-                           std::string_view new_name, int flags) {
+                           std::string_view new_name, unsigned int flags) {
   std::string old_key(old_name);
   std::string new_key(new_name);
 
