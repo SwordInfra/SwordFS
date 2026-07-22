@@ -148,6 +148,41 @@ bool MemMetaStore::IsDescendantOf(InodeID ancestor_ino,
   return IsDescendantOfImplLocked(ancestor_ino, child_ino);
 }
 
+Status MemMetaStore::SwapEntries(InodeID parent_a_ino, std::string_view name_a,
+                                 InodeID parent_b_ino, std::string_view name_b) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto dir_a_it = dirs_.find(parent_a_ino);
+  if (dir_a_it == dirs_.end()) {
+    return Status::NotFound("parent A directory not found");
+  }
+  auto it_a = dir_a_it->second.find(name_a);
+  if (it_a == dir_a_it->second.end()) {
+    return Status::NotFound("source entry A not found");
+  }
+
+  auto dir_b_it = dirs_.find(parent_b_ino);
+  if (dir_b_it == dirs_.end()) {
+    return Status::NotFound("parent B directory not found");
+  }
+  auto it_b = dir_b_it->second.find(name_b);
+  if (it_b == dir_b_it->second.end()) {
+    return Status::NotFound("source entry B not found");
+  }
+
+  // Atomically swap the inode pointers.  The two-step assignment handles
+  // both same-directory and cross-directory swaps correctly:
+  //   - Cross-directory: each parent's entry table gets the other's inode.
+  //   - Same-directory (different names): values are swapped.
+  //   - Same-directory (same name): no-op (identical values).
+  SwordFsInode* inode_a = it_a->second;
+  SwordFsInode* inode_b = it_b->second;
+  dir_a_it->second[std::string(name_a)] = inode_b;
+  dir_b_it->second[std::string(name_b)] = inode_a;
+
+  return Status::OK();
+}
+
 // ────────────────────────────────────────────────────────────────
 // Private helpers — caller MUST hold mutex_
 // ────────────────────────────────────────────────────────────────

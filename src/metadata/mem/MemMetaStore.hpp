@@ -72,6 +72,11 @@ class MemMetaStore {
   // Return true if child is a descendant of ancestor.
   bool IsDescendantOf(InodeID ancestor_ino, InodeID child_ino) const;
 
+  // Atomically swap two directory entries.  Acquires mutex_ for its
+  // entire duration (public API convention).
+  Status SwapEntries(InodeID parent_a_ino, std::string_view name_a,
+                     InodeID parent_b_ino, std::string_view name_b);
+
  private:
   // ────────────────────────────────────────────────────────────────
   // Private helpers — caller MUST hold mutex_

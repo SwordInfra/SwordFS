@@ -48,7 +48,7 @@ class MemMetaImpl : public Meta {
   Status Unlink(InodeID parent_ino, std::string_view name) override;
   Status Rename(InodeID old_parent_ino,
                 std::string_view old_name, InodeID new_parent_ino,
-                std::string_view new_name) override;
+                std::string_view new_name, unsigned int flags) override;
   Status SetAttr(InodeID ino,
                  const struct stat* attr, int to_set,
                  struct stat* out_attr) override;

@@ -348,7 +348,7 @@ TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnOldParent) {
   // Remove write from src
   SetDirMode(src_ino, 0500);
   SetContext(kOwner, kOtherGroup);
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f");
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", 0);
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
@@ -362,7 +362,7 @@ TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnNewParent) {
   // Remove write from dst
   SetDirMode(dst_ino, 0500);
   SetContext(kOwner, kOtherGroup);
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f");
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", 0);
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
@@ -376,8 +376,94 @@ TEST_F(MemMetaImplTest, RenameRootSucceedsRegardlessOfPerms) {
 
   // Root can rename even with no perms on either parent
   SetContext(0, 0);
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f");
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", 0);
   EXPECT_TRUE(st.ok()) << st.message();
+}
+
+// ────────────────────────────────────────────────────────────────
+// RENAME flags tests
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(MemMetaImplTest, RenameNoReplaceSucceedsWhenTargetFree) {
+  InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
+  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
+  SetContext(0, 0);
+  InodeID f_ino = 0;
+  impl_->Create(src_ino, "f", 0644, &f_ino, nullptr);
+
+  // RENAME_NOREPLACE: target "f" under dst does not exist → succeed.
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RENAME_NOREPLACE);
+  EXPECT_TRUE(st.ok()) << st.message();
+
+  // Verify the file moved.
+  struct stat attr;
+  EXPECT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
+}
+
+TEST_F(MemMetaImplTest, RenameNoReplaceFailsWhenTargetExists) {
+  InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
+  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
+  SetContext(0, 0);
+  InodeID f1_ino = 0, f2_ino = 0;
+  impl_->Create(src_ino, "f", 0644, &f1_ino, nullptr);
+  impl_->Create(dst_ino, "f", 0644, &f2_ino, nullptr);
+
+  // RENAME_NOREPLACE: target "f" under dst EXISTS → EEXIST.
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RENAME_NOREPLACE);
+  EXPECT_TRUE(st.IsAlreadyExists()) << st.message();
+
+  // Verify source file was NOT moved (still under src).
+  InodeID found = 0;
+  EXPECT_TRUE(impl_->Lookup(src_ino, "f", &found, nullptr).ok());
+  EXPECT_EQ(f1_ino, found);
+}
+
+TEST_F(MemMetaImplTest, RenameExchangeSucceeds) {
+  InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
+  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
+  SetContext(0, 0);
+  InodeID f1_ino = 0, f2_ino = 0;
+  impl_->Create(src_ino, "a", 0644, &f1_ino, nullptr);
+  impl_->Create(dst_ino, "b", 0644, &f2_ino, nullptr);
+
+  // RENAME_EXCHANGE: atomically swap "a" and "b".
+  Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RENAME_EXCHANGE);
+  EXPECT_TRUE(st.ok()) << st.message();
+
+  // Verify: src/a now has inode f2_ino, dst/b now has inode f1_ino.
+  InodeID found = 0;
+  EXPECT_TRUE(impl_->Lookup(src_ino, "a", &found, nullptr).ok());
+  EXPECT_EQ(f2_ino, found);
+  EXPECT_TRUE(impl_->Lookup(dst_ino, "b", &found, nullptr).ok());
+  EXPECT_EQ(f1_ino, found);
+}
+
+TEST_F(MemMetaImplTest, RenameExchangeFailsWhenTargetMissing) {
+  InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
+  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
+  SetContext(0, 0);
+  InodeID f_ino = 0;
+  impl_->Create(src_ino, "a", 0644, &f_ino, nullptr);
+
+  // RENAME_EXCHANGE: target "b" under dst does NOT exist → ENOENT.
+  Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RENAME_EXCHANGE);
+  EXPECT_TRUE(st.IsNotFound()) << st.message();
+}
+
+TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
+  InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
+  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
+  SetContext(0, 0);
+  InodeID f_ino = 0;
+  impl_->Create(src_ino, "a", 0644, &f_ino, nullptr);
+
+  // Create a directory under dst with same name.
+  InodeID dir_ino = 0;
+  impl_->MkDir(dst_ino, "b", 0755, &dir_ino, nullptr);
+
+  // RENAME_EXCHANGE: file ↔ dir → EINVAL.
+  Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RENAME_EXCHANGE);
+  EXPECT_TRUE(st.IsInvalidArgument()) << st.message();
 }
 
 // ────────────────────────────────────────────────────────────────

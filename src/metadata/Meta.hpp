@@ -56,9 +56,12 @@ class Meta {
   virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;
 
   /// Rename (move) an entry between directories.
+  ///
+  /// flags may be 0 (normal POSIX rename), RENAME_NOREPLACE (fail if
+  /// target exists), or RENAME_EXCHANGE (atomically swap src and dst).
   virtual Status Rename(InodeID old_parent_ino,
                         std::string_view old_name, InodeID new_parent_ino,
-                        std::string_view new_name) = 0;
+                        std::string_view new_name, unsigned int flags) = 0;
 
   /// Set attributes for an inode.
   virtual Status SetAttr(InodeID ino,
