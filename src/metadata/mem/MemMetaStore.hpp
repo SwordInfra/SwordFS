@@ -2,6 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Combined inode + directory manager for the memory backend.
+//
+// Locking model:
+//   Each public method acquires mutex_ once and holds it for its entire
+//   duration.  Private helpers (suffixed _locked) assume the lock is
+//   already held by the caller.
 
 #pragma once
 
@@ -30,7 +35,8 @@ class MemMetaStore {
   // Inode operations
   // ────────────────────────────────────────────────────────────────
 
-  // Look up an inode by number. On success, *out receives the pointer.
+  // Look up an inode by number.  The returned pointer is valid only
+  // until the next call to any MemMetaStore method.
   Status LookupInode(InodeID ino, SwordFsInode** out);
 
   // Return the total number of inodes currently stored.
@@ -41,7 +47,8 @@ class MemMetaStore {
   // ────────────────────────────────────────────────────────────────
 
   // Look up a child entry by name. On success, *out receives the inode pointer.
-  Status LookupEntry(InodeID parent_ino, std::string_view name, SwordFsInode** out);
+  Status LookupEntry(InodeID parent_ino, std::string_view name,
+                     SwordFsInode** out);
 
   // Allocate a new inode and link it as a child of parent. Returns
   // AlreadyExists if the name already exists under that parent.
@@ -67,25 +74,18 @@ class MemMetaStore {
 
  private:
   // ────────────────────────────────────────────────────────────────
-  // Inode-level helpers (each locks mutex_)
+  // Private helpers — caller MUST hold mutex_
   // ────────────────────────────────────────────────────────────────
-  SwordFsInode* FindInode(InodeID ino);
-  void InsertInode(SwordFsInode* inode);
-  void DeleteInode(InodeID ino);
+  SwordFsInode* FindInodeLocked(InodeID ino);
+  void InsertInodeLocked(SwordFsInode* inode);
+  void DeleteInodeLocked(InodeID ino);
+  SwordFsInode* FindEntryLocked(InodeID parent_ino, std::string_view name);
+  void LinkEntryLocked(InodeID parent_ino, std::string_view name,
+                       SwordFsInode* inode);
+  SwordFsInode* UnlinkEntryLocked(InodeID parent_ino, std::string_view name);
+  bool IsDirEmptyLocked(InodeID ino);
 
-  // ────────────────────────────────────────────────────────────────
-  // Directory-entry helpers (each locks mutex_)
-  // ────────────────────────────────────────────────────────────────
-  SwordFsInode* FindEntry(InodeID parent_ino, std::string_view name);
-  void LinkEntry(InodeID parent_ino, std::string_view name, SwordFsInode* inode);
-  SwordFsInode* UnlinkEntry(InodeID parent_ino, std::string_view name);
-  bool IsDirEmpty(InodeID ino);
-  size_t ListDirEntries(InodeID ino, std::vector<std::pair<std::string, SwordFsInode*>>* out);
-
-  // ────────────────────────────────────────────────────────────────
-  // Tree traversal (locks mutex_)
-  // ────────────────────────────────────────────────────────────────
-  bool IsDescendantOfImpl(InodeID current_ino, InodeID target_ino) const;
+  bool IsDescendantOfImplLocked(InodeID current_ino, InodeID target_ino) const;
 
   mutable std::mutex mutex_;
   std::atomic<InodeID> next_ino_;
