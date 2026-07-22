@@ -27,6 +27,20 @@
 
 namespace swordfs::storage {
 
+/// Engine capability limits.
+struct DataEngineLimits {
+  /// Maximum chunk size in bytes.  The upper layer (VfsImpl) MUST
+  /// segment writes into chunks no larger than this value.
+  size_t max_chunk_size = 64 * 1024 * 1024;  // 64 MiB
+
+  /// Whether the engine supports multipart uploads.
+  bool supports_multipart = false;
+
+  /// Whether the engine supports random overwrite (in-place mutation).
+  /// Object storage does not; USE does.
+  bool supports_overwrite = false;
+};
+
 /// Abstract data-plane engine.
 ///
 /// Chunks are addressed by opaque string keys whose format is defined
@@ -35,6 +49,15 @@ namespace swordfs::storage {
 class IDataEngine {
  public:
   virtual ~IDataEngine() = default;
+
+  /// Return the engine's capability limits.
+  virtual DataEngineLimits Limits() const = 0;
+
+  /// Check whether a chunk exists and return its size.
+  /// @param key  chunk key.
+  /// @param size receives the object size if it exists (may be null).
+  /// @return true if the chunk exists.
+  virtual bool Head(std::string_view key, size_t* size) = 0;
 
   /// Write a chunk.  Returns the key that can be used to read it back.
   /// For object-storage engines the key is the object path; for USE it

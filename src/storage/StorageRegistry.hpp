@@ -16,7 +16,6 @@
 #include <unordered_map>
 
 #include "storage/IDataEngine.hpp"
-#include "storage/s3/S3DataEngine.hpp"
 
 namespace swordfs::storage {
 

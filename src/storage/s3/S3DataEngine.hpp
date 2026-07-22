@@ -38,6 +38,8 @@ class S3DataEngine : public IDataEngine {
   explicit S3DataEngine(const S3Config& config);
   ~S3DataEngine() override = default;
 
+  DataEngineLimits Limits() const override;
+  bool Head(std::string_view key, size_t* size) override;
   Status Put(std::string_view key, std::string_view data) override;
   Status Get(std::string_view key, std::string* out,
              size_t offset = 0, size_t size = 0) override;

@@ -6,12 +6,33 @@
 #include <aws/core/Aws.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
 #include <aws/s3/model/GetObjectRequest.h>
+#include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/PutObjectRequest.h>
 
 #include "storage/StorageRegistry.hpp"
 #include "utils/Logging.hpp"
 
 namespace swordfs::storage {
+
+DataEngineLimits S3DataEngine::Limits() const {
+  DataEngineLimits limits;
+  limits.max_chunk_size = 64 * 1024 * 1024;  // 64 MiB
+  limits.supports_multipart = false;
+  limits.supports_overwrite = false;
+  return limits;
+}
+
+bool S3DataEngine::Head(std::string_view key, size_t* size) {
+  Aws::S3::Model::HeadObjectRequest req;
+  req.SetBucket(cfg_.bucket);
+  req.SetKey(ObjectKey(key));
+
+  std::lock_guard<std::mutex> lock(mu_);
+  auto outcome = client_->HeadObject(req);
+  if (!outcome.IsSuccess()) return false;
+  if (size) *size = static_cast<size_t>(outcome.GetResult().GetContentLength());
+  return true;
+}
 
 S3DataEngine::S3DataEngine(const S3Config& config) : cfg_(config) {
   Aws::Client::ClientConfiguration aws_cfg;
@@ -94,15 +115,12 @@ std::string S3DataEngine::ObjectKey(std::string_view key) const {
 
 namespace {
 
-// Register "s3" backend.  ConfigCenter can use this to validate the
-// user's choice and to create the engine at mount time.
+// Register "s3" backend — uses a default config; the real S3Config is
+// populated from ConfigCenter before the first mount.
 static swordfs::storage::RegisterBackend kS3Backend(
     "s3", []() -> std::unique_ptr<swordfs::storage::IDataEngine> {
-      // The actual S3Config is populated from ConfigCenter before
-      // calling Create(), so this factory returns a placeholder.
-      // Real instantiation happens in VfsImpl/Vfs constructor with
-      // the full config.
-      return nullptr;
+      return std::make_unique<swordfs::storage::S3DataEngine>(
+          swordfs::storage::S3Config{});
     });
 
 }  // anonymous namespace
