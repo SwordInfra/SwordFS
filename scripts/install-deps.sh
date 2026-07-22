@@ -17,11 +17,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 FOLLY_SRC="$PROJECT_DIR/build/folly-src"
-FOLLY_VER="v2024.08.12.00"
+FOLLY_VER="v2026.07.20.00"
 
 echo "==> Checking system packages..."
 
-SYSTEM_PKGS="libfuse3-dev libfmt-dev libboost-all-dev libssl-dev libevent-dev curl g++ cmake ninja-build git"
+SYSTEM_PKGS="libfuse3-dev libfmt-dev libboost-all-dev libssl-dev libevent-dev libdouble-conversion-dev libgoogle-glog-dev libfast-float-dev libgtest-dev libcli11-dev curl g++ cmake ninja-build git"
 
 TO_INSTALL=""
 for pkg in $SYSTEM_PKGS; do
@@ -52,22 +52,48 @@ if [ -f /usr/local/lib/cmake/folly/folly-config.cmake ] || \
    [ -f /usr/lib/cmake/folly/folly-config.cmake ]; then
   echo "==> folly already installed, skipping."
 else
-  echo "==> Downloading folly ${FOLLY_VER}..."
-  FOLLY_TARBALL="$PROJECT_DIR/build/folly-${FOLLY_VER}.tar.gz"
-  FOLLY_URL="https://github.com/facebook/folly/archive/refs/tags/${FOLLY_VER}.tar.gz"
-  curl -sL "$FOLLY_URL" -o "$FOLLY_TARBALL"
+  # ── Step 1: Download ─────────────────────────────────────────
 
-  echo "==> Extracting folly..."
-  rm -rf "$FOLLY_SRC"
-  mkdir -p "$FOLLY_SRC"
-  tar xzf "$FOLLY_TARBALL" -C "$FOLLY_SRC" --strip-components=1
+  FOLLY_TARBALL="$PROJECT_DIR/build/folly-${FOLLY_VER}.tar.gz"
+  if [ -f "$FOLLY_TARBALL" ]; then
+    echo "==> folly tarball already downloaded, skipping."
+  else
+    echo "==> Downloading folly ${FOLLY_VER}..."
+    FOLLY_URL="https://github.com/facebook/folly/archive/refs/tags/${FOLLY_VER}.tar.gz"
+    curl -sL "$FOLLY_URL" -o "$FOLLY_TARBALL"
+  fi
+
+  # ── Step 2: Extract ──────────────────────────────────────────
+
+  if [ -f "$FOLLY_SRC/CMakeLists.txt" ]; then
+    echo "==> folly already extracted, skipping."
+  else
+    echo "==> Extracting folly..."
+    rm -rf "$FOLLY_SRC"
+    mkdir -p "$FOLLY_SRC"
+    tar xzf "$FOLLY_TARBALL" -C "$FOLLY_SRC" --strip-components=1
+  fi
+
+  # ── Step 3: Configure (skip if already done) ─────────────────
+
+  if [ -f "$FOLLY_SRC/build/CMakeCache.txt" ]; then
+    echo "==> folly already configured, skipping."
+  else
+    echo "==> Configuring folly..."
+    mkdir -p "$FOLLY_SRC/build"
+    cd "$FOLLY_SRC/build"
+    cmake .. \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+      -DBoost_NO_BOOST_CMAKE=ON \
+      -DBoost_SYSTEM_FOUND=ON
+  fi
+
+  # ── Step 4: Build & Install ──────────────────────────────────
 
   echo "==> Building and installing folly..."
-  mkdir -p "$FOLLY_SRC/build"
   cd "$FOLLY_SRC/build"
-  cmake .. \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX=/usr/local
   cmake --build . -j"$(nproc)"
   cmake --install .
 fi
