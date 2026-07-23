@@ -29,6 +29,18 @@ void ConfigCenter::ConfigureOptions(CLI::App& app) {
   app.add_option("--fuse-threads", fuse_threads_, "FUSE worker thread count")
       ->check(CLI::PositiveNumber)
       ->check(CLI::Range(1, static_cast<int>(std::thread::hardware_concurrency())));
+
+  // Storage backend options
+  app.add_option("--storage", storage_backend_,
+                 "Storage backend (s3 or empty for memory-only)");
+  app.add_option("--s3-endpoint", s3_endpoint_, "S3 endpoint URL")
+      ->default_str(s3_endpoint_);
+  app.add_option("--s3-region", s3_region_, "S3 region")
+      ->default_str(s3_region_);
+  app.add_option("--s3-bucket", s3_bucket_, "S3 bucket name");
+  app.add_option("--s3-prefix", s3_prefix_, "S3 object key prefix")
+      ->default_str(s3_prefix_);
+
   app.add_flag_callback("-V,--version", PrintVersion, "Show version information");
 
   // Mount options

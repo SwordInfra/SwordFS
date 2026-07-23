@@ -2,17 +2,28 @@
 # Install all third-party dependencies needed to build SwordFS.
 #
 # Usage:
-#   ./scripts/install-deps.sh
+#   ./scripts/install-deps.sh [--with-s3]
+#
+#   --with-s3   Also install AWS SDK for C++ (libaws-sdk-s3-dev)
 #
 # This script:
 #   1. Installs system packages (libfuse3, folly build deps)
 #   2. Builds and installs folly from GitHub release tarball
+#   3. (optional) Installs AWS SDK for S3 object storage
 #
 # Each step is skipped if the dependency is already present.
 # After running this script, you can configure with:
-#   cmake --preset default
+#   cmake --preset default          # without S3
+#   cmake --preset default -DENABLE_S3=ON    # with S3
 
 set -e
+
+WITH_S3=false
+for arg in "$@"; do
+  case "$arg" in
+    --with-s3) WITH_S3=true ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -128,4 +139,32 @@ else
   cmake --install .
 fi
 
-echo "==> Done. You can now build SwordFS."
+# ────────────────────────────────────────────────────────────────
+# AWS SDK for C++ (optional — only when --with-s3)
+# ────────────────────────────────────────────────────────────────
+
+if [ "$WITH_S3" = true ]; then
+  echo "==> Checking AWS SDK for C++..."
+
+  S3_PKGS="libaws-sdk-s3-dev"
+  S3_TO_INSTALL=""
+  for pkg in $S3_PKGS; do
+    if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then
+      echo "  [ok] $pkg"
+    else
+      echo "  [missing] $pkg"
+      S3_TO_INSTALL="$S3_TO_INSTALL $pkg"
+    fi
+  done
+
+  if [ -n "$S3_TO_INSTALL" ]; then
+    echo "==> Installing AWS SDK packages:$S3_TO_INSTALL"
+    apt-get install -y -qq $S3_TO_INSTALL
+  else
+    echo "==> AWS SDK packages already installed."
+  fi
+
+  echo "==> Done. You can now build SwordFS with: cmake --preset default -DENABLE_S3=ON"
+else
+  echo "==> Done. You can now build SwordFS."
+fi

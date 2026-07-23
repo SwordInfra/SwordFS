@@ -74,6 +74,17 @@ class ConfigCenter {
   /// Returns the mount point directory.
   const std::string& mountpoint() const { return mountpoint_; }
 
+  /// Returns the storage backend name (empty string = none/memory-only).
+  const std::string& storage_backend() const { return storage_backend_; }
+  /// Returns the S3 endpoint.
+  const std::string& s3_endpoint() const { return s3_endpoint_; }
+  /// Returns the S3 region.
+  const std::string& s3_region() const { return s3_region_; }
+  /// Returns the S3 bucket.
+  const std::string& s3_bucket() const { return s3_bucket_; }
+  /// Returns the S3 object key prefix.
+  const std::string& s3_prefix() const { return s3_prefix_; }
+
  private:
   ConfigCenter() = default;
   ConfigCenter(const ConfigCenter&) = delete;
@@ -91,6 +102,14 @@ class ConfigCenter {
   int fuse_threads_ = 1;
   // mount point directory (positional argument)
   std::string mountpoint_;
+
+  // Storage engine configuration
+  std::string storage_backend_;   // "s3" or "" (none)
+  std::string s3_endpoint_ = "https://s3.amazonaws.com";
+  std::string s3_region_ = "us-east-1";
+  std::string s3_bucket_;
+  std::string s3_prefix_ = "swordfs/chunks";
+
   // Subcommands registered with the CLI::App.
   std::vector<SubCommand> sub_commands_;
 };
