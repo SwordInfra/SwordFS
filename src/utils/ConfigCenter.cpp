@@ -63,6 +63,8 @@ void ConfigCenter::RegisterMountOptions(CLI::App& app) {
   auto cmd = app.add_subcommand("mount", "Mount a filesystem");
   cmd->add_option("mountpoint", mountpoint_, "Mount point directory (created if needed)")
       ->required();
+  cmd->add_option("--volume", volume_path_,
+                  "Volume directory (reads volume.json for storage config)");
   cmd->allow_extras();  // -o allow_other,ro etc. through to FUSE
 
   SubCommand sc;

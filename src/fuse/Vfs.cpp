@@ -9,11 +9,17 @@
 #include <vector>
 
 #include "fuse/VfsImpl.hpp"
+#include "storage/IDataEngine.hpp"
 #include "utils/FiberRuntime.hpp"
 
 namespace swordfs::fuse {
 
 VfsImpl* VfsHookFactory::vfs_ = new VfsImpl();
+
+void VfsHookFactory::SetDataEngine(
+    std::unique_ptr<swordfs::storage::IDataEngine> data) {
+  vfs_->SetDataEngine(std::move(data));
+}
 
 // ────────────────────────────────────────────────────────────────
 // FUSE callbacks: forward to `VfsImpl`.

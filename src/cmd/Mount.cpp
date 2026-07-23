@@ -21,6 +21,10 @@
 
 #include "cmd/Mount.hpp"
 #include "fuse/Vfs.hpp"
+#include "storage/VolumeConfig.hpp"
+#ifdef SWORDFS_ENABLE_S3
+#include "storage/s3/S3DataEngine.hpp"
+#endif
 #include "utils/ConfigCenter.hpp"
 #include "utils/Fuse.hpp"
 #include "utils/Logging.hpp"
@@ -193,9 +197,51 @@ static int Mount(const std::string& mountpoint,
 }
 
 int RunMount() {
-  const std::string& mountpoint = ConfigCenter::Instance().mountpoint();
+  auto& cfg = ConfigCenter::Instance();
+  const std::string& mountpoint = cfg.mountpoint();
   if (ValidateMountpoint(mountpoint) != 0) {
     return 1;
+  }
+
+  // If --volume was specified, read volume.json and configure the
+  // storage engine.  This recovers the backend configuration from
+  // the previous `swordfs format` run.
+  if (!cfg.volume_path().empty()) {
+    swordfs::storage::VolumeConfig vol;
+    auto status =
+        swordfs::storage::VolumeConfig::ReadFromFile(cfg.volume_path(), &vol);
+    if (!status.ok()) {
+      SWORDFS_PROMPT_INFO << "Error: failed to read volume config from "
+                          << cfg.volume_path()
+                          << ": " << status.message();
+      return 1;
+    }
+
+    // Volume-level storage overrides the global --storage flag.
+    // If the volume was formatted with --storage=s3, use S3 even if no
+    // --storage flag was passed on this mount invocation.
+    if (vol.storage == "s3") {
+#ifdef SWORDFS_ENABLE_S3
+      swordfs::storage::S3Config s3_cfg;
+      s3_cfg.bucket = vol.s3_config.bucket;
+      s3_cfg.endpoint = vol.s3_config.endpoint;
+      s3_cfg.region = vol.s3_config.region;
+      s3_cfg.prefix = vol.s3_config.prefix;
+
+      auto engine = std::make_unique<swordfs::storage::S3DataEngine>(s3_cfg);
+      swordfs::fuse::VfsHookFactory::SetDataEngine(std::move(engine));
+
+      SWORDFS_LOG_INFO << "Volume " << vol.uuid << " loaded from "
+                       << cfg.volume_path() << " (storage=" << vol.storage
+                       << ")";
+#else
+      SWORDFS_PROMPT_INFO
+          << "Error: this build has S3 support disabled (ENABLE_S3=OFF)."
+          << " Volume " << cfg.volume_path()
+          << " requires S3. Rebuild with -DENABLE_S3=ON.";
+      return 1;
+#endif
+    }
   }
 
   // Daemonize by default; -f / --foreground disables this

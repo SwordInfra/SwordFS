@@ -18,6 +18,10 @@ namespace metadata {
 class Meta;
 }  // namespace metadata
 
+namespace storage {
+class IDataEngine;
+}  // namespace storage
+
 namespace fuse {
 
 class VfsImpl {
@@ -93,8 +97,12 @@ class VfsImpl {
   void Statx(fuse_req_t req, fuse_ino_t ino, int flags, int mask,
              struct fuse_file_info* fi);
 
+  /// Set the data engine (called during mount after reading volume config).
+  void SetDataEngine(std::unique_ptr<swordfs::storage::IDataEngine> data);
+
  private:
   std::unique_ptr<swordfs::metadata::Meta> meta_;
+  std::unique_ptr<swordfs::storage::IDataEngine> data_;
 };
 
 }  // namespace fuse
