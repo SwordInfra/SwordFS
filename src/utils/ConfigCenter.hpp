@@ -84,6 +84,8 @@ class ConfigCenter {
   const std::string& s3_bucket() const { return s3_bucket_; }
   /// Returns the S3 object key prefix.
   const std::string& s3_prefix() const { return s3_prefix_; }
+  /// Returns the volume path (format subcommand positional arg).
+  const std::string& volume_path() const { return volume_path_; }
 
  private:
   ConfigCenter() = default;
@@ -91,6 +93,8 @@ class ConfigCenter {
   ConfigCenter& operator=(const ConfigCenter&) = delete;
   /// Register mount options with the CLI::App.
   void RegisterMountOptions(CLI::App& app);
+  /// Register format options with the CLI::App.
+  void RegisterFormatOptions(CLI::App& app);
 
  private:
   LogConfig log_;
@@ -109,6 +113,9 @@ class ConfigCenter {
   std::string s3_region_ = "us-east-1";
   std::string s3_bucket_;
   std::string s3_prefix_ = "swordfs/chunks";
+
+  // Volume configuration (format subcommand)
+  std::string volume_path_;
 
   // Subcommands registered with the CLI::App.
   std::vector<SubCommand> sub_commands_;
