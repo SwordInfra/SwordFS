@@ -31,19 +31,15 @@ void ConfigCenter::ConfigureOptions(CLI::App& app) {
       ->check(CLI::Range(1, static_cast<int>(std::thread::hardware_concurrency())));
 
   // Storage backend options
-  auto* storage_opt = app.add_option("--storage", storage_backend_,
-                                     "Storage backend (s3 or empty for memory-only)");
-  auto* s3_group =
-      app.add_option_group("S3 Options", "S3 object storage configuration");
-  s3_group->add_option("--s3-endpoint", s3_endpoint_, "S3 endpoint URL")
+  app.add_option("--storage", storage_backend_,
+                 "Storage backend (s3 or empty for memory-only)");
+  app.add_option("--s3-endpoint", s3_endpoint_, "S3 endpoint URL")
       ->default_str(s3_endpoint_);
-  s3_group->add_option("--s3-region", s3_region_, "S3 region")
+  app.add_option("--s3-region", s3_region_, "S3 region")
       ->default_str(s3_region_);
-  s3_group->add_option("--s3-bucket", s3_bucket_, "S3 bucket name");
-  s3_group->add_option("--s3-prefix", s3_prefix_, "S3 object key prefix")
+  app.add_option("--s3-bucket", s3_bucket_, "S3 bucket name");
+  app.add_option("--s3-prefix", s3_prefix_, "S3 object key prefix")
       ->default_str(s3_prefix_);
-  // Require --s3-bucket when --storage=s3
-  s3_group->needs(storage_opt);
 
   app.add_flag_callback("-V,--version", PrintVersion, "Show version information");
 
