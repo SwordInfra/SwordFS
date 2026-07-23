@@ -39,8 +39,9 @@ jobs:
         run: |
           lcov --capture --directory build --output-file coverage.info \
                --ignore-errors inconsistent,gcov,source,mismatch,negative
-          lcov --remove coverage.info '/usr/*' '*/_deps/*' '*/third_party/*' \
-               --output-file coverage.info
+          lcov --remove coverage.info '/usr/*' '*/_deps/*' \
+               --output-file coverage.info \
+               --ignore-errors unused
           lcov --list coverage.info || true
 
       - name: Upload coverage to Codecov
