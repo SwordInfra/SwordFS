@@ -22,6 +22,8 @@
 
 #include "utils/Status.hpp"
 
+using Status = swordfs::utils::Status;
+
 namespace swordfs::storage {
 
 /// Engine capability limits.
