@@ -14,6 +14,16 @@
 
 namespace swordfs::storage {
 
+S3DataEngine::S3DataEngine(const S3Config& config) : cfg_(config) {
+  Aws::Client::ClientConfiguration aws_cfg;
+  aws_cfg.endpointOverride = cfg_.endpoint;
+  aws_cfg.region = cfg_.region;
+  client_ = std::make_unique<Aws::S3::S3Client>(std::move(aws_cfg));
+
+  SWORDFS_LOG_INFO << "S3DataEngine: endpoint=" << cfg_.endpoint
+                   << " bucket=" << cfg_.bucket;
+}
+
 DataEngineLimits S3DataEngine::Limits() const {
   DataEngineLimits limits;
   limits.max_chunk_size = 64 * 1024 * 1024;  // 64 MiB
@@ -30,16 +40,6 @@ bool S3DataEngine::Head(std::string_view key, size_t* size) {
   if (!outcome.IsSuccess()) return false;
   if (size) *size = static_cast<size_t>(outcome.GetResult().GetContentLength());
   return true;
-}
-
-S3DataEngine::S3DataEngine(const S3Config& config) : cfg_(config) {
-  Aws::Client::ClientConfiguration aws_cfg;
-  aws_cfg.endpointOverride = cfg_.endpoint;
-  aws_cfg.region = cfg_.region;
-  client_ = std::make_unique<Aws::S3::S3Client>(std::move(aws_cfg));
-
-  SWORDFS_LOG_INFO << "S3DataEngine: endpoint=" << cfg_.endpoint
-                   << " bucket=" << cfg_.bucket;
 }
 
 Status S3DataEngine::Put(std::string_view key, std::string_view data) {

@@ -32,10 +32,16 @@ configure_file(
 
 option(ENABLE_S3 "Enable S3 object storage backend" OFF)
 
+# Framework code — always compiled
+add_library(swordfs_storage OBJECT
+  src/storage/StorageRegistry.cpp
+)
+target_link_libraries(swordfs_storage PUBLIC ${CMAKE_DL_LIBS})
+target_include_directories(swordfs_storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 if(ENABLE_S3)
   find_package(AWSSDK REQUIRED COMPONENTS s3)
-  add_library(swordfs_storage OBJECT
-    src/storage/StorageRegistry.cpp
+  target_sources(swordfs_storage PRIVATE
     src/storage/s3/S3DataEngine.cpp
   )
   target_link_libraries(swordfs_storage PUBLIC
