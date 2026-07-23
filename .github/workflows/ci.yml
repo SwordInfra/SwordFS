@@ -41,7 +41,7 @@ jobs:
                --ignore-errors inconsistent,gcov,source,mismatch,negative
           lcov --remove coverage.info '/usr/*' '*/_deps/*' '*/third_party/*' \
                --output-file coverage.info
-          lcov --list coverage.info
+          lcov --list coverage.info || true
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
