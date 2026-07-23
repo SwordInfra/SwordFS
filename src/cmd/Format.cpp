@@ -3,8 +3,8 @@
 
 // SwordFS format subcommand — initialise a new volume.
 //
-// Mirrors JuiceFS `format`: creates volume metadata (volume.json) at the
-// given path.  The config is then read by `swordfs mount` to recover the
+// Creates volume metadata (volume.json) at the given path.
+// The config is then read by `swordfs mount --volume` to recover the
 // storage backend without re-specifying CLI flags.
 
 #include "cmd/Format.hpp"
@@ -43,17 +43,17 @@ int RunFormat() {
     return 1;
   }
 
-  std::cout << "Volume formatted successfully.\n"
-            << "  Path:    " << volume_path << "\n"
-            << "  UUID:    " << vol.uuid << "\n"
-            << "  Storage: " << (storage.empty() ? "memory" : storage) << "\n";
+  SWORDFS_LOG_INFO << "Volume formatted successfully.";
+  SWORDFS_LOG_INFO << "  Path:    " << volume_path;
+  SWORDFS_LOG_INFO << "  UUID:    " << vol.uuid;
+  SWORDFS_LOG_INFO << "  Storage: " << (storage.empty() ? "memory" : storage);
   if (storage == "s3") {
-    std::cout << "  S3 Bucket:   " << vol.s3_config.bucket << "\n"
-              << "  S3 Endpoint: " << vol.s3_config.endpoint << "\n"
-              << "  S3 Region:   " << vol.s3_config.region << "\n";
+    SWORDFS_LOG_INFO << "  S3 Bucket:   " << vol.s3_config.bucket;
+    SWORDFS_LOG_INFO << "  S3 Endpoint: " << vol.s3_config.endpoint;
+    SWORDFS_LOG_INFO << "  S3 Region:   " << vol.s3_config.region;
   }
-  std::cout << "\nMount with:\n"
-            << "  swordfs mount --volume " << volume_path << " /mnt/swordfs\n";
+  SWORDFS_LOG_INFO << "Mount with: swordfs mount --volume " << volume_path
+                    << " /mnt/swordfs";
 
   return 0;
 }

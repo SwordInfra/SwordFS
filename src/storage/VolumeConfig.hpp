@@ -5,7 +5,6 @@
 //
 // Created by `swordfs format` and read by `swordfs mount` to recover
 // the storage backend configuration without re-specifying CLI flags.
-// Mirrors JuiceFS's `format` → `mount` separation.
 
 #pragma once
 
