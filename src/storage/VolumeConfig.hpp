@@ -9,11 +9,14 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 
 #include "utils/Status.hpp"
 
 namespace swordfs::storage {
+
+class IDataEngine;
 
 /// S3-specific configuration persisted in volume.json.
 struct S3VolumeConfig {
@@ -44,5 +47,15 @@ struct VolumeConfig {
   /// Read a VolumeConfig from path/volume.json.
   static utils::Status ReadFromFile(const std::string& path, VolumeConfig* out);
 };
+
+/// Create the data engine described by a VolumeConfig.
+///
+/// Returns nullptr when:
+/// - vol.storage is empty (memory-only, no data engine needed), or
+/// - the required backend is not compiled in (e.g. ENABLE_S3=OFF).
+///
+/// The caller (Mount.cpp) does not need to know which backends are
+/// available — the registry + conditional compilation handle that.
+std::unique_ptr<IDataEngine> CreateDataEngine(const VolumeConfig& vol);
 
 }  // namespace swordfs::storage

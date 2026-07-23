@@ -2,7 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include "storage/VolumeConfig.hpp"
+#include "storage/IDataEngine.hpp"
 
+#include <folly/json.h>
 #include <folly/portability/Filesystem.h>
 
 #include <fstream>
@@ -10,6 +12,10 @@
 #include <sstream>
 
 #include "utils/Logging.hpp"
+
+#ifdef SWORDFS_ENABLE_S3
+#include "storage/s3/S3DataEngine.hpp"
+#endif
 
 namespace swordfs::storage {
 
@@ -32,96 +38,52 @@ std::string VolumeConfig::GenerateUUID() {
   return buf;
 }
 
-namespace {
-
-std::string JsonEscape(std::string_view s) {
-  std::string out;
-  out.reserve(s.size() + 2);
-  for (char c : s) {
-    switch (c) {
-      case '"':  out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\n': out += "\\n"; break;
-      case '\r': out += "\\r"; break;
-      case '\t': out += "\\t"; break;
-      default:   out += c; break;
-    }
-  }
-  return out;
-}
-
-std::string JsonUnescape(std::string_view s) {
-  std::string out;
-  out.reserve(s.size());
-  for (size_t i = 0; i < s.size(); ++i) {
-    if (s[i] == '\\' && i + 1 < s.size()) {
-      switch (s[++i]) {
-        case '"':  out += '"';  break;
-        case '\\': out += '\\'; break;
-        case 'n':  out += '\n'; break;
-        case 'r':  out += '\r'; break;
-        case 't':  out += '\t'; break;
-        default:   out += '\\'; out += s[i]; break;
-      }
-    } else {
-      out += s[i];
-    }
-  }
-  return out;
-}
-
-bool ExtractString(std::string_view json, std::string_view key,
-                   std::string* value) {
-  std::string search = "\"" + std::string(key) + "\"";
-  auto pos = json.find(search);
-  if (pos == std::string_view::npos) return false;
-
-  pos = json.find(':', pos + search.size());
-  if (pos == std::string_view::npos) return false;
-  ++pos;
-
-  while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\n' ||
-                                json[pos] == '\r' || json[pos] == '\t'))
-    ++pos;
-
-  if (pos >= json.size() || json[pos] != '"') return false;
-  ++pos;
-
-  auto close = json.find('"', pos);
-  while (close != std::string_view::npos && close > 0 && json[close - 1] == '\\')
-    close = json.find('"', close + 1);
-  if (close == std::string_view::npos) return false;
-
-  *value = JsonUnescape(json.substr(pos, close - pos));
-  return true;
-}
-
-}  // anonymous namespace
-
 std::string VolumeConfig::ToJson() const {
-  std::ostringstream os;
-  os << "{\n";
-  os << "  \"uuid\": \"" << JsonEscape(uuid) << "\",\n";
-  os << "  \"storage\": \"" << JsonEscape(storage) << "\",\n";
-  os << "  \"s3_config\": {\n";
-  os << "    \"bucket\": \"" << JsonEscape(s3_config.bucket) << "\",\n";
-  os << "    \"endpoint\": \"" << JsonEscape(s3_config.endpoint) << "\",\n";
-  os << "    \"region\": \"" << JsonEscape(s3_config.region) << "\",\n";
-  os << "    \"prefix\": \"" << JsonEscape(s3_config.prefix) << "\"\n";
-  os << "  }\n";
-  os << "}\n";
-  return os.str();
+  folly::dynamic s3_cfg = folly::dynamic::object;
+  s3_cfg["bucket"] = s3_config.bucket;
+  s3_cfg["endpoint"] = s3_config.endpoint;
+  s3_cfg["region"] = s3_config.region;
+  s3_cfg["prefix"] = s3_config.prefix;
+
+  folly::dynamic root = folly::dynamic::object;
+  root["uuid"] = uuid;
+  root["storage"] = storage;
+  root["s3_config"] = std::move(s3_cfg);
+
+  return folly::toPrettyJson(root);
 }
 
 utils::Status VolumeConfig::FromJson(std::string_view json, VolumeConfig* out) {
-  if (!ExtractString(json, "uuid", &out->uuid))
+  folly::dynamic root;
+  try {
+    root = folly::parseJson(json);
+  } catch (const std::exception& e) {
+    return utils::Status::InvalidArgument(
+        std::string("invalid JSON in volume.json: ") + e.what());
+  }
+
+  if (!root.isObject())
+    return utils::Status::InvalidArgument("volume.json root is not an object");
+
+  if (!root.count("uuid") || !root["uuid"].isString())
     return utils::Status::InvalidArgument("missing uuid in volume.json");
-  if (!ExtractString(json, "storage", &out->storage))
-    return utils::Status::InvalidArgument("missing storage in volume.json");
-  ExtractString(json, "bucket", &out->s3_config.bucket);
-  ExtractString(json, "endpoint", &out->s3_config.endpoint);
-  ExtractString(json, "region", &out->s3_config.region);
-  ExtractString(json, "prefix", &out->s3_config.prefix);
+  out->uuid = root["uuid"].asString();
+
+  if (root.count("storage") && root["storage"].isString())
+    out->storage = root["storage"].asString();
+
+  if (root.count("s3_config") && root["s3_config"].isObject()) {
+    auto& s3 = root["s3_config"];
+    if (s3.count("bucket") && s3["bucket"].isString())
+      out->s3_config.bucket = s3["bucket"].asString();
+    if (s3.count("endpoint") && s3["endpoint"].isString())
+      out->s3_config.endpoint = s3["endpoint"].asString();
+    if (s3.count("region") && s3["region"].isString())
+      out->s3_config.region = s3["region"].asString();
+    if (s3.count("prefix") && s3["prefix"].isString())
+      out->s3_config.prefix = s3["prefix"].asString();
+  }
+
   return utils::Status::OK();
 }
 
@@ -168,6 +130,22 @@ utils::Status VolumeConfig::ReadFromFile(const std::string& path,
   }
 
   return FromJson(oss.str(), out);
+}
+
+std::unique_ptr<IDataEngine> CreateDataEngine(const VolumeConfig& vol) {
+  if (vol.storage == "s3") {
+#ifdef SWORDFS_ENABLE_S3
+    S3Config s3_cfg;
+    s3_cfg.bucket = vol.s3_config.bucket;
+    s3_cfg.endpoint = vol.s3_config.endpoint;
+    s3_cfg.region = vol.s3_config.region;
+    s3_cfg.prefix = vol.s3_config.prefix;
+    return std::make_unique<S3DataEngine>(s3_cfg);
+#else
+    return nullptr;
+#endif
+  }
+  return nullptr;
 }
 
 }  // namespace swordfs::storage

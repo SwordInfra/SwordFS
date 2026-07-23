@@ -21,10 +21,8 @@
 
 #include "cmd/Mount.hpp"
 #include "fuse/Vfs.hpp"
+#include "storage/IDataEngine.hpp"
 #include "storage/VolumeConfig.hpp"
-#ifdef SWORDFS_ENABLE_S3
-#include "storage/s3/S3DataEngine.hpp"
-#endif
 #include "utils/ConfigCenter.hpp"
 #include "utils/Fuse.hpp"
 #include "utils/Logging.hpp"
@@ -217,30 +215,21 @@ int RunMount() {
       return 1;
     }
 
-    // Volume-level storage overrides the global --storage flag.
-    // If the volume was formatted with --storage=s3, use S3 even if no
-    // --storage flag was passed on this mount invocation.
-    if (vol.storage == "s3") {
-#ifdef SWORDFS_ENABLE_S3
-      swordfs::storage::S3Config s3_cfg;
-      s3_cfg.bucket = vol.s3_config.bucket;
-      s3_cfg.endpoint = vol.s3_config.endpoint;
-      s3_cfg.region = vol.s3_config.region;
-      s3_cfg.prefix = vol.s3_config.prefix;
-
-      auto engine = std::make_unique<swordfs::storage::S3DataEngine>(s3_cfg);
+    // Create the storage engine from volume.json.
+    // Returns nullptr for memory-only volumes or when the backend
+    // is not compiled in (ENABLE_S3=OFF).
+    auto engine = swordfs::storage::CreateDataEngine(vol);
+    if (engine) {
       swordfs::fuse::VfsHookFactory::SetDataEngine(std::move(engine));
-
       SWORDFS_LOG_INFO << "Volume " << vol.uuid << " loaded from "
                        << cfg.volume_path() << " (storage=" << vol.storage
                        << ")";
-#else
+    } else if (vol.storage == "s3") {
       SWORDFS_PROMPT_INFO
           << "Error: this build has S3 support disabled (ENABLE_S3=OFF)."
           << " Volume " << cfg.volume_path()
           << " requires S3. Rebuild with -DENABLE_S3=ON.";
       return 1;
-#endif
     }
   }
 
