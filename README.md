@@ -2,7 +2,7 @@
 
 # SwordFS
 
-[![CI](https://github.com/SwordInfra/SwordFS/actions/workflows/ci.yml/badge.svg)](https://github.com/SwordInfra/SwordFS/actions/workflows/ci.yml)
+[![CI](https://github.com/SwordInfra/SwordFS/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SwordInfra/SwordFS/actions/workflows/ci.yml?query=branch%3Amain)
 [![codecov](https://codecov.io/gh/SwordInfra/SwordFS/branch/main/graph/badge.svg)](https://codecov.io/gh/SwordInfra/SwordFS)
 
 ## What is SwordFS?
