@@ -60,6 +60,7 @@ file(GLOB_RECURSE SWORDFS_SOURCES
   src/*.h
 )
 list(FILTER SWORDFS_SOURCES EXCLUDE REGEX "src/cmd/Main\.cpp$")
+list(FILTER SWORDFS_SOURCES EXCLUDE REGEX "src/storage/s3/")
 
 add_library(swordfs_lib OBJECT ${SWORDFS_SOURCES})
 if(ENABLE_S3)
