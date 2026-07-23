@@ -20,16 +20,32 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
+          sudo apt-get install -y -qq lcov
           if [ ! -f /usr/local/lib/libfolly.a ]; then
             sudo bash scripts/install-deps.sh
           fi
           sudo rm -rf build
 
       - name: Configure
-        run: cmake --preset default
+        run: cmake --preset default -DCMAKE_CXX_FLAGS="--coverage" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
 
       - name: Build
         run: cmake --build build --target swordfs_test
 
       - name: Test
         run: build/swordfs_test --gtest_color=no
+
+      - name: Generate coverage report
+        run: |
+          lcov --capture --directory build --output-file coverage.info \
+               --ignore-errors inconsistent,gcov,source,mismatch,negative
+          lcov --remove coverage.info '/usr/*' '*/_deps/*' \
+               --output-file coverage.info \
+               --ignore-errors unused
+          lcov --list coverage.info || true
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.info
+          fail_ci_if_error: false
