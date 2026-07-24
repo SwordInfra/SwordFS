@@ -262,4 +262,36 @@ bool MemMetaStore::IsDescendantOfImplLocked(InodeID current_ino,
   return false;
 }
 
+// ────────────────────────────────────────────────────────────────
+// Chunk Slice storage (S3 Phase 2)
+// ────────────────────────────────────────────────────────────────
+
+Status MemMetaStore::AppendSlice(InodeID ino,
+                                  const swordfs::storage::Slice& slice) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto& list = chunks_[ino];
+  list.slices.push_back(slice);
+  // Keep slices sorted by offset for efficient Read stitching.
+  std::sort(list.slices.begin(), list.slices.end());
+  return Status::OK();
+}
+
+Status MemMetaStore::GetSlices(InodeID ino,
+                                swordfs::storage::SliceList* out) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = chunks_.find(ino);
+  if (it == chunks_.end()) {
+    *out = swordfs::storage::SliceList{};
+    return Status::OK();
+  }
+  *out = it->second;
+  return Status::OK();
+}
+
+uint64_t MemMetaStore::NextSliceID(InodeID ino) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto& list = chunks_[ino];
+  return list.AllocID();
+}
+
 }  // namespace swordfs::metadata
