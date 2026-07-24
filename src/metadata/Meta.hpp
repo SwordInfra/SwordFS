@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "metadata/Types.hpp"
+#include "storage/Slice.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
 
@@ -93,6 +94,19 @@ class Meta {
   /// FUSE forget requests. The caller may free or reuse the inode's backend
   /// resources when the count reaches zero.
   virtual Status Forget(InodeID ino, uint64_t nlookup) = 0;
+
+  // ── Chunk Slice operations (S3 Phase 2) ──────────────────────────
+
+  /// Append a slice to an inode's chunk list.
+  virtual Status AppendSlice(InodeID ino,
+                             const storage::Slice& slice) = 0;
+
+  /// Retrieve the full slice list for an inode.
+  virtual Status GetSlices(InodeID ino,
+                           storage::SliceList* out) = 0;
+
+  /// Return the next slice id for an inode (atomically increments).
+  virtual uint64_t NextSliceID(InodeID ino) = 0;
 };
 
 }  // namespace swordfs::metadata

@@ -207,24 +207,47 @@ void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
   }
 
   size_t file_off = static_cast<size_t>(off);
-  std::string key = ChunkKey(ino, file_off);
-  size_t chunk_off = file_off % data_->Limits().max_chunk_size;
+  size_t end_off = file_off + size;
 
-  std::string data;
-  Status status = data_->Get(key, &data, chunk_off, size);
-  if (status.IsNotFound()) {
+  // Get all slices for this inode and stitch together the requested range.
+  storage::SliceList slices;
+  Status s = meta_->GetSlices(ino, &slices);
+  if (!s.ok()) {
+    fuse_reply_err(req, s.ToErrno());
+    return;
+  }
+
+  std::string result;
+  for (const auto& slice : slices.slices) {
+    if (slice.length == 0) continue;
+    size_t slice_end = slice.offset + slice.length;
+    if (slice_end <= file_off) continue;  // before requested range
+    if (slice.offset >= end_off) break;   // past requested range (sorted)
+
+    size_t overlap_off = std::max(static_cast<size_t>(slice.offset), file_off);
+    size_t overlap_end = std::min(slice_end, end_off);
+    size_t overlap_len = overlap_end - overlap_off;
+    size_t slice_off = overlap_off - slice.offset;
+
+    std::string key =
+        "chunks/" + std::to_string(ino) + "/" + std::to_string(slice.id);
+    std::string chunk_data;
+    Status gs = data_->Get(key, &chunk_data, slice_off, overlap_len);
+    if (gs.IsNotFound()) continue;  // slice not yet flushed
+    if (!gs.ok()) {
+      SWORDFS_LOG_ERROR << "Read: ino=" << ino << " key=" << key
+                        << " off=" << off << " failed: " << gs.message();
+      fuse_reply_err(req, gs.ToErrno());
+      return;
+    }
+    result.append(chunk_data);
+  }
+
+  if (result.empty()) {
     fuse_reply_buf(req, nullptr, 0);
     return;
   }
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Read: ino=" << ino << " key=" << key
-                      << " off=" << off << " size=" << size
-                      << " failed: " << status.message();
-    fuse_reply_err(req, status.ToErrno());
-    return;
-  }
-
-  fuse_reply_buf(req, data.data(), data.size());
+  fuse_reply_buf(req, result.data(), result.size());
 }
 
 void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
@@ -234,22 +257,8 @@ void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
     return;
   }
 
-  // Phase 1: append-only — writes must start at or beyond the current
-  // file size.  Random overwrites are deferred to Phase 2 (slice model).
-  struct stat attr;
-  Status status = meta_->GetAttr(ino, &attr);
-  if (!status.ok()) {
-    fuse_reply_err(req, status.ToErrno());
-    return;
-  }
-
-  if (off < attr.st_size) {
-    SWORDFS_LOG_DEBUG << "Write: ino=" << ino << " off=" << off
-                      << " < st_size=" << attr.st_size
-                      << " — random overwrite not supported in Phase 1";
-    fuse_reply_err(req, EOPNOTSUPP);
-    return;
-  }
+  // Phase 2: allow overwrites — new data supersedes old slices via COW.
+  (void)ino;
 
   // Accumulate writes in the per-handle buffer.  Data is flushed to the
   // storage engine on Flush / Release.
@@ -599,7 +608,11 @@ Status VfsImpl::FlushChunked(InodeID ino, uint64_t fh) {
     size_t seg_size =
         std::min(data_->Limits().max_chunk_size, buf.size() - seg_off);
     size_t file_off = base_off + seg_off;
-    std::string key = ChunkKey(ino, file_off);
+
+    // Allocate a unique slice id and upload under chunks/{ino}/{slice_id}.
+    uint64_t slice_id = meta_->NextSliceID(ino);
+    std::string key =
+        "chunks/" + std::to_string(ino) + "/" + std::to_string(slice_id);
 
     Status s = data_->Put(
         key, std::string_view(buf.data() + seg_off, seg_size));
@@ -609,6 +622,11 @@ Status VfsImpl::FlushChunked(InodeID ino, uint64_t fh) {
                         << " failed: " << s.message();
       return s;
     }
+
+    // Record the slice so Read can locate it later.
+    storage::Slice slice{slice_id, static_cast<uint32_t>(file_off),
+                         static_cast<uint32_t>(seg_size)};
+    meta_->AppendSlice(ino, slice);
   }
 
   // Erase so the next write starts a fresh buffer at its own offset.
@@ -628,12 +646,5 @@ Status VfsImpl::FlushChunked(InodeID ino, uint64_t fh) {
   return Status::OK();
 }
 
-std::string VfsImpl::ChunkKey(InodeID ino, size_t file_offset) {
-  // Chunk N contains file offsets [N*data_->Limits().max_chunk_size, (N+1)*data_->Limits().max_chunk_size).
-  // The chunk key is deterministic from the offset — no metadata lookup
-  // is needed to locate the chunk for a Read.
-  uint64_t chunk_seq = file_offset / data_->Limits().max_chunk_size;
-  return "chunks/" + std::to_string(ino) + "/" + std::to_string(chunk_seq);
-}
 
 }  // namespace swordfs::fuse

@@ -607,4 +607,18 @@ Status MemMetaImpl::Forget(InodeID ino,
   return Status::OK();
 }
 
+Status MemMetaImpl::AppendSlice(InodeID ino,
+                                const storage::Slice& slice) {
+  return store_.AppendSlice(ino, slice);
+}
+
+Status MemMetaImpl::GetSlices(InodeID ino,
+                              storage::SliceList* out) {
+  return store_.GetSlices(ino, out);
+}
+
+uint64_t MemMetaImpl::NextSliceID(InodeID ino) {
+  return store_.NextSliceID(ino);
+}
+
 }  // namespace swordfs::metadata
