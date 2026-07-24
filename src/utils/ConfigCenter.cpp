@@ -40,20 +40,18 @@ void ConfigCenter::ConfigureOptions(CLI::App& app) {
   RegisterFormatOptions(app);
 }
 
-void ConfigCenter::ParseOptions(CLI::App& app, int argc, char* argv[]) {
-  try {
-    app.parse(argc, argv);
-  } catch (const CLI::ParseError& e) {
-    app.exit(e);
-  }
-}
-
 void ConfigCenter::RegisterMountOptions(CLI::App& app) {
   auto cmd = app.add_subcommand("mount", "Mount a filesystem");
   cmd->add_option("mountpoint", mountpoint_, "Mount point directory (created if needed)")
       ->required();
-  cmd->add_option("--volume", volume_path_,
-                  "Volume directory (reads volume.json for storage config)");
+  cmd->add_option("--volume", volume_name_,
+                  "Volume name to mount")
+      ->required();
+  cmd->add_option("--meta", meta_url_,
+                  "Metadata engine URL (e.g. memory://local, redis://...)")
+      ->required();
+  cmd->add_option("--volume-config-path", volume_config_path_,
+                  "Volume config directory (required for --meta memory://local)");
   cmd->allow_extras();  // -o allow_other,ro etc. through to FUSE
 
   SubCommand sc;
@@ -65,18 +63,19 @@ void ConfigCenter::RegisterMountOptions(CLI::App& app) {
 void ConfigCenter::RegisterFormatOptions(CLI::App& app) {
   auto cmd = app.add_subcommand("format", "Initialise a new SwordFS volume");
 
-  cmd->add_option("volume-path", volume_path_,
-                  "Volume directory (e.g. /var/lib/swordfs/myvol)")
+  cmd->add_option("--volume", volume_name_, "Volume name")
       ->required();
-
-  // Storage backend options — duplicated from global so they can appear
-  // after the "format" subcommand keyword (CLI11 positional ordering).
+  cmd->add_option("--meta", meta_url_,
+                  "Metadata engine URL (e.g. memory://local)")
+      ->required();
   cmd->add_option("--storage", storage_backend_,
-                  "Storage backend (s3 or empty for memory-only)");
-  cmd->add_option("--s3-endpoint", s3_endpoint_, "S3 endpoint URL");
-  cmd->add_option("--s3-region", s3_region_, "S3 region");
-  cmd->add_option("--s3-bucket", s3_bucket_, "S3 bucket name");
-  cmd->add_option("--s3-prefix", s3_prefix_, "S3 object key prefix");
+                  "Data storage type (s3)")
+      ->required();
+  cmd->add_option("--bucket", bucket_url_,
+                  "Bucket URL (e.g. s3://mybucket.s3.amazonaws.com/chunks)");
+  cmd->add_option("volume-config-path", volume_config_path_,
+                  "Volume config directory (required for --meta memory://local)")
+      ->option_text("PATH");
 
   SubCommand sc;
   sc.cmd = cmd;

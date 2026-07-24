@@ -58,8 +58,6 @@ class ConfigCenter {
 
   /// Bind CLI options directly to ConfigCenter members.
   void ConfigureOptions(CLI::App& app);
-  /// Parse the CLI options, will exit the program if parse failed
-  void ParseOptions(CLI::App& app, int argc, char* argv[]);
   /// Returns the selected subcommand.
   std::optional<SubCommand> SelectedSubCommand() const;
 
@@ -74,18 +72,16 @@ class ConfigCenter {
   /// Returns the mount point directory.
   const std::string& mountpoint() const { return mountpoint_; }
 
-  /// Returns the storage backend name (empty string = none/memory-only).
+  /// Returns the metadata engine URL (e.g. "memory://local", "redis://...").
+  const std::string& meta_url() const { return meta_url_; }
+  /// Returns the data storage type (e.g. "s3", empty = none).
   const std::string& storage_backend() const { return storage_backend_; }
-  /// Returns the S3 endpoint.
-  const std::string& s3_endpoint() const { return s3_endpoint_; }
-  /// Returns the S3 region.
-  const std::string& s3_region() const { return s3_region_; }
-  /// Returns the S3 bucket.
-  const std::string& s3_bucket() const { return s3_bucket_; }
-  /// Returns the S3 object key prefix.
-  const std::string& s3_prefix() const { return s3_prefix_; }
-  /// Returns the volume path (format subcommand positional arg).
-  const std::string& volume_path() const { return volume_path_; }
+  /// Returns the bucket URL (e.g. "s3://endpoint/bucket/prefix").
+  const std::string& bucket_url() const { return bucket_url_; }
+  /// Returns the volume name (format and mount subcommands).
+  const std::string& volume_name() const { return volume_name_; }
+  /// Returns the volume config path (format subcommand positional arg).
+  const std::string& volume_config_path() const { return volume_config_path_; }
 
  private:
   ConfigCenter() = default;
@@ -107,15 +103,14 @@ class ConfigCenter {
   // mount point directory (positional argument)
   std::string mountpoint_;
 
-  // Storage engine configuration
-  std::string storage_backend_;   // "s3" or "" (none)
-  std::string s3_endpoint_ = "https://s3.amazonaws.com";
-  std::string s3_region_ = "us-east-1";
-  std::string s3_bucket_;
-  std::string s3_prefix_ = "swordfs/chunks";
+  // Storage engine configuration (URL format)
+  std::string meta_url_ = "memory://local";         // --meta
+  std::string storage_backend_;                     // --storage
+  std::string bucket_url_;                          // --bucket
 
   // Volume configuration (format subcommand)
-  std::string volume_path_;
+  std::string volume_name_;         // --volume (required for format)
+  std::string volume_config_path_;  // volume-config-path (positional, required for memory)
 
   // Subcommands registered with the CLI::App.
   std::vector<SubCommand> sub_commands_;
