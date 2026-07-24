@@ -52,3 +52,47 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.info
           fail_ci_if_error: false
+
+  integration-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache folly build
+        uses: actions/cache@v4
+        with:
+          path: /usr/local
+          key: folly-${{ runner.os }}-${{ hashFiles('scripts/install-deps.sh') }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          if [ ! -f /usr/local/lib/libfolly.a ]; then
+            sudo bash scripts/install-deps.sh --with-s3
+          fi
+
+      - name: Start MinIO
+        run: |
+          wget -q https://dl.min.io/server/minio/release/linux-amd64/minio
+          chmod +x minio
+          MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin ./minio server /tmp/data &
+          sleep 3
+
+      - name: Build with S3
+        run: |
+          cmake --preset default -DENABLE_S3=ON
+          cmake --build build --target swordfs_test swordfs
+
+      - name: Run S3 integration tests
+        env:
+          SWORDFS_TEST_S3_ENDPOINT: http://localhost:9000
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+        run: build/swordfs_test --gtest_color=no --gtest_filter='S3DataEngine*:S3Integration*'
+
+      - name: Run smoke test
+        env:
+          SWORDFS_TEST_S3_ENDPOINT: http://localhost:9000
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+        run: bash tests/integration/smoke_test.sh ./build/swordfs
