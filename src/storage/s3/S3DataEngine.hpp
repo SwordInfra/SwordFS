@@ -3,9 +3,6 @@
 
 // S3DataEngine — object-storage backend via AWS SDK for C++.
 //
-// Controlled by CMake option ENABLE_S3=ON/OFF.  Builds only when
-// libaws-cpp-sdk-s3 is available.
-//
 // Chunks are stored as immutable objects under a configurable bucket
 // and prefix.
 
@@ -22,10 +19,10 @@
 namespace swordfs::storage {
 
 struct S3Config {
-  std::string endpoint;   // e.g. "https://s3.amazonaws.com"
-  std::string region;     // e.g. "us-east-1"
+  std::string endpoint;  // e.g. "https://s3.amazonaws.com"
+  std::string region;    // e.g. "us-east-1"
   std::string bucket;
-  std::string prefix;     // optional key prefix, e.g. "swordfs/chunks"
+  std::string prefix;  // optional key prefix, e.g. "swordfs/chunks"
 };
 
 /// S3-compatible object storage engine using AWS SDK for C++.

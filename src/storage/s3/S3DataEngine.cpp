@@ -14,7 +14,29 @@
 
 namespace swordfs::storage {
 
+// ────────────────────────────────────────────────────────────────
+// AWS SDK lifetime — initialised on first S3DataEngine creation
+// and shut down at process exit.
+// ────────────────────────────────────────────────────────────────
+
+namespace {
+void EnsureAwsSdkInit() {
+  static const struct AwsSdkGuard {
+    AwsSdkGuard() {
+      Aws::SDKOptions opts;
+      Aws::InitAPI(opts);
+    }
+    ~AwsSdkGuard() {
+      Aws::SDKOptions opts;
+      Aws::ShutdownAPI(opts);
+    }
+  } guard;
+  (void)guard;
+}
+}  // namespace
+
 S3DataEngine::S3DataEngine(const S3Config& config) : cfg_(config) {
+  EnsureAwsSdkInit();
   Aws::Client::ClientConfiguration aws_cfg;
   aws_cfg.endpointOverride = cfg_.endpoint;
   aws_cfg.region = cfg_.region;
