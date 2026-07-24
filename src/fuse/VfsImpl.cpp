@@ -20,6 +20,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 using namespace swordfs::utils;
@@ -199,33 +200,124 @@ void VfsImpl::Open(fuse_req_t req, fuse_ino_t ino,
 
 void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                    struct fuse_file_info* fi) {
-  (void)ino;
-  (void)size;
-  (void)off;
   (void)fi;
-  fuse_reply_err(req, ENOSYS);
+  if (!data_) {
+    fuse_reply_err(req, ENOSYS);
+    return;
+  }
+
+  size_t file_off = static_cast<size_t>(off);
+  size_t end_off = file_off + size;
+
+  // Get all slices for this inode and stitch together the requested range.
+  storage::SliceList slices;
+  Status s = meta_->GetSlices(ino, &slices);
+  if (!s.ok()) {
+    fuse_reply_err(req, s.ToErrno());
+    return;
+  }
+
+  std::string result;
+  for (const auto& slice : slices.slices) {
+    if (slice.length == 0) continue;
+    size_t slice_end = slice.offset + slice.length;
+    if (slice_end <= file_off) continue;  // before requested range
+    if (slice.offset >= end_off) break;   // past requested range (sorted)
+
+    size_t overlap_off = std::max(static_cast<size_t>(slice.offset), file_off);
+    size_t overlap_end = std::min(slice_end, end_off);
+    size_t overlap_len = overlap_end - overlap_off;
+    size_t slice_off = overlap_off - slice.offset;
+
+    std::string key =
+        "chunks/" + std::to_string(ino) + "/" + std::to_string(slice.id);
+    std::string chunk_data;
+    Status gs = data_->Get(key, &chunk_data, slice_off, overlap_len);
+    if (gs.IsNotFound()) continue;  // slice not yet flushed
+    if (!gs.ok()) {
+      SWORDFS_LOG_ERROR << "Read: ino=" << ino << " key=" << key
+                        << " off=" << off << " failed: " << gs.message();
+      fuse_reply_err(req, gs.ToErrno());
+      return;
+    }
+    result.append(chunk_data);
+  }
+
+  if (result.empty()) {
+    fuse_reply_buf(req, nullptr, 0);
+    return;
+  }
+  fuse_reply_buf(req, result.data(), result.size());
 }
 
 void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
                     size_t size, off_t off, struct fuse_file_info* fi) {
+  if (!data_) {
+    fuse_reply_err(req, ENOSYS);
+    return;
+  }
+
+  // Phase 2: allow overwrites — new data supersedes old slices via COW.
   (void)ino;
-  (void)buf;
-  (void)size;
-  (void)off;
-  (void)fi;
-  fuse_reply_err(req, ENOSYS);
+
+  // Accumulate writes in the per-handle buffer.  Data is flushed to the
+  // storage engine on Flush / Release.
+  WriteBuf& wb = write_buf_[fi->fh];
+
+  // First write (or first after flush): record the absolute base offset.
+  if (wb.data.empty()) {
+    wb.base_offset = static_cast<size_t>(off);
+  }
+
+  // Append: pad any gap between the end of the buffer and off.
+  size_t rel_off = static_cast<size_t>(off) - wb.base_offset;
+  size_t needed = rel_off + size;
+  if (wb.data.size() < needed) {
+    wb.data.resize(needed, '\0');
+  }
+
+  std::memcpy(wb.data.data() + rel_off, buf, size);
+
+  // Auto-flush if the buffer has grown beyond the chunk size limit.
+  // This prevents unbounded memory growth for large files.
+  if (wb.data.size() >= data_->Limits().max_chunk_size) {
+    Status s = FlushChunked(ino, fi->fh);
+    if (!s.ok()) {
+      fuse_reply_err(req, s.ToErrno());
+      return;
+    }
+  }
+
+  fuse_reply_write(req, size);
 }
 
 void VfsImpl::Flush(fuse_req_t req, fuse_ino_t ino,
                     struct fuse_file_info* fi) {
-  (void)ino;
-  (void)fi;
-  fuse_reply_err(req, 0);
+  if (!data_) {
+    fuse_reply_err(req, 0);
+    return;
+  }
+  fuse_reply_err(req, FlushChunked(ino, fi->fh).ToErrno());
 }
 
 void VfsImpl::Release(fuse_req_t req, fuse_ino_t ino,
                       struct fuse_file_info* fi) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+
+  // Flush any buffered writes before releasing the handle.
+  // Must use FlushChunked directly — NOT Flush — because Flush calls
+  // fuse_reply_err and each FUSE request can only be replied once.
+  if (data_) {
+    Status s = FlushChunked(ino, fi->fh);
+    if (!s.ok()) {
+      write_buf_.erase(fi->fh);   // clean up on failure
+      meta_->Release(fi->fh);     // still release the handle
+      fuse_reply_err(req, s.ToErrno());
+      return;
+    }
+    write_buf_.erase(fi->fh);     // clean up on success
+  }
+
   Status status = meta_->Release(fi->fh);
   (void)ino;
   fuse_reply_err(req, status.ToErrno());
@@ -233,10 +325,8 @@ void VfsImpl::Release(fuse_req_t req, fuse_ino_t ino,
 
 void VfsImpl::Fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
                     struct fuse_file_info* fi) {
-  (void)ino;
-  (void)datasync;
-  (void)fi;
-  fuse_reply_err(req, ENOSYS);
+  // Fsync delegates to Flush for data persistence.
+  return Flush(req, ino, fi);
 }
 
 void VfsImpl::Opendir(fuse_req_t req, fuse_ino_t ino,
@@ -499,5 +589,62 @@ void VfsImpl::Statx(fuse_req_t req, fuse_ino_t ino, int flags, int mask,
   (void)fi;
   fuse_reply_err(req, ENOSYS);
 }
+
+Status VfsImpl::FlushChunked(InodeID ino, uint64_t fh) {
+  auto it = write_buf_.find(fh);
+  if (it == write_buf_.end() || it->second.data.empty()) {
+    return Status::OK();
+  }
+
+  WriteBuf& entry = it->second;
+  const std::string& buf = entry.data;
+  size_t base_off = entry.base_offset;
+
+  // Upload the buffer in chunk-sized segments.  Each segment's absolute
+  // file offset is base_off + seg_off, and its chunk key is derived from
+  // that absolute offset.
+  for (size_t seg_off = 0; seg_off < buf.size();
+       seg_off += data_->Limits().max_chunk_size) {
+    size_t seg_size =
+        std::min(data_->Limits().max_chunk_size, buf.size() - seg_off);
+    size_t file_off = base_off + seg_off;
+
+    // Allocate a unique slice id and upload under chunks/{ino}/{slice_id}.
+    uint64_t slice_id = meta_->NextSliceID(ino);
+    std::string key =
+        "chunks/" + std::to_string(ino) + "/" + std::to_string(slice_id);
+
+    Status s = data_->Put(
+        key, std::string_view(buf.data() + seg_off, seg_size));
+    if (!s.ok()) {
+      SWORDFS_LOG_ERROR << "FlushChunked: ino=" << ino << " key=" << key
+                        << " seg_off=" << seg_off << " size=" << seg_size
+                        << " failed: " << s.message();
+      return s;
+    }
+
+    // Record the slice so Read can locate it later.
+    storage::Slice slice{slice_id, static_cast<uint32_t>(file_off),
+                         static_cast<uint32_t>(seg_size)};
+    meta_->AppendSlice(ino, slice);
+  }
+
+  // Erase so the next write starts a fresh buffer at its own offset.
+  write_buf_.erase(it);
+
+  // Update the inode's file size after a successful flush.
+  struct stat attr;
+  Status s = meta_->GetAttr(ino, &attr);
+  if (s.ok()) {
+    off_t new_size = static_cast<off_t>(base_off + buf.size());
+    if (new_size > attr.st_size) {
+      attr.st_size = new_size;
+      meta_->SetAttr(ino, &attr, FUSE_SET_ATTR_SIZE, &attr);
+    }
+  }
+
+  return Status::OK();
+}
+
 
 }  // namespace swordfs::fuse

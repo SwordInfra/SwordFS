@@ -8,13 +8,18 @@
 #pragma once
 
 #define FUSE_USE_VERSION 312
+#include <folly/container/F14Map.h>
 #include <fuse_lowlevel.h>
 
 #include <memory>
+#include <string>
+
+#include "utils/Status.hpp"
 
 namespace swordfs {
 
 namespace metadata {
+using InodeID = uint64_t;
 class Meta;
 }  // namespace metadata
 
@@ -23,6 +28,9 @@ class IDataEngine;
 }  // namespace storage
 
 namespace fuse {
+
+using swordfs::metadata::InodeID;
+using swordfs::utils::Status;
 
 class VfsImpl {
  public:
@@ -101,8 +109,21 @@ class VfsImpl {
   void SetDataEngine(std::unique_ptr<swordfs::storage::IDataEngine> data);
 
  private:
+  // Flush the write buffer to S3 in chunk-sized segments, recording
+  // a Slice for each segment in the metadata engine.
+  Status FlushChunked(InodeID ino, uint64_t fh);
+
   std::unique_ptr<swordfs::metadata::Meta> meta_;
   std::unique_ptr<swordfs::storage::IDataEngine> data_;
+
+  // Per-handle write buffer.  base_offset is the absolute file offset
+  // of the first buffered byte; flushed entries are erased so the next
+  // write starts a fresh buffer at its own offset.
+  struct WriteBuf {
+    size_t base_offset = 0;
+    std::string data;
+  };
+  folly::F14FastMap<uint64_t, WriteBuf> write_buf_;
 };
 
 }  // namespace fuse
