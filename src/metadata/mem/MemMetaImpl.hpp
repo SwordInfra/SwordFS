@@ -66,6 +66,11 @@ class MemMetaImpl : public Meta {
   Status ReleaseDir(uint64_t fh) override;
   Status Forget(InodeID ino, uint64_t nlookup) override;
 
+  Status AppendSlice(InodeID ino,
+                     const storage::Slice& slice) override;
+  Status GetSlices(InodeID ino, storage::SliceList* out) override;
+  uint64_t NextSliceID(InodeID ino) override;
+
   // Volume operations
   Status StatFs(struct statvfs* stbuf) override;
 
