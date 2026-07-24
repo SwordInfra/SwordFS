@@ -69,6 +69,13 @@ class MemMetaImpl : public Meta {
   // Volume operations
   Status StatFs(struct statvfs* stbuf) override;
 
+  // Slice operations
+  Status AppendSlice(InodeID ino, uint64_t chunk_idx,
+                     const swordfs::storage::Slice& slice) override;
+  Status GetSlices(InodeID ino, uint64_t chunk_idx,
+                   swordfs::storage::SliceList* list) override;
+  uint64_t NextSliceID(InodeID ino, uint64_t chunk_idx) override;
+
  private:
   // Helpers
   void KillSUID(struct stat* st);

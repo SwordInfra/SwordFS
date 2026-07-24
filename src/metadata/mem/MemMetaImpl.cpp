@@ -607,4 +607,22 @@ Status MemMetaImpl::Forget(InodeID ino,
   return Status::OK();
 }
 
+// ────────────────────────────────────────────────────────────────
+// Slice operations (S3 Phase 2)
+// ────────────────────────────────────────────────────────────────
+
+Status MemMetaImpl::AppendSlice(InodeID ino, uint64_t chunk_idx,
+                                const swordfs::storage::Slice& slice) {
+  return store_.AppendSlice(ino, chunk_idx, slice);
+}
+
+Status MemMetaImpl::GetSlices(InodeID ino, uint64_t chunk_idx,
+                              swordfs::storage::SliceList* list) {
+  return store_.GetSlices(ino, chunk_idx, list);
+}
+
+uint64_t MemMetaImpl::NextSliceID(InodeID ino, uint64_t chunk_idx) {
+  return store_.NextSliceID(ino, chunk_idx);
+}
+
 }  // namespace swordfs::metadata

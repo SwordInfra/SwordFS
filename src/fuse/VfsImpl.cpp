@@ -594,6 +594,8 @@ Status VfsImpl::FlushChunked(InodeID ino, uint64_t fh) {
   // Upload the buffer in chunk-sized segments.  Each segment's absolute
   // file offset is base_off + seg_off, and its chunk key is derived from
   // that absolute offset.
+  //
+  // After each successful Put, create a Slice so Read can locate the data.
   for (size_t seg_off = 0; seg_off < buf.size();
        seg_off += data_->Limits().max_chunk_size) {
     size_t seg_size =
@@ -609,6 +611,17 @@ Status VfsImpl::FlushChunked(InodeID ino, uint64_t fh) {
                         << " failed: " << s.message();
       return s;
     }
+
+    // Record a Slice so that Read can locate the chunk data.
+    // chunk_idx = file_off / max_chunk_size (same as ChunkKey uses)
+    // chunk_off = file_off % max_chunk_size (offset within the chunk)
+    uint64_t chunk_idx = file_off / data_->Limits().max_chunk_size;
+    uint32_t chunk_off =
+        static_cast<uint32_t>(file_off % data_->Limits().max_chunk_size);
+    uint64_t slice_id = meta_->NextSliceID(ino, chunk_idx);
+    swordfs::storage::Slice slice{slice_id, chunk_off,
+                                  static_cast<uint32_t>(seg_size)};
+    meta_->AppendSlice(ino, chunk_idx, slice);
   }
 
   // Erase so the next write starts a fresh buffer at its own offset.
