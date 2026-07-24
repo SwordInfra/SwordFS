@@ -102,9 +102,25 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
 file(GLOB_RECURSE TEST_SOURCES tests/*.cpp)
+
+# S3 integration tests require AWS SDK headers — only available with
+# ENABLE_S3=ON.  Exclude them from the test binary when S3 is off.
+if(NOT ENABLE_S3)
+  list(FILTER TEST_SOURCES EXCLUDE REGEX "tests/integration/storage/")
+endif()
+
 add_executable(swordfs_test ${TEST_SOURCES})
 target_link_libraries(swordfs_test PRIVATE swordfs_lib gtest gtest_main)
+target_include_directories(swordfs_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
 target_compile_definitions(swordfs_test PRIVATE _FILE_OFFSET_BITS=64)
+
+# S3 tests are gated behind SWORDFS_ENABLE_S3 — they gracefully skip
+# when the compile-time flag is not set.
+if(ENABLE_S3)
+  target_compile_definitions(swordfs_test PRIVATE SWORDFS_ENABLE_S3)
+endif()
 
 include(GoogleTest)
 gtest_discover_tests(swordfs_test)
