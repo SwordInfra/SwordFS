@@ -6,6 +6,7 @@
 #include "fuse/Limits.hpp"
 #include "metadata/Meta.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
+#include "storage/IDataEngine.hpp"
 #include "utils/ConfigCenter.hpp"
 #include "utils/Context.hpp"
 #include "utils/Logging.hpp"
@@ -35,6 +36,11 @@ VfsImpl::VfsImpl() {
     SWORDFS_PROMPT_EXIT << "VFS backend not supported";
     return;
   }
+}
+
+void VfsImpl::SetDataEngine(
+    std::unique_ptr<swordfs::storage::IDataEngine> data) {
+  data_ = std::move(data);
 }
 
 void VfsImpl::Init(void* userdata, struct fuse_conn_info* conn) {

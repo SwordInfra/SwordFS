@@ -24,6 +24,11 @@ class VfsHookFactory {
   /// Return the fully-populated fuse_lowlevel_ops table.
   static const struct fuse_lowlevel_ops& GetOps();
 
+  /// Inject the data engine into the VfsImpl singleton.
+  /// Called once before mount when --volume is specified.
+  static void SetDataEngine(
+      std::unique_ptr<swordfs::storage::IDataEngine> data);
+
   // FUSE callbacks — delegate to vfs_
   static void SwordfsInit(void* userdata, struct fuse_conn_info* conn);
   static void SwordfsDestroy(void* userdata);

@@ -21,6 +21,8 @@
 
 #include "cmd/Mount.hpp"
 #include "fuse/Vfs.hpp"
+#include "storage/IDataEngine.hpp"
+#include "storage/VolumeConfig.hpp"
 #include "utils/ConfigCenter.hpp"
 #include "utils/Fuse.hpp"
 #include "utils/Logging.hpp"
@@ -192,9 +194,63 @@ static int Mount(const std::string& mountpoint,
   return ret;
 }
 
+// Load volume configuration and initialise the storage engine.
+//
+// When --volume is specified and the metadata engine is memory-backed,
+// this function reads volume.json and creates the IDataEngine described
+// by it.  Metadata engines with persistent storage (e.g. Redis) will
+// recover configuration from their own store instead.
+//
+// Returns 0 on success, non-zero on error.
+static int LoadVolumeConfig(ConfigCenter& cfg) {
+  if (cfg.volume_path().empty()) {
+    return 0;  // --volume not specified, nothing to load
+  }
+
+  // When the metadata engine has its own persistent store, volume
+  // configuration is recovered from there — not from a local file.
+  if (cfg.vfs_backend() != VfsBackend::kMemory) {
+    // Future: recover volume config from Redis / other persistent store.
+    return 0;
+  }
+
+  swordfs::storage::VolumeConfig vol;
+  auto status =
+      swordfs::storage::VolumeConfig::ReadFromFile(cfg.volume_path(), &vol);
+  if (!status.ok()) {
+    SWORDFS_PROMPT_INFO << "Error: failed to read volume config from "
+                        << cfg.volume_path() << ": " << status.message();
+    return 1;
+  }
+
+  // Create the storage engine from volume.json.
+  // Returns nullptr for memory-only volumes or when the backend
+  // is not compiled in (e.g. ENABLE_S3=OFF).
+  auto engine = swordfs::storage::CreateDataEngine(vol);
+  if (engine) {
+    swordfs::fuse::VfsHookFactory::SetDataEngine(std::move(engine));
+    SWORDFS_LOG_INFO << "Volume " << vol.uuid << " loaded from "
+                     << cfg.volume_path() << " (storage=" << vol.storage
+                     << ")";
+  } else if (vol.storage == "s3") {
+    SWORDFS_PROMPT_INFO
+        << "Error: this build has S3 support disabled (ENABLE_S3=OFF)."
+        << " Volume " << cfg.volume_path()
+        << " requires S3. Rebuild with -DENABLE_S3=ON.";
+    return 1;
+  }
+
+  return 0;
+}
+
 int RunMount() {
-  const std::string& mountpoint = ConfigCenter::Instance().mountpoint();
+  auto& cfg = ConfigCenter::Instance();
+  const std::string& mountpoint = cfg.mountpoint();
   if (ValidateMountpoint(mountpoint) != 0) {
+    return 1;
+  }
+
+  if (LoadVolumeConfig(cfg) != 0) {
     return 1;
   }
 

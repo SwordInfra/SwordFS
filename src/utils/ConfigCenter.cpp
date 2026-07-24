@@ -3,6 +3,7 @@
 
 #include "utils/ConfigCenter.hpp"
 
+#include "cmd/Format.hpp"
 #include "cmd/Mount.hpp"
 
 namespace swordfs::utils {
@@ -30,21 +31,13 @@ void ConfigCenter::ConfigureOptions(CLI::App& app) {
       ->check(CLI::PositiveNumber)
       ->check(CLI::Range(1, static_cast<int>(std::thread::hardware_concurrency())));
 
-  // Storage backend options
-  app.add_option("--storage", storage_backend_,
-                 "Storage backend (s3 or empty for memory-only)");
-  app.add_option("--s3-endpoint", s3_endpoint_, "S3 endpoint URL")
-      ->default_str(s3_endpoint_);
-  app.add_option("--s3-region", s3_region_, "S3 region")
-      ->default_str(s3_region_);
-  app.add_option("--s3-bucket", s3_bucket_, "S3 bucket name");
-  app.add_option("--s3-prefix", s3_prefix_, "S3 object key prefix")
-      ->default_str(s3_prefix_);
-
   app.add_flag_callback("-V,--version", PrintVersion, "Show version information");
 
   // Mount options
   RegisterMountOptions(app);
+
+  // Format options
+  RegisterFormatOptions(app);
 }
 
 void ConfigCenter::ParseOptions(CLI::App& app, int argc, char* argv[]) {
@@ -59,11 +52,35 @@ void ConfigCenter::RegisterMountOptions(CLI::App& app) {
   auto cmd = app.add_subcommand("mount", "Mount a filesystem");
   cmd->add_option("mountpoint", mountpoint_, "Mount point directory (created if needed)")
       ->required();
+  cmd->add_option("--volume", volume_path_,
+                  "Volume directory (reads volume.json for storage config)");
   cmd->allow_extras();  // -o allow_other,ro etc. through to FUSE
 
   SubCommand sc;
   sc.cmd = cmd;
   sc.run = swordfs::cmd::RunMount;
+  sub_commands_.push_back(sc);
+}
+
+void ConfigCenter::RegisterFormatOptions(CLI::App& app) {
+  auto cmd = app.add_subcommand("format", "Initialise a new SwordFS volume");
+
+  cmd->add_option("volume-path", volume_path_,
+                  "Volume directory (e.g. /var/lib/swordfs/myvol)")
+      ->required();
+
+  // Storage backend options — duplicated from global so they can appear
+  // after the "format" subcommand keyword (CLI11 positional ordering).
+  cmd->add_option("--storage", storage_backend_,
+                  "Storage backend (s3 or empty for memory-only)");
+  cmd->add_option("--s3-endpoint", s3_endpoint_, "S3 endpoint URL");
+  cmd->add_option("--s3-region", s3_region_, "S3 region");
+  cmd->add_option("--s3-bucket", s3_bucket_, "S3 bucket name");
+  cmd->add_option("--s3-prefix", s3_prefix_, "S3 object key prefix");
+
+  SubCommand sc;
+  sc.cmd = cmd;
+  sc.run = swordfs::cmd::RunFormat;
   sub_commands_.push_back(sc);
 }
 
