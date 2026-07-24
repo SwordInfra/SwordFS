@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <CLI/CLI.hpp>
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <string>
@@ -22,10 +23,11 @@
 #include "cmd/Mount.hpp"
 #include "fuse/Vfs.hpp"
 #include "storage/IDataEngine.hpp"
-#include "storage/VolumeConfig.hpp"
+#include "storage/StorageUrl.hpp"
 #include "utils/ConfigCenter.hpp"
 #include "utils/Fuse.hpp"
 #include "utils/Logging.hpp"
+#include "volume/VolumeConfig.hpp"
 
 using namespace swordfs::utils;
 
@@ -203,8 +205,9 @@ static int Mount(const std::string& mountpoint,
 //
 // Returns 0 on success, non-zero on error.
 static int LoadVolumeConfig(ConfigCenter& cfg) {
-  if (cfg.volume_path().empty()) {
-    return 0;  // --volume not specified, nothing to load
+  const std::string& config_path = cfg.volume_config_path();
+  if (config_path.empty()) {
+    return 0;  // --volume-config-path not specified, nothing to load
   }
 
   // When the metadata engine has its own persistent store, volume
@@ -216,10 +219,10 @@ static int LoadVolumeConfig(ConfigCenter& cfg) {
 
   swordfs::storage::VolumeConfig vol;
   auto status =
-      swordfs::storage::VolumeConfig::ReadFromFile(cfg.volume_path(), &vol);
+      swordfs::storage::VolumeConfig::ReadFromFile(config_path, &vol);
   if (!status.ok()) {
     SWORDFS_PROMPT_INFO << "Error: failed to read volume config from "
-                        << cfg.volume_path() << ": " << status.message();
+                        << config_path << ": " << status.message();
     return 1;
   }
 
@@ -230,13 +233,12 @@ static int LoadVolumeConfig(ConfigCenter& cfg) {
   if (engine) {
     swordfs::fuse::VfsHookFactory::SetDataEngine(std::move(engine));
     SWORDFS_LOG_INFO << "Volume " << vol.uuid << " loaded from "
-                     << cfg.volume_path() << " (storage=" << vol.storage
+                     << config_path << " (bucket=" << vol.bucket
                      << ")";
-  } else if (vol.storage == "s3") {
+  } else if (!vol.bucket.empty()) {
     SWORDFS_PROMPT_INFO
-        << "Error: this build has S3 support disabled (ENABLE_S3=OFF)."
-        << " Volume " << cfg.volume_path()
-        << " requires S3. Rebuild with -DENABLE_S3=ON.";
+        << "Error: failed to create data engine for " << vol.bucket
+        << ". The storage backend may not be compiled in.";
     return 1;
   }
 
@@ -245,6 +247,27 @@ static int LoadVolumeConfig(ConfigCenter& cfg) {
 
 int RunMount() {
   auto& cfg = ConfigCenter::Instance();
+
+  // Validate --meta URL
+  swordfs::utils::StorageUrl meta;
+  const std::string& meta_url = cfg.meta_url();
+  if (!swordfs::utils::StorageUrl::Parse(meta_url, &meta)) {
+    SWORDFS_PROMPT_INFO << "Error: invalid --meta URL: " << meta_url;
+    return 1;
+  }
+  static const std::vector<std::string> kSupportedMeta = {"memory"};
+  if (std::find(kSupportedMeta.begin(), kSupportedMeta.end(), meta.scheme) ==
+      kSupportedMeta.end()) {
+    SWORDFS_PROMPT_INFO << "Error: unsupported metadata engine '"
+                        << meta.scheme << "'. Supported: memory://local";
+    return 1;
+  }
+  if (meta.scheme == "memory" && cfg.volume_config_path().empty()) {
+    SWORDFS_PROMPT_INFO
+        << "Error: --volume-config-path is required for --meta memory://local";
+    return 1;
+  }
+
   const std::string& mountpoint = cfg.mountpoint();
   if (ValidateMountpoint(mountpoint) != 0) {
     return 1;

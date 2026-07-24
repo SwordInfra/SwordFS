@@ -1,7 +1,7 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include "storage/VolumeConfig.hpp"
+#include "volume/VolumeConfig.hpp"
 #include "storage/IDataEngine.hpp"
 
 #include <folly/json.h>
@@ -12,6 +12,7 @@
 #include <sstream>
 
 #include "utils/Logging.hpp"
+#include "storage/StorageUrl.hpp"
 
 #ifdef SWORDFS_ENABLE_S3
 #include "storage/s3/S3DataEngine.hpp"
@@ -39,16 +40,11 @@ std::string VolumeConfig::GenerateUUID() {
 }
 
 std::string VolumeConfig::ToJson() const {
-  folly::dynamic s3_cfg = folly::dynamic::object;
-  s3_cfg["bucket"] = s3_config.bucket;
-  s3_cfg["endpoint"] = s3_config.endpoint;
-  s3_cfg["region"] = s3_config.region;
-  s3_cfg["prefix"] = s3_config.prefix;
-
   folly::dynamic root = folly::dynamic::object;
+  root["name"] = name;
   root["uuid"] = uuid;
-  root["storage"] = storage;
-  root["s3_config"] = std::move(s3_cfg);
+  root["meta"] = meta_url;
+  root["bucket"] = bucket;
 
   return folly::toPrettyJson(root);
 }
@@ -65,24 +61,18 @@ utils::Status VolumeConfig::FromJson(std::string_view json, VolumeConfig* out) {
   if (!root.isObject())
     return utils::Status::InvalidArgument("volume.json root is not an object");
 
+  if (root.count("name") && root["name"].isString())
+    out->name = root["name"].asString();
+
   if (!root.count("uuid") || !root["uuid"].isString())
     return utils::Status::InvalidArgument("missing uuid in volume.json");
   out->uuid = root["uuid"].asString();
 
-  if (root.count("storage") && root["storage"].isString())
-    out->storage = root["storage"].asString();
+  if (root.count("meta") && root["meta"].isString())
+    out->meta_url = root["meta"].asString();
 
-  if (root.count("s3_config") && root["s3_config"].isObject()) {
-    auto& s3 = root["s3_config"];
-    if (s3.count("bucket") && s3["bucket"].isString())
-      out->s3_config.bucket = s3["bucket"].asString();
-    if (s3.count("endpoint") && s3["endpoint"].isString())
-      out->s3_config.endpoint = s3["endpoint"].asString();
-    if (s3.count("region") && s3["region"].isString())
-      out->s3_config.region = s3["region"].asString();
-    if (s3.count("prefix") && s3["prefix"].isString())
-      out->s3_config.prefix = s3["prefix"].asString();
-  }
+  if (root.count("bucket") && root["bucket"].isString())
+    out->bucket = root["bucket"].asString();
 
   return utils::Status::OK();
 }
@@ -133,18 +123,39 @@ utils::Status VolumeConfig::ReadFromFile(const std::string& path,
 }
 
 std::unique_ptr<IDataEngine> CreateDataEngine(const VolumeConfig& vol) {
-  if (vol.storage == "s3") {
+  if (vol.bucket.empty()) return nullptr;
+
+  utils::StorageUrl url;
+  if (!utils::StorageUrl::Parse(vol.bucket, &url)) {
+    SWORDFS_LOG_ERROR << "Invalid bucket URL: " << vol.bucket;
+    return nullptr;
+  }
+
+  if (url.scheme == "s3") {
 #ifdef SWORDFS_ENABLE_S3
+    // bucket URL format: s3://<endpoint>/<bucket>[/<prefix>]
     S3Config s3_cfg;
-    s3_cfg.bucket = vol.s3_config.bucket;
-    s3_cfg.endpoint = vol.s3_config.endpoint;
-    s3_cfg.region = vol.s3_config.region;
-    s3_cfg.prefix = vol.s3_config.prefix;
+    s3_cfg.endpoint = "https://" + url.host;
+
+    // First path segment is bucket, rest is prefix
+    std::string path = url.path;
+    if (!path.empty() && path[0] == '/') path = path.substr(1);
+
+    auto slash = path.find('/');
+    if (slash == std::string::npos) {
+      s3_cfg.bucket = path;
+    } else {
+      s3_cfg.bucket = path.substr(0, slash);
+      s3_cfg.prefix = path.substr(slash + 1);
+    }
+
     return std::make_unique<S3DataEngine>(s3_cfg);
 #else
+    SWORDFS_LOG_ERROR << "S3 support disabled (ENABLE_S3=OFF)";
     return nullptr;
 #endif
   }
+  SWORDFS_LOG_ERROR << "Unknown data storage scheme: " << url.scheme;
   return nullptr;
 }
 

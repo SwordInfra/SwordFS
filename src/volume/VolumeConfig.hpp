@@ -17,19 +17,12 @@ namespace swordfs::storage {
 
 class IDataEngine;
 
-/// S3-specific configuration persisted in volume.json.
-struct S3VolumeConfig {
-  std::string bucket;
-  std::string endpoint = "https://s3.amazonaws.com";
-  std::string region = "us-east-1";
-  std::string prefix = "swordfs/chunks";
-};
-
 /// Volume-level metadata written by `swordfs format`.
 struct VolumeConfig {
+  std::string name;           // volume name, set via --volume
   std::string uuid;
-  std::string storage;  // "s3" or empty (memory-only)
-  S3VolumeConfig s3_config;
+  std::string meta_url;       // e.g. "memory://local", "redis://..."
+  std::string bucket;         // e.g. "s3://endpoint/bucket/prefix"
 
   /// Generate a random UUID v4 string.
   static std::string GenerateUUID();

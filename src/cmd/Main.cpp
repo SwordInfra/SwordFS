@@ -17,20 +17,25 @@ int main(int argc, char* argv[]) {
 
   CLI::App app{"SwordFS - A modern high-performance distributed file system"};
 
-  // Bind and parse CLI options directly to ConfigCenter members
+  // Bind CLI options to ConfigCenter members
   auto& cfg = swordfs::utils::ConfigCenter::Instance();
   cfg.ConfigureOptions(app);
-  cfg.ParseOptions(app, argc, argv);
 
-  // Initialize logging etc
-  swordfs::utils::Init();
+  // Parse CLI arguments
+  try {
+    app.parse(argc, argv);
+  } catch (const CLI::ParseError& e) {
+    return app.exit(e);
+  }
 
   // Dispatch the selected subcommand
   auto sub_command = cfg.SelectedSubCommand();
-  if (sub_command) {
-    return sub_command->run();
+  if (!sub_command) {
+    // No subcommand given, show help
+    std::cout << app.help();
+    return 0;
   }
-  // No subcommand given, show help
-  std::cout << app.help();
-  return 0;
+  // Initialize logging only when executing a subcommand
+  swordfs::utils::Init();
+  return sub_command->run();
 }
