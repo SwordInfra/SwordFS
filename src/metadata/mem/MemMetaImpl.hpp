@@ -1,7 +1,7 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// Memory-backed Meta implementation — thin facade around MemMetaStore
+// Memory-backed IMetaEngine implementation — thin facade around MemMetaStore
 // that adds locking, file/dir handle accounting, and permission checks.
 
 #pragma once
@@ -23,6 +23,9 @@ class HandleTable {
   // Allocate a new handle and map it to the given inode.
   uint64_t Alloc(InodeID ino);
 
+  // Look up the inode for a given handle. Returns 0 if not found.
+  InodeID Resolve(uint64_t fh) const;
+
   // Release a handle. Returns true if the handle was found and removed.
   bool Release(uint64_t fh);
 
@@ -32,7 +35,7 @@ class HandleTable {
   folly::F14FastMap<uint64_t, InodeID> handles_;
 };
 
-class MemMetaImpl : public Meta {
+class MemMetaImpl : public IMetaEngine {
  public:
   MemMetaImpl();
   ~MemMetaImpl() override;

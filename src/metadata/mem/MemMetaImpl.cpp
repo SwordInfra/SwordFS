@@ -32,6 +32,12 @@ uint64_t HandleTable::Alloc(InodeID ino) {
   return fh;
 }
 
+InodeID HandleTable::Resolve(uint64_t fh) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = handles_.find(fh);
+  return (it != handles_.end()) ? it->second : 0;
+}
+
 bool HandleTable::Release(uint64_t fh) {
   std::lock_guard<std::mutex> lock(mutex_);
   return handles_.erase(fh) > 0;

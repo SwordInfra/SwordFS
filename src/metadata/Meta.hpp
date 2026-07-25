@@ -24,9 +24,9 @@ using SwordFsContext = swordfs::utils::SwordFsContext;
 
 namespace swordfs::metadata {
 
-class Meta {
+class IMetaEngine {
  public:
-  virtual ~Meta() = default;
+  virtual ~IMetaEngine() = default;
 
   /// Look up a child entry by name.
   virtual Status Lookup(InodeID parent_ino,

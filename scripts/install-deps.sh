@@ -2,28 +2,18 @@
 # Install all third-party dependencies needed to build SwordFS.
 #
 # Usage:
-#   ./scripts/install-deps.sh [--with-s3]
-#
-#   --with-s3   Also install AWS SDK for C++ (libaws-sdk-s3-dev)
+#   ./scripts/install-deps.sh
 #
 # This script:
 #   1. Installs system packages (libfuse3, folly build deps)
 #   2. Builds and installs folly from GitHub release tarball
-#   3. (optional) Installs AWS SDK for S3 object storage
+#   3. Installs AWS SDK for S3 object storage
 #
 # Each step is skipped if the dependency is already present.
-# After running this script, you can configure with:
-#   cmake --preset default          # without S3
-#   cmake --preset default -DENABLE_S3=ON    # with S3
+# After running this script, you can build with:
+#   cmake --preset default
 
 set -e
-
-WITH_S3=false
-for arg in "$@"; do
-  case "$arg" in
-    --with-s3) WITH_S3=true ;;
-  esac
-done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -32,7 +22,7 @@ FOLLY_VER="v2026.07.20.00"
 
 echo "==> Checking system packages..."
 
-SYSTEM_PKGS="libfuse3-dev libfmt-dev libboost-all-dev libssl-dev libevent-dev libdouble-conversion-dev libgoogle-glog-dev libgtest-dev libcli11-dev curl g++ cmake ninja-build git"
+SYSTEM_PKGS="libfuse3-dev fuse3 libfmt-dev libboost-all-dev libssl-dev libevent-dev libdouble-conversion-dev libgoogle-glog-dev libgtest-dev libcli11-dev libcurl4-openssl-dev zlib1g-dev curl g++ cmake ninja-build git"
 
 TO_INSTALL=""
 for pkg in $SYSTEM_PKGS; do
@@ -80,6 +70,17 @@ if ! dpkg-query -W -f='${Version}' libfuse3-dev 2>/dev/null | grep -qE '^3\.(1[8
   apt-get install -y -qq -t resolute libfuse3-dev
 else
   echo "  [ok] libfuse3-dev >= 3.18"
+fi
+
+# binutils: GCC >= 15 emits .base64 string encoding which requires
+# binutils >= 2.43.  Ubuntu 24.04 ships binutils 2.42 which is too old.
+# Upgrading from resolute (25.04) ensures ABI compatibility with GCC 15.
+echo "==> Checking binutils version..."
+if ! as --version 2>/dev/null | grep -qE '2\.(4[3-9]|[5-9][0-9])'; then
+  echo "  ==> Installing binutils from resolute..."
+  apt-get install -y -qq -t resolute binutils
+else
+  echo "  [ok] binutils >= 2.43"
 fi
 
 # ────────────────────────────────────────────────────────────────
@@ -140,31 +141,55 @@ else
 fi
 
 # ────────────────────────────────────────────────────────────────
-# AWS SDK for C++ (optional — only when --with-s3)
+# AWS SDK for C++
 # ────────────────────────────────────────────────────────────────
 
-if [ "$WITH_S3" = true ]; then
-  echo "==> Checking AWS SDK for C++..."
+echo "==> Checking AWS SDK for C++..."
 
-  S3_PKGS="libaws-sdk-s3-dev"
-  S3_TO_INSTALL=""
-  for pkg in $S3_PKGS; do
-    if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then
-      echo "  [ok] $pkg"
-    else
-      echo "  [missing] $pkg"
-      S3_TO_INSTALL="$S3_TO_INSTALL $pkg"
-    fi
-  done
+AWS_SDK_VER="1.11.540"
+AWS_SDK_SRC="$PROJECT_DIR/build/aws-sdk-src"
 
-  if [ -n "$S3_TO_INSTALL" ]; then
-    echo "==> Installing AWS SDK packages:$S3_TO_INSTALL"
-    apt-get install -y -qq $S3_TO_INSTALL
+if [ -f /usr/local/lib/cmake/aws-cpp-sdk-s3/aws-cpp-sdk-s3-config.cmake ]; then
+  echo "==> AWS SDK already installed, skipping."
+else
+  # ── Step 1: Clone with submodules ──────────────────────────
+
+  if [ -f "$AWS_SDK_SRC/CMakeLists.txt" ]; then
+    echo "==> AWS SDK already cloned, skipping."
   else
-    echo "==> AWS SDK packages already installed."
+    echo "==> Cloning AWS SDK ${AWS_SDK_VER} (with submodules)..."
+    git clone --recurse-submodules \
+      --depth 1 --branch "${AWS_SDK_VER}" \
+      https://github.com/aws/aws-sdk-cpp.git "$AWS_SDK_SRC"
   fi
 
-  echo "==> Done. You can now build SwordFS with: cmake --preset default -DENABLE_S3=ON"
-else
-  echo "==> Done. You can now build SwordFS."
+  # ── Step 2: Configure ──────────────────────────────────────
+
+  if [ -f "$AWS_SDK_SRC/build/CMakeCache.txt" ]; then
+    echo "==> AWS SDK already configured, skipping."
+  else
+    echo "==> Configuring AWS SDK..."
+    mkdir -p "$AWS_SDK_SRC/build"
+    cd "$AWS_SDK_SRC/build"
+    cmake .. \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_C_COMPILER=clang \
+      -DCMAKE_CXX_COMPILER=clang++ \
+      -DBUILD_ONLY="s3" \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DOPENSSL_USE_STATIC_LIBS=OFF \
+      -DENABLE_TESTING=OFF \
+      -DAUTORUN_UNIT_TESTS=OFF \
+      -DFORCE_SHARED_CRT=ON
+  fi
+
+  # ── Step 3: Build & Install ────────────────────────────────
+
+  echo "==> Building and installing AWS SDK..."
+  cd "$AWS_SDK_SRC/build"
+  cmake --build . -j"$(nproc)"
+  cmake --install .
 fi
+
+echo "==> Done. You can now build SwordFS with: cmake --preset default"

@@ -11,26 +11,29 @@
 #include <folly/container/F14Map.h>
 #include <fuse_lowlevel.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "utils/Status.hpp"
 
 namespace swordfs {
 
 namespace metadata {
+class IMetaEngine;
 using InodeID = uint64_t;
-class Meta;
 }  // namespace metadata
 
 namespace storage {
 class IDataEngine;
 }  // namespace storage
 
-namespace fuse {
+namespace utils {
+class Status;
+}  // namespace utils
 
-using swordfs::metadata::InodeID;
-using swordfs::utils::Status;
+namespace fuse {
 
 class VfsImpl {
  public:
@@ -61,13 +64,12 @@ class VfsImpl {
             const char* newname);
   void Open(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi);
   void Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
-            struct fuse_file_info* fi);
+            uint64_t fh);
   void Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
-             size_t size, off_t off, struct fuse_file_info* fi);
-  void Flush(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi);
-  void Release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi);
-  void Fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
-             struct fuse_file_info* fi);
+             size_t size, off_t off, uint64_t fh);
+  void Flush(fuse_req_t req, fuse_ino_t ino, uint64_t fh);
+  void Release(fuse_req_t req, fuse_ino_t ino, uint64_t fh);
+  void Fsync(fuse_req_t req, fuse_ino_t ino, int datasync, uint64_t fh);
   void Opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi);
   void Readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                struct fuse_file_info* fi);
@@ -106,28 +108,40 @@ class VfsImpl {
              struct fuse_file_info* fi);
 
   /// Set the data engine (called during mount after reading volume config).
-  void SetDataEngine(std::unique_ptr<swordfs::storage::IDataEngine> data);
+  void set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine> data);
 
- private:
-  // Derive the chunk key from inode + file offset.  Chunk N contains
-  // file offsets [N*chunk_size, (N+1)*chunk_size).  The mapping is
-  // deterministic so Read can locate chunks without metadata lookups.
-  std::string ChunkKey(InodeID ino, size_t file_offset);
-
-  // Flush the write buffer to the data engine in chunk-sized segments.
-  Status FlushChunked(InodeID ino, uint64_t fh);
-
-  std::unique_ptr<swordfs::metadata::Meta> meta_;
-  std::unique_ptr<swordfs::storage::IDataEngine> data_;
-
-  // Per-handle write buffer.  base_offset is the absolute file offset
-  // of the first buffered byte; flushed entries are erased so the next
-  // write starts a fresh buffer at its own offset.
+ protected:
+  // ────────────────────────────────────────────────────────────────
+  // Write buffer — accumulates writes until max_chunk_size, then
+  // flushes to the data engine as a single chunk.
+  // ────────────────────────────────────────────────────────────────
   struct WriteBuf {
-    size_t base_offset = 0;
-    std::string data;
+    std::vector<char> data;
+    size_t max_chunk_size = 64 * 1024 * 1024;  // 64 MiB default
+    uint64_t ino = 0;
+    uint32_t next_chunk = 0;
+    off_t max_write_end = 0;  // highest byte offset written so far
+
+    bool Empty() const { return data.empty(); }
+    void Reset() {
+      data.clear();
+      next_chunk = 0;
+      max_write_end = 0;
+    }
   };
-  folly::F14FastMap<uint64_t, WriteBuf> write_buf_;
+
+  swordfs::utils::Status FlushWriteBuf(uint64_t fh, bool force);
+
+  /// Core read logic — reads up to |size| bytes starting at |off|,
+  /// potentially spanning multiple chunks.  Returns the data and a
+  /// Status so that unit tests can exercise the logic without FUSE.
+  swordfs::utils::Status HandleRead(
+      swordfs::metadata::InodeID ino, size_t size, off_t off,
+      std::string* out);
+
+  std::unique_ptr<swordfs::metadata::IMetaEngine> meta_engine_;
+  std::unique_ptr<swordfs::storage::IDataEngine> data_engine_;
+  folly::F14FastMap<uint64_t, WriteBuf> write_bufs_;
 };
 
 }  // namespace fuse
