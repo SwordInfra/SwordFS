@@ -52,7 +52,8 @@ void ConfigCenter::RegisterMountOptions(CLI::App& app) {
       ->required();
   cmd->add_option("--volume-config-path", volume_config_path_,
                   "Volume config directory (required for --meta memory://local)");
-  cmd->allow_extras();  // -o allow_other,ro etc. through to FUSE
+  cmd->add_option("-o", fuse_opts_, "FUSE mount options (e.g. -o allow_other,ro)")
+      ->allow_extra_args(false);
 
   SubCommand sc;
   sc.cmd = cmd;

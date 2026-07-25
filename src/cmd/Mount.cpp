@@ -166,7 +166,7 @@ static int Mount(const std::string& mountpoint,
   FuseArgsGuard args(BuildFuseArgs(extras));
 
   FuseSessionGuard se(fuse_session_new(
-      args.get(), &::swordfs::fuse::VfsHookFactory::GetOps(),
+      args.get(), &::swordfs::fuse::VfsHookFactory::get_ops(),
       sizeof(struct fuse_lowlevel_ops), nullptr));
   if (!se) {
     return 1;
@@ -229,7 +229,7 @@ static int LoadVolumeConfig(ConfigCenter& cfg) {
   // Create the storage engine from volume.json.
   auto engine = swordfs::storage::CreateDataEngine(vol);
   if (engine) {
-    swordfs::fuse::VfsHookFactory::SetDataEngine(std::move(engine));
+    swordfs::fuse::VfsHookFactory::set_data_engine(std::move(engine));
     SWORDFS_LOG_INFO << "Volume " << vol.uuid << " loaded from "
                      << config_path << " (bucket=" << vol.bucket
                      << ")";
@@ -301,8 +301,13 @@ int RunMount() {
   // The low-level session loop will exit cleanly on SIGINT/SIGTERM or when
   // the filesystem is unmounted externally.
 
-  // Collect remaining arguments (e.g. -o allow_other, ro) for FUSE
-  std::vector<std::string> fuse_extras = sub_command->cmd->remaining();
+  // Build FUSE arguments from --log-level (if specified)
+  std::vector<std::string> fuse_extras;
+  const std::string& opts = cfg.fuse_opts();
+  if (!opts.empty()) {
+    fuse_extras.push_back("-o");
+    fuse_extras.push_back(opts);
+  }
   int ret = Mount(mountpoint, fuse_extras, signal_fd);
   if (ret != 0) {
     SWORDFS_PROMPT_FMT("Error: mount failed (code {})", ret);

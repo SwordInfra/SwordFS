@@ -22,11 +22,11 @@ namespace swordfs::fuse {
 class VfsHookFactory {
  public:
   /// Return the fully-populated fuse_lowlevel_ops table.
-  static const struct fuse_lowlevel_ops& GetOps();
+  static const struct fuse_lowlevel_ops& get_ops();
 
   /// Inject the data engine into the VfsImpl singleton.
   /// Called once before mount when --volume is specified.
-  static void SetDataEngine(
+  static void set_data_engine(
       std::unique_ptr<swordfs::storage::IDataEngine> data);
 
   // FUSE callbacks — delegate to vfs_

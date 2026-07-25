@@ -132,6 +132,8 @@ std::unique_ptr<IDataEngine> CreateDataEngine(const VolumeConfig& vol) {
     // bucket URL format: s3://<endpoint>/<bucket>[/<prefix>]
     S3Config s3_cfg;
     s3_cfg.endpoint = "https://" + url.host;
+    // Required by S3 compatible services, e.g., Cloudflare R2, MinIO, etc.
+    s3_cfg.region = "auto";
 
     // First path segment is bucket, rest is prefix
     std::string path = url.path;

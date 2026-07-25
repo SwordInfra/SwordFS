@@ -82,6 +82,8 @@ class ConfigCenter {
   const std::string& volume_name() const { return volume_name_; }
   /// Returns the volume config path (format subcommand positional arg).
   const std::string& volume_config_path() const { return volume_config_path_; }
+  /// Returns the FUSE mount options string (e.g. "allow_other,ro").
+  const std::string& fuse_opts() const { return fuse_opts_; }
 
  private:
   ConfigCenter() = default;
@@ -111,6 +113,7 @@ class ConfigCenter {
   // Volume configuration (format subcommand)
   std::string volume_name_;         // --volume (required for format)
   std::string volume_config_path_;  // volume-config-path (positional, required for memory)
+  std::string fuse_opts_;           // -o FUSE mount options (e.g. allow_other,ro)
 
   // Subcommands registered with the CLI::App.
   std::vector<SubCommand> sub_commands_;

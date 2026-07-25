@@ -39,7 +39,12 @@ S3DataEngine::S3DataEngine(const S3Config& config) : cfg_(config) {
   EnsureAwsSdkInit();
   Aws::Client::ClientConfiguration aws_cfg;
   aws_cfg.endpointOverride = cfg_.endpoint;
-  aws_cfg.region = cfg_.region;
+  // Only override region if explicitly provided; otherwise let the SDK
+  // resolve it via the default chain (AWS_DEFAULT_REGION env var,
+  // ~/.aws/config, IAM role, etc.).
+  if (!cfg_.region.empty()) {
+    aws_cfg.region = cfg_.region;
+  }
   client_ = std::make_unique<Aws::S3::S3Client>(std::move(aws_cfg));
 
   SWORDFS_LOG_INFO << "S3DataEngine: endpoint=" << cfg_.endpoint
