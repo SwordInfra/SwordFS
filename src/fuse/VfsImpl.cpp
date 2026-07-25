@@ -21,6 +21,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 using namespace swordfs::utils;

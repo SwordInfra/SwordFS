@@ -13,7 +13,10 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
+
+#include "utils/Status.hpp"
 
 namespace swordfs {
 
@@ -31,6 +34,7 @@ class Status;
 }  // namespace utils
 
 namespace fuse {
+
 class VfsImpl {
  public:
   VfsImpl();

@@ -39,7 +39,6 @@ find_package(OpenSSL REQUIRED)
 set(OPENSSL_USE_STATIC_LIBS OFF)
 find_package(ZLIB REQUIRED)
 find_package(AWSSDK REQUIRED COMPONENTS s3)
-find_library(JITTERENTROPY_LIB jitterentropy REQUIRED)
 
 add_library(swordfs_storage STATIC
   src/storage/StorageRegistry.cpp
@@ -48,7 +47,6 @@ add_library(swordfs_storage STATIC
 target_link_libraries(swordfs_storage PUBLIC
   ${CMAKE_DL_LIBS}
   ${AWSSDK_LINK_LIBRARIES}
-  ${JITTERENTROPY_LIB}
 )
 target_include_directories(swordfs_storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(swordfs_storage PUBLIC
