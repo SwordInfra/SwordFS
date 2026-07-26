@@ -31,12 +31,17 @@ void VfsHookFactory::SwordfsInit(void* userdata,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   // Initialise per-thread fiber runtime.
   ::swordfs::utils::InitFiberRuntime();
-  vfs_->Init(userdata, conn);
+  auto status = vfs_->Init();
+  if (!status.ok()) {
+    SWORDFS_LOG_ERROR << "VfsImpl::Init failed: " << status.message();
+    return;
+  }
+  vfs_->FuseInit(userdata, conn);
 }
 
 void VfsHookFactory::SwordfsDestroy(void* userdata) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  vfs_->Destroy(userdata);
+  vfs_->FuseDestroy(userdata);
   // Tear down per-thread fiber runtime.
   ::swordfs::utils::ShutdownFiberRuntime();
 }

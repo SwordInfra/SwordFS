@@ -13,6 +13,7 @@
 #include "storage/IDataEngine.hpp"
 #include "storage/StorageUrl.hpp"
 #include "storage/s3/S3DataEngine.hpp"
+#include "config/ConfigCenter.hpp"
 #include "utils/Logging.hpp"
 
 namespace swordfs::storage {
@@ -41,6 +42,7 @@ std::string VolumeConfig::ToJson() const {
   root["name"] = name;
   root["uuid"] = uuid;
   root["meta"] = meta_url;
+  root["storage"] = storage;
   root["bucket"] = bucket;
 
   return folly::toPrettyJson(root);
@@ -67,6 +69,9 @@ utils::Status VolumeConfig::FromJson(std::string_view json, VolumeConfig* out) {
 
   if (root.count("meta") && root["meta"].isString())
     out->meta_url = root["meta"].asString();
+
+  if (root.count("storage") && root["storage"].isString())
+    out->storage = root["storage"].asString();
 
   if (root.count("bucket") && root["bucket"].isString())
     out->bucket = root["bucket"].asString();
@@ -117,6 +122,28 @@ utils::Status VolumeConfig::ReadFromFile(const std::string& path,
   }
 
   return FromJson(oss.str(), out);
+}
+
+std::string VolumeConfig::DebugString() const {
+  std::ostringstream oss;
+  oss << "  Name:    " << name << "\n"
+      << "  UUID:    " << uuid << "\n"
+      << "  Meta:    " << meta_url << "\n"
+      << "  Storage: " << storage << "\n"
+      << "  Bucket:  " << bucket;
+  return oss.str();
+}
+
+std::string VolumeConfig::MountHint() const {
+  const std::string& config_path =
+      swordfs::config::ConfigCenter::Instance().volume_config_path();
+  std::string hint = "swordfs mount --volume " + name;
+  hint += " --meta " + meta_url;
+  if (!config_path.empty()) {
+    hint += " --volume-config-path " + config_path;
+  }
+  hint += " /mnt/swordfs";
+  return hint;
 }
 
 std::unique_ptr<IDataEngine> CreateDataEngine(const VolumeConfig& vol) {

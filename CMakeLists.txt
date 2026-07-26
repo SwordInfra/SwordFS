@@ -35,10 +35,18 @@ configure_file(
 # S3 data engine
 # ============================================================
 
-find_package(OpenSSL REQUIRED)
 set(OPENSSL_USE_STATIC_LIBS OFF)
+find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(AWSSDK REQUIRED COMPONENTS s3)
+
+# jitterentropy is a transitive dependency of the AWS SDK only when
+# it is built against static OpenSSL (libcrypto.a).  When the SDK
+# links shared OpenSSL the symbol is resolved internally and this
+# library is not needed.  Make it optional so that both local dev
+# environments (where the pre-built SDK may use static OpenSSL)
+# and CI (where it uses shared) work without patching.
+find_library(JITTERENTROPY_LIB jitterentropy)
 
 add_library(swordfs_storage STATIC
   src/storage/StorageRegistry.cpp
@@ -48,6 +56,9 @@ target_link_libraries(swordfs_storage PUBLIC
   ${CMAKE_DL_LIBS}
   ${AWSSDK_LINK_LIBRARIES}
 )
+if(JITTERENTROPY_LIB)
+  target_link_libraries(swordfs_storage PUBLIC ${JITTERENTROPY_LIB})
+endif()
 target_include_directories(swordfs_storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(swordfs_storage PUBLIC
   SWORDFS_ENABLE_S3

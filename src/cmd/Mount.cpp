@@ -21,15 +21,17 @@
 #include <fuse_lowlevel.h>
 
 #include "cmd/Mount.hpp"
+#include "config/ConfigCenter.hpp"
 #include "fuse/Vfs.hpp"
+#include "metadata/Meta.hpp"
 #include "storage/IDataEngine.hpp"
 #include "storage/StorageUrl.hpp"
-#include "utils/ConfigCenter.hpp"
 #include "utils/Fuse.hpp"
 #include "utils/Logging.hpp"
 #include "volume/VolumeConfig.hpp"
 
 using namespace swordfs::utils;
+using namespace swordfs::config;
 
 namespace swordfs::cmd {
 
@@ -210,13 +212,6 @@ static int LoadVolumeConfig(ConfigCenter& cfg) {
     return 0;  // --volume-config-path not specified, nothing to load
   }
 
-  // When the metadata engine has its own persistent store, volume
-  // configuration is recovered from there — not from a local file.
-  if (cfg.vfs_backend() != VfsBackend::kMemory) {
-    // Future: recover volume config from Redis / other persistent store.
-    return 0;
-  }
-
   swordfs::storage::VolumeConfig vol;
   auto status =
       swordfs::storage::VolumeConfig::ReadFromFile(config_path, &vol);
@@ -252,33 +247,19 @@ static int LoadVolumeConfig(ConfigCenter& cfg) {
 int RunMount() {
   auto& cfg = ConfigCenter::Instance();
 
-  // Validate --meta URL
-  swordfs::utils::StorageUrl meta;
-  const std::string& meta_url = cfg.meta_url();
-  if (!swordfs::utils::StorageUrl::Parse(meta_url, &meta)) {
-    SWORDFS_PROMPT_INFO << "Error: invalid --meta URL: " << meta_url;
-    return 1;
-  }
-  static const std::vector<std::string> kSupportedMeta = {"memory"};
-  if (std::find(kSupportedMeta.begin(), kSupportedMeta.end(), meta.scheme) ==
-      kSupportedMeta.end()) {
-    SWORDFS_PROMPT_INFO << "Error: unsupported metadata engine '"
-                        << meta.scheme << "'. Supported: memory://local";
-    return 1;
-  }
-  if (meta.scheme == "memory" && cfg.volume_config_path().empty()) {
-    SWORDFS_PROMPT_INFO
-        << "Error: --volume-config-path is required for --meta memory://local";
-    return 1;
-  }
-
   const std::string& mountpoint = cfg.mountpoint();
   if (ValidateMountpoint(mountpoint) != 0) {
     return 1;
   }
 
-  if (LoadVolumeConfig(cfg) != 0) {
-    return 1;
+  // Only memory://local reads volume config from a local file.
+  // Future backends (e.g. Redis) will recover it from their own store.
+  if (swordfs::metadata::IsMemoryMode(cfg.meta_url())) {
+    if (LoadVolumeConfig(cfg) != 0) {
+      return 1;
+    }
+  } else {
+    // TODO: fetch volume information from Redis etc.
   }
 
   // Daemonize by default; -f / --foreground disables this

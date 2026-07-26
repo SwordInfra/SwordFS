@@ -17,9 +17,10 @@
 #include <unordered_map>
 #include <vector>
 
-#include "Status.hpp"
+#include "utils/Logging.hpp"
+#include "utils/Status.hpp"
 
-namespace swordfs::utils {
+namespace swordfs::config {
 
 static void PrintVersion() {
   std::cout << "SwordFS version " << SWORDFS_VERSION_MAJOR << "."
@@ -34,12 +35,6 @@ static void PrintVersion() {
 struct SubCommand {
   CLI::App* cmd;
   std::function<int()> run;
-};
-
-/// Virtual file system backend type.
-enum class VfsBackend {
-  kMemory,   ///< In-memory Meta (default).
-  kInvalid,  ///< Invalid backend type.
 };
 
 /// Logging-related configuration.
@@ -65,21 +60,19 @@ class ConfigCenter {
   LogConfig& log() { return log_; }
   /// Returns the foreground mode.
   bool foreground() const { return foreground_; }
-  /// Returns the VFS backend.
-  VfsBackend vfs_backend() const { return vfs_backend_; }
-  /// Returns the number of FUSE worker threads.
   int fuse_threads() const { return fuse_threads_; }
   /// Returns the mount point directory.
   const std::string& mountpoint() const { return mountpoint_; }
 
-  /// Returns the metadata engine URL (e.g. "memory://local", "redis://...").
+  /// Returns the metadata engine URL (e.g. memory://local, redis://host:port).
   const std::string& meta_url() const { return meta_url_; }
+  void set_meta_url(const std::string& url) { meta_url_ = url; }
   /// Returns the data storage type (e.g. "s3", empty = none).
   const std::string& storage_backend() const { return storage_backend_; }
   /// Returns the bucket URL (e.g. "s3://endpoint/bucket/prefix").
   const std::string& bucket_url() const { return bucket_url_; }
   /// Returns the volume name (format and mount subcommands).
-  const std::string& volume_name() const { return volume_name_; }
+  const std::string& volume() const { return volume_; }
   /// Returns the volume config path (format subcommand positional arg).
   const std::string& volume_config_path() const { return volume_config_path_; }
   /// Returns the FUSE mount options string (e.g. "allow_other,ro").
@@ -98,25 +91,22 @@ class ConfigCenter {
   LogConfig log_;
   // -f / --foreground: run in foreground
   bool foreground_ = false;
-  // --backend: VFS backend type
-  VfsBackend vfs_backend_ = VfsBackend::kMemory;
-  // --fuse-threads: number of FUSE worker threads (default: single-thread)
   int fuse_threads_ = 1;
   // mount point directory (positional argument)
   std::string mountpoint_;
 
   // Storage engine configuration (URL format)
-  std::string meta_url_ = "memory://local";         // --meta
-  std::string storage_backend_;                     // --storage
-  std::string bucket_url_;                          // --bucket
+  std::string meta_url_;         // --meta
+  std::string storage_backend_;  // --storage
+  std::string bucket_url_;       // --bucket
 
   // Volume configuration (format subcommand)
-  std::string volume_name_;         // --volume (required for format)
-  std::string volume_config_path_;  // volume-config-path (positional, required for memory)
+  std::string volume_;              // --volume (required for format)
+  std::string volume_config_path_;  // --volume-config-path (required for memory)
   std::string fuse_opts_;           // -o FUSE mount options (e.g. allow_other,ro)
 
   // Subcommands registered with the CLI::App.
   std::vector<SubCommand> sub_commands_;
 };
 
-}  // namespace swordfs::utils
+}  // namespace swordfs::config

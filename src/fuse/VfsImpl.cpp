@@ -6,11 +6,11 @@
 #include <dirent.h>
 #include <folly/fibers/FiberManagerInternal.h>
 
+#include "config/ConfigCenter.hpp"
 #include "fuse/Limits.hpp"
 #include "metadata/Meta.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "storage/IDataEngine.hpp"
-#include "utils/ConfigCenter.hpp"
 #include "utils/Context.hpp"
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
@@ -25,29 +25,32 @@
 #include <vector>
 
 using namespace swordfs::utils;
+using namespace swordfs::config;
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::SwordFsEntry;
 
 namespace swordfs::fuse {
 
-VfsImpl::VfsImpl() {
-  if (ConfigCenter::Instance().vfs_backend() == VfsBackend::kMemory) {
-    meta_engine_ = std::make_unique<swordfs::metadata::MemMetaImpl>();
-  } else {
-    SWORDFS_PROMPT_EXIT << "VFS backend not supported";
-    return;
-  }
-}
+VfsImpl::VfsImpl() = default;
 
 VfsImpl::~VfsImpl() = default;
+
+swordfs::utils::Status VfsImpl::Init() {
+  const std::string& meta_url = ConfigCenter::Instance().meta_url();
+  if (swordfs::metadata::IsMemoryMode(meta_url)) {
+    meta_engine_ = std::make_unique<swordfs::metadata::MemMetaImpl>();
+    return Status::OK();
+  }
+  return Status::NotSupported("Unsupported metadata engine: " + meta_url);
+}
 
 void VfsImpl::set_data_engine(
     std::unique_ptr<swordfs::storage::IDataEngine> data) {
   data_engine_ = std::move(data);
 }
 
-void VfsImpl::Init(void* userdata, struct fuse_conn_info* conn) {
+void VfsImpl::FuseInit(void* userdata, struct fuse_conn_info* conn) {
   (void)userdata;
   conn->no_interrupt = 1;
   conn->max_write = kMaxWriteSize;
@@ -74,7 +77,7 @@ void VfsImpl::Init(void* userdata, struct fuse_conn_info* conn) {
   SWORDFS_LOG_INFO << "SwordFS filesystem initialized (mount OK)";
 }
 
-void VfsImpl::Destroy(void* userdata) {
+void VfsImpl::FuseDestroy(void* userdata) {
   (void)userdata;
   SWORDFS_LOG_INFO << "SwordFS filesystem unmounted";
 }

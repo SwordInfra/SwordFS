@@ -13,11 +13,13 @@
 #include <string_view>
 #include <unordered_map>
 
+#include "config/ConfigCenter.hpp"
 #include "fuse/VfsImpl.hpp"
 #include "metadata/Meta.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Status.hpp"
 
+using swordfs::config::ConfigCenter;
 using swordfs::fuse::VfsImpl;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
@@ -164,6 +166,9 @@ class MockMetaEngine : public IMetaEngine {
 class HandleReadTest : public VfsImpl, public ::testing::Test {
  protected:
   void SetUp() override {
+    ConfigCenter::Instance().set_meta_url(
+        std::string{swordfs::metadata::kMemoryMetaUrl});
+    ASSERT_TRUE(Init().ok());
     auto mock = std::make_unique<MockDataEngine>();
     mock_ = mock.get();
     mock_->set_chunk_size(kChunkSize);
@@ -374,6 +379,9 @@ TEST_F(HandleReadTest, ReadEntirelyBeforeBuffer) {
 class FlushWriteBufTest : public VfsImpl, public ::testing::Test {
  protected:
   void SetUp() override {
+    ConfigCenter::Instance().set_meta_url(
+        std::string{swordfs::metadata::kMemoryMetaUrl});
+    ASSERT_TRUE(Init().ok());
     auto mock_data = std::make_unique<MockDataEngine>();
     mock_data_ = mock_data.get();
     mock_data_->set_chunk_size(kChunkSize);

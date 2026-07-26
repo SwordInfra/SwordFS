@@ -24,6 +24,14 @@ using SwordFsContext = swordfs::utils::SwordFsContext;
 
 namespace swordfs::metadata {
 
+/// Well-known metadata engine URLs.
+constexpr std::string_view kMemoryMetaUrl = "memory://local";
+
+/// Returns true if |meta_url| refers to the in-memory metadata engine.
+inline bool IsMemoryMode(std::string_view meta_url) {
+  return meta_url == kMemoryMetaUrl;
+}
+
 class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
