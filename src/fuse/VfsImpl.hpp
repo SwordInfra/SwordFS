@@ -40,8 +40,14 @@ class VfsImpl {
   VfsImpl();
   ~VfsImpl();
 
-  void Init(void* userdata, struct fuse_conn_info* conn);
-  void Destroy(void* userdata);
+  /// Initialize the VfsImpl itself (creates meta_engine_ from ConfigCenter).
+  /// Must be called after ConfigCenter is fully configured.
+  swordfs::utils::Status Init();
+
+  /// FUSE init callback — configure connection capabilities.
+  void FuseInit(void* userdata, struct fuse_conn_info* conn);
+  /// FUSE destroy callback — called on unmount.
+  void FuseDestroy(void* userdata);
 
   void Lookup(fuse_req_t req, fuse_ino_t parent, const char* name);
   void Forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup);

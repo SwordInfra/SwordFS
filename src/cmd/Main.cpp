@@ -6,7 +6,7 @@
 #include <CLI/CLI.hpp>
 #include <iostream>
 
-#include "utils/ConfigCenter.hpp"
+#include "config/ConfigCenter.hpp"
 #include "utils/Logging.hpp"
 
 using namespace swordfs::utils;
@@ -18,7 +18,7 @@ int main(int argc, char* argv[]) {
   CLI::App app{"SwordFS - A modern high-performance distributed file system"};
 
   // Bind CLI options to ConfigCenter members
-  auto& cfg = swordfs::utils::ConfigCenter::Instance();
+  auto& cfg = swordfs::config::ConfigCenter::Instance();
   cfg.ConfigureOptions(app);
 
   // Parse CLI arguments

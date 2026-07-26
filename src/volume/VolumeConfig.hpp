@@ -22,6 +22,7 @@ struct VolumeConfig {
   std::string name;  // volume name, set via --volume
   std::string uuid;
   std::string meta_url;  // e.g. "memory://local", "redis://..."
+  std::string storage;   // e.g. "s3"
   std::string bucket;    // e.g. "s3://endpoint/bucket/prefix"
 
   /// Generate a random UUID v4 string.
@@ -38,6 +39,12 @@ struct VolumeConfig {
 
   /// Read a VolumeConfig from path/volume.json.
   static utils::Status ReadFromFile(const std::string& path, VolumeConfig* out);
+
+  /// Returns a human-readable multi-line string of all key fields.
+  std::string DebugString() const;
+
+  /// Returns a `swordfs mount` command-line hint for this volume.
+  std::string MountHint() const;
 };
 
 /// Create the data engine described by a VolumeConfig.

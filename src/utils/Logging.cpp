@@ -16,7 +16,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "utils/ConfigCenter.hpp"
+#include "config/ConfigCenter.hpp"
 
 namespace swordfs::utils {
 
@@ -45,7 +45,7 @@ void Init() {
   folly::LoggerDB::get().registerHandlerFactory(
       std::make_unique<folly::FileHandlerFactory>());
 
-  auto& cfg = utils::ConfigCenter::Instance();
+  auto& cfg = swordfs::config::ConfigCenter::Instance();
   checkLogLevel(cfg.log().level);
 
   if (cfg.foreground()) {
