@@ -33,7 +33,7 @@ echo ""
 
 echo "==> Test 1: format volume"
 mkdir -p "$FORMAT_DIR"
-if "$SWORDFS" format "$FORMAT_DIR" 2>&1; then
+if "$SWORDFS" format --meta memory://local --volume "$FORMAT_DIR" 2>&1; then
   pass "format succeeded"
   if [ -f "$FORMAT_DIR/volume.json" ]; then
     pass "volume.json created"
