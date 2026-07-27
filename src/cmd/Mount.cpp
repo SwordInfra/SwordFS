@@ -203,12 +203,14 @@ int RunMount() {
     return 1;
   }
 
-  // Load volume config and initialise the storage engine.
-  swordfs::volume::VolumeImpl vol;
-  auto status = vol.LoadFrom(cfg);
+  // Load volume config and initialise engines.
+  auto vol = std::make_unique<swordfs::volume::VolumeImpl>();
+  auto status = vol->LoadFrom(cfg);
   if (!status.ok()) {
     SWORDFS_PROMPT_INFO << "Error: " << status.message();
     return 1;
+  } else {
+    swordfs::fuse::VfsHookFactory::BindVolume(std::move(vol));
   }
 
   // Daemonize by default; -f / --foreground disables this

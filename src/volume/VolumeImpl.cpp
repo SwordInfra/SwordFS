@@ -4,12 +4,25 @@
 #include "volume/VolumeImpl.hpp"
 
 #include "config/ConfigCenter.hpp"
-#include "fuse/Vfs.hpp"
 #include "metadata/Meta.hpp"
+#include "metadata/MetaEngineFactory.hpp"
 #include "storage/DataEngineFactory.hpp"
 #include "storage/IDataEngine.hpp"
 
 namespace swordfs::volume {
+
+VolumeImpl::VolumeImpl() = default;
+VolumeImpl::~VolumeImpl() = default;
+
+void VolumeImpl::set_meta_engine(
+    std::unique_ptr<swordfs::metadata::IMetaEngine> meta) {
+  meta_engine_ = std::move(meta);
+}
+
+void VolumeImpl::set_data_engine(
+    std::unique_ptr<swordfs::storage::IDataEngine> data) {
+  data_engine_ = std::move(data);
+}
 
 Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter& cfg) {
   config_.meta_url = cfg.meta_url();
@@ -34,20 +47,15 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter& cfg) {
 }
 
 Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter& cfg) {
-  if (!swordfs::metadata::IsMemoryMode(cfg.meta_url())) {
-    return Status::NotSupported(
-        "unsupported metadata engine: " + cfg.meta_url());
-  }
-
   auto status = config_.ReadFromFile(cfg.volume_config_path());
   if (!status.ok()) return status;
 
-  auto engine = swordfs::storage::CreateDataEngine(config_);
-  if (engine) {
-    swordfs::fuse::VfsHookFactory::set_data_engine(std::move(engine));
-  } else if (!config_.bucket.empty()) {
-    return Status::InvalidArgument(
-        "failed to create data engine for " + config_.bucket);
+  // Create engines.
+  status = swordfs::metadata::CreateMetaEngine(config_.meta_url, &meta_engine_);
+  if (!status.ok()) return status;
+  if (!config_.bucket.empty()) {
+    status = swordfs::storage::CreateDataEngine(config_, &data_engine_);
+    if (!status.ok()) return status;
   }
 
   return Status::OK();

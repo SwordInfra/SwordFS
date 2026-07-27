@@ -14,6 +14,7 @@
 
 using swordfs::storage::CreateDataEngine;
 using swordfs::storage::IDataEngine;
+using swordfs::utils::Status;
 using swordfs::volume::VolumeConfig;
 
 namespace {
@@ -31,22 +32,28 @@ VolumeConfig MakeVol(const std::string& bucket, const std::string& region) {
 }  // namespace
 
 // ────────────────────────────────────────────────────────────────
-// CreateDataEngine — nullptr cases
+// CreateDataEngine — empty / error cases
 // ────────────────────────────────────────────────────────────────
 
-TEST(DataEngineFactoryTest, EmptyBucketReturnsNull) {
+TEST(DataEngineFactoryTest, EmptyBucketReturnsError) {
   VolumeConfig vol = MakeVol("", "auto");
-  EXPECT_EQ(CreateDataEngine(vol), nullptr);
+  std::unique_ptr<IDataEngine> engine;
+  Status st = CreateDataEngine(vol, &engine);
+  EXPECT_FALSE(st.ok());
 }
 
-TEST(DataEngineFactoryTest, InvalidBucketUrlReturnsNull) {
+TEST(DataEngineFactoryTest, InvalidBucketUrlReturnsError) {
   VolumeConfig vol = MakeVol("not-a-valid-url", "auto");
-  EXPECT_EQ(CreateDataEngine(vol), nullptr);
+  std::unique_ptr<IDataEngine> engine;
+  Status st = CreateDataEngine(vol, &engine);
+  EXPECT_FALSE(st.ok());
 }
 
-TEST(DataEngineFactoryTest, UnknownSchemeReturnsNull) {
+TEST(DataEngineFactoryTest, UnknownSchemeReturnsError) {
   VolumeConfig vol = MakeVol("ftp://host/bucket", "auto");
-  EXPECT_EQ(CreateDataEngine(vol), nullptr);
+  std::unique_ptr<IDataEngine> engine;
+  Status st = CreateDataEngine(vol, &engine);
+  EXPECT_FALSE(st.ok());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -55,22 +62,26 @@ TEST(DataEngineFactoryTest, UnknownSchemeReturnsNull) {
 
 TEST(DataEngineFactoryTest, S3SchemeCreatesEngine) {
   VolumeConfig vol = MakeVol("s3://myhost.example.com/mybucket", "auto");
-  auto engine = CreateDataEngine(vol);
-  // Engine should be created (even if it won't connect in unit tests).
+  std::unique_ptr<IDataEngine> engine;
+  Status st = CreateDataEngine(vol, &engine);
+  ASSERT_TRUE(st.ok()) << st.message();
   ASSERT_NE(engine, nullptr);
   EXPECT_GT(engine->Limits().max_chunk_size, 0U);
 }
 
 TEST(DataEngineFactoryTest, S3EnginePropagatesRegion) {
   VolumeConfig vol = MakeVol("s3://myhost.example.com/bucket", "us-west-2");
-  auto engine = CreateDataEngine(vol);
+  std::unique_ptr<IDataEngine> engine;
+  Status st = CreateDataEngine(vol, &engine);
+  ASSERT_TRUE(st.ok()) << st.message();
   ASSERT_NE(engine, nullptr);
-  // Region is embedded in S3DataEngine; construction succeeds with non-"auto".
   EXPECT_GT(engine->Limits().max_chunk_size, 0U);
 }
 
 TEST(DataEngineFactoryTest, S3SchemeWithPrefix) {
   VolumeConfig vol = MakeVol("s3://myhost.example.com/bucket/prefix/path", "auto");
-  auto engine = CreateDataEngine(vol);
+  std::unique_ptr<IDataEngine> engine;
+  Status st = CreateDataEngine(vol, &engine);
+  ASSERT_TRUE(st.ok()) << st.message();
   ASSERT_NE(engine, nullptr);
 }

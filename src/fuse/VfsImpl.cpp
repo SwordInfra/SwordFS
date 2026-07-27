@@ -9,8 +9,8 @@
 #include "config/ConfigCenter.hpp"
 #include "fuse/Limits.hpp"
 #include "metadata/Meta.hpp"
-#include "metadata/mem/MemMetaImpl.hpp"
 #include "storage/IDataEngine.hpp"
+#include "volume/VolumeImpl.hpp"
 #include "utils/Context.hpp"
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
@@ -36,18 +36,8 @@ VfsImpl::VfsImpl() = default;
 
 VfsImpl::~VfsImpl() = default;
 
-swordfs::utils::Status VfsImpl::Init() {
-  const std::string& meta_url = ConfigCenter::Instance().meta_url();
-  if (swordfs::metadata::IsMemoryMode(meta_url)) {
-    meta_engine_ = std::make_unique<swordfs::metadata::MemMetaImpl>();
-    return Status::OK();
-  }
-  return Status::NotSupported("Unsupported metadata engine: " + meta_url);
-}
-
-void VfsImpl::set_data_engine(
-    std::unique_ptr<swordfs::storage::IDataEngine> data) {
-  data_engine_ = std::move(data);
+void VfsImpl::Bind(std::unique_ptr<volume::VolumeImpl> vol) {
+  vol_ = std::move(vol);
 }
 
 void VfsImpl::FuseInit(void* userdata, struct fuse_conn_info* conn) {
@@ -86,7 +76,7 @@ void VfsImpl::Lookup(fuse_req_t req, fuse_ino_t parent, const char* name) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
   InodeID child_ino;
   struct stat attr;
-  Status status = meta_engine_->Lookup(parent, name, &child_ino,
+  Status status = vol_->meta_engine()->Lookup(parent, name, &child_ino,
                                        &attr);
   if (!status.ok()) {
     fuse_reply_err(req, status.ToErrno());
@@ -102,7 +92,7 @@ void VfsImpl::Lookup(fuse_req_t req, fuse_ino_t parent, const char* name) {
 
 void VfsImpl::Forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
-  meta_engine_->Forget(ino, nlookup);
+  vol_->meta_engine()->Forget(ino, nlookup);
 }
 
 void VfsImpl::Getattr(fuse_req_t req, fuse_ino_t ino,
@@ -110,7 +100,7 @@ void VfsImpl::Getattr(fuse_req_t req, fuse_ino_t ino,
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
   (void)fi;
   struct stat attr;
-  Status status = meta_engine_->GetAttr(ino, &attr);
+  Status status = vol_->meta_engine()->GetAttr(ino, &attr);
   if (!status.ok()) {
     fuse_reply_err(req, status.ToErrno());
   } else {
@@ -122,7 +112,7 @@ void VfsImpl::Setattr(fuse_req_t req, fuse_ino_t ino, struct stat* attr,
                       int to_set, struct fuse_file_info* fi) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
   struct stat out_attr;
-  Status status = meta_engine_->SetAttr(ino, attr, to_set,
+  Status status = vol_->meta_engine()->SetAttr(ino, attr, to_set,
                                         &out_attr);
   if (!status.ok()) {
     fuse_reply_err(req, status.ToErrno());
@@ -151,7 +141,7 @@ void VfsImpl::Mkdir(fuse_req_t req, fuse_ino_t parent, const char* name,
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
   InodeID child_ino;
   struct stat attr;
-  Status status = meta_engine_->MkDir(parent, name, mode,
+  Status status = vol_->meta_engine()->MkDir(parent, name, mode,
                                       &child_ino, &attr);
   if (!status.ok()) {
     fuse_reply_err(req, status.ToErrno());
@@ -167,13 +157,13 @@ void VfsImpl::Mkdir(fuse_req_t req, fuse_ino_t parent, const char* name,
 
 void VfsImpl::Unlink(fuse_req_t req, fuse_ino_t parent, const char* name) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
-  Status status = meta_engine_->Unlink(parent, name);
+  Status status = vol_->meta_engine()->Unlink(parent, name);
   fuse_reply_err(req, status.ToErrno());
 }
 
 void VfsImpl::Rmdir(fuse_req_t req, fuse_ino_t parent, const char* name) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
-  Status status = meta_engine_->RmDir(parent, name);
+  Status status = vol_->meta_engine()->RmDir(parent, name);
   fuse_reply_err(req, status.ToErrno());
 }
 
@@ -189,7 +179,7 @@ void VfsImpl::Rename(fuse_req_t req, fuse_ino_t parent, const char* name,
                      fuse_ino_t newparent, const char* newname,
                      unsigned int flags) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
-  Status status = meta_engine_->Rename(parent, name, newparent,
+  Status status = vol_->meta_engine()->Rename(parent, name, newparent,
                                        newname, flags);
   fuse_reply_err(req, status.ToErrno());
 }
@@ -206,7 +196,7 @@ void VfsImpl::Open(fuse_req_t req, fuse_ino_t ino,
                    struct fuse_file_info* fi) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
   uint64_t fh;
-  Status status = meta_engine_->Open(ino, &fh);
+  Status status = vol_->meta_engine()->Open(ino, &fh);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Open FAILED: ino=" << ino << " — " << status.message();
     fuse_reply_err(req, status.ToErrno());
@@ -250,7 +240,7 @@ Status VfsImpl::FlushWriteBuf(uint64_t fh, bool force) {
 
   std::string key = std::to_string(wb.ino) + "/" +
                     std::to_string(wb.next_chunk);
-  Status status = data_engine_->Put(
+  Status status = vol_->data_engine()->Put(
       key, std::string_view(wb.data.data(), flush_size));
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "FlushWriteBuf FAILED: ino=" << wb.ino
@@ -266,11 +256,11 @@ Status VfsImpl::FlushWriteBuf(uint64_t fh, bool force) {
 
   // Update file size from actual write offsets.
   struct stat attr;
-  if (meta_engine_->GetAttr(wb.ino, &attr).ok() &&
+  if (vol_->meta_engine()->GetAttr(wb.ino, &attr).ok() &&
       wb.max_write_end > attr.st_size) {
     struct stat new_attr = {};
     new_attr.st_size = wb.max_write_end;
-    meta_engine_->SetAttr(wb.ino, &new_attr, FUSE_SET_ATTR_SIZE, nullptr);
+    vol_->meta_engine()->SetAttr(wb.ino, &new_attr, FUSE_SET_ATTR_SIZE, nullptr);
   }
 
   // Remove only the flushed bytes; keep the remainder for next chunk.
@@ -304,11 +294,11 @@ void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
 
 Status VfsImpl::HandleRead(InodeID ino, size_t size, off_t off,
                            std::string* out) {
-  if (!data_engine_) {
+  if (!vol_->data_engine()) {
     return Status::Internal("no data engine configured");
   }
 
-  size_t chunk_sz = data_engine_->Limits().max_chunk_size;
+  size_t chunk_sz = vol_->data_engine()->Limits().max_chunk_size;
   out->clear();
   out->reserve(size);
 
@@ -354,7 +344,7 @@ Status VfsImpl::HandleRead(InodeID ino, size_t size, off_t off,
         std::to_string(ino) + "/" + std::to_string(chunk_idx);
 
     size_t chunk_actual = 0;
-    if (!data_engine_->Head(key, &chunk_actual) ||
+    if (!vol_->data_engine()->Head(key, &chunk_actual) ||
         chunk_off_val >= chunk_actual) {
       break;  // EOF — no more chunks (and nothing in buffer)
     }
@@ -362,7 +352,7 @@ Status VfsImpl::HandleRead(InodeID ino, size_t size, off_t off,
     size_t to_read = std::min(remaining, chunk_actual - chunk_off_val);
     std::string chunk_data;
     Status status =
-        data_engine_->Get(key, &chunk_data, chunk_off_val, to_read);
+        vol_->data_engine()->Get(key, &chunk_data, chunk_off_val, to_read);
     if (!status.ok()) {
       return status;
     }
@@ -382,7 +372,7 @@ void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
                     size_t size, off_t off, uint64_t fh) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
 
-  if (!data_engine_) {
+  if (!vol_->data_engine()) {
     SWORDFS_LOG_ERROR << "Write: no data engine configured (ino=" << ino << ")";
     fuse_reply_err(req, EIO);
     return;
@@ -392,7 +382,7 @@ void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
   auto& wb = write_bufs_[fh];
   if (wb.ino == 0) {
     wb.ino = ino;
-    wb.max_chunk_size = data_engine_->Limits().max_chunk_size;
+    wb.max_chunk_size = vol_->data_engine()->Limits().max_chunk_size;
   }
 
   // Append data to buffer.
@@ -436,7 +426,7 @@ void VfsImpl::Release(fuse_req_t req, fuse_ino_t ino,
 
   write_bufs_.erase(fh);
 
-  st = meta_engine_->Release(fh);
+  st = vol_->meta_engine()->Release(fh);
   if (!st.ok()) {
     SWORDFS_LOG_ERROR << "Release FAILED: ino=" << ino << " fh=" << fh
                       << " — " << st.message();
@@ -458,7 +448,7 @@ void VfsImpl::Opendir(fuse_req_t req, fuse_ino_t ino,
                       struct fuse_file_info* fi) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
   uint64_t fh;
-  Status status = meta_engine_->OpenDir(ino, &fh);
+  Status status = vol_->meta_engine()->OpenDir(ino, &fh);
   if (!status.ok()) {
     fuse_reply_err(req, status.ToErrno());
     return;
@@ -476,7 +466,7 @@ void VfsImpl::Opendir(fuse_req_t req, fuse_ino_t ino,
 template <typename F>
 static void ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
                           off_t off,
-                          std::unique_ptr<swordfs::metadata::IMetaEngine>& meta,
+                          swordfs::metadata::IMetaEngine* meta,
                           F&& add_entry) {
   using swordfs::metadata::SwordFsEntry;
 
@@ -525,7 +515,7 @@ void VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
   (void)fi;
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
 
-  ReaddirCommon(req, ino, size, off, meta_engine_,
+  ReaddirCommon(req, ino, size, off, vol_->meta_engine(),
                 [](fuse_req_t req, char* buf, size_t bufsize,
                    const swordfs::metadata::SwordFsEntry& e, off_t off) {
                   struct stat st = {};
@@ -538,7 +528,7 @@ void VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 void VfsImpl::Releasedir(fuse_req_t req, fuse_ino_t ino,
                          struct fuse_file_info* fi) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
-  Status status = meta_engine_->ReleaseDir(fi->fh);
+  Status status = vol_->meta_engine()->ReleaseDir(fi->fh);
   (void)ino;
   fuse_reply_err(req, status.ToErrno());
 }
@@ -555,7 +545,7 @@ void VfsImpl::Statfs(fuse_req_t req, fuse_ino_t ino) {
   (void)ino;
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
   struct statvfs stbuf;
-  Status status = meta_engine_->StatFs(&stbuf);
+  Status status = vol_->meta_engine()->StatFs(&stbuf);
   if (!status.ok()) {
     fuse_reply_err(req, status.ToErrno());
   } else {
@@ -595,7 +585,7 @@ void VfsImpl::Removexattr(fuse_req_t req, fuse_ino_t ino, const char* name) {
 
 void VfsImpl::Access(fuse_req_t req, fuse_ino_t ino, int mask) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
-  Status status = meta_engine_->Access(ino, mask);
+  Status status = vol_->meta_engine()->Access(ino, mask);
   fuse_reply_err(req, status.ToErrno());
 }
 
@@ -604,7 +594,7 @@ void VfsImpl::Create(fuse_req_t req, fuse_ino_t parent, const char* name,
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
   InodeID child_ino;
   struct stat attr;
-  Status status = meta_engine_->Create(parent, name, mode, &child_ino, &attr);
+  Status status = vol_->meta_engine()->Create(parent, name, mode, &child_ino, &attr);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Create FAILED: parent=" << parent << " name='" << name
                       << "' — " << status.message();
@@ -612,7 +602,7 @@ void VfsImpl::Create(fuse_req_t req, fuse_ino_t parent, const char* name,
     return;
   }
   uint64_t fh;
-  Status status2 = meta_engine_->Open(child_ino, &fh);
+  Status status2 = vol_->meta_engine()->Open(child_ino, &fh);
   if (!status2.ok()) {
     SWORDFS_LOG_ERROR << "Create: Open FAILED: ino=" << child_ino
                       << " — " << status2.message();
@@ -684,11 +674,11 @@ void VfsImpl::Readdirplus(fuse_req_t req, fuse_ino_t ino, size_t size,
   (void)fi;
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
 
-  ReaddirCommon(req, ino, size, off, meta_engine_,
+  ReaddirCommon(req, ino, size, off, vol_->meta_engine(),
                 [this](fuse_req_t req, char* buf, size_t bufsize,
                        const swordfs::metadata::SwordFsEntry& e, off_t off) {
                   struct stat attr = {};
-                  if (e.ino != 0) meta_engine_->GetAttr(e.ino, &attr);
+                  if (e.ino != 0) vol_->meta_engine()->GetAttr(e.ino, &attr);
                   struct fuse_entry_param ep = {};
                   ep.ino = e.ino;
                   ep.attr = attr;
