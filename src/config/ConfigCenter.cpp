@@ -7,6 +7,7 @@
 #include "cmd/Mount.hpp"
 #include "config/Validator.hpp"
 #include "metadata/Meta.hpp"
+#include "storage/StorageUrl.hpp"
 
 namespace swordfs::config {
 
@@ -52,10 +53,10 @@ void ConfigCenter::RegisterMountOptions(CLI::App& app) {
       ->allow_extra_args(false);
 
   cmd->parse_complete_callback([this]() {
-    if (!volume_config_path_.empty() &&
-        meta_url_ != swordfs::metadata::kMemoryMetaUrl) {
+    if (volume_config_path_.empty() ==
+        swordfs::metadata::IsMemoryMode(meta_url_)) {
       throw CLI::ValidationError(
-          "--volume-config-path requires --meta memory://local");
+          "--volume-config-path and --meta memory://local must be used together");
     }
   });
 
@@ -74,22 +75,27 @@ void ConfigCenter::RegisterFormatOptions(CLI::App& app) {
                   "Metadata engine URL (e.g. memory://local)")
       ->required()
       ->check(swordfs::config::ValidateMetaUrl);
-  cmd->add_option("--storage", storage_backend_,
-                  "Data storage type (s3)")
-      ->required()
-      ->check(swordfs::config::ValidateStorageBackend);
   cmd->add_option("--bucket", bucket_url_,
-                  "Bucket URL (e.g. s3://mybucket.s3.amazonaws.com/chunks)");
+                  "Bucket URL (e.g. s3://mybucket.s3.amazonaws.com/chunks)")
+      ->required()
+      ->check(swordfs::config::ValidateBucketUrl);
   cmd->add_option("--storage-region", storage_region_,
                   "Storage region (default: auto)");
   cmd->add_option("--volume-config-path", volume_config_path_,
                   "Volume config directory (required for --meta memory://local)");
 
   cmd->parse_complete_callback([this]() {
-    if (!volume_config_path_.empty() &&
-        meta_url_ != swordfs::metadata::kMemoryMetaUrl) {
+    if (volume_config_path_.empty() ==
+        swordfs::metadata::IsMemoryMode(meta_url_)) {
       throw CLI::ValidationError(
-          "--volume-config-path requires --meta memory://local");
+          "--volume-config-path and --meta memory://local must be used together");
+    }
+    // Derive storage backend from --bucket scheme.
+    if (!bucket_url_.empty()) {
+      utils::StorageUrl url;
+      if (utils::StorageUrl::Parse(bucket_url_, &url)) {
+        storage_backend_ = url.scheme;
+      }
     }
   });
 

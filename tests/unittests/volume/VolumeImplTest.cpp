@@ -64,6 +64,17 @@ TEST_F(VolumeImplTest, CreateFromWriteToFileFailure) {
   EXPECT_FALSE(st.ok());
 }
 
+TEST_F(VolumeImplTest, CreateFromVolumeAlreadyExists) {
+  auto cfg = makeConfig("memory://local", tmpdir_);
+  VolumeImpl vol;
+  ASSERT_TRUE(vol.CreateFrom(cfg).ok());
+
+  // Second format on the same path must fail.
+  VolumeImpl vol2;
+  Status st = vol2.CreateFrom(cfg);
+  EXPECT_FALSE(st.ok());
+}
+
 // ── LoadFrom ────────────────────────────────────────────────────────
 
 TEST_F(VolumeImplTest, LoadFromSucceeds) {

@@ -82,6 +82,11 @@ class ConfigCenter {
   /// Returns the FUSE mount options string (e.g. "allow_other,ro").
   const std::string& fuse_opts() const { return fuse_opts_; }
 
+  /// Reset all state (for unit testing).
+  void ResetForTesting() {
+    *this = ConfigCenter{};
+  }
+
  private:
  public:
   ConfigCenter() = default;
@@ -106,7 +111,7 @@ class ConfigCenter {
 
   // Storage engine configuration (URL format)
   std::string meta_url_;         // --meta
-  std::string storage_backend_;  // --storage
+  std::string storage_backend_;  // derived from --bucket scheme
   std::string bucket_url_;       // --bucket
   std::string storage_region_;   // --storage-region
 
