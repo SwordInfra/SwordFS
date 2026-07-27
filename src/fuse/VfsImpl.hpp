@@ -20,18 +20,13 @@
 
 namespace swordfs {
 
+namespace volume {
+class VolumeImpl;
+}
+
 namespace metadata {
-class IMetaEngine;
 using InodeID = uint64_t;
 }  // namespace metadata
-
-namespace storage {
-class IDataEngine;
-}  // namespace storage
-
-namespace utils {
-class Status;
-}  // namespace utils
 
 namespace fuse {
 
@@ -40,9 +35,9 @@ class VfsImpl {
   VfsImpl();
   ~VfsImpl();
 
-  /// Initialize the VfsImpl itself (creates meta_engine_ from ConfigCenter).
-  /// Must be called after ConfigCenter is fully configured.
-  swordfs::utils::Status Init();
+  /// Bind this VfsImpl to a VolumeImpl, which provides meta engine,
+  /// data engine, and volume configuration.  Takes ownership.
+  void Bind(std::unique_ptr<volume::VolumeImpl> vol);
 
   /// FUSE init callback — configure connection capabilities.
   void FuseInit(void* userdata, struct fuse_conn_info* conn);
@@ -113,9 +108,6 @@ class VfsImpl {
   void Statx(fuse_req_t req, fuse_ino_t ino, int flags, int mask,
              struct fuse_file_info* fi);
 
-  /// Set the data engine (called during mount after reading volume config).
-  void set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine> data);
-
  protected:
   // ────────────────────────────────────────────────────────────────
   // Write buffer — accumulates writes until max_chunk_size, then
@@ -145,8 +137,7 @@ class VfsImpl {
       swordfs::metadata::InodeID ino, size_t size, off_t off,
       std::string* out);
 
-  std::unique_ptr<swordfs::metadata::IMetaEngine> meta_engine_;
-  std::unique_ptr<swordfs::storage::IDataEngine> data_engine_;
+  std::unique_ptr<volume::VolumeImpl> vol_;
   folly::F14FastMap<uint64_t, WriteBuf> write_bufs_;
 };
 

@@ -7,6 +7,8 @@
 
 #include <memory>
 
+#include "utils/Status.hpp"
+
 namespace swordfs {
 
 namespace volume {
@@ -19,13 +21,11 @@ class IDataEngine;
 
 /// Create the data engine described by a VolumeConfig.
 ///
-/// Returns nullptr when:
-/// - vol.bucket is empty (memory-only, no data engine needed), or
-/// - the scheme is unknown / unsupported.
-///
-/// The caller (Mount.cpp) does not need to know which backends are
-/// available — the registry handles that.
-std::unique_ptr<IDataEngine> CreateDataEngine(const volume::VolumeConfig& vol);
+/// |out| is set to nullptr when vol.bucket is empty (no data engine
+/// needed).  Returns an error Status when the bucket URL is invalid
+/// or the scheme is unsupported.
+utils::Status CreateDataEngine(const volume::VolumeConfig& vol,
+                            std::unique_ptr<IDataEngine>* out);
 
 }  // namespace storage
 }  // namespace swordfs

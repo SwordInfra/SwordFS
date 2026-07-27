@@ -17,6 +17,7 @@
 #include "fuse/VfsImpl.hpp"
 #include "metadata/Meta.hpp"
 #include "storage/IDataEngine.hpp"
+#include "volume/VolumeImpl.hpp"
 #include "utils/Status.hpp"
 
 using swordfs::config::ConfigCenter;
@@ -166,13 +167,13 @@ class MockMetaEngine : public IMetaEngine {
 class HandleReadTest : public VfsImpl, public ::testing::Test {
  protected:
   void SetUp() override {
-    ConfigCenter::Instance().set_meta_url(
-        std::string{swordfs::metadata::kMemoryMetaUrl});
-    ASSERT_TRUE(Init().ok());
     auto mock = std::make_unique<MockDataEngine>();
     mock_ = mock.get();
     mock_->set_chunk_size(kChunkSize);
-    data_engine_ = std::move(mock);
+    auto vol = std::make_unique<swordfs::volume::VolumeImpl>();
+    vol->set_meta_engine(std::make_unique<MockMetaEngine>());
+    vol->set_data_engine(std::move(mock));
+    Bind(std::move(vol));
   }
 
   void TearDown() override {
@@ -300,10 +301,15 @@ TEST_F(HandleReadTest, ZeroSizeRequest) {
 }
 
 TEST_F(HandleReadTest, NoDataEngine) {
-  data_engine_.reset();
+  // Bind a fresh VolumeImpl with no data engine.
+  auto saved = std::move(vol_);
+  auto no_data = std::make_unique<swordfs::volume::VolumeImpl>();
+  no_data->set_meta_engine(std::make_unique<MockMetaEngine>());
+  Bind(std::move(no_data));
   std::string out;
   Status st = HandleRead(42, 100, 0, &out);
   EXPECT_FALSE(st.ok());
+  Bind(std::move(saved));  // restore
 }
 
 TEST_F(HandleReadTest, EmptyOutputOnNonexistentChunk) {
@@ -379,15 +385,13 @@ TEST_F(HandleReadTest, ReadEntirelyBeforeBuffer) {
 class FlushWriteBufTest : public VfsImpl, public ::testing::Test {
  protected:
   void SetUp() override {
-    ConfigCenter::Instance().set_meta_url(
-        std::string{swordfs::metadata::kMemoryMetaUrl});
-    ASSERT_TRUE(Init().ok());
     auto mock_data = std::make_unique<MockDataEngine>();
     mock_data_ = mock_data.get();
     mock_data_->set_chunk_size(kChunkSize);
-    data_engine_ = std::move(mock_data);
-
-    meta_engine_ = std::make_unique<MockMetaEngine>();
+    auto vol = std::make_unique<swordfs::volume::VolumeImpl>();
+    vol->set_meta_engine(std::make_unique<MockMetaEngine>());
+    vol->set_data_engine(std::move(mock_data));
+    Bind(std::move(vol));
   }
 
   /// Simulate a write to file handle |fh| by injecting data directly

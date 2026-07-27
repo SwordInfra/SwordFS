@@ -9,25 +9,30 @@
 
 #pragma once
 
+#include <memory>
+
 #include "fuse/VfsImpl.hpp"
 #define FUSE_USE_VERSION 312
 #include <fuse_lowlevel.h>
 
 #include <cstdint>
 
+namespace swordfs::volume {
+class VolumeImpl;
+}
+
 namespace swordfs::fuse {
 
 /// Static registry of FUSE callbacks that forward every request to a
-/// user-provided SwordfsInterface instance.
+/// VfsImpl instance bound to a VolumeImpl.
 class VfsHookFactory {
  public:
   /// Return the fully-populated fuse_lowlevel_ops table.
   static const struct fuse_lowlevel_ops& get_ops();
 
-  /// Inject the data engine into the VfsImpl singleton.
-  /// Called once before mount when --volume is specified.
-  static void set_data_engine(
-      std::unique_ptr<swordfs::storage::IDataEngine> data);
+  /// Bind a VolumeImpl to the VfsImpl singleton before mount.
+  /// Takes ownership of |vol|.
+  static void BindVolume(std::unique_ptr<volume::VolumeImpl> vol);
 
   // FUSE callbacks — delegate to vfs_
   static void SwordfsInit(void* userdata, struct fuse_conn_info* conn);

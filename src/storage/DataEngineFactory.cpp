@@ -6,19 +6,21 @@
 #include "storage/IDataEngine.hpp"
 #include "storage/StorageUrl.hpp"
 #include "storage/s3/S3DataEngine.hpp"
-#include "utils/Logging.hpp"
 #include "volume/VolumeConfig.hpp"
 
 namespace swordfs::storage {
 
-std::unique_ptr<IDataEngine> CreateDataEngine(
-    const volume::VolumeConfig& vol) {
-  if (vol.bucket.empty()) return nullptr;
+utils::Status CreateDataEngine(
+    const volume::VolumeConfig& vol,
+    std::unique_ptr<IDataEngine>* out) {
+  if (vol.bucket.empty()) {
+    return utils::Status::InvalidArgument("bucket URL is empty");
+  }
 
   utils::StorageUrl url;
   if (!utils::StorageUrl::Parse(vol.bucket, &url)) {
-    SWORDFS_LOG_ERROR << "Invalid bucket URL: " << vol.bucket;
-    return nullptr;
+    return utils::Status::InvalidArgument(
+        "invalid bucket URL: " + vol.bucket);
   }
 
   if (url.scheme == "s3") {
@@ -40,10 +42,11 @@ std::unique_ptr<IDataEngine> CreateDataEngine(
       s3_cfg.prefix = path.substr(slash + 1);
     }
 
-    return std::make_unique<S3DataEngine>(s3_cfg);
+    *out = std::make_unique<S3DataEngine>(s3_cfg);
+    return utils::Status::OK();
   }
-  SWORDFS_LOG_ERROR << "Unknown data storage scheme: " << url.scheme;
-  return nullptr;
+  return utils::Status::InvalidArgument(
+      "unknown data storage scheme: " + std::string(url.scheme));
 }
 
 }  // namespace swordfs::storage

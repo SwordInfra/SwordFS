@@ -9,17 +9,17 @@
 #include <vector>
 
 #include "fuse/VfsImpl.hpp"
-#include "storage/IDataEngine.hpp"
 #include "utils/FiberRuntime.hpp"
 #include "utils/Logging.hpp"
+#include "volume/VolumeImpl.hpp"
 
 namespace swordfs::fuse {
 
 VfsImpl* VfsHookFactory::vfs_ = new VfsImpl();
 
-void VfsHookFactory::set_data_engine(
-    std::unique_ptr<swordfs::storage::IDataEngine> data) {
-  vfs_->set_data_engine(std::move(data));
+void VfsHookFactory::BindVolume(
+    std::unique_ptr<volume::VolumeImpl> vol) {
+  vfs_->Bind(std::move(vol));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -31,11 +31,6 @@ void VfsHookFactory::SwordfsInit(void* userdata,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   // Initialise per-thread fiber runtime.
   ::swordfs::utils::InitFiberRuntime();
-  auto status = vfs_->Init();
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "VfsImpl::Init failed: " << status.message();
-    return;
-  }
   vfs_->FuseInit(userdata, conn);
 }
 
