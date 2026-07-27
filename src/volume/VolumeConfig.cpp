@@ -3,11 +3,9 @@
 
 #include "volume/VolumeConfig.hpp"
 
+#include <folly/FileUtil.h>
 #include <folly/json.h>
 #include <folly/portability/Filesystem.h>
-
-#include <fstream>
-#include <sstream>
 
 #include "config/ConfigCenter.hpp"
 #include "utils/Logging.hpp"
@@ -62,25 +60,24 @@ Status VolumeConfig::FromJson(std::string_view json) {
 
 Status VolumeConfig::WriteToFile(const std::string& path) const {
   std::error_code ec;
-  if (!folly::fs::exists(path)) {
+  if (!folly::fs::exists(path, ec)) {
+    if (ec) {
+      return Status::IOError("failed to access volume directory: " +
+                             path + ": " + ec.message());
+    }
     folly::fs::create_directories(path, ec);
     if (ec) {
       return Status::IOError("failed to create volume directory: " +
                              path + ": " + ec.message());
     }
-  } else if (!folly::fs::is_directory(path)) {
+  } else if (!folly::fs::is_directory(path, ec) || ec) {
     return Status::InvalidArgument("volume path is not a directory: " +
                                    path);
   }
 
   std::string file_path = path + "/volume.json";
-  std::ofstream ofs(file_path);
-  if (!ofs) {
-    return Status::IOError("failed to open " + file_path +
-                           " for writing");
-  }
-  ofs << ToJson();
-  if (!ofs) {
+  std::string json = ToJson();
+  if (!folly::writeFile(json, file_path.c_str())) {
     return Status::IOError("failed to write " + file_path);
   }
 
@@ -90,18 +87,12 @@ Status VolumeConfig::WriteToFile(const std::string& path) const {
 
 Status VolumeConfig::ReadFromFile(const std::string& path) {
   std::string file_path = path + "/volume.json";
-  std::ifstream ifs(file_path);
-  if (!ifs) {
+  std::string content;
+  if (!folly::readFile(file_path.c_str(), content)) {
     return Status::NotFound("volume.json not found at " + file_path);
   }
 
-  std::ostringstream oss;
-  oss << ifs.rdbuf();
-  if (!ifs) {
-    return Status::IOError("failed to read " + file_path);
-  }
-
-  return FromJson(oss.str());
+  return FromJson(content);
 }
 
 std::string VolumeConfig::MountHint() const {

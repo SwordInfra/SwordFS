@@ -75,13 +75,20 @@ class ConfigCenter {
   const std::string& storage_region() const { return storage_region_; }
   /// Returns the volume name (format and mount subcommands).
   const std::string& volume() const { return volume_; }
+  void set_volume(const std::string& v) { volume_ = v; }
   /// Returns the volume config path (format subcommand positional arg).
   const std::string& volume_config_path() const { return volume_config_path_; }
+  void set_volume_config_path(const std::string& p) { volume_config_path_ = p; }
   /// Returns the FUSE mount options string (e.g. "allow_other,ro").
   const std::string& fuse_opts() const { return fuse_opts_; }
 
  private:
+ public:
   ConfigCenter() = default;
+  ConfigCenter(ConfigCenter&&) = default;
+  ConfigCenter& operator=(ConfigCenter&&) = default;
+
+ private:
   ConfigCenter(const ConfigCenter&) = delete;
   ConfigCenter& operator=(const ConfigCenter&) = delete;
   /// Register mount options with the CLI::App.
