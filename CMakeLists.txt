@@ -48,23 +48,6 @@ find_package(AWSSDK REQUIRED COMPONENTS s3)
 # and CI (where it uses shared) work without patching.
 find_library(JITTERENTROPY_LIB jitterentropy)
 
-add_library(swordfs_storage STATIC
-  src/storage/StorageRegistry.cpp
-  src/storage/s3/S3DataEngine.cpp
-)
-target_link_libraries(swordfs_storage PUBLIC
-  ${CMAKE_DL_LIBS}
-  ${AWSSDK_LINK_LIBRARIES}
-)
-if(JITTERENTROPY_LIB)
-  target_link_libraries(swordfs_storage PUBLIC ${JITTERENTROPY_LIB})
-endif()
-target_include_directories(swordfs_storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_compile_definitions(swordfs_storage PUBLIC
-  SWORDFS_ENABLE_S3
-  _FILE_OFFSET_BITS=64
-)
-
 # ============================================================
 # SwordFS library (all sources except main)
 # ============================================================
@@ -76,7 +59,15 @@ file(GLOB_RECURSE SWORDFS_SOURCES
 list(FILTER SWORDFS_SOURCES EXCLUDE REGEX "src/cmd/Main\.cpp$")
 
 add_library(swordfs_lib OBJECT ${SWORDFS_SOURCES})
-target_link_libraries(swordfs_lib PUBLIC swordfs_storage ${CMAKE_DL_LIBS} Folly::folly ${FUSE3_LIBRARY})
+target_link_libraries(swordfs_lib PUBLIC
+  ${CMAKE_DL_LIBS}
+  ${AWSSDK_LINK_LIBRARIES}
+  Folly::folly
+  ${FUSE3_LIBRARY}
+)
+if(JITTERENTROPY_LIB)
+  target_link_libraries(swordfs_lib PUBLIC ${JITTERENTROPY_LIB})
+endif()
 target_include_directories(swordfs_lib PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}
