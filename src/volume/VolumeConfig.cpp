@@ -7,131 +7,101 @@
 #include <folly/portability/Filesystem.h>
 
 #include <fstream>
-#include <random>
 #include <sstream>
 
-#include "storage/IDataEngine.hpp"
-#include "storage/StorageUrl.hpp"
-#include "storage/s3/S3DataEngine.hpp"
 #include "config/ConfigCenter.hpp"
 #include "utils/Logging.hpp"
 
-namespace swordfs::storage {
-
-std::string VolumeConfig::GenerateUUID() {
-  static std::random_device rd;
-  static std::mt19937_64 gen(rd());
-  static std::uniform_int_distribution<uint64_t> dis;
-
-  uint64_t a = dis(gen);
-  uint64_t b = dis(gen);
-
-  char buf[37];
-  snprintf(buf, sizeof(buf),
-           "%08x-%04x-4%03x-%04lx-%012lx",
-           static_cast<uint32_t>(a),
-           static_cast<uint16_t>(a >> 32),
-           static_cast<uint16_t>(b & 0xFFF),
-           static_cast<unsigned long>((b >> 12) & 0x3FFF) | 0x8000UL,
-           static_cast<unsigned long>(b >> 28));
-  return buf;
-}
+namespace swordfs::volume {
 
 std::string VolumeConfig::ToJson() const {
   folly::dynamic root = folly::dynamic::object;
   root["name"] = name;
-  root["uuid"] = uuid;
   root["meta"] = meta_url;
   root["storage"] = storage;
   root["bucket"] = bucket;
+  root["region"] = region;
 
   return folly::toPrettyJson(root);
 }
 
-utils::Status VolumeConfig::FromJson(std::string_view json, VolumeConfig* out) {
+Status VolumeConfig::FromJson(std::string_view json) {
   folly::dynamic root;
   try {
     root = folly::parseJson(json);
   } catch (const std::exception& e) {
-    return utils::Status::InvalidArgument(
+    return Status::InvalidArgument(
         std::string("invalid JSON in volume.json: ") + e.what());
   }
 
   if (!root.isObject())
-    return utils::Status::InvalidArgument("volume.json root is not an object");
+    return Status::InvalidArgument("volume.json root is not an object");
 
-  if (root.count("name") && root["name"].isString())
-    out->name = root["name"].asString();
+  if (!root.count("name") || !root["name"].isString())
+    return Status::InvalidArgument("missing or invalid 'name' in volume.json");
+  name = root["name"].asString();
 
-  if (!root.count("uuid") || !root["uuid"].isString())
-    return utils::Status::InvalidArgument("missing uuid in volume.json");
-  out->uuid = root["uuid"].asString();
+  if (!root.count("meta") || !root["meta"].isString())
+    return Status::InvalidArgument("missing or invalid 'meta' in volume.json");
+  meta_url = root["meta"].asString();
 
-  if (root.count("meta") && root["meta"].isString())
-    out->meta_url = root["meta"].asString();
+  if (!root.count("storage") || !root["storage"].isString())
+    return Status::InvalidArgument("missing or invalid 'storage' in volume.json");
+  storage = root["storage"].asString();
 
-  if (root.count("storage") && root["storage"].isString())
-    out->storage = root["storage"].asString();
+  if (!root.count("bucket") || !root["bucket"].isString())
+    return Status::InvalidArgument("missing or invalid 'bucket' in volume.json");
+  bucket = root["bucket"].asString();
 
-  if (root.count("bucket") && root["bucket"].isString())
-    out->bucket = root["bucket"].asString();
+  if (!root.count("region") || !root["region"].isString())
+    return Status::InvalidArgument("missing or invalid 'region' in volume.json");
+  region = root["region"].asString();
 
-  return utils::Status::OK();
+  return Status::OK();
 }
 
-utils::Status VolumeConfig::WriteToFile(const std::string& path) const {
+Status VolumeConfig::WriteToFile(const std::string& path) const {
   std::error_code ec;
   if (!folly::fs::exists(path)) {
     folly::fs::create_directories(path, ec);
     if (ec) {
-      return utils::Status::IOError("failed to create volume directory: " +
-                                    path + ": " + ec.message());
+      return Status::IOError("failed to create volume directory: " +
+                             path + ": " + ec.message());
     }
   } else if (!folly::fs::is_directory(path)) {
-    return utils::Status::InvalidArgument("volume path is not a directory: " +
-                                          path);
+    return Status::InvalidArgument("volume path is not a directory: " +
+                                   path);
   }
 
   std::string file_path = path + "/volume.json";
   std::ofstream ofs(file_path);
   if (!ofs) {
-    return utils::Status::IOError("failed to open " + file_path +
-                                  " for writing");
+    return Status::IOError("failed to open " + file_path +
+                           " for writing");
   }
   ofs << ToJson();
   if (!ofs) {
-    return utils::Status::IOError("failed to write " + file_path);
+    return Status::IOError("failed to write " + file_path);
   }
 
   SWORDFS_LOG_INFO << "Volume config written to " << file_path;
-  return utils::Status::OK();
+  return Status::OK();
 }
 
-utils::Status VolumeConfig::ReadFromFile(const std::string& path,
-                                         VolumeConfig* out) {
+Status VolumeConfig::ReadFromFile(const std::string& path) {
   std::string file_path = path + "/volume.json";
   std::ifstream ifs(file_path);
   if (!ifs) {
-    return utils::Status::NotFound("volume.json not found at " + file_path);
+    return Status::NotFound("volume.json not found at " + file_path);
   }
 
   std::ostringstream oss;
   oss << ifs.rdbuf();
   if (!ifs) {
-    return utils::Status::IOError("failed to read " + file_path);
+    return Status::IOError("failed to read " + file_path);
   }
 
-  return FromJson(oss.str(), out);
-}
-
-std::string VolumeConfig::DebugString() const {
-  std::ostringstream oss;
-  oss << "  Name:    " << name << "\n"
-      << "  UUID:    " << uuid << "\n"
-      << "  Meta:    " << meta_url << "\n"
-      << "  Storage: " << storage << "\n"
-      << "  Bucket:  " << bucket;
-  return oss.str();
+  return FromJson(oss.str());
 }
 
 std::string VolumeConfig::MountHint() const {
@@ -146,38 +116,4 @@ std::string VolumeConfig::MountHint() const {
   return hint;
 }
 
-std::unique_ptr<IDataEngine> CreateDataEngine(const VolumeConfig& vol) {
-  if (vol.bucket.empty()) return nullptr;
-
-  utils::StorageUrl url;
-  if (!utils::StorageUrl::Parse(vol.bucket, &url)) {
-    SWORDFS_LOG_ERROR << "Invalid bucket URL: " << vol.bucket;
-    return nullptr;
-  }
-
-  if (url.scheme == "s3") {
-    // bucket URL format: s3://<endpoint>/<bucket>[/<prefix>]
-    S3Config s3_cfg;
-    s3_cfg.endpoint = "https://" + url.host;
-    // Required by S3 compatible services, e.g., Cloudflare R2, MinIO, etc.
-    s3_cfg.region = "auto";
-
-    // First path segment is bucket, rest is prefix
-    std::string path = url.path;
-    if (!path.empty() && path[0] == '/') path = path.substr(1);
-
-    auto slash = path.find('/');
-    if (slash == std::string::npos) {
-      s3_cfg.bucket = path;
-    } else {
-      s3_cfg.bucket = path.substr(0, slash);
-      s3_cfg.prefix = path.substr(slash + 1);
-    }
-
-    return std::make_unique<S3DataEngine>(s3_cfg);
-  }
-  SWORDFS_LOG_ERROR << "Unknown data storage scheme: " << url.scheme;
-  return nullptr;
-}
-
-}  // namespace swordfs::storage
+}  // namespace swordfs::volume

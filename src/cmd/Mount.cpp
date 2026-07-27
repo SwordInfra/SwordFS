@@ -23,12 +23,9 @@
 #include "cmd/Mount.hpp"
 #include "config/ConfigCenter.hpp"
 #include "fuse/Vfs.hpp"
-#include "metadata/Meta.hpp"
-#include "storage/IDataEngine.hpp"
-#include "storage/StorageUrl.hpp"
 #include "utils/Fuse.hpp"
 #include "utils/Logging.hpp"
-#include "volume/VolumeConfig.hpp"
+#include "volume/VolumeImpl.hpp"
 
 using namespace swordfs::utils;
 using namespace swordfs::config;
@@ -198,52 +195,6 @@ static int Mount(const std::string& mountpoint,
   return ret;
 }
 
-// Load volume configuration and initialise the storage engine.
-//
-// When --volume is specified and the metadata engine is memory-backed,
-// this function reads volume.json and creates the IDataEngine described
-// by it.  Metadata engines with persistent storage (e.g. Redis) will
-// recover configuration from their own store instead.
-//
-// Returns 0 on success, non-zero on error.
-static int LoadVolumeConfig(ConfigCenter& cfg) {
-  const std::string& config_path = cfg.volume_config_path();
-  if (config_path.empty()) {
-    return 0;  // --volume-config-path not specified, nothing to load
-  }
-
-  swordfs::storage::VolumeConfig vol;
-  auto status =
-      swordfs::storage::VolumeConfig::ReadFromFile(config_path, &vol);
-  if (!status.ok()) {
-    SWORDFS_PROMPT_INFO << "Error: failed to read volume config from "
-                        << config_path << ": " << status.message();
-    return 1;
-  }
-
-  // Create the storage engine from volume.json.
-  auto engine = swordfs::storage::CreateDataEngine(vol);
-  if (engine) {
-    swordfs::fuse::VfsHookFactory::set_data_engine(std::move(engine));
-    SWORDFS_LOG_INFO << "Volume " << vol.uuid << " loaded from "
-                     << config_path << " (bucket=" << vol.bucket
-                     << ")";
-  } else if (!vol.bucket.empty()) {
-    swordfs::utils::StorageUrl url;
-    if (swordfs::utils::StorageUrl::Parse(vol.bucket, &url)) {
-      SWORDFS_PROMPT_INFO
-          << "Error: data engine not available for '" << url.scheme
-          << "' storage.";
-    } else {
-      SWORDFS_PROMPT_INFO
-          << "Error: failed to create data engine for " << vol.bucket;
-    }
-    return 1;
-  }
-
-  return 0;
-}
-
 int RunMount() {
   auto& cfg = ConfigCenter::Instance();
 
@@ -252,14 +203,12 @@ int RunMount() {
     return 1;
   }
 
-  // Only memory://local reads volume config from a local file.
-  // Future backends (e.g. Redis) will recover it from their own store.
-  if (swordfs::metadata::IsMemoryMode(cfg.meta_url())) {
-    if (LoadVolumeConfig(cfg) != 0) {
-      return 1;
-    }
-  } else {
-    // TODO: fetch volume information from Redis etc.
+  // Load volume config and initialise the storage engine.
+  swordfs::volume::VolumeImpl vol;
+  auto status = vol.LoadFrom(cfg);
+  if (!status.ok()) {
+    SWORDFS_PROMPT_INFO << "Error: " << status.message();
+    return 1;
   }
 
   // Daemonize by default; -f / --foreground disables this

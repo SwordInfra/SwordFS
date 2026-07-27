@@ -71,6 +71,8 @@ class ConfigCenter {
   const std::string& storage_backend() const { return storage_backend_; }
   /// Returns the bucket URL (e.g. "s3://endpoint/bucket/prefix").
   const std::string& bucket_url() const { return bucket_url_; }
+  /// Returns the storage region (e.g. "auto", "us-east-1").
+  const std::string& storage_region() const { return storage_region_; }
   /// Returns the volume name (format and mount subcommands).
   const std::string& volume() const { return volume_; }
   /// Returns the volume config path (format subcommand positional arg).
@@ -99,6 +101,7 @@ class ConfigCenter {
   std::string meta_url_;         // --meta
   std::string storage_backend_;  // --storage
   std::string bucket_url_;       // --bucket
+  std::string storage_region_;   // --storage-region
 
   // Volume configuration (format subcommand)
   std::string volume_;              // --volume (required for format)

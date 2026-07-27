@@ -80,6 +80,8 @@ void ConfigCenter::RegisterFormatOptions(CLI::App& app) {
       ->check(swordfs::config::ValidateStorageBackend);
   cmd->add_option("--bucket", bucket_url_,
                   "Bucket URL (e.g. s3://mybucket.s3.amazonaws.com/chunks)");
+  cmd->add_option("--storage-region", storage_region_,
+                  "Storage region (default: auto)");
   cmd->add_option("--volume-config-path", volume_config_path_,
                   "Volume config directory (required for --meta memory://local)");
 
