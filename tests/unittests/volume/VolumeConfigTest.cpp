@@ -9,7 +9,7 @@
 
 #include "volume/VolumeConfig.hpp"
 
-using swordfs::storage::VolumeConfig;
+using swordfs::volume::VolumeConfig;
 using swordfs::utils::Status;
 
 class VolumeConfigTest : public ::testing::Test {
