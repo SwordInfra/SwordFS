@@ -168,10 +168,12 @@ class ChunkManagerReadTest : public ::testing::Test {
 
   void ExpectRead(InodeID ino, size_t size, off_t off,
                   const std::string& expected) {
-    std::string out;
-    Status st = chunk_mgr_->Read(ino, size, off, &out);
+    auto out = folly::IOBuf::create(kChunkSize);
+    Status st = chunk_mgr_->Read(ino, size, off, out.get());
     EXPECT_TRUE(st.ok()) << st.message();
-    EXPECT_EQ(out, expected);
+    std::string_view sv(reinterpret_cast<const char*>(out->data()),
+                        out->length());
+    EXPECT_EQ(sv, expected);
   }
 
   static constexpr size_t kChunkSize = 1024;
@@ -261,8 +263,8 @@ TEST_F(ChunkManagerReadTest, ZeroSizeRequest) {
 
 TEST_F(ChunkManagerReadTest, NoDataEngine) {
   ChunkManager no_data(mock_meta_.get(), nullptr);
-  std::string out;
-  Status st = no_data.Read(42, 100, 0, &out);
+  auto out = folly::IOBuf::create(0);
+  Status st = no_data.Read(42, 100, 0, out.get());
   EXPECT_FALSE(st.ok());
 }
 
@@ -345,100 +347,49 @@ class ChunkManagerFlushTest : public ::testing::Test {
 };
 
 // ────────────────────────────────────────────────────────────────
-// Flush — non-force (auto) flush
+// Flush — basic
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(ChunkManagerFlushTest, NoBuffer) {
-  Status st = chunk_mgr_->Flush(kFh, /*force=*/false);
+TEST_F(ChunkManagerFlushTest, NoData) {
+  Status st = chunk_mgr_->Flush(kFh);
   EXPECT_TRUE(st.ok());
   EXPECT_EQ(mock_data_->chunk_count(), 0);
 }
 
-TEST_F(ChunkManagerFlushTest, BelowThresholdNoFlush) {
-  chunk_mgr_->Write(kFh, kIno, Repeat('X', kChunkSize - 1).data(),
-                    kChunkSize - 1, 0);
-
-  Status st = chunk_mgr_->Flush(kFh, /*force=*/false);
-  EXPECT_TRUE(st.ok());
-  EXPECT_EQ(mock_data_->chunk_count(), 0);
-
-  // Read back from buffer to verify data is still there.
-  std::string out;
-  chunk_mgr_->Read(kIno, kChunkSize - 1, 0, &out);
-  EXPECT_EQ(out, Repeat('X', kChunkSize - 1));
-}
-
-TEST_F(ChunkManagerFlushTest, AtThresholdFlushExactlyOneChunk) {
-  chunk_mgr_->Write(kFh, kIno, Repeat('X', kChunkSize).data(),
-                    kChunkSize, 0);
-
-  // Write at threshold triggers auto-flush internally.
-  EXPECT_EQ(mock_data_->chunk_count(), 1);
-  EXPECT_TRUE(mock_data_->has_chunk("42/0"));
-  EXPECT_EQ(mock_data_->get_chunk_data("42/0"), Repeat('X', kChunkSize));
-}
-
-TEST_F(ChunkManagerFlushTest, AboveThresholdFlushKeepsRemainder) {
-  // Write 1.5 chunks — first chunk auto-flushes, remainder stays.
-  size_t total = kChunkSize + kChunkSize / 2;
-  chunk_mgr_->Write(kFh, kIno, Repeat('X', total).data(), total, 0);
-
-  // Chunk 0 should have been auto-flushed.
-  EXPECT_EQ(mock_data_->get_chunk_data("42/0").size(), kChunkSize);
-  EXPECT_EQ(mock_data_->get_chunk_data("42/0"), Repeat('X', kChunkSize));
-
-  // Remainder is still in buffer — readable.
-  std::string out;
-  chunk_mgr_->Read(kIno, kChunkSize / 2, kChunkSize, &out);
-  EXPECT_EQ(out, Repeat('X', kChunkSize / 2));
-}
-
-TEST_F(ChunkManagerFlushTest, MultipleNonForceFlushes) {
-  // Write 3.5 chunks: 3 auto-flush, 0.5 stays in buffer.
-  size_t total = 3 * kChunkSize + kChunkSize / 2;
-  chunk_mgr_->Write(kFh, kIno, Repeat('X', total).data(), total, 0);
-
-  EXPECT_EQ(mock_data_->chunk_count(), 3);
-  EXPECT_EQ(mock_data_->get_chunk_data("42/0"), Repeat('X', kChunkSize));
-  EXPECT_EQ(mock_data_->get_chunk_data("42/1"), Repeat('X', kChunkSize));
-  EXPECT_EQ(mock_data_->get_chunk_data("42/2"), Repeat('X', kChunkSize));
-
-  // Remainder readable from buffer.
-  std::string out;
-  chunk_mgr_->Read(kIno, kChunkSize / 2, 3 * kChunkSize, &out);
-  EXPECT_EQ(out, Repeat('X', kChunkSize / 2));
-}
-
-// ────────────────────────────────────────────────────────────────
-// Flush — force flush
-// ────────────────────────────────────────────────────────────────
-
-TEST_F(ChunkManagerFlushTest, ForceFlushEmpty) {
-  Status st = chunk_mgr_->Flush(kFh, /*force=*/true);
-  EXPECT_TRUE(st.ok());
-  EXPECT_EQ(mock_data_->chunk_count(), 0);
-}
-
-TEST_F(ChunkManagerFlushTest, ForceFlushBelowThreshold) {
+TEST_F(ChunkManagerFlushTest, FlushUploadsPartialChunk) {
   chunk_mgr_->Write(kFh, kIno, Repeat('Y', kChunkSize / 2).data(),
                     kChunkSize / 2, 0);
 
-  Status st = chunk_mgr_->Flush(kFh, /*force=*/true);
+  Status st = chunk_mgr_->Flush(kFh);
   EXPECT_TRUE(st.ok());
   EXPECT_EQ(mock_data_->chunk_count(), 1);
   EXPECT_EQ(mock_data_->get_chunk_data("42/0"),
             Repeat('Y', kChunkSize / 2));
 }
 
-TEST_F(ChunkManagerFlushTest, ForceFlushAboveThreshold) {
-  // Write 2 full chunks + 10 bytes — first 2 auto-flush.
-  chunk_mgr_->Write(kFh, kIno, Repeat('Z', kChunkSize * 2 + 10).data(),
-                    kChunkSize * 2 + 10, 0);
+TEST_F(ChunkManagerFlushTest, FlushUploadsFullChunks) {
+  chunk_mgr_->Write(kFh, kIno, Repeat('X', kChunkSize * 2).data(),
+                    kChunkSize * 2, 0);
 
-  // Force-flush the remaining 10 bytes.
-  Status st = chunk_mgr_->Flush(kFh, /*force=*/true);
+  // Chunks are sealed but not uploaded until Flush.
+  EXPECT_EQ(mock_data_->chunk_count(), 0);
+
+  Status st = chunk_mgr_->Flush(kFh);
+  EXPECT_TRUE(st.ok());
+  EXPECT_EQ(mock_data_->chunk_count(), 2);
+  EXPECT_EQ(mock_data_->get_chunk_data("42/0"), Repeat('X', kChunkSize));
+  EXPECT_EQ(mock_data_->get_chunk_data("42/1"), Repeat('X', kChunkSize));
+}
+
+TEST_F(ChunkManagerFlushTest, FlushUploadsFullPlusRemainder) {
+  size_t total = kChunkSize * 2 + 10;
+  chunk_mgr_->Write(kFh, kIno, Repeat('Z', total).data(), total, 0);
+
+  Status st = chunk_mgr_->Flush(kFh);
   EXPECT_TRUE(st.ok());
   EXPECT_EQ(mock_data_->chunk_count(), 3);
+  EXPECT_EQ(mock_data_->get_chunk_data("42/0"), Repeat('Z', kChunkSize));
+  EXPECT_EQ(mock_data_->get_chunk_data("42/1"), Repeat('Z', kChunkSize));
   EXPECT_EQ(mock_data_->get_chunk_data("42/2"), Repeat('Z', 10));
 }
 
@@ -447,9 +398,9 @@ TEST_F(ChunkManagerFlushTest, ForceFlushAboveThreshold) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(ChunkManagerFlushTest, ChunkIndexIncrementsCorrectly) {
-  // Write 3 full chunks — all auto-flush.
   chunk_mgr_->Write(kFh, kIno, Repeat('X', kChunkSize * 3).data(),
                     kChunkSize * 3, 0);
+  chunk_mgr_->Flush(kFh);
 
   for (int i = 0; i < 3; i++) {
     std::string expected_key =
@@ -463,21 +414,17 @@ TEST_F(ChunkManagerFlushTest, ChunkIndexIncrementsCorrectly) {
 // Flush — data integrity
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(ChunkManagerFlushTest, DataIntegrityAcrossFlushes) {
+TEST_F(ChunkManagerFlushTest, DataIntegrityAcrossChunks) {
   std::string chunk_a = Repeat('A', kChunkSize);
   std::string chunk_b = Repeat('B', kChunkSize);
   std::string leftover = Repeat('C', 10);
 
-  // Write all at once — first 2 chunks auto-flush, 10 bytes remain.
   chunk_mgr_->Write(kFh, kIno,
                     (chunk_a + chunk_b + leftover).data(),
                     chunk_a.size() + chunk_b.size() + leftover.size(), 0);
+  chunk_mgr_->Flush(kFh);
 
   EXPECT_EQ(mock_data_->get_chunk_data("42/0"), chunk_a);
   EXPECT_EQ(mock_data_->get_chunk_data("42/1"), chunk_b);
-
-  // Force flush remainder.
-  Status st = chunk_mgr_->Flush(kFh, /*force=*/true);
-  EXPECT_TRUE(st.ok());
   EXPECT_EQ(mock_data_->get_chunk_data("42/2"), leftover);
 }

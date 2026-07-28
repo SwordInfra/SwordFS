@@ -4,78 +4,60 @@
 #include "chunk/WriteBuf.hpp"
 
 #include <algorithm>
-#include <string_view>
+#include <cstring>
 
 namespace swordfs::chunk {
 
-// ────────────────────────────────────────────────────────────────
-// Initialisation
-// ────────────────────────────────────────────────────────────────
-
-void WriteBuf::Init(metadata::InodeID ino, size_t max_chunk_size) {
-  ino_ = ino;
-  max_chunk_size_ = max_chunk_size;
-  data_.clear();
-  next_chunk_ = 0;
-  max_write_end_ = 0;
+WriteBuf::WriteBuf(size_t capacity) {
+  buf_ = folly::IOBuf::create(capacity);
 }
 
-// ────────────────────────────────────────────────────────────────
-// Write path
-// ────────────────────────────────────────────────────────────────
-
-void WriteBuf::Append(const char* data, size_t size, off_t write_offset) {
-  data_.insert(data_.end(), data, data + size);
+utils::Status WriteBuf::Write(const char* data, size_t size, off_t write_offset) {
   off_t end = write_offset + static_cast<off_t>(size);
-  if (end > max_write_end_) max_write_end_ = end;
-}
-
-std::string_view WriteBuf::FlushData(bool force) const {
-  if (data_.empty()) return {};
-
-  size_t n;
-  if (force) {
-    n = data_.size();
-  } else {
-    n = std::min(data_.size(), max_chunk_size_);
+  // Bounds check — writes must stay within the pre-allocated capacity.
+  if (write_offset < 0) {
+    return utils::Status::InvalidArgument("WriteBuf: negative write offset");
+  } else if (end > static_cast<off_t>(buf_->capacity())) {
+    return utils::Status::InvalidArgument(
+        "WriteBuf: write exceeds capacity");
   }
-  return std::string_view(data_.data(), n);
+
+  // ── Unavoidable copy ─────────────────────────────────────────
+  // The source buffer belongs to the FUSE layer.  Once
+  // fuse_reply_write() returns, the kernel may reuse or free that
+  // memory immediately.  We must own a private copy so the data
+  // survives until the chunk is sealed and uploaded.
+  uint8_t* dest = const_cast<uint8_t*>(buf_->data()) + write_offset;
+  std::memcpy(dest, data, size);
+
+  if (end > static_cast<off_t>(buf_->length())) {
+    buf_->append(end - buf_->length());
+  }
+
+  return utils::Status::OK();
 }
 
-void WriteBuf::CommitFlush(size_t flushed_size) {
-  data_.erase(data_.begin(), data_.begin() + flushed_size);
-  next_chunk_++;
+std::string_view WriteBuf::FlushData() const {
+  if (!buf_ || buf_->length() == 0) return {};
+  return {reinterpret_cast<const char*>(buf_->data()), buf_->length()};
 }
 
-// ────────────────────────────────────────────────────────────────
-// Read-through support
-// ────────────────────────────────────────────────────────────────
-
-off_t WriteBuf::BufStart() const {
-  return static_cast<off_t>(next_chunk_) *
-         static_cast<off_t>(max_chunk_size_);
-}
-
-off_t WriteBuf::BufEnd() const {
-  return BufStart() + static_cast<off_t>(data_.size());
-}
-
-size_t WriteBuf::CopyOut(off_t off, size_t size, std::string* out) const {
-  size_t buf_off = static_cast<size_t>(off - BufStart());
-  size_t avail = data_.size() - buf_off;
-  size_t n = std::min(size, avail);
-  out->append(data_.data() + buf_off, n);
-  return n;
-}
-
-// ────────────────────────────────────────────────────────────────
-// Misc
-// ────────────────────────────────────────────────────────────────
-
-void WriteBuf::Reset() {
-  data_.clear();
-  next_chunk_ = 0;
-  max_write_end_ = 0;
+utils::Status WriteBuf::CopyOut(off_t off, size_t len, folly::IOBuf* out) const {
+  if (off < 0) {
+    return utils::Status::InvalidArgument("CopyOut: negative offset");
+  }
+  if (static_cast<size_t>(off) >= buf_->length()) {
+    return utils::Status::OK();  // EOF — nothing to copy
+  }
+  size_t avail = buf_->length() - static_cast<size_t>(off);
+  size_t n = std::min(len, avail);
+  if (n > out->tailroom()) {
+    return utils::Status::InvalidArgument(
+        "CopyOut: output buffer too small");
+  }
+  std::memcpy(out->writableTail(), buf_->data() + off, n);
+  out->append(n);
+  return utils::Status::OK();
 }
 
 }  // namespace swordfs::chunk

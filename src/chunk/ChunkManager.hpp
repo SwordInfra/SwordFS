@@ -1,16 +1,18 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// ChunkManager — manages chunk-level I/O: write buffering, chunk flush,
-// and chunk-aware read (merging unflushed buffer data with stored chunks).
+// ChunkManager — manages chunk-level I/O: write buffering, chunk seal
+// and upload, and chunk-aware read (merging buffer data with storage).
 
 #pragma once
 
 #include <folly/container/F14Map.h>
 
 #include <cstdint>
+#include <deque>
 #include <string>
 
+#include "chunk/Chunk.hpp"
 #include "chunk/WriteBuf.hpp"
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
@@ -40,22 +42,20 @@ class ChunkManager {
   // Write path
   // ──────────────────────────────────────────────────────────────
 
-  /// Append |size| bytes from |data| at file offset |off| to the
-  /// in-memory write buffer identified by |fh|.  If the buffer
-  /// reaches max_chunk_size a non-forced flush is performed
-  /// automatically.  Returns the status of any automatic flush.
+  /// Append |size| bytes from |data| at file offset |off|.  When the
+  /// current chunk fills up it is automatically sealed and a new
+  /// chunk is created for the remainder.
   Status Write(uint64_t fh, InodeID ino, const char* data, size_t size,
                off_t off);
 
-  /// Flush the write buffer for |fh| to the data engine.
-  ///
-  /// When |force| is true the entire buffer is flushed regardless of
-  /// size.  When false only max_chunk_size bytes are flushed and the
-  /// remainder is kept for the next chunk.
-  Status Flush(uint64_t fh, bool force);
+  /// Seal and upload ALL chunks for |fh|.  Called on flush / fsync /
+  /// release.
+  Status Flush(uint64_t fh);
 
-  /// Discard the write buffer for |fh| (called on file close).
-  void RemoveBuf(uint64_t fh);
+  /// Upload sealed chunks and discard the chunk chain (called on
+  /// file release).  The meta engine's Release is still the caller's
+  /// responsibility.
+  Status Release(uint64_t fh);
 
   // ──────────────────────────────────────────────────────────────
   // Read path
@@ -66,16 +66,21 @@ class ChunkManager {
   /// Unflushed write-buffer data takes precedence over stored chunks.
   /// Appends the resulting data to |out|.  Returns OK on success
   /// (including short reads / EOF).
-  Status Read(InodeID ino, size_t size, off_t off, std::string* out);
+  Status Read(InodeID ino, size_t size, off_t off, folly::IOBuf* out);
 
  private:
-  /// Find the write buffer for |ino| that has unflushed data, or
-  /// return nullptr if none exists.
-  WriteBuf* FindWriteBuf(InodeID ino);
+  /// Get or create the chunk deque for |fh|.
+  std::deque<Chunk>& GetChunks(uint64_t fh);
+
+  /// Upload a single sealed chunk to the data engine.
+  Status UploadChunk(Chunk& c);
+
+  /// Find the chunk that contains |off|, or nullptr.
+  Chunk* FindChunk(InodeID ino, off_t off);
 
   metadata::IMetaEngine* meta_;  // non-owning
   storage::IDataEngine* data_;   // non-owning
-  folly::F14FastMap<uint64_t, WriteBuf> write_bufs_;
+  folly::F14FastMap<uint64_t, std::deque<Chunk>> chunks_;
 };
 
 }  // namespace chunk
