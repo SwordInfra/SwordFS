@@ -42,6 +42,9 @@ struct VolumeConfig {
 
   /// Returns a `swordfs mount` command-line hint for this volume.
   std::string MountHint() const;
+
+  /// Returns true if path/volume.json already exists on disk.
+  static bool ConfigFileExists(const std::string& path);
 };
 
 }  // namespace swordfs::volume

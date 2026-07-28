@@ -12,6 +12,10 @@
 
 namespace swordfs::volume {
 
+namespace {
+constexpr const char* kConfigFileName = "/volume.json";
+}
+
 std::string VolumeConfig::ToJson() const {
   folly::dynamic root = folly::dynamic::object;
   root["name"] = name;
@@ -75,7 +79,7 @@ Status VolumeConfig::WriteToFile(const std::string& path) const {
                                    path);
   }
 
-  std::string file_path = path + "/volume.json";
+  std::string file_path = path + kConfigFileName;
   std::string json = ToJson();
   if (!folly::writeFile(json, file_path.c_str())) {
     return Status::IOError("failed to write " + file_path);
@@ -86,13 +90,19 @@ Status VolumeConfig::WriteToFile(const std::string& path) const {
 }
 
 Status VolumeConfig::ReadFromFile(const std::string& path) {
-  std::string file_path = path + "/volume.json";
+  std::string file_path = path + kConfigFileName;
   std::string content;
   if (!folly::readFile(file_path.c_str(), content)) {
     return Status::NotFound("volume.json not found at " + file_path);
   }
 
   return FromJson(content);
+}
+
+bool VolumeConfig::ConfigFileExists(const std::string& path) {
+  std::string file_path = path + kConfigFileName;
+  std::error_code ec;
+  return folly::fs::exists(file_path, ec) && !ec;
 }
 
 std::string VolumeConfig::MountHint() const {

@@ -13,7 +13,7 @@ namespace swordfs::config {
 /// Validates --meta URL format and scheme (e.g. memory://local).
 extern const CLI::Validator ValidateMetaUrl;
 
-/// Validates --storage against registered StorageRegistry backends.
-extern const CLI::Validator ValidateStorageBackend;
+/// Validates --bucket URL has a recognised storage scheme (e.g. s3://).
+extern const CLI::Validator ValidateBucketUrl;
 
 }  // namespace swordfs::config

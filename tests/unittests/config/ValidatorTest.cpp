@@ -11,7 +11,6 @@
 #include "storage/StorageRegistry.hpp"
 
 using swordfs::config::ValidateMetaUrl;
-using swordfs::config::ValidateStorageBackend;
 
 // ================================================================
 // ValidateMetaUrl
@@ -41,28 +40,4 @@ TEST(ValidateMetaUrlTest, ErrorMessageContainsScheme) {
   EXPECT_NE(err.find("redis"), std::string::npos);
   EXPECT_NE(err.find("Supported"), std::string::npos)
       << "Error message should mention 'Supported': " << err;
-}
-
-// ================================================================
-// ValidateStorageBackend
-// ================================================================
-
-TEST(ValidateStorageBackendTest, RegisteredBackend) {
-  // "s3" is registered at static-init time (S3DataEngine.cpp).
-  EXPECT_TRUE(ValidateStorageBackend("s3").empty());
-  // Backend names are case-insensitive.
-  EXPECT_TRUE(ValidateStorageBackend("S3").empty());
-}
-
-TEST(ValidateStorageBackendTest, UnknownBackend) {
-  EXPECT_FALSE(ValidateStorageBackend("nfs").empty());
-}
-
-TEST(ValidateStorageBackendTest, EmptyString) {
-  EXPECT_FALSE(ValidateStorageBackend("").empty());
-}
-
-TEST(ValidateStorageBackendTest, ErrorMessageContainsInput) {
-  std::string err = ValidateStorageBackend("gcs");
-  EXPECT_NE(err.find("gcs"), std::string::npos);
 }

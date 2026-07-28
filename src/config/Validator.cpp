@@ -22,17 +22,20 @@ const CLI::Validator ValidateMetaUrl = CLI::Validator(
     },
     "META_URL");
 
-const CLI::Validator ValidateStorageBackend = CLI::Validator(
+const CLI::Validator ValidateBucketUrl = CLI::Validator(
     [](const std::string& input) -> std::string {
-      // Backend names are case-insensitive — normalise before lookup.
-      std::string lower = input;
-      std::transform(lower.begin(), lower.end(), lower.begin(),
+      auto pos = input.find("://");
+      if (pos == std::string::npos) {
+        return "Bucket URL must have a scheme:// prefix, got: " + input;
+      }
+      std::string scheme = input.substr(0, pos);
+      std::transform(scheme.begin(), scheme.end(), scheme.begin(),
                      [](unsigned char c) { return std::tolower(c); });
-      if (swordfs::storage::StorageRegistry::Instance().Available(lower)) {
+      if (swordfs::storage::StorageRegistry::Instance().Available(scheme)) {
         return {};
       }
-      return "Unknown storage backend: " + input;
+      return "Unsupported bucket scheme '" + scheme + "', got: " + input;
     },
-    "STORAGE_BACKEND");
+    "BUCKET_URL");
 
 }  // namespace swordfs::config

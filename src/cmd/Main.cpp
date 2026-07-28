@@ -16,6 +16,7 @@ int main(int argc, char* argv[]) {
   folly::Init folly_init(&argc, &argv, folly::InitOptions().useGFlags(false));
 
   CLI::App app{"SwordFS - A modern high-performance distributed file system"};
+  app.allow_extras(false);
 
   // Bind CLI options to ConfigCenter members
   auto& cfg = swordfs::config::ConfigCenter::Instance();

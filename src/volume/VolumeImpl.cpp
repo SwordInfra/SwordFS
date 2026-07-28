@@ -39,6 +39,9 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter& cfg) {
 
   const std::string& config_path = cfg.volume_config_path();
   if (!config_path.empty()) {
+    if (VolumeConfig::ConfigFileExists(config_path)) {
+      return Status::AlreadyExists("volume already exists at " + config_path);
+    }
     auto status = config_.WriteToFile(config_path);
     if (!status.ok()) return status;
   }
