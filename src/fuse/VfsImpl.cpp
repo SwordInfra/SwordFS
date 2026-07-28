@@ -10,10 +10,10 @@
 #include "fuse/Limits.hpp"
 #include "metadata/Meta.hpp"
 #include "storage/IDataEngine.hpp"
-#include "volume/VolumeImpl.hpp"
 #include "utils/Context.hpp"
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
+#include "volume/VolumeImpl.hpp"
 
 #define FUSE_USE_VERSION 312
 #include <fuse_lowlevel.h>
@@ -38,6 +38,8 @@ VfsImpl::~VfsImpl() = default;
 
 void VfsImpl::Bind(std::unique_ptr<volume::VolumeImpl> vol) {
   vol_ = std::move(vol);
+  chunk_mgr_ = std::make_unique<chunk::ChunkManager>(
+      vol_->meta_engine(), vol_->data_engine());
 }
 
 void VfsImpl::FuseInit(void* userdata, struct fuse_conn_info* conn) {
@@ -77,7 +79,7 @@ void VfsImpl::Lookup(fuse_req_t req, fuse_ino_t parent, const char* name) {
   InodeID child_ino;
   struct stat attr;
   Status status = vol_->meta_engine()->Lookup(parent, name, &child_ino,
-                                       &attr);
+                                              &attr);
   if (!status.ok()) {
     fuse_reply_err(req, status.ToErrno());
     return;
@@ -113,7 +115,7 @@ void VfsImpl::Setattr(fuse_req_t req, fuse_ino_t ino, struct stat* attr,
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
   struct stat out_attr;
   Status status = vol_->meta_engine()->SetAttr(ino, attr, to_set,
-                                        &out_attr);
+                                               &out_attr);
   if (!status.ok()) {
     fuse_reply_err(req, status.ToErrno());
   } else {
@@ -142,7 +144,7 @@ void VfsImpl::Mkdir(fuse_req_t req, fuse_ino_t parent, const char* name,
   InodeID child_ino;
   struct stat attr;
   Status status = vol_->meta_engine()->MkDir(parent, name, mode,
-                                      &child_ino, &attr);
+                                             &child_ino, &attr);
   if (!status.ok()) {
     fuse_reply_err(req, status.ToErrno());
     return;
@@ -180,7 +182,7 @@ void VfsImpl::Rename(fuse_req_t req, fuse_ino_t parent, const char* name,
                      unsigned int flags) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
   Status status = vol_->meta_engine()->Rename(parent, name, newparent,
-                                       newname, flags);
+                                              newname, flags);
   fuse_reply_err(req, status.ToErrno());
 }
 
@@ -208,66 +210,8 @@ void VfsImpl::Open(fuse_req_t req, fuse_ino_t ino,
 }
 
 // ────────────────────────────────────────────────────────────────
-// Read / Write — chunk-based via data engine
+// Read / Write — delegated to ChunkManager
 // ────────────────────────────────────────────────────────────────
-
-Status VfsImpl::FlushWriteBuf(uint64_t fh, bool force) {
-  auto it = write_bufs_.find(fh);
-  if (it == write_bufs_.end()) {
-    SWORDFS_LOG_DEBUG << "FlushWriteBuf: fh=" << fh << " — no buffer";
-    return Status::OK();
-  }
-  WriteBuf& wb = it->second;
-
-  if (wb.data.empty()) return Status::OK();
-
-  // When not forced, flush exactly max_chunk_size bytes and keep the
-  // remainder for the next chunk.  When forced (Flush/Release/Fsync),
-  // flush everything even if below the threshold.
-  size_t flush_size;
-  if (force) {
-    flush_size = wb.data.size();
-  } else {
-    if (wb.data.size() < wb.max_chunk_size) {
-      SWORDFS_LOG_DEBUG << "FlushWriteBuf: fh=" << fh
-                        << " buf=" << wb.data.size()
-                        << " — below threshold (max=" << wb.max_chunk_size
-                        << ")";
-      return Status::OK();
-    }
-    flush_size = wb.max_chunk_size;
-  }
-
-  std::string key = std::to_string(wb.ino) + "/" +
-                    std::to_string(wb.next_chunk);
-  Status status = vol_->data_engine()->Put(
-      key, std::string_view(wb.data.data(), flush_size));
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "FlushWriteBuf FAILED: ino=" << wb.ino
-                      << " chunk=" << wb.next_chunk
-                      << " size=" << flush_size
-                      << " — " << status.message();
-    return status;
-  }
-
-  SWORDFS_LOG_INFO << "FlushWriteBuf: ino=" << wb.ino
-                   << " chunk=" << wb.next_chunk
-                   << " size=" << flush_size;
-
-  // Update file size from actual write offsets.
-  struct stat attr;
-  if (vol_->meta_engine()->GetAttr(wb.ino, &attr).ok() &&
-      wb.max_write_end > attr.st_size) {
-    struct stat new_attr = {};
-    new_attr.st_size = wb.max_write_end;
-    vol_->meta_engine()->SetAttr(wb.ino, &new_attr, FUSE_SET_ATTR_SIZE, nullptr);
-  }
-
-  // Remove only the flushed bytes; keep the remainder for next chunk.
-  wb.data.erase(wb.data.begin(), wb.data.begin() + flush_size);
-  wb.next_chunk++;
-  return Status::OK();
-}
 
 void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                    uint64_t fh) {
@@ -275,7 +219,7 @@ void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
   (void)fh;
 
   std::string data;
-  Status status = HandleRead(ino, size, off, &data);
+  Status status = chunk_mgr_->Read(ino, size, off, &data);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Read failed: ino=" << ino << " offset=" << off
                       << " — " << status.message();
@@ -288,119 +232,16 @@ void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
   fuse_reply_buf(req, data.data(), data.size());
 }
 
-// ────────────────────────────────────────────────────────────────
-// HandleRead — core read logic (no FUSE dependency, testable)
-// ────────────────────────────────────────────────────────────────
-
-Status VfsImpl::HandleRead(InodeID ino, size_t size, off_t off,
-                           std::string* out) {
-  if (!vol_->data_engine()) {
-    return Status::Internal("no data engine configured");
-  }
-
-  size_t chunk_sz = vol_->data_engine()->Limits().max_chunk_size;
-  out->clear();
-  out->reserve(size);
-
-  // Locate any active write buffer for this inode — unflushed data
-  // must take precedence over storage.
-  WriteBuf* wb = nullptr;
-  for (auto& [fh, candidate] : write_bufs_) {
-    if (candidate.ino == ino && !candidate.data.empty()) {
-      wb = &candidate;
-      break;
-    }
-  }
-  // If a buffer exists, its data occupies file offsets
-  // [next_chunk * max_chunk_size, next_chunk * max_chunk_size + data.size()).
-  off_t buf_start = 0;
-  off_t buf_end = 0;
-  if (wb) {
-    buf_start = static_cast<off_t>(wb->next_chunk) *
-                static_cast<off_t>(wb->max_chunk_size);
-    buf_end = buf_start + static_cast<off_t>(wb->data.size());
-  }
-
-  size_t remaining = size;
-  off_t cur_off = off;
-
-  while (remaining > 0) {
-    // ── Serve from write buffer if the current offset falls within it ──
-    if (wb && cur_off >= buf_start && cur_off < buf_end) {
-      size_t buf_off = static_cast<size_t>(cur_off - buf_start);
-      size_t buf_avail = static_cast<size_t>(buf_end - cur_off);
-      size_t n = std::min(remaining, buf_avail);
-      out->append(wb->data.data() + buf_off, n);
-      remaining -= n;
-      cur_off += static_cast<off_t>(n);
-      continue;
-    }
-
-    // ── Serve from storage ──
-    off_t chunk_idx = cur_off / static_cast<off_t>(chunk_sz);
-    size_t chunk_off_val = static_cast<size_t>(
-        cur_off % static_cast<off_t>(chunk_sz));
-    std::string key =
-        std::to_string(ino) + "/" + std::to_string(chunk_idx);
-
-    size_t chunk_actual = 0;
-    if (!vol_->data_engine()->Head(key, &chunk_actual) ||
-        chunk_off_val >= chunk_actual) {
-      break;  // EOF — no more chunks (and nothing in buffer)
-    }
-
-    size_t to_read = std::min(remaining, chunk_actual - chunk_off_val);
-    std::string chunk_data;
-    Status status =
-        vol_->data_engine()->Get(key, &chunk_data, chunk_off_val, to_read);
-    if (!status.ok()) {
-      return status;
-    }
-
-    out->append(chunk_data);
-    remaining -= chunk_data.size();
-    cur_off += chunk_data.size();
-
-    // If the engine returned fewer bytes than requested we've hit EOF.
-    if (chunk_data.size() < to_read) break;
-  }
-
-  return Status::OK();
-}
-
 void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
                     size_t size, off_t off, uint64_t fh) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
 
-  if (!vol_->data_engine()) {
-    SWORDFS_LOG_ERROR << "Write: no data engine configured (ino=" << ino << ")";
-    fuse_reply_err(req, EIO);
+  Status st = chunk_mgr_->Write(fh, ino, buf, size, off);
+  if (!st.ok()) {
+    SWORDFS_LOG_ERROR << "Write: chunk_mgr write failed (ino=" << ino
+                      << ") — " << st.message();
+    fuse_reply_err(req, st.ToErrno());
     return;
-  }
-
-  // Get or create write buffer for this file handle.
-  auto& wb = write_bufs_[fh];
-  if (wb.ino == 0) {
-    wb.ino = ino;
-    wb.max_chunk_size = vol_->data_engine()->Limits().max_chunk_size;
-  }
-
-  // Append data to buffer.
-  wb.data.insert(wb.data.end(), buf, buf + size);
-  off_t end = off + static_cast<off_t>(size);
-  if (end > wb.max_write_end) wb.max_write_end = end;
-
-  SWORDFS_LOG_DEBUG << "Write buffered: ino=" << ino << " offset=" << off
-                    << " size=" << size
-                    << " buf_total=" << wb.data.size();
-
-  // Flush if buffer is full.
-  if (wb.data.size() >= wb.max_chunk_size) {
-    Status st = FlushWriteBuf(fh, false);
-    if (!st.ok()) {
-      fuse_reply_err(req, st.ToErrno());
-      return;
-    }
   }
 
   fuse_reply_write(req, size);
@@ -409,7 +250,7 @@ void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
 void VfsImpl::Flush(fuse_req_t req, fuse_ino_t ino,
                     uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Flush: ino=" << ino << " fh=" << fh;
-  Status st = FlushWriteBuf(fh, /*force=*/true);
+  Status st = chunk_mgr_->Flush(fh, /*force=*/true);
   fuse_reply_err(req, st.ok() ? 0 : st.ToErrno());
 }
 
@@ -418,13 +259,13 @@ void VfsImpl::Release(fuse_req_t req, fuse_ino_t ino,
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
 
   // Flush any remaining buffered data before releasing.
-  Status st = FlushWriteBuf(fh, /*force=*/true);
+  Status st = chunk_mgr_->Flush(fh, /*force=*/true);
   if (!st.ok()) {
     SWORDFS_LOG_ERROR << "Release: flush failed for fh=" << fh
                       << " — " << st.message();
   }
 
-  write_bufs_.erase(fh);
+  chunk_mgr_->RemoveBuf(fh);
 
   st = vol_->meta_engine()->Release(fh);
   if (!st.ok()) {
@@ -440,7 +281,7 @@ void VfsImpl::Fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
                     uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Fsync: ino=" << ino << " datasync=" << datasync
                     << " fh=" << fh;
-  Status st = FlushWriteBuf(fh, /*force=*/true);
+  Status st = chunk_mgr_->Flush(fh, /*force=*/true);
   fuse_reply_err(req, st.ok() ? 0 : st.ToErrno());
 }
 
