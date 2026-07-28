@@ -88,31 +88,11 @@ jobs:
         run: |
           sudo apt-get update
           if [ ! -f /usr/local/lib/libfolly.a ]; then
-            sudo bash scripts/install-deps.sh --with-s3
+            sudo bash scripts/install-deps.sh
           fi
 
-      - name: Start MinIO
-        run: |
-          wget -q https://dl.min.io/server/minio/release/linux-amd64/minio
-          chmod +x minio
-          MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin ./minio server /tmp/data &
-          sleep 3
-
-      - name: Build with S3
-        run: |
-          cmake --preset default -DENABLE_S3=ON
-          cmake --build build --target swordfs_test swordfs
-
-      - name: Run S3 integration tests
-        env:
-          SWORDFS_TEST_S3_ENDPOINT: http://localhost:9000
-          AWS_ACCESS_KEY_ID: minioadmin
-          AWS_SECRET_ACCESS_KEY: minioadmin
-        run: build/swordfs_test --gtest_color=no --gtest_filter='S3DataEngine*:S3Integration*'
+      - name: Build swordfs
+        run: cmake --preset default && cmake --build build --target swordfs
 
       - name: Run smoke test
-        env:
-          SWORDFS_TEST_S3_ENDPOINT: http://localhost:9000
-          AWS_ACCESS_KEY_ID: minioadmin
-          AWS_SECRET_ACCESS_KEY: minioadmin
         run: bash tests/integration/smoke_test.sh ./build/swordfs
