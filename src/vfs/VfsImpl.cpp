@@ -1,7 +1,7 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include "fuse/VfsImpl.hpp"
+#include "vfs/VfsImpl.hpp"
 
 #include <dirent.h>
 #include <folly/fibers/FiberManagerInternal.h>
@@ -13,6 +13,8 @@
 #include "utils/Context.hpp"
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
+#include "vfs/FileHandleManager.hpp"
+#include "vfs/FileReadWriter.hpp"
 #include "volume/VolumeImpl.hpp"
 
 #define FUSE_USE_VERSION 312
@@ -30,48 +32,14 @@ using namespace swordfs::config;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::SwordFsEntry;
 
-namespace swordfs::fuse {
+namespace swordfs::vfs {
 
 VfsImpl::VfsImpl() = default;
 
 VfsImpl::~VfsImpl() = default;
 
-void VfsImpl::Bind(std::unique_ptr<volume::VolumeImpl> vol) {
+void VfsImpl::Init(std::unique_ptr<volume::VolumeImpl> vol) {
   vol_ = std::move(vol);
-  chunk_mgr_ = std::make_unique<chunk::ChunkManager>(
-      vol_->meta_engine(), vol_->data_engine());
-}
-
-void VfsImpl::FuseInit(void* userdata, struct fuse_conn_info* conn) {
-  (void)userdata;
-  conn->no_interrupt = 1;
-  conn->max_write = kMaxWriteSize;
-  conn->max_readahead = kMaxReadAheadSize;
-  conn->time_gran = kTimeGran;
-
-  // Enable features (only if the kernel supports them).
-  if (conn->capable & FUSE_CAP_WRITEBACK_CACHE)
-    fuse_set_feature_flag(conn, FUSE_CAP_WRITEBACK_CACHE);
-  if (conn->capable & FUSE_CAP_SPLICE_READ)
-    fuse_set_feature_flag(conn, FUSE_CAP_SPLICE_READ);
-  if (conn->capable & FUSE_CAP_READDIRPLUS)
-    fuse_set_feature_flag(conn, FUSE_CAP_READDIRPLUS);
-  if (conn->capable & FUSE_CAP_ASYNC_READ)
-    fuse_set_feature_flag(conn, FUSE_CAP_ASYNC_READ);
-  if (conn->capable & FUSE_CAP_ATOMIC_O_TRUNC)
-    fuse_set_feature_flag(conn, FUSE_CAP_ATOMIC_O_TRUNC);
-  if (conn->capable & FUSE_CAP_DONT_MASK)
-    fuse_set_feature_flag(conn, FUSE_CAP_DONT_MASK);
-
-  // Explicitly disable splice write — write_buf is not yet implemented.
-  fuse_unset_feature_flag(conn, FUSE_CAP_SPLICE_WRITE);
-
-  SWORDFS_LOG_INFO << "SwordFS filesystem initialized (mount OK)";
-}
-
-void VfsImpl::FuseDestroy(void* userdata) {
-  (void)userdata;
-  SWORDFS_LOG_INFO << "SwordFS filesystem unmounted";
 }
 
 void VfsImpl::Lookup(fuse_req_t req, fuse_ino_t parent, const char* name) {
@@ -204,14 +172,13 @@ void VfsImpl::Open(fuse_req_t req, fuse_ino_t ino,
     fuse_reply_err(req, status.ToErrno());
     return;
   }
+  FileHandleManager::Instance().Open(
+      fh, std::make_unique<vfs::FileReadWriter>(
+              vol_->meta_engine(), vol_->data_engine(), ino));
   fi->fh = fh;
   SWORDFS_LOG_DEBUG << "Open: ino=" << ino << " fh=" << fh;
   fuse_reply_open(req, fi);
 }
-
-// ────────────────────────────────────────────────────────────────
-// Read / Write — delegated to ChunkManager
-// ────────────────────────────────────────────────────────────────
 
 void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                    uint64_t fh) {
@@ -219,11 +186,19 @@ void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
   (void)fh;
 
   auto buf = folly::IOBuf::create(size);
-  Status status = chunk_mgr_->Read(ino, size, off, buf.get());
-  if (!status.ok()) {
+  auto rw = FileHandleManager::Instance().Find(fh);
+  Status st;
+  if (rw) {
+    st = rw->Read(size, off, buf.get());
+  } else {
+    // No open handle — read from storage only.
+    vfs::FileReadWriter tmp(vol_->meta_engine(), vol_->data_engine(), ino);
+    st = tmp.Read(size, off, buf.get());
+  }
+  if (!st.ok()) {
     SWORDFS_LOG_ERROR << "Read failed: ino=" << ino << " offset=" << off
-                      << " — " << status.message();
-    fuse_reply_err(req, status.ToErrno());
+                      << " — " << st.message();
+    fuse_reply_err(req, st.ToErrno());
     return;
   }
 
@@ -237,10 +212,15 @@ void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
                     size_t size, off_t off, uint64_t fh) {
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
 
-  Status st = chunk_mgr_->Write(fh, ino, buf, size, off);
+  auto rw = FileHandleManager::Instance().Find(fh);
+  if (!rw) {
+    fuse_reply_err(req, EBADF);
+    return;
+  }
+  Status st = rw->Write(buf, size, off);
   if (!st.ok()) {
-    SWORDFS_LOG_ERROR << "Write: chunk_mgr write failed (ino=" << ino
-                      << ") — " << st.message();
+    SWORDFS_LOG_ERROR << "Write failed: ino=" << ino << " offset=" << off
+                      << " — " << st.message();
     fuse_reply_err(req, st.ToErrno());
     return;
   }
@@ -251,7 +231,8 @@ void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
 void VfsImpl::Flush(fuse_req_t req, fuse_ino_t ino,
                     uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Flush: ino=" << ino << " fh=" << fh;
-  Status st = chunk_mgr_->Flush(fh);
+  auto rw = FileHandleManager::Instance().Find(fh);
+  Status st = rw ? rw->Flush() : Status::OK();
   fuse_reply_err(req, st.ok() ? 0 : st.ToErrno());
 }
 
@@ -260,15 +241,9 @@ void VfsImpl::Release(fuse_req_t req, fuse_ino_t ino,
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
 
   // Flush any remaining buffered data before releasing.
-  Status st = chunk_mgr_->Release(fh);
-  if (!st.ok()) {
-    SWORDFS_LOG_ERROR << "Release: flush failed for fh=" << fh
-                      << " — " << st.message();
-  }
+  FileHandleManager::Instance().Release(fh);
 
-  chunk_mgr_->Release(fh);
-
-  st = vol_->meta_engine()->Release(fh);
+  Status st = vol_->meta_engine()->Release(fh);
   if (!st.ok()) {
     SWORDFS_LOG_ERROR << "Release FAILED: ino=" << ino << " fh=" << fh
                       << " — " << st.message();
@@ -282,7 +257,8 @@ void VfsImpl::Fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
                     uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Fsync: ino=" << ino << " datasync=" << datasync
                     << " fh=" << fh;
-  Status st = chunk_mgr_->Flush(fh);
+  auto rw = FileHandleManager::Instance().Find(fh);
+  Status st = rw ? rw->Flush() : Status::OK();
   fuse_reply_err(req, st.ok() ? 0 : st.ToErrno());
 }
 
@@ -559,4 +535,4 @@ void VfsImpl::Statx(fuse_req_t req, fuse_ino_t ino, int flags, int mask,
   fuse_reply_err(req, ENOSYS);
 }
 
-}  // namespace swordfs::fuse
+}  // namespace swordfs::vfs

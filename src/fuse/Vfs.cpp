@@ -8,17 +8,20 @@
 #include <string>
 #include <vector>
 
-#include "fuse/VfsImpl.hpp"
+#include "fuse/Limits.hpp"
+#include "vfs/VfsImpl.hpp"
 #include "utils/FiberRuntime.hpp"
 #include "utils/Logging.hpp"
 #include "volume/VolumeImpl.hpp"
+
+using swordfs::vfs::VfsImpl;
 
 namespace swordfs::fuse {
 
 VfsImpl* VfsHookFactory::vfs_ = new VfsImpl();
 
 void VfsHookFactory::BindVolume(std::unique_ptr<volume::VolumeImpl> vol) {
-  vfs_->Bind(std::move(vol));
+  vfs_->Init(std::move(vol));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -30,13 +33,34 @@ void VfsHookFactory::SwordFsInit(void* userdata,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   // Initialise per-thread fiber runtime.
   ::swordfs::utils::InitFiberRuntime();
-  vfs_->FuseInit(userdata, conn);
+  (void)userdata;
+  conn->no_interrupt = 1;
+  conn->max_write = kMaxWriteSize;
+  conn->max_readahead = kMaxReadAheadSize;
+  conn->time_gran = kTimeGran;
+
+  if (conn->capable & FUSE_CAP_WRITEBACK_CACHE)
+    fuse_set_feature_flag(conn, FUSE_CAP_WRITEBACK_CACHE);
+  if (conn->capable & FUSE_CAP_SPLICE_READ)
+    fuse_set_feature_flag(conn, FUSE_CAP_SPLICE_READ);
+  if (conn->capable & FUSE_CAP_READDIRPLUS)
+    fuse_set_feature_flag(conn, FUSE_CAP_READDIRPLUS);
+  if (conn->capable & FUSE_CAP_ASYNC_READ)
+    fuse_set_feature_flag(conn, FUSE_CAP_ASYNC_READ);
+  if (conn->capable & FUSE_CAP_ATOMIC_O_TRUNC)
+    fuse_set_feature_flag(conn, FUSE_CAP_ATOMIC_O_TRUNC);
+  if (conn->capable & FUSE_CAP_DONT_MASK)
+    fuse_set_feature_flag(conn, FUSE_CAP_DONT_MASK);
+
+  fuse_unset_feature_flag(conn, FUSE_CAP_SPLICE_WRITE);
+
+  SWORDFS_LOG_INFO << "SwordFS filesystem initialized (mount OK)";
 }
 
 void VfsHookFactory::SwordFsDestroy(void* userdata) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  vfs_->FuseDestroy(userdata);
-  // Tear down per-thread fiber runtime.
+  (void)userdata;
+  SWORDFS_LOG_INFO << "SwordFS filesystem unmounted";
   ::swordfs::utils::ShutdownFiberRuntime();
 }
 
@@ -435,7 +459,7 @@ void VfsHookFactory::SwordFsStatx(fuse_req_t req, fuse_ino_t ino, int flags,
                                   int mask, struct fuse_file_info* fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, flags, mask, fi] { vfs->Statx(req, ino, flags, mask, fi); });
+      [v = vfs_, req, ino, flags, mask, fi] { v->Statx(req, ino, flags, mask, fi); });
 }
 
 // Operation table

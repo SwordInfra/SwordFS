@@ -42,41 +42,25 @@ class ChunkManager {
   // Write path
   // ──────────────────────────────────────────────────────────────
 
-  /// Append |size| bytes from |data| at file offset |off|.  When the
-  /// current chunk fills up it is automatically sealed and a new
-  /// chunk is created for the remainder.
-  Status Write(uint64_t fh, InodeID ino, const char* data, size_t size,
-               off_t off);
+  /// Get or create the chunk covering file offset |off|.
+  Chunk& GetOrCreateChunk(uint64_t fh, InodeID ino, off_t off);
 
-  /// Seal and upload ALL chunks for |fh|.  Called on flush / fsync /
-  /// release.
+  /// Seal all writing chunks and upload them to the data engine.
   Status Flush(uint64_t fh);
 
-  /// Upload sealed chunks and discard the chunk chain (called on
-  /// file release).  The meta engine's Release is still the caller's
-  /// responsibility.
+  /// Flush and then discard the chunk chain.
   Status Release(uint64_t fh);
 
   // ──────────────────────────────────────────────────────────────
   // Read path
   // ──────────────────────────────────────────────────────────────
 
-  /// Read up to |size| bytes starting at |off|.
-  ///
-  /// Unflushed write-buffer data takes precedence over stored chunks.
-  /// Appends the resulting data to |out|.  Returns OK on success
-  /// (including short reads / EOF).
-  Status Read(InodeID ino, size_t size, off_t off, folly::IOBuf* out);
+  /// Find the chunk that contains |off| for the given inode, or
+  /// nullptr if no in-flight chunk covers that offset.
+  Chunk* FindChunk(InodeID ino, off_t off);
 
  private:
-  /// Get or create the chunk deque for |fh|.
   std::deque<Chunk>& GetChunks(uint64_t fh);
-
-  /// Upload a single sealed chunk to the data engine.
-  Status UploadChunk(Chunk& c);
-
-  /// Find the chunk that contains |off|, or nullptr.
-  Chunk* FindChunk(InodeID ino, off_t off);
 
   metadata::IMetaEngine* meta_;  // non-owning
   storage::IDataEngine* data_;   // non-owning

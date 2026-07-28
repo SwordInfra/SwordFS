@@ -11,7 +11,7 @@
 
 #include <memory>
 
-#include "fuse/VfsImpl.hpp"
+#include "vfs/VfsImpl.hpp"
 #define FUSE_USE_VERSION 312
 #include <fuse_lowlevel.h>
 
@@ -27,6 +27,7 @@ namespace swordfs::fuse {
 /// VfsImpl instance bound to a VolumeImpl.
 class VfsHookFactory {
  public:
+  using VfsImpl = swordfs::vfs::VfsImpl;
   /// Return the fully-populated fuse_lowlevel_ops table.
   static const struct fuse_lowlevel_ops& get_ops();
 

@@ -16,6 +16,8 @@
 #include "metadata/Meta.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Status.hpp"
+#include "vfs/FileHandleManager.hpp"
+#include "vfs/FileReadWriter.hpp"
 
 using swordfs::chunk::ChunkManager;
 using swordfs::metadata::IMetaEngine;
@@ -162,14 +164,27 @@ class ChunkManagerReadTest : public ::testing::Test {
     mock_data_ = std::make_unique<MockDataEngine>();
     mock_data_->set_chunk_size(kChunkSize);
     mock_meta_ = std::make_unique<MockMetaEngine>();
-    chunk_mgr_ = std::make_unique<ChunkManager>(mock_meta_.get(),
-                                                mock_data_.get());
+    // Release any lingering handle from a previous test so the singleton
+    // does not leak state between tests that share the same fh.
+    swordfs::vfs::FileHandleManager::Instance().Release(kFh);
+  }
+
+  void TearDown() override {
+    swordfs::vfs::FileHandleManager::Instance().Release(kFh);
   }
 
   void ExpectRead(InodeID ino, size_t size, off_t off,
                   const std::string& expected) {
     auto out = folly::IOBuf::create(kChunkSize);
-    Status st = chunk_mgr_->Read(ino, size, off, out.get());
+    // Read through the opened handle so in-flight chunks are visible.
+    auto rw = swordfs::vfs::FileHandleManager::Instance().Find(kFh);
+    Status st;
+    if (rw) {
+      st = rw->Read(size, off, out.get());
+    } else {
+      swordfs::vfs::FileReadWriter tmp(mock_meta_.get(), mock_data_.get(), ino);
+      st = tmp.Read(size, off, out.get());
+    }
     EXPECT_TRUE(st.ok()) << st.message();
     std::string_view sv(reinterpret_cast<const char*>(out->data()),
                         out->length());
@@ -180,7 +195,6 @@ class ChunkManagerReadTest : public ::testing::Test {
   static constexpr uint64_t kFh = 1;
   std::unique_ptr<MockDataEngine> mock_data_;
   std::unique_ptr<MockMetaEngine> mock_meta_;
-  std::unique_ptr<ChunkManager> chunk_mgr_;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -262,9 +276,10 @@ TEST_F(ChunkManagerReadTest, ZeroSizeRequest) {
 }
 
 TEST_F(ChunkManagerReadTest, NoDataEngine) {
-  ChunkManager no_data(mock_meta_.get(), nullptr);
-  auto out = folly::IOBuf::create(0);
-  Status st = no_data.Read(42, 100, 0, out.get());
+  ChunkManager no_cm(mock_meta_.get(), nullptr);
+  auto out = folly::IOBuf::create(256);
+  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), nullptr, 42);
+  Status st = rw.Read(100, 0, out.get());
   EXPECT_FALSE(st.ok());
 }
 
@@ -277,26 +292,28 @@ TEST_F(ChunkManagerReadTest, EmptyOutputOnNonexistentChunk) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(ChunkManagerReadTest, ReadFromUnflushedBufferOnly) {
-  // Write data to buffer (all fits in one chunk, no auto-flush).
-  Status st = chunk_mgr_->Write(kFh, 42, Repeat('X', 500).data(), 500, 0);
-  EXPECT_TRUE(st.ok());
+  auto rw = std::make_unique<swordfs::vfs::FileReadWriter>(mock_meta_.get(), mock_data_.get(), 42);
+  auto* rw_ptr = rw.get();
+  rw_ptr->Write(Repeat('X', 500).data(), 500, 0);
+  swordfs::vfs::FileHandleManager::Instance().Open(kFh, std::move(rw));
   ExpectRead(42, 500, 0, Repeat('X', 500));
 }
 
 TEST_F(ChunkManagerReadTest, ReadFromUnflushedBufferWithOffset) {
-  chunk_mgr_->Write(kFh, 42, Repeat('X', 500).data(), 500, 0);
+  auto rw = std::make_unique<swordfs::vfs::FileReadWriter>(mock_meta_.get(), mock_data_.get(), 42);
+  auto* rw_ptr = rw.get();
+  rw_ptr->Write(Repeat('X', 500).data(), 500, 0);
+  swordfs::vfs::FileHandleManager::Instance().Open(kFh, std::move(rw));
   ExpectRead(42, 200, 100, Repeat('X', 200));
 }
 
 TEST_F(ChunkManagerReadTest, ReadPastEndOfBufferToStorage) {
-  // Chunk 0 flushed to storage, chunk 1 partially in buffer.
   mock_data_->InjectChunk("42/0", Repeat('A', kChunkSize));
-  // Write chunk 0 worth first → auto-flushes to storage.
-  chunk_mgr_->Write(kFh, 42, Repeat('B', kChunkSize).data(), kChunkSize, 0);
-  // Now write partial chunk 1 → stays in buffer.
-  chunk_mgr_->Write(kFh, 42, Repeat('B', 300).data(), 300, kChunkSize);
-
-  // Read starting in chunk 0, spanning into buffer.
+  auto rw = std::make_unique<swordfs::vfs::FileReadWriter>(mock_meta_.get(), mock_data_.get(), 42);
+  auto* rw_ptr = rw.get();
+  rw_ptr->Write(Repeat('B', kChunkSize).data(), kChunkSize, 0);
+  rw_ptr->Write(Repeat('B', 300).data(), 300, kChunkSize);
+  swordfs::vfs::FileHandleManager::Instance().Open(kFh, std::move(rw));
   std::string expected =
       Repeat('B', kChunkSize - 900) +
       Repeat('B', 400 - (kChunkSize - 900));
@@ -305,21 +322,21 @@ TEST_F(ChunkManagerReadTest, ReadPastEndOfBufferToStorage) {
 
 TEST_F(ChunkManagerReadTest, ReadBufferTakesPrecedenceOverStorage) {
   mock_data_->InjectChunk("42/0", Repeat('S', kChunkSize));
-  // Write to buffer — same offset range as chunk 0.
-  chunk_mgr_->Write(kFh, 42, Repeat('B', 200).data(), 200, 0);
-
-  // Buffer data should take precedence.
+  auto rw = std::make_unique<swordfs::vfs::FileReadWriter>(mock_meta_.get(), mock_data_.get(), 42);
+  auto* rw_ptr = rw.get();
+  rw_ptr->Write(Repeat('B', 200).data(), 200, 0);
+  swordfs::vfs::FileHandleManager::Instance().Open(kFh, std::move(rw));
   std::string expected = Repeat('B', 200) + Repeat('S', 100);
   ExpectRead(42, 300, 0, expected);
 }
 
 TEST_F(ChunkManagerReadTest, ReadEntirelyBeforeBuffer) {
   mock_data_->InjectChunk("42/0", Repeat('A', kChunkSize));
-  // Write chunk 0 → auto-flushes, then write partial chunk 1.
-  chunk_mgr_->Write(kFh, 42, Repeat('B', kChunkSize).data(), kChunkSize, 0);
-  chunk_mgr_->Write(kFh, 42, Repeat('B', 200).data(), 200, kChunkSize);
-
-  // Read entirely within chunk 0 — comes from storage.
+  auto rw = std::make_unique<swordfs::vfs::FileReadWriter>(mock_meta_.get(), mock_data_.get(), 42);
+  auto* rw_ptr = rw.get();
+  rw_ptr->Write(Repeat('B', kChunkSize).data(), kChunkSize, 0);
+  rw_ptr->Write(Repeat('B', 200).data(), 200, kChunkSize);
+  swordfs::vfs::FileHandleManager::Instance().Open(kFh, std::move(rw));
   ExpectRead(42, 100, 500, Repeat('B', 100));
 }
 
@@ -333,8 +350,6 @@ class ChunkManagerFlushTest : public ::testing::Test {
     mock_data_ = std::make_unique<MockDataEngine>();
     mock_data_->set_chunk_size(kChunkSize);
     mock_meta_ = std::make_unique<MockMetaEngine>();
-    chunk_mgr_ = std::make_unique<ChunkManager>(mock_meta_.get(),
-                                                mock_data_.get());
   }
 
   static constexpr size_t kChunkSize = 256;
@@ -343,7 +358,6 @@ class ChunkManagerFlushTest : public ::testing::Test {
 
   std::unique_ptr<MockDataEngine> mock_data_;
   std::unique_ptr<MockMetaEngine> mock_meta_;
-  std::unique_ptr<ChunkManager> chunk_mgr_;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -351,16 +365,18 @@ class ChunkManagerFlushTest : public ::testing::Test {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(ChunkManagerFlushTest, NoData) {
-  Status st = chunk_mgr_->Flush(kFh);
+  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), mock_data_.get(), kIno);
+  Status st = rw.Flush();
   EXPECT_TRUE(st.ok());
   EXPECT_EQ(mock_data_->chunk_count(), 0);
 }
 
 TEST_F(ChunkManagerFlushTest, FlushUploadsPartialChunk) {
-  chunk_mgr_->Write(kFh, kIno, Repeat('Y', kChunkSize / 2).data(),
-                    kChunkSize / 2, 0);
+  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), mock_data_.get(), kIno);
+  rw.Write(Repeat('Y', kChunkSize / 2).data(),
+           kChunkSize / 2, 0);
 
-  Status st = chunk_mgr_->Flush(kFh);
+  Status st = rw.Flush();
   EXPECT_TRUE(st.ok());
   EXPECT_EQ(mock_data_->chunk_count(), 1);
   EXPECT_EQ(mock_data_->get_chunk_data("42/0"),
@@ -368,13 +384,14 @@ TEST_F(ChunkManagerFlushTest, FlushUploadsPartialChunk) {
 }
 
 TEST_F(ChunkManagerFlushTest, FlushUploadsFullChunks) {
-  chunk_mgr_->Write(kFh, kIno, Repeat('X', kChunkSize * 2).data(),
-                    kChunkSize * 2, 0);
+  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), mock_data_.get(), kIno);
+  rw.Write(Repeat('X', kChunkSize * 2).data(),
+           kChunkSize * 2, 0);
 
   // Chunks are sealed but not uploaded until Flush.
   EXPECT_EQ(mock_data_->chunk_count(), 0);
 
-  Status st = chunk_mgr_->Flush(kFh);
+  Status st = rw.Flush();
   EXPECT_TRUE(st.ok());
   EXPECT_EQ(mock_data_->chunk_count(), 2);
   EXPECT_EQ(mock_data_->get_chunk_data("42/0"), Repeat('X', kChunkSize));
@@ -383,9 +400,10 @@ TEST_F(ChunkManagerFlushTest, FlushUploadsFullChunks) {
 
 TEST_F(ChunkManagerFlushTest, FlushUploadsFullPlusRemainder) {
   size_t total = kChunkSize * 2 + 10;
-  chunk_mgr_->Write(kFh, kIno, Repeat('Z', total).data(), total, 0);
+  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), mock_data_.get(), kIno);
+  rw.Write(Repeat('Z', total).data(), total, 0);
 
-  Status st = chunk_mgr_->Flush(kFh);
+  Status st = rw.Flush();
   EXPECT_TRUE(st.ok());
   EXPECT_EQ(mock_data_->chunk_count(), 3);
   EXPECT_EQ(mock_data_->get_chunk_data("42/0"), Repeat('Z', kChunkSize));
@@ -398,9 +416,10 @@ TEST_F(ChunkManagerFlushTest, FlushUploadsFullPlusRemainder) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(ChunkManagerFlushTest, ChunkIndexIncrementsCorrectly) {
-  chunk_mgr_->Write(kFh, kIno, Repeat('X', kChunkSize * 3).data(),
-                    kChunkSize * 3, 0);
-  chunk_mgr_->Flush(kFh);
+  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), mock_data_.get(), kIno);
+  rw.Write(Repeat('X', kChunkSize * 3).data(),
+           kChunkSize * 3, 0);
+  rw.Flush();
 
   for (int i = 0; i < 3; i++) {
     std::string expected_key =
@@ -419,10 +438,10 @@ TEST_F(ChunkManagerFlushTest, DataIntegrityAcrossChunks) {
   std::string chunk_b = Repeat('B', kChunkSize);
   std::string leftover = Repeat('C', 10);
 
-  chunk_mgr_->Write(kFh, kIno,
-                    (chunk_a + chunk_b + leftover).data(),
-                    chunk_a.size() + chunk_b.size() + leftover.size(), 0);
-  chunk_mgr_->Flush(kFh);
+  std::string all = chunk_a + chunk_b + leftover;
+  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), mock_data_.get(), kIno);
+  rw.Write(all.data(), all.size(), 0);
+  rw.Flush();
 
   EXPECT_EQ(mock_data_->get_chunk_data("42/0"), chunk_a);
   EXPECT_EQ(mock_data_->get_chunk_data("42/1"), chunk_b);

@@ -12,8 +12,8 @@ utils::Status Chunk::Write(const char* data, size_t size, off_t write_offset) {
 
 std::string_view Chunk::FlushData() const { return wb_.FlushData(); }
 
-utils::Status Chunk::CopyOut(off_t off, size_t len,
-                             folly::IOBuf* out) const {
+utils::Status Chunk::Read(off_t off, size_t len,
+                          folly::IOBuf* out) const {
   return wb_.CopyOut(off, len, out);
 }
 

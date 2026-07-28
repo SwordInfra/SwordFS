@@ -24,7 +24,7 @@ class Chunk {
   };
 
   /// Create a chunk ready to accept writes.
-  Chunk(uint32_t index, metadata::InodeID ino, size_t max_chunk_size)
+  Chunk(metadata::InodeID ino, uint32_t index, size_t max_chunk_size)
       : ino_(ino), max_chunk_size_(max_chunk_size), wb_(max_chunk_size), index_(index) {}
 
   // ──────────────────────────────────────────────────────────────
@@ -45,9 +45,10 @@ class Chunk {
   // Read-through support
   // ──────────────────────────────────────────────────────────────
 
-  /// Copy up to |len| bytes starting at |off| (relative to chunk
-  /// start) into |out|.  Returns the number of bytes copied.
-  utils::Status CopyOut(off_t off, size_t len, folly::IOBuf* out) const;
+  /// Read up to |len| bytes starting at chunk-relative |off| into
+  /// |out|.  Only valid while the chunk holds a WriteBuf (i.e.
+  /// before it is removed from ChunkManager after upload).
+  utils::Status Read(off_t off, size_t len, folly::IOBuf* out) const;
 
   // ──────────────────────────────────────────────────────────────
   // Accessors
