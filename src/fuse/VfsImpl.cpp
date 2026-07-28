@@ -218,8 +218,8 @@ void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
   (void)fh;
 
-  std::string data;
-  Status status = chunk_mgr_->Read(ino, size, off, &data);
+  auto buf = folly::IOBuf::create(size);
+  Status status = chunk_mgr_->Read(ino, size, off, buf.get());
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Read failed: ino=" << ino << " offset=" << off
                       << " — " << status.message();
@@ -228,8 +228,9 @@ void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
   }
 
   SWORDFS_LOG_DEBUG << "Read: ino=" << ino << " offset=" << off
-                    << " nread=" << data.size();
-  fuse_reply_buf(req, data.data(), data.size());
+                    << " nread=" << buf->length();
+  fuse_reply_buf(req, reinterpret_cast<const char*>(buf->data()),
+                 buf->length());
 }
 
 void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
@@ -250,7 +251,7 @@ void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
 void VfsImpl::Flush(fuse_req_t req, fuse_ino_t ino,
                     uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Flush: ino=" << ino << " fh=" << fh;
-  Status st = chunk_mgr_->Flush(fh, /*force=*/true);
+  Status st = chunk_mgr_->Flush(fh);
   fuse_reply_err(req, st.ok() ? 0 : st.ToErrno());
 }
 
@@ -259,13 +260,13 @@ void VfsImpl::Release(fuse_req_t req, fuse_ino_t ino,
   folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
 
   // Flush any remaining buffered data before releasing.
-  Status st = chunk_mgr_->Flush(fh, /*force=*/true);
+  Status st = chunk_mgr_->Release(fh);
   if (!st.ok()) {
     SWORDFS_LOG_ERROR << "Release: flush failed for fh=" << fh
                       << " — " << st.message();
   }
 
-  chunk_mgr_->RemoveBuf(fh);
+  chunk_mgr_->Release(fh);
 
   st = vol_->meta_engine()->Release(fh);
   if (!st.ok()) {
@@ -281,7 +282,7 @@ void VfsImpl::Fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
                     uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Fsync: ino=" << ino << " datasync=" << datasync
                     << " fh=" << fh;
-  Status st = chunk_mgr_->Flush(fh, /*force=*/true);
+  Status st = chunk_mgr_->Flush(fh);
   fuse_reply_err(req, st.ok() ? 0 : st.ToErrno());
 }
 
