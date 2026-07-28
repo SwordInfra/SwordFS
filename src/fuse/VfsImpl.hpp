@@ -8,7 +8,6 @@
 #pragma once
 
 #define FUSE_USE_VERSION 312
-#include <folly/container/F14Map.h>
 #include <fuse_lowlevel.h>
 
 #include <cstdint>
@@ -16,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "chunk/ChunkManager.hpp"
 #include "utils/Status.hpp"
 
 namespace swordfs {
@@ -23,10 +23,6 @@ namespace swordfs {
 namespace volume {
 class VolumeImpl;
 }
-
-namespace metadata {
-using InodeID = uint64_t;
-}  // namespace metadata
 
 namespace fuse {
 
@@ -109,36 +105,8 @@ class VfsImpl {
              struct fuse_file_info* fi);
 
  protected:
-  // ────────────────────────────────────────────────────────────────
-  // Write buffer — accumulates writes until max_chunk_size, then
-  // flushes to the data engine as a single chunk.
-  // ────────────────────────────────────────────────────────────────
-  struct WriteBuf {
-    std::vector<char> data;
-    size_t max_chunk_size = 64 * 1024 * 1024;  // 64 MiB default
-    uint64_t ino = 0;
-    uint32_t next_chunk = 0;
-    off_t max_write_end = 0;  // highest byte offset written so far
-
-    bool Empty() const { return data.empty(); }
-    void Reset() {
-      data.clear();
-      next_chunk = 0;
-      max_write_end = 0;
-    }
-  };
-
-  swordfs::utils::Status FlushWriteBuf(uint64_t fh, bool force);
-
-  /// Core read logic — reads up to |size| bytes starting at |off|,
-  /// potentially spanning multiple chunks.  Returns the data and a
-  /// Status so that unit tests can exercise the logic without FUSE.
-  swordfs::utils::Status HandleRead(
-      swordfs::metadata::InodeID ino, size_t size, off_t off,
-      std::string* out);
-
   std::unique_ptr<volume::VolumeImpl> vol_;
-  folly::F14FastMap<uint64_t, WriteBuf> write_bufs_;
+  std::unique_ptr<chunk::ChunkManager> chunk_mgr_;
 };
 
 }  // namespace fuse
