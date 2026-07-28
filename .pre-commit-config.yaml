@@ -1,0 +1,10 @@
+# SwordFS pre-commit hooks
+# Install: pip install pre-commit && pre-commit install
+
+repos:
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v18.1.0
+    hooks:
+      - id: clang-format
+        files: \.(cpp|hpp|h)$
+        args: [--style=file, -i]
