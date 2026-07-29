@@ -4,7 +4,7 @@
 #include "vfs/VfsImpl.hpp"
 
 #include <dirent.h>
-#include <folly/fibers/FiberManagerInternal.h>
+#include <folly/fibers/FiberManager.h>
 
 #include "config/ConfigCenter.hpp"
 #include "fuse/Limits.hpp"
@@ -42,8 +42,14 @@ void VfsImpl::Init(std::unique_ptr<volume::VolumeImpl> vol) {
   vol_ = std::move(vol);
 }
 
-void VfsImpl::Lookup(fuse_req_t req, fuse_ino_t parent, const char* name) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+void VfsImpl::SetRequestContext(fuse_req_t req) {
+  auto &ctx = folly::fibers::local<SwordFsContext>();
+  ctx = SwordFsContext{fuse_req_ctx(req)};
+  ctx.vol = vol_.get();
+}
+
+void VfsImpl::Lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
+  SetRequestContext(req);
   InodeID child_ino;
   struct stat attr;
   Status status = vol_->meta_engine()->Lookup(parent, name, &child_ino,
@@ -61,13 +67,13 @@ void VfsImpl::Lookup(fuse_req_t req, fuse_ino_t parent, const char* name) {
 }
 
 void VfsImpl::Forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+  SetRequestContext(req);
   vol_->meta_engine()->Forget(ino, nlookup);
 }
 
 void VfsImpl::Getattr(fuse_req_t req, fuse_ino_t ino,
-                      struct fuse_file_info* fi) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+                      struct fuse_file_info *fi) {
+  SetRequestContext(req);
   (void)fi;
   struct stat attr;
   Status status = vol_->meta_engine()->GetAttr(ino, &attr);
@@ -78,9 +84,9 @@ void VfsImpl::Getattr(fuse_req_t req, fuse_ino_t ino,
   }
 }
 
-void VfsImpl::Setattr(fuse_req_t req, fuse_ino_t ino, struct stat* attr,
-                      int to_set, struct fuse_file_info* fi) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+void VfsImpl::Setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
+                      int to_set, struct fuse_file_info *fi) {
+  SetRequestContext(req);
   struct stat out_attr;
   Status status = vol_->meta_engine()->SetAttr(ino, attr, to_set,
                                                &out_attr);
@@ -97,7 +103,7 @@ void VfsImpl::Readlink(fuse_req_t req, fuse_ino_t ino) {
   fuse_reply_err(req, ENOSYS);
 }
 
-void VfsImpl::Mknod(fuse_req_t req, fuse_ino_t parent, const char* name,
+void VfsImpl::Mknod(fuse_req_t req, fuse_ino_t parent, const char *name,
                     mode_t mode, dev_t rdev) {
   (void)parent;
   (void)name;
@@ -106,9 +112,9 @@ void VfsImpl::Mknod(fuse_req_t req, fuse_ino_t parent, const char* name,
   fuse_reply_err(req, ENOSYS);
 }
 
-void VfsImpl::Mkdir(fuse_req_t req, fuse_ino_t parent, const char* name,
+void VfsImpl::Mkdir(fuse_req_t req, fuse_ino_t parent, const char *name,
                     mode_t mode) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+  SetRequestContext(req);
   InodeID child_ino;
   struct stat attr;
   Status status = vol_->meta_engine()->MkDir(parent, name, mode,
@@ -125,37 +131,37 @@ void VfsImpl::Mkdir(fuse_req_t req, fuse_ino_t parent, const char* name,
   fuse_reply_entry(req, &entry);
 }
 
-void VfsImpl::Unlink(fuse_req_t req, fuse_ino_t parent, const char* name) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+void VfsImpl::Unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
+  SetRequestContext(req);
   Status status = vol_->meta_engine()->Unlink(parent, name);
   fuse_reply_err(req, status.ToErrno());
 }
 
-void VfsImpl::Rmdir(fuse_req_t req, fuse_ino_t parent, const char* name) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+void VfsImpl::Rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
+  SetRequestContext(req);
   Status status = vol_->meta_engine()->RmDir(parent, name);
   fuse_reply_err(req, status.ToErrno());
 }
 
-void VfsImpl::Symlink(fuse_req_t req, const char* link, fuse_ino_t parent,
-                      const char* name) {
+void VfsImpl::Symlink(fuse_req_t req, const char *link, fuse_ino_t parent,
+                      const char *name) {
   (void)link;
   (void)parent;
   (void)name;
   fuse_reply_err(req, ENOSYS);
 }
 
-void VfsImpl::Rename(fuse_req_t req, fuse_ino_t parent, const char* name,
-                     fuse_ino_t newparent, const char* newname,
+void VfsImpl::Rename(fuse_req_t req, fuse_ino_t parent, const char *name,
+                     fuse_ino_t newparent, const char *newname,
                      unsigned int flags) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+  SetRequestContext(req);
   Status status = vol_->meta_engine()->Rename(parent, name, newparent,
                                               newname, flags);
   fuse_reply_err(req, status.ToErrno());
 }
 
 void VfsImpl::Link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent,
-                   const char* newname) {
+                   const char *newname) {
   (void)ino;
   (void)newparent;
   (void)newname;
@@ -163,65 +169,68 @@ void VfsImpl::Link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent,
 }
 
 void VfsImpl::Open(fuse_req_t req, fuse_ino_t ino,
-                   struct fuse_file_info* fi) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+                   struct fuse_file_info *fi) {
+  SetRequestContext(req);
   uint64_t fh;
   Status status = vol_->meta_engine()->Open(ino, &fh);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Open FAILED: ino=" << ino << " — " << status.message();
     fuse_reply_err(req, status.ToErrno());
     return;
+  } else {
+    SWORDFS_LOG_DEBUG << "Open: ino=" << ino << " fh=" << fh;
+    fi->fh = fh;
   }
-  FileHandleManager::Instance().Open(
-      fh, std::make_unique<vfs::FileReadWriter>(
-              vol_->meta_engine(), vol_->data_engine(), ino));
-  fi->fh = fh;
-  SWORDFS_LOG_DEBUG << "Open: ino=" << ino << " fh=" << fh;
+  status = FileHandleManager::Instance().Open(fh, vol_.get(), ino);
+  if (!status.ok()) {
+    SWORDFS_LOG_ERROR << "Open FAILED: ino=" << ino << " fh=" << fh
+                      << " — " << status.message();
+    fuse_reply_err(req, status.ToErrno());
+    return;
+  }
   fuse_reply_open(req, fi);
 }
 
 void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
                    uint64_t fh) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+  SetRequestContext(req);
   (void)fh;
 
   auto buf = folly::IOBuf::create(size);
   auto rw = FileHandleManager::Instance().Find(fh);
-  Status st;
-  if (rw) {
-    st = rw->Read(size, off, buf.get());
-  } else {
-    // No open handle — read from storage only.
-    vfs::FileReadWriter tmp(vol_->meta_engine(), vol_->data_engine(), ino);
-    st = tmp.Read(size, off, buf.get());
+  if (!rw) {
+    SWORDFS_LOG_ERROR << "Read: no handle for fh=" << fh;
+    fuse_reply_err(req, EBADF);
+    return;
   }
-  if (!st.ok()) {
+  Status status = rw->Read(size, off, buf.get());
+  if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Read failed: ino=" << ino << " offset=" << off
-                      << " — " << st.message();
-    fuse_reply_err(req, st.ToErrno());
+                      << " — " << status.message();
+    fuse_reply_err(req, status.ToErrno());
     return;
   }
 
   SWORDFS_LOG_DEBUG << "Read: ino=" << ino << " offset=" << off
                     << " nread=" << buf->length();
-  fuse_reply_buf(req, reinterpret_cast<const char*>(buf->data()),
+  fuse_reply_buf(req, reinterpret_cast<const char *>(buf->data()),
                  buf->length());
 }
 
-void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char* buf,
+void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char *buf,
                     size_t size, off_t off, uint64_t fh) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+  SetRequestContext(req);
 
   auto rw = FileHandleManager::Instance().Find(fh);
   if (!rw) {
     fuse_reply_err(req, EBADF);
     return;
   }
-  Status st = rw->Write(buf, size, off);
-  if (!st.ok()) {
+  Status status = rw->Write(buf, size, off);
+  if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Write failed: ino=" << ino << " offset=" << off
-                      << " — " << st.message();
-    fuse_reply_err(req, st.ToErrno());
+                      << " — " << status.message();
+    fuse_reply_err(req, status.ToErrno());
     return;
   }
 
@@ -232,25 +241,25 @@ void VfsImpl::Flush(fuse_req_t req, fuse_ino_t ino,
                     uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Flush: ino=" << ino << " fh=" << fh;
   auto rw = FileHandleManager::Instance().Find(fh);
-  Status st = rw ? rw->Flush() : Status::OK();
-  fuse_reply_err(req, st.ok() ? 0 : st.ToErrno());
+  Status status = rw ? rw->Flush() : Status::OK();
+  fuse_reply_err(req, status.ok() ? 0 : status.ToErrno());
 }
 
 void VfsImpl::Release(fuse_req_t req, fuse_ino_t ino,
                       uint64_t fh) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+  SetRequestContext(req);
 
   // Flush any remaining buffered data before releasing.
   FileHandleManager::Instance().Release(fh);
 
-  Status st = vol_->meta_engine()->Release(fh);
-  if (!st.ok()) {
+  Status status = vol_->meta_engine()->Release(fh);
+  if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Release FAILED: ino=" << ino << " fh=" << fh
-                      << " — " << st.message();
+                      << " — " << status.message();
   } else {
     SWORDFS_LOG_DEBUG << "Release: ino=" << ino << " fh=" << fh;
   }
-  fuse_reply_err(req, st.ToErrno());
+  fuse_reply_err(req, status.ToErrno());
 }
 
 void VfsImpl::Fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
@@ -258,13 +267,13 @@ void VfsImpl::Fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
   SWORDFS_LOG_DEBUG << "Fsync: ino=" << ino << " datasync=" << datasync
                     << " fh=" << fh;
   auto rw = FileHandleManager::Instance().Find(fh);
-  Status st = rw ? rw->Flush() : Status::OK();
-  fuse_reply_err(req, st.ok() ? 0 : st.ToErrno());
+  Status status = rw ? rw->Flush() : Status::OK();
+  fuse_reply_err(req, status.ok() ? 0 : status.ToErrno());
 }
 
 void VfsImpl::Opendir(fuse_req_t req, fuse_ino_t ino,
-                      struct fuse_file_info* fi) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+                      struct fuse_file_info *fi) {
+  SetRequestContext(req);
   uint64_t fh;
   Status status = vol_->meta_engine()->OpenDir(ino, &fh);
   if (!status.ok()) {
@@ -284,14 +293,14 @@ void VfsImpl::Opendir(fuse_req_t req, fuse_ino_t ino,
 template <typename F>
 static void ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
                           off_t off,
-                          swordfs::metadata::IMetaEngine* meta,
-                          F&& add_entry) {
+                          swordfs::metadata::IMetaEngine *meta,
+                          F &&add_entry) {
   using swordfs::metadata::SwordFsEntry;
 
   std::vector<SwordFsEntry> entries;
-  Status st = meta->ReadDir(ino, &entries);
-  if (!st.ok()) {
-    fuse_reply_err(req, st.ToErrno());
+  Status status = meta->ReadDir(ino, &entries);
+  if (!status.ok()) {
+    fuse_reply_err(req, status.ToErrno());
     return;
   }
 
@@ -307,7 +316,7 @@ static void ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
     cap += sizes[i];
   }
 
-  char* buf = static_cast<char*>(std::malloc(cap));
+  char *buf = static_cast<char *>(std::malloc(cap));
   if (!buf) {
     fuse_reply_err(req, ENOMEM);
     return;
@@ -329,13 +338,13 @@ static void ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
 }
 
 void VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
-                      off_t off, struct fuse_file_info* fi) {
+                      off_t off, struct fuse_file_info *fi) {
   (void)fi;
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+  SetRequestContext(req);
 
   ReaddirCommon(req, ino, size, off, vol_->meta_engine(),
-                [](fuse_req_t req, char* buf, size_t bufsize,
-                   const swordfs::metadata::SwordFsEntry& e, off_t off) {
+                [](fuse_req_t req, char *buf, size_t bufsize,
+                   const swordfs::metadata::SwordFsEntry &e, off_t off) {
                   struct stat st = {};
                   st.st_ino = e.ino;
                   st.st_mode = e.type << 12;
@@ -344,15 +353,15 @@ void VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 }
 
 void VfsImpl::Releasedir(fuse_req_t req, fuse_ino_t ino,
-                         struct fuse_file_info* fi) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+                         struct fuse_file_info *fi) {
+  SetRequestContext(req);
   Status status = vol_->meta_engine()->ReleaseDir(fi->fh);
   (void)ino;
   fuse_reply_err(req, status.ToErrno());
 }
 
 void VfsImpl::Fsyncdir(fuse_req_t req, fuse_ino_t ino, int datasync,
-                       struct fuse_file_info* fi) {
+                       struct fuse_file_info *fi) {
   (void)ino;
   (void)datasync;
   (void)fi;
@@ -361,7 +370,7 @@ void VfsImpl::Fsyncdir(fuse_req_t req, fuse_ino_t ino, int datasync,
 
 void VfsImpl::Statfs(fuse_req_t req, fuse_ino_t ino) {
   (void)ino;
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+  SetRequestContext(req);
   struct statvfs stbuf;
   Status status = vol_->meta_engine()->StatFs(&stbuf);
   if (!status.ok()) {
@@ -371,8 +380,8 @@ void VfsImpl::Statfs(fuse_req_t req, fuse_ino_t ino) {
   }
 }
 
-void VfsImpl::Setxattr(fuse_req_t req, fuse_ino_t ino, const char* name,
-                       const char* value, size_t size, int flags) {
+void VfsImpl::Setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
+                       const char *value, size_t size, int flags) {
   (void)ino;
   (void)name;
   (void)value;
@@ -381,7 +390,7 @@ void VfsImpl::Setxattr(fuse_req_t req, fuse_ino_t ino, const char* name,
   fuse_reply_err(req, ENOSYS);
 }
 
-void VfsImpl::Getxattr(fuse_req_t req, fuse_ino_t ino, const char* name,
+void VfsImpl::Getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
                        size_t size) {
   (void)ino;
   (void)name;
@@ -395,21 +404,21 @@ void VfsImpl::Listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
   fuse_reply_err(req, ENOSYS);
 }
 
-void VfsImpl::Removexattr(fuse_req_t req, fuse_ino_t ino, const char* name) {
+void VfsImpl::Removexattr(fuse_req_t req, fuse_ino_t ino, const char *name) {
   (void)ino;
   (void)name;
   fuse_reply_err(req, ENOSYS);
 }
 
 void VfsImpl::Access(fuse_req_t req, fuse_ino_t ino, int mask) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+  SetRequestContext(req);
   Status status = vol_->meta_engine()->Access(ino, mask);
   fuse_reply_err(req, status.ToErrno());
 }
 
-void VfsImpl::Create(fuse_req_t req, fuse_ino_t parent, const char* name,
-                     mode_t mode, struct fuse_file_info* fi) {
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+void VfsImpl::Create(fuse_req_t req, fuse_ino_t parent, const char *name,
+                     mode_t mode, struct fuse_file_info *fi) {
+  SetRequestContext(req);
   InodeID child_ino;
   struct stat attr;
   Status status = vol_->meta_engine()->Create(parent, name, mode, &child_ino, &attr);
@@ -420,11 +429,11 @@ void VfsImpl::Create(fuse_req_t req, fuse_ino_t parent, const char* name,
     return;
   }
   uint64_t fh;
-  Status status2 = vol_->meta_engine()->Open(child_ino, &fh);
-  if (!status2.ok()) {
+  status = vol_->meta_engine()->Open(child_ino, &fh);
+  if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Create: Open FAILED: ino=" << child_ino
-                      << " — " << status2.message();
-    fuse_reply_err(req, status2.ToErrno());
+                      << " — " << status.message();
+    fuse_reply_err(req, status.ToErrno());
     return;
   }
   fi->fh = fh;
@@ -438,9 +447,9 @@ void VfsImpl::Create(fuse_req_t req, fuse_ino_t parent, const char* name,
   fuse_reply_create(req, &entry, fi);
 }
 
-void VfsImpl::Ioctl(fuse_req_t req, fuse_ino_t ino, int cmd, void* arg,
-                    struct fuse_file_info* fi, unsigned flags,
-                    const void* in_buf, size_t in_bufsz, size_t out_bufsz) {
+void VfsImpl::Ioctl(fuse_req_t req, fuse_ino_t ino, int cmd, void *arg,
+                    struct fuse_file_info *fi, unsigned flags,
+                    const void *in_buf, size_t in_bufsz, size_t out_bufsz) {
   (void)ino;
   (void)cmd;
   (void)arg;
@@ -452,8 +461,8 @@ void VfsImpl::Ioctl(fuse_req_t req, fuse_ino_t ino, int cmd, void* arg,
   fuse_reply_err(req, ENOSYS);
 }
 
-void VfsImpl::RetrieveReply(fuse_req_t req, void* cookie, fuse_ino_t ino,
-                            off_t offset, struct fuse_bufvec* bufv) {
+void VfsImpl::RetrieveReply(fuse_req_t req, void *cookie, fuse_ino_t ino,
+                            off_t offset, struct fuse_bufvec *bufv) {
   (void)cookie;
   (void)ino;
   (void)offset;
@@ -462,14 +471,14 @@ void VfsImpl::RetrieveReply(fuse_req_t req, void* cookie, fuse_ino_t ino,
 }
 
 void VfsImpl::ForgetMulti(fuse_req_t req, size_t count,
-                          struct fuse_forget_data* forgets) {
+                          struct fuse_forget_data *forgets) {
   (void)count;
   (void)forgets;
   fuse_reply_none(req);
 }
 
 void VfsImpl::Flock(fuse_req_t req, fuse_ino_t ino,
-                    struct fuse_file_info* fi, int op) {
+                    struct fuse_file_info *fi, int op) {
   (void)ino;
   (void)fi;
   (void)op;
@@ -478,7 +487,7 @@ void VfsImpl::Flock(fuse_req_t req, fuse_ino_t ino,
 
 void VfsImpl::Fallocate(fuse_req_t req, fuse_ino_t ino, int mode,
                         off_t offset, off_t length,
-                        struct fuse_file_info* fi) {
+                        struct fuse_file_info *fi) {
   (void)ino;
   (void)mode;
   (void)offset;
@@ -488,13 +497,13 @@ void VfsImpl::Fallocate(fuse_req_t req, fuse_ino_t ino, int mode,
 }
 
 void VfsImpl::Readdirplus(fuse_req_t req, fuse_ino_t ino, size_t size,
-                          off_t off, struct fuse_file_info* fi) {
+                          off_t off, struct fuse_file_info *fi) {
   (void)fi;
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{fuse_req_ctx(req)};
+  SetRequestContext(req);
 
   ReaddirCommon(req, ino, size, off, vol_->meta_engine(),
-                [this](fuse_req_t req, char* buf, size_t bufsize,
-                       const swordfs::metadata::SwordFsEntry& e, off_t off) {
+                [this](fuse_req_t req, char *buf, size_t bufsize,
+                       const swordfs::metadata::SwordFsEntry &e, off_t off) {
                   struct stat attr = {};
                   if (e.ino != 0) vol_->meta_engine()->GetAttr(e.ino, &attr);
                   struct fuse_entry_param ep = {};
@@ -510,7 +519,7 @@ void VfsImpl::Readdirplus(fuse_req_t req, fuse_ino_t ino, size_t size,
 }
 
 void VfsImpl::Lseek(fuse_req_t req, fuse_ino_t ino, off_t off, int whence,
-                    struct fuse_file_info* fi) {
+                    struct fuse_file_info *fi) {
   (void)ino;
   (void)off;
   (void)whence;
@@ -519,7 +528,7 @@ void VfsImpl::Lseek(fuse_req_t req, fuse_ino_t ino, off_t off, int whence,
 }
 
 void VfsImpl::Tmpfile(fuse_req_t req, fuse_ino_t parent, mode_t mode,
-                      struct fuse_file_info* fi) {
+                      struct fuse_file_info *fi) {
   (void)parent;
   (void)mode;
   (void)fi;
@@ -527,7 +536,7 @@ void VfsImpl::Tmpfile(fuse_req_t req, fuse_ino_t parent, mode_t mode,
 }
 
 void VfsImpl::Statx(fuse_req_t req, fuse_ino_t ino, int flags, int mask,
-                    struct fuse_file_info* fi) {
+                    struct fuse_file_info *fi) {
   (void)ino;
   (void)flags;
   (void)mask;

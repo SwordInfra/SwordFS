@@ -114,9 +114,9 @@ Status ChunkManager::Flush(uint64_t fh) {
 }
 
 Status ChunkManager::Release(uint64_t fh) {
-  Status st = Flush(fh);
+  Status status = Flush(fh);
   chunks_.erase(fh);
-  return st;
+  return status;
 }
 
 }  // namespace swordfs::chunk
