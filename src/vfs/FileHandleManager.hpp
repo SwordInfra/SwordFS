@@ -14,7 +14,14 @@
 #include <shared_mutex>
 
 #include "metadata/Types.hpp"
+#include "utils/Status.hpp"
 #include "vfs/FileReadWriter.hpp"
+
+namespace swordfs {
+namespace volume {
+class VolumeImpl;
+}
+}  // namespace swordfs
 
 namespace swordfs::vfs {
 
@@ -22,8 +29,10 @@ class FileHandleManager {
  public:
   static FileHandleManager& Instance();
 
-  /// Register |rw| for |fh|.  Called on FUSE open.
-  void Open(uint64_t fh, std::unique_ptr<FileReadWriter> rw);
+  /// Create a FileReadWriter from |vol| and associate it with |fh|.
+  /// Returns kAlreadyExists if |fh| is already open.
+  utils::Status Open(uint64_t fh, volume::VolumeImpl* vol,
+                     metadata::InodeID ino);
 
   /// Find the FileReadWriter for |fh|, or nullptr.
   /// The returned shared_ptr keeps the handle alive.

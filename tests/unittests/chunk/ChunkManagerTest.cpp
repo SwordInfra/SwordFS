@@ -46,7 +46,7 @@ class MockDataEngine : public IDataEngine {
 
   void set_chunk_size(size_t sz) { chunk_size_ = sz; }
 
-  bool Head(std::string_view key, size_t* size) override {
+  bool Head(std::string_view key, size_t *size) override {
     auto it = store_.find(std::string(key));
     if (it == store_.end()) return false;
     if (size) *size = it->second.size();
@@ -58,12 +58,12 @@ class MockDataEngine : public IDataEngine {
     return Status::OK();
   }
 
-  Status Get(std::string_view key, std::string* out,
+  Status Get(std::string_view key, std::string *out,
              size_t offset = 0, size_t size = 0) override {
     auto it = store_.find(std::string(key));
     if (it == store_.end()) return Status::NotFound("chunk not found");
 
-    const std::string& chunk = it->second;
+    const std::string &chunk = it->second;
     if (offset >= chunk.size()) {
       *out = "";
       return Status::OK();
@@ -79,15 +79,15 @@ class MockDataEngine : public IDataEngine {
     return Status::OK();
   }
 
-  void InjectChunk(const std::string& key, std::string data) {
+  void InjectChunk(const std::string &key, std::string data) {
     store_[key] = std::move(data);
   }
 
-  bool has_chunk(const std::string& key) const {
+  bool has_chunk(const std::string &key) const {
     return store_.count(key) > 0;
   }
 
-  std::string get_chunk_data(const std::string& key) const {
+  std::string get_chunk_data(const std::string &key) const {
     auto it = store_.find(key);
     return (it != store_.end()) ? it->second : "";
   }
@@ -105,24 +105,24 @@ class MockDataEngine : public IDataEngine {
 
 class MockMetaEngine : public IMetaEngine {
  public:
-  Status Lookup(InodeID, std::string_view, InodeID*,
-                struct stat*) override {
+  Status Lookup(InodeID, std::string_view, InodeID *,
+                struct stat *) override {
     return Status::OK();
   }
-  Status GetAttr(InodeID, struct stat* attr) override {
+  Status GetAttr(InodeID, struct stat *attr) override {
     std::memset(attr, 0, sizeof(*attr));
     return Status::OK();
   }
   Status ReadDir(InodeID,
-                 std::vector<swordfs::metadata::SwordFsEntry>*) override {
+                 std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, mode_t, InodeID*,
-                struct stat*) override {
+  Status Create(InodeID, std::string_view, mode_t, InodeID *,
+                struct stat *) override {
     return Status::OK();
   }
-  Status MkDir(InodeID, std::string_view, mode_t, InodeID*,
-               struct stat*) override {
+  Status MkDir(InodeID, std::string_view, mode_t, InodeID *,
+               struct stat *) override {
     return Status::OK();
   }
   Status Unlink(InodeID, std::string_view) override {
@@ -135,18 +135,18 @@ class MockMetaEngine : public IMetaEngine {
                 std::string_view, unsigned int) override {
     return Status::OK();
   }
-  Status SetAttr(InodeID, const struct stat*, int,
-                 struct stat*) override {
+  Status SetAttr(InodeID, const struct stat *, int,
+                 struct stat *) override {
     return Status::OK();
   }
-  Status StatFs(struct statvfs*) override { return Status::OK(); }
+  Status StatFs(struct statvfs *) override { return Status::OK(); }
   Status Access(InodeID, int) override { return Status::OK(); }
-  Status Open(InodeID, uint64_t* fh) override {
+  Status Open(InodeID, uint64_t *fh) override {
     *fh = 1;
     return Status::OK();
   }
   Status Release(uint64_t) override { return Status::OK(); }
-  Status OpenDir(InodeID, uint64_t* fh) override {
+  Status OpenDir(InodeID, uint64_t *fh) override {
     *fh = 1;
     return Status::OK();
   }
@@ -174,7 +174,7 @@ class ChunkManagerReadTest : public ::testing::Test {
   }
 
   void ExpectRead(InodeID ino, size_t size, off_t off,
-                  const std::string& expected) {
+                  const std::string &expected) {
     auto out = folly::IOBuf::create(kChunkSize);
     // Read through the opened handle so in-flight chunks are visible.
     auto rw = swordfs::vfs::FileHandleManager::Instance().Find(kFh);
@@ -186,7 +186,7 @@ class ChunkManagerReadTest : public ::testing::Test {
       st = tmp.Read(size, off, out.get());
     }
     EXPECT_TRUE(st.ok()) << st.message();
-    std::string_view sv(reinterpret_cast<const char*>(out->data()),
+    std::string_view sv(reinterpret_cast<const char *>(out->data()),
                         out->length());
     EXPECT_EQ(sv, expected);
   }
@@ -275,14 +275,6 @@ TEST_F(ChunkManagerReadTest, ZeroSizeRequest) {
   ExpectRead(42, 0, 0, "");
 }
 
-TEST_F(ChunkManagerReadTest, NoDataEngine) {
-  ChunkManager no_cm(mock_meta_.get(), nullptr);
-  auto out = folly::IOBuf::create(256);
-  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), nullptr, 42);
-  Status st = rw.Read(100, 0, out.get());
-  EXPECT_FALSE(st.ok());
-}
-
 TEST_F(ChunkManagerReadTest, EmptyOutputOnNonexistentChunk) {
   ExpectRead(42, 100, 0, "");
 }
@@ -292,52 +284,72 @@ TEST_F(ChunkManagerReadTest, EmptyOutputOnNonexistentChunk) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(ChunkManagerReadTest, ReadFromUnflushedBufferOnly) {
-  auto rw = std::make_unique<swordfs::vfs::FileReadWriter>(mock_meta_.get(), mock_data_.get(), 42);
-  auto* rw_ptr = rw.get();
-  rw_ptr->Write(Repeat('X', 500).data(), 500, 0);
-  swordfs::vfs::FileHandleManager::Instance().Open(kFh, std::move(rw));
-  ExpectRead(42, 500, 0, Repeat('X', 500));
+  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), mock_data_.get(), 42);
+  rw.Write(Repeat('X', 500).data(), 500, 0);
+
+  auto out = folly::IOBuf::create(kChunkSize);
+  Status st = rw.Read(500, 0, out.get());
+  EXPECT_TRUE(st.ok()) << st.message();
+  std::string_view sv(reinterpret_cast<const char *>(out->data()),
+                      out->length());
+  EXPECT_EQ(sv, Repeat('X', 500));
 }
 
 TEST_F(ChunkManagerReadTest, ReadFromUnflushedBufferWithOffset) {
-  auto rw = std::make_unique<swordfs::vfs::FileReadWriter>(mock_meta_.get(), mock_data_.get(), 42);
-  auto* rw_ptr = rw.get();
-  rw_ptr->Write(Repeat('X', 500).data(), 500, 0);
-  swordfs::vfs::FileHandleManager::Instance().Open(kFh, std::move(rw));
-  ExpectRead(42, 200, 100, Repeat('X', 200));
+  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), mock_data_.get(), 42);
+  rw.Write(Repeat('X', 500).data(), 500, 0);
+
+  auto out = folly::IOBuf::create(kChunkSize);
+  Status st = rw.Read(200, 100, out.get());
+  EXPECT_TRUE(st.ok()) << st.message();
+  std::string_view sv(reinterpret_cast<const char *>(out->data()),
+                      out->length());
+  EXPECT_EQ(sv, Repeat('X', 200));
 }
 
 TEST_F(ChunkManagerReadTest, ReadPastEndOfBufferToStorage) {
   mock_data_->InjectChunk("42/0", Repeat('A', kChunkSize));
-  auto rw = std::make_unique<swordfs::vfs::FileReadWriter>(mock_meta_.get(), mock_data_.get(), 42);
-  auto* rw_ptr = rw.get();
-  rw_ptr->Write(Repeat('B', kChunkSize).data(), kChunkSize, 0);
-  rw_ptr->Write(Repeat('B', 300).data(), 300, kChunkSize);
-  swordfs::vfs::FileHandleManager::Instance().Open(kFh, std::move(rw));
+  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), mock_data_.get(), 42);
+  rw.Write(Repeat('B', kChunkSize).data(), kChunkSize, 0);
+  rw.Write(Repeat('B', 300).data(), 300, kChunkSize);
+
+  auto out = folly::IOBuf::create(kChunkSize);
+  Status st = rw.Read(400, 900, out.get());
+  EXPECT_TRUE(st.ok()) << st.message();
+  std::string_view sv(reinterpret_cast<const char *>(out->data()),
+                      out->length());
   std::string expected =
       Repeat('B', kChunkSize - 900) +
       Repeat('B', 400 - (kChunkSize - 900));
-  ExpectRead(42, 400, 900, expected);
+  EXPECT_EQ(sv, expected);
 }
 
 TEST_F(ChunkManagerReadTest, ReadBufferTakesPrecedenceOverStorage) {
   mock_data_->InjectChunk("42/0", Repeat('S', kChunkSize));
-  auto rw = std::make_unique<swordfs::vfs::FileReadWriter>(mock_meta_.get(), mock_data_.get(), 42);
-  auto* rw_ptr = rw.get();
-  rw_ptr->Write(Repeat('B', 200).data(), 200, 0);
-  swordfs::vfs::FileHandleManager::Instance().Open(kFh, std::move(rw));
+  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), mock_data_.get(), 42);
+  rw.Write(Repeat('B', 200).data(), 200, 0);
+
+  auto out = folly::IOBuf::create(kChunkSize);
+  Status st = rw.Read(300, 0, out.get());
+  EXPECT_TRUE(st.ok()) << st.message();
+  std::string_view sv(reinterpret_cast<const char *>(out->data()),
+                      out->length());
   std::string expected = Repeat('B', 200) + Repeat('S', 100);
-  ExpectRead(42, 300, 0, expected);
+  EXPECT_EQ(sv, expected);
 }
 
 TEST_F(ChunkManagerReadTest, ReadEntirelyBeforeBuffer) {
   mock_data_->InjectChunk("42/0", Repeat('A', kChunkSize));
-  auto rw = std::make_unique<swordfs::vfs::FileReadWriter>(mock_meta_.get(), mock_data_.get(), 42);
-  auto* rw_ptr = rw.get();
-  rw_ptr->Write(Repeat('B', kChunkSize).data(), kChunkSize, 0);
-  rw_ptr->Write(Repeat('B', 200).data(), 200, kChunkSize);
-  swordfs::vfs::FileHandleManager::Instance().Open(kFh, std::move(rw));
-  ExpectRead(42, 100, 500, Repeat('B', 100));
+  swordfs::vfs::FileReadWriter rw(mock_meta_.get(), mock_data_.get(), 42);
+  rw.Write(Repeat('B', kChunkSize).data(), kChunkSize, 0);
+  rw.Write(Repeat('B', 200).data(), 200, kChunkSize);
+
+  auto out = folly::IOBuf::create(kChunkSize);
+  Status st = rw.Read(100, 500, out.get());
+  EXPECT_TRUE(st.ok()) << st.message();
+  std::string_view sv(reinterpret_cast<const char *>(out->data()),
+                      out->length());
+  EXPECT_EQ(sv, Repeat('B', 100));
 }
 
 // ================================================================

@@ -41,7 +41,6 @@ chunk::Chunk &FileReadWriter::GetOrCreateChunk(off_t off) {
 // ────────────────────────────────────────────────────────────────
 
 Status FileReadWriter::Write(const char *data, size_t size, off_t off) {
-  if (!data_) return Status::Internal("no data engine configured");
   size_t max_chunk = data_->Limits().max_chunk_size;
   const char *pos = data;
   size_t remaining = size;
@@ -51,8 +50,8 @@ Status FileReadWriter::Write(const char *data, size_t size, off_t off) {
     auto &c = GetOrCreateChunk(cur_off);
     size_t room = max_chunk - (cur_off % max_chunk);
     size_t n = std::min(remaining, room);
-    Status st = c.Write(pos, n, cur_off);
-    if (!st.ok()) return st;
+    Status status = c.Write(pos, n, cur_off);
+    if (!status.ok()) return status;
     pos += n;
     remaining -= n;
     cur_off += static_cast<off_t>(n);
@@ -66,7 +65,6 @@ Status FileReadWriter::Write(const char *data, size_t size, off_t off) {
 // ────────────────────────────────────────────────────────────────
 
 Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
-  if (!data_) return Status::Internal("no data engine configured");
   size_t chunk_sz = data_->Limits().max_chunk_size;
   size_t remaining = size;
   off_t cur_off = off;
@@ -84,8 +82,8 @@ Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
     if (found) {
       off_t local_off = cur_off - found->StartOffset();
       size_t before = out->length();
-      Status st = found->Read(local_off, remaining, out);
-      if (!st.ok()) return st;
+      Status status = found->Read(local_off, remaining, out);
+      if (!status.ok()) return status;
       size_t n = out->length() - before;
       remaining -= n;
       cur_off += static_cast<off_t>(n);

@@ -2,5 +2,5 @@ BasedOnStyle: Google
 SortIncludes: true
 IncludeBlocks: Regroup
 ColumnLimit: 0
-AccessModifierOffset: 1
+AccessModifierOffset: -1
 PointerAlignment: Right

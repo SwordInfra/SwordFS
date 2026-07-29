@@ -13,6 +13,12 @@
 
 #include <sys/types.h>
 
+namespace swordfs {
+namespace volume {
+class VolumeImpl;
+}
+}  // namespace swordfs
+
 namespace swordfs::utils {
 
 struct SwordFsContext {
@@ -24,6 +30,11 @@ struct SwordFsContext {
   gid_t gid = 0;
   pid_t pid = 0;
   mode_t umask = 0;
+
+  /// VolumeImpl that owns the meta/data engines for the current mount.
+  /// Set by VfsImpl at the start of every request; always valid during
+  /// the mount lifecycle.
+  volume::VolumeImpl* vol = nullptr;
 };
 
 }  // namespace swordfs::utils

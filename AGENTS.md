@@ -1,5 +1,9 @@
 # Agent Instructions
 
+## Editing Rules
+
+- **NEVER use `sed`, `python`, `awk`, or any external command for direct file editing.** All file modifications MUST go through the `replace_string_in_file` tool so every change is visible and reviewable. This includes bulk find-and-replace operations — use `multi_replace_string_in_file` instead.
+
 ## Code Style
 
 All C++ code MUST follow the **Google C++ Style Guide**. Key rules include:

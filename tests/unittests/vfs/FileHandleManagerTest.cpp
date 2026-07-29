@@ -11,18 +11,25 @@
 
 #include "vfs/FileHandleManager.hpp"
 #include "vfs/FileReadWriter.hpp"
+#include "volume/VolumeImpl.hpp"
 
 namespace swordfs::vfs {
 namespace {
 
 class FileHandleManagerTest : public ::testing::Test {
-   protected:
+ protected:
+  void SetUp() override {
+    vol_ = std::make_unique<volume::VolumeImpl>();
+  }
+
   void TearDown() override {
     // Clean up any handles left by a test.
     FileHandleManager::Instance().Release(1);
     FileHandleManager::Instance().Release(2);
     FileHandleManager::Instance().Release(42);
   }
+
+  std::unique_ptr<volume::VolumeImpl> vol_;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -40,8 +47,8 @@ TEST_F(FileHandleManagerTest, InstanceIsSingleton) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(FileHandleManagerTest, OpenAndFind) {
-  auto rw = std::make_unique<FileReadWriter>(nullptr, nullptr, 42);
-  FileHandleManager::Instance().Open(1, std::move(rw));
+  auto st = FileHandleManager::Instance().Open(1, vol_.get(), 42);
+  EXPECT_TRUE(st.ok()) << st.message();
 
   auto found = FileHandleManager::Instance().Find(1);
   EXPECT_NE(found, nullptr);
@@ -53,11 +60,8 @@ TEST_F(FileHandleManagerTest, FindNonexistent) {
 }
 
 TEST_F(FileHandleManagerTest, OpenMultipleHandles) {
-  auto rw1 = std::make_unique<FileReadWriter>(nullptr, nullptr, 10);
-  auto rw2 = std::make_unique<FileReadWriter>(nullptr, nullptr, 20);
-
-  FileHandleManager::Instance().Open(1, std::move(rw1));
-  FileHandleManager::Instance().Open(2, std::move(rw2));
+  EXPECT_TRUE(FileHandleManager::Instance().Open(1, vol_.get(), 10).ok());
+  EXPECT_TRUE(FileHandleManager::Instance().Open(2, vol_.get(), 20).ok());
 
   auto f1 = FileHandleManager::Instance().Find(1);
   auto f2 = FileHandleManager::Instance().Find(2);
@@ -72,8 +76,7 @@ TEST_F(FileHandleManagerTest, OpenMultipleHandles) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(FileHandleManagerTest, ReleaseRemovesHandle) {
-  auto rw = std::make_unique<FileReadWriter>(nullptr, nullptr, 7);
-  FileHandleManager::Instance().Open(1, std::move(rw));
+  EXPECT_TRUE(FileHandleManager::Instance().Open(1, vol_.get(), 7).ok());
 
   FileHandleManager::Instance().Release(1);
   EXPECT_EQ(FileHandleManager::Instance().Find(1), nullptr);
@@ -86,11 +89,8 @@ TEST_F(FileHandleManagerTest, ReleaseNonexistentNoCrash) {
 }
 
 TEST_F(FileHandleManagerTest, ReleaseKeepsOtherHandles) {
-  auto rw1 = std::make_unique<FileReadWriter>(nullptr, nullptr, 1);
-  auto rw2 = std::make_unique<FileReadWriter>(nullptr, nullptr, 2);
-
-  FileHandleManager::Instance().Open(1, std::move(rw1));
-  FileHandleManager::Instance().Open(2, std::move(rw2));
+  EXPECT_TRUE(FileHandleManager::Instance().Open(1, vol_.get(), 1).ok());
+  EXPECT_TRUE(FileHandleManager::Instance().Open(2, vol_.get(), 2).ok());
 
   FileHandleManager::Instance().Release(1);
 
@@ -100,19 +100,18 @@ TEST_F(FileHandleManagerTest, ReleaseKeepsOtherHandles) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Open overwrite
+// Open duplicate fh
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleManagerTest, OpenOverwritesExistingHandle) {
-  auto rw1 = std::make_unique<FileReadWriter>(nullptr, nullptr, 100);
-  FileHandleManager::Instance().Open(1, std::move(rw1));
+TEST_F(FileHandleManagerTest, OpenDuplicateFails) {
+  EXPECT_TRUE(FileHandleManager::Instance().Open(1, vol_.get(), 100).ok());
+  auto st = FileHandleManager::Instance().Open(1, vol_.get(), 200);
+  EXPECT_FALSE(st.ok());
+  EXPECT_EQ(st.code(), utils::Status::Code::kAlreadyExists);
 
-  auto rw2 = std::make_unique<FileReadWriter>(nullptr, nullptr, 200);
-  FileHandleManager::Instance().Open(1, std::move(rw2));
-
+  // First handle is still intact.
   auto found = FileHandleManager::Instance().Find(1);
   ASSERT_NE(found, nullptr);
-  // Overwritten handle was replaced — the old unique_ptr is gone.
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -120,8 +119,7 @@ TEST_F(FileHandleManagerTest, OpenOverwritesExistingHandle) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(FileHandleManagerTest, FindKeepsHandleAliveAfterRelease) {
-  auto rw = std::make_unique<FileReadWriter>(nullptr, nullptr, 55);
-  FileHandleManager::Instance().Open(1, std::move(rw));
+  EXPECT_TRUE(FileHandleManager::Instance().Open(1, vol_.get(), 55).ok());
 
   // Hold a shared_ptr before releasing.
   auto held = FileHandleManager::Instance().Find(1);
@@ -144,12 +142,13 @@ TEST_F(FileHandleManagerTest, ConcurrentOpenAndFind) {
 
   std::vector<std::thread> threads;
   for (int t = 0; t < kThreads; ++t) {
-    threads.emplace_back([t] {
+    threads.emplace_back([this, t] {
       for (int i = 0; i < kIters; ++i) {
         uint64_t fh = static_cast<uint64_t>(t) * kIters + i + 100;
-        auto rw = std::make_unique<FileReadWriter>(
-            nullptr, nullptr, static_cast<metadata::InodeID>(fh));
-        FileHandleManager::Instance().Open(fh, std::move(rw));
+        EXPECT_TRUE(FileHandleManager::Instance()
+                        .Open(fh, vol_.get(),
+                              static_cast<metadata::InodeID>(fh))
+                        .ok());
         auto found = FileHandleManager::Instance().Find(fh);
         EXPECT_NE(found, nullptr);
       }
