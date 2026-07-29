@@ -74,3 +74,27 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.info
           fail_ci_if_error: false
+
+  integration-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache folly build
+        uses: actions/cache@v4
+        with:
+          path: /usr/local
+          key: folly-${{ runner.os }}-${{ hashFiles('scripts/install-deps.sh') }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          if [ ! -f /usr/local/lib/libfolly.a ]; then
+            sudo bash scripts/install-deps.sh
+          fi
+
+      - name: Build swordfs
+        run: cmake --preset default && cmake --build build --target swordfs
+
+      - name: Run smoke test
+        run: bash tests/integration/smoke_test.sh ./build/swordfs
