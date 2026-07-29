@@ -6,6 +6,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# folly's config uses find_package(Boost) which triggers CMP0167
+# (FindBoost removed in CMake >= 3.30).  Use the NEW policy to
+# suppress the developer warning.
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 NEW)
+endif()
+
 # ============================================================
 # Third-party dependencies
 # ============================================================

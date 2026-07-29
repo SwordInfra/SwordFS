@@ -2,18 +2,27 @@
 # Install all third-party dependencies needed to build SwordFS.
 #
 # Usage:
-#   ./scripts/install-deps.sh
+#   ./scripts/install-deps.sh [--force]
+#
+#   --force   Rebuild and reinstall even if already present.
 #
 # This script:
 #   1. Installs system packages (libfuse3, folly build deps)
 #   2. Builds and installs folly from GitHub release tarball
 #   3. Installs AWS SDK for S3 object storage
 #
-# Each step is skipped if the dependency is already present.
+# Each step is skipped if the dependency is already present and
+# passes verification (cmake configs AND library binaries exist).
 # After running this script, you can build with:
 #   cmake --preset default
 
 set -e
+
+FORCE=false
+if [ "$1" = "--force" ]; then
+  FORCE=true
+  shift
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -48,9 +57,13 @@ fi
 # pin specific packages with -t resolute.  Using a new file avoids
 # mutating the system's existing sources.list.
 echo "==> Adding resolute source for newer packages..."
-echo "deb http://archive.ubuntu.com/ubuntu resolute main universe" \
-  > /etc/apt/sources.list.d/resolute.list
-apt-get update -qq
+if [ -f /etc/apt/sources.list.d/resolute.list ]; then
+  echo "  [ok] resolute source already configured"
+else
+  echo "deb http://archive.ubuntu.com/ubuntu resolute main universe" \
+    > /etc/apt/sources.list.d/resolute.list
+  apt-get update -qq
+fi
 
 # fast_float: folly v2026.07.20.00 requires fast_float >= 7.0.0
 # (needs chars_format::allow_leading_plus). Ubuntu 24.04 ships 6.1.0.
@@ -84,15 +97,72 @@ else
 fi
 
 # ────────────────────────────────────────────────────────────────
+# Helper: verify that an installed dependency is actually usable.
+# Returns 0 (success) if find_package works, non-zero otherwise.
+# ────────────────────────────────────────────────────────────────
+
+verify_folly() {
+  TMPDIR=$(mktemp -d)
+  cat > "$TMPDIR/CMakeLists.txt" << 'CMEOF'
+cmake_minimum_required(VERSION 3.16)
+project(VerifyFolly CXX)
+find_package(folly REQUIRED)
+message(STATUS "folly OK")
+CMEOF
+  cd "$TMPDIR"
+  if cmake . > /dev/null 2>&1; then
+    rm -rf "$TMPDIR"
+    return 0
+  fi
+  rm -rf "$TMPDIR"
+  return 1
+}
+
+verify_aws_sdk() {
+  TMPDIR=$(mktemp -d)
+  cat > "$TMPDIR/CMakeLists.txt" << 'CMEOF'
+cmake_minimum_required(VERSION 3.16)
+project(VerifyAwsSdk CXX)
+find_package(AWSSDK REQUIRED COMPONENTS s3)
+message(STATUS "AWSSDK OK")
+CMEOF
+  cd "$TMPDIR"
+  if cmake . > /dev/null 2>&1; then
+    rm -rf "$TMPDIR"
+    return 0
+  fi
+  rm -rf "$TMPDIR"
+  return 1
+}
+
+# ────────────────────────────────────────────────────────────────
 # folly
 # ────────────────────────────────────────────────────────────────
 
 echo "==> Checking folly..."
 
-if [ -f /usr/local/lib/cmake/folly/folly-config.cmake ] || \
-   [ -f /usr/lib/cmake/folly/folly-config.cmake ]; then
-  echo "==> folly already installed, skipping."
-else
+FOLLY_INSTALLED=false
+if [ "$FORCE" = false ]; then
+  if [ -f /usr/local/lib/cmake/folly/folly-config.cmake ] || \
+     [ -f /usr/lib/cmake/folly/folly-config.cmake ]; then
+    # Also verify the actual library file exists (not just cmake config).
+    if [ -f /usr/local/lib/libfolly.a ] || [ -f /usr/local/lib/libfolly.so ] || \
+       [ -f /usr/lib/libfolly.a ] || [ -f /usr/lib/libfolly.so ] || \
+       [ -f /usr/lib/x86_64-linux-gnu/libfolly.so ]; then
+      echo "==> folly cmake config and library found, verifying..."
+      if verify_folly; then
+        echo "==> folly verified OK, skipping."
+        FOLLY_INSTALLED=true
+      else
+        echo "==> folly verification FAILED, will reinstall."
+      fi
+    else
+      echo "==> folly cmake config found but library missing, will reinstall."
+    fi
+  fi
+fi
+
+if [ "$FOLLY_INSTALLED" = false ]; then
   # ── Step 1: Download ─────────────────────────────────────────
 
   FOLLY_TARBALL="$PROJECT_DIR/build/folly-${FOLLY_VER}.tar.gz"
@@ -149,9 +219,26 @@ echo "==> Checking AWS SDK for C++..."
 AWS_SDK_VER="1.11.540"
 AWS_SDK_SRC="$PROJECT_DIR/build/aws-sdk-src"
 
-if [ -f /usr/local/lib/cmake/aws-cpp-sdk-s3/aws-cpp-sdk-s3-config.cmake ]; then
-  echo "==> AWS SDK already installed, skipping."
-else
+AWS_SDK_INSTALLED=false
+if [ "$FORCE" = false ]; then
+  if [ -f /usr/local/lib/cmake/aws-cpp-sdk-s3/aws-cpp-sdk-s3-config.cmake ]; then
+    # Also verify the actual core library exists (not just cmake config).
+    if [ -f /usr/local/lib/libaws-cpp-sdk-core.a ] || \
+       [ -f /usr/local/lib/libaws-cpp-sdk-core.so ]; then
+      echo "==> AWS SDK cmake config and library found, verifying..."
+      if verify_aws_sdk; then
+        echo "==> AWS SDK verified OK, skipping."
+        AWS_SDK_INSTALLED=true
+      else
+        echo "==> AWS SDK verification FAILED, will reinstall."
+      fi
+    else
+      echo "==> AWS SDK cmake config found but library missing, will reinstall."
+    fi
+  fi
+fi
+
+if [ "$AWS_SDK_INSTALLED" = false ]; then
   # ── Step 1: Clone with submodules ──────────────────────────
 
   if [ -f "$AWS_SDK_SRC/CMakeLists.txt" ]; then

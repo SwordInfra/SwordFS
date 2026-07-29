@@ -18,24 +18,117 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
+            /usr/local/include/folly
+            /usr/local/include/aws
+            /usr/local/lib/cmake/folly
+            /usr/local/lib/cmake/AWSSDK
+            /usr/local/lib/cmake/aws-cpp-sdk-*
+            /usr/local/lib/cmake/aws-crt-cpp
+            /usr/local/lib/cmake/aws-c-*
             /usr/local/lib/libfolly*
-            /usr/local/include/folly/
-            /usr/local/lib/cmake/folly/
             /usr/local/lib/libaws*
-            /usr/local/include/aws/
-            /usr/local/lib/cmake/aws-*/
+            /usr/local/lib/libgtest*
+            /usr/local/lib/libgmock*
           key: deps-${{ runner.os }}-${{ hashFiles('scripts/install-deps.sh') }}
+          restore-keys: |
+            deps-${{ runner.os }}-
 
-      - name: Install dependencies
-        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Verify cached dependencies
+        id: verify
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: |
+          echo "==> Verifying cached folly..."
+          TMPDIR=$(mktemp -d)
+          cat > "$TMPDIR/CMakeLists.txt" << 'CMEOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(VerifyFolly CXX)
+          find_package(folly REQUIRED)
+          message(STATUS "folly OK")
+          CMEOF
+          if cmake -S "$TMPDIR" -B "$TMPDIR/build" > /dev/null 2>&1; then
+            echo "  [ok] folly verified"
+          else
+            echo "  [FAIL] folly verification failed, will reinstall"
+            echo "needs_reinstall=true" >> "$GITHUB_OUTPUT"
+            rm -rf "$TMPDIR"
+            exit 0
+          fi
+          rm -rf "$TMPDIR"
+
+          echo "==> Verifying cached AWS SDK..."
+          TMPDIR=$(mktemp -d)
+          cat > "$TMPDIR/CMakeLists.txt" << 'CMEOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(VerifyAwsSdk CXX)
+          find_package(AWSSDK REQUIRED COMPONENTS s3)
+          message(STATUS "AWSSDK OK")
+          CMEOF
+          if cmake -S "$TMPDIR" -B "$TMPDIR/build" > /dev/null 2>&1; then
+            echo "  [ok] AWS SDK verified"
+          else
+            echo "  [FAIL] AWS SDK verification failed, will reinstall"
+            echo "needs_reinstall=true" >> "$GITHUB_OUTPUT"
+            rm -rf "$TMPDIR"
+            exit 0
+          fi
+          rm -rf "$TMPDIR"
+
+      - name: Clear broken cached dependencies
+        if: steps.verify.outputs.needs_reinstall == 'true'
+        run: |
+          echo "==> Removing broken cached dependencies..."
+          sudo rm -rf /usr/local/include/folly
+          sudo rm -rf /usr/local/include/aws
+          sudo rm -rf /usr/local/lib/cmake/folly
+          sudo rm -rf /usr/local/lib/cmake/AWSSDK
+          sudo rm -rf /usr/local/lib/cmake/aws-cpp-sdk-*
+          sudo rm -rf /usr/local/lib/cmake/aws-crt-cpp
+          sudo rm -rf /usr/local/lib/cmake/aws-c-*
+          sudo rm -f /usr/local/lib/libfolly*
+          sudo rm -f /usr/local/lib/libaws*
+          sudo rm -f /usr/local/lib/libgtest*
+          sudo rm -f /usr/local/lib/libgmock*
+
+      - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y -qq lcov clang-tidy
-          sudo bash scripts/install-deps.sh
-          sudo rm -rf build
+          sudo apt-get install -y -qq \
+            lcov clang-tidy \
+            libfuse3-dev fuse3 libfmt-dev libboost-all-dev libssl-dev \
+            libevent-dev libdouble-conversion-dev libgoogle-glog-dev \
+            libgtest-dev libcli11-dev libcurl4-openssl-dev zlib1g-dev
+
+      - name: Upgrade system packages from resolute
+        run: |
+          # Some packages on Ubuntu 24.04 are too old for our deps.
+          # Install newer versions from resolute (25.04).
+          echo "deb http://archive.ubuntu.com/ubuntu resolute main universe" \
+            | sudo tee /etc/apt/sources.list.d/resolute.list
+          sudo apt-get update -qq
+
+          # fast_float: folly v2026.07.20.00 requires >= 7.0.0
+          if ! dpkg-query -W -f='${Version}' libfast-float-dev 2>/dev/null | grep -qE '^([89]|[1-9][0-9])\.'; then
+            sudo apt-get install -y -qq -t resolute libfast-float-dev
+          fi
+
+          # libfuse3-dev: SwordFS requires >= 3.18
+          if ! dpkg-query -W -f='${Version}' libfuse3-dev 2>/dev/null | grep -qE '^3\.(1[89]|[2-9])'; then
+            sudo apt-get install -y -qq -t resolute libfuse3-dev
+          fi
+
+          # binutils: GCC >= 15 needs binutils >= 2.43
+          if ! as --version 2>/dev/null | grep -qE '2\.(4[3-9]|[5-9][0-9])'; then
+            sudo apt-get install -y -qq -t resolute binutils
+          fi
+
+      - name: Install heavy dependencies
+        if: steps.cache.outputs.cache-hit != 'true' || steps.verify.outputs.needs_reinstall == 'true'
+        run: sudo bash scripts/install-deps.sh
 
       - name: Configure
-        run: cmake --preset default -DCMAKE_CXX_FLAGS="--coverage" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+        run: |
+          sudo rm -rf build
+          cmake --preset default -DCMAKE_CXX_FLAGS="--coverage" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
 
       - name: Build
         run: cmake --build build --target swordfs swordfs_test

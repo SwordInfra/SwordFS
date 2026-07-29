@@ -56,6 +56,14 @@ TEST(DataEngineFactoryTest, UnknownSchemeReturnsError) {
   EXPECT_FALSE(st.ok());
 }
 
+TEST(DataEngineFactoryTest, S3UrlMissingBucketName) {
+  VolumeConfig vol = MakeVol("s3://endpoint.example.com", "auto");
+  std::unique_ptr<IDataEngine> engine;
+  Status st = CreateDataEngine(vol, &engine);
+  EXPECT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("missing bucket name"), std::string::npos)
+      << st.message();
+}
 // ────────────────────────────────────────────────────────────────
 // CreateDataEngine — S3 engine creation
 // ────────────────────────────────────────────────────────────────
