@@ -33,7 +33,7 @@ echo ""
 
 echo "==> Test 1: format volume"
 mkdir -p "$FORMAT_DIR"
-if "$SWORDFS" format --meta memory://local --volume "$FORMAT_DIR" 2>&1; then
+if "$SWORDFS" format --meta memory://local --volume testvol --volume-config-path "$FORMAT_DIR" 2>&1; then
   pass "format succeeded"
   if [ -f "$FORMAT_DIR/volume.json" ]; then
     pass "volume.json created"
@@ -47,7 +47,7 @@ fi
 echo ""
 echo "==> Test 2: mount volume"
 mkdir -p "$MNT"
-if "$SWORDFS" mount --volume "$FORMAT_DIR" "$MNT" -o allow_other 2>&1 &
+if "$SWORDFS" mount --volume testvol --volume-config-path "$FORMAT_DIR" "$MNT" -o allow_other 2>&1 &
 then
   sleep 1
   if mountpoint -q "$MNT"; then
