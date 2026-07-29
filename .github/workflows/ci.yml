@@ -16,26 +16,48 @@ jobs:
       - name: Prepare cache directories
         run: sudo mkdir -p /usr/local/lib /usr/local/include /usr/local/bin
 
-      - name: Cache folly build
+      - name: Restore/Save build cache
+        id: cache
         uses: actions/cache@v4
         with:
-          path: /usr/local
-          key: folly-${{ runner.os }}-${{ hashFiles('scripts/install-deps.sh') }}
+          path: |
+            /usr/local/lib/libfolly*
+            /usr/local/include/folly/
+            /usr/local/lib/cmake/folly/
+            /usr/local/lib/libaws*
+            /usr/local/include/aws/
+            /usr/local/lib/cmake/aws-*/
+          key: deps-${{ runner.os }}-${{ hashFiles('scripts/install-deps.sh') }}
 
       - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y -qq lcov
-          if [ ! -f /usr/local/lib/libfolly.a ]; then
-            sudo bash scripts/install-deps.sh
-          fi
+          sudo apt-get install -y -qq lcov clang-tidy
+          sudo bash scripts/install-deps.sh
           sudo rm -rf build
 
       - name: Configure
         run: cmake --preset default -DCMAKE_CXX_FLAGS="--coverage" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
 
       - name: Build
-        run: cmake --build build --target swordfs_test
+        run: cmake --build build --target swordfs swordfs_test
+
+      - name: Run clang-tidy (changed files only)
+        run: |
+          if git rev-parse origin/main >/dev/null 2>&1; then
+            BASE="origin/main"
+          else
+            BASE=$(git rev-list --max-parents=0 HEAD)
+          fi
+          CHANGED=$(git diff --name-only --diff-filter=ACMR "$BASE"...HEAD \
+            | grep -E '\.(cpp|hpp)$' | grep '^src/' || true)
+          if [ -n "$CHANGED" ]; then
+            echo "$CHANGED" | xargs run-clang-tidy -p build -j $(nproc) \
+              --warnings-as-errors='*' || true
+          else
+            echo "No C++ source changes detected."
+          fi
 
       - name: Test
         run: build/swordfs_test --gtest_color=no
