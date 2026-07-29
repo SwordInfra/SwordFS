@@ -23,9 +23,9 @@
 // User-facing terminal output (plain text, no metadata)
 
 struct PromptStream {
-  ~PromptStream() { std::cerr << std::endl; }
+  ~PromptStream() { std::cerr << '\n'; }
   template <typename T>
-  PromptStream& operator<<(T&& val) {
+  PromptStream &operator<<(T &&val) {
     std::cerr << std::forward<T>(val);
     return *this;
   }
@@ -33,18 +33,18 @@ struct PromptStream {
 
 struct PromptExitStream {
   ~PromptExitStream() {
-    std::cerr << std::endl;
+    std::cerr << '\n';
     std::exit(1);
   }
   template <typename T>
-  PromptExitStream& operator<<(T&& val) {
+  PromptExitStream &operator<<(T &&val) {
     std::cerr << std::forward<T>(val);
     return *this;
   }
 };
 
 template <typename... Args>
-void PromptFmt(fmt::format_string<Args...> fmt_str, Args&&... args) {
+void PromptFmt(fmt::format_string<Args...> fmt_str, Args &&...args) {
   std::cerr << fmt::format(fmt_str, std::forward<Args>(args)...) << std::endl;
 }
 

@@ -31,11 +31,9 @@ int Status::ToErrno() const {
       return EACCES;
     case kNoMemory:
       return ENOMEM;
-    case kInternal:
-      return EIO;  // maps to generic I/O error for kernel
     default:
       return EIO;
   }
 }
 
-}  // namespace swordfs
+}  // namespace swordfs::utils

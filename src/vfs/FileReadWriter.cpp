@@ -16,8 +16,8 @@
 
 namespace swordfs::vfs {
 
-FileReadWriter::FileReadWriter(metadata::IMetaEngine* meta,
-                               storage::IDataEngine* data,
+FileReadWriter::FileReadWriter(metadata::IMetaEngine *meta,
+                               storage::IDataEngine *data,
                                InodeID ino)
     : meta_(meta), data_(data), ino_(ino) {}
 
@@ -25,7 +25,7 @@ FileReadWriter::FileReadWriter(metadata::IMetaEngine* meta,
 // Chunk management
 // ────────────────────────────────────────────────────────────────
 
-chunk::Chunk& FileReadWriter::GetOrCreateChunk(off_t off) {
+chunk::Chunk &FileReadWriter::GetOrCreateChunk(off_t off) {
   size_t max_chunk = data_->Limits().max_chunk_size;
   uint32_t idx = static_cast<uint32_t>(off / static_cast<off_t>(max_chunk));
 
@@ -40,15 +40,15 @@ chunk::Chunk& FileReadWriter::GetOrCreateChunk(off_t off) {
 // Write — split across chunk boundaries
 // ────────────────────────────────────────────────────────────────
 
-Status FileReadWriter::Write(const char* data, size_t size, off_t off) {
+Status FileReadWriter::Write(const char *data, size_t size, off_t off) {
   if (!data_) return Status::Internal("no data engine configured");
   size_t max_chunk = data_->Limits().max_chunk_size;
-  const char* pos = data;
+  const char *pos = data;
   size_t remaining = size;
   off_t cur_off = off;
 
   while (remaining > 0) {
-    auto& c = GetOrCreateChunk(cur_off);
+    auto &c = GetOrCreateChunk(cur_off);
     size_t room = max_chunk - (cur_off % max_chunk);
     size_t n = std::min(remaining, room);
     Status st = c.Write(pos, n, cur_off);
@@ -65,7 +65,7 @@ Status FileReadWriter::Write(const char* data, size_t size, off_t off) {
 // Read — merge in-flight chunk buffers with storage
 // ────────────────────────────────────────────────────────────────
 
-Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf* out) {
+Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   if (!data_) return Status::Internal("no data engine configured");
   size_t chunk_sz = data_->Limits().max_chunk_size;
   size_t remaining = size;
@@ -73,8 +73,8 @@ Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf* out) {
 
   while (remaining > 0) {
     // 1. Search own chunks.
-    chunk::Chunk* found = nullptr;
-    for (auto& c : chunks_) {
+    chunk::Chunk *found = nullptr;
+    for (auto &c : chunks_) {
       if (cur_off >= c.StartOffset() && cur_off < c.EndOffset()) {
         found = &c;
         break;
@@ -115,7 +115,7 @@ Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf* out) {
       std::memcpy(out->writableTail(), chunk_data.data(), chunk_data.size());
       out->append(chunk_data.size());
       remaining -= chunk_data.size();
-      cur_off += chunk_data.size();
+      cur_off += static_cast<off_t>(chunk_data.size());
 
       if (chunk_data.size() < to_read) break;
     }
@@ -130,12 +130,12 @@ Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf* out) {
 
 Status FileReadWriter::Flush() {
   off_t file_end = 0;
-  for (auto& c : chunks_) {
+  for (auto &c : chunks_) {
     if (c.EndOffset() > file_end) file_end = c.EndOffset();
     if (c.IsWriting() && !c.empty()) c.Seal();
   }
 
-  for (auto& c : chunks_) {
+  for (auto &c : chunks_) {
     if (!c.IsSealed()) continue;
     std::string_view data = c.FlushData();
     if (data.empty()) continue;
@@ -157,7 +157,7 @@ Status FileReadWriter::Flush() {
   }
 
   chunks_.erase(std::remove_if(chunks_.begin(), chunks_.end(),
-                               [](const chunk::Chunk& c) {
+                               [](const chunk::Chunk &c) {
                                  return c.IsSealed();
                                }),
                 chunks_.end());
@@ -169,9 +169,9 @@ Status FileReadWriter::Flush() {
 // FindChunk — for cross-fh reads
 // ────────────────────────────────────────────────────────────────
 
-chunk::Chunk* FileReadWriter::FindChunk(InodeID ino, off_t off) {
+chunk::Chunk *FileReadWriter::FindChunk(InodeID ino, off_t off) {
   if (ino != ino_) return nullptr;
-  for (auto& c : chunks_) {
+  for (auto &c : chunks_) {
     if (off >= c.StartOffset() && off < c.EndOffset()) return &c;
   }
   return nullptr;
