@@ -13,6 +13,9 @@ jobs:
         with:
           submodules: false
 
+      - name: Prepare cache directories
+        run: sudo mkdir -p /usr/local/lib /usr/local/include /usr/local/bin
+
       - name: Restore/Save build cache
         id: cache
         uses: actions/cache@v4
