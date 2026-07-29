@@ -6,13 +6,13 @@
 #include <cstring>
 
 #include "chunk/Chunk.hpp"
-#include "metadata/IMetaEngine.hpp"
+#include "metadata/Meta.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Status.hpp"
 #include "vfs/FileReadWriter.hpp"
 
 using swordfs::chunk::Chunk;
-using swordfs::metadata::IMetaEngine;
+using swordfs::metadata::Meta;
 using swordfs::metadata::InodeID;
 using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
@@ -39,7 +39,7 @@ class MockDataEngine : public IDataEngine {
   Status Delete(std::string_view /*key*/) override { return Status::OK(); }
 };
 
-class MockMetaEngine : public IMetaEngine {
+class MockMetaEngine : public Meta {
  public:
   Status GetAttr(InodeID, struct stat* attr) override {
     std::memset(attr, 0, sizeof(*attr));
