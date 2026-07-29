@@ -47,7 +47,7 @@ fi
 echo ""
 echo "==> Test 2: mount volume"
 mkdir -p "$MNT"
-if "$SWORDFS" mount --volume testvol --volume-config-path "$FORMAT_DIR" "$MNT" -o allow_other 2>&1 &
+if "$SWORDFS" mount --volume testvol --volume-config-path "$FORMAT_DIR" "$MNT" 2>&1 &
 then
   sleep 1
   if mountpoint -q "$MNT"; then
