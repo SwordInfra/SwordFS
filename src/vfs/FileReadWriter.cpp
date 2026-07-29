@@ -41,6 +41,8 @@ chunk::Chunk &FileReadWriter::GetOrCreateChunk(off_t off) {
 // ────────────────────────────────────────────────────────────────
 
 Status FileReadWriter::Write(const char *data, size_t size, off_t off) {
+  SWORDFS_LOG_DEBUG << "FileReadWriter::Write: ino=" << ino_
+                    << " size=" << size << " off=" << off;
   size_t max_chunk = data_->Limits().max_chunk_size;
   const char *pos = data;
   size_t remaining = size;
@@ -50,6 +52,8 @@ Status FileReadWriter::Write(const char *data, size_t size, off_t off) {
     auto &c = GetOrCreateChunk(cur_off);
     size_t room = max_chunk - (cur_off % max_chunk);
     size_t n = std::min(remaining, room);
+    SWORDFS_LOG_DEBUG << "FileReadWriter::Write: chunk=" << c.index()
+                      << " cur_off=" << cur_off << " n=" << n;
     Status status = c.Write(pos, n, cur_off);
     if (!status.ok()) return status;
     pos += n;
@@ -57,6 +61,8 @@ Status FileReadWriter::Write(const char *data, size_t size, off_t off) {
     cur_off += static_cast<off_t>(n);
   }
 
+  SWORDFS_LOG_DEBUG << "FileReadWriter::Write: done ino=" << ino_
+                    << " total=" << size << " chunks=" << chunks_.size();
   return Status::OK();
 }
 
@@ -127,6 +133,8 @@ Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
 // ────────────────────────────────────────────────────────────────
 
 Status FileReadWriter::Flush() {
+  SWORDFS_LOG_DEBUG << "FileReadWriter::Flush: ino=" << ino_
+                    << " chunks=" << chunks_.size();
   off_t file_end = 0;
   for (auto &c : chunks_) {
     if (c.EndOffset() > file_end) file_end = c.EndOffset();
@@ -138,8 +146,18 @@ Status FileReadWriter::Flush() {
     std::string_view data = c.FlushData();
     if (data.empty()) continue;
 
-    Status status = data_->Put(c.ChunkKey(), data);
-    if (!status.ok()) return status;
+    std::string key(c.ChunkKey());
+    std::string payload(data);
+    SWORDFS_LOG_DEBUG << "FileReadWriter::Flush: uploading ino=" << c.ino()
+                      << " chunk=" << c.index()
+                      << " key=" << key << " size=" << payload.size();
+    auto status = data_->Put(key, payload);
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "FileReadWriter::Flush: upload FAILED ino="
+                        << c.ino() << " chunk=" << c.index()
+                        << " key=" << key << " — " << status.message();
+      return status;
+    }
     SWORDFS_LOG_INFO << "Flush uploaded: ino=" << c.ino()
                      << " chunk=" << c.index()
                      << " size=" << data.size();
@@ -160,6 +178,7 @@ Status FileReadWriter::Flush() {
                                }),
                 chunks_.end());
 
+  SWORDFS_LOG_DEBUG << "FileReadWriter::Flush: done ino=" << ino_;
   return Status::OK();
 }
 

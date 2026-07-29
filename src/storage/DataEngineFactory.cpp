@@ -6,6 +6,7 @@
 #include "storage/IDataEngine.hpp"
 #include "storage/StorageUrl.hpp"
 #include "storage/s3/S3DataEngine.hpp"
+#include "utils/FiberThreadPool.hpp"
 #include "volume/VolumeConfig.hpp"
 
 namespace swordfs::storage {
@@ -40,6 +41,13 @@ utils::Status CreateDataEngine(
     } else {
       s3_cfg.bucket = path.substr(0, slash);
       s3_cfg.prefix = path.substr(slash + 1);
+    }
+
+    if (s3_cfg.bucket.empty()) {
+      return utils::Status::InvalidArgument(
+          "bucket URL is missing bucket name. "
+          "Expected format: s3://<endpoint>/<bucket>[/<prefix>], "
+          "got: " + vol.bucket);
     }
 
     *out = std::make_unique<S3DataEngine>(s3_cfg);

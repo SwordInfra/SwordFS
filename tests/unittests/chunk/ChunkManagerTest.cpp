@@ -18,6 +18,7 @@
 #include "utils/Status.hpp"
 #include "vfs/FileHandleManager.hpp"
 #include "vfs/FileReadWriter.hpp"
+#include "volume/VolumeImpl.hpp"
 
 using swordfs::chunk::ChunkManager;
 using swordfs::metadata::IMetaEngine;
@@ -352,8 +353,35 @@ TEST_F(ChunkManagerReadTest, ReadEntirelyBeforeBuffer) {
   EXPECT_EQ(sv, Repeat('B', 100));
 }
 
-// ================================================================
-// ChunkManagerFlushTest
+// ────────────────────────────────────────────────────────────────
+// Read — through FileHandleManager (regression: Create path)
+// Verifies Open → Find → Write → Read works through the manager.
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(ChunkManagerReadTest, OpenThenWriteReadViaHandleManager) {
+  swordfs::volume::VolumeImpl vol;
+  vol.set_meta_engine(std::make_unique<MockMetaEngine>());
+  vol.set_data_engine(std::make_unique<MockDataEngine>());
+  static_cast<MockDataEngine *>(vol.data_engine())->set_chunk_size(kChunkSize);
+
+  auto &mgr = swordfs::vfs::FileHandleManager::Instance();
+  mgr.Release(kFh);  // ensure clean state
+  EXPECT_TRUE(mgr.Open(kFh, &vol, 42).ok());
+
+  auto handle = mgr.Find(kFh);
+  ASSERT_NE(handle, nullptr);
+  handle->Write(Repeat('Z', 300).data(), 300, 0);
+
+  auto out = folly::IOBuf::create(kChunkSize);
+  Status st = handle->Read(300, 0, out.get());
+  EXPECT_TRUE(st.ok()) << st.message();
+  std::string_view sv(reinterpret_cast<const char *>(out->data()),
+                      out->length());
+  EXPECT_EQ(sv, Repeat('Z', 300));
+
+  mgr.Release(kFh);
+}
+
 // ================================================================
 
 class ChunkManagerFlushTest : public ::testing::Test {

@@ -24,8 +24,8 @@ class IDataEngine;
 /// |out| is set to nullptr when vol.bucket is empty (no data engine
 /// needed).  Returns an error Status when the bucket URL is invalid
 /// or the scheme is unsupported.
-utils::Status CreateDataEngine(const volume::VolumeConfig& vol,
-                            std::unique_ptr<IDataEngine>* out);
+utils::Status CreateDataEngine(const volume::VolumeConfig &vol,
+                               std::unique_ptr<IDataEngine> *out);
 
 }  // namespace storage
 }  // namespace swordfs

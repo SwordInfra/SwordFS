@@ -41,8 +41,15 @@ struct DataEngineLimits {
 /// Chunks are addressed by opaque string keys whose format is defined
 /// by the concrete engine (e.g. "chunks/0/1/23_0_4" for object storage).
 /// The engine itself has no knowledge of inodes or file-system concepts.
+///
+/// @important  Implementations MUST dispatch blocking I/O
+/// (e.g. SDK calls to object storage) to a background thread pool
+/// and suspend the calling fiber rather than blocking the OS thread.
+/// Blocking the thread starves all other fibers on the same
+/// EventBase.  See S3DataEngine for the recommended pattern
+/// (FiberThreadPool + folly::fibers::Baton).
 class IDataEngine {
-   public:
+ public:
   virtual ~IDataEngine() = default;
 
   /// Return the engine's capability limits.

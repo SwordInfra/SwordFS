@@ -11,12 +11,12 @@ namespace swordfs::utils {
 namespace {
 
 std::mutex g_mutex;
-std::vector<FiberRuntime*> g_runtimes;
+std::vector<FiberRuntime *> g_runtimes;
 bool g_shutdown = false;
 
 }  // namespace
 
-thread_local FiberRuntime* t_runtime = nullptr;
+thread_local FiberRuntime *t_runtime = nullptr;
 
 FiberRuntime::FiberRuntime() : evb_(std::make_unique<folly::EventBase>()) {
   driver_thread_ = std::thread([this] { evb_->loopForever(); });
@@ -40,18 +40,18 @@ void InitFiberRuntime() {
 }
 
 void ShutdownFiberRuntime() {
-  std::vector<FiberRuntime*> runtimes;
+  std::vector<FiberRuntime *> runtimes;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_shutdown = true;
     runtimes.swap(g_runtimes);
   }
 
-  for (auto* rt : runtimes) {
+  for (auto *rt : runtimes) {
     delete rt;
   }
 }
 
-FiberRuntime* ThisFiberRuntime() { return t_runtime; }
+FiberRuntime *ThisFiberRuntime() { return t_runtime; }
 
 }  // namespace swordfs::utils

@@ -10,6 +10,7 @@
 #include "config/Validator.hpp"
 #include "storage/StorageRegistry.hpp"
 
+using swordfs::config::ValidateBucketUrl;
 using swordfs::config::ValidateMetaUrl;
 
 // ================================================================
@@ -40,4 +41,35 @@ TEST(ValidateMetaUrlTest, ErrorMessageContainsScheme) {
   EXPECT_NE(err.find("redis"), std::string::npos);
   EXPECT_NE(err.find("Supported"), std::string::npos)
       << "Error message should mention 'Supported': " << err;
+}
+
+// ================================================================
+// ValidateBucketUrl
+// ================================================================
+
+TEST(ValidateBucketUrlTest, ValidBucketUrl) {
+  EXPECT_TRUE(ValidateBucketUrl("s3://endpoint.example.com/my-bucket").empty());
+}
+
+TEST(ValidateBucketUrlTest, ValidBucketUrlWithPrefix) {
+  EXPECT_TRUE(ValidateBucketUrl("s3://endpoint.example.com/bucket/prefix").empty());
+}
+
+TEST(ValidateBucketUrlTest, MissingBucketName) {
+  std::string err = ValidateBucketUrl("s3://endpoint.example.com");
+  EXPECT_FALSE(err.empty());
+  EXPECT_NE(err.find("missing bucket name"), std::string::npos)
+      << "Error should mention 'missing bucket name': " << err;
+}
+
+TEST(ValidateBucketUrlTest, EmptyString) {
+  EXPECT_FALSE(ValidateBucketUrl("").empty());
+}
+
+TEST(ValidateBucketUrlTest, NoScheme) {
+  EXPECT_FALSE(ValidateBucketUrl("not-a-url").empty());
+}
+
+TEST(ValidateBucketUrlTest, UnsupportedScheme) {
+  EXPECT_FALSE(ValidateBucketUrl("ftp://host/bucket").empty());
 }

@@ -19,7 +19,7 @@ using swordfs::volume::VolumeConfig;
 
 namespace {
 
-VolumeConfig MakeVol(const std::string& bucket, const std::string& region) {
+VolumeConfig MakeVol(const std::string &bucket, const std::string &region) {
   VolumeConfig v;
   v.name = "test";
   v.meta_url = "memory://local";
