@@ -35,7 +35,7 @@ void EnsureAwsSdkInit() {
 }
 }  // namespace
 
-S3DataEngine::S3DataEngine(const S3Config& config) : cfg_(config) {
+S3DataEngine::S3DataEngine(const S3Config &config) : cfg_(config) {
   EnsureAwsSdkInit();
   Aws::Client::ClientConfiguration aws_cfg;
   aws_cfg.endpointOverride = cfg_.endpoint;
@@ -53,12 +53,12 @@ S3DataEngine::S3DataEngine(const S3Config& config) : cfg_(config) {
 
 DataEngineLimits S3DataEngine::Limits() const {
   DataEngineLimits limits;
-  limits.max_chunk_size = 64 * 1024 * 1024;  // 64 MiB
+  limits.max_chunk_size = 64ULL * 1024 * 1024;  // 64 MiB
   limits.supports_multipart = false;
   return limits;
 }
 
-bool S3DataEngine::Head(std::string_view key, size_t* size) {
+bool S3DataEngine::Head(std::string_view key, size_t *size) {
   Aws::S3::Model::HeadObjectRequest req;
   req.SetBucket(cfg_.bucket);
   req.SetKey(ObjectKey(key));
@@ -75,7 +75,7 @@ Status S3DataEngine::Put(std::string_view key, std::string_view data) {
   req.SetKey(ObjectKey(key));
 
   auto body = Aws::MakeShared<Aws::StringStream>("PutObject",
-      std::string(data.data(), data.size()));
+                                                 std::string(data.data(), data.size()));
   req.SetBody(body);
 
   auto outcome = client_->PutObject(req);
@@ -87,7 +87,7 @@ Status S3DataEngine::Put(std::string_view key, std::string_view data) {
   return Status::OK();
 }
 
-Status S3DataEngine::Get(std::string_view key, std::string* out,
+Status S3DataEngine::Get(std::string_view key, std::string *out,
                          size_t offset, size_t size) {
   Aws::S3::Model::GetObjectRequest req;
   req.SetBucket(cfg_.bucket);
@@ -110,7 +110,7 @@ Status S3DataEngine::Get(std::string_view key, std::string* out,
     return Status::Internal("S3 GetObject failed");
   }
 
-  auto& stream = outcome.GetResult().GetBody();
+  auto &stream = outcome.GetResult().GetBody();
   std::string result((std::istreambuf_iterator<char>(stream)),
                      std::istreambuf_iterator<char>());
   *out = std::move(result);

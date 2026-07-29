@@ -8,15 +8,15 @@
 
 #include <memory>
 
-#include "fuse/VfsImpl.hpp"
+#include "vfs/VfsImpl.hpp"
 #include "volume/VolumeImpl.hpp"
 
-using swordfs::fuse::VfsImpl;
+using swordfs::vfs::VfsImpl;
 
 TEST(VfsImplTest, ConstructAndBind) {
   auto vfs = std::make_unique<VfsImpl>();
   auto vol = std::make_unique<swordfs::volume::VolumeImpl>();
-  vfs->Bind(std::move(vol));
-  // If we get here without crashing, Bind() succeeded.
+  vfs->Init(std::move(vol));
+  // If we get here without crashing, Init() succeeded.
   SUCCEED();
 }

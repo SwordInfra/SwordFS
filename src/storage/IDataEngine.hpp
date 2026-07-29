@@ -30,7 +30,7 @@ namespace swordfs::storage {
 struct DataEngineLimits {
   /// Maximum chunk size in bytes.  The upper layer (VfsImpl) MUST
   /// segment writes into chunks no larger than this value.
-  size_t max_chunk_size = 64 * 1024 * 1024;  // 64 MiB
+  size_t max_chunk_size = 64ULL * 1024 * 1024;  // 64 MiB
 
   /// Whether the engine supports multipart uploads.
   bool supports_multipart = false;
@@ -42,7 +42,7 @@ struct DataEngineLimits {
 /// by the concrete engine (e.g. "chunks/0/1/23_0_4" for object storage).
 /// The engine itself has no knowledge of inodes or file-system concepts.
 class IDataEngine {
- public:
+   public:
   virtual ~IDataEngine() = default;
 
   /// Return the engine's capability limits.
@@ -52,7 +52,7 @@ class IDataEngine {
   /// @param key  chunk key.
   /// @param size receives the object size if it exists (may be null).
   /// @return true if the chunk exists.
-  virtual bool Head(std::string_view key, size_t* size) = 0;
+  virtual bool Head(std::string_view key, size_t *size) = 0;
 
   /// Write a chunk to the storage backend.
   virtual Status Put(std::string_view key, std::string_view data) = 0;
@@ -63,7 +63,7 @@ class IDataEngine {
   /// @param out    receives the chunk data.
   /// @param offset byte offset within the chunk (0 = from start).
   /// @param size   number of bytes to read (0 = until end).
-  virtual Status Get(std::string_view key, std::string* out,
+  virtual Status Get(std::string_view key, std::string *out,
                      size_t offset = 0, size_t size = 0) = 0;
 
   /// Delete a chunk (called by the garbage collector).

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "chunk/ChunkManager.hpp"
+#include "config/ConfigCenter.hpp"
 #include "utils/Status.hpp"
 
 namespace swordfs {
@@ -24,21 +25,16 @@ namespace volume {
 class VolumeImpl;
 }
 
-namespace fuse {
+namespace vfs {
 
 class VfsImpl {
  public:
   VfsImpl();
   ~VfsImpl();
 
-  /// Bind this VfsImpl to a VolumeImpl, which provides meta engine,
+  /// Initialise with a VolumeImpl, which provides meta engine,
   /// data engine, and volume configuration.  Takes ownership.
-  void Bind(std::unique_ptr<volume::VolumeImpl> vol);
-
-  /// FUSE init callback — configure connection capabilities.
-  void FuseInit(void* userdata, struct fuse_conn_info* conn);
-  /// FUSE destroy callback — called on unmount.
-  void FuseDestroy(void* userdata);
+  void Init(std::unique_ptr<volume::VolumeImpl> vol);
 
   void Lookup(fuse_req_t req, fuse_ino_t parent, const char* name);
   void Forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup);
@@ -106,8 +102,7 @@ class VfsImpl {
 
  protected:
   std::unique_ptr<volume::VolumeImpl> vol_;
-  std::unique_ptr<chunk::ChunkManager> chunk_mgr_;
 };
 
-}  // namespace fuse
+}  // namespace vfs
 }  // namespace swordfs

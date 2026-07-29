@@ -1,0 +1,15 @@
+# SwordFS clang-tidy configuration
+#
+# Run: clang-tidy -p build <source files>
+
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  modernize-use-override,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape
+
+CheckOptions:
+  - key: performance-enum-size.EnumIgnoreList
+    value: 'swordfs::utils::Status::Code'
