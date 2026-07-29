@@ -150,6 +150,16 @@ class MockMetaEngine : public IMetaEngine {
   }
   Status ReleaseDir(uint64_t) override { return Status::OK(); }
   Status Forget(InodeID, uint64_t) override { return Status::OK(); }
+  Status AppendSlice(InodeID, uint64_t,
+                     const swordfs::storage::Slice&) override {
+    return Status::OK();
+  }
+  Status GetSlices(InodeID, uint64_t,
+                   swordfs::storage::SliceList* out) override {
+    *out = swordfs::storage::SliceList{};
+    return Status::OK();
+  }
+  uint64_t NextSliceID(InodeID, uint64_t) override { return 1; }
 };
 
 // ================================================================
