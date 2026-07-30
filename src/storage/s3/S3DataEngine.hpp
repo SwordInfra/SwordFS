@@ -16,7 +16,13 @@
 
 #include "storage/IDataEngine.hpp"
 
-namespace swordfs::storage {
+namespace swordfs {
+
+namespace utils {
+class FiberThreadPool;
+}
+
+namespace storage {
 
 struct S3Config {
   std::string endpoint;  // e.g. "https://s3.amazonaws.com"
@@ -51,7 +57,9 @@ class S3DataEngine : public IDataEngine {
 
  private:
   S3Config cfg_;
+  std::shared_ptr<swordfs::utils::FiberThreadPool> pool_;
   std::unique_ptr<Aws::S3::S3Client> client_;
 };
 
-}  // namespace swordfs::storage
+}  // namespace storage
+}  // namespace swordfs

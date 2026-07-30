@@ -51,6 +51,9 @@ void ConfigCenter::RegisterMountOptions(CLI::App& app) {
                   "Volume config directory (required for --meta memory://local)");
   cmd->add_option("-o", fuse_opts_, "FUSE mount options (e.g. -o allow_other,ro)")
       ->allow_extra_args(false);
+  cmd->add_option("--storage-async-threads", storage_async_threads_,
+                  "Thread pool size for async storage operations (default: CPU count)")
+      ->check(CLI::PositiveNumber);
 
   cmd->parse_complete_callback([this]() {
     if (volume_config_path_.empty() ==

@@ -220,9 +220,13 @@ void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
 void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char *buf,
                     size_t size, off_t off, uint64_t fh) {
   SetRequestContext(req);
+  SWORDFS_LOG_DEBUG << "Write: ino=" << ino << " fh=" << fh
+                    << " size=" << size << " off=" << off;
 
   auto rw = FileHandleManager::Instance().Find(fh);
   if (!rw) {
+    SWORDFS_LOG_ERROR << "Write: no handle for fh=" << fh
+                      << " ino=" << ino;
     fuse_reply_err(req, EBADF);
     return;
   }
@@ -437,6 +441,15 @@ void VfsImpl::Create(fuse_req_t req, fuse_ino_t parent, const char *name,
     return;
   }
   fi->fh = fh;
+
+  status = FileHandleManager::Instance().Open(fh, vol_.get(), child_ino);
+  if (!status.ok()) {
+    SWORDFS_LOG_ERROR << "Create: FileHandleManager::Open FAILED: fh=" << fh
+                      << " — " << status.message();
+    fuse_reply_err(req, status.ToErrno());
+    return;
+  }
+
   fuse_entry_param entry = {};
   entry.ino = child_ino;
   entry.attr = attr;

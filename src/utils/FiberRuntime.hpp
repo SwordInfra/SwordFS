@@ -34,15 +34,15 @@ class FiberRuntime {
   FiberRuntime();
   ~FiberRuntime();
 
-  FiberRuntime(const FiberRuntime&) = delete;
-  FiberRuntime& operator=(const FiberRuntime&) = delete;
+  FiberRuntime(const FiberRuntime &) = delete;
+  FiberRuntime &operator=(const FiberRuntime &) = delete;
 
   /// Submit `fn` as a folly fiber.  Returns immediately; the fiber runs on
   /// the driver thread.
   template <typename Fn>
-  void Submit(Fn&& fn) {
+  void Submit(Fn &&fn) {
     evb_->runInEventBaseThread([this, fn = std::forward<Fn>(fn)]() mutable {
-      auto& fm = folly::fibers::getFiberManagerT<SwordFsContext>(*evb_);
+      auto &fm = folly::fibers::getFiberManagerT<SwordFsContext>(*evb_);
       fm.addTask(std::move(fn));
     });
   }
@@ -60,13 +60,13 @@ void InitFiberRuntime();
 void ShutdownFiberRuntime();
 
 /// Returns the calling thread's FiberRuntime, or nullptr.
-FiberRuntime* ThisFiberRuntime();
+FiberRuntime *ThisFiberRuntime();
 
 /// Asynchronously execute `fn` as a folly fiber.  Falls back to direct
 /// execution if the fiber runtime hasn't been initialised.
 template <typename Fn>
-void RunInFiber(Fn&& fn) {
-  auto* rt = ThisFiberRuntime();
+void RunInFiber(Fn &&fn) {
+  auto *rt = ThisFiberRuntime();
   if (rt == nullptr) {
     // EventBase not initialised — execute directly (graceful fallback).
     fn();

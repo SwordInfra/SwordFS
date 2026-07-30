@@ -9,6 +9,7 @@
 
 #include "metadata/Meta.hpp"
 #include "storage/StorageRegistry.hpp"
+#include "storage/StorageUrl.hpp"
 
 namespace swordfs::config {
 
@@ -31,10 +32,22 @@ const CLI::Validator ValidateBucketUrl = CLI::Validator(
       std::string scheme = input.substr(0, pos);
       std::transform(scheme.begin(), scheme.end(), scheme.begin(),
                      [](unsigned char c) { return std::tolower(c); });
-      if (swordfs::storage::StorageRegistry::Instance().Available(scheme)) {
-        return {};
+      if (!swordfs::storage::StorageRegistry::Instance().Available(scheme)) {
+        return "Unsupported bucket scheme '" + scheme + "', got: " + input;
       }
-      return "Unsupported bucket scheme '" + scheme + "', got: " + input;
+
+      // Require at least a bucket name in the path:
+      //   s3://<endpoint>/<bucket>[/<prefix>]
+      swordfs::utils::StorageUrl url;
+      if (!swordfs::utils::StorageUrl::Parse(input, &url)) {
+        return "Invalid bucket URL: " + input;
+      }
+      if (url.path.empty() || url.path == "/") {
+        return "Bucket URL is missing bucket name. "
+               "Expected format: " + scheme + "://<endpoint>/<bucket>, "
+               "got: " + input;
+      }
+      return {};
     },
     "BUCKET_URL");
 

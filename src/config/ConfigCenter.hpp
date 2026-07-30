@@ -61,6 +61,7 @@ class ConfigCenter {
   /// Returns the foreground mode.
   bool foreground() const { return foreground_; }
   int fuse_threads() const { return fuse_threads_; }
+  int storage_async_threads() const { return storage_async_threads_; }
   /// Returns the mount point directory.
   const std::string& mountpoint() const { return mountpoint_; }
 
@@ -106,6 +107,7 @@ class ConfigCenter {
   // -f / --foreground: run in foreground
   bool foreground_ = false;
   int fuse_threads_ = 1;
+  int storage_async_threads_ = static_cast<int>(std::thread::hardware_concurrency());
   // mount point directory (positional argument)
   std::string mountpoint_;
 

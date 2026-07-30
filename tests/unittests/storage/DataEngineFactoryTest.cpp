@@ -19,7 +19,7 @@ using swordfs::volume::VolumeConfig;
 
 namespace {
 
-VolumeConfig MakeVol(const std::string& bucket, const std::string& region) {
+VolumeConfig MakeVol(const std::string &bucket, const std::string &region) {
   VolumeConfig v;
   v.name = "test";
   v.meta_url = "memory://local";
@@ -56,6 +56,14 @@ TEST(DataEngineFactoryTest, UnknownSchemeReturnsError) {
   EXPECT_FALSE(st.ok());
 }
 
+TEST(DataEngineFactoryTest, S3UrlMissingBucketName) {
+  VolumeConfig vol = MakeVol("s3://endpoint.example.com", "auto");
+  std::unique_ptr<IDataEngine> engine;
+  Status st = CreateDataEngine(vol, &engine);
+  EXPECT_FALSE(st.ok());
+  EXPECT_NE(st.message().find("missing bucket name"), std::string::npos)
+      << st.message();
+}
 // ────────────────────────────────────────────────────────────────
 // CreateDataEngine — S3 engine creation
 // ────────────────────────────────────────────────────────────────
