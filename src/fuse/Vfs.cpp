@@ -5,10 +5,16 @@
 
 #include "fuse/Vfs.hpp"
 
+#include <dirent.h>
+
+#include <cstddef>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
 #include "fuse/Limits.hpp"
+#include "metadata/Meta.hpp"
+#include "metadata/Types.hpp"
 #include "utils/FiberRuntime.hpp"
 #include "utils/Logging.hpp"
 #include "vfs/VfsImpl.hpp"
@@ -69,7 +75,14 @@ void VfsHookFactory::SwordFsLookup(fuse_req_t req, fuse_ino_t parent,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, parent, name = std::string(name)] {
-        vfs->Lookup(req, parent, name.c_str());
+        vfs->SetRequestContext(req);
+        fuse_entry_param entry;
+        auto status = vfs->Lookup(parent, name.c_str(), &entry);
+        if (!status.ok()) {
+          fuse_reply_err(req, status.ToErrno());
+          return;
+        }
+        fuse_reply_entry(req, &entry);
       });
 }
 
@@ -77,30 +90,49 @@ void VfsHookFactory::SwordFsForget(fuse_req_t req, fuse_ino_t ino,
                                    uint64_t nlookup) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, nlookup] { vfs->Forget(req, ino, nlookup); });
+      [vfs = vfs_, ino, nlookup] { vfs->Forget(ino, nlookup); });
 }
 
 void VfsHookFactory::SwordFsGetattr(fuse_req_t req, fuse_ino_t ino,
                                     struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, fi] { vfs->Getattr(req, ino, fi); });
+  (void)fi;
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino] {
+    vfs->SetRequestContext(req);
+    struct stat attr;
+    auto status = vfs->Getattr(ino, &attr);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    fuse_reply_attr(req, &attr, 1.0);
+  });
 }
 
 void VfsHookFactory::SwordFsSetattr(fuse_req_t req, fuse_ino_t ino,
                                     struct stat *attr, int to_set,
                                     struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, attr, to_set, fi] {
-        vfs->Setattr(req, ino, attr, to_set, fi);
-      });
+  (void)fi;
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, attr, to_set] {
+    vfs->SetRequestContext(req);
+    struct stat out_attr;
+    auto status = vfs->Setattr(ino, attr, to_set, &out_attr);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    fuse_reply_attr(req, &out_attr, 1.0);
+  });
 }
 
 void VfsHookFactory::SwordFsReadlink(fuse_req_t req, fuse_ino_t ino) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino] { vfs->Readlink(req, ino); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Readlink(ino);
+    fuse_reply_err(req, status.ToErrno());
+  });
 }
 
 void VfsHookFactory::SwordFsMknod(fuse_req_t req, fuse_ino_t parent,
@@ -109,7 +141,9 @@ void VfsHookFactory::SwordFsMknod(fuse_req_t req, fuse_ino_t parent,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, parent, name = std::string(name), mode, rdev] {
-        vfs->Mknod(req, parent, name.c_str(), mode, rdev);
+        vfs->SetRequestContext(req);
+        auto status = vfs->Mknod(parent, name.c_str(), mode, rdev);
+        fuse_reply_err(req, status.ToErrno());
       });
 }
 
@@ -118,7 +152,14 @@ void VfsHookFactory::SwordFsMkdir(fuse_req_t req, fuse_ino_t parent,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, parent, name = std::string(name), mode] {
-        vfs->Mkdir(req, parent, name.c_str(), mode);
+        vfs->SetRequestContext(req);
+        fuse_entry_param entry;
+        auto status = vfs->Mkdir(parent, name.c_str(), mode, &entry);
+        if (!status.ok()) {
+          fuse_reply_err(req, status.ToErrno());
+          return;
+        }
+        fuse_reply_entry(req, &entry);
       });
 }
 
@@ -127,7 +168,9 @@ void VfsHookFactory::SwordFsUnlink(fuse_req_t req, fuse_ino_t parent,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, parent, name = std::string(name)] {
-        vfs->Unlink(req, parent, name.c_str());
+        vfs->SetRequestContext(req);
+        auto status = vfs->Unlink(parent, name.c_str());
+        fuse_reply_err(req, status.ToErrno());
       });
 }
 
@@ -136,7 +179,9 @@ void VfsHookFactory::SwordFsRmdir(fuse_req_t req, fuse_ino_t parent,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, parent, name = std::string(name)] {
-        vfs->Rmdir(req, parent, name.c_str());
+        vfs->SetRequestContext(req);
+        auto status = vfs->Rmdir(parent, name.c_str());
+        fuse_reply_err(req, status.ToErrno());
       });
 }
 
@@ -146,7 +191,9 @@ void VfsHookFactory::SwordFsSymlink(fuse_req_t req, const char *link,
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, link = std::string(link), parent,
        name = std::string(name)] {
-        vfs->Symlink(req, link.c_str(), parent, name.c_str());
+        vfs->SetRequestContext(req);
+        auto status = vfs->Symlink(link.c_str(), parent, name.c_str());
+        fuse_reply_err(req, status.ToErrno());
       });
 }
 
@@ -157,8 +204,10 @@ void VfsHookFactory::SwordFsRename(fuse_req_t req, fuse_ino_t parent,
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, parent, name = std::string(name), newparent,
        newname = std::string(newname), flags] {
-        vfs->Rename(req, parent, name.c_str(), newparent, newname.c_str(),
-                    flags);
+        vfs->SetRequestContext(req);
+        auto status = vfs->Rename(parent, name.c_str(), newparent,
+                             newname.c_str(), flags);
+        fuse_reply_err(req, status.ToErrno());
       });
 }
 
@@ -167,23 +216,40 @@ void VfsHookFactory::SwordFsLink(fuse_req_t req, fuse_ino_t ino,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, ino, newparent, newname = std::string(newname)] {
-        vfs->Link(req, ino, newparent, newname.c_str());
+        vfs->SetRequestContext(req);
+        auto status = vfs->Link(ino, newparent, newname.c_str());
+        fuse_reply_err(req, status.ToErrno());
       });
 }
 
 void VfsHookFactory::SwordFsOpen(fuse_req_t req, fuse_ino_t ino,
                                  struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, fi] { vfs->Open(req, ino, fi); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, fi] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Open(ino, fi);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    fuse_reply_open(req, fi);
+  });
 }
 
 void VfsHookFactory::SwordFsRead(fuse_req_t req, fuse_ino_t ino, size_t size,
                                  off_t off, struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   uint64_t fh = fi->fh;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, size, off, fh] { vfs->Read(req, ino, size, off, fh); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, size, off, fh] {
+    vfs->SetRequestContext(req);
+    std::string data;
+    auto status = vfs->Read(ino, size, off, fh, &data);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    fuse_reply_buf(req, data.data(), data.size());
+  });
 }
 
 void VfsHookFactory::SwordFsWrite(fuse_req_t req, fuse_ino_t ino,
@@ -193,7 +259,13 @@ void VfsHookFactory::SwordFsWrite(fuse_req_t req, fuse_ino_t ino,
   uint64_t fh = fi->fh;
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, ino, buf = std::string(buf, size), size, off, fh] {
-        vfs->Write(req, ino, buf.data(), size, off, fh);
+        vfs->SetRequestContext(req);
+        auto status = vfs->Write(ino, buf.data(), size, off, fh);
+        if (!status.ok()) {
+          fuse_reply_err(req, status.ToErrno());
+          return;
+        }
+        fuse_reply_write(req, size);
       });
 }
 
@@ -201,60 +273,141 @@ void VfsHookFactory::SwordFsFlush(fuse_req_t req, fuse_ino_t ino,
                                   struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   uint64_t fh = fi->fh;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, fh] { vfs->Flush(req, ino, fh); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, fh] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Flush(ino, fh);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    fuse_reply_err(req, 0);
+  });
 }
 
 void VfsHookFactory::SwordFsRelease(fuse_req_t req, fuse_ino_t ino,
                                     struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   uint64_t fh = fi->fh;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, fh] { vfs->Release(req, ino, fh); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, fh] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Release(ino, fh);
+    fuse_reply_err(req, status.ToErrno());
+  });
 }
 
 void VfsHookFactory::SwordFsFsync(fuse_req_t req, fuse_ino_t ino,
                                   int datasync, struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   uint64_t fh = fi->fh;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, datasync, fh] { vfs->Fsync(req, ino, datasync, fh); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, datasync, fh] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Fsync(ino, datasync, fh);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    fuse_reply_err(req, 0);
+  });
 }
 
 void VfsHookFactory::SwordFsOpendir(fuse_req_t req, fuse_ino_t ino,
                                     struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, fi] { vfs->Opendir(req, ino, fi); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, fi] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Opendir(ino, &fi->fh);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    fuse_reply_open(req, fi);
+  });
 }
 
 void VfsHookFactory::SwordFsReaddir(fuse_req_t req, fuse_ino_t ino,
                                     size_t size, off_t off,
                                     struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, size, off, fi] { vfs->Readdir(req, ino, size, off, fi); });
+  (void)fi;
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, size, off] {
+    vfs->SetRequestContext(req);
+    std::vector<swordfs::metadata::SwordFsEntry> entries;
+    entries.push_back(swordfs::metadata::SwordFsEntry{".", DT_DIR, ino});
+    entries.push_back(swordfs::metadata::SwordFsEntry{
+        "..", DT_DIR, ino == FUSE_ROOT_ID ? ino : 0});
+    auto status = vfs->Volume()->meta_engine()->ReadDir(ino, &entries);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    size_t cap = 0;
+    std::vector<size_t> sizes(entries.size());
+    for (size_t i = 0; i < entries.size(); ++i) {
+      struct stat st = {};
+      st.st_ino = entries[i].ino;
+      st.st_mode = entries[i].type << 12;
+      sizes[i] = fuse_add_direntry(req, nullptr, 0,
+                                   entries[i].name.c_str(), &st, 0);
+      cap += sizes[i];
+    }
+    char *buf = static_cast<char *>(std::malloc(cap));
+    if (!buf) {
+      fuse_reply_err(req, ENOMEM);
+      return;
+    }
+    size_t pos = 0;
+    for (size_t i = 0; i < entries.size() && pos < cap; ++i) {
+      struct stat st = {};
+      st.st_ino = entries[i].ino;
+      st.st_mode = entries[i].type << 12;
+      size_t n = fuse_add_direntry(req, buf + pos, cap - pos,
+                                   entries[i].name.c_str(), &st,
+                                   pos + sizes[i]);
+      if (n > cap - pos) break;
+      pos += n;
+    }
+    if (static_cast<size_t>(off) < pos)
+      fuse_reply_buf(req, buf + off, std::min(pos - off, size));
+    else
+      fuse_reply_buf(req, nullptr, 0);
+    std::free(buf);
+  });
 }
 
 void VfsHookFactory::SwordFsReleasedir(fuse_req_t req, fuse_ino_t ino,
                                        struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, fi] { vfs->Releasedir(req, ino, fi); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, fi] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Releasedir(ino, fi->fh);
+    fuse_reply_err(req, status.ToErrno());
+  });
 }
 
 void VfsHookFactory::SwordFsFsyncdir(fuse_req_t req, fuse_ino_t ino,
                                      int datasync,
                                      struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, datasync, fi] { vfs->Fsyncdir(req, ino, datasync, fi); });
+  (void)fi;
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, datasync] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Fsyncdir(ino, datasync);
+    fuse_reply_err(req, status.ToErrno());
+  });
 }
 
 void VfsHookFactory::SwordFsStatfs(fuse_req_t req, fuse_ino_t ino) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino] { vfs->Statfs(req, ino); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino] {
+    vfs->SetRequestContext(req);
+    struct statvfs stbuf;
+    auto status = vfs->Statfs(ino, &stbuf);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    fuse_reply_statfs(req, &stbuf);
+  });
 }
 
 void VfsHookFactory::SwordFsSetxattr(fuse_req_t req, fuse_ino_t ino,
@@ -264,7 +417,10 @@ void VfsHookFactory::SwordFsSetxattr(fuse_req_t req, fuse_ino_t ino,
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, ino, name = std::string(name),
        value = std::string(value, size), size, flags] {
-        vfs->Setxattr(req, ino, name.c_str(), value.data(), size, flags);
+        vfs->SetRequestContext(req);
+        auto status = vfs->Setxattr(ino, name.c_str(), value.data(),
+                                    size, flags);
+        fuse_reply_err(req, status.ToErrno());
       });
 }
 
@@ -273,15 +429,20 @@ void VfsHookFactory::SwordFsGetxattr(fuse_req_t req, fuse_ino_t ino,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, ino, name = std::string(name), size] {
-        vfs->Getxattr(req, ino, name.c_str(), size);
+        vfs->SetRequestContext(req);
+        auto status = vfs->Getxattr(ino, name.c_str(), size);
+        fuse_reply_err(req, status.ToErrno());
       });
 }
 
 void VfsHookFactory::SwordFsListxattr(fuse_req_t req, fuse_ino_t ino,
                                       size_t size) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, size] { vfs->Listxattr(req, ino, size); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, size] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Listxattr(ino, size);
+    fuse_reply_err(req, status.ToErrno());
+  });
 }
 
 void VfsHookFactory::SwordFsRemovexattr(fuse_req_t req, fuse_ino_t ino,
@@ -289,14 +450,19 @@ void VfsHookFactory::SwordFsRemovexattr(fuse_req_t req, fuse_ino_t ino,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, ino, name = std::string(name)] {
-        vfs->Removexattr(req, ino, name.c_str());
+        vfs->SetRequestContext(req);
+        auto status = vfs->Removexattr(ino, name.c_str());
+        fuse_reply_err(req, status.ToErrno());
       });
 }
 
 void VfsHookFactory::SwordFsAccess(fuse_req_t req, fuse_ino_t ino, int mask) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, mask] { vfs->Access(req, ino, mask); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, mask] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Access(ino, mask);
+    fuse_reply_err(req, status.ToErrno());
+  });
 }
 
 void VfsHookFactory::SwordFsCreate(fuse_req_t req, fuse_ino_t parent,
@@ -305,7 +471,14 @@ void VfsHookFactory::SwordFsCreate(fuse_req_t req, fuse_ino_t parent,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, parent, name = std::string(name), mode, fi] {
-        vfs->Create(req, parent, name.c_str(), mode, fi);
+        vfs->SetRequestContext(req);
+        fuse_entry_param entry;
+        auto status = vfs->Create(parent, name.c_str(), mode, &entry, fi);
+        if (!status.ok()) {
+          fuse_reply_err(req, status.ToErrno());
+          return;
+        }
+        fuse_reply_create(req, &entry, fi);
       });
 }
 
@@ -351,9 +524,11 @@ void VfsHookFactory::SwordFsIoctl(fuse_req_t req, fuse_ino_t ino, unsigned int c
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, ino, cmd, arg, fi, flags,
        in_buf_str = std::move(in_buf_str), in_bufsz, out_bufsz] {
-        vfs->Ioctl(req, ino, static_cast<int>(cmd), arg, fi, flags,
-                   in_buf_str.empty() ? nullptr : in_buf_str.data(),
-                   in_bufsz, out_bufsz);
+        vfs->SetRequestContext(req);
+        auto status = vfs->Ioctl(ino, static_cast<int>(cmd), arg, fi, flags,
+                                 in_buf_str.empty() ? nullptr : in_buf_str.data(),
+                                 in_bufsz, out_bufsz);
+        fuse_reply_err(req, status.ToErrno());
       });
 }
 
@@ -382,11 +557,8 @@ void VfsHookFactory::SwordFsRetrieveReply(fuse_req_t req, void *cookie,
                                           fuse_ino_t ino, off_t offset,
                                           struct fuse_bufvec *bufv) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  (void)cookie;
-  (void)ino;
-  (void)offset;
-  (void)bufv;
-  fuse_reply_err(req, ENOSYS);
+  auto status = vfs_->RetrieveReply(req, cookie, ino, offset, bufv);
+  fuse_reply_err(req, status.ToErrno());
 }
 
 void VfsHookFactory::SwordFsForgetMulti(fuse_req_t req, size_t count,
@@ -403,8 +575,11 @@ void VfsHookFactory::SwordFsForgetMulti(fuse_req_t req, size_t count,
 void VfsHookFactory::SwordFsFlock(fuse_req_t req, fuse_ino_t ino,
                                   struct fuse_file_info *fi, int op) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, fi, op] { vfs->Flock(req, ino, fi, op); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, fi, op] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Flock(ino, fi, op);
+    fuse_reply_err(req, status.ToErrno());
+  });
 }
 
 void VfsHookFactory::SwordFsFallocate(fuse_req_t req, fuse_ino_t ino,
@@ -413,7 +588,9 @@ void VfsHookFactory::SwordFsFallocate(fuse_req_t req, fuse_ino_t ino,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   ::swordfs::utils::RunInFiber(
       [vfs = vfs_, req, ino, mode, offset, length, fi] {
-        vfs->Fallocate(req, ino, mode, offset, length, fi);
+        vfs->SetRequestContext(req);
+        auto status = vfs->Fallocate(ino, mode, offset, length, fi);
+        fuse_reply_err(req, status.ToErrno());
       });
 }
 
@@ -421,8 +598,56 @@ void VfsHookFactory::SwordFsReaddirplus(fuse_req_t req, fuse_ino_t ino,
                                         size_t size, off_t off,
                                         struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, size, off, fi] { vfs->Readdirplus(req, ino, size, off, fi); });
+  (void)fi;
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, size, off] {
+    vfs->SetRequestContext(req);
+    std::vector<swordfs::metadata::SwordFsEntry> entries;
+    entries.push_back(swordfs::metadata::SwordFsEntry{".", DT_DIR, ino});
+    entries.push_back(swordfs::metadata::SwordFsEntry{
+        "..", DT_DIR, ino == FUSE_ROOT_ID ? ino : 0});
+    auto status = vfs->Volume()->meta_engine()->ReadDir(ino, &entries);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    size_t cap = 0;
+    std::vector<size_t> sizes(entries.size());
+    for (size_t i = 0; i < entries.size(); ++i) {
+      fuse_entry_param e = {};
+      e.ino = entries[i].ino;
+      e.attr.st_ino = entries[i].ino;
+      e.attr.st_mode = entries[i].type << 12;
+      e.attr_timeout = 86400;
+      e.entry_timeout = 86400;
+      sizes[i] = fuse_add_direntry_plus(req, nullptr, 0,
+                                        entries[i].name.c_str(), &e, 0);
+      cap += sizes[i];
+    }
+    char *buf = static_cast<char *>(std::malloc(cap));
+    if (!buf) {
+      fuse_reply_err(req, ENOMEM);
+      return;
+    }
+    size_t pos = 0;
+    for (size_t i = 0; i < entries.size() && pos < cap; ++i) {
+      fuse_entry_param e = {};
+      e.ino = entries[i].ino;
+      e.attr.st_ino = entries[i].ino;
+      e.attr.st_mode = entries[i].type << 12;
+      e.attr_timeout = 86400;
+      e.entry_timeout = 86400;
+      size_t n = fuse_add_direntry_plus(req, buf + pos, cap - pos,
+                                        entries[i].name.c_str(), &e,
+                                        pos + sizes[i]);
+      if (n > cap - pos) break;
+      pos += n;
+    }
+    if (static_cast<size_t>(off) < pos)
+      fuse_reply_buf(req, buf + off, std::min(pos - off, size));
+    else
+      fuse_reply_buf(req, nullptr, 0);
+    std::free(buf);
+  });
 }
 
 void VfsHookFactory::SwordFsCopyFileRange(
@@ -444,22 +669,31 @@ void VfsHookFactory::SwordFsCopyFileRange(
 void VfsHookFactory::SwordFsLseek(fuse_req_t req, fuse_ino_t ino, off_t off,
                                   int whence, struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, off, whence, fi] { vfs->Lseek(req, ino, off, whence, fi); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, off, whence, fi] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Lseek(ino, off, whence, fi);
+    fuse_reply_err(req, status.ToErrno());
+  });
 }
 
 void VfsHookFactory::SwordFsTmpfile(fuse_req_t req, fuse_ino_t parent,
                                     mode_t mode, struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, parent, mode, fi] { vfs->Tmpfile(req, parent, mode, fi); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, parent, mode, fi] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Tmpfile(parent, mode, fi);
+    fuse_reply_err(req, status.ToErrno());
+  });
 }
 
 void VfsHookFactory::SwordFsStatx(fuse_req_t req, fuse_ino_t ino, int flags,
                                   int mask, struct fuse_file_info *fi) {
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
-  ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, flags, mask, fi] { vfs->Statx(req, ino, flags, mask, fi); });
+  ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, flags, mask, fi] {
+    vfs->SetRequestContext(req);
+    auto status = vfs->Statx(ino, flags, mask, fi);
+    fuse_reply_err(req, status.ToErrno());
+  });
 }
 
 // Operation table
