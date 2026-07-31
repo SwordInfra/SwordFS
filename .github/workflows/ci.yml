@@ -50,8 +50,6 @@ jobs:
           else
             echo "  [FAIL] folly verification failed, will reinstall"
             echo "needs_reinstall=true" >> "$GITHUB_OUTPUT"
-            rm -rf "$TMPDIR"
-            exit 0
           fi
           rm -rf "$TMPDIR"
 
@@ -68,8 +66,6 @@ jobs:
           else
             echo "  [FAIL] AWS SDK verification failed, will reinstall"
             echo "needs_reinstall=true" >> "$GITHUB_OUTPUT"
-            rm -rf "$TMPDIR"
-            exit 0
           fi
           rm -rf "$TMPDIR"
 
@@ -89,41 +85,19 @@ jobs:
           sudo rm -f /usr/local/lib/libgtest*
           sudo rm -f /usr/local/lib/libgmock*
 
-      - name: Install system packages
+      - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y -qq \
-            lcov clang-tidy \
-            libfuse3-dev fuse3 libfmt-dev libboost-all-dev libssl-dev \
-            libevent-dev libdouble-conversion-dev libgoogle-glog-dev \
-            libgtest-dev libcli11-dev libcurl4-openssl-dev zlib1g-dev
-
-      - name: Upgrade system packages from resolute
-        run: |
-          # Some packages on Ubuntu 24.04 are too old for our deps.
-          # Install newer versions from resolute (25.04).
-          echo "deb http://archive.ubuntu.com/ubuntu resolute main universe" \
-            | sudo tee /etc/apt/sources.list.d/resolute.list
-          sudo apt-get update -qq
-
-          # fast_float: folly v2026.07.20.00 requires >= 7.0.0
-          if ! dpkg-query -W -f='${Version}' libfast-float-dev 2>/dev/null | grep -qE '^([89]|[1-9][0-9])\.'; then
-            sudo apt-get install -y -qq -t resolute libfast-float-dev
+          if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ] && \
+             [ "${{ steps.verify.outputs.needs_reinstall }}" != "true" ]; then
+            echo "==> Cache hit, skipping heavy deps"
+            sudo bash scripts/install-deps.sh --skip-heavy
+          else
+            echo "==> Cache miss or stale, full install"
+            sudo bash scripts/install-deps.sh
           fi
 
-          # libfuse3-dev: SwordFS requires >= 3.18
-          if ! dpkg-query -W -f='${Version}' libfuse3-dev 2>/dev/null | grep -qE '^3\.(1[89]|[2-9])'; then
-            sudo apt-get install -y -qq -t resolute libfuse3-dev
-          fi
-
-          # binutils: GCC >= 15 needs binutils >= 2.43
-          if ! as --version 2>/dev/null | grep -qE '2\.(4[3-9]|[5-9][0-9])'; then
-            sudo apt-get install -y -qq -t resolute binutils
-          fi
-
-      - name: Install heavy dependencies
-        if: steps.cache.outputs.cache-hit != 'true' || steps.verify.outputs.needs_reinstall == 'true'
-        run: sudo bash scripts/install-deps.sh
+      - name: Install CI tools
+        run: sudo apt-get install -y -qq lcov clang-tidy
 
       - name: Configure
         run: |

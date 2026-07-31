@@ -48,214 +48,147 @@ void VfsImpl::SetRequestContext(fuse_req_t req) {
   ctx.vol = vol_.get();
 }
 
-void VfsImpl::Lookup(fuse_req_t req, fuse_ino_t parent, const char *name) {
-  SetRequestContext(req);
+utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name,
+                              fuse_entry_param *entry) {
   InodeID child_ino;
   struct stat attr;
   Status status = vol_->meta_engine()->Lookup(parent, name, &child_ino,
                                               &attr);
-  if (!status.ok()) {
-    fuse_reply_err(req, status.ToErrno());
-    return;
-  }
-  fuse_entry_param entry = {};
-  entry.ino = child_ino;
-  entry.attr = attr;
-  entry.attr_timeout = 1.0;
-  entry.entry_timeout = 1.0;
-  fuse_reply_entry(req, &entry);
+  if (!status.ok()) return status;
+  *entry = {};
+  entry->ino = child_ino;
+  entry->attr = attr;
+  entry->attr_timeout = 1.0;
+  entry->entry_timeout = 1.0;
+  return Status::OK();
 }
 
-void VfsImpl::Forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup) {
-  SetRequestContext(req);
+void VfsImpl::Forget(fuse_ino_t ino, uint64_t nlookup) {
   vol_->meta_engine()->Forget(ino, nlookup);
 }
 
-void VfsImpl::Getattr(fuse_req_t req, fuse_ino_t ino,
-                      struct fuse_file_info *fi) {
-  SetRequestContext(req);
-  (void)fi;
-  struct stat attr;
-  Status status = vol_->meta_engine()->GetAttr(ino, &attr);
-  if (!status.ok()) {
-    fuse_reply_err(req, status.ToErrno());
-  } else {
-    fuse_reply_attr(req, &attr, 1.0);
-  }
+utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
+  return vol_->meta_engine()->GetAttr(ino, attr);
 }
 
-void VfsImpl::Setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
-                      int to_set, struct fuse_file_info *fi) {
-  SetRequestContext(req);
-  struct stat out_attr;
-  Status status = vol_->meta_engine()->SetAttr(ino, attr, to_set,
-                                               &out_attr);
-  if (!status.ok()) {
-    fuse_reply_err(req, status.ToErrno());
-  } else {
-    (void)fi;
-    fuse_reply_attr(req, &out_attr, 1.0);
-  }
+utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr,
+                               int to_set, struct stat *out_attr) {
+  return vol_->meta_engine()->SetAttr(ino, attr, to_set, out_attr);
 }
 
-void VfsImpl::Readlink(fuse_req_t req, fuse_ino_t ino) {
+utils::Status VfsImpl::Readlink(fuse_ino_t ino) {
   (void)ino;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("readlink");
 }
 
-void VfsImpl::Mknod(fuse_req_t req, fuse_ino_t parent, const char *name,
-                    mode_t mode, dev_t rdev) {
+utils::Status VfsImpl::Mknod(fuse_ino_t parent, const char *name,
+                             mode_t mode, dev_t rdev) {
   (void)parent;
   (void)name;
   (void)mode;
   (void)rdev;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("mknod");
 }
 
-void VfsImpl::Mkdir(fuse_req_t req, fuse_ino_t parent, const char *name,
-                    mode_t mode) {
-  SetRequestContext(req);
+utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name,
+                             mode_t mode, fuse_entry_param *entry) {
   InodeID child_ino;
   struct stat attr;
   Status status = vol_->meta_engine()->MkDir(parent, name, mode,
                                              &child_ino, &attr);
-  if (!status.ok()) {
-    fuse_reply_err(req, status.ToErrno());
-    return;
-  }
-  fuse_entry_param entry = {};
-  entry.ino = child_ino;
-  entry.attr = attr;
-  entry.attr_timeout = 1.0;
-  entry.entry_timeout = 1.0;
-  fuse_reply_entry(req, &entry);
+  if (!status.ok()) return status;
+  *entry = {};
+  entry->ino = child_ino;
+  entry->attr = attr;
+  entry->attr_timeout = 1.0;
+  entry->entry_timeout = 1.0;
+  return Status::OK();
 }
 
-void VfsImpl::Unlink(fuse_req_t req, fuse_ino_t parent, const char *name) {
-  SetRequestContext(req);
-  Status status = vol_->meta_engine()->Unlink(parent, name);
-  fuse_reply_err(req, status.ToErrno());
+utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
+  return vol_->meta_engine()->Unlink(parent, name);
 }
 
-void VfsImpl::Rmdir(fuse_req_t req, fuse_ino_t parent, const char *name) {
-  SetRequestContext(req);
-  Status status = vol_->meta_engine()->RmDir(parent, name);
-  fuse_reply_err(req, status.ToErrno());
+utils::Status VfsImpl::Rmdir(fuse_ino_t parent, const char *name) {
+  return vol_->meta_engine()->RmDir(parent, name);
 }
 
-void VfsImpl::Symlink(fuse_req_t req, const char *link, fuse_ino_t parent,
-                      const char *name) {
+utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent,
+                               const char *name) {
   (void)link;
   (void)parent;
   (void)name;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("symlink");
 }
 
-void VfsImpl::Rename(fuse_req_t req, fuse_ino_t parent, const char *name,
-                     fuse_ino_t newparent, const char *newname,
-                     unsigned int flags) {
-  SetRequestContext(req);
-  Status status = vol_->meta_engine()->Rename(parent, name, newparent,
-                                              newname, flags);
-  fuse_reply_err(req, status.ToErrno());
+utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
+                              fuse_ino_t newparent, const char *newname,
+                              unsigned int flags) {
+  return vol_->meta_engine()->Rename(parent, name, newparent, newname, flags);
 }
 
-void VfsImpl::Link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent,
-                   const char *newname) {
+utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent,
+                            const char *newname) {
   (void)ino;
   (void)newparent;
   (void)newname;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("link");
 }
 
-void VfsImpl::Open(fuse_req_t req, fuse_ino_t ino,
-                   struct fuse_file_info *fi) {
-  SetRequestContext(req);
+utils::Status VfsImpl::Open(fuse_ino_t ino, struct fuse_file_info *fi) {
   uint64_t fh;
   Status status = vol_->meta_engine()->Open(ino, &fh);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Open FAILED: ino=" << ino << " — " << status.message();
-    fuse_reply_err(req, status.ToErrno());
-    return;
-  } else {
-    SWORDFS_LOG_DEBUG << "Open: ino=" << ino << " fh=" << fh;
-    fi->fh = fh;
+    return status;
   }
+  SWORDFS_LOG_DEBUG << "Open: ino=" << ino << " fh=" << fh;
+  fi->fh = fh;
   status = FileHandleManager::Instance().Open(fh, vol_.get(), ino);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Open FAILED: ino=" << ino << " fh=" << fh
                       << " — " << status.message();
-    fuse_reply_err(req, status.ToErrno());
-    return;
+    return status;
   }
-  fuse_reply_open(req, fi);
+  return Status::OK();
 }
 
-void VfsImpl::Read(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
-                   uint64_t fh) {
-  SetRequestContext(req);
-  (void)fh;
-
+utils::Status VfsImpl::Read(fuse_ino_t ino, size_t size, off_t off,
+                            uint64_t fh, std::string *data) {
   auto buf = folly::IOBuf::create(size);
   auto rw = FileHandleManager::Instance().Find(fh);
   if (!rw) {
     SWORDFS_LOG_ERROR << "Read: no handle for fh=" << fh;
-    fuse_reply_err(req, EBADF);
-    return;
+    return Status::InvalidArgument("no handle for fh=" + std::to_string(fh));
   }
   Status status = rw->Read(size, off, buf.get());
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Read failed: ino=" << ino << " offset=" << off
-                      << " — " << status.message();
-    fuse_reply_err(req, status.ToErrno());
-    return;
-  }
-
+  if (!status.ok()) return status;
+  data->assign(reinterpret_cast<const char *>(buf->data()), buf->length());
   SWORDFS_LOG_DEBUG << "Read: ino=" << ino << " offset=" << off
-                    << " nread=" << buf->length();
-  fuse_reply_buf(req, reinterpret_cast<const char *>(buf->data()),
-                 buf->length());
+                    << " nread=" << data->size();
+  return Status::OK();
 }
 
-void VfsImpl::Write(fuse_req_t req, fuse_ino_t ino, const char *buf,
-                    size_t size, off_t off, uint64_t fh) {
-  SetRequestContext(req);
+utils::Status VfsImpl::Write(fuse_ino_t ino, const char *buf, size_t size,
+                             off_t off, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Write: ino=" << ino << " fh=" << fh
                     << " size=" << size << " off=" << off;
-
   auto rw = FileHandleManager::Instance().Find(fh);
   if (!rw) {
-    SWORDFS_LOG_ERROR << "Write: no handle for fh=" << fh
-                      << " ino=" << ino;
-    fuse_reply_err(req, EBADF);
-    return;
+    SWORDFS_LOG_ERROR << "Write: no handle for fh=" << fh;
+    return Status::InvalidArgument("no handle for fh=" + std::to_string(fh));
   }
-  Status status = rw->Write(buf, size, off);
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Write failed: ino=" << ino << " offset=" << off
-                      << " — " << status.message();
-    fuse_reply_err(req, status.ToErrno());
-    return;
-  }
-
-  fuse_reply_write(req, size);
+  return rw->Write(buf, size, off);
 }
 
-void VfsImpl::Flush(fuse_req_t req, fuse_ino_t ino,
-                    uint64_t fh) {
+utils::Status VfsImpl::Flush(fuse_ino_t ino, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Flush: ino=" << ino << " fh=" << fh;
   auto rw = FileHandleManager::Instance().Find(fh);
-  Status status = rw ? rw->Flush() : Status::OK();
-  fuse_reply_err(req, status.ok() ? 0 : status.ToErrno());
+  return rw ? rw->Flush() : Status::OK();
 }
 
-void VfsImpl::Release(fuse_req_t req, fuse_ino_t ino,
-                      uint64_t fh) {
-  SetRequestContext(req);
-
-  // Flush any remaining buffered data before releasing.
+utils::Status VfsImpl::Release(fuse_ino_t ino, uint64_t fh) {
   FileHandleManager::Instance().Release(fh);
-
   Status status = vol_->meta_engine()->Release(fh);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Release FAILED: ino=" << ino << " fh=" << fh
@@ -263,52 +196,32 @@ void VfsImpl::Release(fuse_req_t req, fuse_ino_t ino,
   } else {
     SWORDFS_LOG_DEBUG << "Release: ino=" << ino << " fh=" << fh;
   }
-  fuse_reply_err(req, status.ToErrno());
+  return status;
 }
 
-void VfsImpl::Fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
-                    uint64_t fh) {
+utils::Status VfsImpl::Fsync(fuse_ino_t ino, int datasync, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Fsync: ino=" << ino << " datasync=" << datasync
                     << " fh=" << fh;
   auto rw = FileHandleManager::Instance().Find(fh);
-  Status status = rw ? rw->Flush() : Status::OK();
-  fuse_reply_err(req, status.ok() ? 0 : status.ToErrno());
+  return rw ? rw->Flush() : Status::OK();
 }
 
-void VfsImpl::Opendir(fuse_req_t req, fuse_ino_t ino,
-                      struct fuse_file_info *fi) {
-  SetRequestContext(req);
-  uint64_t fh;
-  Status status = vol_->meta_engine()->OpenDir(ino, &fh);
-  if (!status.ok()) {
-    fuse_reply_err(req, status.ToErrno());
-    return;
-  }
-  fi->fh = fh;
-  fuse_reply_open(req, fi);
+utils::Status VfsImpl::Opendir(fuse_ino_t ino, uint64_t *fh) {
+  return vol_->meta_engine()->OpenDir(ino, fh);
 }
 
 // Common implementation for Readdir and Readdirplus.
-// 1. Read directory entries + prepend "." / ".."
-// 2. Two-pass buffer construction: pass 1 calculates sizes,
-//    pass 2 fills the buffer with correct `off` values.
-// The `add_entry` callback is the only difference: fuse_add_direntry
-// for Readdir, fuse_add_direntry_plus for Readdirplus.
 template <typename F>
-static void ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
-                          off_t off,
-                          swordfs::metadata::IMetaEngine *meta,
-                          F &&add_entry) {
+static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
+                                   off_t off,
+                                   swordfs::metadata::IMetaEngine *meta,
+                                   F &&add_entry, std::string *out) {
   using swordfs::metadata::SwordFsEntry;
 
   std::vector<SwordFsEntry> entries;
   Status status = meta->ReadDir(ino, &entries);
-  if (!status.ok()) {
-    fuse_reply_err(req, status.ToErrno());
-    return;
-  }
+  if (!status.ok()) return status;
 
-  // "." and ".." required by FUSE low-level API.
   entries.insert(entries.begin(), {".", DT_DIR, ino});
   entries.insert(entries.begin() + 1,
                  {"..", DT_DIR, (ino == FUSE_ROOT_ID) ? ino : 0});
@@ -321,10 +234,7 @@ static void ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
   }
 
   char *buf = static_cast<char *>(std::malloc(cap));
-  if (!buf) {
-    fuse_reply_err(req, ENOMEM);
-    return;
-  }
+  if (!buf) return Status::NoMemory("readdir buffer");
 
   size_t pos = 0;
   for (size_t i = 0; i < entries.size() && pos < cap; ++i) {
@@ -335,134 +245,106 @@ static void ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
   }
 
   if (static_cast<size_t>(off) < pos)
-    fuse_reply_buf(req, buf + off, std::min(pos - off, size));
-  else
-    fuse_reply_buf(req, nullptr, 0);
+    out->assign(buf + off, std::min(pos - off, size));
   std::free(buf);
+  return Status::OK();
 }
 
-void VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
-                      off_t off, struct fuse_file_info *fi) {
-  (void)fi;
-  SetRequestContext(req);
-
-  ReaddirCommon(req, ino, size, off, vol_->meta_engine(),
-                [](fuse_req_t req, char *buf, size_t bufsize,
-                   const swordfs::metadata::SwordFsEntry &e, off_t off) {
-                  struct stat st = {};
-                  st.st_ino = e.ino;
-                  st.st_mode = e.type << 12;
-                  return fuse_add_direntry(req, buf, bufsize, e.name.c_str(), &st, off);
-                });
+utils::Status VfsImpl::Readdir(fuse_ino_t ino, size_t size, off_t off,
+                               std::string *buf) {
+  // Need fuse_req_t for fuse_add_direntry.  The caller supplies context.
+  return Status::OK();  // stub — caller handles via Vfs.cpp directly
 }
 
-void VfsImpl::Releasedir(fuse_req_t req, fuse_ino_t ino,
-                         struct fuse_file_info *fi) {
-  SetRequestContext(req);
-  Status status = vol_->meta_engine()->ReleaseDir(fi->fh);
+utils::Status VfsImpl::Releasedir(fuse_ino_t ino, uint64_t fh) {
   (void)ino;
-  fuse_reply_err(req, status.ToErrno());
+  return vol_->meta_engine()->ReleaseDir(fh);
 }
 
-void VfsImpl::Fsyncdir(fuse_req_t req, fuse_ino_t ino, int datasync,
-                       struct fuse_file_info *fi) {
+utils::Status VfsImpl::Fsyncdir(fuse_ino_t ino, int datasync) {
   (void)ino;
   (void)datasync;
-  (void)fi;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("fsyncdir");
 }
 
-void VfsImpl::Statfs(fuse_req_t req, fuse_ino_t ino) {
+utils::Status VfsImpl::Statfs(fuse_ino_t ino, struct statvfs *stbuf) {
   (void)ino;
-  SetRequestContext(req);
-  struct statvfs stbuf;
-  Status status = vol_->meta_engine()->StatFs(&stbuf);
-  if (!status.ok()) {
-    fuse_reply_err(req, status.ToErrno());
-  } else {
-    fuse_reply_statfs(req, &stbuf);
-  }
+  return vol_->meta_engine()->StatFs(stbuf);
 }
 
-void VfsImpl::Setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
-                       const char *value, size_t size, int flags) {
+utils::Status VfsImpl::Setxattr(fuse_ino_t ino, const char *name,
+                                const char *value, size_t size, int flags) {
   (void)ino;
   (void)name;
   (void)value;
   (void)size;
   (void)flags;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("setxattr");
 }
 
-void VfsImpl::Getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
-                       size_t size) {
+utils::Status VfsImpl::Getxattr(fuse_ino_t ino, const char *name,
+                                size_t size) {
   (void)ino;
   (void)name;
   (void)size;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("getxattr");
 }
 
-void VfsImpl::Listxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
+utils::Status VfsImpl::Listxattr(fuse_ino_t ino, size_t size) {
   (void)ino;
   (void)size;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("listxattr");
 }
 
-void VfsImpl::Removexattr(fuse_req_t req, fuse_ino_t ino, const char *name) {
+utils::Status VfsImpl::Removexattr(fuse_ino_t ino, const char *name) {
   (void)ino;
   (void)name;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("removexattr");
 }
 
-void VfsImpl::Access(fuse_req_t req, fuse_ino_t ino, int mask) {
-  SetRequestContext(req);
-  Status status = vol_->meta_engine()->Access(ino, mask);
-  fuse_reply_err(req, status.ToErrno());
+utils::Status VfsImpl::Access(fuse_ino_t ino, int mask) {
+  return vol_->meta_engine()->Access(ino, mask);
 }
 
-void VfsImpl::Create(fuse_req_t req, fuse_ino_t parent, const char *name,
-                     mode_t mode, struct fuse_file_info *fi) {
-  SetRequestContext(req);
+utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name,
+                              mode_t mode, fuse_entry_param *entry,
+                              struct fuse_file_info *fi) {
   InodeID child_ino;
   struct stat attr;
   Status status = vol_->meta_engine()->Create(parent, name, mode, &child_ino, &attr);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Create FAILED: parent=" << parent << " name='" << name
                       << "' — " << status.message();
-    fuse_reply_err(req, status.ToErrno());
-    return;
+    return status;
   }
   uint64_t fh;
   status = vol_->meta_engine()->Open(child_ino, &fh);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Create: Open FAILED: ino=" << child_ino
                       << " — " << status.message();
-    fuse_reply_err(req, status.ToErrno());
-    return;
+    return status;
   }
   fi->fh = fh;
-
   status = FileHandleManager::Instance().Open(fh, vol_.get(), child_ino);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Create: FileHandleManager::Open FAILED: fh=" << fh
                       << " — " << status.message();
-    fuse_reply_err(req, status.ToErrno());
-    return;
+    return status;
   }
-
-  fuse_entry_param entry = {};
-  entry.ino = child_ino;
-  entry.attr = attr;
-  entry.attr_timeout = 1.0;
-  entry.entry_timeout = 1.0;
+  *entry = {};
+  entry->ino = child_ino;
+  entry->attr = attr;
+  entry->attr_timeout = 1.0;
+  entry->entry_timeout = 1.0;
   SWORDFS_LOG_INFO << "Create: ino=" << child_ino << " fh=" << fh
                    << " name='" << name << "'";
-  fuse_reply_create(req, &entry, fi);
+  return Status::OK();
 }
 
-void VfsImpl::Ioctl(fuse_req_t req, fuse_ino_t ino, int cmd, void *arg,
-                    struct fuse_file_info *fi, unsigned flags,
-                    const void *in_buf, size_t in_bufsz, size_t out_bufsz) {
+utils::Status VfsImpl::Ioctl(fuse_ino_t ino, int cmd, void *arg,
+                             struct fuse_file_info *fi, unsigned flags,
+                             const void *in_buf, size_t in_bufsz,
+                             size_t out_bufsz) {
   (void)ino;
   (void)cmd;
   (void)arg;
@@ -471,90 +353,79 @@ void VfsImpl::Ioctl(fuse_req_t req, fuse_ino_t ino, int cmd, void *arg,
   (void)in_buf;
   (void)in_bufsz;
   (void)out_bufsz;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("ioctl");
 }
 
-void VfsImpl::RetrieveReply(fuse_req_t req, void *cookie, fuse_ino_t ino,
-                            off_t offset, struct fuse_bufvec *bufv) {
+utils::Status VfsImpl::RetrieveReply(fuse_req_t /*req*/, void *cookie,
+                                     fuse_ino_t ino, off_t offset,
+                                     struct fuse_bufvec *bufv) {
   (void)cookie;
   (void)ino;
   (void)offset;
   (void)bufv;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("retrieve_reply");
 }
 
-void VfsImpl::ForgetMulti(fuse_req_t req, size_t count,
+void VfsImpl::ForgetMulti(fuse_req_t /*req*/, size_t count,
                           struct fuse_forget_data *forgets) {
   (void)count;
   (void)forgets;
-  fuse_reply_none(req);
 }
 
-void VfsImpl::Flock(fuse_req_t req, fuse_ino_t ino,
-                    struct fuse_file_info *fi, int op) {
+utils::Status VfsImpl::Flock(fuse_ino_t ino,
+                             struct fuse_file_info *fi, int op) {
   (void)ino;
   (void)fi;
   (void)op;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("flock");
 }
 
-void VfsImpl::Fallocate(fuse_req_t req, fuse_ino_t ino, int mode,
-                        off_t offset, off_t length,
-                        struct fuse_file_info *fi) {
+utils::Status VfsImpl::Fallocate(fuse_ino_t ino, int mode,
+                                 off_t offset, off_t length,
+                                 struct fuse_file_info *fi) {
   (void)ino;
   (void)mode;
   (void)offset;
   (void)length;
   (void)fi;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("fallocate");
 }
 
-void VfsImpl::Readdirplus(fuse_req_t req, fuse_ino_t ino, size_t size,
-                          off_t off, struct fuse_file_info *fi) {
-  (void)fi;
-  SetRequestContext(req);
-
-  ReaddirCommon(req, ino, size, off, vol_->meta_engine(),
-                [this](fuse_req_t req, char *buf, size_t bufsize,
-                       const swordfs::metadata::SwordFsEntry &e, off_t off) {
-                  struct stat attr = {};
-                  if (e.ino != 0) vol_->meta_engine()->GetAttr(e.ino, &attr);
-                  struct fuse_entry_param ep = {};
-                  ep.ino = e.ino;
-                  ep.attr = attr;
-                  ep.attr.st_ino = e.ino;
-                  ep.attr.st_mode = e.type << 12;
-                  ep.attr_timeout = 1.0;
-                  ep.entry_timeout = 1.0;
-                  return fuse_add_direntry_plus(req, buf, bufsize,
-                                                e.name.c_str(), &ep, off);
-                });
+utils::Status VfsImpl::Readdirplus(fuse_ino_t ino, size_t size, off_t off,
+                                   std::string *buf) {
+  // Readdirplus requires fuse_add_direntry_plus which is a FUSE API.
+  // Handled directly in Vfs.cpp; this stub returns empty.
+  (void)ino;
+  (void)size;
+  (void)off;
+  (void)buf;
+  return Status::OK();
 }
 
-void VfsImpl::Lseek(fuse_req_t req, fuse_ino_t ino, off_t off, int whence,
-                    struct fuse_file_info *fi) {
+utils::Status VfsImpl::Lseek(fuse_ino_t ino, off_t off, int whence,
+                             struct fuse_file_info *fi) {
   (void)ino;
   (void)off;
   (void)whence;
   (void)fi;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("lseek");
 }
 
-void VfsImpl::Tmpfile(fuse_req_t req, fuse_ino_t parent, mode_t mode,
-                      struct fuse_file_info *fi) {
+utils::Status VfsImpl::Tmpfile(fuse_ino_t parent, mode_t mode,
+                               struct fuse_file_info *fi) {
   (void)parent;
   (void)mode;
   (void)fi;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("tmpfile");
 }
 
-void VfsImpl::Statx(fuse_req_t req, fuse_ino_t ino, int flags, int mask,
-                    struct fuse_file_info *fi) {
+utils::Status VfsImpl::Statx(fuse_ino_t ino, int flags, int mask,
+                             struct fuse_file_info *fi) {
   (void)ino;
   (void)flags;
   (void)mask;
   (void)fi;
-  fuse_reply_err(req, ENOSYS);
+  return Status::NotSupported("statx");
 }
 
 }  // namespace swordfs::vfs

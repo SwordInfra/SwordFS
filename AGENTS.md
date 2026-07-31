@@ -19,6 +19,12 @@ All C++ code MUST follow the **Google C++ Style Guide**. Key rules include:
 
 - **`SwordFsInode` variables**: MUST NOT end with `_ino`, `_inode`, or any similar suffix. Use plain names like `parent`, `child`, `dir`, `inode`.
 
+- **`Status` return value variables**: MUST be named `status` — never `s`, `st`, `rc`, `ret`, or any abbreviation. A function returning `utils::Status` or similar status type must be captured as:
+  ```cpp
+  auto status = DoSomething();
+  if (!status.ok()) { ... }
+  ```
+
 - **Section comments**: Use the following separator style when commenting on groups of related functions (e.g., "Public API", "Private helpers"):
 
   ```cpp
