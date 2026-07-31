@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 
 #include "metadata/Types.hpp"
@@ -38,9 +39,10 @@ class FileHandleManager {
   utils::Status Open(uint64_t fh, volume::VolumeImpl *vol,
                      metadata::InodeID ino);
 
-  /// Find the FileHandle for |fh|.
+  /// Find the FileHandle for |fh|.  Returns std::nullopt if not found.
   /// The returned FileHandle keeps the underlying FileReadWriter alive.
-  FileHandle Find(uint64_t fh);
+  /// When a handle is returned, file_readwriter is guaranteed non-null.
+  std::optional<FileHandle> Find(uint64_t fh);
 
   /// Flush and remove |fh|.  Called on release / close.
   void Release(uint64_t fh);

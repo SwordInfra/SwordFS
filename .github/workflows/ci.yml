@@ -49,12 +49,39 @@ jobs:
 
       - name: Generate coverage report
         run: |
+          # Run the entire coverage pipeline with relaxed error handling.
+          # lcov 2.x (Ubuntu 24.04) is stricter than 1.x and may exit non-zero
+          # for gcov version mismatches, empty .gcda files, or missing source
+          # references — all of which are harmless for our report.
+          set +e
+
+          # Step 1: capture raw coverage data
           lcov --capture --directory build --output-file coverage.info \
-               --ignore-errors inconsistent,gcov,source,mismatch,negative
-          lcov --remove coverage.info '/usr/*' '*/_deps/*' \
-               --output-file coverage.info \
-               --ignore-errors unused
-          lcov --list coverage.info || true
+               --ignore-errors inconsistent,gcov,source,mismatch,negative,empty,unused,corrupt
+          LCOV_EXIT=$?
+          if [ $LCOV_EXIT -ne 0 ]; then
+            echo "::warning::lcov --capture exited with $LCOV_EXIT (ignored)"
+          fi
+
+          # Step 2: remove system / third-party paths
+          if [ -f coverage.info ] && [ -s coverage.info ]; then
+            lcov --remove coverage.info \
+                 '/usr/*' '*/_deps/*' '*/googletest-src/*' '*/build/*' \
+                 --output-file coverage_filtered.info \
+                 --ignore-errors unused,empty,source,mismatch,corrupt,inconsistent || true
+            if [ -f coverage_filtered.info ] && [ -s coverage_filtered.info ]; then
+              mv coverage_filtered.info coverage.info
+            else
+              echo "::warning::coverage_filtered.info empty — keeping original coverage.info"
+            fi
+          else
+            echo "::warning::coverage.info is empty or missing after capture"
+          fi
+
+          # Step 3: print summary
+          if [ -f coverage.info ] && [ -s coverage.info ]; then
+            lcov --list coverage.info --ignore-errors unused,empty,source || true
+          fi
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

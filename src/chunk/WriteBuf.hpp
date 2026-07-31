@@ -26,15 +26,15 @@ class WriteBuf {
   /// Allocates one contiguous IOBuf of exactly |capacity| bytes.
   explicit WriteBuf(size_t capacity);
 
-  /// Write |size| bytes from |data| at the given buffer-relative |offset|.
-  utils::Status Write(const char* data, size_t size, off_t offset);
+  /// Write the contents of |data| at the given buffer-relative |offset|.
+  utils::Status Write(off_t offset, const folly::IOBuf& data);
 
   /// Return all buffered data for upload.
   std::string_view FlushData() const;
 
-  /// Copy up to |len| bytes starting at |off| into |out|.
-  /// The number of bytes copied is available via out->length().
-  utils::Status CopyOut(off_t off, size_t len, folly::IOBuf* out) const;
+  /// Copy up to |len| bytes starting at chunk-relative |off| into |out|.
+  /// The number of bytes copied is available via out->length() increase.
+  utils::Status CopyOut(off_t off, size_t len, folly::IOBuf *out) const;
 
   /// Number of valid bytes in the buffer.
   size_t size() const { return buf_ ? buf_->length() : 0; }

@@ -46,7 +46,7 @@ class Chunk {
 
   /// Write |size| bytes from |data| at the given chunk-relative offset.
   /// Returns InvalidArgument if the write would exceed chunk bounds.
-  utils::Status Write(const char *data, size_t size, off_t write_offset);
+  utils::Status Write(off_t write_offset, const folly::IOBuf& data);
 
   /// Return all buffered data for upload.
   std::string_view FlushData() const;
@@ -62,12 +62,8 @@ class Chunk {
   // Read-through support
   // ──────────────────────────────────────────────────────────────
 
-  /// Read up to |len| bytes starting at chunk-relative |off| from
-  /// the in-memory buffer, or nullptr.
-  /// If the in-memory buffer holds data for the requested range,
-  /// returns them. Range not covered by the buffer is treated as
-  /// empty. Chunks not present in the writer's deque have never
-  /// been written — the caller should treat those ranges as EOF.
+  /// Read up to |len| bytes starting at chunk-relative |off| into |out|.
+  /// The number of bytes copied is available via out->length() increase.
   utils::Status Read(off_t off, size_t len, folly::IOBuf *out) const;
 
   // ──────────────────────────────────────────────────────────────

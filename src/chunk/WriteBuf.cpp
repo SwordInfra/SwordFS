@@ -12,9 +12,8 @@ WriteBuf::WriteBuf(size_t capacity) {
   buf_ = folly::IOBuf::create(capacity);
 }
 
-utils::Status WriteBuf::Write(const char* data, size_t size, off_t write_offset) {
-  off_t end = write_offset + static_cast<off_t>(size);
-  // Bounds check — writes must stay within the pre-allocated capacity.
+utils::Status WriteBuf::Write(off_t write_offset, const folly::IOBuf& data) {
+  off_t end = write_offset + static_cast<off_t>(data.length());
   if (write_offset < 0) {
     return utils::Status::InvalidArgument("WriteBuf: negative write offset");
   } else if (end > static_cast<off_t>(buf_->capacity())) {
@@ -27,8 +26,8 @@ utils::Status WriteBuf::Write(const char* data, size_t size, off_t write_offset)
   // fuse_reply_write() returns, the kernel may reuse or free that
   // memory immediately.  We must own a private copy so the data
   // survives until the chunk is sealed and uploaded.
-  uint8_t* dest = const_cast<uint8_t*>(buf_->data()) + write_offset;
-  std::memcpy(dest, data, size);
+  std::memcpy(const_cast<uint8_t*>(buf_->data()) + write_offset,
+              data.data(), data.length());
 
   if (end > static_cast<off_t>(buf_->length())) {
     buf_->append(end - buf_->length());

@@ -28,10 +28,11 @@ utils::Status FileHandleManager::Open(uint64_t fh, volume::VolumeImpl *vol,
   return utils::Status::OK();
 }
 
-FileHandle FileHandleManager::Find(uint64_t fh) {
+std::optional<FileHandle> FileHandleManager::Find(uint64_t fh) {
   std::shared_lock lock(mutex_);
   auto it = files_.find(fh);
-  return it != files_.end() ? it->second : FileHandle{};
+  if (it != files_.end()) return it->second;
+  return std::nullopt;
 }
 
 void FileHandleManager::Release(uint64_t fh) {
@@ -44,7 +45,7 @@ void FileHandleManager::Release(uint64_t fh) {
     files_.erase(it);
   }
   // Flush outside the lock — I/O can take a long time.
-  if (handle.file_readwriter) handle.file_readwriter->Flush();
+  handle.file_readwriter->Flush();
 }
 
 }  // namespace swordfs::vfs
