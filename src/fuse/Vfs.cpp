@@ -206,7 +206,7 @@ void VfsHookFactory::SwordFsRename(fuse_req_t req, fuse_ino_t parent,
        newname = std::string(newname), flags] {
         vfs->SetRequestContext(req);
         auto status = vfs->Rename(parent, name.c_str(), newparent,
-                             newname.c_str(), flags);
+                                  newname.c_str(), flags);
         fuse_reply_err(req, status.ToErrno());
       });
 }
@@ -242,13 +242,13 @@ void VfsHookFactory::SwordFsRead(fuse_req_t req, fuse_ino_t ino, size_t size,
   uint64_t fh = fi->fh;
   ::swordfs::utils::RunInFiber([vfs = vfs_, req, ino, size, off, fh] {
     vfs->SetRequestContext(req);
-    std::string data;
+    std::unique_ptr<folly::IOBuf> data;
     auto status = vfs->Read(ino, size, off, fh, &data);
     if (!status.ok()) {
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    fuse_reply_buf(req, data.data(), data.size());
+    fuse_reply_buf(req, reinterpret_cast<const char *>(data->data()), data->length());
   });
 }
 
@@ -258,14 +258,15 @@ void VfsHookFactory::SwordFsWrite(fuse_req_t req, fuse_ino_t ino,
   SWORDFS_LOG_DEBUG << "FUSE " << __func__;
   uint64_t fh = fi->fh;
   ::swordfs::utils::RunInFiber(
-      [vfs = vfs_, req, ino, buf = std::string(buf, size), size, off, fh] {
+      [vfs = vfs_, req, ino,
+       buf = folly::IOBuf::copyBuffer(buf, size), off, fh] {
         vfs->SetRequestContext(req);
-        auto status = vfs->Write(ino, buf.data(), size, off, fh);
+        auto status = vfs->Write(ino, *buf, off, fh);
         if (!status.ok()) {
           fuse_reply_err(req, status.ToErrno());
           return;
         }
-        fuse_reply_write(req, size);
+        fuse_reply_write(req, buf->length());
       });
 }
 

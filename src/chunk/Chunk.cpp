@@ -10,15 +10,13 @@
 
 namespace swordfs::chunk {
 
-utils::Status Chunk::Write(const char *data, size_t size, off_t write_offset) {
-  // Convert file-absolute offset to chunk-relative.
-  return wb_.Write(data, size, write_offset - StartOffset());
+utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf& data) {
+  return wb_.Write(write_offset - StartOffset(), data);
 }
 
 std::string_view Chunk::FlushData() const { return wb_.FlushData(); }
 
-utils::Status Chunk::Read(off_t off, size_t len,
-                          folly::IOBuf *out) const {
+utils::Status Chunk::Read(off_t off, size_t len, folly::IOBuf *out) const {
   return wb_.CopyOut(off, len, out);
 }
 

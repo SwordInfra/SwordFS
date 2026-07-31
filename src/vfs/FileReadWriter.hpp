@@ -24,11 +24,12 @@ class FileReadWriter {
 
   FileReadWriter(uint64_t fh, InodeID ino, size_t chunk_size);
 
-  /// Write |size| bytes at |off|, splitting across chunk boundaries.
-  Status Write(const char *data, size_t size, off_t off);
+  /// Write the contents of |buf| at |off|, splitting across chunk boundaries.
+  Status Write(const folly::IOBuf &buf, off_t off);
 
-  /// Read up to |size| bytes at |off| from in-flight chunks.
-  /// Ranges not yet written return EOF (no storage fallback).
+  /// Read up to |size| bytes at |off| into |out|.
+  /// |out| must be an empty IOBuf with capacity >= |size|.
+  /// On success, out->length() reflects bytes actually read.
   utils::Status Read(size_t size, off_t off, folly::IOBuf *out);
 
   /// Seal and upload all chunks for this file handle.

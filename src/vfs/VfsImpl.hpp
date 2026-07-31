@@ -8,6 +8,7 @@
 #pragma once
 
 #define FUSE_USE_VERSION 312
+#include <folly/io/IOBuf.h>
 #include <fuse_lowlevel.h>
 
 #include <cstdint>
@@ -66,8 +67,8 @@ class VfsImpl {
                      const char *newname);
   utils::Status Open(fuse_ino_t ino, struct fuse_file_info *fi);
   utils::Status Read(fuse_ino_t ino, size_t size, off_t off, uint64_t fh,
-                     std::string *data);
-  utils::Status Write(fuse_ino_t ino, const char *buf, size_t size,
+                     std::unique_ptr<folly::IOBuf> *data);
+  utils::Status Write(fuse_ino_t ino, const folly::IOBuf &buf,
                       off_t off, uint64_t fh);
   utils::Status Flush(fuse_ino_t ino, uint64_t fh);
   utils::Status Release(fuse_ino_t ino, uint64_t fh);
