@@ -20,7 +20,7 @@ std::string ParseOptions(std::vector<std::string> args) {
   app.allow_extras(false);
 
   auto& cfg = swordfs::config::ConfigCenter::Instance();
-  cfg.ResetForTesting();
+  cfg.Initialize();
   cfg.ConfigureOptions(app);
 
   // Convert to argc/argv as CLI11's vector-based parse can behave

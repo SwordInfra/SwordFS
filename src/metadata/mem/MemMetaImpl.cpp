@@ -22,28 +22,6 @@
 namespace swordfs::metadata {
 
 // ────────────────────────────────────────────────────────────────
-// HandleTable
-// ────────────────────────────────────────────────────────────────
-
-uint64_t HandleTable::Alloc(InodeID ino) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  uint64_t fh = next_fh_++;
-  handles_[fh] = ino;
-  return fh;
-}
-
-InodeID HandleTable::Resolve(uint64_t fh) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = handles_.find(fh);
-  return (it != handles_.end()) ? it->second : 0;
-}
-
-bool HandleTable::Release(uint64_t fh) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return handles_.erase(fh) > 0;
-}
-
-// ────────────────────────────────────────────────────────────────
 // MemMetaImpl
 // ────────────────────────────────────────────────────────────────
 
@@ -558,19 +536,18 @@ Status MemMetaImpl::Open(InodeID ino,
     return Status::Permission("access denied");
   }
 
-  uint64_t handle = file_handles_.Alloc(ino);
-  // Update atime on the file
+  // Update atime on the file.
   inode->attr.st_atime = ::time(nullptr);
 
-  *fh = handle;
+  // Handle allocation is now managed by FileHandleManager; the caller
+  // obtains the real fh from FileHandleManager::Open().
+  if (fh) *fh = 0;
   return Status::OK();
 }
 
 Status MemMetaImpl::Release(uint64_t fh) {
-  if (!file_handles_.Release(fh)) {
-    SWORDFS_LOG_ERROR << "Release: unknown file handle " << fh;
-    return Status::InvalidArgument("unknown file handle");
-  }
+  // Handle lifecycle is now managed by FileHandleManager.
+  (void)fh;
   return Status::OK();
 }
 
@@ -583,19 +560,18 @@ Status MemMetaImpl::OpenDir(InodeID ino,
     return Status::NotDirectory("not a directory");
   }
 
-  uint64_t handle = dir_handles_.Alloc(ino);
-  // Update atime on the directory
+  // Update atime on the directory.
   dir->Touch(kAtime);
 
-  *fh = handle;
+  // Handle allocation is now managed by FileHandleManager; the caller
+  // obtains the real fh from FileHandleManager::OpenDir().
+  if (fh) *fh = 0;
   return Status::OK();
 }
 
 Status MemMetaImpl::ReleaseDir(uint64_t fh) {
-  if (!dir_handles_.Release(fh)) {
-    SWORDFS_LOG_ERROR << "ReleaseDir: unknown dir handle " << fh;
-    return Status::InvalidArgument("unknown dir handle");
-  }
+  // Handle lifecycle is now managed by FileHandleManager.
+  (void)fh;
   return Status::OK();
 }
 

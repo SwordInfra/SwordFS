@@ -13,18 +13,26 @@ FileHandleManager &FileHandleManager::Instance() {
   return instance;
 }
 
-utils::Status FileHandleManager::Open(uint64_t fh, volume::VolumeImpl *vol,
-                                      metadata::InodeID ino) {
-  chunk::ChunkManager::Instance().Init(vol->meta_engine(),
-                                       vol->data_engine(),
-                                       vol->chunk_size());
-  auto rw = std::make_shared<FileReadWriter>(fh, ino, vol->chunk_size());
+uint64_t FileHandleManager::AllocFh() {
   std::unique_lock lock(mutex_);
-  auto [it, inserted] = files_.try_emplace(fh, FileHandle{std::move(rw)});
+  return next_fh_++;
+}
+
+utils::Status FileHandleManager::Open(metadata::InodeID ino,
+                                      uint64_t *fh) {
+  uint64_t handle = AllocFh();
+  auto &vol = volume::VolumeImpl::Instance();
+  chunk::ChunkManager::Instance().Initialize(vol.meta_engine(),
+                                       vol.data_engine(),
+                                       vol.chunk_size());
+  auto rw = std::make_shared<FileReadWriter>(handle, ino, vol.chunk_size());
+  std::unique_lock lock(mutex_);
+  auto [it, inserted] = files_.try_emplace(handle, FileHandle{std::move(rw)});
   if (!inserted) {
-    return utils::Status::AlreadyExists("fh " + std::to_string(fh) +
+    return utils::Status::AlreadyExists("fh " + std::to_string(handle) +
                                         " is already open");
   }
+  *fh = handle;
   return utils::Status::OK();
 }
 
@@ -46,6 +54,18 @@ void FileHandleManager::Release(uint64_t fh) {
   }
   // Flush outside the lock — I/O can take a long time.
   handle.file_readwriter->Flush();
+}
+
+uint64_t FileHandleManager::OpenDir(metadata::InodeID ino) {
+  uint64_t handle = AllocFh();
+  std::unique_lock lock(mutex_);
+  dir_handles_[handle] = ino;
+  return handle;
+}
+
+void FileHandleManager::ReleaseDir(uint64_t fh) {
+  std::unique_lock lock(mutex_);
+  dir_handles_.erase(fh);
 }
 
 }  // namespace swordfs::vfs

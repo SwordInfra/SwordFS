@@ -14,27 +14,6 @@
 
 namespace swordfs::metadata {
 
-// ────────────────────────────────────────────────────────────────
-// HandleTable — thread-safe handle-to-inode mapping.
-// ────────────────────────────────────────────────────────────────
-
-class HandleTable {
- public:
-  // Allocate a new handle and map it to the given inode.
-  uint64_t Alloc(InodeID ino);
-
-  // Look up the inode for a given handle. Returns 0 if not found.
-  InodeID Resolve(uint64_t fh) const;
-
-  // Release a handle. Returns true if the handle was found and removed.
-  bool Release(uint64_t fh);
-
- private:
-  mutable std::mutex mutex_;
-  uint64_t next_fh_{1};
-  folly::F14FastMap<uint64_t, InodeID> handles_;
-};
-
 class MemMetaImpl : public IMetaEngine {
  public:
   MemMetaImpl();
@@ -78,8 +57,6 @@ class MemMetaImpl : public IMetaEngine {
 
  private:
   MemMetaStore store_;
-  HandleTable file_handles_;
-  HandleTable dir_handles_;
 };
 
 }  // namespace swordfs::metadata

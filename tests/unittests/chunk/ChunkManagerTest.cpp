@@ -183,17 +183,15 @@ class MockMetaEngine : public IMetaEngine {
 class ChunkManagerReadTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    ChunkManager::Instance().ResetForTesting();
+    ChunkManager::Instance().Initialize(nullptr, nullptr, 0);
     mock_data_ = std::make_unique<MockDataEngine>();
     mock_meta_ = std::make_unique<MockMetaEngine>();
-    ChunkManager::Instance().Init(mock_meta_.get(), mock_data_.get(),
+    ChunkManager::Instance().Initialize(mock_meta_.get(), mock_data_.get(),
                                   kChunkSize);
-    swordfs::vfs::FileHandleManager::Instance().Release(kFh);
   }
 
   void TearDown() override {
-    swordfs::vfs::FileHandleManager::Instance().Release(kFh);
-    ChunkManager::Instance().ResetForTesting();
+    ChunkManager::Instance().Initialize(nullptr, nullptr, 0);
   }
 
   static constexpr size_t kChunkSize = 1024;
@@ -481,15 +479,16 @@ rw.Write(Buf(Repeat('B', kChunkSize)), 0);
 
 TEST_F(ChunkManagerReadTest, OpenThenWriteReadViaHandleManager) {
   RunInTestFiber([&] {
-    swordfs::volume::VolumeImpl vol;
+    swordfs::volume::VolumeImpl::Initialize();
+    auto& vol = swordfs::volume::VolumeImpl::Instance();
     vol.set_meta_engine(std::make_unique<MockMetaEngine>());
     vol.set_data_engine(std::make_unique<MockDataEngine>());
 
     auto &mgr = swordfs::vfs::FileHandleManager::Instance();
-    mgr.Release(kFh);  // ensure clean state
-    EXPECT_TRUE(mgr.Open(kFh, &vol, 42).ok());
+    uint64_t fh;
+    EXPECT_TRUE(mgr.Open(42, &fh).ok());
 
-    auto handle = mgr.Find(kFh);
+    auto handle = mgr.Find(fh);
     ASSERT_TRUE(handle.has_value());
     handle->file_readwriter->Write(Buf(Repeat('Z', 300)), 0);
 
@@ -500,7 +499,8 @@ TEST_F(ChunkManagerReadTest, OpenThenWriteReadViaHandleManager) {
                         out->length());
     EXPECT_EQ(sv, Repeat('Z', 300));
 
-    mgr.Release(kFh);
+    mgr.Release(fh);
+    swordfs::volume::VolumeImpl::Initialize();
   });
 }
 
@@ -511,12 +511,12 @@ class ChunkManagerFlushTest : public ::testing::Test {
   void SetUp() override {
     mock_data_ = std::make_unique<MockDataEngine>();
     mock_meta_ = std::make_unique<MockMetaEngine>();
-    ChunkManager::Instance().Init(mock_meta_.get(), mock_data_.get(),
+    ChunkManager::Instance().Initialize(mock_meta_.get(), mock_data_.get(),
                                   kChunkSize);
   }
 
   void TearDown() override {
-    ChunkManager::Instance().ResetForTesting();
+    ChunkManager::Instance().Initialize(nullptr, nullptr, 0);
   }
 
   static constexpr size_t kChunkSize = 256;

@@ -14,6 +14,16 @@ namespace swordfs::volume {
 VolumeImpl::VolumeImpl() = default;
 VolumeImpl::~VolumeImpl() = default;
 
+std::unique_ptr<VolumeImpl> VolumeImpl::instance_;
+
+void VolumeImpl::Initialize() {
+  instance_ = std::make_unique<VolumeImpl>();
+}
+
+VolumeImpl& VolumeImpl::Instance() {
+  return *instance_;
+}
+
 void VolumeImpl::set_meta_engine(
     std::unique_ptr<swordfs::metadata::IMetaEngine> meta) {
   meta_engine_ = std::move(meta);

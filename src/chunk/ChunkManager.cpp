@@ -17,18 +17,12 @@ ChunkManager &ChunkManager::Instance() {
   return instance;
 }
 
-void ChunkManager::Init(metadata::IMetaEngine *meta,
-                        storage::IDataEngine *data,
-                        size_t chunk_size) {
+void ChunkManager::Initialize(metadata::IMetaEngine *meta,
+                              storage::IDataEngine *data,
+                              size_t chunk_size) {
   meta_ = meta;
   data_ = data;
   chunk_size_ = chunk_size;
-}
-
-void ChunkManager::ResetForTesting() {
-  meta_ = nullptr;
-  data_ = nullptr;
-  chunk_size_ = 0;
   chunks_.clear();
 }
 
