@@ -74,6 +74,8 @@ class ConfigCenter {
   const std::string& bucket_url() const { return bucket_url_; }
   /// Returns the storage region (e.g. "auto", "us-east-1").
   const std::string& storage_region() const { return storage_region_; }
+  /// Returns the chunk size in bytes (format subcommand).
+  size_t chunk_size() const { return chunk_size_; }
   /// Returns the volume name (format and mount subcommands).
   const std::string& volume() const { return volume_; }
   void set_volume(const std::string& v) { volume_ = v; }
@@ -121,6 +123,7 @@ class ConfigCenter {
   std::string volume_;              // --volume (required for format)
   std::string volume_config_path_;  // --volume-config-path (required for memory)
   std::string fuse_opts_;           // -o FUSE mount options (e.g. allow_other,ro)
+  size_t chunk_size_ = 64ULL * 1024 * 1024;  // --chunk-size
 
   // Subcommands registered with the CLI::App.
   std::vector<SubCommand> sub_commands_;

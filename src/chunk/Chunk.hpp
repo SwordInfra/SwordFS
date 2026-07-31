@@ -14,7 +14,19 @@
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
 
+namespace swordfs {
+namespace storage {
+class IDataEngine;
+}
+}  // namespace swordfs
+
 namespace swordfs::chunk {
+
+/// Build the storage key for a chunk: "<inode>/<chunk_index>".
+inline std::string MakeChunkKey(metadata::InodeID ino,
+                                uint32_t chunk_index) {
+  return std::to_string(ino) + "/" + std::to_string(chunk_index);
+}
 
 class Chunk {
  public:
@@ -24,8 +36,9 @@ class Chunk {
   };
 
   /// Create a chunk ready to accept writes.
-  Chunk(metadata::InodeID ino, uint32_t index, size_t max_chunk_size)
-      : ino_(ino), max_chunk_size_(max_chunk_size), wb_(max_chunk_size), index_(index) {}
+  Chunk(metadata::InodeID ino, uint32_t index, size_t max_chunk_size,
+        storage::IDataEngine *data)
+      : ino_(ino), max_chunk_size_(max_chunk_size), wb_(max_chunk_size), index_(index), data_(data) {}
 
   // ──────────────────────────────────────────────────────────────
   // Write path (only valid while kWriting)
@@ -33,7 +46,7 @@ class Chunk {
 
   /// Write |size| bytes from |data| at the given chunk-relative offset.
   /// Returns InvalidArgument if the write would exceed chunk bounds.
-  utils::Status Write(const char* data, size_t size, off_t write_offset);
+  utils::Status Write(const char *data, size_t size, off_t write_offset);
 
   /// Return all buffered data for upload.
   std::string_view FlushData() const;
@@ -41,14 +54,21 @@ class Chunk {
   /// Seal the chunk — no more writes accepted.
   void Seal();
 
+  /// Seal (if writing) and upload to the storage engine.
+  /// Returns OK if there is nothing to flush.
+  utils::Status Flush();
+
   // ──────────────────────────────────────────────────────────────
   // Read-through support
   // ──────────────────────────────────────────────────────────────
 
-  /// Read up to |len| bytes starting at chunk-relative |off| into
-  /// |out|.  Only valid while the chunk holds a WriteBuf (i.e.
-  /// before it is removed from ChunkManager after upload).
-  utils::Status Read(off_t off, size_t len, folly::IOBuf* out) const;
+  /// Read up to |len| bytes starting at chunk-relative |off| from
+  /// the in-memory buffer, or nullptr.
+  /// If the in-memory buffer holds data for the requested range,
+  /// returns them. Range not covered by the buffer is treated as
+  /// empty. Chunks not present in the writer's deque have never
+  /// been written — the caller should treat those ranges as EOF.
+  utils::Status Read(off_t off, size_t len, folly::IOBuf *out) const;
 
   // ──────────────────────────────────────────────────────────────
   // Accessors
@@ -71,9 +91,7 @@ class Chunk {
   }
   off_t EndOffset() const { return StartOffset() + static_cast<off_t>(size()); }
 
-  std::string ChunkKey() const {
-    return std::to_string(ino_) + "/" + std::to_string(index_);
-  }
+  std::string ChunkKey() const { return MakeChunkKey(ino_, index_); }
 
  private:
   WriteBuf wb_;
@@ -81,6 +99,7 @@ class Chunk {
   metadata::InodeID ino_;
   size_t max_chunk_size_;
   uint32_t index_;
+  storage::IDataEngine *data_;
 };
 
 }  // namespace swordfs::chunk

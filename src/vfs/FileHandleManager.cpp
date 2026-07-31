@@ -3,6 +3,7 @@
 
 #include "vfs/FileHandleManager.hpp"
 
+#include "chunk/ChunkManager.hpp"
 #include "volume/VolumeImpl.hpp"
 
 namespace swordfs::vfs {
@@ -13,11 +14,13 @@ FileHandleManager &FileHandleManager::Instance() {
 }
 
 utils::Status FileHandleManager::Open(uint64_t fh, volume::VolumeImpl *vol,
-                             metadata::InodeID ino) {
-  auto rw = std::make_unique<FileReadWriter>(
-      vol->meta_engine(), vol->data_engine(), ino);
+                                      metadata::InodeID ino) {
+  chunk::ChunkManager::Instance().Init(vol->meta_engine(),
+                                       vol->data_engine(),
+                                       vol->chunk_size());
+  auto rw = std::make_shared<FileReadWriter>(fh, ino, vol->chunk_size());
   std::unique_lock lock(mutex_);
-  auto [it, inserted] = files_.try_emplace(fh, std::move(rw));
+  auto [it, inserted] = files_.try_emplace(fh, FileHandle{std::move(rw)});
   if (!inserted) {
     return utils::Status::AlreadyExists("fh " + std::to_string(fh) +
                                         " is already open");
@@ -25,23 +28,23 @@ utils::Status FileHandleManager::Open(uint64_t fh, volume::VolumeImpl *vol,
   return utils::Status::OK();
 }
 
-std::shared_ptr<FileReadWriter> FileHandleManager::Find(uint64_t fh) {
+FileHandle FileHandleManager::Find(uint64_t fh) {
   std::shared_lock lock(mutex_);
   auto it = files_.find(fh);
-  return it != files_.end() ? it->second : nullptr;
+  return it != files_.end() ? it->second : FileHandle{};
 }
 
 void FileHandleManager::Release(uint64_t fh) {
-  std::shared_ptr<FileReadWriter> rw;
+  FileHandle handle;
   {
     std::unique_lock lock(mutex_);
     auto it = files_.find(fh);
     if (it == files_.end()) return;
-    rw = std::move(it->second);
+    handle = std::move(it->second);
     files_.erase(it);
   }
   // Flush outside the lock — I/O can take a long time.
-  if (rw) rw->Flush();
+  if (handle.file_readwriter) handle.file_readwriter->Flush();
 }
 
 }  // namespace swordfs::vfs
