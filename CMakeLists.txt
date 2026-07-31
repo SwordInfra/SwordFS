@@ -90,12 +90,20 @@ target_include_directories(swordfs_lib PUBLIC
 )
 target_compile_definitions(swordfs_lib PRIVATE SWORDFS_ENABLE_S3 _FILE_OFFSET_BITS=64)
 
+# ────────────────────────────────────────────────────────────────
+# Precompiled header — compile folly + STL once, reuse across all TUs
+# This drastically reduces clangd memory (single shared AST vs 46×)
+# ────────────────────────────────────────────────────────────────
+target_precompile_headers(swordfs_lib PRIVATE src/pch.hpp)
+
 # ============================================================
 # SwordFS binary
 # ============================================================
 
 add_executable(swordfs src/cmd/Main.cpp)
 target_link_libraries(swordfs PRIVATE swordfs_lib)
+# Reuse the PCH from swordfs_lib
+target_precompile_headers(swordfs REUSE_FROM swordfs_lib)
 
 # ============================================================
 # Tests
@@ -118,6 +126,8 @@ target_include_directories(swordfs_test BEFORE PRIVATE
   ${googletest_SOURCE_DIR}/googletest/include
   ${googletest_SOURCE_DIR}/googletest
 )
+# Reuse the PCH from swordfs_lib for test targets
+target_precompile_headers(swordfs_test REUSE_FROM swordfs_lib)
 target_compile_definitions(swordfs_test PRIVATE _FILE_OFFSET_BITS=64)
 
 include(GoogleTest)
