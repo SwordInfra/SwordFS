@@ -34,16 +34,19 @@ class ChunkManager {
   using Status = utils::Status;
   using InodeID = metadata::InodeID;
 
-  /// Construct with the metadata and data engines that back all I/O.
-  /// Both pointers must remain valid for the lifetime of this object.
-  ChunkManager(metadata::IMetaEngine* meta, storage::IDataEngine* data);
+  static ChunkManager &Instance();
 
-  // ──────────────────────────────────────────────────────────────
-  // Write path
-  // ──────────────────────────────────────────────────────────────
+  /// Initialise the singleton.  Must be called once before any other
+  /// method.  Both pointers must remain valid for the lifetime of the
+  /// process.
+  void Init(metadata::IMetaEngine *meta, storage::IDataEngine *data,
+            size_t chunk_size);
+
+  /// Reset all state (for unit testing).
+  void ResetForTesting();
 
   /// Get or create the chunk covering file offset |off|.
-  Chunk& GetOrCreateChunk(uint64_t fh, InodeID ino, off_t off);
+  Chunk &GetOrCreateChunk(uint64_t fh, InodeID ino, off_t off);
 
   /// Seal all writing chunks and upload them to the data engine.
   Status Flush(uint64_t fh);
@@ -51,19 +54,15 @@ class ChunkManager {
   /// Flush and then discard the chunk chain.
   Status Release(uint64_t fh);
 
-  // ──────────────────────────────────────────────────────────────
-  // Read path
-  // ──────────────────────────────────────────────────────────────
-
-  /// Find the chunk that contains |off| for the given inode, or
-  /// nullptr if no in-flight chunk covers that offset.
-  Chunk* FindChunk(InodeID ino, off_t off);
+  /// Find the chunk covering |off| for the given inode, or nullptr.
+  Chunk *FindChunk(InodeID ino, off_t off);
 
  private:
-  std::deque<Chunk>& GetChunks(uint64_t fh);
+  std::deque<Chunk> &GetChunks(uint64_t fh);
 
-  metadata::IMetaEngine* meta_;  // non-owning
-  storage::IDataEngine* data_;   // non-owning
+  metadata::IMetaEngine *meta_;  // non-owning
+  storage::IDataEngine *data_;   // non-owning
+  size_t chunk_size_;
   folly::F14FastMap<uint64_t, std::deque<Chunk>> chunks_;
 };
 

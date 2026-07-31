@@ -27,6 +27,7 @@ struct VolumeConfig {
   std::string storage;   // e.g. "s3"
   std::string bucket;    // e.g. "s3://endpoint/bucket/prefix"
   std::string region;    // storage region, default "auto"
+  size_t chunk_size = 64ULL * 1024 * 1024;  // immutable after format
 
   /// Serialize to a JSON string.
   std::string ToJson() const;

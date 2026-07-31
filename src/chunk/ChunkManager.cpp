@@ -12,15 +12,31 @@
 
 namespace swordfs::chunk {
 
-ChunkManager::ChunkManager(metadata::IMetaEngine* meta,
-                           storage::IDataEngine* data)
-    : meta_(meta), data_(data) {}
+ChunkManager &ChunkManager::Instance() {
+  static ChunkManager instance;
+  return instance;
+}
+
+void ChunkManager::Init(metadata::IMetaEngine *meta,
+                        storage::IDataEngine *data,
+                        size_t chunk_size) {
+  meta_ = meta;
+  data_ = data;
+  chunk_size_ = chunk_size;
+}
+
+void ChunkManager::ResetForTesting() {
+  meta_ = nullptr;
+  data_ = nullptr;
+  chunk_size_ = 0;
+  chunks_.clear();
+}
 
 // ────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────
 
-std::deque<Chunk>& ChunkManager::GetChunks(uint64_t fh) {
+std::deque<Chunk> &ChunkManager::GetChunks(uint64_t fh) {
   auto it = chunks_.find(fh);
   if (it == chunks_.end()) {
     it = chunks_.emplace(fh, std::deque<Chunk>{}).first;
@@ -28,15 +44,12 @@ std::deque<Chunk>& ChunkManager::GetChunks(uint64_t fh) {
   return it->second;
 }
 
-Chunk* ChunkManager::FindChunk(InodeID ino, off_t off) {
-  // Search all chunk deques for a chunk covering |off|.
-  for (auto& [fh, dq] : chunks_) {
+Chunk *ChunkManager::FindChunk(InodeID ino, off_t off) {
+  for (auto &[fh, dq] : chunks_) {
     if (dq.empty()) continue;
     if (dq.front().ino() != ino) continue;
-    for (auto& c : dq) {
-      if (off >= c.StartOffset() && off < c.EndOffset()) {
-        return &c;
-      }
+    for (auto &c : dq) {
+      if (off >= c.StartOffset() && off < c.EndOffset()) return &c;
     }
   }
   return nullptr;
@@ -46,18 +59,18 @@ Chunk* ChunkManager::FindChunk(InodeID ino, off_t off) {
 // Write path
 // ────────────────────────────────────────────────────────────────
 
-Chunk& ChunkManager::GetOrCreateChunk(uint64_t fh, InodeID ino,
-                                           off_t off) {
-  auto& dq = GetChunks(fh);
-  size_t max_chunk = data_->Limits().max_chunk_size;
+Chunk &ChunkManager::GetOrCreateChunk(uint64_t fh, InodeID ino,
+                                      off_t off) {
+  auto &dq = GetChunks(fh);
 
   // Find or create the chunk that covers |off|.
-  uint32_t idx = static_cast<uint32_t>(off / static_cast<off_t>(max_chunk));
+  uint32_t idx = static_cast<uint32_t>(
+      off / static_cast<off_t>(chunk_size_));
 
   // Create missing intermediate chunks (only the last one is writable).
   while (static_cast<uint32_t>(dq.size()) <= idx) {
     uint32_t next = dq.empty() ? 0 : dq.back().index() + 1;
-    dq.emplace_back(ino, next, max_chunk);
+    dq.emplace_back(ino, next, chunk_size_, data_);
   }
 
   return dq.back();
@@ -67,31 +80,13 @@ Status ChunkManager::Flush(uint64_t fh) {
   auto it = chunks_.find(fh);
   if (it == chunks_.end()) return Status::OK();
 
-  auto& dq = it->second;
+  auto &dq = it->second;
 
   off_t file_end = 0;
-  for (auto& c : dq) {
+  for (auto &c : dq) {
     if (c.EndOffset() > file_end) file_end = c.EndOffset();
-    if (c.IsWriting() && !c.empty()) c.Seal();
-  }
-
-  // Upload sealed chunks.
-  for (auto& c : dq) {
-    if (!c.IsSealed()) continue;
-    std::string_view data = c.FlushData();
-    if (data.empty()) continue;
-
-    Status status = data_->Put(c.ChunkKey(), data);
-    if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "Flush FAILED: ino=" << c.ino()
-                        << " chunk=" << c.index()
-                        << " size=" << data.size()
-                        << " — " << status.message();
-      return status;
-    }
-    SWORDFS_LOG_INFO << "Flush uploaded: ino=" << c.ino()
-                     << " chunk=" << c.index()
-                     << " size=" << data.size();
+    auto status = c.Flush();
+    if (!status.ok()) return status;
   }
 
   // Update file size.
@@ -107,7 +102,7 @@ Status ChunkManager::Flush(uint64_t fh) {
 
   // Remove uploaded chunks.
   dq.erase(std::remove_if(dq.begin(), dq.end(),
-                          [](const Chunk& c) { return c.IsSealed(); }),
+                          [](const Chunk &c) { return c.IsSealed(); }),
            dq.end());
 
   return Status::OK();

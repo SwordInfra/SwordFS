@@ -84,6 +84,10 @@ void ConfigCenter::RegisterFormatOptions(CLI::App& app) {
       ->check(swordfs::config::ValidateBucketUrl);
   cmd->add_option("--storage-region", storage_region_,
                   "Storage region (default: auto)");
+  cmd->add_option("--chunk-size", chunk_size_,
+                  "Chunk size in bytes (default: 64 MiB)")
+      ->check(CLI::PositiveNumber)
+      ->check(CLI::Range(4096ULL, 1024ULL * 1024 * 1024));
   cmd->add_option("--volume-config-path", volume_config_path_,
                   "Volume config directory (required for --meta memory://local)");
 

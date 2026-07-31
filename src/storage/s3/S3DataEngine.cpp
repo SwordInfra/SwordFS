@@ -58,7 +58,6 @@ S3DataEngine::S3DataEngine(const S3Config &config)
 
 DataEngineLimits S3DataEngine::Limits() const {
   DataEngineLimits limits;
-  limits.max_chunk_size = 64ULL * 1024 * 1024;  // 64 MiB
   limits.supports_multipart = false;
   return limits;
 }

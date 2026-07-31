@@ -25,18 +25,22 @@ class VolumeImpl;
 
 namespace swordfs::vfs {
 
+struct FileHandle {
+  std::shared_ptr<FileReadWriter> file_readwriter;
+};
+
 class FileHandleManager {
  public:
-  static FileHandleManager& Instance();
+  static FileHandleManager &Instance();
 
   /// Create a FileReadWriter from |vol| and associate it with |fh|.
   /// Returns kAlreadyExists if |fh| is already open.
-  utils::Status Open(uint64_t fh, volume::VolumeImpl* vol,
+  utils::Status Open(uint64_t fh, volume::VolumeImpl *vol,
                      metadata::InodeID ino);
 
-  /// Find the FileReadWriter for |fh|, or nullptr.
-  /// The returned shared_ptr keeps the handle alive.
-  std::shared_ptr<FileReadWriter> Find(uint64_t fh);
+  /// Find the FileHandle for |fh|.
+  /// The returned FileHandle keeps the underlying FileReadWriter alive.
+  FileHandle Find(uint64_t fh);
 
   /// Flush and remove |fh|.  Called on release / close.
   void Release(uint64_t fh);
@@ -45,7 +49,7 @@ class FileHandleManager {
   FileHandleManager() = default;
 
   mutable std::shared_mutex mutex_;
-  folly::F14FastMap<uint64_t, std::shared_ptr<FileReadWriter>> files_;
+  folly::F14FastMap<uint64_t, FileHandle> files_;
 };
 
 }  // namespace swordfs::vfs

@@ -26,12 +26,8 @@ using Status = swordfs::utils::Status;
 
 namespace swordfs::storage {
 
-/// Engine capability limits.
+/// Engine capability flags.
 struct DataEngineLimits {
-  /// Maximum chunk size in bytes.  The upper layer (VfsImpl) MUST
-  /// segment writes into chunks no larger than this value.
-  size_t max_chunk_size = 64ULL * 1024 * 1024;  // 64 MiB
-
   /// Whether the engine supports multipart uploads.
   bool supports_multipart = false;
 };

@@ -74,7 +74,7 @@ TEST(DataEngineFactoryTest, S3SchemeCreatesEngine) {
   Status st = CreateDataEngine(vol, &engine);
   ASSERT_TRUE(st.ok()) << st.message();
   ASSERT_NE(engine, nullptr);
-  EXPECT_GT(engine->Limits().max_chunk_size, 0U);
+  EXPECT_FALSE(engine->Limits().supports_multipart);
 }
 
 TEST(DataEngineFactoryTest, S3EnginePropagatesRegion) {
@@ -83,7 +83,7 @@ TEST(DataEngineFactoryTest, S3EnginePropagatesRegion) {
   Status st = CreateDataEngine(vol, &engine);
   ASSERT_TRUE(st.ok()) << st.message();
   ASSERT_NE(engine, nullptr);
-  EXPECT_GT(engine->Limits().max_chunk_size, 0U);
+  EXPECT_FALSE(engine->Limits().supports_multipart);
 }
 
 TEST(DataEngineFactoryTest, S3SchemeWithPrefix) {

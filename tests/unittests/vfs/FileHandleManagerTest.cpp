@@ -51,12 +51,12 @@ TEST_F(FileHandleManagerTest, OpenAndFind) {
   EXPECT_TRUE(st.ok()) << st.message();
 
   auto found = FileHandleManager::Instance().Find(1);
-  EXPECT_NE(found, nullptr);
+  EXPECT_NE(found.file_readwriter, nullptr);
 }
 
 TEST_F(FileHandleManagerTest, FindNonexistent) {
   auto found = FileHandleManager::Instance().Find(999);
-  EXPECT_EQ(found, nullptr);
+  EXPECT_EQ(found.file_readwriter, nullptr);
 }
 
 TEST_F(FileHandleManagerTest, OpenMultipleHandles) {
@@ -66,9 +66,9 @@ TEST_F(FileHandleManagerTest, OpenMultipleHandles) {
   auto f1 = FileHandleManager::Instance().Find(1);
   auto f2 = FileHandleManager::Instance().Find(2);
 
-  ASSERT_NE(f1, nullptr);
-  ASSERT_NE(f2, nullptr);
-  EXPECT_NE(f1.get(), f2.get());
+  ASSERT_NE(f1.file_readwriter, nullptr);
+  ASSERT_NE(f2.file_readwriter, nullptr);
+  EXPECT_NE(f1.file_readwriter.get(), f2.file_readwriter.get());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ TEST_F(FileHandleManagerTest, ReleaseRemovesHandle) {
   EXPECT_TRUE(FileHandleManager::Instance().Open(1, vol_.get(), 7).ok());
 
   FileHandleManager::Instance().Release(1);
-  EXPECT_EQ(FileHandleManager::Instance().Find(1), nullptr);
+  EXPECT_EQ(FileHandleManager::Instance().Find(1).file_readwriter, nullptr);
 }
 
 TEST_F(FileHandleManagerTest, ReleaseNonexistentNoCrash) {
@@ -94,9 +94,9 @@ TEST_F(FileHandleManagerTest, ReleaseKeepsOtherHandles) {
 
   FileHandleManager::Instance().Release(1);
 
-  EXPECT_EQ(FileHandleManager::Instance().Find(1), nullptr);
+  EXPECT_EQ(FileHandleManager::Instance().Find(1).file_readwriter, nullptr);
   auto f2 = FileHandleManager::Instance().Find(2);
-  ASSERT_NE(f2, nullptr);
+  ASSERT_NE(f2.file_readwriter, nullptr);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -111,7 +111,7 @@ TEST_F(FileHandleManagerTest, OpenDuplicateFails) {
 
   // First handle is still intact.
   auto found = FileHandleManager::Instance().Find(1);
-  ASSERT_NE(found, nullptr);
+  ASSERT_NE(found.file_readwriter, nullptr);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -123,13 +123,13 @@ TEST_F(FileHandleManagerTest, FindKeepsHandleAliveAfterRelease) {
 
   // Hold a shared_ptr before releasing.
   auto held = FileHandleManager::Instance().Find(1);
-  ASSERT_NE(held, nullptr);
+  ASSERT_NE(held.file_readwriter, nullptr);
 
   FileHandleManager::Instance().Release(1);
   // Map entry is gone, but our shared_ptr still owns the object.
-  EXPECT_EQ(FileHandleManager::Instance().Find(1), nullptr);
-  ASSERT_NE(held, nullptr);
-  EXPECT_NE(held.get(), nullptr);  // still alive
+  EXPECT_EQ(FileHandleManager::Instance().Find(1).file_readwriter, nullptr);
+  ASSERT_NE(held.file_readwriter, nullptr);
+  EXPECT_NE(held.file_readwriter.get(), nullptr);  // still alive
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -150,7 +150,7 @@ TEST_F(FileHandleManagerTest, ConcurrentOpenAndFind) {
                               static_cast<metadata::InodeID>(fh))
                         .ok());
         auto found = FileHandleManager::Instance().Find(fh);
-        EXPECT_NE(found, nullptr);
+        EXPECT_NE(found.file_readwriter, nullptr);
       }
     });
   }

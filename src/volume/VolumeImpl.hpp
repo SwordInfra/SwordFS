@@ -44,6 +44,9 @@ class VolumeImpl {
 
   const VolumeConfig& config() const { return config_; }
 
+  /// Chunk size in bytes — immutable after format.
+  size_t chunk_size() const { return config_.chunk_size; }
+
   swordfs::metadata::IMetaEngine* meta_engine() const {
     return meta_engine_.get();
   }

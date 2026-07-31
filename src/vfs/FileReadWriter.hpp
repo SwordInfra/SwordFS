@@ -2,29 +2,19 @@
 // Licensed under the Apache License, Version 2.0.
 
 // FileReadWriter — per-open-file read/write over a chain of chunks.
-// Owns the chunk deque and provides file-level I/O.
+// Delegates chunk management to ChunkManager; this class only handles
+// file-offset → chunk-boundary splitting.
 
 #pragma once
 
 #include <folly/io/IOBuf.h>
 
 #include <cstdint>
-#include <deque>
 
-#include "chunk/Chunk.hpp"
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
 
 namespace swordfs {
-
-namespace metadata {
-class IMetaEngine;
-}
-
-namespace storage {
-class IDataEngine;
-}
-
 namespace vfs {
 
 class FileReadWriter {
@@ -32,29 +22,22 @@ class FileReadWriter {
   using Status = utils::Status;
   using InodeID = metadata::InodeID;
 
-  FileReadWriter(metadata::IMetaEngine* meta,
-                 storage::IDataEngine* data,
-                 InodeID ino);
+  FileReadWriter(uint64_t fh, InodeID ino, size_t chunk_size);
 
   /// Write |size| bytes at |off|, splitting across chunk boundaries.
-  Status Write(const char* data, size_t size, off_t off);
+  Status Write(const char *data, size_t size, off_t off);
 
-  /// Read up to |size| bytes at |off|, merging buffer + storage.
-  utils::Status Read(size_t size, off_t off, folly::IOBuf* out);
+  /// Read up to |size| bytes at |off| from in-flight chunks.
+  /// Ranges not yet written return EOF (no storage fallback).
+  utils::Status Read(size_t size, off_t off, folly::IOBuf *out);
 
-  /// Seal and upload all chunks.
+  /// Seal and upload all chunks for this file handle.
   Status Flush();
 
-  /// Find the chunk covering |off| for |ino|, or nullptr.
-  chunk::Chunk* FindChunk(InodeID ino, off_t off);
-
  private:
-  chunk::Chunk& GetOrCreateChunk(off_t off);
-
-  metadata::IMetaEngine* meta_;
-  storage::IDataEngine* data_;
+  uint64_t fh_;
   InodeID ino_;
-  std::deque<chunk::Chunk> chunks_;
+  size_t chunk_size_;
 };
 
 }  // namespace vfs

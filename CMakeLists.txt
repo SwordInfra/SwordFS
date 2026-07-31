@@ -55,6 +55,10 @@ find_package(AWSSDK REQUIRED COMPONENTS s3)
 # and CI (where it uses shared) work without patching.
 find_library(JITTERENTROPY_LIB jitterentropy)
 
+# libzstd is a transitive dependency of static libcrypto.a (OpenSSL)
+# when it was built with zstd compression support.
+find_library(ZSTD_LIB zstd)
+
 # ============================================================
 # SwordFS library (all sources except main)
 # ============================================================
@@ -74,6 +78,9 @@ target_link_libraries(swordfs_lib PUBLIC
 )
 if(JITTERENTROPY_LIB)
   target_link_libraries(swordfs_lib PUBLIC ${JITTERENTROPY_LIB})
+endif()
+if(ZSTD_LIB)
+  target_link_libraries(swordfs_lib PUBLIC ${ZSTD_LIB})
 endif()
 target_include_directories(swordfs_lib PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

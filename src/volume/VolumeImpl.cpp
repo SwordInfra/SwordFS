@@ -36,6 +36,7 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter& cfg) {
   config_.bucket = cfg.bucket_url();
   config_.region = cfg.storage_region();
   if (config_.region.empty()) config_.region = "auto";
+  config_.chunk_size = cfg.chunk_size();
 
   const std::string& config_path = cfg.volume_config_path();
   if (!config_path.empty()) {

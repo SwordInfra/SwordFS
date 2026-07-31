@@ -156,12 +156,12 @@ utils::Status VfsImpl::Open(fuse_ino_t ino, struct fuse_file_info *fi) {
 utils::Status VfsImpl::Read(fuse_ino_t ino, size_t size, off_t off,
                             uint64_t fh, std::string *data) {
   auto buf = folly::IOBuf::create(size);
-  auto rw = FileHandleManager::Instance().Find(fh);
-  if (!rw) {
+  auto handle = FileHandleManager::Instance().Find(fh);
+  if (!handle.file_readwriter) {
     SWORDFS_LOG_ERROR << "Read: no handle for fh=" << fh;
     return Status::InvalidArgument("no handle for fh=" + std::to_string(fh));
   }
-  Status status = rw->Read(size, off, buf.get());
+  Status status = handle.file_readwriter->Read(size, off, buf.get());
   if (!status.ok()) return status;
   data->assign(reinterpret_cast<const char *>(buf->data()), buf->length());
   SWORDFS_LOG_DEBUG << "Read: ino=" << ino << " offset=" << off
@@ -173,18 +173,18 @@ utils::Status VfsImpl::Write(fuse_ino_t ino, const char *buf, size_t size,
                              off_t off, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Write: ino=" << ino << " fh=" << fh
                     << " size=" << size << " off=" << off;
-  auto rw = FileHandleManager::Instance().Find(fh);
-  if (!rw) {
+  auto handle = FileHandleManager::Instance().Find(fh);
+  if (!handle.file_readwriter) {
     SWORDFS_LOG_ERROR << "Write: no handle for fh=" << fh;
     return Status::InvalidArgument("no handle for fh=" + std::to_string(fh));
   }
-  return rw->Write(buf, size, off);
+  return handle.file_readwriter->Write(buf, size, off);
 }
 
 utils::Status VfsImpl::Flush(fuse_ino_t ino, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Flush: ino=" << ino << " fh=" << fh;
-  auto rw = FileHandleManager::Instance().Find(fh);
-  return rw ? rw->Flush() : Status::OK();
+  auto handle = FileHandleManager::Instance().Find(fh);
+  return handle.file_readwriter ? handle.file_readwriter->Flush() : Status::OK();
 }
 
 utils::Status VfsImpl::Release(fuse_ino_t ino, uint64_t fh) {
@@ -202,8 +202,8 @@ utils::Status VfsImpl::Release(fuse_ino_t ino, uint64_t fh) {
 utils::Status VfsImpl::Fsync(fuse_ino_t ino, int datasync, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Fsync: ino=" << ino << " datasync=" << datasync
                     << " fh=" << fh;
-  auto rw = FileHandleManager::Instance().Find(fh);
-  return rw ? rw->Flush() : Status::OK();
+  auto handle = FileHandleManager::Instance().Find(fh);
+  return handle.file_readwriter ? handle.file_readwriter->Flush() : Status::OK();
 }
 
 utils::Status VfsImpl::Opendir(fuse_ino_t ino, uint64_t *fh) {

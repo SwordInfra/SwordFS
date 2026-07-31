@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build-and-test:
@@ -13,88 +14,8 @@ jobs:
         with:
           submodules: false
 
-      - name: Restore/Save build cache
-        id: cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/local/include/folly
-            /usr/local/include/aws
-            /usr/local/lib/cmake/folly
-            /usr/local/lib/cmake/AWSSDK
-            /usr/local/lib/cmake/aws-cpp-sdk-*
-            /usr/local/lib/cmake/aws-crt-cpp
-            /usr/local/lib/cmake/aws-c-*
-            /usr/local/lib/libfolly*
-            /usr/local/lib/libaws*
-            /usr/local/lib/libgtest*
-            /usr/local/lib/libgmock*
-          key: deps-${{ runner.os }}-${{ hashFiles('scripts/install-deps.sh') }}
-          restore-keys: |
-            deps-${{ runner.os }}-
-
-      - name: Verify cached dependencies
-        id: verify
-        if: steps.cache.outputs.cache-hit == 'true'
-        run: |
-          echo "==> Verifying cached folly..."
-          TMPDIR=$(mktemp -d)
-          cat > "$TMPDIR/CMakeLists.txt" << 'CMEOF'
-          cmake_minimum_required(VERSION 3.16)
-          project(VerifyFolly CXX)
-          find_package(folly REQUIRED)
-          message(STATUS "folly OK")
-          CMEOF
-          if cmake -S "$TMPDIR" -B "$TMPDIR/build" > /dev/null 2>&1; then
-            echo "  [ok] folly verified"
-          else
-            echo "  [FAIL] folly verification failed, will reinstall"
-            echo "needs_reinstall=true" >> "$GITHUB_OUTPUT"
-          fi
-          rm -rf "$TMPDIR"
-
-          echo "==> Verifying cached AWS SDK..."
-          TMPDIR=$(mktemp -d)
-          cat > "$TMPDIR/CMakeLists.txt" << 'CMEOF'
-          cmake_minimum_required(VERSION 3.16)
-          project(VerifyAwsSdk CXX)
-          find_package(AWSSDK REQUIRED COMPONENTS s3)
-          message(STATUS "AWSSDK OK")
-          CMEOF
-          if cmake -S "$TMPDIR" -B "$TMPDIR/build" > /dev/null 2>&1; then
-            echo "  [ok] AWS SDK verified"
-          else
-            echo "  [FAIL] AWS SDK verification failed, will reinstall"
-            echo "needs_reinstall=true" >> "$GITHUB_OUTPUT"
-          fi
-          rm -rf "$TMPDIR"
-
-      - name: Clear broken cached dependencies
-        if: steps.verify.outputs.needs_reinstall == 'true'
-        run: |
-          echo "==> Removing broken cached dependencies..."
-          sudo rm -rf /usr/local/include/folly
-          sudo rm -rf /usr/local/include/aws
-          sudo rm -rf /usr/local/lib/cmake/folly
-          sudo rm -rf /usr/local/lib/cmake/AWSSDK
-          sudo rm -rf /usr/local/lib/cmake/aws-cpp-sdk-*
-          sudo rm -rf /usr/local/lib/cmake/aws-crt-cpp
-          sudo rm -rf /usr/local/lib/cmake/aws-c-*
-          sudo rm -f /usr/local/lib/libfolly*
-          sudo rm -f /usr/local/lib/libaws*
-          sudo rm -f /usr/local/lib/libgtest*
-          sudo rm -f /usr/local/lib/libgmock*
-
       - name: Install dependencies
-        run: |
-          if [ "${{ steps.cache.outputs.cache-hit }}" = "true" ] && \
-             [ "${{ steps.verify.outputs.needs_reinstall }}" != "true" ]; then
-            echo "==> Cache hit, skipping heavy deps"
-            sudo bash scripts/install-deps.sh --skip-heavy
-          else
-            echo "==> Cache miss or stale, full install"
-            sudo bash scripts/install-deps.sh
-          fi
+        run: sudo bash scripts/install-deps.sh
 
       - name: Install CI tools
         run: sudo apt-get install -y -qq lcov clang-tidy
