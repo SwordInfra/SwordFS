@@ -34,10 +34,15 @@ class FileHandleManager {
  public:
   static FileHandleManager &Instance();
 
-  /// Create a FileReadWriter from |vol| and associate it with |fh|.
-  /// Returns kAlreadyExists if |fh| is already open.
-  utils::Status Open(uint64_t fh, volume::VolumeImpl *vol,
-                     metadata::InodeID ino);
+  /// Allocate a file handle, create a FileReadWriter from the global
+  /// VolumeImpl, and return the handle via |*fh|.
+  utils::Status Open(metadata::InodeID ino, uint64_t *fh);
+
+  /// Allocate a directory handle mapped to |ino|.
+  uint64_t OpenDir(metadata::InodeID ino);
+
+  /// Release a directory handle.
+  void ReleaseDir(uint64_t fh);
 
   /// Find the FileHandle for |fh|.  Returns std::nullopt if not found.
   /// The returned FileHandle keeps the underlying FileReadWriter alive.
@@ -50,8 +55,12 @@ class FileHandleManager {
  private:
   FileHandleManager() = default;
 
+  uint64_t AllocFh();
+
   mutable std::shared_mutex mutex_;
+  uint64_t next_fh_{1};
   folly::F14FastMap<uint64_t, FileHandle> files_;
+  folly::F14FastMap<uint64_t, metadata::InodeID> dir_handles_;
 };
 
 }  // namespace swordfs::vfs

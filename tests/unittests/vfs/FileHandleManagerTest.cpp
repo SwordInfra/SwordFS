@@ -19,17 +19,27 @@ namespace {
 class FileHandleManagerTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    vol_ = std::make_unique<volume::VolumeImpl>();
+    volume::VolumeImpl::Initialize();
   }
 
   void TearDown() override {
     // Clean up any handles left by a test.
-    FileHandleManager::Instance().Release(1);
-    FileHandleManager::Instance().Release(2);
-    FileHandleManager::Instance().Release(42);
+    for (uint64_t fh : fhs_) {
+      FileHandleManager::Instance().Release(fh);
+    }
+    volume::VolumeImpl::Initialize();
   }
 
-  std::unique_ptr<volume::VolumeImpl> vol_;
+  /// Helper: open a handle and remember it for cleanup.
+  uint64_t OpenHandle(metadata::InodeID ino) {
+    uint64_t fh;
+    auto st = FileHandleManager::Instance().Open(ino, &fh);
+    EXPECT_TRUE(st.ok()) << st.message();
+    fhs_.push_back(fh);
+    return fh;
+  }
+
+  std::vector<uint64_t> fhs_;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -47,10 +57,11 @@ TEST_F(FileHandleManagerTest, InstanceIsSingleton) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(FileHandleManagerTest, OpenAndFind) {
-  auto st = FileHandleManager::Instance().Open(1, vol_.get(), 42);
+  uint64_t fh;
+  auto st = FileHandleManager::Instance().Open(42, &fh);
   EXPECT_TRUE(st.ok()) << st.message();
 
-  auto found = FileHandleManager::Instance().Find(1);
+  auto found = FileHandleManager::Instance().Find(fh);
   EXPECT_TRUE(found.has_value());
 }
 
@@ -60,11 +71,13 @@ TEST_F(FileHandleManagerTest, FindNonexistent) {
 }
 
 TEST_F(FileHandleManagerTest, OpenMultipleHandles) {
-  EXPECT_TRUE(FileHandleManager::Instance().Open(1, vol_.get(), 10).ok());
-  EXPECT_TRUE(FileHandleManager::Instance().Open(2, vol_.get(), 20).ok());
+  uint64_t fh1, fh2;
+  EXPECT_TRUE(FileHandleManager::Instance().Open(10, &fh1).ok());
+  EXPECT_TRUE(FileHandleManager::Instance().Open(20, &fh2).ok());
+  EXPECT_NE(fh1, fh2);
 
-  auto f1 = FileHandleManager::Instance().Find(1);
-  auto f2 = FileHandleManager::Instance().Find(2);
+  auto f1 = FileHandleManager::Instance().Find(fh1);
+  auto f2 = FileHandleManager::Instance().Find(fh2);
 
   ASSERT_TRUE(f1.has_value());
   ASSERT_TRUE(f2.has_value());
@@ -76,10 +89,11 @@ TEST_F(FileHandleManagerTest, OpenMultipleHandles) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(FileHandleManagerTest, ReleaseRemovesHandle) {
-  EXPECT_TRUE(FileHandleManager::Instance().Open(1, vol_.get(), 7).ok());
+  uint64_t fh;
+  EXPECT_TRUE(FileHandleManager::Instance().Open(7, &fh).ok());
 
-  FileHandleManager::Instance().Release(1);
-  EXPECT_FALSE(FileHandleManager::Instance().Find(1).has_value());
+  FileHandleManager::Instance().Release(fh);
+  EXPECT_FALSE(FileHandleManager::Instance().Find(fh).has_value());
 }
 
 TEST_F(FileHandleManagerTest, ReleaseNonexistentNoCrash) {
@@ -89,13 +103,14 @@ TEST_F(FileHandleManagerTest, ReleaseNonexistentNoCrash) {
 }
 
 TEST_F(FileHandleManagerTest, ReleaseKeepsOtherHandles) {
-  EXPECT_TRUE(FileHandleManager::Instance().Open(1, vol_.get(), 1).ok());
-  EXPECT_TRUE(FileHandleManager::Instance().Open(2, vol_.get(), 2).ok());
+  uint64_t fh1, fh2;
+  EXPECT_TRUE(FileHandleManager::Instance().Open(1, &fh1).ok());
+  EXPECT_TRUE(FileHandleManager::Instance().Open(2, &fh2).ok());
 
-  FileHandleManager::Instance().Release(1);
+  FileHandleManager::Instance().Release(fh1);
 
-  EXPECT_FALSE(FileHandleManager::Instance().Find(1).has_value());
-  auto f2 = FileHandleManager::Instance().Find(2);
+  EXPECT_FALSE(FileHandleManager::Instance().Find(fh1).has_value());
+  auto f2 = FileHandleManager::Instance().Find(fh2);
   ASSERT_TRUE(f2.has_value());
 }
 
@@ -103,15 +118,13 @@ TEST_F(FileHandleManagerTest, ReleaseKeepsOtherHandles) {
 // Open duplicate fh
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleManagerTest, OpenDuplicateFails) {
-  EXPECT_TRUE(FileHandleManager::Instance().Open(1, vol_.get(), 100).ok());
-  auto st = FileHandleManager::Instance().Open(1, vol_.get(), 200);
-  EXPECT_FALSE(st.ok());
-  EXPECT_EQ(st.code(), utils::Status::Code::kAlreadyExists);
-
-  // First handle is still intact.
-  auto found = FileHandleManager::Instance().Find(1);
-  ASSERT_TRUE(found.has_value());
+// With auto-allocated fh, duplicates cannot occur — every Open gets a
+// unique handle.
+TEST_F(FileHandleManagerTest, OpenReturnsUniqueFh) {
+  uint64_t fh1, fh2;
+  EXPECT_TRUE(FileHandleManager::Instance().Open(100, &fh1).ok());
+  EXPECT_TRUE(FileHandleManager::Instance().Open(200, &fh2).ok());
+  EXPECT_NE(fh1, fh2);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -119,15 +132,16 @@ TEST_F(FileHandleManagerTest, OpenDuplicateFails) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(FileHandleManagerTest, FindKeepsHandleAliveAfterRelease) {
-  EXPECT_TRUE(FileHandleManager::Instance().Open(1, vol_.get(), 55).ok());
+  uint64_t fh;
+  EXPECT_TRUE(FileHandleManager::Instance().Open(55, &fh).ok());
 
   // Hold a shared_ptr before releasing.
-  auto held = FileHandleManager::Instance().Find(1);
+  auto held = FileHandleManager::Instance().Find(fh);
   ASSERT_TRUE(held.has_value());
 
-  FileHandleManager::Instance().Release(1);
+  FileHandleManager::Instance().Release(fh);
   // Map entry is gone.
-  auto after = FileHandleManager::Instance().Find(1);
+  auto after = FileHandleManager::Instance().Find(fh);
   EXPECT_FALSE(after.has_value());
   ASSERT_TRUE(held.has_value());
   EXPECT_NE(held->file_readwriter.get(), nullptr);  // still alive
@@ -145,10 +159,10 @@ TEST_F(FileHandleManagerTest, ConcurrentOpenAndFind) {
   for (int t = 0; t < kThreads; ++t) {
     threads.emplace_back([this, t] {
       for (int i = 0; i < kIters; ++i) {
-        uint64_t fh = static_cast<uint64_t>(t) * kIters + i + 100;
+        uint64_t fh;
+        auto ino = static_cast<metadata::InodeID>(t * kIters + i + 100);
         EXPECT_TRUE(FileHandleManager::Instance()
-                        .Open(fh, vol_.get(),
-                              static_cast<metadata::InodeID>(fh))
+                        .Open(ino, &fh)
                         .ok());
         auto found = FileHandleManager::Instance().Find(fh);
         EXPECT_TRUE(found.has_value());
@@ -157,13 +171,51 @@ TEST_F(FileHandleManagerTest, ConcurrentOpenAndFind) {
   }
   for (auto &th : threads) th.join();
 
-  // Clean up.
-  for (int t = 0; t < kThreads; ++t) {
-    for (int i = 0; i < kIters; ++i) {
-      FileHandleManager::Instance().Release(
-          static_cast<uint64_t>(t) * kIters + i + 100);
-    }
+  // Clean up — release handles we know about (auto-allocated, consecutive
+  // from 1).  The test threads opened kThreads * kIters handles.
+  for (uint64_t fh = 1; fh <= kThreads * kIters; ++fh) {
+    FileHandleManager::Instance().Release(fh);
   }
+}
+
+// ────────────────────────────────────────────────────────────────
+// OpenDir / ReleaseDir
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(FileHandleManagerTest, OpenDirAllocatesHandle) {
+  auto& mgr = FileHandleManager::Instance();
+  uint64_t dh = mgr.OpenDir(42);
+  EXPECT_GT(dh, 0u);
+  mgr.ReleaseDir(dh);
+}
+
+TEST_F(FileHandleManagerTest, OpenDirUniqueHandles) {
+  auto& mgr = FileHandleManager::Instance();
+  uint64_t dh1 = mgr.OpenDir(10);
+  uint64_t dh2 = mgr.OpenDir(20);
+  EXPECT_NE(dh1, dh2);
+  mgr.ReleaseDir(dh1);
+  mgr.ReleaseDir(dh2);
+}
+
+TEST_F(FileHandleManagerTest, ReleaseDirNonexistentNoCrash) {
+  // Releasing a directory handle that was never allocated should not crash.
+  FileHandleManager::Instance().ReleaseDir(999);
+  SUCCEED();
+}
+
+TEST_F(FileHandleManagerTest, OpenDirAndReleaseDirLifecycle) {
+  auto& mgr = FileHandleManager::Instance();
+  constexpr metadata::InodeID kIno = 77;
+
+  uint64_t dh = mgr.OpenDir(kIno);
+  EXPECT_NE(dh, 0u);
+
+  // Release and then re-allocate — should get a new handle.
+  mgr.ReleaseDir(dh);
+  uint64_t dh2 = mgr.OpenDir(kIno);
+  EXPECT_NE(dh, dh2);
+  mgr.ReleaseDir(dh2);
 }
 
 }  // namespace

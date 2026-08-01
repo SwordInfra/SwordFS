@@ -7,29 +7,25 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <memory>
 
+#include "chunk/ChunkManager.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "vfs/VfsImpl.hpp"
 #include "volume/VolumeImpl.hpp"
 
+using swordfs::metadata::InodeID;
 using swordfs::vfs::VfsImpl;
 
 // ────────────────────────────────────────────────────────────────
-// Construction & binding
+// Volume singleton access
 // ────────────────────────────────────────────────────────────────
 
-TEST(VfsImplTest, ConstructAndBind) {
-  auto vfs = std::make_unique<VfsImpl>();
-  auto vol = std::make_unique<swordfs::volume::VolumeImpl>();
-  vfs->Init(std::move(vol));
-  SUCCEED();
-}
-
 TEST(VfsImplTest, VolumeReturnsNonNullAfterInit) {
-  auto vfs = std::make_unique<VfsImpl>();
-  EXPECT_EQ(vfs->Volume(), nullptr);
-  vfs->Init(std::make_unique<swordfs::volume::VolumeImpl>());
-  EXPECT_NE(vfs->Volume(), nullptr);
+  swordfs::volume::VolumeImpl::Initialize();
+  EXPECT_NE(VfsImpl::Volume(), nullptr);
+  swordfs::volume::VolumeImpl::Initialize();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -44,78 +40,63 @@ TEST(VfsImplTest, VolumeReturnsNonNullAfterInit) {
   } while (0)
 
 TEST(VfsImplTest, Readlink) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Readlink(1));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Readlink(1));
 }
 
 TEST(VfsImplTest, Mknod) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Mknod(1, "test", 0644, 0));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Mknod(1, "test", 0644, 0));
 }
 
 TEST(VfsImplTest, Symlink) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Symlink("/target", 1, "link"));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Symlink("/target", 1, "link"));
 }
 
 TEST(VfsImplTest, Link) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Link(2, 1, "hardlink"));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Link(2, 1, "hardlink"));
 }
 
 TEST(VfsImplTest, Fsyncdir) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Fsyncdir(1, 0));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Fsyncdir(1, 0));
 }
 
 TEST(VfsImplTest, Setxattr) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Setxattr(1, "user.key", "val", 3, 0));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Setxattr(1, "user.key", "val", 3, 0));
 }
 
 TEST(VfsImplTest, Getxattr) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Getxattr(1, "user.key", 256));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Getxattr(1, "user.key", 256));
 }
 
 TEST(VfsImplTest, Listxattr) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Listxattr(1, 1024));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Listxattr(1, 1024));
 }
 
 TEST(VfsImplTest, Removexattr) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Removexattr(1, "user.key"));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Removexattr(1, "user.key"));
 }
 
 TEST(VfsImplTest, Ioctl) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Ioctl(1, 0, nullptr, nullptr, 0, nullptr, 0, 0));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Ioctl(1, 0, nullptr, nullptr, 0, nullptr, 0, 0));
 }
 
 TEST(VfsImplTest, Flock) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Flock(1, nullptr, 0));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Flock(1, nullptr, 0));
 }
 
 TEST(VfsImplTest, Fallocate) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Fallocate(1, 0, 0, 4096, nullptr));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Fallocate(1, 0, 0, 4096, nullptr));
 }
 
 TEST(VfsImplTest, Lseek) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Lseek(1, 0, SEEK_SET, nullptr));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Lseek(1, 0, SEEK_SET, nullptr));
 }
 
 TEST(VfsImplTest, Tmpfile) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Tmpfile(1, 0644, nullptr));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Tmpfile(1, 0644, nullptr));
 }
 
 TEST(VfsImplTest, Statx) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.Statx(1, 0, 0, nullptr));
+  EXPECT_NOT_SUPPORTED(VfsImpl::Statx(1, 0, 0, nullptr));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -123,8 +104,7 @@ TEST(VfsImplTest, Statx) {
 // ────────────────────────────────────────────────────────────────
 
 TEST(VfsImplTest, RetrieveReply) {
-  VfsImpl vfs;
-  EXPECT_NOT_SUPPORTED(vfs.RetrieveReply(nullptr, nullptr, 1, 0, nullptr));
+  EXPECT_NOT_SUPPORTED(VfsImpl::RetrieveReply(nullptr, nullptr, 1, 0, nullptr));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -132,16 +112,14 @@ TEST(VfsImplTest, RetrieveReply) {
 // ────────────────────────────────────────────────────────────────
 
 TEST(VfsImplTest, Readdir) {
-  VfsImpl vfs;
   std::string buf;
-  auto status = vfs.Readdir(1, 4096, 0, &buf);
+  auto status = VfsImpl::Readdir(1, 4096, 0, &buf);
   EXPECT_TRUE(status.ok());
 }
 
 TEST(VfsImplTest, Readdirplus) {
-  VfsImpl vfs;
   std::string buf;
-  auto status = vfs.Readdirplus(1, 4096, 0, &buf);
+  auto status = VfsImpl::Readdirplus(1, 4096, 0, &buf);
   EXPECT_TRUE(status.ok());
 }
 
@@ -150,21 +128,157 @@ TEST(VfsImplTest, Readdirplus) {
 // ────────────────────────────────────────────────────────────────
 
 TEST(VfsImplTest, Forget) {
-  VfsImpl vfs;
   // Needs a bound volume for meta_engine().  Without one this would
   // crash, so we can only test with a VolumeImpl that has a meta engine.
-  // For now we document this requires a proper fixture.
 }
 
 // ────────────────────────────────────────────────────────────────
-// Methods requiring a meta engine (TODO: mock IMetaEngine)
+// VfsImplIntegrationTest — methods requiring a mock IMetaEngine
 // ────────────────────────────────────────────────────────────────
 //
-// These methods call vol_->meta_engine()->Xxx() and cannot be tested
-// without a mock IMetaEngine:
-//   Lookup, Getattr, Setattr, Mkdir, Unlink, Rmdir, Rename,
-//   Open, Read, Write, Flush, Release, Fsync, Opendir,
-//   Releasedir, Statfs, Access, Create, ForgetMulti
-//
-// They should be covered by integration tests that set up a real
-// MemMetaStore-backed VolumeImpl.
+// These tests set up a VolumeImpl singleton with mock engines so that
+// VfsImpl methods that delegate to meta_engine() can be exercised.
+
+namespace {
+
+class MockMetaEngine : public swordfs::metadata::IMetaEngine {
+ public:
+  Status Lookup(InodeID, std::string_view, InodeID*,
+                struct stat*) override {
+    return Status::OK();
+  }
+  Status GetAttr(InodeID, struct stat* attr) override {
+    std::memset(attr, 0, sizeof(*attr));
+    return call_status_;
+  }
+  Status ReadDir(InodeID,
+                 std::vector<swordfs::metadata::SwordFsEntry>*) override {
+    return Status::OK();
+  }
+  Status Create(InodeID, std::string_view, mode_t, InodeID* child_ino,
+                struct stat* attr) override {
+    *child_ino = 100;
+    std::memset(attr, 0, sizeof(*attr));
+    return call_status_;
+  }
+  Status MkDir(InodeID, std::string_view, mode_t, InodeID*,
+               struct stat*) override {
+    return Status::OK();
+  }
+  Status Unlink(InodeID, std::string_view) override {
+    return Status::OK();
+  }
+  Status RmDir(InodeID, std::string_view) override {
+    return Status::OK();
+  }
+  Status Rename(InodeID, std::string_view, InodeID,
+                std::string_view, unsigned int) override {
+    return Status::OK();
+  }
+  Status SetAttr(InodeID, const struct stat*, int,
+                 struct stat*) override {
+    return Status::OK();
+  }
+  Status StatFs(struct statvfs* stbuf) override {
+    std::memset(stbuf, 0, sizeof(*stbuf));
+    return call_status_;
+  }
+  Status Access(InodeID, int) override {
+    return call_status_;
+  }
+  Status Open(InodeID) override { return call_status_; }
+  Status OpenDir(InodeID) override { return call_status_; }
+  Status Forget(InodeID, uint64_t) override { return Status::OK(); }
+
+  void set_status(Status s) { call_status_ = s; }
+
+ private:
+  Status call_status_{Status::OK()};
+};
+
+class VfsImplIntegrationTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    swordfs::volume::VolumeImpl::Initialize();
+    auto& vol = swordfs::volume::VolumeImpl::Instance();
+    auto mock = std::make_unique<MockMetaEngine>();
+    mock_meta_ = mock.get();
+    vol.set_meta_engine(std::move(mock));
+  }
+
+  void TearDown() override {
+    // Reset singleton state for the next test.
+    swordfs::volume::VolumeImpl::Initialize();
+    swordfs::chunk::ChunkManager::Instance().Initialize(nullptr, nullptr, 0);
+  }
+
+  MockMetaEngine* mock_meta_ = nullptr;
+};
+
+}  // namespace
+
+TEST_F(VfsImplIntegrationTest, OpendirSuccess) {
+  uint64_t fh = 0;
+  auto status = VfsImpl::Opendir(1, &fh);
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_NE(fh, 0u);
+  // Clean up the directory handle.
+  VfsImpl::Releasedir(1, fh);
+}
+
+TEST_F(VfsImplIntegrationTest, OpendirPermissionDenied) {
+  mock_meta_->set_status(Status::Permission("denied"));
+
+  uint64_t fh = 0;
+  auto status = VfsImpl::Opendir(1, &fh);
+  EXPECT_TRUE(status.IsPermission()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, ReleasedirSuccess) {
+  uint64_t fh = 0;
+  auto status = VfsImpl::Opendir(2, &fh);
+  ASSERT_TRUE(status.ok());
+
+  status = VfsImpl::Releasedir(2, fh);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, OpenSuccess) {
+  struct fuse_file_info fi = {};
+  auto status = VfsImpl::Open(42, &fi);
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_NE(fi.fh, 0u);
+  // Clean up — release the file handle via VfsImpl::Release.
+  VfsImpl::Release(42, fi.fh);
+}
+
+TEST_F(VfsImplIntegrationTest, OpenPermissionDenied) {
+  mock_meta_->set_status(Status::Permission("denied"));
+
+  struct fuse_file_info fi = {};
+  auto status = VfsImpl::Open(42, &fi);
+  EXPECT_TRUE(status.IsPermission()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, StatfsSuccess) {
+  struct statvfs stbuf;
+  auto status = VfsImpl::Statfs(1, &stbuf);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, AccessSuccess) {
+  auto status = VfsImpl::Access(1, R_OK);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, AccessDenied) {
+  mock_meta_->set_status(Status::Permission("denied"));
+  auto status = VfsImpl::Access(1, R_OK);
+  EXPECT_TRUE(status.IsPermission()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, GetattrSuccess) {
+  struct stat attr;
+  auto status = VfsImpl::Getattr(1, &attr);
+  EXPECT_TRUE(status.ok()) << status.message();
+}

@@ -36,14 +36,11 @@ class ChunkManager {
 
   static ChunkManager &Instance();
 
-  /// Initialise the singleton.  Must be called once before any other
-  /// method.  Both pointers must remain valid for the lifetime of the
-  /// process.
-  void Init(metadata::IMetaEngine *meta, storage::IDataEngine *data,
-            size_t chunk_size);
-
-  /// Reset all state (for unit testing).
-  void ResetForTesting();
+  /// Initialise (or reset) the singleton.  Must be called once before any
+  /// other method.  Both pointers must remain valid for the lifetime of the
+  /// process.  Pass nullptr to reset.
+  void Initialize(metadata::IMetaEngine *meta, storage::IDataEngine *data,
+                  size_t chunk_size);
 
   /// Get or create the chunk covering file offset |off|.
   Chunk &GetOrCreateChunk(uint64_t fh, InodeID ino, off_t off);

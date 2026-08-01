@@ -5,7 +5,7 @@
 
 #include <string>
 
-#include "metadata/Meta.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 
 namespace swordfs::metadata {

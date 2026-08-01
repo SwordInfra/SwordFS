@@ -4,7 +4,7 @@
 #include "volume/VolumeImpl.hpp"
 
 #include "config/ConfigCenter.hpp"
-#include "metadata/Meta.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineFactory.hpp"
 #include "storage/DataEngineFactory.hpp"
 #include "storage/IDataEngine.hpp"
@@ -13,6 +13,16 @@ namespace swordfs::volume {
 
 VolumeImpl::VolumeImpl() = default;
 VolumeImpl::~VolumeImpl() = default;
+
+std::unique_ptr<VolumeImpl> VolumeImpl::instance_;
+
+void VolumeImpl::Initialize() {
+  instance_ = std::make_unique<VolumeImpl>();
+}
+
+VolumeImpl& VolumeImpl::Instance() {
+  return *instance_;
+}
 
 void VolumeImpl::set_meta_engine(
     std::unique_ptr<swordfs::metadata::IMetaEngine> meta) {

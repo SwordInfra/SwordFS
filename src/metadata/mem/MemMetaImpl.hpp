@@ -9,31 +9,10 @@
 #include <mutex>
 #include <string>
 
-#include "metadata/Meta.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 
 namespace swordfs::metadata {
-
-// ────────────────────────────────────────────────────────────────
-// HandleTable — thread-safe handle-to-inode mapping.
-// ────────────────────────────────────────────────────────────────
-
-class HandleTable {
- public:
-  // Allocate a new handle and map it to the given inode.
-  uint64_t Alloc(InodeID ino);
-
-  // Look up the inode for a given handle. Returns 0 if not found.
-  InodeID Resolve(uint64_t fh) const;
-
-  // Release a handle. Returns true if the handle was found and removed.
-  bool Release(uint64_t fh);
-
- private:
-  mutable std::mutex mutex_;
-  uint64_t next_fh_{1};
-  folly::F14FastMap<uint64_t, InodeID> handles_;
-};
 
 class MemMetaImpl : public IMetaEngine {
  public:
@@ -56,8 +35,7 @@ class MemMetaImpl : public IMetaEngine {
                  const struct stat* attr, int to_set,
                  struct stat* out_attr) override;
   Status Access(InodeID ino, int mask) override;
-  Status Open(InodeID ino, uint64_t* fh) override;
-  Status Release(uint64_t fh) override;
+  Status Open(InodeID ino) override;
 
   // Directory operations
   Status ReadDir(InodeID ino, std::vector<SwordFsEntry>* entries) override;
@@ -65,8 +43,7 @@ class MemMetaImpl : public IMetaEngine {
                std::string_view name, mode_t mode, InodeID* child_ino,
                struct stat* attr) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
-  Status OpenDir(InodeID ino, uint64_t* fh) override;
-  Status ReleaseDir(uint64_t fh) override;
+  Status OpenDir(InodeID ino) override;
   Status Forget(InodeID ino, uint64_t nlookup) override;
 
   // Volume operations
@@ -78,8 +55,6 @@ class MemMetaImpl : public IMetaEngine {
 
  private:
   MemMetaStore store_;
-  HandleTable file_handles_;
-  HandleTable dir_handles_;
 };
 
 }  // namespace swordfs::metadata

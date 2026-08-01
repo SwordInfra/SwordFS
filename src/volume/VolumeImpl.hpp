@@ -36,6 +36,23 @@ class VolumeImpl {
   VolumeImpl();
   ~VolumeImpl();
 
+  // ────────────────────────────────────────────────────────────────
+  // Singleton — the VolumeImpl is immutable after mount, so a global
+  // access point eliminates parameter threading.
+  // ────────────────────────────────────────────────────────────────
+
+  /// Initialize the singleton.  Must be called exactly once during
+  /// mount, before any other code accesses Instance().  Also serves
+  /// as a reset (testing only).
+  static void Initialize();
+
+  /// Return the singleton instance.  Must be called after Initialize().
+  static VolumeImpl& Instance();
+
+  // ────────────────────────────────────────────────────────────────
+  // Lifecycle
+  // ────────────────────────────────────────────────────────────────
+
   /// Build config from CLI flags and persist to disk (format).
   Status CreateFrom(const swordfs::config::ConfigCenter& cfg);
 
@@ -64,6 +81,8 @@ class VolumeImpl {
   VolumeConfig config_;
   std::unique_ptr<swordfs::metadata::IMetaEngine> meta_engine_;
   std::unique_ptr<swordfs::storage::IDataEngine> data_engine_;
+
+  static std::unique_ptr<VolumeImpl> instance_;
 };
 
 }  // namespace volume

@@ -9,17 +9,11 @@
 
 #pragma once
 
-#include <memory>
-
 #include "vfs/VfsImpl.hpp"
 #define FUSE_USE_VERSION 312
 #include <fuse_lowlevel.h>
 
 #include <cstdint>
-
-namespace swordfs::volume {
-class VolumeImpl;
-}
 
 namespace swordfs::fuse {
 
@@ -31,12 +25,15 @@ class VfsHookFactory {
   /// Return the fully-populated fuse_lowlevel_ops table.
   static const struct fuse_lowlevel_ops &get_ops();
 
-  /// Bind a VolumeImpl to the VfsImpl singleton before mount.
-  /// Takes ownership of |vol|.
-  static void BindVolume(std::unique_ptr<volume::VolumeImpl> vol);
-
-  // FUSE callbacks — delegate to vfs_
+  // FUSE callbacks — delegate to VfsImpl
   static void SwordFsInit(void *userdata, struct fuse_conn_info *conn);
+
+ private:
+  /// Set per-request fiber context. Called at the start of every FUSE
+  /// callback to populate caller identity (uid, gid, pid, umask).
+  static void SetRequestContext(fuse_req_t req);
+
+ public:
   static void SwordFsDestroy(void *userdata);
   static void SwordFsLookup(fuse_req_t req, fuse_ino_t parent,
                             const char *name);
@@ -133,8 +130,6 @@ class VfsHookFactory {
   static void SwordFsStatx(fuse_req_t req, fuse_ino_t ino, int flags, int mask,
                            struct fuse_file_info *fi);
 
- private:
-  static VfsImpl *vfs_;
 };
 
 }  // namespace swordfs::fuse
