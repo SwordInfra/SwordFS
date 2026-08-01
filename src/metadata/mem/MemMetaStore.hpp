@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "metadata/Types.hpp"
+#include "storage/Slice.hpp"
 #include "utils/Status.hpp"
 
 using Status = swordfs::utils::Status;
@@ -77,6 +78,20 @@ class MemMetaStore {
   Status SwapEntries(InodeID parent_a_ino, std::string_view name_a,
                      InodeID parent_b_ino, std::string_view name_b);
 
+  // ────────────────────────────────────────────────────────────────
+  // Chunk Slice storage (S3 Phase 2)
+  // ────────────────────────────────────────────────────────────────
+
+  // Append a slice to an inode's chunk list.  Creates the entry if
+  // this is the first slice for the inode.
+  Status AppendSlice(InodeID ino, const swordfs::storage::Slice& slice);
+
+  // Retrieve the full slice list for an inode.
+  Status GetSlices(InodeID ino, swordfs::storage::SliceList* out);
+
+  // Return the next slice id for an inode (without advancing).
+  uint64_t NextSliceID(InodeID ino);
+
  private:
   // ────────────────────────────────────────────────────────────────
   // Private helpers — caller MUST hold mutex_
@@ -96,6 +111,8 @@ class MemMetaStore {
   std::atomic<InodeID> next_ino_;
   InodeTable inodes_;
   folly::F14FastMap<InodeID, EntryTable> dirs_;
+  // Chunk Slice storage: inode → ordered list of slices.
+  folly::F14FastMap<InodeID, swordfs::storage::SliceList> chunks_;
 };
 
 }  // namespace swordfs::metadata
