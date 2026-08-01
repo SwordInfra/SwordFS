@@ -4,7 +4,7 @@
 #include "volume/VolumeImpl.hpp"
 
 #include "config/ConfigCenter.hpp"
-#include "metadata/Meta.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineFactory.hpp"
 #include "storage/DataEngineFactory.hpp"
 #include "storage/IDataEngine.hpp"

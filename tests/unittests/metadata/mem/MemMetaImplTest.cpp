@@ -515,8 +515,7 @@ TEST_F(MemMetaImplTest, OpenRequiresReadPermission) {
                  FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID | FUSE_SET_ATTR_MODE,
                  nullptr);
 
-  uint64_t fh = 0;
-  Status s = impl_->Open(f_ino, &fh);
+  Status s = impl_->Open(f_ino);
   EXPECT_TRUE(s.IsPermission()) << s.message();
 }
 
@@ -533,7 +532,6 @@ TEST_F(MemMetaImplTest, OpenRootSucceedsWithoutReadPerm) {
   impl_->SetAttr(f_ino, &st, FUSE_SET_ATTR_MODE, nullptr);
 
   SetContext(0, 0);
-  uint64_t fh = 0;
-  Status s = impl_->Open(f_ino, &fh);
+  Status s = impl_->Open(f_ino);
   EXPECT_TRUE(s.ok()) << s.message();
 }

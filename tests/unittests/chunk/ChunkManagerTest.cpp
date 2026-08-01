@@ -17,7 +17,7 @@
 #include <unordered_map>
 
 #include "chunk/ChunkManager.hpp"
-#include "metadata/Meta.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Status.hpp"
 #include "vfs/FileHandleManager.hpp"
@@ -163,16 +163,8 @@ class MockMetaEngine : public IMetaEngine {
   }
   Status StatFs(struct statvfs *) override { return Status::OK(); }
   Status Access(InodeID, int) override { return Status::OK(); }
-  Status Open(InodeID, uint64_t *fh) override {
-    *fh = 1;
-    return Status::OK();
-  }
-  Status Release(uint64_t) override { return Status::OK(); }
-  Status OpenDir(InodeID, uint64_t *fh) override {
-    *fh = 1;
-    return Status::OK();
-  }
-  Status ReleaseDir(uint64_t) override { return Status::OK(); }
+  Status Open(InodeID) override { return Status::OK(); }
+  Status OpenDir(InodeID) override { return Status::OK(); }
   Status Forget(InodeID, uint64_t) override { return Status::OK(); }
 };
 

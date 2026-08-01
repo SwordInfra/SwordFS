@@ -6,7 +6,7 @@
 #include "cmd/Format.hpp"
 #include "cmd/Mount.hpp"
 #include "config/Validator.hpp"
-#include "metadata/Meta.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "storage/StorageUrl.hpp"
 
 namespace swordfs::config {

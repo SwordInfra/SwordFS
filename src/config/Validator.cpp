@@ -7,7 +7,7 @@
 #include <cctype>
 #include <string>
 
-#include "metadata/Meta.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "storage/StorageRegistry.hpp"
 #include "storage/StorageUrl.hpp"
 

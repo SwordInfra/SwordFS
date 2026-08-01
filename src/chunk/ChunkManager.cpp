@@ -3,7 +3,7 @@
 
 #include "chunk/ChunkManager.hpp"
 
-#include "metadata/Meta.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Logging.hpp"
 

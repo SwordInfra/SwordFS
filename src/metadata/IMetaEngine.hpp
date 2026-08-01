@@ -82,20 +82,13 @@ class IMetaEngine {
   /// Check access permissions.
   virtual Status Access(InodeID ino, int mask) = 0;
 
-  /// Open a regular file. Allocates a handle (*fh) that is passed to
-  /// subsequent read/write/flush calls.
-  virtual Status Open(InodeID ino, uint64_t* fh) = 0;
+  /// Open a regular file. Performs permission check and updates atime.
+  /// Handle allocation is now managed by FileHandleManager.
+  virtual Status Open(InodeID ino) = 0;
 
-  /// Release a file handle. Called when the last reference to this open
-  /// instance is closed.
-  virtual Status Release(uint64_t fh) = 0;
-
-  /// Open a directory for reading. Allocates a handle (*fh) that is passed
-  /// to subsequent readdir calls.
-  virtual Status OpenDir(InodeID ino, uint64_t* fh) = 0;
-
-  /// Release a directory handle.
-  virtual Status ReleaseDir(uint64_t fh) = 0;
+  /// Open a directory for reading. Performs permission check and updates
+  /// atime. Handle allocation is now managed by FileHandleManager.
+  virtual Status OpenDir(InodeID ino) = 0;
 
   /// Decrement the inode's lookup count by nlookup. Called in response to
   /// FUSE forget requests. The caller may free or reuse the inode's backend

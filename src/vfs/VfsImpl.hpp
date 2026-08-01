@@ -32,10 +32,6 @@ class VfsImpl {
   /// Return the VolumeImpl singleton (convenience).
   static volume::VolumeImpl *Volume();
 
-  /// Set per-request fiber context. Must be called before any method
-  /// that requires context (caller identity, volume binding).
-  static void SetRequestContext(fuse_req_t req);
-
   static utils::Status Lookup(fuse_ino_t parent, const char *name,
                               fuse_entry_param *entry);
   static void Forget(fuse_ino_t ino, uint64_t nlookup);

@@ -8,9 +8,8 @@
 
 #include "config/ConfigCenter.hpp"
 #include "fuse/Limits.hpp"
-#include "metadata/Meta.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
-#include "utils/Context.hpp"
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
 #include "vfs/FileHandleManager.hpp"
@@ -37,11 +36,6 @@ namespace swordfs::vfs {
 
 volume::VolumeImpl *VfsImpl::Volume() {
   return &volume::VolumeImpl::Instance();
-}
-
-void VfsImpl::SetRequestContext(fuse_req_t req) {
-  auto &ctx = folly::fibers::local<SwordFsContext>();
-  ctx = SwordFsContext{fuse_req_ctx(req)};
 }
 
 utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name,
@@ -133,16 +127,13 @@ utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent,
 
 utils::Status VfsImpl::Open(fuse_ino_t ino, struct fuse_file_info *fi) {
   // Permission check and atime update (fh allocation moved to FileHandleManager).
-  {
-    uint64_t dummy;
-    auto status = VolumeImpl::Instance().meta_engine()->Open(ino, &dummy);
-    if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "Open FAILED: ino=" << ino << " — " << status.message();
-      return status;
-    }
+  auto status = VolumeImpl::Instance().meta_engine()->Open(ino);
+  if (!status.ok()) {
+    SWORDFS_LOG_ERROR << "Open FAILED: ino=" << ino << " — " << status.message();
+    return status;
   }
   uint64_t fh;
-  auto status = FileHandleManager::Instance().Open(ino, &fh);
+  status = FileHandleManager::Instance().Open(ino, &fh);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Open FAILED: ino=" << ino << " — " << status.message();
     return status;
@@ -186,14 +177,8 @@ utils::Status VfsImpl::Flush(fuse_ino_t ino, uint64_t fh) {
 
 utils::Status VfsImpl::Release(fuse_ino_t ino, uint64_t fh) {
   FileHandleManager::Instance().Release(fh);
-  Status status = VolumeImpl::Instance().meta_engine()->Release(fh);
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Release FAILED: ino=" << ino << " fh=" << fh
-                      << " — " << status.message();
-  } else {
-    SWORDFS_LOG_DEBUG << "Release: ino=" << ino << " fh=" << fh;
-  }
-  return status;
+  SWORDFS_LOG_DEBUG << "Release: ino=" << ino << " fh=" << fh;
+  return Status::OK();
 }
 
 utils::Status VfsImpl::Fsync(fuse_ino_t ino, int datasync, uint64_t fh) {
@@ -206,11 +191,8 @@ utils::Status VfsImpl::Fsync(fuse_ino_t ino, int datasync, uint64_t fh) {
 
 utils::Status VfsImpl::Opendir(fuse_ino_t ino, uint64_t *fh) {
   // Permission check and atime update.
-  {
-    uint64_t dummy;
-    auto status = VolumeImpl::Instance().meta_engine()->OpenDir(ino, &dummy);
-    if (!status.ok()) return status;
-  }
+  auto status = VolumeImpl::Instance().meta_engine()->OpenDir(ino);
+  if (!status.ok()) return status;
   *fh = FileHandleManager::Instance().OpenDir(ino);
   return Status::OK();
 }
@@ -264,7 +246,7 @@ utils::Status VfsImpl::Readdir(fuse_ino_t ino, size_t size, off_t off,
 utils::Status VfsImpl::Releasedir(fuse_ino_t ino, uint64_t fh) {
   (void)ino;
   FileHandleManager::Instance().ReleaseDir(fh);
-  return VolumeImpl::Instance().meta_engine()->ReleaseDir(fh);
+  return Status::OK();
 }
 
 utils::Status VfsImpl::Fsyncdir(fuse_ino_t ino, int datasync) {
@@ -324,20 +306,17 @@ utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name,
     return status;
   }
   uint64_t fh;
-  {
-    uint64_t dummy;
-    auto status = VolumeImpl::Instance().meta_engine()->Open(child_ino, &dummy);
-    if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "Create: Open FAILED: ino=" << child_ino
-                        << " — " << status.message();
-      return status;
-    }
+  status = VolumeImpl::Instance().meta_engine()->Open(child_ino);
+  if (!status.ok()) {
+    SWORDFS_LOG_ERROR << "Create: Open FAILED: ino=" << child_ino
+                      << " — " << status.message();
+    return status;
   }
-  auto status2 = FileHandleManager::Instance().Open(child_ino, &fh);
-  if (!status2.ok()) {
+  status = FileHandleManager::Instance().Open(child_ino, &fh);
+  if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Create: FileHandleManager::Open FAILED: ino=" << child_ino
-                      << " — " << status2.message();
-    return status2;
+                      << " — " << status.message();
+    return status;
   }
   fi->fh = fh;
   *entry = {};

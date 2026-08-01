@@ -178,5 +178,45 @@ TEST_F(FileHandleManagerTest, ConcurrentOpenAndFind) {
   }
 }
 
+// ────────────────────────────────────────────────────────────────
+// OpenDir / ReleaseDir
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(FileHandleManagerTest, OpenDirAllocatesHandle) {
+  auto& mgr = FileHandleManager::Instance();
+  uint64_t dh = mgr.OpenDir(42);
+  EXPECT_GT(dh, 0u);
+  mgr.ReleaseDir(dh);
+}
+
+TEST_F(FileHandleManagerTest, OpenDirUniqueHandles) {
+  auto& mgr = FileHandleManager::Instance();
+  uint64_t dh1 = mgr.OpenDir(10);
+  uint64_t dh2 = mgr.OpenDir(20);
+  EXPECT_NE(dh1, dh2);
+  mgr.ReleaseDir(dh1);
+  mgr.ReleaseDir(dh2);
+}
+
+TEST_F(FileHandleManagerTest, ReleaseDirNonexistentNoCrash) {
+  // Releasing a directory handle that was never allocated should not crash.
+  FileHandleManager::Instance().ReleaseDir(999);
+  SUCCEED();
+}
+
+TEST_F(FileHandleManagerTest, OpenDirAndReleaseDirLifecycle) {
+  auto& mgr = FileHandleManager::Instance();
+  constexpr metadata::InodeID kIno = 77;
+
+  uint64_t dh = mgr.OpenDir(kIno);
+  EXPECT_NE(dh, 0u);
+
+  // Release and then re-allocate — should get a new handle.
+  mgr.ReleaseDir(dh);
+  uint64_t dh2 = mgr.OpenDir(kIno);
+  EXPECT_NE(dh, dh2);
+  mgr.ReleaseDir(dh2);
+}
+
 }  // namespace
 }  // namespace swordfs::vfs

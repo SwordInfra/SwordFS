@@ -27,6 +27,13 @@ class VfsHookFactory {
 
   // FUSE callbacks — delegate to VfsImpl
   static void SwordFsInit(void *userdata, struct fuse_conn_info *conn);
+
+ private:
+  /// Set per-request fiber context. Called at the start of every FUSE
+  /// callback to populate caller identity (uid, gid, pid, umask).
+  static void SetRequestContext(fuse_req_t req);
+
+ public:
   static void SwordFsDestroy(void *userdata);
   static void SwordFsLookup(fuse_req_t req, fuse_ino_t parent,
                             const char *name);

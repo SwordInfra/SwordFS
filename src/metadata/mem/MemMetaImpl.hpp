@@ -9,7 +9,7 @@
 #include <mutex>
 #include <string>
 
-#include "metadata/Meta.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 
 namespace swordfs::metadata {
@@ -35,8 +35,7 @@ class MemMetaImpl : public IMetaEngine {
                  const struct stat* attr, int to_set,
                  struct stat* out_attr) override;
   Status Access(InodeID ino, int mask) override;
-  Status Open(InodeID ino, uint64_t* fh) override;
-  Status Release(uint64_t fh) override;
+  Status Open(InodeID ino) override;
 
   // Directory operations
   Status ReadDir(InodeID ino, std::vector<SwordFsEntry>* entries) override;
@@ -44,8 +43,7 @@ class MemMetaImpl : public IMetaEngine {
                std::string_view name, mode_t mode, InodeID* child_ino,
                struct stat* attr) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
-  Status OpenDir(InodeID ino, uint64_t* fh) override;
-  Status ReleaseDir(uint64_t fh) override;
+  Status OpenDir(InodeID ino) override;
   Status Forget(InodeID ino, uint64_t nlookup) override;
 
   // Volume operations

@@ -512,8 +512,7 @@ Status MemMetaImpl::Access(InodeID ino,
   return Status::OK();
 }
 
-Status MemMetaImpl::Open(InodeID ino,
-                         uint64_t* fh) {
+Status MemMetaImpl::Open(InodeID ino) {
   SwordFsInode* inode = nullptr;
   store_.LookupInode(ino, &inode);
   if (!inode) {
@@ -539,20 +538,10 @@ Status MemMetaImpl::Open(InodeID ino,
   // Update atime on the file.
   inode->attr.st_atime = ::time(nullptr);
 
-  // Handle allocation is now managed by FileHandleManager; the caller
-  // obtains the real fh from FileHandleManager::Open().
-  if (fh) *fh = 0;
   return Status::OK();
 }
 
-Status MemMetaImpl::Release(uint64_t fh) {
-  // Handle lifecycle is now managed by FileHandleManager.
-  (void)fh;
-  return Status::OK();
-}
-
-Status MemMetaImpl::OpenDir(InodeID ino,
-                            uint64_t* fh) {
+Status MemMetaImpl::OpenDir(InodeID ino) {
   SwordFsInode* dir = nullptr;
   if (!store_.LookupInode(ino, &dir).ok() || !dir ||
       !dir->IsDir()) {
@@ -563,15 +552,6 @@ Status MemMetaImpl::OpenDir(InodeID ino,
   // Update atime on the directory.
   dir->Touch(kAtime);
 
-  // Handle allocation is now managed by FileHandleManager; the caller
-  // obtains the real fh from FileHandleManager::OpenDir().
-  if (fh) *fh = 0;
-  return Status::OK();
-}
-
-Status MemMetaImpl::ReleaseDir(uint64_t fh) {
-  // Handle lifecycle is now managed by FileHandleManager.
-  (void)fh;
   return Status::OK();
 }
 
