@@ -6,8 +6,6 @@
 
 #pragma once
 
-#include <folly/io/IOBuf.h>
-
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -16,6 +14,10 @@
 
 #include "utils/Status.hpp"
 
+namespace folly {
+class IOBuf;
+}
+
 namespace swordfs::chunk {
 
 /// Single-chunk write buffer backed by folly::IOBuf.
@@ -23,8 +25,16 @@ namespace swordfs::chunk {
 /// Holds at most |capacity| bytes of in-flight write data.
 class WriteBuf {
  public:
-  /// Allocates one contiguous IOBuf of exactly |capacity| bytes.
   explicit WriteBuf(size_t capacity);
+  ~WriteBuf();
+
+  // Movable (required by std::deque<Chunk>::erase)
+  WriteBuf(WriteBuf&&) = default;
+  WriteBuf& operator=(WriteBuf&&) = default;
+
+  // Non-copyable (owns unique_ptr)
+  WriteBuf(const WriteBuf&) = delete;
+  WriteBuf& operator=(const WriteBuf&) = delete;
 
   /// Write the contents of |data| at the given buffer-relative |offset|.
   utils::Status Write(off_t offset, const folly::IOBuf& data);
@@ -37,7 +47,7 @@ class WriteBuf {
   utils::Status CopyOut(off_t off, size_t len, folly::IOBuf *out) const;
 
   /// Number of valid bytes in the buffer.
-  size_t size() const { return buf_ ? buf_->length() : 0; }
+  size_t size() const;
 
  private:
   std::unique_ptr<folly::IOBuf> buf_;

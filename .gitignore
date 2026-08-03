@@ -44,6 +44,9 @@ build/
 Build/
 build-*/
 
+# clangd persistent index cache
+.clangd-cache/
+
 # CMake generated files
 CMakeFiles/
 CMakeCache.txt

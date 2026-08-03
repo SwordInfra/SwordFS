@@ -4,12 +4,14 @@
 #include "vfs/FileReadWriter.hpp"
 
 #include <folly/fibers/Baton.h>
+#include <folly/io/IOBuf.h>
 
 #include <algorithm>
 #include <vector>
 
 #include "chunk/Chunk.hpp"
 #include "chunk/ChunkManager.hpp"
+#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
 
 namespace swordfs::vfs {

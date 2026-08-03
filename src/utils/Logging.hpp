@@ -6,8 +6,11 @@
 
 #pragma once
 
+// This header defines SWORDFS_LOG_* macros that expand to folly's XLOG.
+// Before including this header, include <folly/logging/xlog.h> in your
+// .cpp file so the XLOG macro is available at expansion time.
+
 #include <fmt/core.h>
-#include <folly/logging/xlog.h>
 
 #include <cstdlib>
 #include <iostream>

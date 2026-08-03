@@ -17,7 +17,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "utils/Logging.hpp"
 #include "utils/Status.hpp"
 
 namespace swordfs::config {

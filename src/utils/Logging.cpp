@@ -5,6 +5,7 @@
 
 #include <fcntl.h>
 #include <folly/FileUtil.h>
+#include <folly/logging/xlog.h>
 #include <folly/logging/FileHandlerFactory.h>
 #include <folly/logging/Init.h>
 #include <folly/logging/LogLevel.h>

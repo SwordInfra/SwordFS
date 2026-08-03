@@ -8,16 +8,18 @@
 #pragma once
 
 #define FUSE_USE_VERSION 312
-#include <folly/io/IOBuf.h>
 #include <fuse_lowlevel.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
-#include "chunk/ChunkManager.hpp"
-#include "config/ConfigCenter.hpp"
 #include "utils/Status.hpp"
+
+namespace folly {
+class IOBuf;
+}
 
 namespace swordfs {
 

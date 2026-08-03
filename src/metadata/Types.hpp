@@ -1,12 +1,13 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// SwordFS metadata types — shared data structures used across the metadata
-// subsystem.
+// Core POD types for the metadata subsystem.
+//
+// This header does NOT pull in Folly (F14Map). If you need F14FastMap,
+// include <folly/container/F14Map.h> directly.
 
 #pragma once
 
-#include <folly/container/F14Map.h>
 #include <sys/stat.h>
 
 #include <cstdint>
@@ -15,17 +16,14 @@
 
 namespace swordfs::metadata {
 
-// forward declaration
+// forward declaration — most users only hold pointers
 struct SwordFsInode;
 
 using InodeID = uint64_t;
-using InodeTable = folly::F14FastMap<InodeID, SwordFsInode*>;
-using EntryTable = folly::F14FastMap<std::string, SwordFsInode*>;
 
 struct SwordFsEntry {
   std::string name;
-  // DT_DIR, DT_REG, DT_LNK, etc.
-  uint32_t type;
+  uint32_t type;  // DT_DIR, DT_REG, DT_LNK, etc.
   InodeID ino;
 };
 
@@ -60,13 +58,10 @@ struct SwordFsInode {
     } else if (gid == attr.st_gid) {
       access_bits = (attr.st_mode & S_IRWXG) >> 3;
     } else {
-      access_bits = attr.st_mode & S_IRWXO;
+      access_bits = (attr.st_mode & S_IRWXO);
     }
-
-    if ((mask & R_OK) && !(access_bits & R_OK)) return false;
-    if ((mask & W_OK) && !(access_bits & W_OK)) return false;
-    if ((mask & X_OK) && !(access_bits & X_OK)) return false;
-    return true;
+    return (access_bits & static_cast<unsigned int>(mask)) ==
+           static_cast<unsigned int>(mask);
   }
 };
 

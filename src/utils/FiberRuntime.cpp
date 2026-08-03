@@ -3,6 +3,8 @@
 
 #include "utils/FiberRuntime.hpp"
 
+#include <folly/io/async/EventBase.h>
+
 #include <mutex>
 #include <vector>
 

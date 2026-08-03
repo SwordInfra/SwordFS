@@ -16,6 +16,7 @@
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "utils/FiberRuntime.hpp"
+#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
 #include "vfs/VfsImpl.hpp"
 #include "volume/VolumeImpl.hpp"

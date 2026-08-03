@@ -3,6 +3,8 @@
 
 #include "chunk/WriteBuf.hpp"
 
+#include <folly/io/IOBuf.h>
+
 #include <algorithm>
 #include <cstring>
 
@@ -10,6 +12,12 @@ namespace swordfs::chunk {
 
 WriteBuf::WriteBuf(size_t capacity) {
   buf_ = folly::IOBuf::create(capacity);
+}
+
+WriteBuf::~WriteBuf() = default;
+
+size_t WriteBuf::size() const {
+  return buf_ ? buf_->length() : 0;
 }
 
 utils::Status WriteBuf::Write(off_t write_offset, const folly::IOBuf& data) {

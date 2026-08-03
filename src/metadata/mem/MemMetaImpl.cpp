@@ -17,6 +17,7 @@
 #include <cerrno>
 #include <cstring>
 
+#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
 
 namespace swordfs::metadata {

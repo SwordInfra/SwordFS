@@ -6,8 +6,6 @@
 
 #pragma once
 
-#include <folly/container/F14Map.h>
-
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -29,6 +27,11 @@ namespace swordfs::vfs {
 struct FileHandle {
   std::shared_ptr<FileReadWriter> file_readwriter;
 };
+
+// Opaque map types — defined in FileHandleManager.cpp to avoid pulling
+// Folly's F14FastMap into every translation unit that includes this header.
+struct FileMap;
+struct DirMap;
 
 class FileHandleManager {
  public:
@@ -53,14 +56,14 @@ class FileHandleManager {
   void Release(uint64_t fh);
 
  private:
-  FileHandleManager() = default;
+  FileHandleManager();
 
   uint64_t AllocFh();
 
   mutable std::shared_mutex mutex_;
   uint64_t next_fh_{1};
-  folly::F14FastMap<uint64_t, FileHandle> files_;
-  folly::F14FastMap<uint64_t, metadata::InodeID> dir_handles_;
+  std::unique_ptr<FileMap> files_;
+  std::unique_ptr<DirMap> dir_handles_;
 };
 
 }  // namespace swordfs::vfs

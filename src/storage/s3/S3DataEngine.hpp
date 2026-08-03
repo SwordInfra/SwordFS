@@ -8,13 +8,17 @@
 
 #pragma once
 
-#include <aws/s3/S3Client.h>
-
 #include <memory>
 #include <string>
 #include <string_view>
 
 #include "storage/IDataEngine.hpp"
+
+namespace Aws {
+namespace S3 {
+class S3Client;
+}
+}  // namespace Aws
 
 namespace swordfs {
 
@@ -42,7 +46,7 @@ struct S3Config {
 class S3DataEngine : public IDataEngine {
  public:
   explicit S3DataEngine(const S3Config& config);
-  ~S3DataEngine() override = default;
+  ~S3DataEngine() override;
 
   DataEngineLimits Limits() const override;
   bool Head(std::string_view key, size_t* size) override;

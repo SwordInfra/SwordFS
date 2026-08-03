@@ -3,6 +3,8 @@
 
 #include "chunk/ChunkManager.hpp"
 
+#include <folly/io/IOBuf.h>
+
 #include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Logging.hpp"

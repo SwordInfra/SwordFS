@@ -8,6 +8,7 @@
 #include <folly/portability/Filesystem.h>
 
 #include "config/ConfigCenter.hpp"
+#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
 
 namespace swordfs::volume {

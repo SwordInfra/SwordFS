@@ -3,6 +3,7 @@
 
 // Unit tests for WriteBuf — memory-only, no mocks required.
 
+#include <folly/io/IOBuf.h>
 #include <gtest/gtest.h>
 
 #include <string>
