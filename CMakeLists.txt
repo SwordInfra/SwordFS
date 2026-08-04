@@ -110,7 +110,8 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-file(GLOB_RECURSE TEST_SOURCES tests/*.cpp)
+# Unit tests (tests/unittests/)
+file(GLOB_RECURSE TEST_SOURCES tests/unittests/*.cpp)
 add_executable(swordfs_test ${TEST_SOURCES})
 target_link_libraries(swordfs_test PRIVATE swordfs_lib gtest gtest_main)
 # Ensure FetchContent gtest headers take priority over any system/conda gtest
@@ -122,3 +123,16 @@ target_compile_definitions(swordfs_test PRIVATE _FILE_OFFSET_BITS=64)
 
 include(GoogleTest)
 gtest_discover_tests(swordfs_test)
+
+# End-to-end tests (tests/e2e/)
+file(GLOB_RECURSE E2E_TEST_SOURCES tests/e2e/*.cpp)
+add_executable(swordfs_e2e_test ${E2E_TEST_SOURCES})
+target_link_libraries(swordfs_e2e_test PRIVATE swordfs_lib gtest gtest_main)
+target_include_directories(swordfs_e2e_test BEFORE PRIVATE
+  ${googletest_SOURCE_DIR}/googletest/include
+  ${googletest_SOURCE_DIR}/googletest
+  ${CMAKE_CURRENT_SOURCE_DIR}  # for "tests/e2e/Fixture.hpp" includes
+)
+target_compile_definitions(swordfs_e2e_test PRIVATE _FILE_OFFSET_BITS=64)
+
+gtest_discover_tests(swordfs_e2e_test)

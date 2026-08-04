@@ -26,7 +26,7 @@ jobs:
           cmake --preset default -DCMAKE_CXX_FLAGS="--coverage" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
 
       - name: Build
-        run: cmake --build build --target swordfs swordfs_test
+        run: cmake --build build --target swordfs swordfs_test swordfs_e2e_test
 
       - name: Run clang-tidy (changed files only)
         run: |
@@ -44,8 +44,19 @@ jobs:
             echo "No C++ source changes detected."
           fi
 
-      - name: Test
+      - name: Test (unit)
         run: build/swordfs_test --gtest_color=no
+
+      - name: Test (E2E)
+        env:
+          SWORDFS_S3_NO_SSL: "1"
+          SWORDFS_E2E_S3_BUCKET: "s3://127.0.0.1:9000/swordfs-e2e"
+          SWORDFS_BIN: "${{ github.workspace }}/build/swordfs"
+          E2E_BIN: "${{ github.workspace }}/build/swordfs_e2e_test"
+        run: |
+          sudo modprobe fuse
+          sudo chmod 666 /dev/fuse
+          bash scripts/run-e2e.sh --gtest_color=no
 
       - name: Generate coverage report
         run: |
