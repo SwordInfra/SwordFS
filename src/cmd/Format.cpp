@@ -10,6 +10,7 @@
 #include "cmd/Format.hpp"
 
 #include "config/ConfigCenter.hpp"
+#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
 #include "volume/VolumeImpl.hpp"
 

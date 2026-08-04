@@ -7,12 +7,14 @@
 
 #pragma once
 
-#include <folly/io/IOBuf.h>
-
 #include <cstdint>
 
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
+
+namespace folly {
+class IOBuf;
+}
 
 namespace swordfs {
 namespace vfs {

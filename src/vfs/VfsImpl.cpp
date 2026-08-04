@@ -4,12 +4,13 @@
 #include "vfs/VfsImpl.hpp"
 
 #include <dirent.h>
-#include <folly/fibers/FiberManager.h>
+#include <folly/io/IOBuf.h>
 
 #include "config/ConfigCenter.hpp"
 #include "fuse/Limits.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
+#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
 #include "vfs/FileHandleManager.hpp"

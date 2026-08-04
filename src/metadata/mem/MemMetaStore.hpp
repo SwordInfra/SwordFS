@@ -94,8 +94,8 @@ class MemMetaStore {
 
   mutable std::mutex mutex_;
   std::atomic<InodeID> next_ino_;
-  InodeTable inodes_;
-  folly::F14FastMap<InodeID, EntryTable> dirs_;
+  folly::F14FastMap<InodeID, SwordFsInode*> inodes_;
+  folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode*>> dirs_;
 };
 
 }  // namespace swordfs::metadata

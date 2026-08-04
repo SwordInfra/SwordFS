@@ -19,13 +19,16 @@
 #pragma once
 
 #include <folly/fibers/FiberManagerMap.h>
-#include <folly/io/async/EventBase.h>
 
 #include <functional>
 #include <memory>
 #include <thread>
 
 #include "utils/Context.hpp"
+
+namespace folly {
+class EventBase;
+}
 
 namespace swordfs::utils {
 

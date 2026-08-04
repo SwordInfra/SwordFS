@@ -4,17 +4,23 @@
 #include "storage/s3/S3DataEngine.hpp"
 
 #include <aws/core/Aws.h>
+#include <aws/s3/S3Client.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
 #include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/PutObjectRequest.h>
 
+#include <folly/executors/CPUThreadPoolExecutor.h>
+
 #include "config/ConfigCenter.hpp"
 #include "storage/StorageRegistry.hpp"
 #include "utils/FiberThreadPool.hpp"
+#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
 
 namespace swordfs::storage {
+
+S3DataEngine::~S3DataEngine() = default;
 
 // ────────────────────────────────────────────────────────────────
 // AWS SDK lifetime — initialised on first S3DataEngine creation

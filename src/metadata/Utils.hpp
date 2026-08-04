@@ -3,7 +3,8 @@
 
 #pragma once
 
-#include "metadata/Types.hpp"
+#include <cstdint>
+#include <sys/stat.h>
 
 namespace swordfs::metadata {
 

@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "storage/IDataEngine.hpp"
+#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
 
 namespace swordfs::chunk {
