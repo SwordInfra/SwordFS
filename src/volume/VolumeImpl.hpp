@@ -59,6 +59,11 @@ class VolumeImpl {
   /// Load config from persistent store and initialise both engines (mount).
   Status LoadFrom(const swordfs::config::ConfigCenter& cfg);
 
+  /// Explicitly tear down engines before static destruction.  Must be
+  /// called before the process exits to avoid blocking in
+  /// Aws::ShutdownAPI() when AWS SDK resources are still alive.
+  void Shutdown();
+
   const VolumeConfig& config() const { return config_; }
 
   /// Chunk size in bytes — immutable after format.

@@ -3,12 +3,15 @@
 
 #include "volume/VolumeImpl.hpp"
 
+#include <folly/logging/xlog.h>
+
 #include "chunk/ChunkManager.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineFactory.hpp"
 #include "storage/DataEngineFactory.hpp"
 #include "storage/IDataEngine.hpp"
+#include "storage/s3/S3DataEngine.hpp"
 
 namespace swordfs::volume {
 
@@ -78,6 +81,11 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter& cfg) {
       meta_engine_.get(), data_engine_.get(), config_.chunk_size);
 
   return Status::OK();
+}
+
+void VolumeImpl::Shutdown() {
+  data_engine_.reset();
+  meta_engine_.reset();
 }
 
 }  // namespace swordfs::volume
