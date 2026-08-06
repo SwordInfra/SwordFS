@@ -35,7 +35,8 @@ class MultiChunkReadWriter {
                   std::unique_ptr<folly::IOBuf> window) {
     auto p = std::make_unique<Pending>();
     p->window = std::move(window);
-    folly::fibers::addTask([c, off, len, raw = p.get()] {
+    auto& fm = folly::fibers::FiberManager::getFiberManager();
+    fm.addTask([c, off, len, raw = p.get()] {
       raw->status = c->Read(off, len, raw->window.get());
       raw->bytes = raw->window->length();
       raw->baton.post();
@@ -99,7 +100,12 @@ FileReadWriter::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off)
         n, (std::size_t)n,
         +[](void*, void*) {}, nullptr, true);
     auto status = c.Write(cur_off, *slice);
-    if (!status.ok()) return status;
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "FileReadWriter::Write FAILED: ino=" << ino_
+                        << " fh=" << fh_ << " off=" << cur_off
+                        << " chunk=" << c.index() << " — " << status.message();
+      return status;
+    }
     remaining -= n;
     cur_off += static_cast<off_t>(n);
   }

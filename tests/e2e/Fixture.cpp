@@ -5,6 +5,7 @@
 
 #include <folly/FileUtil.h>
 #include <folly/portability/Filesystem.h>
+#include <folly/hash/Hash.h>
 
 #include <chrono>
 #include <cstdio>
@@ -37,12 +38,13 @@ Fixture::Fixture() {
   if (bucket_url_.back() != '/') {
     bucket_url_ += '/';
   }
+  // Save the base URL so SetUp() can be called multiple times
+  // without accumulating test-name suffixes.
+  base_bucket_url_ = bucket_url_;
 }
 
 Fixture::~Fixture() {
-  if (mounted_) {
-    TearDown();
-  }
+  TearDown();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -61,8 +63,8 @@ bool Fixture::SetUp() {
   mountpoint_ = work_dir_ + "/mnt";
   vol_config_dir_ = work_dir_ + "/config";
 
-  // Append test-specific prefix to the bucket URL.
-  bucket_url_ += test_name;
+  // Restore base URL and append test-specific prefix.
+  bucket_url_ = base_bucket_url_ + test_name;
 
   // Create directory structure (parent directories are created automatically).
   std::error_code ec;
@@ -88,14 +90,16 @@ bool Fixture::SetUp() {
 }
 
 void Fixture::TearDown() {
-  if (mounted_) {
-    StopMount();
-    mounted_ = false;
-  }
+  // Idempotent: skip if already torn down.
+  if (mountpoint_.empty()) return;
 
-  // Best-effort cleanup of temp directory.
-  std::string cmd = "rm -rf " + work_dir_ + " 2>/dev/null";
-  std::system(cmd.c_str());
+  StopMount();
+  mounted_ = false;
+
+  if (!std::getenv("SWORDFS_E2E_KEEP_WORKDIR")) {
+    std::string cmd = "rm -rf " + work_dir_;
+    std::system(cmd.c_str());
+  }
 
   work_dir_.clear();
   mountpoint_.clear();
@@ -135,14 +139,19 @@ bool Fixture::FormatVolume() {
 
 bool Fixture::StartMount() {
   std::ostringstream cmd;
+  const char* log_override = std::getenv("SWORDFS_E2E_LOG");
+  std::string log_path = log_override ? log_override
+                                      : work_dir_ + "/swordfs.log";
   cmd << FindSwordfsBin()
-      << " --log-file " << work_dir_ << "/swordfs.log"
+      << " --log-file " << log_path
       << " mount "
-      << mountpoint_
+      << " --volume " << volume_name_
+      << " --meta memory://local"
       << " --volume-config-path " << vol_config_dir_
       << " --fuse-threads 2"
       << " --storage-async-threads 2"
-      << " 2>&1 &";
+      << " " << mountpoint_
+      << " 2>&1";
 
   int ret = std::system(cmd.str().c_str());
   if (ret != 0) {
@@ -158,8 +167,11 @@ bool Fixture::WaitForMount() {
   constexpr useconds_t kDelayUs = 50000;  // 50 ms
 
   for (int i = 0; i < kMaxRetries; ++i) {
+    // Verify the mountpoint is actually a FUSE filesystem, not just
+    // a regular directory on the host.
     struct statvfs sv;
-    if (::statvfs(mountpoint_.c_str(), &sv) == 0) {
+    if (::statvfs(mountpoint_.c_str(), &sv) == 0 &&
+        sv.f_type == 0x65735546 /* FUSE_SUPER_MAGIC */) {
       return true;
     }
 
@@ -181,9 +193,12 @@ bool Fixture::WaitForMount() {
 }
 
 bool Fixture::StopMount() {
-  // fusermount3 sends FUSE_DESTROY; the daemon exits on its own.
-  std::string cmd = "fusermount3 -u " + mountpoint_ + " 2>/dev/null";
-  std::system(cmd.c_str());
+  std::string cmd = "fusermount3 -u " + mountpoint_;
+  if (std::system(cmd.c_str()) != 0) {
+    // Force-unmount as fallback.
+    cmd = "fusermount3 -uz " + mountpoint_;
+    std::system(cmd.c_str());
+  }
   return true;
 }
 
@@ -192,7 +207,7 @@ bool Fixture::StopMount() {
 // ────────────────────────────────────────────────────────────────
 
 std::string Fixture::MountPath(const std::string& relpath) const {
-  if (relpath.empty()) return mountpoint_;
+  if (relpath.empty() || relpath == ".") return mountpoint_;
   return mountpoint_ + "/" + relpath;
 }
 
@@ -202,70 +217,68 @@ bool Fixture::IsMounted() const {
   return ::statvfs(mountpoint_.c_str(), &sv) == 0;
 }
 
-bool Fixture::Mkdir(const std::string& relpath, mode_t mode) {
-  std::error_code ec;
-  if (!folly::fs::create_directory(MountPath(relpath), ec)) {
-    return false;
-  }
-  folly::fs::permissions(MountPath(relpath),
-                          static_cast<folly::fs::perms>(mode), ec);
-  return !ec;
-}
-
-bool Fixture::Rmdir(const std::string& relpath) {
-  std::error_code ec;
-  folly::fs::remove(MountPath(relpath), ec);
-  return !ec;
-}
-
-bool Fixture::Unlink(const std::string& relpath) {
-  std::error_code ec;
-  return folly::fs::remove(MountPath(relpath), ec) && !ec;
-}
-
-bool Fixture::Rename(const std::string& oldpath,
-                         const std::string& newpath) {
-  std::error_code ec;
-  folly::fs::rename(MountPath(oldpath), MountPath(newpath), ec);
-  return !ec;
-}
-
-struct stat Fixture::Stat(const std::string& relpath) {
-  struct stat st {};
-  std::string path = MountPath(relpath);
-  if (::stat(path.c_str(), &st) != 0) {
-    std::memset(&st, 0, sizeof(st));
-  }
-  return st;
-}
-
-struct statvfs Fixture::Statfs(const std::string& relpath) {
+struct statvfs Fixture::Statfs() {
   struct statvfs sv {};
-  std::string path = MountPath(relpath.empty() ? "" : relpath);
-  ::statvfs(path.c_str(), &sv);
+  if (::statvfs(mountpoint_.c_str(), &sv) != 0 ||
+      sv.f_type != 0x65735546 /* FUSE_SUPER_MAGIC */) {
+    std::memset(&sv, 0, sizeof(sv));
+  }
   return sv;
 }
 
-int Fixture::Access(const std::string& relpath, int mode) {
-  return ::access(MountPath(relpath).c_str(), mode);
-}
-
-std::string Fixture::ReadFile(const std::string& relpath) {
-  std::string data;
-  if (!folly::readFile(MountPath(relpath).c_str(), data)) {
-    return {};
+int Fixture::ReadFile(const std::string& relpath, std::string* out) {
+  if (!folly::readFile(MountPath(relpath).c_str(), *out)) {
+    return errno;
   }
-  return data;
+  return 0;
 }
 
-bool Fixture::WriteFile(const std::string& relpath,
-                            const std::string& data) {
+namespace {
+std::string Hash64Hex(std::string_view data) {
+  auto h = folly::hash::SpookyHashV2::Hash64(data.data(), data.size(), 0);
+  char buf[18];  // "0x" + 16 hex digits + NUL
+  std::snprintf(buf, sizeof(buf), "0x%016lx", h);
+  return buf;
+}
+}  // namespace
+
+::testing::AssertionResult Fixture::CheckFile(
+    const std::string& relpath, const std::string& expected) {
+  std::string actual;
+  int err = ReadFile(relpath, &actual);
+  if (err != 0) {
+    return ::testing::AssertionFailure()
+        << "Failed to read \"" << relpath << "\": "
+        << std::strerror(err) << " (errno=" << err << ")";
+  }
+  if (actual == expected) {
+    return ::testing::AssertionSuccess();
+  }
+  return ::testing::AssertionFailure()
+      << "File content mismatch for \"" << relpath << "\""
+      << "\n  Expected: size=" << expected.size()
+      << " hash=" << Hash64Hex(expected)
+      << "\n  Actual:   size=" << actual.size()
+      << " hash=" << Hash64Hex(actual);
+}
+
+bool Fixture::FileEquals(const std::string& relpath,
+                         const std::string& expected) {
+  std::string data;
+  return ReadFile(relpath, &data) == 0 && data == expected;
+}
+
+int Fixture::WriteFile(const std::string& relpath,
+                           const std::string& data) {
   // Pin umask to 022 so newly-created files get 0644 regardless of
   // the caller's environment.
   mode_t old_umask = ::umask(022);
-  folly::writeFile(data, MountPath(relpath).c_str());
+  if (!folly::writeFile(data, MountPath(relpath).c_str())) {
+    ::umask(old_umask);
+    return errno;
+  }
   ::umask(old_umask);
-  return true;
+  return 0;
 }
 
 std::vector<std::string> Fixture::ReadDir(const std::string& relpath) {
@@ -278,33 +291,6 @@ std::vector<std::string> Fixture::ReadDir(const std::string& relpath) {
     }
   }
   return entries;
-}
-
-bool Fixture::Truncate(const std::string& relpath, off_t size) {
-  std::error_code ec;
-  folly::fs::resize_file(MountPath(relpath), static_cast<uintmax_t>(size), ec);
-  return !ec;
-}
-
-bool Fixture::Chmod(const std::string& relpath, mode_t mode) {
-  std::error_code ec;
-  folly::fs::permissions(MountPath(relpath),
-                          static_cast<folly::fs::perms>(mode), ec);
-  return !ec;
-}
-
-bool Fixture::Link(const std::string& target,
-                       const std::string& linkpath) {
-  std::error_code ec;
-  folly::fs::create_hard_link(MountPath(target), MountPath(linkpath), ec);
-  return !ec;
-}
-
-bool Fixture::Symlink(const std::string& target,
-                          const std::string& linkpath) {
-  std::error_code ec;
-  folly::fs::create_symlink(target, MountPath(linkpath), ec);
-  return !ec;
 }
 
 // ────────────────────────────────────────────────────────────────

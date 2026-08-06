@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <folly/portability/Filesystem.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -196,6 +197,12 @@ static int Mount(const std::string& mountpoint,
 }
 
 int RunMount() {
+  // Enable core dumps for debugging daemon crashes.
+  {
+    struct rlimit rl = {RLIM_INFINITY, RLIM_INFINITY};
+    setrlimit(RLIMIT_CORE, &rl);
+  }
+
   auto& cfg = ConfigCenter::Instance();
 
   const std::string& mountpoint = cfg.mountpoint();

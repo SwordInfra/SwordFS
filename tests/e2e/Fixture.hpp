@@ -16,6 +16,8 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 
+#include <gtest/gtest.h>
+
 #include <string>
 #include <vector>
 
@@ -38,50 +40,32 @@ class Fixture {
 
   // ── Filesystem helpers ────────────────────────────────────────
 
-  /// Create a directory relative to the mountpoint.
-  bool Mkdir(const std::string& relpath, mode_t mode = 0755);
+  /// statvfs() on the mountpoint.
+  struct statvfs Statfs();
 
-  /// Remove an empty directory.
-  bool Rmdir(const std::string& relpath);
+  /// Read all contents of a file into |out|.
+  /// Returns 0 on success, or a positive errno value on failure.
+  int ReadFile(const std::string& relpath, std::string* out);
 
-  /// Remove a file.
-  bool Unlink(const std::string& relpath);
+  /// Compare file content with expected via hash.  On mismatch, prints
+  /// only sizes and hashes — never dumps raw binary content.
+  ::testing::AssertionResult CheckFile(const std::string& relpath,
+                                        const std::string& expected);
 
-  /// Rename a file or directory.
-  bool Rename(const std::string& oldpath, const std::string& newpath);
-
-  /// stat() a path relative to the mountpoint.
-  struct stat Stat(const std::string& relpath);
-
-  /// statvfs() on the mountpoint (or a subdirectory).
-  struct statvfs Statfs(const std::string& relpath = "");
-
-  /// Check access permissions.
-  int Access(const std::string& relpath, int mode);
-
-  /// Read all contents of a file into a string.
-  std::string ReadFile(const std::string& relpath);
+  /// Return true if file content equals expected (no GTest output).
+  /// Suitable for use inside loops / threads where assertion macros
+  /// cannot be used.
+  bool FileEquals(const std::string& relpath,
+                  const std::string& expected);
 
   /// Write data to a file (creates if not exists, truncates if exists).
-  bool WriteFile(const std::string& relpath, const std::string& data);
+  int WriteFile(const std::string& relpath, const std::string& data);
 
   /// List directory entries (excluding . and ..).
-  std::vector<std::string> ReadDir(const std::string& relpath = "");
-
-  /// Truncate a file to the given size.
-  bool Truncate(const std::string& relpath, off_t size);
-
-  /// Chmod a path.
-  bool Chmod(const std::string& relpath, mode_t mode);
-
-  /// Create a hard link (currently not supported by SwordFS).
-  bool Link(const std::string& target, const std::string& linkpath);
-
-  /// Create a symbolic link (currently not supported by SwordFS).
-  bool Symlink(const std::string& target, const std::string& linkpath);
+  std::vector<std::string> ReadDir(const std::string& relpath);
 
   /// Return the absolute path for a relative path under the mountpoint.
-  std::string MountPath(const std::string& relpath = "") const;
+  std::string MountPath(const std::string& relpath) const;
 
   /// Return true if the mount is currently active.
   bool IsMounted() const;
@@ -104,6 +88,7 @@ class Fixture {
   std::string vol_config_dir_;
   std::string volume_name_;
   std::string bucket_url_;
+  std::string base_bucket_url_;  // original URL (without test-name suffix)
   bool mounted_ = false;
 };
 

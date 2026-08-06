@@ -24,6 +24,9 @@ using SwordFsContext = swordfs::utils::SwordFsContext;
 
 namespace swordfs::metadata {
 
+/// Maximum length of a directory entry name (POSIX NAME_MAX).
+constexpr size_t kMaxNameLength = 255;
+
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
 

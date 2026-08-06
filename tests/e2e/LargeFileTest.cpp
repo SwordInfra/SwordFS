@@ -37,15 +37,16 @@ TEST_F(LargeFileTest, WriteCrossingChunkBoundary) {
   // chunk boundary.
   constexpr size_t kSize = 80ULL * 1024 * 1024;  // 80 MiB
   std::string data(kSize, 'A');
-  ASSERT_TRUE(fixture_.WriteFile("big.bin", data));
-  EXPECT_EQ(fixture_.ReadFile("big.bin"), data);
+  ASSERT_EQ(fixture_.WriteFile("big.bin", data), 0);
+  EXPECT_TRUE(fixture_.CheckFile("big.bin", data));
 }
 
 TEST_F(LargeFileTest, ReadPastEndOfFile) {
-  ASSERT_TRUE(fixture_.WriteFile("small.bin", "hello"));
+  ASSERT_EQ(fixture_.WriteFile("small.bin", "hello"), 0);
   // Reading past EOF should return only what's available.
-  EXPECT_EQ(fixture_.ReadFile("small.bin"), "hello");
-  auto st = fixture_.Stat("small.bin");
+  EXPECT_TRUE(fixture_.CheckFile("small.bin", "hello"));
+  struct stat st;
+  ASSERT_EQ(::stat(fixture_.MountPath("small.bin").c_str(), &st), 0);
   EXPECT_EQ(st.st_size, 5);
 }
 
@@ -70,11 +71,13 @@ TEST_F(LargeFileTest, SeekWriteHole) {
 
   ::close(fd);
 
-  auto st = fixture_.Stat("sparse.bin");
+  struct stat st;
+  ASSERT_EQ(::stat(fixture_.MountPath("sparse.bin").c_str(), &st), 0);
   EXPECT_EQ(st.st_size, 1024 * 1024 + 3);
 
   // Read back the first bytes.
-  std::string content = fixture_.ReadFile("sparse.bin");
+  std::string content;
+  ASSERT_EQ(fixture_.ReadFile("sparse.bin", &content), 0);
   ASSERT_GE(content.size(), 5u);
   EXPECT_EQ(content.substr(0, 5), "BEGIN");
 }
@@ -100,7 +103,7 @@ TEST_F(LargeFileTest, ManySmallWrites) {
   }
   ::close(fd);
 
-  EXPECT_EQ(fixture_.ReadFile("many.bin"), expected);
+  EXPECT_TRUE(fixture_.CheckFile("many.bin", expected));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -109,7 +112,7 @@ TEST_F(LargeFileTest, ManySmallWrites) {
 
 TEST_F(LargeFileTest, ReadAtOffset) {
   std::string data(10000, 'X');
-  ASSERT_TRUE(fixture_.WriteFile("offset.bin", data));
+  ASSERT_EQ(fixture_.WriteFile("offset.bin", data), 0);
 
   std::string path = fixture_.MountPath("offset.bin");
   int fd = ::open(path.c_str(), O_RDONLY);
@@ -139,7 +142,7 @@ TEST_F(LargeFileTest, FsyncAfterWrite) {
   EXPECT_EQ(::fsync(fd), 0);
   ::close(fd);
 
-  EXPECT_EQ(fixture_.ReadFile("fsync.bin"), "fsync test data");
+  EXPECT_TRUE(fixture_.CheckFile("fsync.bin", "fsync test data"));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -153,5 +156,5 @@ TEST_F(LargeFileTest, DataVisibleAfterClose) {
   ASSERT_EQ(::write(fd, "before close", 12), 12);
   ::close(fd);
 
-  EXPECT_EQ(fixture_.ReadFile("close.bin"), "before close");
+  EXPECT_TRUE(fixture_.CheckFile("close.bin", "before close"));
 }

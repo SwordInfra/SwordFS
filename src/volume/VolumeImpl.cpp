@@ -3,6 +3,7 @@
 
 #include "volume/VolumeImpl.hpp"
 
+#include "chunk/ChunkManager.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineFactory.hpp"
@@ -71,6 +72,10 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter& cfg) {
     status = storage::CreateDataEngine(config_, &data_engine_);
     if (!status.ok()) return status;
   }
+
+  // Initialize chunk layer (once per mount).
+  swordfs::chunk::ChunkManager::Instance().Initialize(
+      meta_engine_.get(), data_engine_.get(), config_.chunk_size);
 
   return Status::OK();
 }

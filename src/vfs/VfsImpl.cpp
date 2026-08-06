@@ -160,13 +160,16 @@ utils::Status VfsImpl::Read(fuse_ino_t ino, size_t size, off_t off,
 
 utils::Status VfsImpl::Write(fuse_ino_t ino, const folly::IOBuf &buf,
                              off_t off, uint64_t fh) {
-  SWORDFS_LOG_DEBUG << "Write: ino=" << ino << " fh=" << fh
-                    << " size=" << buf.length() << " off=" << off;
   auto handle = FileHandleManager::Instance().Find(fh);
   if (!handle) {
     return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
   }
-  return handle->file_readwriter->Write(buf, off);
+  auto status = handle->file_readwriter->Write(buf, off);
+  if (!status.ok()) {
+    SWORDFS_LOG_ERROR << "VfsImpl::Write FAILED: ino=" << ino
+                      << " fh=" << fh << " — " << status.message();
+  }
+  return status;
 }
 
 utils::Status VfsImpl::Flush(fuse_ino_t ino, uint64_t fh) {

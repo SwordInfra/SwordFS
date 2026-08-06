@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <shared_mutex>
 #include <string>
 
 #include "chunk/Chunk.hpp"
@@ -60,6 +61,7 @@ class ChunkManager {
   metadata::IMetaEngine *meta_;  // non-owning
   storage::IDataEngine *data_;   // non-owning
   size_t chunk_size_;
+  mutable std::shared_mutex mutex_;
   folly::F14FastMap<uint64_t, std::deque<Chunk>> chunks_;
 };
 

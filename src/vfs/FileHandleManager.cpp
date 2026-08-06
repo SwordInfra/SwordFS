@@ -33,9 +33,6 @@ utils::Status FileHandleManager::Open(metadata::InodeID ino,
                                       uint64_t *fh) {
   uint64_t handle = AllocFh();
   auto &vol = volume::VolumeImpl::Instance();
-  chunk::ChunkManager::Instance().Initialize(vol.meta_engine(),
-                                       vol.data_engine(),
-                                       vol.chunk_size());
   auto rw = std::make_shared<FileReadWriter>(handle, ino, vol.chunk_size());
   std::unique_lock lock(mutex_);
   auto [it, inserted] = files_->try_emplace(handle, FileHandle{std::move(rw)});

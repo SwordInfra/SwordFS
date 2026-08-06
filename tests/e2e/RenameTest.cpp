@@ -29,13 +29,14 @@ class RenameTest : public ::testing::Test {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(RenameTest, RenameFileSameDir) {
-  ASSERT_TRUE(fixture_.WriteFile("old.txt", "hello"));
-  ASSERT_TRUE(fixture_.Rename("old.txt", "new.txt"));
+  ASSERT_EQ(fixture_.WriteFile("old.txt", "hello"), 0);
+  ASSERT_EQ(::rename(fixture_.MountPath("old.txt").c_str(),
+                         fixture_.MountPath("new.txt").c_str()), 0);
 
-  auto st = fixture_.Stat("old.txt");
-  EXPECT_EQ(st.st_ino, static_cast<ino_t>(0));  // gone
+  struct stat st;
+  EXPECT_NE(::stat(fixture_.MountPath("old.txt").c_str(), &st), 0);
 
-  EXPECT_EQ(fixture_.ReadFile("new.txt"), "hello");
+  EXPECT_TRUE(fixture_.CheckFile("new.txt", "hello"));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -43,15 +44,16 @@ TEST_F(RenameTest, RenameFileSameDir) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(RenameTest, RenameFileCrossDir) {
-  ASSERT_TRUE(fixture_.Mkdir("src"));
-  ASSERT_TRUE(fixture_.Mkdir("dst"));
-  ASSERT_TRUE(fixture_.WriteFile("src/f.txt", "data"));
+  ASSERT_EQ(::mkdir(fixture_.MountPath("src").c_str(), 0755), 0);
+  ASSERT_EQ(::mkdir(fixture_.MountPath("dst").c_str(), 0755), 0);
+  ASSERT_EQ(fixture_.WriteFile("src/f.txt", "data"), 0);
 
-  ASSERT_TRUE(fixture_.Rename("src/f.txt", "dst/f.txt"));
+  ASSERT_EQ(::rename(fixture_.MountPath("src/f.txt").c_str(),
+                         fixture_.MountPath("dst/f.txt").c_str()), 0);
 
-  auto st = fixture_.Stat("src/f.txt");
-  EXPECT_EQ(st.st_ino, static_cast<ino_t>(0));
-  EXPECT_EQ(fixture_.ReadFile("dst/f.txt"), "data");
+  struct stat st;
+  EXPECT_NE(::stat(fixture_.MountPath("src/f.txt").c_str(), &st), 0);
+  EXPECT_TRUE(fixture_.CheckFile("dst/f.txt", "data"));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -59,14 +61,15 @@ TEST_F(RenameTest, RenameFileCrossDir) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(RenameTest, RenameDirSameParent) {
-  ASSERT_TRUE(fixture_.Mkdir("olddir"));
-  ASSERT_TRUE(fixture_.WriteFile("olddir/f.txt", "x"));
+  ASSERT_EQ(::mkdir(fixture_.MountPath("olddir").c_str(), 0755), 0);
+  ASSERT_EQ(fixture_.WriteFile("olddir/f.txt", "x"), 0);
 
-  ASSERT_TRUE(fixture_.Rename("olddir", "newdir"));
+  ASSERT_EQ(::rename(fixture_.MountPath("olddir").c_str(),
+                         fixture_.MountPath("newdir").c_str()), 0);
 
-  auto st = fixture_.Stat("olddir");
-  EXPECT_EQ(st.st_ino, static_cast<ino_t>(0));
-  EXPECT_EQ(fixture_.ReadFile("newdir/f.txt"), "x");
+  struct stat st;
+  EXPECT_NE(::stat(fixture_.MountPath("olddir").c_str(), &st), 0);
+  EXPECT_TRUE(fixture_.CheckFile("newdir/f.txt", "x"));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -74,15 +77,16 @@ TEST_F(RenameTest, RenameDirSameParent) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(RenameTest, RenameDirCrossParent) {
-  ASSERT_TRUE(fixture_.Mkdir("a"));
-  ASSERT_TRUE(fixture_.Mkdir("a/b"));
-  ASSERT_TRUE(fixture_.WriteFile("a/b/f.txt", "data"));
+  ASSERT_EQ(::mkdir(fixture_.MountPath("a").c_str(), 0755), 0);
+  ASSERT_EQ(::mkdir(fixture_.MountPath("a/b").c_str(), 0755), 0);
+  ASSERT_EQ(fixture_.WriteFile("a/b/f.txt", "data"), 0);
 
-  ASSERT_TRUE(fixture_.Rename("a/b", "b"));
+  ASSERT_EQ(::rename(fixture_.MountPath("a/b").c_str(),
+                         fixture_.MountPath("b").c_str()), 0);
 
-  auto st = fixture_.Stat("a/b");
-  EXPECT_EQ(st.st_ino, static_cast<ino_t>(0));
-  EXPECT_EQ(fixture_.ReadFile("b/f.txt"), "data");
+  struct stat st;
+  EXPECT_NE(::stat(fixture_.MountPath("a/b").c_str(), &st), 0);
+  EXPECT_TRUE(fixture_.CheckFile("b/f.txt", "data"));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -90,26 +94,28 @@ TEST_F(RenameTest, RenameDirCrossParent) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(RenameTest, RenameOverExistingFile) {
-  ASSERT_TRUE(fixture_.WriteFile("old.txt", "old"));
-  ASSERT_TRUE(fixture_.WriteFile("new.txt", "new"));
+  ASSERT_EQ(fixture_.WriteFile("old.txt", "old"), 0);
+  ASSERT_EQ(fixture_.WriteFile("new.txt", "new"), 0);
 
-  ASSERT_TRUE(fixture_.Rename("old.txt", "new.txt"));
+  ASSERT_EQ(::rename(fixture_.MountPath("old.txt").c_str(),
+                         fixture_.MountPath("new.txt").c_str()), 0);
 
-  EXPECT_EQ(fixture_.ReadFile("new.txt"), "old");
-  auto st = fixture_.Stat("old.txt");
-  EXPECT_EQ(st.st_ino, static_cast<ino_t>(0));
+  EXPECT_TRUE(fixture_.CheckFile("new.txt", "old"));
+  struct stat st;
+  EXPECT_NE(::stat(fixture_.MountPath("old.txt").c_str(), &st), 0);
 }
 
 TEST_F(RenameTest, RenameDirOverEmptyDir) {
-  ASSERT_TRUE(fixture_.Mkdir("a"));
-  ASSERT_TRUE(fixture_.WriteFile("a/f.txt", "a"));
-  ASSERT_TRUE(fixture_.Mkdir("b"));
+  ASSERT_EQ(::mkdir(fixture_.MountPath("a").c_str(), 0755), 0);
+  ASSERT_EQ(fixture_.WriteFile("a/f.txt", "a"), 0);
+  ASSERT_EQ(::mkdir(fixture_.MountPath("b").c_str(), 0755), 0);
 
-  ASSERT_TRUE(fixture_.Rename("a", "b"));
+  ASSERT_EQ(::rename(fixture_.MountPath("a").c_str(),
+                         fixture_.MountPath("b").c_str()), 0);
 
-  auto st = fixture_.Stat("a");
-  EXPECT_EQ(st.st_ino, static_cast<ino_t>(0));
-  EXPECT_EQ(fixture_.ReadFile("b/f.txt"), "a");
+  struct stat st;
+  EXPECT_NE(::stat(fixture_.MountPath("a").c_str(), &st), 0);
+  EXPECT_TRUE(fixture_.CheckFile("b/f.txt", "a"));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -117,15 +123,19 @@ TEST_F(RenameTest, RenameDirOverEmptyDir) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(RenameTest, RenameNonexistentSource) {
-  EXPECT_FALSE(fixture_.Rename("noent", "dst"));
+  ASSERT_EQ(::rename(fixture_.MountPath("noent").c_str(),
+                         fixture_.MountPath("dst").c_str()), -1);
+  EXPECT_EQ(errno, ENOENT);
 }
 
 TEST_F(RenameTest, RenameDirOverNonEmptyDir) {
-  ASSERT_TRUE(fixture_.Mkdir("a"));
-  ASSERT_TRUE(fixture_.Mkdir("b"));
-  ASSERT_TRUE(fixture_.WriteFile("b/f.txt", "x"));
+  ASSERT_EQ(::mkdir(fixture_.MountPath("a").c_str(), 0755), 0);
+  ASSERT_EQ(::mkdir(fixture_.MountPath("b").c_str(), 0755), 0);
+  ASSERT_EQ(fixture_.WriteFile("b/f.txt", "x"), 0);
 
-  EXPECT_FALSE(fixture_.Rename("a", "b"));  // ENOTEMPTY
+  ASSERT_EQ(::rename(fixture_.MountPath("a").c_str(),
+                         fixture_.MountPath("b").c_str()), -1);
+  EXPECT_EQ(errno, ENOTEMPTY);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -133,11 +143,12 @@ TEST_F(RenameTest, RenameDirOverNonEmptyDir) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(RenameTest, RenameDeeplyNested) {
-  ASSERT_TRUE(fixture_.Mkdir("a"));
-  ASSERT_TRUE(fixture_.Mkdir("a/b"));
-  ASSERT_TRUE(fixture_.Mkdir("a/b/c"));
-  ASSERT_TRUE(fixture_.WriteFile("a/b/c/deep.txt", "deep data"));
+  ASSERT_EQ(::mkdir(fixture_.MountPath("a").c_str(), 0755), 0);
+  ASSERT_EQ(::mkdir(fixture_.MountPath("a/b").c_str(), 0755), 0);
+  ASSERT_EQ(::mkdir(fixture_.MountPath("a/b/c").c_str(), 0755), 0);
+  ASSERT_EQ(fixture_.WriteFile("a/b/c/deep.txt", "deep data"), 0);
 
-  ASSERT_TRUE(fixture_.Rename("a/b/c/deep.txt", "a/flat.txt"));
-  EXPECT_EQ(fixture_.ReadFile("a/flat.txt"), "deep data");
+  ASSERT_EQ(::rename(fixture_.MountPath("a/b/c/deep.txt").c_str(),
+                         fixture_.MountPath("a/flat.txt").c_str()), 0);
+  EXPECT_TRUE(fixture_.CheckFile("a/flat.txt", "deep data"));
 }

@@ -38,12 +38,12 @@ TEST_F(StaleMountTest, MountIsAlive) {
 }
 
 TEST_F(StaleMountTest, WriteAfterMount) {
-  ASSERT_TRUE(fixture_.WriteFile("after_mount.txt", "ok"));
-  EXPECT_EQ(fixture_.ReadFile("after_mount.txt"), "ok");
+  ASSERT_EQ(fixture_.WriteFile("after_mount.txt", "ok"), 0);
+  EXPECT_TRUE(fixture_.CheckFile("after_mount.txt", "ok"));
 }
 
 TEST_F(StaleMountTest, DataPersistsAfterRemount) {
-  ASSERT_TRUE(fixture_.WriteFile("persist.txt", "persistent data"));
+  ASSERT_EQ(fixture_.WriteFile("persist.txt", "persistent data"), 0);
 
   // Unmount and remount.
   fixture_.TearDown();

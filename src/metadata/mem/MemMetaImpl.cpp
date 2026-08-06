@@ -106,6 +106,10 @@ Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry>* entries) {
 Status MemMetaImpl::Create(InodeID parent_ino,
                            std::string_view name, mode_t mode,
                            InodeID* child_ino, struct stat* attr) {
+  if (name.size() > kMaxNameLength) {
+    return Status::NameTooLong("file name exceeds maximum length");
+  }
+
   SwordFsInode* parent = nullptr;
   Status status = store_.LookupInode(parent_ino, &parent);
   if (!status.ok()) {
@@ -141,6 +145,10 @@ Status MemMetaImpl::Create(InodeID parent_ino,
 Status MemMetaImpl::MkDir(InodeID parent_ino,
                           std::string_view name, mode_t mode,
                           InodeID* child_ino, struct stat* attr) {
+  if (name.size() > kMaxNameLength) {
+    return Status::NameTooLong("directory name exceeds maximum length");
+  }
+
   SwordFsInode* parent = nullptr;
   if (!store_.LookupInode(parent_ino, &parent).ok() || !parent ||
       !parent->IsDir()) {
@@ -280,6 +288,10 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
                            std::string_view new_name, unsigned int flags) {
   std::string old_key(old_name);
   std::string new_key(new_name);
+
+  if (new_name.size() > kMaxNameLength) {
+    return Status::NameTooLong("target name exceeds maximum length");
+  }
 
   // "." and ".." cannot be renamed
   if (old_key == "." || old_key == ".." || new_key == "." ||

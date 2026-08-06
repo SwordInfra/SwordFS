@@ -118,7 +118,7 @@ Status MemMetaStore::RemoveEntry(InodeID parent_ino, std::string_view name) {
   if (!child) return Status::OK();  // idempotent
 
   if (child->IsDir() && !IsDirEmptyLocked(child->ino))
-    return Status::Busy("directory not empty");
+    return Status::NotEmpty("directory not empty");
 
   UnlinkEntryLocked(parent_ino, name);
   DeleteInodeLocked(child->ino);
