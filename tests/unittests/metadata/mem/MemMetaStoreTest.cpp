@@ -215,7 +215,7 @@ TEST_F(MemMetaStoreTest, RemoveEntryNonEmptyDirectory) {
   store_->AddEntry(sub->ino, "f", kRegFile, 0, nullptr);
 
   Status st = store_->RemoveEntry(kRoot, "sub");
-  EXPECT_TRUE(st.IsBusy());
+  EXPECT_TRUE(st.IsNotEmpty());
   EXPECT_EQ(store_->InodeCount(), 3);  // root + sub + f
 }
 

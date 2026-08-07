@@ -19,6 +19,7 @@ class Status {
     kNotFound,         // ENOENT
     kAlreadyExists,    // EEXIST
     kNotDirectory,     // ENOTDIR
+    kNotEmpty,         // ENOTEMPTY
     kInvalidArgument,  // EINVAL
     kNotSupported,     // ENOSYS
     kIOError,          // EIO
@@ -26,6 +27,7 @@ class Status {
     kNoSpace,          // ENOSPC
     kPermission,       // EPERM / EACCES
     kNoMemory,         // ENOMEM
+    kNameTooLong,      // ENAMETOOLONG
     kInternal,         // internal / unexpected error
   };
 
@@ -38,8 +40,10 @@ class Status {
   bool IsNotFound() const { return code_ == kNotFound; }
   bool IsAlreadyExists() const { return code_ == kAlreadyExists; }
   bool IsBusy() const { return code_ == kBusy; }
+  bool IsNotEmpty() const { return code_ == kNotEmpty; }
   bool IsNotDirectory() const { return code_ == kNotDirectory; }
   bool IsNotSupported() const { return code_ == kNotSupported; }
+  bool IsNameTooLong() const { return code_ == kNameTooLong; }
   bool IsPermission() const { return code_ == kPermission; }
 
   Code code() const { return code_; }
@@ -71,6 +75,9 @@ class Status {
     return Status(kIOError, std::move(msg));
   }
   static Status Busy(std::string msg) { return Status(kBusy, std::move(msg)); }
+  static Status NotEmpty(std::string msg) {
+    return Status(kNotEmpty, std::move(msg));
+  }
   static Status NoSpace(std::string msg) {
     return Status(kNoSpace, std::move(msg));
   }
@@ -79,6 +86,9 @@ class Status {
   }
   static Status NoMemory(std::string msg) {
     return Status(kNoMemory, std::move(msg));
+  }
+  static Status NameTooLong(std::string msg) {
+    return Status(kNameTooLong, std::move(msg));
   }
   static Status Internal(std::string msg) {
     return Status(kInternal, std::move(msg));

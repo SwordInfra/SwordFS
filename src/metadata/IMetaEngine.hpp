@@ -24,6 +24,14 @@ using SwordFsContext = swordfs::utils::SwordFsContext;
 
 namespace swordfs::metadata {
 
+/// Filesystem limits provided by each metadata engine.
+struct Limits {
+  /// Maximum length of a single path component (POSIX NAME_MAX).
+  size_t max_name_length;
+  /// Maximum free inodes, reported as f_ffree in statvfs.
+  size_t max_free_inodes;
+};
+
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
 
@@ -36,26 +44,29 @@ class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
 
+  /// Return limits for the given metadata engine type.
+  static Limits GetLimits(std::string_view meta_url);
+
   /// Look up a child entry by name.
   virtual Status Lookup(InodeID parent_ino,
-                        std::string_view name, InodeID* child_ino,
-                        struct stat* attr) = 0;
+                        std::string_view name, InodeID *child_ino,
+                        struct stat *attr) = 0;
 
   /// Get attributes for an inode.
-  virtual Status GetAttr(InodeID ino, struct stat* attr) = 0;
+  virtual Status GetAttr(InodeID ino, struct stat *attr) = 0;
 
   /// List all entries in a directory.
-  virtual Status ReadDir(InodeID ino, std::vector<SwordFsEntry>* entries) = 0;
+  virtual Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) = 0;
 
   /// Create a regular file.
   virtual Status Create(InodeID parent_ino,
                         std::string_view name, mode_t mode,
-                        InodeID* child_ino, struct stat* attr) = 0;
+                        InodeID *child_ino, struct stat *attr) = 0;
 
   /// Create a directory. Increments parent nlink to account for "..".
   virtual Status MkDir(InodeID parent,
                        std::string_view name, mode_t mode,
-                       InodeID* child_ino, struct stat* attr) = 0;
+                       InodeID *child_ino, struct stat *attr) = 0;
 
   /// Remove a regular file.
   virtual Status Unlink(InodeID parent_ino, std::string_view name) = 0;
@@ -73,11 +84,11 @@ class IMetaEngine {
 
   /// Set attributes for an inode.
   virtual Status SetAttr(InodeID ino,
-                         const struct stat* attr, int to_set,
-                         struct stat* out_attr) = 0;
+                         const struct stat *attr, int to_set,
+                         struct stat *out_attr) = 0;
 
   /// Get file system statistics.
-  virtual Status StatFs(struct statvfs* stbuf) = 0;
+  virtual Status StatFs(struct statvfs *stbuf) = 0;
 
   /// Check access permissions.
   virtual Status Access(InodeID ino, int mask) = 0;

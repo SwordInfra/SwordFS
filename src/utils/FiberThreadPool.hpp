@@ -40,23 +40,34 @@ class FiberThreadPool {
   auto Run(Fn &&fn) -> decltype(fn()) {
     using Result = decltype(fn());
     folly::fibers::Baton baton;
+    std::exception_ptr ex;
     if constexpr (std::is_void_v<Result>) {
       auto fut = folly::via(pool_.get(),
-                            [&baton, fn = std::forward<Fn>(fn)]() mutable {
-                              fn();
+                            [&baton, &ex, fn = std::forward<Fn>(fn)]() mutable {
+                              try {
+                                fn();
+                              } catch (...) {
+                                ex = std::current_exception();
+                              }
                               baton.post();
                             });
       baton.wait();
       std::move(fut).get();
+      if (ex) std::rethrow_exception(ex);
     } else {
       Result result;
       auto fut = folly::via(pool_.get(),
-                            [&baton, &result, fn = std::forward<Fn>(fn)]() mutable {
-                              result = fn();
+                            [&baton, &ex, &result, fn = std::forward<Fn>(fn)]() mutable {
+                              try {
+                                result = fn();
+                              } catch (...) {
+                                ex = std::current_exception();
+                              }
                               baton.post();
                             });
       baton.wait();
       std::move(fut).get();
+      if (ex) std::rethrow_exception(ex);
       return result;
     }
   }

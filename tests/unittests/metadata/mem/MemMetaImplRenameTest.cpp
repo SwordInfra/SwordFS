@@ -206,7 +206,7 @@ TEST_F(MemMetaImplRenameTest, RenameOverwriteNonEmptyDirectoryFails) {
   impl_->Create(d2_ino, "child", 0644, nullptr, nullptr);
 
   Status st = impl_->Rename(kRoot, "d1", kRoot, "d2", 0);
-  EXPECT_TRUE(st.IsBusy()) << st.message();
+  EXPECT_TRUE(st.IsNotEmpty()) << st.message();
 }
 
 // ════════════════════════════════════════════════════════════════════

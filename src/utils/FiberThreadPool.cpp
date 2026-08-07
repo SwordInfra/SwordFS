@@ -3,6 +3,9 @@
 
 #include "utils/FiberThreadPool.hpp"
 
+#include <folly/logging/xlog.h>
+#include "utils/Logging.hpp"
+
 namespace swordfs::utils {
 
 FiberThreadPool::FiberThreadPool(size_t num_threads)
@@ -10,7 +13,9 @@ FiberThreadPool::FiberThreadPool(size_t num_threads)
 
 FiberThreadPool::~FiberThreadPool() {
   if (pool_) {
+    SWORDFS_LOG_INFO << "FiberThreadPool: joining threads...";
     pool_->join();
+    SWORDFS_LOG_INFO << "FiberThreadPool: join complete";
   }
 }
 

@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <folly/portability/Filesystem.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -196,6 +197,12 @@ static int Mount(const std::string& mountpoint,
 }
 
 int RunMount() {
+  // Enable core dumps for debugging daemon crashes.
+  {
+    struct rlimit rl = {RLIM_INFINITY, RLIM_INFINITY};
+    setrlimit(RLIMIT_CORE, &rl);
+  }
+
   auto& cfg = ConfigCenter::Instance();
 
   const std::string& mountpoint = cfg.mountpoint();
@@ -203,21 +210,23 @@ int RunMount() {
     return 1;
   }
 
-  // Load volume config and initialise engines.
-  swordfs::volume::VolumeImpl::Initialize();
-  auto status = swordfs::volume::VolumeImpl::Instance().LoadFrom(cfg);
-  if (!status.ok()) {
-    SWORDFS_PROMPT_INFO << "Error: " << status.message();
-    return 1;
-  }
-
-  // Daemonize by default; -f / --foreground disables this
-  int signal_fd = -1;  // pipe fd for child to signal mount success
+  // Daemonize before initialising the volume.  Volume
+  // initialisation creates threads; fork() must happen
+  // while the process is single-threaded.
+  int signal_fd = -1;
   if (!ConfigCenter::Instance().foreground()) {
     signal_fd = Daemonize();
     if (signal_fd < 0) {
       return 1;
     }
+  }
+
+  // Load volume config and initialise engines (after fork).
+  swordfs::volume::VolumeImpl::Initialize();
+  auto status = swordfs::volume::VolumeImpl::Instance().LoadFrom(cfg);
+  if (!status.ok()) {
+    SWORDFS_PROMPT_INFO << "Error: " << status.message();
+    return 1;
   }
 
   auto sub_command = ConfigCenter::Instance().SelectedSubCommand();
@@ -242,6 +251,8 @@ int RunMount() {
   if (ret != 0) {
     SWORDFS_PROMPT_FMT("Error: mount failed (code {})", ret);
   }
+
+  swordfs::volume::VolumeImpl::Instance().Shutdown();
   return ret;
 }
 

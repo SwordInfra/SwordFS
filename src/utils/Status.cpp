@@ -25,12 +25,16 @@ int Status::ToErrno() const {
       return EIO;
     case kBusy:
       return EBUSY;
+    case kNotEmpty:
+      return ENOTEMPTY;
     case kNoSpace:
       return ENOSPC;
     case kPermission:
       return EACCES;
     case kNoMemory:
       return ENOMEM;
+    case kNameTooLong:
+      return ENAMETOOLONG;
     default:
       return EIO;
   }
