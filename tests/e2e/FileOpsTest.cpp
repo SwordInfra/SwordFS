@@ -7,13 +7,13 @@
 //            append, overwrite, file name length limits,
 //            rename name length limit.
 
-#include <gtest/gtest.h>
-
 #include <fcntl.h>
+#include <gtest/gtest.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <climits>
 
 #include "tests/e2e/Fixture.hpp"
 
@@ -36,7 +36,7 @@ class FileOpsTest : public ::testing::Test {
 
 TEST_F(FileOpsTest, CreateWriteReadUnlink) {
   ASSERT_EQ(fixture_.WriteFile("hello.txt", "Hello, SwordFS!"), 0);
-  EXPECT_TRUE(fixture_.CheckFile("hello.txt", "Hello, SwordFS!"));
+  EXPECT_TRUE(fixture_.FileEquals("hello.txt", 15, Fixture::Hash64("Hello, SwordFS!")));
 
   ASSERT_EQ(::unlink(fixture_.MountPath("hello.txt").c_str()), 0);
   struct stat st;
@@ -45,7 +45,7 @@ TEST_F(FileOpsTest, CreateWriteReadUnlink) {
 
 TEST_F(FileOpsTest, WriteEmptyFile) {
   ASSERT_EQ(fixture_.WriteFile("empty.txt", ""), 0);
-  EXPECT_TRUE(fixture_.CheckFile("empty.txt", ""));
+  EXPECT_TRUE(fixture_.FileEquals("empty.txt", 0, Fixture::Hash64("")));
 
   struct stat st;
   ASSERT_EQ(::stat(fixture_.MountPath("empty.txt").c_str(), &st), 0);
@@ -55,7 +55,7 @@ TEST_F(FileOpsTest, WriteEmptyFile) {
 TEST_F(FileOpsTest, WriteLargeData) {
   std::string data(1024 * 1024, 'X');
   ASSERT_EQ(fixture_.WriteFile("large.bin", data), 0);
-  EXPECT_TRUE(fixture_.CheckFile("large.bin", data));
+  EXPECT_TRUE(fixture_.FileEquals("large.bin", data.size(), Fixture::Hash64(data)));
 }
 
 TEST_F(FileOpsTest, AppendToFile) {
@@ -64,12 +64,12 @@ TEST_F(FileOpsTest, AppendToFile) {
   std::string path = fixture_.MountPath("append.txt");
   int fd = ::open(path.c_str(), O_WRONLY | O_APPEND);
   ASSERT_GE(fd, 0);
-  const char* extra = " world";
+  const char *extra = " world";
   ssize_t n = ::write(fd, extra, 6);
   ::close(fd);
   ASSERT_EQ(n, 6);
 
-  EXPECT_TRUE(fixture_.CheckFile("append.txt", "hello world"));
+  EXPECT_TRUE(fixture_.FileEquals("append.txt", 11, Fixture::Hash64("hello world")));
 }
 
 TEST_F(FileOpsTest, UnlinkNonexistent) {
@@ -108,7 +108,14 @@ TEST_F(FileOpsTest, StatFile) {
 TEST_F(FileOpsTest, StatfsReturnsValidData) {
   auto sv = fixture_.Statfs();
   EXPECT_GT(sv.f_bsize, static_cast<unsigned long>(0));
-  EXPECT_GT(sv.f_blocks, static_cast<fsblkcnt_t>(0));
+  EXPECT_GT(sv.f_frsize, static_cast<unsigned long>(0));
+  EXPECT_GE(sv.f_blocks, static_cast<fsblkcnt_t>(0));
+  EXPECT_GE(sv.f_bfree, static_cast<fsblkcnt_t>(0));
+  EXPECT_GE(sv.f_bavail, static_cast<fsblkcnt_t>(0));
+  EXPECT_GT(sv.f_files, static_cast<fsfilcnt_t>(0));
+  EXPECT_GE(sv.f_ffree, static_cast<fsfilcnt_t>(0));
+  EXPECT_GT(sv.f_namemax, static_cast<unsigned long>(0));
+  EXPECT_LE(sv.f_namemax, static_cast<unsigned long>(NAME_MAX));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -118,7 +125,7 @@ TEST_F(FileOpsTest, StatfsReturnsValidData) {
 TEST_F(FileOpsTest, TruncateShrink) {
   ASSERT_EQ(fixture_.WriteFile("t.txt", "hello world"), 0);
   ASSERT_EQ(::truncate(fixture_.MountPath("t.txt").c_str(), 5), 0);
-  EXPECT_TRUE(fixture_.CheckFile("t.txt", "hello"));
+  EXPECT_TRUE(fixture_.FileEquals("t.txt", 5, Fixture::Hash64("hello")));
 }
 
 TEST_F(FileOpsTest, TruncateExtend) {
@@ -136,7 +143,7 @@ TEST_F(FileOpsTest, TruncateExtend) {
 TEST_F(FileOpsTest, CreateFileAtLimit) {
   std::string name(255, 'x');
   ASSERT_EQ(fixture_.WriteFile(name, "ok"), 0);
-  EXPECT_TRUE(fixture_.CheckFile(name, "ok"));
+  EXPECT_TRUE(fixture_.FileEquals(name, 2, Fixture::Hash64("ok")));
 }
 
 TEST_F(FileOpsTest, CreateFileNameTooLong) {
@@ -151,7 +158,8 @@ TEST_F(FileOpsTest, RenameTargetNameTooLong) {
   ASSERT_EQ(fixture_.WriteFile("src.txt", "data"), 0);
   std::string long_name(256, 'x');
   ASSERT_EQ(::rename(fixture_.MountPath("src.txt").c_str(),
-                         fixture_.MountPath(long_name).c_str()), -1);
+                     fixture_.MountPath(long_name).c_str()),
+            -1);
   EXPECT_EQ(errno, ENAMETOOLONG);
-  EXPECT_TRUE(fixture_.CheckFile("src.txt", "data"));
+  EXPECT_TRUE(fixture_.FileEquals("src.txt", 4, Fixture::Hash64("data")));
 }

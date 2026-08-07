@@ -38,13 +38,13 @@ TEST_F(LargeFileTest, WriteCrossingChunkBoundary) {
   constexpr size_t kSize = 80ULL * 1024 * 1024;  // 80 MiB
   std::string data(kSize, 'A');
   ASSERT_EQ(fixture_.WriteFile("big.bin", data), 0);
-  EXPECT_TRUE(fixture_.CheckFile("big.bin", data));
+  EXPECT_TRUE(fixture_.FileEquals("big.bin", data.size(), Fixture::Hash64(data)));
 }
 
 TEST_F(LargeFileTest, ReadPastEndOfFile) {
   ASSERT_EQ(fixture_.WriteFile("small.bin", "hello"), 0);
   // Reading past EOF should return only what's available.
-  EXPECT_TRUE(fixture_.CheckFile("small.bin", "hello"));
+  EXPECT_TRUE(fixture_.FileEquals("small.bin", 5, Fixture::Hash64("hello")));
   struct stat st;
   ASSERT_EQ(::stat(fixture_.MountPath("small.bin").c_str(), &st), 0);
   EXPECT_EQ(st.st_size, 5);
@@ -103,7 +103,7 @@ TEST_F(LargeFileTest, ManySmallWrites) {
   }
   ::close(fd);
 
-  EXPECT_TRUE(fixture_.CheckFile("many.bin", expected));
+  EXPECT_TRUE(fixture_.FileEquals("many.bin", expected.size(), Fixture::Hash64(expected)));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ TEST_F(LargeFileTest, FsyncAfterWrite) {
   EXPECT_EQ(::fsync(fd), 0);
   ::close(fd);
 
-  EXPECT_TRUE(fixture_.CheckFile("fsync.bin", "fsync test data"));
+  EXPECT_TRUE(fixture_.FileEquals("fsync.bin", 15, Fixture::Hash64("fsync test data")));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -156,5 +156,5 @@ TEST_F(LargeFileTest, DataVisibleAfterClose) {
   ASSERT_EQ(::write(fd, "before close", 12), 12);
   ::close(fd);
 
-  EXPECT_TRUE(fixture_.CheckFile("close.bin", "before close"));
+  EXPECT_TRUE(fixture_.FileEquals("close.bin", 12, Fixture::Hash64("before close")));
 }

@@ -79,7 +79,7 @@ TEST_F(StaleMountTest, MountIsAlive) {
 
 TEST_F(StaleMountTest, WriteAfterMount) {
   ASSERT_EQ(fixture_.WriteFile("after_mount.txt", "ok"), 0);
-  EXPECT_TRUE(fixture_.CheckFile("after_mount.txt", "ok"));
+  EXPECT_TRUE(fixture_.FileEquals("after_mount.txt", 2, Fixture::Hash64("ok")));
 }
 
 TEST_F(StaleMountTest, DataPersistsAfterRemount) {
@@ -130,7 +130,7 @@ TEST_F(StaleMountTest, DaemonExitsAfterMultiCycle) {
 
 TEST_F(StaleMountTest, DaemonExitsAfterWriteAndUmount) {
   ASSERT_EQ(fixture_.WriteFile("before_umount.txt", "clean shutdown"), 0);
-  EXPECT_TRUE(fixture_.CheckFile("before_umount.txt", "clean shutdown"));
+  EXPECT_TRUE(fixture_.FileEquals("before_umount.txt", 14, Fixture::Hash64("clean shutdown")));
   fixture_.TearDown();
   EXPECT_EQ(CountSwordfsDaemons(), 0);
 }

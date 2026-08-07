@@ -36,7 +36,7 @@ TEST_F(RenameTest, RenameFileSameDir) {
   struct stat st;
   EXPECT_NE(::stat(fixture_.MountPath("old.txt").c_str(), &st), 0);
 
-  EXPECT_TRUE(fixture_.CheckFile("new.txt", "hello"));
+  EXPECT_TRUE(fixture_.FileEquals("new.txt", 5, Fixture::Hash64("hello")));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ TEST_F(RenameTest, RenameFileCrossDir) {
 
   struct stat st;
   EXPECT_NE(::stat(fixture_.MountPath("src/f.txt").c_str(), &st), 0);
-  EXPECT_TRUE(fixture_.CheckFile("dst/f.txt", "data"));
+  EXPECT_TRUE(fixture_.FileEquals("dst/f.txt", 4, Fixture::Hash64("data")));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ TEST_F(RenameTest, RenameDirSameParent) {
 
   struct stat st;
   EXPECT_NE(::stat(fixture_.MountPath("olddir").c_str(), &st), 0);
-  EXPECT_TRUE(fixture_.CheckFile("newdir/f.txt", "x"));
+  EXPECT_TRUE(fixture_.FileEquals("newdir/f.txt", 1, Fixture::Hash64("x")));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -86,7 +86,7 @@ TEST_F(RenameTest, RenameDirCrossParent) {
 
   struct stat st;
   EXPECT_NE(::stat(fixture_.MountPath("a/b").c_str(), &st), 0);
-  EXPECT_TRUE(fixture_.CheckFile("b/f.txt", "data"));
+  EXPECT_TRUE(fixture_.FileEquals("b/f.txt", 4, Fixture::Hash64("data")));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ TEST_F(RenameTest, RenameOverExistingFile) {
   ASSERT_EQ(::rename(fixture_.MountPath("old.txt").c_str(),
                          fixture_.MountPath("new.txt").c_str()), 0);
 
-  EXPECT_TRUE(fixture_.CheckFile("new.txt", "old"));
+  EXPECT_TRUE(fixture_.FileEquals("new.txt", 3, Fixture::Hash64("old")));
   struct stat st;
   EXPECT_NE(::stat(fixture_.MountPath("old.txt").c_str(), &st), 0);
 }
@@ -115,7 +115,7 @@ TEST_F(RenameTest, RenameDirOverEmptyDir) {
 
   struct stat st;
   EXPECT_NE(::stat(fixture_.MountPath("a").c_str(), &st), 0);
-  EXPECT_TRUE(fixture_.CheckFile("b/f.txt", "a"));
+  EXPECT_TRUE(fixture_.FileEquals("b/f.txt", 1, Fixture::Hash64("a")));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -150,5 +150,5 @@ TEST_F(RenameTest, RenameDeeplyNested) {
 
   ASSERT_EQ(::rename(fixture_.MountPath("a/b/c/deep.txt").c_str(),
                          fixture_.MountPath("a/flat.txt").c_str()), 0);
-  EXPECT_TRUE(fixture_.CheckFile("a/flat.txt", "deep data"));
+  EXPECT_TRUE(fixture_.FileEquals("a/flat.txt", 9, Fixture::Hash64("deep data")));
 }

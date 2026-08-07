@@ -111,12 +111,12 @@ TEST_F(DirectoryOpsTest, ReaddirListsEntries) {
   ASSERT_EQ(fixture_.WriteFile("f1.txt", ""), 0);
   ASSERT_EQ(fixture_.WriteFile("f2.txt", ""), 0);
 
-  auto entries = fixture_.ReadDir(".");
+  std::vector<std::string> entries; fixture_.ReadDir(".", &entries);
   EXPECT_EQ(entries.size(), 4u);
 }
 
 TEST_F(DirectoryOpsTest, ReaddirEmpty) {
-  auto entries = fixture_.ReadDir(".");
+  std::vector<std::string> entries; fixture_.ReadDir(".", &entries);
   EXPECT_TRUE(entries.empty());
 }
 

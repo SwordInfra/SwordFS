@@ -44,7 +44,7 @@ TEST_F(ConcurrencyTest, ConcurrentReads) {
   std::atomic<int> errors{0};
   auto reader = [&](int id) {
     for (int i = 0; i < 10; ++i) {
-      if (!fixture_.FileEquals("shared.bin", data)) {
+      if (!fixture_.FileEquals("shared.bin", data.size(), Fixture::Hash64(data))) {
         errors.fetch_add(1);
       }
     }
@@ -77,7 +77,7 @@ TEST_F(ConcurrencyTest, ConcurrentWritesDifferentFiles) {
         errors.fetch_add(1);
         continue;
       }
-      if (!fixture_.FileEquals(fname, content)) {
+      if (!fixture_.FileEquals(fname, content.size(), Fixture::Hash64(content))) {
         errors.fetch_add(1);
       }
     }
@@ -94,7 +94,7 @@ TEST_F(ConcurrencyTest, ConcurrentWritesDifferentFiles) {
   EXPECT_EQ(errors.load(), 0);
 
   // Verify all files exist.
-  auto entries = fixture_.ReadDir(".");
+  std::vector<std::string> entries; fixture_.ReadDir(".", &entries);
   EXPECT_EQ(entries.size(), static_cast<size_t>(kNumThreads * 5));
 }
 
@@ -123,7 +123,7 @@ TEST_F(ConcurrencyTest, ConcurrentMkdir) {
   }
 
   EXPECT_EQ(created.load(), kNumDirs);
-  auto entries = fixture_.ReadDir(".");
+  std::vector<std::string> entries; fixture_.ReadDir(".", &entries);
   EXPECT_EQ(entries.size(), static_cast<size_t>(kNumDirs));
 }
 

@@ -56,7 +56,9 @@ jobs:
         run: |
           sudo modprobe fuse
           sudo chmod 666 /dev/fuse
-          bash scripts/run-e2e.sh --gtest_color=no
+          getent group fuse || sudo groupadd fuse
+          sudo usermod -aG fuse "$(whoami)"
+          sg fuse -c "bash scripts/run-e2e.sh --gtest_color=no"
 
       - name: Generate coverage report
         run: |

@@ -13,10 +13,9 @@
 
 #pragma once
 
+#include <gtest/gtest.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
-
-#include <gtest/gtest.h>
 
 #include <string>
 #include <vector>
@@ -44,45 +43,44 @@ class Fixture {
   struct statvfs Statfs();
 
   /// Read all contents of a file into |out|.
-  /// Returns 0 on success, or a positive errno value on failure.
-  int ReadFile(const std::string& relpath, std::string* out);
-
-  /// Compare file content with expected via hash.  On mismatch, prints
-  /// only sizes and hashes — never dumps raw binary content.
-  ::testing::AssertionResult CheckFile(const std::string& relpath,
-                                        const std::string& expected);
-
-  /// Return true if file content equals expected (no GTest output).
-  /// Suitable for use inside loops / threads where assertion macros
-  /// cannot be used.
-  bool FileEquals(const std::string& relpath,
-                  const std::string& expected);
+  /// Returns 0 on success, or -1 on failure (errno is set).
+  int ReadFile(const std::string &relpath, std::string *out);
 
   /// Write data to a file (creates if not exists, truncates if exists).
-  int WriteFile(const std::string& relpath, const std::string& data);
+  /// Returns 0 on success, or -1 on failure (errno is set).
+  int WriteFile(const std::string &relpath, const std::string &data);
+
+  /// Compare file content with expected via 64-bit hash.
+  /// On mismatch, prints sizes and hashes — never dumps raw content.
+  /// Returns an AssertionResult (usable with EXPECT_TRUE) that also
+  /// converts to bool for use in loops / threads.
+  ::testing::AssertionResult FileEquals(const std::string &relpath,
+                                        size_t expected_size,
+                                        uint64_t expected_hash);
+
+  /// Compute a 64-bit SpookyHashV2 for use with FileEquals.
+  static uint64_t Hash64(std::string_view data);
 
   /// List directory entries (excluding . and ..).
-  std::vector<std::string> ReadDir(const std::string& relpath);
+  /// Returns 0 on success, or -1 on failure (errno is set).
+  int ReadDir(const std::string &relpath, std::vector<std::string> *entries);
 
   /// Return the absolute path for a relative path under the mountpoint.
-  std::string MountPath(const std::string& relpath) const;
+  std::string MountPath(const std::string &relpath) const;
 
   /// Return true if the mount is currently active.
-  bool IsMounted() const;
-
-  // ── Accessors ─────────────────────────────────────────────────
-
-  const std::string& work_dir() const { return work_dir_; }
-  const std::string& mountpoint() const { return mountpoint_; }
-  const std::string& bucket_url() const { return bucket_url_; }
+  bool IsMounted();
 
  private:
   bool FormatVolume();
   bool StartMount();
   bool WaitForMount();
   bool StopMount();
+  void InitPaths();
+  std::string LogPath() const;
   std::string FindSwordfsBin() const;
 
+ private:
   std::string work_dir_;
   std::string mountpoint_;
   std::string vol_config_dir_;
