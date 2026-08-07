@@ -7,7 +7,6 @@
 //            remount after kill, and clean shutdown.
 
 #include <gtest/gtest.h>
-
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -78,12 +77,16 @@ TEST_F(StaleMountTest, MountIsAlive) {
 }
 
 TEST_F(StaleMountTest, WriteAfterMount) {
-  ASSERT_EQ(fixture_.WriteFile("after_mount.txt", "ok"), 0);
-  EXPECT_TRUE(fixture_.FileEquals("after_mount.txt", 2, Fixture::Hash64("ok")));
+  const char *name = "after_mount.txt";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "ok"), 0);
+  EXPECT_TRUE(fixture_.FileEquals(name, 2, Fixture::Hash64("ok")));
 }
 
 TEST_F(StaleMountTest, DataPersistsAfterRemount) {
-  ASSERT_EQ(fixture_.WriteFile("persist.txt", "persistent data"), 0);
+  const char *name = "persist.txt";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "persistent data"), 0);
 
   // Unmount and remount.
   fixture_.TearDown();
@@ -129,8 +132,10 @@ TEST_F(StaleMountTest, DaemonExitsAfterMultiCycle) {
 }
 
 TEST_F(StaleMountTest, DaemonExitsAfterWriteAndUmount) {
-  ASSERT_EQ(fixture_.WriteFile("before_umount.txt", "clean shutdown"), 0);
-  EXPECT_TRUE(fixture_.FileEquals("before_umount.txt", 14, Fixture::Hash64("clean shutdown")));
+  const char *name = "before_umount.txt";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "clean shutdown"), 0);
+  EXPECT_TRUE(fixture_.FileEquals(name, 14, Fixture::Hash64("clean shutdown")));
   fixture_.TearDown();
   EXPECT_EQ(CountSwordfsDaemons(), 0);
 }

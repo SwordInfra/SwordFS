@@ -9,6 +9,7 @@
 #define FUSE_USE_VERSION 312
 #include <dirent.h>
 #include <folly/fibers/FiberManagerInternal.h>
+#include <folly/logging/xlog.h>
 #include <fuse_lowlevel.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -17,10 +18,17 @@
 #include <cerrno>
 #include <cstring>
 
-#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
 
 namespace swordfs::metadata {
+
+namespace {
+
+// MemMeta-specific filesystem limits.
+constexpr size_t kMaxNameLength = 255;  // POSIX NAME_MAX
+constexpr size_t kMaxFreeInodes = UINT64_MAX;
+
+}  // namespace
 
 // ────────────────────────────────────────────────────────────────
 // MemMetaImpl
@@ -32,7 +40,7 @@ MemMetaImpl::MemMetaImpl() {
 MemMetaImpl::~MemMetaImpl() {
 }
 
-void MemMetaImpl::KillSUID(struct stat* st) {
+void MemMetaImpl::KillSUID(struct stat *st) {
   if (st->st_mode & S_ISUID) st->st_mode &= ~S_ISUID;
   if (st->st_mode & S_ISGID) st->st_mode &= ~S_ISGID;
 }
@@ -42,9 +50,9 @@ void MemMetaImpl::KillSUID(struct stat* st) {
 // ────────────────────────────────────────────────────────────────
 
 Status MemMetaImpl::Lookup(InodeID parent_ino,
-                           std::string_view name, InodeID* child_ino,
-                           struct stat* attr) {
-  SwordFsInode* inode = nullptr;
+                           std::string_view name, InodeID *child_ino,
+                           struct stat *attr) {
+  SwordFsInode *inode = nullptr;
   Status status = store_.LookupEntry(parent_ino, name, &inode);
   if (!status.ok()) {
     SWORDFS_LOG_DEBUG << "Lookup: parent=" << parent_ino << " name='" << name
@@ -65,8 +73,8 @@ Status MemMetaImpl::Lookup(InodeID parent_ino,
   return Status::OK();
 }
 
-Status MemMetaImpl::GetAttr(InodeID ino, struct stat* attr) {
-  SwordFsInode* inode = nullptr;
+Status MemMetaImpl::GetAttr(InodeID ino, struct stat *attr) {
+  SwordFsInode *inode = nullptr;
   store_.LookupInode(ino, &inode);
   if (!inode) {
     SWORDFS_LOG_DEBUG << "GetAttr: ino " << ino << " not found";
@@ -76,8 +84,8 @@ Status MemMetaImpl::GetAttr(InodeID ino, struct stat* attr) {
   return Status::OK();
 }
 
-Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry>* entries) {
-  SwordFsInode* dir = nullptr;
+Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
+  SwordFsInode *dir = nullptr;
   Status status = store_.LookupInode(ino, &dir);
   if (!status.ok()) {
     return status;
@@ -86,14 +94,14 @@ Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry>* entries) {
     return Status::NotDirectory("not a directory");
   }
 
-  std::vector<std::pair<std::string, SwordFsInode*>> raw_entries;
+  std::vector<std::pair<std::string, SwordFsInode *>> raw_entries;
   status = store_.ListEntries(ino, &raw_entries);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "ReadDir: ino " << ino << " dir map not found";
     return status;
   }
 
-  for (const auto& [name, child_inode] : raw_entries) {
+  for (const auto &[name, child_inode] : raw_entries) {
     entries->push_back(
         {name, ModeToDt(child_inode->attr.st_mode), child_inode->ino});
   }
@@ -105,12 +113,12 @@ Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry>* entries) {
 
 Status MemMetaImpl::Create(InodeID parent_ino,
                            std::string_view name, mode_t mode,
-                           InodeID* child_ino, struct stat* attr) {
+                           InodeID *child_ino, struct stat *attr) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("file name exceeds maximum length");
   }
 
-  SwordFsInode* parent = nullptr;
+  SwordFsInode *parent = nullptr;
   Status status = store_.LookupInode(parent_ino, &parent);
   if (!status.ok()) {
     return status;
@@ -120,14 +128,14 @@ Status MemMetaImpl::Create(InodeID parent_ino,
   }
 
   // Check permissions: need write+execute on the parent directory
-  auto& ctx = folly::fibers::local<SwordFsContext>();
+  auto &ctx = folly::fibers::local<SwordFsContext>();
   if (!parent->CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
     return Status::Permission("access denied on parent");
   }
 
   mode_t file_mode = (S_IFREG | (mode & 0777));
 
-  SwordFsInode* child = nullptr;
+  SwordFsInode *child = nullptr;
   status = store_.AddEntry(parent_ino, name, file_mode, 1, &child);
   if (!status.ok()) return status;
 
@@ -144,26 +152,26 @@ Status MemMetaImpl::Create(InodeID parent_ino,
 
 Status MemMetaImpl::MkDir(InodeID parent_ino,
                           std::string_view name, mode_t mode,
-                          InodeID* child_ino, struct stat* attr) {
+                          InodeID *child_ino, struct stat *attr) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("directory name exceeds maximum length");
   }
 
-  SwordFsInode* parent = nullptr;
+  SwordFsInode *parent = nullptr;
   if (!store_.LookupInode(parent_ino, &parent).ok() || !parent ||
       !parent->IsDir()) {
     SWORDFS_LOG_ERROR << "MkDir: parent " << parent_ino << " is not a directory";
     return Status::NotDirectory("parent is not a directory");
   }
 
-  auto& ctx = folly::fibers::local<SwordFsContext>();
+  auto &ctx = folly::fibers::local<SwordFsContext>();
   if (!parent->CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
     return Status::Permission("access denied on parent");
   }
 
   mode_t dir_mode = (S_IFDIR | (mode & 0777));
 
-  SwordFsInode* child = nullptr;
+  SwordFsInode *child = nullptr;
   Status status = store_.AddEntry(parent_ino, name, dir_mode, 1, &child);
   if (!status.ok()) return status;
 
@@ -185,7 +193,7 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
 
 Status MemMetaImpl::Unlink(InodeID parent_ino,
                            std::string_view name) {
-  SwordFsInode* parent = nullptr;
+  SwordFsInode *parent = nullptr;
   if (!store_.LookupInode(parent_ino, &parent).ok() || !parent ||
       !parent->IsDir()) {
     SWORDFS_LOG_ERROR << "Unlink: parent " << parent_ino << " is not a directory";
@@ -193,7 +201,7 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
   }
 
   // Permission check on parent directory
-  auto& ctx = folly::fibers::local<SwordFsContext>();
+  auto &ctx = folly::fibers::local<SwordFsContext>();
   if (!parent->CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
     return Status::Permission("access denied on parent");
   }
@@ -203,7 +211,7 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
   if (parent->attr.st_mode & S_ISVTX) {
     uid_t caller = folly::fibers::local<SwordFsContext>().uid;
     if (caller != 0 && caller != parent->attr.st_uid) {
-      SwordFsInode* target = nullptr;
+      SwordFsInode *target = nullptr;
       if (store_.LookupEntry(parent_ino, name, &target).ok()) {
         if (target && caller != target->attr.st_uid) {
           return Status::Permission("sticky bit denied");
@@ -218,7 +226,7 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
   if (key == "." || key == "..")
     return Status::InvalidArgument("cannot unlink . or ..");
 
-  SwordFsInode* target = nullptr;
+  SwordFsInode *target = nullptr;
   Status status = store_.LookupEntry(parent_ino, name, &target);
   if (!status.ok()) return status;
 
@@ -237,14 +245,14 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
 
 Status MemMetaImpl::RmDir(InodeID parent_ino,
                           std::string_view name) {
-  SwordFsInode* parent = nullptr;
+  SwordFsInode *parent = nullptr;
   if (!store_.LookupInode(parent_ino, &parent).ok() || !parent ||
       !parent->IsDir()) {
     SWORDFS_LOG_ERROR << "RmDir: parent " << parent_ino << " is not a directory";
     return Status::NotDirectory("parent is not a directory");
   }
 
-  auto& ctx = folly::fibers::local<SwordFsContext>();
+  auto &ctx = folly::fibers::local<SwordFsContext>();
   if (!parent->CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
     return Status::Permission("access denied on parent");
   }
@@ -259,7 +267,7 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
   if (parent_ino == FUSE_ROOT_ID && key == ".")
     return Status::Busy("root directory is busy");
 
-  SwordFsInode* target = nullptr;
+  SwordFsInode *target = nullptr;
   Status status = store_.LookupEntry(parent_ino, name, &target);
   if (!status.ok()) return status;
 
@@ -300,14 +308,14 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
   }
 
   // Both parents must be directories
-  SwordFsInode* op = nullptr;
+  SwordFsInode *op = nullptr;
   Status status = store_.LookupInode(old_parent_ino, &op);
   if (!status.ok() || !op || !op->IsDir()) {
     SWORDFS_LOG_ERROR << "Rename: old parent " << old_parent_ino
                       << " is not a directory";
     return Status::NotDirectory("old parent is not a directory");
   }
-  SwordFsInode* np = nullptr;
+  SwordFsInode *np = nullptr;
   status = store_.LookupInode(new_parent_ino, &np);
   if (!status.ok() || !np || !np->IsDir()) {
     SWORDFS_LOG_ERROR << "Rename: new parent " << new_parent_ino
@@ -316,7 +324,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
   }
 
   // Check write+execute permission on both parents
-  auto& ctx = folly::fibers::local<SwordFsContext>();
+  auto &ctx = folly::fibers::local<SwordFsContext>();
   if (op && !op->CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
     return Status::Permission("access denied on old parent");
   }
@@ -324,7 +332,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
     return Status::Permission("access denied on new parent");
   }
 
-  SwordFsInode* moved = nullptr;
+  SwordFsInode *moved = nullptr;
   status = store_.LookupEntry(old_parent_ino, old_name, &moved);
   if (!status.ok()) {
     return Status::NotFound("source entry not found");
@@ -340,7 +348,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
 
   // ── RENAME flags handling ──────────────────────────────────────────
 
-  SwordFsInode* existing = nullptr;
+  SwordFsInode *existing = nullptr;
   bool target_exists = store_.LookupEntry(new_parent_ino, new_name, &existing).ok();
 
   // RENAME_NOREPLACE (1): fail if target already exists.
@@ -433,16 +441,16 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
 }
 
 Status MemMetaImpl::SetAttr(InodeID ino,
-                            const struct stat* attr, int to_set,
-                            struct stat* out_attr) {
-  SwordFsInode* inode = nullptr;
+                            const struct stat *attr, int to_set,
+                            struct stat *out_attr) {
+  SwordFsInode *inode = nullptr;
   store_.LookupInode(ino, &inode);
   if (!inode) {
     SWORDFS_LOG_ERROR << "SetAttr: ino " << ino << " not found";
     return Status::NotFound("inode not found");
   }
 
-  auto& st = inode->attr;
+  auto &st = inode->attr;
   bool size_changed = false;
   bool owner_changed = false;
 
@@ -495,9 +503,11 @@ Status MemMetaImpl::SetAttr(InodeID ino,
   return Status::OK();
 }
 
-Status MemMetaImpl::StatFs(struct statvfs* stbuf) {
+Status MemMetaImpl::StatFs(struct statvfs *stbuf) {
   std::memset(stbuf, 0, sizeof(*stbuf));
-  stbuf->f_namemax = 255;
+
+  struct Limits limits = GetLimits();
+  stbuf->f_namemax = limits.max_name_length;
   stbuf->f_frsize = 4096;
   stbuf->f_bsize = 4096;
   // Report a large virtual capacity so df shows this mount.
@@ -506,19 +516,23 @@ Status MemMetaImpl::StatFs(struct statvfs* stbuf) {
   stbuf->f_bfree = 268435456;
   stbuf->f_bavail = 268435456;
   stbuf->f_files = store_.InodeCount();
-  stbuf->f_ffree = UINT64_MAX;  // unlimited for in-memory store
+  stbuf->f_ffree = limits.max_free_inodes;
   return Status::OK();
+}
+
+Limits MemMetaImpl::GetLimits() {
+  return Limits{kMaxNameLength, kMaxFreeInodes};
 }
 
 Status MemMetaImpl::Access(InodeID ino,
                            int mask) {
-  SwordFsInode* inode = nullptr;
+  SwordFsInode *inode = nullptr;
   store_.LookupInode(ino, &inode);
   if (!inode) {
     return Status::NotFound("inode not found");
   }
 
-  auto& ctx = folly::fibers::local<SwordFsContext>();
+  auto &ctx = folly::fibers::local<SwordFsContext>();
   if (!inode->CheckAccess(ctx.uid, ctx.gid, mask)) {
     return Status::Permission("access denied");
   }
@@ -526,7 +540,7 @@ Status MemMetaImpl::Access(InodeID ino,
 }
 
 Status MemMetaImpl::Open(InodeID ino) {
-  SwordFsInode* inode = nullptr;
+  SwordFsInode *inode = nullptr;
   store_.LookupInode(ino, &inode);
   if (!inode) {
     SWORDFS_LOG_ERROR << "Open: ino " << ino << " not found";
@@ -543,7 +557,7 @@ Status MemMetaImpl::Open(InodeID ino) {
   // Check read or write permission based on flags
   // (The kernel already passes filtered fi->flags to the FUSE daemon, so
   // O_RDONLY/O_WRONLY/O_RDWR are already set appropriately.)
-  auto& ctx = folly::fibers::local<SwordFsContext>();
+  auto &ctx = folly::fibers::local<SwordFsContext>();
   if (!inode->CheckAccess(ctx.uid, ctx.gid, R_OK)) {
     return Status::Permission("access denied");
   }
@@ -555,7 +569,7 @@ Status MemMetaImpl::Open(InodeID ino) {
 }
 
 Status MemMetaImpl::OpenDir(InodeID ino) {
-  SwordFsInode* dir = nullptr;
+  SwordFsInode *dir = nullptr;
   if (!store_.LookupInode(ino, &dir).ok() || !dir ||
       !dir->IsDir()) {
     SWORDFS_LOG_ERROR << "OpenDir: ino " << ino << " is not a directory";
@@ -570,7 +584,7 @@ Status MemMetaImpl::OpenDir(InodeID ino) {
 
 Status MemMetaImpl::Forget(InodeID ino,
                            uint64_t nlookup) {
-  SwordFsInode* inode = nullptr;
+  SwordFsInode *inode = nullptr;
   store_.LookupInode(ino, &inode);
   if (!inode) return Status::OK();
 

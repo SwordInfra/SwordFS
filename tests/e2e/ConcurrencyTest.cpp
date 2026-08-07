@@ -6,9 +6,8 @@
 // Validates: concurrent reads, concurrent writes to different files,
 //            concurrent mkdir, and basic thread safety.
 
-#include <gtest/gtest.h>
-
 #include <fcntl.h>
+#include <gtest/gtest.h>
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -38,13 +37,15 @@ class ConcurrencyTest : public ::testing::Test {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(ConcurrencyTest, ConcurrentReads) {
+  const char *name = "shared.bin";
   std::string data(65536, 'R');
-  ASSERT_EQ(fixture_.WriteFile("shared.bin", data), 0);
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, data), 0);
 
   std::atomic<int> errors{0};
   auto reader = [&](int id) {
     for (int i = 0; i < 10; ++i) {
-      if (!fixture_.FileEquals("shared.bin", data.size(), Fixture::Hash64(data))) {
+      if (!fixture_.FileEquals(name, data.size(), Fixture::Hash64(data))) {
         errors.fetch_add(1);
       }
     }
@@ -54,7 +55,7 @@ TEST_F(ConcurrencyTest, ConcurrentReads) {
   for (int i = 0; i < 4; ++i) {
     threads.emplace_back(reader, i);
   }
-  for (auto& t : threads) {
+  for (auto &t : threads) {
     t.join();
   }
 
@@ -73,6 +74,10 @@ TEST_F(ConcurrencyTest, ConcurrentWritesDifferentFiles) {
     for (int i = 0; i < 5; ++i) {
       std::string fname = "file_" + std::to_string(id) + "_" + std::to_string(i);
       std::string content = "thread_" + std::to_string(id) + "_iter_" + std::to_string(i);
+      if (fixture_.CreateFile(fname, 0644, O_CREAT | O_WRONLY | O_TRUNC) != 0) {
+        errors.fetch_add(1);
+        continue;
+      }
       if (fixture_.WriteFile(fname, content) != 0) {
         errors.fetch_add(1);
         continue;
@@ -87,14 +92,15 @@ TEST_F(ConcurrencyTest, ConcurrentWritesDifferentFiles) {
   for (int i = 0; i < kNumThreads; ++i) {
     threads.emplace_back(writer, i);
   }
-  for (auto& t : threads) {
+  for (auto &t : threads) {
     t.join();
   }
 
   EXPECT_EQ(errors.load(), 0);
 
   // Verify all files exist.
-  std::vector<std::string> entries; fixture_.ReadDir(".", &entries);
+  std::vector<std::string> entries;
+  fixture_.ReadDir(".", &entries);
   EXPECT_EQ(entries.size(), static_cast<size_t>(kNumThreads * 5));
 }
 
@@ -109,7 +115,7 @@ TEST_F(ConcurrencyTest, ConcurrentMkdir) {
   auto maker = [&](int start, int end) {
     for (int i = start; i < end; ++i) {
       std::string dirname = "dir_" + std::to_string(i);
-      if (::mkdir(fixture_.MountPath(dirname).c_str(), 0755) == 0) {
+      if (fixture_.MkDir(dirname, 0755) == 0) {
         created.fetch_add(1);
       }
     }
@@ -118,12 +124,13 @@ TEST_F(ConcurrencyTest, ConcurrentMkdir) {
   std::vector<std::thread> threads;
   threads.emplace_back(maker, 0, 10);
   threads.emplace_back(maker, 10, 20);
-  for (auto& t : threads) {
+  for (auto &t : threads) {
     t.join();
   }
 
   EXPECT_EQ(created.load(), kNumDirs);
-  std::vector<std::string> entries; fixture_.ReadDir(".", &entries);
+  std::vector<std::string> entries;
+  fixture_.ReadDir(".", &entries);
   EXPECT_EQ(entries.size(), static_cast<size_t>(kNumDirs));
 }
 
@@ -132,13 +139,15 @@ TEST_F(ConcurrencyTest, ConcurrentMkdir) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(ConcurrencyTest, ConcurrentStat) {
-  ASSERT_EQ(fixture_.WriteFile("st.txt", "stat me"), 0);
+  const char *name = "st.txt";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "stat me"), 0);
   std::atomic<int> errors{0};
 
   auto stater = [&]() {
     for (int i = 0; i < 100; ++i) {
       struct stat st;
-      if (::stat(fixture_.MountPath("st.txt").c_str(), &st) != 0 ||
+      if (fixture_.Stat(name, &st) != 0 ||
           !S_ISREG(st.st_mode) || st.st_size != 7) {
         errors.fetch_add(1);
       }
@@ -149,7 +158,7 @@ TEST_F(ConcurrencyTest, ConcurrentStat) {
   for (int i = 0; i < 4; ++i) {
     threads.emplace_back(stater);
   }
-  for (auto& t : threads) {
+  for (auto &t : threads) {
     t.join();
   }
 
@@ -168,7 +177,7 @@ TEST_F(ConcurrencyTest, ConcurrentCreateAndUnlink) {
   auto creator = [&]() {
     for (int i = 0; i < kNumFiles; ++i) {
       std::string fname = "temp_" + std::to_string(i);
-      int fd = ::creat(fixture_.MountPath(fname).c_str(), 0644);
+      int fd = fixture_.CreateFile(fname, 0644, O_CREAT | O_WRONLY | O_TRUNC);
       if (fd >= 0) {
         ::close(fd);
         created.fetch_add(1);
@@ -179,7 +188,7 @@ TEST_F(ConcurrencyTest, ConcurrentCreateAndUnlink) {
   auto unlinker = [&]() {
     for (int i = 0; i < kNumFiles; ++i) {
       std::string fname = "temp_" + std::to_string(i);
-      if (::unlink(fixture_.MountPath(fname).c_str()) == 0) {
+      if (fixture_.UnlinkFile(fname) == 0) {
         unlinked.fetch_add(1);
       }
     }

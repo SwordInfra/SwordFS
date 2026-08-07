@@ -3,19 +3,24 @@
 
 #include "tests/e2e/Fixture.hpp"
 
+#include <dirent.h>
+#include <fcntl.h>
 #include <folly/FileUtil.h>
 #include <folly/hash/Hash.h>
-#include <folly/portability/Filesystem.h>
-#include <gtest/gtest.h>
 #include <linux/magic.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <thread>
+
+#include "metadata/IMetaEngine.hpp"
 
 namespace swordfs {
 namespace e2e {
@@ -79,7 +84,7 @@ void Fixture::TearDown() {
 
 bool Fixture::FormatVolume() {
   std::error_code ec;
-  folly::fs::create_directories(vol_config_dir_, ec);
+  std::filesystem::create_directories(vol_config_dir_, ec);
   if (ec) {
     std::fprintf(stderr, "E2E: failed to create %s: %s\n",
                  vol_config_dir_.c_str(), ec.message().c_str());
@@ -113,7 +118,7 @@ bool Fixture::FormatVolume() {
 
 bool Fixture::StartMount() {
   std::error_code ec;
-  folly::fs::create_directories(mountpoint_, ec);
+  std::filesystem::create_directories(mountpoint_, ec);
   if (ec) {
     std::fprintf(stderr, "E2E: failed to create %s: %s\n",
                  mountpoint_.c_str(), ec.message().c_str());
@@ -174,29 +179,59 @@ bool Fixture::StopMount() {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Filesystem helpers
+// POSIX wrappers
 // ────────────────────────────────────────────────────────────────
 
-std::string Fixture::MountPath(const std::string &relpath) const {
-  if (relpath.empty() || relpath == ".") return mountpoint_;
-  return mountpoint_ + "/" + relpath;
+int Fixture::Stat(const std::string &relpath, struct stat *st) const {
+  if (::stat(MountPath(relpath).c_str(), st) != 0) {
+    std::fprintf(stderr, "E2E: stat(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  return 0;
 }
 
-bool Fixture::IsMounted() {
-  // Verify the mountpoint is actually a FUSE filesystem, not just
-  // a regular directory on the host.
-  struct statvfs sv = Statfs();
-  return sv.f_type == FUSE_SUPER_MAGIC;
+int Fixture::Statfs(struct statvfs *sv) const {
+  if (::statvfs(mountpoint_.c_str(), sv) != 0) {
+    return -1;
+  }
+  return 0;
 }
 
-struct statvfs Fixture::Statfs() {
-  struct statvfs sv{};
-  ::statvfs(mountpoint_.c_str(), &sv);
-  return sv;
+int Fixture::Access(const std::string &relpath, int mode) {
+  if (::access(MountPath(relpath).c_str(), mode) != 0) {
+    std::fprintf(stderr, "E2E: access(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+int Fixture::CreateFile(const std::string &relpath, mode_t mode, int flags) {
+  int fd = ::open(MountPath(relpath).c_str(), flags, mode);
+  if (fd < 0) {
+    std::fprintf(stderr, "E2E: open(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  ::close(fd);
+  return 0;
+}
+
+int Fixture::OpenFile(const std::string &relpath, int flags) {
+  int fd = ::open(MountPath(relpath).c_str(), flags);
+  if (fd < 0) {
+    std::fprintf(stderr, "E2E: open(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  return fd;
 }
 
 int Fixture::ReadFile(const std::string &relpath, std::string *out) {
   if (!folly::readFile(MountPath(relpath).c_str(), *out)) {
+    std::fprintf(stderr, "E2E: read(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -204,10 +239,127 @@ int Fixture::ReadFile(const std::string &relpath, std::string *out) {
 
 int Fixture::WriteFile(const std::string &relpath,
                        const std::string &data) {
-  if (!folly::writeFile(data, MountPath(relpath).c_str())) {
+  std::string path = MountPath(relpath);
+  if (::access(path.c_str(), F_OK) != 0) {
+    std::fprintf(stderr, "E2E: write(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  if (!folly::writeFile(data, path.c_str())) {
+    std::fprintf(stderr, "E2E: write(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
+}
+
+int Fixture::ReadDir(const std::string &relpath, std::vector<std::string> *entries) {
+  entries->clear();
+  DIR *dp = ::opendir(MountPath(relpath).c_str());
+  if (!dp) {
+    std::fprintf(stderr, "E2E: opendir(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  struct dirent *de;
+  while ((de = ::readdir(dp)) != nullptr) {
+    if (std::string(de->d_name) == "." || std::string(de->d_name) == "..") {
+      continue;
+    }
+    entries->push_back(de->d_name);
+  }
+  ::closedir(dp);
+  return 0;
+}
+
+int Fixture::UnlinkFile(const std::string &relpath) {
+  if (::unlink(MountPath(relpath).c_str()) != 0) {
+    std::fprintf(stderr, "E2E: unlink(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+int Fixture::MkDir(const std::string &relpath, mode_t mode) {
+  if (::mkdir(MountPath(relpath).c_str(), mode) != 0) {
+    std::fprintf(stderr, "E2E: mkdir(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+int Fixture::RmDir(const std::string &relpath) {
+  if (::rmdir(MountPath(relpath).c_str()) != 0) {
+    std::fprintf(stderr, "E2E: rmdir(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+int Fixture::Rename(const std::string &oldpath, const std::string &newpath) {
+  if (::rename(MountPath(oldpath).c_str(), MountPath(newpath).c_str()) != 0) {
+    std::fprintf(stderr, "E2E: rename(%s -> %s) failed: %s\n",
+                 oldpath.c_str(), newpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+int Fixture::Chmod(const std::string &relpath, mode_t mode) {
+  if (::chmod(MountPath(relpath).c_str(), mode) != 0) {
+    std::fprintf(stderr, "E2E: chmod(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+int Fixture::Truncate(const std::string &relpath, off_t length) {
+  if (::truncate(MountPath(relpath).c_str(), length) != 0) {
+    std::fprintf(stderr, "E2E: truncate(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+// ────────────────────────────────────────────────────────────────
+// Test utilities
+// ────────────────────────────────────────────────────────────────
+
+bool Fixture::IsMounted() {
+  // Verify the mountpoint is actually a FUSE filesystem, not just
+  // a regular directory on the host.
+  struct statvfs sv{};
+  if (Statfs(&sv) != 0) return false;
+  return sv.f_type == FUSE_SUPER_MAGIC;
+}
+
+std::string Fixture::MountPath(const std::string &relpath) const {
+  if (relpath.empty() || relpath == ".") return mountpoint_;
+  return mountpoint_ + "/" + relpath;
+}
+
+::testing::AssertionResult Fixture::UmaskEquals(
+    const std::string &relpath, mode_t expected_mask) const {
+  struct stat st;
+  if (::stat(MountPath(relpath).c_str(), &st) != 0) {
+    return ::testing::AssertionFailure()
+           << "stat(" << relpath << ") failed: " << std::strerror(errno);
+  }
+  mode_t old = ::umask(0);
+  ::umask(old);
+  mode_t expected = expected_mask & ~old;
+  if ((st.st_mode & 0777) != expected) {
+    return ::testing::AssertionFailure()
+           << "umask mismatch for " << relpath
+           << ": expected " << std::oct << expected
+           << ", got " << (st.st_mode & 0777);
+  }
+  return ::testing::AssertionSuccess();
 }
 
 ::testing::AssertionResult Fixture::FileEquals(
@@ -233,15 +385,8 @@ uint64_t Fixture::Hash64(std::string_view data) {
   return folly::hash::SpookyHashV2::Hash64(data.data(), data.size(), 0);
 }
 
-int Fixture::ReadDir(const std::string &relpath, std::vector<std::string> *entries) {
-  std::error_code ec;
-  for (auto &entry : folly::fs::directory_iterator(MountPath(relpath), ec)) {
-    std::string name = entry.path().filename().string();
-    if (name != "." && name != "..") {
-      entries->push_back(name);
-    }
-  }
-  return ec ? -1 : 0;
+metadata::Limits Fixture::GetLimits() const {
+  return metadata::IMetaEngine::GetLimits("memory://local");
 }
 
 // ────────────────────────────────────────────────────────────────

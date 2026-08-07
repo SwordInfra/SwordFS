@@ -6,9 +6,8 @@
 // Validates: owner/group/other read/write/execute bits via
 //            chmod and access checks.
 
-#include <gtest/gtest.h>
-
 #include <fcntl.h>
+#include <gtest/gtest.h>
 #include <unistd.h>
 
 #include "tests/e2e/Fixture.hpp"
@@ -31,20 +30,23 @@ class PermissionsTest : public ::testing::Test {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(PermissionsTest, ChmodFile) {
-  ASSERT_EQ(fixture_.WriteFile("f.txt", "data"), 0);
-  ASSERT_EQ(::chmod(fixture_.MountPath("f.txt").c_str(), 0600), 0);
+  const char *name = "f.txt";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "data"), 0);
+  ASSERT_EQ(fixture_.Chmod(name, 0600), 0);
 
   struct stat st;
-  ASSERT_EQ(::stat(fixture_.MountPath("f.txt").c_str(), &st), 0);
+  ASSERT_EQ(fixture_.Stat(name, &st), 0);
   EXPECT_EQ(st.st_mode & 0777, 0600);
 }
 
 TEST_F(PermissionsTest, ChmodDir) {
-  ASSERT_EQ(::mkdir(fixture_.MountPath("d").c_str(), 0755), 0);
-  ASSERT_EQ(::chmod(fixture_.MountPath("d").c_str(), 0700), 0);
+  const char *name = "d";
+  ASSERT_EQ(fixture_.MkDir(name, 0755), 0);
+  ASSERT_EQ(fixture_.Chmod(name, 0700), 0);
 
   struct stat st;
-  ASSERT_EQ(::stat(fixture_.MountPath("d").c_str(), &st), 0);
+  ASSERT_EQ(fixture_.Stat(name, &st), 0);
   EXPECT_EQ(st.st_mode & 0777, 0700);
 }
 
@@ -53,22 +55,24 @@ TEST_F(PermissionsTest, ChmodDir) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(PermissionsTest, DefaultFileMode) {
+  const char *name = "f.txt";
   mode_t old = ::umask(022);
-  int fd = ::creat(fixture_.MountPath("f.txt").c_str(), 0666);
+  int fd = fixture_.CreateFile(name, 0666, O_CREAT | O_WRONLY | O_TRUNC);
   ::umask(old);
   ASSERT_GE(fd, 0);
   ::close(fd);
 
   struct stat st;
-  ASSERT_EQ(::stat(fixture_.MountPath("f.txt").c_str(), &st), 0);
+  ASSERT_EQ(fixture_.Stat(name, &st), 0);
   // umask 022 strips group/other write bits, leaving 0644.
   EXPECT_EQ(st.st_mode & 0777, 0644);
 }
 
 TEST_F(PermissionsTest, DefaultDirMode) {
-  ASSERT_EQ(::mkdir(fixture_.MountPath("d").c_str(), 0755), 0);
+  const char *name = "d";
+  ASSERT_EQ(fixture_.MkDir(name, 0755), 0);
   struct stat st;
-  ASSERT_EQ(::stat(fixture_.MountPath("d").c_str(), &st), 0);
+  ASSERT_EQ(fixture_.Stat(name, &st), 0);
   EXPECT_EQ(st.st_mode & 0777, 0755);
 }
 
@@ -77,30 +81,38 @@ TEST_F(PermissionsTest, DefaultDirMode) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(PermissionsTest, AccessOwnerReadWrite) {
-  ASSERT_EQ(fixture_.WriteFile("f.txt", "data"), 0);
-  ASSERT_EQ(::chmod(fixture_.MountPath("f.txt").c_str(), 0600), 0);
-  EXPECT_EQ(::access(fixture_.MountPath("f.txt").c_str(), R_OK | W_OK), 0);
+  const char *name = "f.txt";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "data"), 0);
+  ASSERT_EQ(fixture_.Chmod(name, 0600), 0);
+  EXPECT_EQ(fixture_.Access(name, R_OK | W_OK), 0);
 }
 
 TEST_F(PermissionsTest, AccessOtherDenied) {
-  ASSERT_EQ(fixture_.WriteFile("f.txt", "data"), 0);
-  ASSERT_EQ(::chmod(fixture_.MountPath("f.txt").c_str(), 0600), 0);
+  const char *name = "f.txt";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "data"), 0);
+  ASSERT_EQ(fixture_.Chmod(name, 0600), 0);
   struct stat st;
-  ASSERT_EQ(::stat(fixture_.MountPath("f.txt").c_str(), &st), 0);
+  ASSERT_EQ(fixture_.Stat(name, &st), 0);
   // Mode was set correctly: owner rw, group/other nothing.
   EXPECT_EQ(st.st_mode & 0777, 0600);
 }
 
 TEST_F(PermissionsTest, AccessDirExecute) {
-  ASSERT_EQ(::mkdir(fixture_.MountPath("d").c_str(), 0700), 0);
-  EXPECT_EQ(::access(fixture_.MountPath("d").c_str(), X_OK), 0);
+  const char *name = "d";
+  ASSERT_EQ(fixture_.MkDir(name, 0700), 0);
+  EXPECT_EQ(fixture_.Access(name, X_OK), 0);
 }
 
 TEST_F(PermissionsTest, AccessReadWrite) {
-  ASSERT_EQ(fixture_.WriteFile("rw.txt", "data"), 0);
-  EXPECT_EQ(::access(fixture_.MountPath("rw.txt").c_str(), R_OK | W_OK), 0);
+  const char *name = "rw.txt";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "data"), 0);
+  EXPECT_EQ(fixture_.Access(name, R_OK | W_OK), 0);
 }
 
 TEST_F(PermissionsTest, AccessNonexistent) {
-  EXPECT_NE(::access(fixture_.MountPath("noent").c_str(), F_OK), 0);
+  const char *name = "noent";
+  EXPECT_NE(fixture_.Access(name, F_OK), 0);
 }

@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "metadata/IMetaEngine.hpp"
+
 namespace swordfs {
 namespace e2e {
 
@@ -37,23 +39,69 @@ class Fixture {
   /// Unmount and clean up.
   void TearDown();
 
-  // ── Filesystem helpers ────────────────────────────────────────
+  // ── POSIX wrappers ───────────────────────────────────────────
 
-  /// statvfs() on the mountpoint.
-  struct statvfs Statfs();
+  /// stat() on a file or directory under the mountpoint.
+  /// Returns 0 on success, or -1 on failure (errno is set).
+  int Stat(const std::string &relpath, struct stat* st) const;
+
+  /// statvfs() on the mountpoint.  Returns 0 on success, or -1.
+  int Statfs(struct statvfs* sv) const;
+
+  /// Check file accessibility.  Returns 0 on success, or -1.
+  int Access(const std::string &relpath, int mode);
+
+  /// Create a regular file.  flags are passed to ::open (e.g. O_EXCL).
+  /// Returns 0 on success, or -1 on failure (errno is set).
+  int CreateFile(const std::string &relpath, mode_t mode, int flags);
+
+  /// Open a file.  Returns fd on success, or -1 on failure (errno is set).
+  int OpenFile(const std::string &relpath, int flags);
 
   /// Read all contents of a file into |out|.
   /// Returns 0 on success, or -1 on failure (errno is set).
   int ReadFile(const std::string &relpath, std::string *out);
 
-  /// Write data to a file (creates if not exists, truncates if exists).
+  /// Write data to a file (file must already exist).
   /// Returns 0 on success, or -1 on failure (errno is set).
   int WriteFile(const std::string &relpath, const std::string &data);
 
+  /// List directory entries (excluding . and ..).
+  /// Returns 0 on success, or -1 on failure (errno is set).
+  int ReadDir(const std::string &relpath, std::vector<std::string> *entries);
+
+  /// Unlink (delete) a file.  Returns 0 on success, or -1.
+  int UnlinkFile(const std::string &relpath);
+
+  /// Create a directory.  Returns 0 on success, or -1.
+  int MkDir(const std::string &relpath, mode_t mode);
+
+  /// Remove an empty directory.  Returns 0 on success, or -1.
+  int RmDir(const std::string &relpath);
+
+  /// Rename (move) a file or directory.  Returns 0 on success, or -1.
+  int Rename(const std::string &oldpath, const std::string &newpath);
+
+  /// Change file mode.  Returns 0 on success, or -1.
+  int Chmod(const std::string &relpath, mode_t mode);
+
+  /// Truncate a file to a given size.  Returns 0 on success, or -1.
+  int Truncate(const std::string &relpath, off_t length);
+
+  // ── Test utilities ────────────────────────────────────────────
+
+  /// Return true if the mount is currently active.
+  bool IsMounted();
+
+  /// Return the absolute path for a relative path under the mountpoint.
+  std::string MountPath(const std::string &relpath) const;
+
+  /// Check that the file permissions match |requested_mode| minus umask.
+  ::testing::AssertionResult UmaskEquals(const std::string &relpath,
+                                         mode_t expected_mask) const;
+
   /// Compare file content with expected via 64-bit hash.
   /// On mismatch, prints sizes and hashes — never dumps raw content.
-  /// Returns an AssertionResult (usable with EXPECT_TRUE) that also
-  /// converts to bool for use in loops / threads.
   ::testing::AssertionResult FileEquals(const std::string &relpath,
                                         size_t expected_size,
                                         uint64_t expected_hash);
@@ -61,15 +109,8 @@ class Fixture {
   /// Compute a 64-bit SpookyHashV2 for use with FileEquals.
   static uint64_t Hash64(std::string_view data);
 
-  /// List directory entries (excluding . and ..).
-  /// Returns 0 on success, or -1 on failure (errno is set).
-  int ReadDir(const std::string &relpath, std::vector<std::string> *entries);
-
-  /// Return the absolute path for a relative path under the mountpoint.
-  std::string MountPath(const std::string &relpath) const;
-
-  /// Return true if the mount is currently active.
-  bool IsMounted();
+  /// Return the filesystem limits for this test run.
+  metadata::Limits GetLimits() const;
 
  private:
   bool FormatVolume();
