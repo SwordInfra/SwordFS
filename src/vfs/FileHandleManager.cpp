@@ -5,17 +5,13 @@
 
 #include <folly/container/F14Map.h>
 
-#include "volume/VolumeImpl.hpp"
-
 namespace swordfs::vfs {
 
 // Concrete F14FastMap types — hidden from the header to avoid pulling
 // the heavy Folly template into every includer.
 struct FileMap : folly::F14FastMap<uint64_t, FileHandle> {};
 struct DirMap : folly::F14FastMap<uint64_t, metadata::InodeID> {};
-struct InodeWriterMap
-    : folly::F14FastMap<metadata::InodeID,
-                        std::weak_ptr<FileReadWriter>> {};
+struct InodeWriterMap : folly::F14FastMap<metadata::InodeID, std::weak_ptr<FileReadWriter>> {};
 
 FileHandleManager::FileHandleManager()
     : files_(std::make_unique<FileMap>()),
@@ -32,26 +28,27 @@ uint64_t FileHandleManager::AllocFh() {
   return next_fh_++;
 }
 
-utils::Status FileHandleManager::Open(metadata::InodeID ino,
-                                      uint64_t *fh) {
-  uint64_t handle = AllocFh();
-  auto &vol = volume::VolumeImpl::Instance();
-
-  // Look up or create a shared FileReadWriter for this inode.
-  std::shared_ptr<FileReadWriter> rw;
+std::shared_ptr<FileReadWriter> FileHandleManager::GetFileReadWriter(
+    metadata::InodeID ino, bool create_if_missing) {
   {
     std::shared_lock lock(mutex_);
     auto it = inode_writers_->find(ino);
     if (it != inode_writers_->end()) {
-      rw = it->second.lock();
+      if (auto rw = it->second.lock()) return rw;
     }
   }
-  if (!rw) {
-    rw = std::make_shared<FileReadWriter>(
-        ino, vol.chunk_size(), vol.meta_engine(), vol.data_engine());
-    std::unique_lock lock(mutex_);
-    (*inode_writers_)[ino] = rw;
-  }
+  if (!create_if_missing) return nullptr;
+
+  auto rw = std::make_shared<FileReadWriter>(ino);
+  std::unique_lock lock(mutex_);
+  (*inode_writers_)[ino] = rw;
+  return rw;
+}
+
+utils::Status FileHandleManager::Open(metadata::InodeID ino,
+                                      uint64_t *fh) {
+  uint64_t handle = AllocFh();
+  auto rw = GetFileReadWriter(ino, /*create_if_missing=*/true);
 
   std::unique_lock lock(mutex_);
   auto [it, inserted] = files_->try_emplace(handle, FileHandle{std::move(rw)});

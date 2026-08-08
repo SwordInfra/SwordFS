@@ -5,6 +5,7 @@
 
 #include <folly/fibers/Baton.h>
 #include <folly/io/IOBuf.h>
+#include <folly/logging/xlog.h>
 
 #include <algorithm>
 #include <vector>
@@ -12,8 +13,8 @@
 #include "chunk/Chunk.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
-#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
+#include "volume/VolumeImpl.hpp"
 
 #define FUSE_USE_VERSION 312
 #include <fuse_lowlevel.h>
@@ -30,7 +31,7 @@ namespace {
 
 class MultiChunkReadWriter {
  public:
-  using Status = FileReadWriter::Status;
+  using Status = utils::Status;
 
   /// Submit a read from |c| at chunk-relative |off| for up to |len|
   /// bytes into |window|.  |window| should be a takeOwnership IOBuf
@@ -39,7 +40,7 @@ class MultiChunkReadWriter {
                   std::unique_ptr<folly::IOBuf> window) {
     auto p = std::make_unique<Pending>();
     p->window = std::move(window);
-    auto& fm = folly::fibers::FiberManager::getFiberManager();
+    auto &fm = folly::fibers::FiberManager::getFiberManager();
     fm.addTask([c, off, len, raw = p.get()] {
       raw->status = c->Read(off, len, raw->window.get());
       raw->bytes = raw->window->length();
@@ -75,30 +76,57 @@ class MultiChunkReadWriter {
 }  // namespace
 
 // ────────────────────────────────────────────────────────────────
-// FileReadWriter
+// DirtyChunkHandler
 // ────────────────────────────────────────────────────────────────
 
-FileReadWriter::FileReadWriter(InodeID ino, size_t chunk_size,
-                               metadata::IMetaEngine* meta,
-                               storage::IDataEngine* data)
-    : ino_(ino), chunk_size_(chunk_size), meta_(meta), data_(data) {}
+chunk::Chunk *DirtyChunkHandler::Get(metadata::ChunkIndex idx, off_t off,
+                                   bool create_if_missing) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = chunks_.find(idx);
+  if (it != chunks_.end() && off < it->second.EndOffset()) {
+    return &it->second;
+  }
+  if (!create_if_missing) return nullptr;
+  it = chunks_.try_emplace(idx, ino_, idx).first;
+  return &it->second;
+}
 
-chunk::Chunk* FileReadWriter::FindDirtyChunk(off_t off) {
-  metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(
-      off / static_cast<off_t>(chunk_size_));
-  auto it = dirty_chunks_.find(idx);
-  if (it != dirty_chunks_.end()) {
-    if (off < it->second.EndOffset()) return &it->second;
+chunk::Chunk *DirtyChunkHandler::GetNextFlushable() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto &[idx, c] : chunks_) {
+    if (c.Flushable()) {
+      c.Seal();
+      return &c;
+    }
   }
   return nullptr;
 }
+
+void DirtyChunkHandler::Remove(metadata::ChunkIndex idx) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = chunks_.find(idx);
+  CHECK(it != chunks_.end()) << "Remove: chunk " << idx << " not found";
+  CHECK(it->second.IsFlushed())
+      << "Remove: chunk " << idx << " is not flushed";
+  chunks_.erase(it);
+}
+
+// ────────────────────────────────────────────────────────────────
+// FileReadWriter
+// ────────────────────────────────────────────────────────────────
+
+FileReadWriter::FileReadWriter(InodeID ino)
+    : ino_(ino),
+      chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
+      meta_(volume::VolumeImpl::Instance().meta_engine()),
+      data_(volume::VolumeImpl::Instance().data_engine()),
+      dirty_(ino) {}
 
 // ────────────────────────────────────────────────────────────────
 // Write
 // ────────────────────────────────────────────────────────────────
 
-FileReadWriter::Status FileReadWriter::Write(const folly::IOBuf& buf,
-                                             off_t off) {
+utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
   SWORDFS_LOG_DEBUG << "FileReadWriter::Write: ino=" << ino_
                     << " size=" << buf.length() << " off=" << off;
   size_t remaining = buf.length();
@@ -108,25 +136,19 @@ FileReadWriter::Status FileReadWriter::Write(const folly::IOBuf& buf,
     metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(
         cur_off / static_cast<off_t>(chunk_size_));
 
-    // Find or create the dirty chunk covering |cur_off|.
-    chunk::Chunk* c = FindDirtyChunk(cur_off);
-    if (!c) {
-      auto [it, _] = dirty_chunks_.try_emplace(
-          idx, ino_, idx, chunk_size_, data_);
-      c = &it->second;
-    }
+    auto &c = *dirty_.Get(idx, cur_off, /*create_if_missing=*/true);
 
     size_t room = chunk_size_ - (cur_off % chunk_size_);
     size_t n = std::min(remaining, room);
     auto slice = folly::IOBuf::takeOwnership(
-        const_cast<uint8_t*>(buf.data()) + (cur_off - off),
+        const_cast<uint8_t *>(buf.data()) + (cur_off - off),
         n, static_cast<std::size_t>(n),
-        +[](void*, void*) {}, nullptr, true);
-    auto status = c->Write(cur_off, *slice);
+        +[](void *, void *) {}, nullptr, true);
+    auto status = c.Write(cur_off, *slice);
     if (!status.ok()) {
       SWORDFS_LOG_ERROR << "FileReadWriter::Write FAILED: ino=" << ino_
                         << " off=" << cur_off
-                        << " chunk=" << c->index() << " — "
+                        << " chunk=" << c.index() << " — "
                         << status.message();
       return status;
     }
@@ -140,9 +162,8 @@ FileReadWriter::Status FileReadWriter::Write(const folly::IOBuf& buf,
 // Read
 // ────────────────────────────────────────────────────────────────
 
-FileReadWriter::Status FileReadWriter::Read(size_t size, off_t off,
-                                            folly::IOBuf* out) {
-  auto* const write_start = out->writableData();
+utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
+  auto *const write_start = out->writableData();
 
   MultiChunkReadWriter multi;
   size_t remaining = size;
@@ -151,7 +172,9 @@ FileReadWriter::Status FileReadWriter::Read(size_t size, off_t off,
 
   while (remaining > 0) {
     // 1) Check dirty chunks (in-memory write buffer).
-    auto* c = FindDirtyChunk(cur_off);
+    metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(
+        cur_off / static_cast<off_t>(chunk_size_));
+    auto *c = dirty_.Get(idx, cur_off, /*create_if_missing=*/false);
     if (c) {
       off_t chunk_off = cur_off - c->StartOffset();
       size_t window_cap =
@@ -161,7 +184,7 @@ FileReadWriter::Status FileReadWriter::Read(size_t size, off_t off,
       auto window = folly::IOBuf::takeOwnership(
           write_start + static_cast<size_t>(cur_off - off),
           window_cap, static_cast<std::size_t>(0),
-          +[](void*, void*) {}, nullptr, true);
+          +[](void *, void *) {}, nullptr, true);
 
       multi.SubmitRead(c, chunk_off, window_cap, std::move(window));
       remaining -= window_cap;
@@ -171,29 +194,27 @@ FileReadWriter::Status FileReadWriter::Read(size_t size, off_t off,
 
     // 2) Try the metadata engine (flushed chunks).
     metadata::ChunkMeta cm;
-    if (meta_) {
-      auto status = meta_->FindChunk(ino_, cur_off, chunk_size_, &cm);
-      if (status.ok()) {
-        off_t chunk_end =
-            static_cast<off_t>(cm.start_offset + cm.size);
-        size_t window_cap =
-            std::min(remaining,
-                     static_cast<size_t>(chunk_end - cur_off));
+    auto status = meta_->FindChunk(ino_, cur_off, chunk_size_, &cm);
+    if (status.ok()) {
+      off_t chunk_end =
+          static_cast<off_t>(cm.start_offset + cm.size);
+      size_t window_cap =
+          std::min(remaining,
+                   static_cast<size_t>(chunk_end - cur_off));
 
-        std::string stored;
-        status = data_->Get(cm.key, &stored,
-                            static_cast<size_t>(cur_off - cm.start_offset),
-                            window_cap);
-        if (status.ok()) {
-          std::memcpy(write_start + static_cast<size_t>(cur_off - off),
-                      stored.data(), stored.size());
-          total += stored.size();
-          remaining -= stored.size();
-          cur_off += static_cast<off_t>(stored.size());
-          continue;
-        }
-        // Chunk registered but not found in storage — fall through to hole.
+      std::string stored;
+      status = data_->Get(cm.key, &stored,
+                          static_cast<size_t>(cur_off - cm.start_offset),
+                          window_cap);
+      if (status.ok()) {
+        std::memcpy(write_start + static_cast<size_t>(cur_off - off),
+                    stored.data(), stored.size());
+        total += stored.size();
+        remaining -= stored.size();
+        cur_off += static_cast<off_t>(stored.size());
+        continue;
       }
+      // Chunk registered but not found in storage — fall through to hole.
     }
 
     // 3) Hole — fill with zeros up to the next chunk boundary.
@@ -218,26 +239,24 @@ FileReadWriter::Status FileReadWriter::Read(size_t size, off_t off,
 // Flush
 // ────────────────────────────────────────────────────────────────
 
-FileReadWriter::Status FileReadWriter::Flush() {
+utils::Status FileReadWriter::Flush() {
   off_t file_end = 0;
-  for (auto& [idx, c] : dirty_chunks_) {
-    if (c.EndOffset() > file_end) file_end = c.EndOffset();
-    auto status = c.Flush();
-    if (!status.ok()) return status;
-
-    // Register non-empty chunks with the metadata engine.
-    if (meta_ && !c.empty()) {
-      metadata::ChunkMeta cm;
-      cm.start_offset = c.StartOffset();
-      cm.key = c.ChunkKey();
-      cm.size = c.size();
-      meta_->AddChunk(ino_, cm);
+  while (auto *c = dirty_.GetNextFlushable()) {
+    auto idx = c->index();
+    auto status = c->Flush();
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "FileReadWriter::Flush chunk FAILED: ino=" << ino_
+                        << " chunk=" << idx
+                        << " — " << status.message();
+      continue;  // keep the sealed chunk, try the next one
     }
+    meta_->AddChunk(ino_, c->BuildMeta());
+    if (c->EndOffset() > file_end) file_end = c->EndOffset();
+    dirty_.Remove(idx);
   }
-  dirty_chunks_.clear();
 
   // Update file size if the file grew.
-  if (file_end > 0 && meta_) {
+  if (file_end > 0) {
     struct stat attr;
     if (meta_->GetAttr(ino_, &attr).ok() &&
         file_end > attr.st_size) {

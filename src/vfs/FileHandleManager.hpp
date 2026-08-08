@@ -61,6 +61,12 @@ class FileHandleManager {
 
   uint64_t AllocFh();
 
+  /// Return the shared FileReadWriter for |ino|, creating it if
+  /// |create_if_missing| is true and none exists.  Returns nullptr
+  /// when create_if_missing is false and no writer exists.
+  std::shared_ptr<FileReadWriter> GetFileReadWriter(
+      metadata::InodeID ino, bool create_if_missing);
+
   mutable std::shared_mutex mutex_;
   uint64_t next_fh_{1};
   std::unique_ptr<FileMap> files_;
