@@ -262,4 +262,37 @@ bool MemMetaStore::IsDescendantOfImplLocked(InodeID current_ino,
   return false;
 }
 
+// ────────────────────────────────────────────────────────────────
+// Chunk metadata
+// ────────────────────────────────────────────────────────────────
+
+Status MemMetaStore::AddChunk(InodeID ino, const ChunkMeta& cm) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto& chunk_map = chunks_[ino];
+  if (chunk_map.count(cm.start_offset) > 0) {
+    return Status::AlreadyExists(
+        "chunk already exists at offset " + std::to_string(cm.start_offset));
+  }
+  chunk_map[cm.start_offset] = cm;
+  return Status::OK();
+}
+
+Status MemMetaStore::FindChunk(InodeID ino, off_t off, size_t chunk_size,
+                               ChunkMeta* cm) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto ino_it = chunks_.find(ino);
+  if (ino_it == chunks_.end()) {
+    return Status::NotFound("no chunks for inode " + std::to_string(ino));
+  }
+  off_t chunk_start = (off / static_cast<off_t>(chunk_size))
+                      * static_cast<off_t>(chunk_size);
+  auto chunk_it = ino_it->second.find(chunk_start);
+  if (chunk_it == ino_it->second.end()) {
+    return Status::NotFound(
+        "chunk not found at offset " + std::to_string(chunk_start));
+  }
+  if (cm) *cm = chunk_it->second;
+  return Status::OK();
+}
+
 }  // namespace swordfs::metadata

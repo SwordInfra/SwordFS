@@ -32,6 +32,7 @@ struct FileHandle {
 // Folly's F14FastMap into every translation unit that includes this header.
 struct FileMap;
 struct DirMap;
+struct InodeWriterMap;
 
 class FileHandleManager {
  public:
@@ -64,6 +65,7 @@ class FileHandleManager {
   uint64_t next_fh_{1};
   std::unique_ptr<FileMap> files_;
   std::unique_ptr<DirMap> dir_handles_;
+  std::unique_ptr<InodeWriterMap> inode_writers_;
 };
 
 }  // namespace swordfs::vfs

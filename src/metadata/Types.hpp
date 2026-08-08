@@ -20,6 +20,7 @@ namespace swordfs::metadata {
 struct SwordFsInode;
 
 using InodeID = uint64_t;
+using ChunkIndex = uint32_t;  // 0-based chunk number within a file
 
 struct SwordFsEntry {
   std::string name;
@@ -63,6 +64,13 @@ struct SwordFsInode {
     return (access_bits & static_cast<unsigned int>(mask)) ==
            static_cast<unsigned int>(mask);
   }
+};
+
+/// Metadata for one flushed chunk.
+struct ChunkMeta {
+  off_t start_offset;  // file offset where this chunk begins
+  std::string key;     // storage key (e.g. "42/0")
+  size_t size;         // data size in bytes
 };
 
 }  // namespace swordfs::metadata

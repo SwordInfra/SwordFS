@@ -24,7 +24,7 @@ namespace swordfs::chunk {
 
 /// Build the storage key for a chunk: "<inode>/<chunk_index>".
 inline std::string MakeChunkKey(metadata::InodeID ino,
-                                uint32_t chunk_index) {
+                                metadata::ChunkIndex chunk_index) {
   return std::to_string(ino) + "/" + std::to_string(chunk_index);
 }
 
@@ -36,8 +36,8 @@ class Chunk {
   };
 
   /// Create a chunk ready to accept writes.
-  Chunk(metadata::InodeID ino, uint32_t index, size_t max_chunk_size,
-        storage::IDataEngine *data)
+  Chunk(metadata::InodeID ino, metadata::ChunkIndex index,
+        size_t max_chunk_size, storage::IDataEngine *data)
       : ino_(ino), max_chunk_size_(max_chunk_size), wb_(max_chunk_size), index_(index), data_(data) {}
 
   // ──────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ class Chunk {
   // Accessors
   // ──────────────────────────────────────────────────────────────
 
-  uint32_t index() const { return index_; }
+  metadata::ChunkIndex index() const { return index_; }
   State state() const { return state_; }
   bool IsWriting() const { return state_ == State::kWriting; }
   bool IsSealed() const { return state_ == State::kSealed; }
@@ -94,7 +94,7 @@ class Chunk {
   State state_ = State::kWriting;
   metadata::InodeID ino_;
   size_t max_chunk_size_;
-  uint32_t index_;
+  metadata::ChunkIndex index_;
   storage::IDataEngine *data_;
 };
 
