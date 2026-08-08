@@ -3,7 +3,10 @@
 
 #include <folly/init/Init.h>
 
+#include <sys/resource.h>
+
 #include <CLI/CLI.hpp>
+#include <cstdlib>
 #include <iostream>
 
 #include "config/ConfigCenter.hpp"
@@ -11,7 +14,22 @@
 
 using namespace swordfs::utils;
 
+// ────────────────────────────────────────────────────────────────
+// Process-level setup driven by environment variables.
+// Add new env-var gated behaviors here.
+// ────────────────────────────────────────────────────────────────
+
+static void SetupProcessFromEnv() {
+  // SWORDFS_ENABLE_COREDUMP — allow core dumps for crash debugging.
+  if (std::getenv("SWORDFS_ENABLE_COREDUMP")) {
+    struct rlimit rl = {RLIM_INFINITY, RLIM_INFINITY};
+    setrlimit(RLIMIT_CORE, &rl);
+  }
+}
+
 int main(int argc, char* argv[]) {
+  SetupProcessFromEnv();
+
   // Initialize folly but skip gflags parsing.
   folly::Init folly_init(&argc, &argv, folly::InitOptions().useGFlags(false));
 

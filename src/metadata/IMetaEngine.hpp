@@ -105,6 +105,19 @@ class IMetaEngine {
   /// FUSE forget requests. The caller may free or reuse the inode's backend
   /// resources when the count reaches zero.
   virtual Status Forget(InodeID ino, uint64_t nlookup) = 0;
+
+  // ────────────────────────────────────────────────────────────────
+  // Chunk metadata
+  // ────────────────────────────────────────────────────────────────
+
+  /// Register a flushed chunk.  The metadata engine stores the chunk
+  /// key, size, and start offset so that subsequent reads can locate
+  /// the data via the data engine.
+  virtual Status AddChunk(InodeID ino, const ChunkMeta& cm) = 0;
+
+  /// Find the chunk covering |off|.  Returns true and fills |*cm| if
+  /// a matching chunk is registered for the given inode.
+  virtual Status FindChunk(InodeID ino, off_t off, size_t chunk_size, ChunkMeta* cm) = 0;
 };
 
 }  // namespace swordfs::metadata

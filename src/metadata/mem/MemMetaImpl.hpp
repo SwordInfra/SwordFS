@@ -46,6 +46,11 @@ class MemMetaImpl : public IMetaEngine {
   Status OpenDir(InodeID ino) override;
   Status Forget(InodeID ino, uint64_t nlookup) override;
 
+  // Chunk metadata
+  Status AddChunk(InodeID ino, const ChunkMeta& cm) override;
+  Status FindChunk(InodeID ino, off_t off, size_t chunk_size,
+                   ChunkMeta* cm) override;
+
   // Volume operations
   Status StatFs(struct statvfs *stbuf) override;
 

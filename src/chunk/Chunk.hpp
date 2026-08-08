@@ -22,34 +22,20 @@ class IDataEngine;
 
 namespace swordfs::chunk {
 
-/// Build the storage key for a chunk: "<inode>/<chunk_index>".
-inline std::string MakeChunkKey(metadata::InodeID ino,
-                                uint32_t chunk_index) {
-  return std::to_string(ino) + "/" + std::to_string(chunk_index);
-}
-
 class Chunk {
  public:
   enum class State : uint8_t {
     kWriting,  // accepting writes
-    kSealed,   // awaiting / undergoing upload
+    kSealed,   // no more writes, not yet in storage
+    kFlushed,  // data successfully persisted to storage
   };
 
   /// Create a chunk ready to accept writes.
-  Chunk(metadata::InodeID ino, uint32_t index, size_t max_chunk_size,
-        storage::IDataEngine *data)
-      : ino_(ino), max_chunk_size_(max_chunk_size), wb_(max_chunk_size), index_(index), data_(data) {}
-
-  // ──────────────────────────────────────────────────────────────
-  // Write path (only valid while kWriting)
-  // ──────────────────────────────────────────────────────────────
+  Chunk(metadata::InodeID ino, metadata::ChunkIndex index);
 
   /// Write |size| bytes from |data| at the given chunk-relative offset.
   /// Returns InvalidArgument if the write would exceed chunk bounds.
-  utils::Status Write(off_t write_offset, const folly::IOBuf& data);
-
-  /// Return all buffered data for upload.
-  std::string_view FlushData() const;
+  utils::Status Write(off_t write_offset, const folly::IOBuf &data);
 
   /// Seal the chunk — no more writes accepted.
   void Seal();
@@ -58,43 +44,43 @@ class Chunk {
   /// Returns OK if there is nothing to flush.
   utils::Status Flush();
 
-  // ──────────────────────────────────────────────────────────────
-  // Read-through support
-  // ──────────────────────────────────────────────────────────────
-
   /// Read up to |len| bytes starting at chunk-relative |off| into |out|.
   /// The number of bytes copied is available via out->length() increase.
   utils::Status Read(off_t off, size_t len, folly::IOBuf *out) const;
+
+  /// Build a ChunkMeta snapshot for metadata registration.
+  metadata::ChunkMeta BuildMeta() const;
+
+  bool IsFlushed() const { return state_ == State::kFlushed; }
+  bool Flushable() const { return state_ == State::kWriting && wb_.size() > 0; }
 
   // ──────────────────────────────────────────────────────────────
   // Accessors
   // ──────────────────────────────────────────────────────────────
 
-  uint32_t index() const { return index_; }
-  State state() const { return state_; }
-  bool IsWriting() const { return state_ == State::kWriting; }
-  bool IsSealed() const { return state_ == State::kSealed; }
-
-  metadata::InodeID ino() const { return ino_; }
-  size_t max_chunk_size() const { return max_chunk_size_; }
-  size_t size() const { return wb_.size(); }
-  bool empty() const { return size() == 0; }
+  metadata::ChunkIndex index() const { return index_; }
 
   /// File-offset range: [StartOffset(), EndOffset()).
   off_t StartOffset() const {
-    return static_cast<off_t>(index_) *
-           static_cast<off_t>(max_chunk_size());
+    return static_cast<off_t>(index_) * static_cast<off_t>(max_chunk_size_);
   }
-  off_t EndOffset() const { return StartOffset() + static_cast<off_t>(size()); }
-
-  std::string ChunkKey() const { return MakeChunkKey(ino_, index_); }
+  off_t EndOffset() const {
+    return StartOffset() + static_cast<off_t>(wb_.size());
+  }
 
  private:
-  WriteBuf wb_;
-  State state_ = State::kWriting;
+  bool IsWriting() const { return state_ == State::kWriting; }
+
+  std::string ChunkKey() const {
+    return std::to_string(ino_) + "/" + std::to_string(index_);
+  }
+
+ private:
   metadata::InodeID ino_;
   size_t max_chunk_size_;
-  uint32_t index_;
+  WriteBuf wb_;
+  State state_;
+  metadata::ChunkIndex index_;
   storage::IDataEngine *data_;
 };
 
