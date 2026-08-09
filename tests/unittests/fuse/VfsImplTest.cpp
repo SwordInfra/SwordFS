@@ -10,7 +10,6 @@
 #include <cstring>
 #include <memory>
 
-#include "chunk/ChunkManager.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "vfs/VfsImpl.hpp"
 #include "volume/VolumeImpl.hpp"
@@ -189,6 +188,12 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status Open(InodeID) override { return call_status_; }
   Status OpenDir(InodeID) override { return call_status_; }
   Status Forget(InodeID, uint64_t) override { return Status::OK(); }
+  Status AddChunk(InodeID, const swordfs::metadata::ChunkMeta&) override {
+    return Status::OK();
+  }
+  Status FindChunk(InodeID, off_t, size_t, swordfs::metadata::ChunkMeta*) override {
+    return Status::NotFound("");
+  }
 
   void set_status(Status s) { call_status_ = s; }
 
@@ -209,7 +214,6 @@ class VfsImplIntegrationTest : public ::testing::Test {
   void TearDown() override {
     // Reset singleton state for the next test.
     swordfs::volume::VolumeImpl::Initialize();
-    swordfs::chunk::ChunkManager::Instance().Initialize(nullptr, nullptr, 0);
   }
 
   MockMetaEngine* mock_meta_ = nullptr;

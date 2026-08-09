@@ -76,7 +76,12 @@ class MemMetaStore {
   // entire duration (public API convention).
   Status SwapEntries(InodeID parent_a_ino, std::string_view name_a,
                      InodeID parent_b_ino, std::string_view name_b);
+  // ────────────────────────────────────────────────────────────────
+  // Chunk metadata
+  // ────────────────────────────────────────────────────────────────
 
+  Status AddChunk(InodeID ino, const ChunkMeta& cm);
+  Status FindChunk(InodeID ino, off_t off, size_t chunk_size, ChunkMeta* cm);
  private:
   // ────────────────────────────────────────────────────────────────
   // Private helpers — caller MUST hold mutex_
@@ -96,6 +101,9 @@ class MemMetaStore {
   std::atomic<InodeID> next_ino_;
   folly::F14FastMap<InodeID, SwordFsInode*> inodes_;
   folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode*>> dirs_;
+
+  // Chunk metadata: inode → (start_offset → ChunkMeta).
+  folly::F14FastMap<InodeID, folly::F14FastMap<off_t, ChunkMeta>> chunks_;
 };
 
 }  // namespace swordfs::metadata

@@ -3,17 +3,26 @@
 
 #include "chunk/Chunk.hpp"
 
+#include <folly/io/IOBuf.h>
+#include <folly/logging/xlog.h>
+
 #include <cstring>
 
-#include <folly/io/IOBuf.h>
-
 #include "storage/IDataEngine.hpp"
-#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
+#include "volume/VolumeImpl.hpp"
 
 namespace swordfs::chunk {
 
-utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf& data) {
+Chunk::Chunk(metadata::InodeID ino, metadata::ChunkIndex index)
+    : ino_(ino),
+      max_chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
+      wb_(volume::VolumeImpl::Instance().chunk_size()),
+      state_(State::kWriting),
+      index_(index),
+      data_(volume::VolumeImpl::Instance().data_engine()) {}
+
+utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf &data) {
   auto status = wb_.Write(write_offset - StartOffset(), data);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Chunk::Write FAILED: ino=" << ino_
@@ -23,16 +32,12 @@ utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf& data) {
   return status;
 }
 
-std::string_view Chunk::FlushData() const { return wb_.FlushData(); }
-
 utils::Status Chunk::Read(off_t off, size_t len, folly::IOBuf *out) const {
-  if (IsSealed()) {
-    std::string data;
-    auto status = data_->Get(ChunkKey(), &data, off, len);
-    if (!status.ok()) return status;
-    std::memcpy(out->writableData(), data.data(), data.size());
-    out->append(data.size());
-    return utils::Status::OK();
+  if (out->tailroom() < len) {
+    return utils::Status::InvalidArgument("Chunk::Read: output buffer too small");
+  }
+  if (IsFlushed()) {
+    return data_->Get(ChunkKey(), off, len, out);
   }
   return wb_.CopyOut(off, len, out);
 }
@@ -42,26 +47,36 @@ void Chunk::Seal() {
 }
 
 utils::Status Chunk::Flush() {
-  if (IsSealed() || empty()) {
+  if (IsFlushed() || wb_.size() == 0) {
     return utils::Status::OK();
   }
 
-  std::string_view data = wb_.FlushData();
-  std::string payload(data);
-  auto status = data_->Put(ChunkKey(), payload);
+  // Not yet sealed → seal now (write-then-flush without GetNextFlushable).
+  if (IsWriting()) Seal();
+
+  auto data = wb_.CloneBuf();
+  auto status = data_->Put(ChunkKey(), std::move(data));
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: ino=" << ino_
                       << " chunk=" << index_
-                      << " size=" << data.size()
+                      << " size=" << wb_.size()
                       << " — " << status.message();
-    return status;  // Not sealed — WriteBuf data preserved, chunk still kWriting.
+    return status;  // WriteBuf data preserved, chunk now sealed.
   }
 
-  Seal();
+  state_ = State::kFlushed;
   SWORDFS_LOG_INFO << "Flush uploaded: ino=" << ino_
                    << " chunk=" << index_
-                   << " size=" << data.size();
+                   << " size=" << wb_.size();
   return utils::Status::OK();
+}
+
+metadata::ChunkMeta Chunk::BuildMeta() const {
+  metadata::ChunkMeta cm;
+  cm.start_offset = StartOffset();
+  cm.key = ChunkKey();
+  cm.size = wb_.size();
+  return cm;
 }
 
 }  // namespace swordfs::chunk

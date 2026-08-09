@@ -16,7 +16,7 @@ using swordfs::utils::Status;
 
 static std::string Repeat(char c, size_t n) { return std::string(n, c); }
 
-static auto Buf(const std::string& s) {
+static auto Buf(const std::string &s) {
   return *folly::IOBuf::copyBuffer(s.data(), s.size());
 }
 
@@ -93,28 +93,36 @@ TEST(WriteBufTest, SizeAtThreshold) {
 // FlushData
 // ================================================================
 
-TEST(WriteBufTest, FlushDataReturnsAllBelowThreshold) {
+TEST(WriteBufTest, CloneBufReturnsAllBelowThreshold) {
   WriteBuf wb(kChunkSize);
   std::string payload = Repeat('Y', kChunkSize / 2);
   wb.Write(0, Buf(payload));
 
-  std::string_view data = wb.FlushData();
-  EXPECT_EQ(data.size(), payload.size());
-  EXPECT_EQ(data, payload);
+  auto data = wb.CloneBuf();
+  ASSERT_NE(data, nullptr);
+  EXPECT_EQ(data->length(), payload.size());
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(data->data()),
+                             data->length()),
+            payload);
 }
 
-TEST(WriteBufTest, FlushDataReturnsFullChunk) {
+TEST(WriteBufTest, CloneBufReturnsFullChunk) {
   WriteBuf wb(kChunkSize);
   wb.Write(0, Buf(Repeat('Z', kChunkSize)));
 
-  std::string_view data = wb.FlushData();
-  EXPECT_EQ(data.size(), kChunkSize);
-  EXPECT_EQ(data, Repeat('Z', kChunkSize));
+  auto data = wb.CloneBuf();
+  ASSERT_NE(data, nullptr);
+  EXPECT_EQ(data->length(), kChunkSize);
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(data->data()),
+                             data->length()),
+            Repeat('Z', kChunkSize));
 }
 
-TEST(WriteBufTest, FlushDataEmpty) {
+TEST(WriteBufTest, CloneBufEmpty) {
   WriteBuf wb(kChunkSize);
-  EXPECT_TRUE(wb.FlushData().empty());
+  auto data = wb.CloneBuf();
+  ASSERT_NE(data, nullptr);
+  EXPECT_EQ(data->length(), 0);
 }
 
 // ================================================================
@@ -276,9 +284,11 @@ TEST(WriteBufTest, ZeroSizeWrite) {
   EXPECT_EQ(wb.size(), 0);
 }
 
-TEST(WriteBufTest, EmptyBufferFlushData) {
+TEST(WriteBufTest, EmptyBufferCloneBuf) {
   WriteBuf wb(kChunkSize);
-  EXPECT_TRUE(wb.FlushData().empty());
+  auto data = wb.CloneBuf();
+  ASSERT_NE(data, nullptr);
+  EXPECT_EQ(data->length(), 0);
 }
 
 TEST(WriteBufTest, WritePastCapacityReturnsError) {
