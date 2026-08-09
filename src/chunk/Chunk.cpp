@@ -33,13 +33,11 @@ utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf &data) {
 }
 
 utils::Status Chunk::Read(off_t off, size_t len, folly::IOBuf *out) const {
+  if (out->tailroom() < len) {
+    return utils::Status::InvalidArgument("Chunk::Read: output buffer too small");
+  }
   if (IsFlushed()) {
-    std::string data;
-    auto status = data_->Get(ChunkKey(), &data, off, len);
-    if (!status.ok()) return status;
-    std::memcpy(out->writableData(), data.data(), data.size());
-    out->append(data.size());
-    return utils::Status::OK();
+    return data_->Get(ChunkKey(), off, len, out);
   }
   return wb_.CopyOut(off, len, out);
 }
@@ -56,13 +54,12 @@ utils::Status Chunk::Flush() {
   // Not yet sealed → seal now (write-then-flush without GetNextFlushable).
   if (IsWriting()) Seal();
 
-  std::string_view data = wb_.FlushData();
-  std::string payload(data);
-  auto status = data_->Put(ChunkKey(), payload);
+  auto data = wb_.CloneBuf();
+  auto status = data_->Put(ChunkKey(), std::move(data));
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: ino=" << ino_
                       << " chunk=" << index_
-                      << " size=" << data.size()
+                      << " size=" << wb_.size()
                       << " — " << status.message();
     return status;  // WriteBuf data preserved, chunk now sealed.
   }
@@ -70,7 +67,7 @@ utils::Status Chunk::Flush() {
   state_ = State::kFlushed;
   SWORDFS_LOG_INFO << "Flush uploaded: ino=" << ino_
                    << " chunk=" << index_
-                   << " size=" << data.size();
+                   << " size=" << wb_.size();
   return utils::Status::OK();
 }
 

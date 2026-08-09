@@ -4,19 +4,20 @@
 #include "storage/s3/S3DataEngine.hpp"
 
 #include <aws/core/Aws.h>
+#include <aws/core/utils/stream/PreallocatedStreamBuf.h>
 #include <aws/s3/S3Client.h>
 #include <aws/s3/S3ClientConfiguration.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
 #include <aws/s3/model/GetObjectRequest.h>
 #include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/PutObjectRequest.h>
-
 #include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/io/IOBuf.h>
+#include <folly/logging/xlog.h>
 
 #include "config/ConfigCenter.hpp"
 #include "storage/StorageRegistry.hpp"
 #include "utils/FiberThreadPool.hpp"
-#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
 
 namespace swordfs::storage {
@@ -54,6 +55,46 @@ void EnsureAwsSdkInit() {
   } guard;
   (void)guard;
 }
+
+// ────────────────────────────────────────────────────────────────
+// Zero-copy stream helpers for AWS SDK I/O.
+//
+// Goal: eliminate intermediate std::string / memcpy when moving
+// data between folly::IOBuf and the AWS SDK's HTTP layer.
+//
+//   • Put:  SDK reads  from our IOBuf → use PreallocatedStreamBuf
+//           (already provided by AWS SDK).
+//   • Get:  SDK writes into our IOBuf → use PreallocatedOutputStreamBuf
+//           + SetResponseStreamFactory to redirect the response body.
+// ────────────────────────────────────────────────────────────────
+
+/// A std::streambuf that writes into a caller-provided buffer.
+/// Unlike PreallocatedStreamBuf (read-only), this exposes the put
+/// area so the SDK's ostream layer writes directly into the target.
+class PreallocatedOutputStreamBuf : public std::streambuf {
+ public:
+  PreallocatedOutputStreamBuf(char* buffer, size_t capacity) {
+    setp(buffer, buffer + capacity);
+  }
+  /// Number of bytes actually written into the buffer.
+  size_t Written() const { return static_cast<size_t>(pptr() - pbase()); }
+};
+
+/// A self-contained Aws::IOStream that owns a PreallocatedOutputStreamBuf.
+/// Instances are created by the response-stream factory and destroyed by
+/// the SDK via Aws::Delete, which correctly tears down both the stream
+/// and its streambuf.
+class PreallocatedResponseStream : public Aws::IOStream {
+ public:
+  PreallocatedResponseStream(char* buffer, size_t capacity)
+      : Aws::IOStream(&buf_), buf_(buffer, capacity) {}
+
+  size_t Written() const { return buf_.Written(); }
+
+ private:
+  PreallocatedOutputStreamBuf buf_;
+};
+
 }  // namespace
 
 S3DataEngine::S3DataEngine(const S3Config &config)
@@ -67,7 +108,7 @@ S3DataEngine::S3DataEngine(const S3Config &config)
   // for MinIO and other S3-compatible stores.  Set
   // SWORDFS_S3_VIRTUAL_HOSTED=1 to switch to virtual-hosted style
   // (http://<bucket>.<host>/<key>) for real AWS S3.
-  const char* vh = std::getenv("SWORDFS_S3_VIRTUAL_HOSTED");
+  const char *vh = std::getenv("SWORDFS_S3_VIRTUAL_HOSTED");
   aws_cfg.useVirtualAddressing = (vh && vh[0] == '1');
   // Only override region if explicitly provided; otherwise let the SDK
   // resolve it via the default chain (AWS_DEFAULT_REGION env var,
@@ -100,30 +141,32 @@ bool S3DataEngine::Head(std::string_view key, size_t *size) {
   });
 }
 
-Status S3DataEngine::Put(std::string_view key, std::string_view data) {
-  SWORDFS_LOG_DEBUG << "S3 Put: key=" << key << " size=" << data.size();
+Status S3DataEngine::Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) {
   try {
-    return pool_->Run([this, key, data] {
+    return pool_->Run([this, key, d = std::move(data)] {
       Aws::S3::Model::PutObjectRequest req;
       req.SetBucket(cfg_.bucket);
       req.SetKey(ObjectKey(key));
 
-      auto body = Aws::MakeShared<Aws::StringStream>(
-          "PutObject", std::string(data.data(), data.size()));
+      // Wrap the IOBuf's existing memory instead of copying into a
+      // temporary std::string.  The IOBuf is moved into the lambda so
+      // the buffer outlives the stream.
+      auto stream_buf = Aws::New<Aws::Utils::Stream::PreallocatedStreamBuf>(
+          "PutObject",
+          const_cast<unsigned char *>(d->data()),
+          d->length());
+      auto body = std::make_shared<std::iostream>(stream_buf);
       req.SetBody(body);
 
-      SWORDFS_LOG_DEBUG << "S3 PutObject sending: bucket=" << cfg_.bucket
-                        << " key=" << ObjectKey(key);
       auto outcome = client_->PutObject(req);
       if (!outcome.IsSuccess()) {
         SWORDFS_LOG_ERROR << "S3 PutObject failed: "
                           << outcome.GetError().GetMessage();
         return Status::Internal("S3 PutObject failed");
       }
-      SWORDFS_LOG_DEBUG << "S3 PutObject OK";
       return Status::OK();
     });
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     SWORDFS_LOG_ERROR << "S3 Put EXCEPTION: " << e.what();
     return Status::Internal(std::string("S3 Put crashed: ") + e.what());
   } catch (...) {
@@ -132,13 +175,10 @@ Status S3DataEngine::Put(std::string_view key, std::string_view data) {
   }
 }
 
-Status S3DataEngine::Get(std::string_view key, std::string *out,
-                         size_t offset, size_t size) {
-  SWORDFS_LOG_DEBUG << "S3 Get: key=" << key << " off=" << offset
-                    << " size=" << size;
+Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size,
+                         folly::IOBuf *out) {
   try {
-    return pool_->Run(
-        [this, key, out, offset, size] {
+    return pool_->Run([this, key, out, offset, size] {
       Aws::S3::Model::GetObjectRequest req;
       req.SetBucket(cfg_.bucket);
       req.SetKey(ObjectKey(key));
@@ -148,6 +188,19 @@ Status S3DataEngine::Get(std::string_view key, std::string *out,
         if (size > 0) range += std::to_string(offset + size - 1);
         req.SetRange(range);
       }
+
+      // ── Zero-copy response stream ───────────────────────────
+      // Redirect the HTTP response body directly into |out| by
+      // providing a stream factory that wraps out->writableData().
+      // The SDK calls the factory lazily when the response arrives
+      // and writes the body into our buffer with no intermediate
+      // std::string or memcpy.
+      req.SetResponseStreamFactory([out]() -> Aws::IOStream* {
+        return Aws::New<PreallocatedResponseStream>(
+            "GetObject",
+            reinterpret_cast<char*>(out->writableData()),
+            out->tailroom());
+      });
 
       auto outcome = client_->GetObject(req);
       if (!outcome.IsSuccess()) {
@@ -162,13 +215,19 @@ Status S3DataEngine::Get(std::string_view key, std::string *out,
         return Status::Internal("S3 GetObject failed");
       }
 
-      auto &stream = outcome.GetResult().GetBody();
-      std::string result((std::istreambuf_iterator<char>(stream)),
-                         std::istreambuf_iterator<char>());
-      *out = std::move(result);
+      // The SDK has already written the body into our buffer.
+      auto content_length = static_cast<size_t>(
+          outcome.GetResult().GetContentLength());
+      if (out->tailroom() < content_length) {
+        SWORDFS_LOG_ERROR << "S3 GetObject: output buffer too small"
+                          << " (need=" << content_length
+                          << " tailroom=" << out->tailroom() << ")";
+        return Status::InvalidArgument("Get: output buffer too small");
+      }
+      out->append(content_length);
       return Status::OK();
     });
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     SWORDFS_LOG_ERROR << "S3 Get EXCEPTION: " << e.what();
     return Status::Internal(std::string("S3 Get crashed: ") + e.what());
   } catch (...) {

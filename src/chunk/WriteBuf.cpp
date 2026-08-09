@@ -44,9 +44,10 @@ utils::Status WriteBuf::Write(off_t write_offset, const folly::IOBuf& data) {
   return utils::Status::OK();
 }
 
-std::string_view WriteBuf::FlushData() const {
-  if (!buf_ || buf_->length() == 0) return {};
-  return {reinterpret_cast<const char*>(buf_->data()), buf_->length()};
+std::unique_ptr<folly::IOBuf> WriteBuf::CloneBuf() const {
+  // IOBuf::clone() is a shallow copy — shares the same underlying
+  // buffer, only bumps the reference count.  No data copy.
+  return buf_ ? buf_->clone() : nullptr;
 }
 
 utils::Status WriteBuf::CopyOut(off_t off, size_t len, folly::IOBuf* out) const {

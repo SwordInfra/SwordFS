@@ -80,7 +80,7 @@ class MultiChunkReadWriter {
 // ────────────────────────────────────────────────────────────────
 
 chunk::Chunk *DirtyChunkHandler::Get(metadata::ChunkIndex idx, off_t off,
-                                   bool create_if_missing) {
+                                     bool create_if_missing) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = chunks_.find(idx);
   if (it != chunks_.end() && off < it->second.EndOffset()) {
@@ -202,16 +202,17 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
           std::min(remaining,
                    static_cast<size_t>(chunk_end - cur_off));
 
-      std::string stored;
-      status = data_->Get(cm.key, &stored,
+      auto window = folly::IOBuf::takeOwnership(
+          write_start + static_cast<size_t>(cur_off - off),
+          window_cap, static_cast<std::size_t>(0),
+          +[](void *, void *) {}, nullptr, true);
+      status = data_->Get(cm.key,
                           static_cast<size_t>(cur_off - cm.start_offset),
-                          window_cap);
+                          window_cap, window.get());
       if (status.ok()) {
-        std::memcpy(write_start + static_cast<size_t>(cur_off - off),
-                    stored.data(), stored.size());
-        total += stored.size();
-        remaining -= stored.size();
-        cur_off += static_cast<off_t>(stored.size());
+        total += window->length();
+        remaining -= window->length();
+        cur_off += static_cast<off_t>(window->length());
         continue;
       }
       // Chunk registered but not found in storage — fall through to hole.
