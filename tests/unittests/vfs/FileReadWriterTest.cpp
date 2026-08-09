@@ -76,23 +76,23 @@ class MockDataEngine : public IDataEngine {
     return true;
   }
 
-  Status Put(std::string_view key, std::string_view data) override {
-    store_[std::string(key)] = std::string(data);
+  Status Put(std::string_view key,
+             std::unique_ptr<folly::IOBuf> data) override {
+    store_[std::string(key)] = std::string(
+        reinterpret_cast<const char *>(data->data()), data->length());
     return Status::OK();
   }
 
-  Status Get(std::string_view key, std::string *out,
-             size_t offset = 0, size_t size = 0) override {
+  Status Get(std::string_view key, size_t offset, size_t size,
+             folly::IOBuf *out) override {
     auto it = store_.find(std::string(key));
     if (it == store_.end()) return Status::NotFound("chunk not found");
     const std::string &chunk = it->second;
-    if (offset >= chunk.size()) {
-      *out = "";
-      return Status::OK();
-    }
+    if (offset >= chunk.size()) return Status::OK();
     size_t len = (size == 0) ? chunk.size() - offset
                              : std::min(size, chunk.size() - offset);
-    *out = chunk.substr(offset, len);
+    std::memcpy(out->writableTail(), chunk.data() + offset, len);
+    out->append(len);
     return Status::OK();
   }
 

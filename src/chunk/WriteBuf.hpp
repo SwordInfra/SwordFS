@@ -39,8 +39,10 @@ class WriteBuf {
   /// Write the contents of |data| at the given buffer-relative |offset|.
   utils::Status Write(off_t offset, const folly::IOBuf& data);
 
-  /// Return all buffered data for upload.
-  std::string_view FlushData() const;
+  /// Clone the underlying IOBuf.  Shares the buffer (refcount bump),
+  /// does NOT copy data.  The original buffer remains valid in the
+  /// WriteBuf so a failed upload can be retried.
+  std::unique_ptr<folly::IOBuf> CloneBuf() const;
 
   /// Copy up to |len| bytes starting at chunk-relative |off| into |out|.
   /// The number of bytes copied is available via out->length() increase.
