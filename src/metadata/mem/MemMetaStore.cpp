@@ -125,6 +125,22 @@ Status MemMetaStore::RemoveEntry(InodeID parent_ino, std::string_view name) {
   return Status::OK();
 }
 
+Status MemMetaStore::LinkExistingEntry(InodeID parent_ino,
+                                       std::string_view name,
+                                       SwordFsInode* inode) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  SwordFsInode* parent = FindInodeLocked(parent_ino);
+  if (!parent) return Status::NotFound("parent directory not found");
+  if (!parent->IsDir()) return Status::NotDirectory("parent is not a directory");
+  if (FindEntryLocked(parent_ino, name) != nullptr)
+    return Status::AlreadyExists("entry already exists");
+
+  inode->attr.st_nlink++;
+  LinkEntryLocked(parent_ino, name, inode);
+  return Status::OK();
+}
+
 Status MemMetaStore::ListEntries(
     InodeID ino,
     std::vector<std::pair<std::string, SwordFsInode*>>* entries) {

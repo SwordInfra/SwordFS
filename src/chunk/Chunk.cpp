@@ -23,6 +23,9 @@ Chunk::Chunk(metadata::InodeID ino, metadata::ChunkIndex index)
       data_(volume::VolumeImpl::Instance().data_engine()) {}
 
 utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf &data) {
+  if (!IsWriting()) {
+    return utils::Status::InvalidArgument("Chunk::Write: chunk is sealed or flushed");
+  }
   auto status = wb_.Write(write_offset - StartOffset(), data);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Chunk::Write FAILED: ino=" << ino_

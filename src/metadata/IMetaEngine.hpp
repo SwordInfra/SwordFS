@@ -93,6 +93,18 @@ class IMetaEngine {
   /// Check access permissions.
   virtual Status Access(InodeID ino, int mask) = 0;
 
+  /// Create a symbolic link.
+  virtual Status Symlink(InodeID parent_ino,
+                        std::string_view name, const char* link,
+                        InodeID* child_ino, struct stat* attr) = 0;
+
+  /// Create a hard link to an existing inode.
+  virtual Status Link(InodeID ino, InodeID newparent_ino,
+                     std::string_view newname, struct stat* attr) = 0;
+
+  /// Read the target of a symbolic link.
+  virtual Status Readlink(InodeID ino, std::string* target) = 0;
+
   /// Open a regular file. Performs permission check and updates atime.
   /// Handle allocation is now managed by FileHandleManager.
   virtual Status Open(InodeID ino) = 0;

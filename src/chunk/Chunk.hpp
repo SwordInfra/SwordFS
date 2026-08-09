@@ -18,16 +18,16 @@ namespace swordfs {
 namespace storage {
 class IDataEngine;
 }
-}  // namespace swordfs
+} // namespace swordfs
 
 namespace swordfs::chunk {
 
 class Chunk {
- public:
+public:
   enum class State : uint8_t {
-    kWriting,  // accepting writes
-    kSealed,   // no more writes, not yet in storage
-    kFlushed,  // data successfully persisted to storage
+    kWriting, // accepting writes
+    kSealed,  // no more writes, not yet in storage
+    kFlushed, // data successfully persisted to storage
   };
 
   /// Create a chunk ready to accept writes.
@@ -68,14 +68,14 @@ class Chunk {
     return StartOffset() + static_cast<off_t>(wb_.size());
   }
 
- private:
+private:
   bool IsWriting() const { return state_ == State::kWriting; }
 
   std::string ChunkKey() const {
     return std::to_string(ino_) + "/" + std::to_string(index_);
   }
 
- private:
+private:
   metadata::InodeID ino_;
   size_t max_chunk_size_;
   WriteBuf wb_;
@@ -84,4 +84,4 @@ class Chunk {
   storage::IDataEngine *data_;
 };
 
-}  // namespace swordfs::chunk
+} // namespace swordfs::chunk

@@ -125,8 +125,13 @@ void VfsHookFactory::SwordFsSetattr(fuse_req_t req, fuse_ino_t ino,
 void VfsHookFactory::SwordFsReadlink(fuse_req_t req, fuse_ino_t ino) {
   ::swordfs::utils::RunInFiber([req, ino] {
     SetRequestContext(req);
-    auto status = VfsImpl::Readlink(ino);
-    fuse_reply_err(req, status.ToErrno());
+    std::string target;
+    auto status = VfsImpl::Readlink(ino, &target);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    fuse_reply_readlink(req, target.c_str());
   });
 }
 
@@ -182,8 +187,14 @@ void VfsHookFactory::SwordFsSymlink(fuse_req_t req, const char *link,
       [req, link = std::string(link), parent,
        name = std::string(name)] {
         SetRequestContext(req);
-        auto status = VfsImpl::Symlink(link.c_str(), parent, name.c_str());
-        fuse_reply_err(req, status.ToErrno());
+        fuse_entry_param entry{};
+        auto status = VfsImpl::Symlink(link.c_str(), parent,
+                                       name.c_str(), &entry);
+        if (!status.ok()) {
+          fuse_reply_err(req, status.ToErrno());
+          return;
+        }
+        fuse_reply_entry(req, &entry);
       });
 }
 
@@ -205,8 +216,14 @@ void VfsHookFactory::SwordFsLink(fuse_req_t req, fuse_ino_t ino,
   ::swordfs::utils::RunInFiber(
       [req, ino, newparent, newname = std::string(newname)] {
         SetRequestContext(req);
-        auto status = VfsImpl::Link(ino, newparent, newname.c_str());
-        fuse_reply_err(req, status.ToErrno());
+        fuse_entry_param entry{};
+        auto status = VfsImpl::Link(ino, newparent, newname.c_str(),
+                                    &entry);
+        if (!status.ok()) {
+          fuse_reply_err(req, status.ToErrno());
+          return;
+        }
+        fuse_reply_entry(req, &entry);
       });
 }
 

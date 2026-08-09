@@ -38,6 +38,7 @@ struct SwordFsInode {
   InodeID ino;
   struct stat attr;
   uint64_t nlookup = 0;  // reserved for future forget support
+  std::string symlink_target;  // non-empty only for S_IFLNK
 
   void Touch(uint8_t fields) {
     time_t now = ::time(nullptr);

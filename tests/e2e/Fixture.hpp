@@ -45,6 +45,9 @@ class Fixture {
   /// Returns 0 on success, or -1 on failure (errno is set).
   int Stat(const std::string &relpath, struct stat* st) const;
 
+  /// lstat() — same as stat() but does not follow symlinks.
+  int Lstat(const std::string &relpath, struct stat* st) const;
+
   /// statvfs() on the mountpoint.  Returns 0 on success, or -1.
   int Statfs(struct statvfs* sv) const;
 
@@ -81,6 +84,15 @@ class Fixture {
 
   /// Rename (move) a file or directory.  Returns 0 on success, or -1.
   int Rename(const std::string &oldpath, const std::string &newpath);
+
+  /// Create a symbolic link. Returns 0 on success, or -1.
+  int Symlink(const std::string &target, const std::string &linkpath);
+
+  /// Create a hard link. Returns 0 on success, or -1.
+  int HardLink(const std::string &oldpath, const std::string &newpath);
+
+  /// Read a symbolic link target. Returns 0 on success, or -1.
+  int Readlink(const std::string &relpath, std::string *target);
 
   /// Change file mode.  Returns 0 on success, or -1.
   int Chmod(const std::string &relpath, mode_t mode);

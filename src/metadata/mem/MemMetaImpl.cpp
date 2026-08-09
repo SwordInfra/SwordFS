@@ -41,8 +41,12 @@ MemMetaImpl::~MemMetaImpl() {
 }
 
 void MemMetaImpl::KillSUID(struct stat *st) {
-  if (st->st_mode & S_ISUID) st->st_mode &= ~S_ISUID;
-  if (st->st_mode & S_ISGID) st->st_mode &= ~S_ISGID;
+  if (st->st_mode & S_ISUID) {
+    st->st_mode &= ~S_ISUID;
+  }
+  if (st->st_mode & S_ISGID) {
+    st->st_mode &= ~S_ISGID;
+  }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -67,8 +71,12 @@ Status MemMetaImpl::Lookup(InodeID parent_ino,
   // referencing this inode.
   inode->nlookup++;
 
-  if (child_ino) *child_ino = inode->ino;
-  if (attr) *attr = inode->attr;
+  if (child_ino) {
+    *child_ino = inode->ino;
+  }
+  if (attr) {
+    *attr = inode->attr;
+  }
 
   return Status::OK();
 }
@@ -137,13 +145,19 @@ Status MemMetaImpl::Create(InodeID parent_ino,
 
   SwordFsInode *child = nullptr;
   status = store_.AddEntry(parent_ino, name, file_mode, 1, &child);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
 
   // Parent directory mtime/ctime must be updated after a child is created.
   parent->Touch(kMtime | kCtime);
 
-  if (child_ino) *child_ino = child->ino;
-  if (attr) *attr = child->attr;
+  if (child_ino) {
+    *child_ino = child->ino;
+  }
+  if (attr) {
+    *attr = child->attr;
+  }
 
   SWORDFS_LOG_DEBUG << "Create: parent=" << parent_ino << " name='" << name
                     << "' -> ino=" << child->ino;
@@ -173,7 +187,9 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
 
   SwordFsInode *child = nullptr;
   Status status = store_.AddEntry(parent_ino, name, dir_mode, 1, &child);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
 
   // Increment parent nlink: the new subdirectory's ".." points back to the
   // parent, creating an additional hard link.
@@ -183,8 +199,12 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
 
   parent->Touch(kMtime | kCtime);
 
-  if (child_ino) *child_ino = child->ino;
-  if (attr) *attr = child->attr;
+  if (child_ino) {
+    *child_ino = child->ino;
+  }
+  if (attr) {
+    *attr = child->attr;
+  }
 
   SWORDFS_LOG_DEBUG << "MkDir: parent=" << parent_ino << " name='" << name
                     << "' -> ino=" << child->ino;
@@ -223,12 +243,15 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
   std::string key(name);
 
   // Refuse to unlink "." or ".."
-  if (key == "." || key == "..")
+  if (key == "." || key == "..") {
     return Status::InvalidArgument("cannot unlink . or ..");
+  }
 
   SwordFsInode *target = nullptr;
   Status status = store_.LookupEntry(parent_ino, name, &target);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
 
   if (S_ISDIR(target->attr.st_mode)) {
     return Status::InvalidArgument("cannot unlink directory");
@@ -236,7 +259,9 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
 
   store_.RemoveEntry(parent_ino, name);
 
-  if (parent) parent->Touch(kMtime | kCtime);
+  if (parent) {
+    parent->Touch(kMtime | kCtime);
+  }
 
   SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name
                     << "' ino=" << target->ino;
@@ -260,23 +285,29 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
   std::string key(name);
 
   // Cannot remove "." or ".."
-  if (key == "." || key == "..")
+  if (key == "." || key == "..") {
     return Status::InvalidArgument("cannot remove . or ..");
+  }
 
   // Cannot remove the root directory by name
-  if (parent_ino == FUSE_ROOT_ID && key == ".")
+  if (parent_ino == FUSE_ROOT_ID && key == ".") {
     return Status::Busy("root directory is busy");
+  }
 
   SwordFsInode *target = nullptr;
   Status status = store_.LookupEntry(parent_ino, name, &target);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
 
   if (!S_ISDIR(target->attr.st_mode)) {
     return Status::NotDirectory("not a directory");
   }
 
   status = store_.RemoveEntry(parent_ino, name);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
 
   // Decrement parent nlink: the removed subdirectory's ".." no longer points
   // back, so parent loses a hard link.
@@ -372,7 +403,9 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
 
     Status status = store_.SwapEntries(old_parent_ino, old_name,
                                        new_parent_ino, new_name);
-    if (!status.ok()) return status;
+    if (!status.ok()) {
+      return status;
+    }
 
     // Adjust parent nlinks for cross-directory directory exchange.
     if (is_dir && old_parent_ino != new_parent_ino) {
@@ -389,8 +422,12 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
     // Update timestamps.
     moved->Touch(kCtime);
     existing->Touch(kCtime);
-    if (op) op->Touch(kMtime | kCtime);
-    if (np) np->Touch(kMtime | kCtime);
+    if (op) {
+      op->Touch(kMtime | kCtime);
+    }
+    if (np) {
+      np->Touch(kMtime | kCtime);
+    }
     if (old_parent_ino != new_parent_ino && np != op) {
       // If new parent is different, and also different from old parent,
       // both parents' timestamps have already been touched above.
@@ -404,36 +441,58 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
 
   // Handle overwrite of an existing target (normal rename)
   if (target_exists) {
+    // Rename to self is a no-op.
+    if (existing == moved) {
+      return Status::OK();
+    }
+
     bool existing_is_dir = S_ISDIR(existing->attr.st_mode);
 
     // Cannot replace a directory with a file or vice versa
     if (existing_is_dir != is_dir) {
-      return Status::InvalidArgument(
-          "cannot replace directory with non-directory");
+      if (existing_is_dir) {
+        return Status::IsDirectory("target is a directory");
+      } else {
+        return Status::NotDirectory("target is not a directory");
+      }
     }
 
     Status status = store_.RemoveEntry(new_parent_ino, new_name);
-    if (!status.ok()) return status;
+    if (!status.ok()) {
+      return status;
+    }
 
     if (existing_is_dir) {
       // Replacing an empty directory: decrement new_parent nlink
-      if (np) np->attr.st_nlink--;
+      if (np) {
+        np->attr.st_nlink--;
+      }
     }
   }
 
   status = store_.MoveEntry(old_parent_ino, old_name, new_parent_ino, new_name);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
 
   // Cross-directory move of a directory: adjust parent nlinks
   if (is_dir && old_parent_ino != new_parent_ino) {
-    if (op) op->attr.st_nlink--;
-    if (np) np->attr.st_nlink++;
+    if (op) {
+      op->attr.st_nlink--;
+    }
+    if (np) {
+      np->attr.st_nlink++;
+    }
   }
 
   // ctime of the moved inode is updated on rename
   moved->Touch(kCtime);
-  if (op) op->Touch(kMtime | kCtime);
-  if (np) np->Touch(kMtime | kCtime);
+  if (op) {
+    op->Touch(kMtime | kCtime);
+  }
+  if (np) {
+    np->Touch(kMtime | kCtime);
+  }
 
   SWORDFS_LOG_DEBUG << "Rename: " << old_parent_ino << "/'" << old_name
                     << "' -> " << new_parent_ino << "/'" << new_name << "'";
@@ -458,15 +517,21 @@ Status MemMetaImpl::SetAttr(InodeID ino,
     st.st_mode = (st.st_mode & S_IFMT) | (attr->st_mode & 07777);
   }
   if (to_set & FUSE_SET_ATTR_UID) {
-    if (st.st_uid != attr->st_uid) owner_changed = true;
+    if (st.st_uid != attr->st_uid) {
+      owner_changed = true;
+    }
     st.st_uid = attr->st_uid;
   }
   if (to_set & FUSE_SET_ATTR_GID) {
-    if (st.st_gid != attr->st_gid) owner_changed = true;
+    if (st.st_gid != attr->st_gid) {
+      owner_changed = true;
+    }
     st.st_gid = attr->st_gid;
   }
   if (to_set & FUSE_SET_ATTR_SIZE) {
-    if (st.st_size != attr->st_size) size_changed = true;
+    if (st.st_size != attr->st_size) {
+      size_changed = true;
+    }
     st.st_size = attr->st_size;
   }
   if (to_set & FUSE_SET_ATTR_ATIME) {
@@ -499,7 +564,90 @@ Status MemMetaImpl::SetAttr(InodeID ino,
     st.st_ctime = ::time(nullptr);
   }
 
-  if (out_attr) *out_attr = st;
+  if (out_attr) {
+    *out_attr = st;
+  }
+  return Status::OK();
+}
+
+Status MemMetaImpl::Symlink(InodeID parent_ino,
+                            std::string_view name, const char* link,
+                            InodeID* child_ino, struct stat* attr) {
+  if (name.size() > kMaxNameLength) {
+    return Status::NameTooLong("symlink name exceeds maximum length");
+  }
+
+  SwordFsInode* parent = nullptr;
+  Status status = store_.LookupInode(parent_ino, &parent);
+  if (!status.ok() || !parent || !parent->IsDir()) {
+    return Status::NotDirectory("parent is not a directory");
+  }
+
+  auto& ctx = folly::fibers::local<SwordFsContext>();
+  if (!parent->CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
+    return Status::Permission("access denied on parent");
+  }
+
+  mode_t link_mode = (S_IFLNK | 0777);
+  SwordFsInode* child = nullptr;
+  status = store_.AddEntry(parent_ino, name, link_mode, 1, &child);
+  if (!status.ok()) return status;
+
+  child->symlink_target = link;
+  child->attr.st_size = child->symlink_target.size();
+  parent->Touch(kMtime | kCtime);
+
+  if (child_ino) *child_ino = child->ino;
+  if (attr) *attr = child->attr;
+  return Status::OK();
+}
+
+Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
+                         std::string_view newname, struct stat* attr) {
+  if (newname.size() > kMaxNameLength) {
+    return Status::NameTooLong("link name exceeds maximum length");
+  }
+
+  SwordFsInode* inode = nullptr;
+  Status status = store_.LookupInode(ino, &inode);
+  if (!status.ok()) return Status::NotFound("source inode not found");
+
+  // Directories cannot be hard-linked (POSIX).
+  if (inode->IsDir()) {
+    return Status::NotPermitted("cannot hard-link directory");
+  }
+
+  SwordFsInode* newparent = nullptr;
+  status = store_.LookupInode(newparent_ino, &newparent);
+  if (!status.ok() || !newparent || !newparent->IsDir()) {
+    return Status::NotDirectory("new parent is not a directory");
+  }
+
+  auto& ctx = folly::fibers::local<SwordFsContext>();
+  if (!newparent->CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
+    return Status::Permission("access denied on new parent");
+  }
+
+  status = store_.LinkExistingEntry(newparent_ino, newname, inode);
+  if (!status.ok()) return status;
+
+  newparent->Touch(kMtime | kCtime);
+  inode->Touch(kCtime);
+
+  if (attr) *attr = inode->attr;
+  return Status::OK();
+}
+
+Status MemMetaImpl::Readlink(InodeID ino, std::string* target) {
+  SwordFsInode* inode = nullptr;
+  Status status = store_.LookupInode(ino, &inode);
+  if (!status.ok()) return status;
+
+  if (!S_ISLNK(inode->attr.st_mode)) {
+    return Status::InvalidArgument("not a symbolic link");
+  }
+
+  *target = inode->symlink_target;
   return Status::OK();
 }
 
@@ -586,7 +734,9 @@ Status MemMetaImpl::Forget(InodeID ino,
                            uint64_t nlookup) {
   SwordFsInode *inode = nullptr;
   store_.LookupInode(ino, &inode);
-  if (!inode) return Status::OK();
+  if (!inode) {
+    return Status::OK();
+  }
 
   if (nlookup >= inode->nlookup) {
     inode->nlookup = 0;
@@ -600,12 +750,12 @@ Status MemMetaImpl::Forget(InodeID ino,
 // Chunk metadata
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaImpl::AddChunk(InodeID ino, const ChunkMeta& cm) {
+Status MemMetaImpl::AddChunk(InodeID ino, const ChunkMeta &cm) {
   return store_.AddChunk(ino, cm);
 }
 
 Status MemMetaImpl::FindChunk(InodeID ino, off_t off, size_t chunk_size,
-                              ChunkMeta* cm) {
+                              ChunkMeta *cm) {
   return store_.FindChunk(ino, off, chunk_size, cm);
 }
 

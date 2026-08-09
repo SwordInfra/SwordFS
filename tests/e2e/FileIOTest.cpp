@@ -115,3 +115,25 @@ TEST_F(FileIOTest, FileInRootIsFile) {
   EXPECT_FALSE(S_ISDIR(st.st_mode));
   EXPECT_TRUE(S_ISREG(st.st_mode));
 }
+
+// ────────────────────────────────────────────────────────────────
+// Truncate
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(FileIOTest, TruncateShrink) {
+  const std::string name = "t.txt";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "hello world"), 0);
+  ASSERT_EQ(fixture_.Truncate(name, 5), 0);
+  EXPECT_TRUE(fixture_.FileEquals(name, 5, Fixture::Hash64("hello")));
+}
+
+TEST_F(FileIOTest, TruncateExtend) {
+  const std::string name = "t.txt";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "hi"), 0);
+  ASSERT_EQ(fixture_.Truncate(name, 10), 0);
+  struct stat st;
+  ASSERT_EQ(fixture_.Stat(name, &st), 0);
+  EXPECT_EQ(st.st_size, 10);
+}

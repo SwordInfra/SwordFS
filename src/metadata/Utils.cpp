@@ -16,6 +16,7 @@ struct stat MakeStat(mode_t mode, time_t now) {
   std::memset(&st, 0, sizeof(st));
   st.st_mode = mode;
   st.st_nlink = S_ISDIR(mode) ? 2 : 1;
+  st.st_size = S_ISDIR(mode) ? 4096 : 0;
   st.st_uid = ::getuid();
   st.st_gid = ::getgid();
   st.st_blksize = 4096;

@@ -40,7 +40,7 @@ class VfsImpl {
   static utils::Status Getattr(fuse_ino_t ino, struct stat *attr);
   static utils::Status Setattr(fuse_ino_t ino, struct stat *attr, int to_set,
                                struct stat *out_attr);
-  static utils::Status Readlink(fuse_ino_t ino);
+  static utils::Status Readlink(fuse_ino_t ino, std::string* target);
   static utils::Status Mknod(fuse_ino_t parent, const char *name,
                              mode_t mode, dev_t rdev);
   static utils::Status Mkdir(fuse_ino_t parent, const char *name, mode_t mode,
@@ -48,12 +48,13 @@ class VfsImpl {
   static utils::Status Unlink(fuse_ino_t parent, const char *name);
   static utils::Status Rmdir(fuse_ino_t parent, const char *name);
   static utils::Status Symlink(const char *link, fuse_ino_t parent,
-                               const char *name);
+                               const char* name,
+                               fuse_entry_param* entry);
   static utils::Status Rename(fuse_ino_t parent, const char *name,
                               fuse_ino_t newparent, const char *newname,
                               unsigned int flags);
   static utils::Status Link(fuse_ino_t ino, fuse_ino_t newparent,
-                            const char *newname);
+                            const char* newname, fuse_entry_param* entry);
   static utils::Status Open(fuse_ino_t ino, struct fuse_file_info *fi);
   static utils::Status Read(fuse_ino_t ino, size_t size, off_t off, uint64_t fh,
                             std::unique_ptr<folly::IOBuf> *data);

@@ -46,6 +46,14 @@ class MemMetaImpl : public IMetaEngine {
   Status OpenDir(InodeID ino) override;
   Status Forget(InodeID ino, uint64_t nlookup) override;
 
+  // Link / symlink operations
+  Status Symlink(InodeID parent_ino,
+                std::string_view name, const char* link,
+                InodeID* child_ino, struct stat* attr) override;
+  Status Link(InodeID ino, InodeID newparent_ino,
+             std::string_view newname, struct stat* attr) override;
+  Status Readlink(InodeID ino, std::string* target) override;
+
   // Chunk metadata
   Status AddChunk(InodeID ino, const ChunkMeta& cm) override;
   Status FindChunk(InodeID ino, off_t off, size_t chunk_size,

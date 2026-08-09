@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -191,6 +192,15 @@ int Fixture::Stat(const std::string &relpath, struct stat *st) const {
   return 0;
 }
 
+int Fixture::Lstat(const std::string &relpath, struct stat *st) const {
+  if (::lstat(MountPath(relpath).c_str(), st) != 0) {
+    std::fprintf(stderr, "E2E: lstat(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
 int Fixture::Statfs(struct statvfs *sv) const {
   if (::statvfs(mountpoint_.c_str(), sv) != 0) {
     return -1;
@@ -305,6 +315,37 @@ int Fixture::Rename(const std::string &oldpath, const std::string &newpath) {
                  oldpath.c_str(), newpath.c_str(), std::strerror(errno));
     return -1;
   }
+  return 0;
+}
+
+int Fixture::Symlink(const std::string &target, const std::string &linkpath) {
+  if (::symlink(target.c_str(), MountPath(linkpath).c_str()) != 0) {
+    std::fprintf(stderr, "E2E: symlink(%s -> %s) failed: %s\n",
+                 linkpath.c_str(), target.c_str(), std::strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+int Fixture::HardLink(const std::string &oldpath, const std::string &newpath) {
+  if (::link(MountPath(oldpath).c_str(), MountPath(newpath).c_str()) != 0) {
+    std::fprintf(stderr, "E2E: link(%s -> %s) failed: %s\n",
+                 oldpath.c_str(), newpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+int Fixture::Readlink(const std::string &relpath, std::string *target) {
+  char buf[PATH_MAX];
+  ssize_t len = ::readlink(MountPath(relpath).c_str(), buf, sizeof(buf) - 1);
+  if (len < 0) {
+    std::fprintf(stderr, "E2E: readlink(%s) failed: %s\n",
+                 relpath.c_str(), std::strerror(errno));
+    return -1;
+  }
+  buf[len] = '\0';
+  target->assign(buf, static_cast<size_t>(len));
   return 0;
 }
 
