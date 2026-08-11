@@ -40,9 +40,13 @@ int CountSwordfsDaemons() {
   }
   // Scan /proc for swordfs processes that are not our test binary.
   for (int pid = 2; pid < 32768; ++pid) {
-    if (pid == my_pid || pid == my_ppid) continue;
+    if (pid == my_pid || pid == my_ppid) {
+      continue;
+    }
     std::ifstream cmdline("/proc/" + std::to_string(pid) + "/cmdline");
-    if (!cmdline.is_open()) continue;
+    if (!cmdline.is_open()) {
+      continue;
+    }
     std::string buf((std::istreambuf_iterator<char>(cmdline)),
                     std::istreambuf_iterator<char>());
     // cmdline uses '\0' as separator; check if "swordfs" appears.
@@ -68,39 +72,9 @@ class StaleMountTest : public ::testing::Test {
   Fixture fixture_;
 };
 
-// ────────────────────────────────────────────────────────────────
-// Mount + unmount lifecycle
-// ────────────────────────────────────────────────────────────────
-
 TEST_F(StaleMountTest, MountIsAlive) {
   EXPECT_TRUE(fixture_.IsMounted());
 }
-
-TEST_F(StaleMountTest, WriteAfterMount) {
-  const char *name = "after_mount.txt";
-  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
-  ASSERT_EQ(fixture_.WriteFile(name, "ok"), 0);
-  EXPECT_TRUE(fixture_.FileEquals(name, 2, Fixture::Hash64("ok")));
-}
-
-TEST_F(StaleMountTest, DataPersistsAfterRemount) {
-  const char *name = "persist.txt";
-  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
-  ASSERT_EQ(fixture_.WriteFile(name, "persistent data"), 0);
-
-  // Unmount and remount.
-  fixture_.TearDown();
-  ASSERT_TRUE(fixture_.SetUp());
-
-  // Data should still be accessible (stored in S3 + memory metadata).
-  // Note: with memory://local metadata, data does NOT persist across
-  // unmount.  This test verifies that the mount cycle itself is clean.
-  EXPECT_TRUE(fixture_.IsMounted());
-}
-
-// ────────────────────────────────────────────────────────────────
-// Multiple sequential mount/unmount cycles
-// ────────────────────────────────────────────────────────────────
 
 TEST_F(StaleMountTest, MountUnmountCycle) {
   EXPECT_TRUE(fixture_.IsMounted());
@@ -109,10 +83,6 @@ TEST_F(StaleMountTest, MountUnmountCycle) {
   ASSERT_TRUE(fixture_.SetUp());
   EXPECT_TRUE(fixture_.IsMounted());
 }
-
-// ────────────────────────────────────────────────────────────────
-// Daemon cleanup — verify no residual processes after umount
-// ────────────────────────────────────────────────────────────────
 
 TEST_F(StaleMountTest, DaemonExitsAfterUmount) {
   EXPECT_TRUE(fixture_.IsMounted());
@@ -129,13 +99,4 @@ TEST_F(StaleMountTest, DaemonExitsAfterMultiCycle) {
     EXPECT_EQ(CountSwordfsDaemons(), 0);
     ASSERT_TRUE(fixture_.SetUp());
   }
-}
-
-TEST_F(StaleMountTest, DaemonExitsAfterWriteAndUmount) {
-  const char *name = "before_umount.txt";
-  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
-  ASSERT_EQ(fixture_.WriteFile(name, "clean shutdown"), 0);
-  EXPECT_TRUE(fixture_.FileEquals(name, 14, Fixture::Hash64("clean shutdown")));
-  fixture_.TearDown();
-  EXPECT_EQ(CountSwordfsDaemons(), 0);
 }

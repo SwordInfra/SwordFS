@@ -54,6 +54,7 @@ void ConfigCenter::RegisterMountOptions(CLI::App& app) {
   cmd->add_option("--fuse-threads", fuse_threads_, "FUSE worker thread count")
       ->check(CLI::PositiveNumber)
       ->check(CLI::Range(1, static_cast<int>(std::thread::hardware_concurrency())));
+  cmd->add_option("--pidfile", pidfile_, "Write daemon PID to this file");
 
   cmd->parse_complete_callback([this]() {
     if (volume_config_path_.empty() ==

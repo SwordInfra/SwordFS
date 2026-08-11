@@ -25,6 +25,13 @@
 namespace swordfs {
 namespace e2e {
 
+/// Lightweight descriptor for a directory entry used in test setup.
+struct Child {
+  std::string name;
+  std::string content;  // empty for directories
+  bool is_dir = false;
+};
+
 /// RAII harness that manages a mounted SwordFS volume for one test case.
 class Fixture {
  public:
@@ -43,13 +50,13 @@ class Fixture {
 
   /// stat() on a file or directory under the mountpoint.
   /// Returns 0 on success, or -1 on failure (errno is set).
-  int Stat(const std::string &relpath, struct stat* st) const;
+  int Stat(const std::string &relpath, struct stat *st) const;
 
   /// lstat() — same as stat() but does not follow symlinks.
-  int Lstat(const std::string &relpath, struct stat* st) const;
+  int Lstat(const std::string &relpath, struct stat *st) const;
 
   /// statvfs() on the mountpoint.  Returns 0 on success, or -1.
-  int Statfs(struct statvfs* sv) const;
+  int Statfs(struct statvfs *sv) const;
 
   /// Check file accessibility.  Returns 0 on success, or -1.
   int Access(const std::string &relpath, int mode);
@@ -105,6 +112,9 @@ class Fixture {
   /// Return true if the mount is currently active.
   bool IsMounted();
 
+  /// Return true if the daemon process recorded during SetUp is gone.
+  bool IsDaemonGone() const;
+
   /// Return the absolute path for a relative path under the mountpoint.
   std::string MountPath(const std::string &relpath) const;
 
@@ -120,6 +130,17 @@ class Fixture {
 
   /// Compute a 64-bit SpookyHashV2 for use with FileEquals.
   static uint64_t Hash64(std::string_view data);
+
+  /// Controls the length of data produced by GenerateRandomData().
+  enum class RandomMode {
+    kExact,  ///< Exactly |len| bytes.
+    kUpTo,   ///< Random length in [1, len].
+  };
+
+  /// Generate pseudo-random data.
+  /// - RandomMode::kExact: returns exactly |len| bytes.
+  /// - RandomMode::kUpTo:  returns a random length in [1, len].
+  static std::string GenerateRandomData(size_t len, RandomMode mode);
 
   /// Return the filesystem limits for this test run.
   metadata::Limits GetLimits() const;
@@ -141,6 +162,7 @@ class Fixture {
   std::string bucket_url_;
   std::string base_bucket_url_;  // original URL (without test-name suffix)
   bool mounted_ = false;
+  pid_t daemon_pid_ = 0;
 };
 
 }  // namespace e2e

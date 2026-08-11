@@ -71,8 +71,12 @@ class MockDataEngine : public IDataEngine {
 
   bool Head(std::string_view key, size_t *size) override {
     auto it = store_.find(std::string(key));
-    if (it == store_.end()) return false;
-    if (size) *size = it->second.size();
+    if (it == store_.end()) {
+      return false;
+    }
+    if (size) {
+      *size = it->second.size();
+    }
     return true;
   }
 
@@ -86,9 +90,13 @@ class MockDataEngine : public IDataEngine {
   Status Get(std::string_view key, size_t offset, size_t size,
              folly::IOBuf *out) override {
     auto it = store_.find(std::string(key));
-    if (it == store_.end()) return Status::NotFound("chunk not found");
+    if (it == store_.end()) {
+      return Status::NotFound("chunk not found");
+    }
     const std::string &chunk = it->second;
-    if (offset >= chunk.size()) return Status::OK();
+    if (offset >= chunk.size()) {
+      return Status::OK();
+    }
     size_t len = (size == 0) ? chunk.size() - offset
                              : std::min(size, chunk.size() - offset);
     std::memcpy(out->writableTail(), chunk.data() + offset, len);
@@ -134,7 +142,9 @@ class MockMetaEngine : public IMetaEngine {
   }
   Status SetAttr(InodeID, const struct stat *attr, int to_set,
                  struct stat *out_attr) override {
-    if (to_set & FUSE_SET_ATTR_SIZE) file_size_ = attr->st_size;
+    if (to_set & FUSE_SET_ATTR_SIZE) {
+      file_size_ = attr->st_size;
+    }
     if (out_attr) {
       std::memset(out_attr, 0, sizeof(*out_attr));
       out_attr->st_size = file_size_;
@@ -143,6 +153,17 @@ class MockMetaEngine : public IMetaEngine {
   }
   Status StatFs(struct statvfs *) override { return Status::OK(); }
   Status Access(InodeID, int) override { return Status::OK(); }
+  Status Symlink(InodeID, std::string_view, const char *,
+                 InodeID *, struct stat *) override {
+    return Status::OK();
+  }
+  Status Link(InodeID, InodeID, std::string_view,
+              struct stat *) override {
+    return Status::OK();
+  }
+  Status Readlink(InodeID, std::string *) override {
+    return Status::OK();
+  }
   Status Open(InodeID) override { return Status::OK(); }
   Status OpenDir(InodeID) override { return Status::OK(); }
   Status Forget(InodeID, uint64_t) override { return Status::OK(); }
@@ -155,11 +176,17 @@ class MockMetaEngine : public IMetaEngine {
   Status FindChunk(InodeID ino, off_t off, size_t chunk_size,
                    ChunkMeta *cm) override {
     auto it = chunks_.find(ino);
-    if (it == chunks_.end()) return Status::NotFound("");
+    if (it == chunks_.end()) {
+      return Status::NotFound("");
+    }
     off_t chunk_start = (off / static_cast<off_t>(chunk_size)) * static_cast<off_t>(chunk_size);
     auto cit = it->second.find(chunk_start);
-    if (cit == it->second.end()) return Status::NotFound("");
-    if (cm) *cm = cit->second;
+    if (cit == it->second.end()) {
+      return Status::NotFound("");
+    }
+    if (cm) {
+      *cm = cit->second;
+    }
     return Status::OK();
   }
 

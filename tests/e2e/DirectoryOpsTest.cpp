@@ -35,24 +35,28 @@ class DirectoryOpsTest : public ::testing::Test {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(DirectoryOpsTest, MkdirAndRmdir) {
-  const char *name = "subdir";
+  const std::string name = "subdir";
   ASSERT_EQ(fixture_.MkDir(name, kDefaultDirMode), 0);
   struct stat st;
   ASSERT_EQ(fixture_.Stat(name, &st), 0);
   EXPECT_TRUE(S_ISDIR(st.st_mode));
+  EXPECT_TRUE(fixture_.UmaskEquals(name, kDefaultDirMode));
 
   ASSERT_EQ(fixture_.RmDir(name), 0);
   EXPECT_NE(fixture_.Stat(name, &st), 0);
+  EXPECT_EQ(errno, ENOENT);
 }
 
 TEST_F(DirectoryOpsTest, MkdirNested) {
-  ASSERT_EQ(fixture_.MkDir("a", kDefaultDirMode), 0);
-  ASSERT_EQ(fixture_.MkDir("a/b", kDefaultDirMode), 0);
-  ASSERT_EQ(fixture_.MkDir("a/b/c", kDefaultDirMode), 0);
+  const std::string top = "a";
+  const std::string nested = "a/b";
+  ASSERT_EQ(fixture_.MkDir(top, kDefaultDirMode), 0);
+  ASSERT_EQ(fixture_.MkDir(nested, kDefaultDirMode), 0);
 
   struct stat st;
-  ASSERT_EQ(fixture_.Stat("a/b/c", &st), 0);
+  ASSERT_EQ(fixture_.Stat(nested, &st), 0);
   EXPECT_TRUE(S_ISDIR(st.st_mode));
+  EXPECT_TRUE(fixture_.UmaskEquals(nested, kDefaultDirMode));
 }
 
 TEST_F(DirectoryOpsTest, StatDir) {
@@ -71,16 +75,17 @@ TEST_F(DirectoryOpsTest, StatDir) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(DirectoryOpsTest, MkdirExisting) {
-  const char *name = "d";
+  const std::string name = "d";
   ASSERT_EQ(fixture_.MkDir(name, kDefaultDirMode), 0);
   ASSERT_EQ(fixture_.MkDir(name, kDefaultDirMode), -1);
   EXPECT_EQ(errno, EEXIST);
 }
 
 TEST_F(DirectoryOpsTest, MkdirUnderFile) {
-  const char *name = "f.txt";
+  const std::string name = "f.txt";
+  const auto content = Fixture::GenerateRandomData(kSmallContentLen, Fixture::RandomMode::kUpTo);
   ASSERT_EQ(fixture_.CreateFile(name, kDefaultFileMode, kDefaultCreateFlags), 0);
-  ASSERT_EQ(fixture_.WriteFile(name, "data"), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, content), 0);
   ASSERT_EQ(fixture_.MkDir(name + std::string("/sub"), kDefaultDirMode), -1);
   EXPECT_EQ(errno, ENOTDIR);
 }
@@ -90,15 +95,30 @@ TEST_F(DirectoryOpsTest, MkdirUnderNonexistent) {
   EXPECT_EQ(errno, ENOENT);
 }
 
+TEST_F(DirectoryOpsTest, MkdirNameAtLimit) {
+  auto limits = fixture_.GetLimits();
+  std::string name(limits.max_name_length, 'x');
+  ASSERT_EQ(fixture_.MkDir(name, kDefaultDirMode), 0);
+  ASSERT_EQ(fixture_.RmDir(name), 0);
+}
+
+TEST_F(DirectoryOpsTest, MkdirNameTooLong) {
+  auto limits = fixture_.GetLimits();
+  std::string name(limits.max_name_length + 1, 'x');
+  ASSERT_EQ(fixture_.MkDir(name, kDefaultDirMode), -1);
+  EXPECT_EQ(errno, ENAMETOOLONG);
+}
+
 // ────────────────────────────────────────────────────────────────
 // rmdir — error cases
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(DirectoryOpsTest, RmdirNonEmpty) {
-  const char *name = "d";
-  ASSERT_EQ(fixture_.MkDir(name, kDefaultDirMode), 0);
-  ASSERT_EQ(fixture_.CreateFile(name + std::string("/f.txt"), kDefaultFileMode, O_CREAT | O_WRONLY), 0);
-  ASSERT_EQ(fixture_.RmDir(name), -1);
+  const std::string dir_name = "d";
+  const std::string file_name = dir_name + std::string("/f.txt");
+  ASSERT_EQ(fixture_.MkDir(dir_name, kDefaultDirMode), 0);
+  ASSERT_EQ(fixture_.CreateFile(file_name, kDefaultFileMode, O_CREAT | O_WRONLY), 0);
+  ASSERT_EQ(fixture_.RmDir(dir_name), -1);
   EXPECT_EQ(errno, ENOTEMPTY);
 }
 
@@ -108,9 +128,10 @@ TEST_F(DirectoryOpsTest, RmdirNonexistent) {
 }
 
 TEST_F(DirectoryOpsTest, RmdirOnFile) {
-  const char *name = "f.txt";
+  const std::string name = "f.txt";
+  const auto content = Fixture::GenerateRandomData(kSmallContentLen, Fixture::RandomMode::kUpTo);
   ASSERT_EQ(fixture_.CreateFile(name, kDefaultFileMode, kDefaultCreateFlags), 0);
-  ASSERT_EQ(fixture_.WriteFile(name, "data"), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, content), 0);
   ASSERT_EQ(fixture_.RmDir(name), -1);
   EXPECT_EQ(errno, ENOTDIR);
 }
@@ -131,28 +152,35 @@ TEST_F(DirectoryOpsTest, RmdirRoot) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(DirectoryOpsTest, ReaddirListsEntries) {
-  ASSERT_EQ(fixture_.MkDir("d1", kDefaultDirMode), 0);
-  ASSERT_EQ(fixture_.MkDir("d2", kDefaultDirMode), 0);
-  ASSERT_EQ(fixture_.CreateFile("f1.txt", kDefaultFileMode, kDefaultCreateFlags), 0);
-  ASSERT_EQ(fixture_.WriteFile("f1.txt", ""), 0);
-  ASSERT_EQ(fixture_.CreateFile("f2.txt", kDefaultFileMode, kDefaultCreateFlags), 0);
-  ASSERT_EQ(fixture_.WriteFile("f2.txt", ""), 0);
+  const Child items[] = {
+      {"d1", "", true},
+      {"d2", "", true},
+      {"f1.txt", "", false},
+      {"f2.txt", "", false},
+  };
+
+  for (const auto &item : items) {
+    if (item.is_dir) {
+      ASSERT_EQ(fixture_.MkDir(item.name, kDefaultDirMode), 0);
+    } else {
+      ASSERT_EQ(fixture_.CreateFile(item.name, kDefaultFileMode, kDefaultCreateFlags), 0);
+    }
+  }
 
   std::vector<std::string> entries;
-  fixture_.ReadDir(".", &entries);
-  EXPECT_EQ(entries.size(), 4u);
+  ASSERT_EQ(fixture_.ReadDir(".", &entries), 0);
+  EXPECT_EQ(entries.size(), std::size(items));
 }
 
 TEST_F(DirectoryOpsTest, ReaddirEmpty) {
   std::vector<std::string> entries;
-  fixture_.ReadDir(".", &entries);
+  ASSERT_EQ(fixture_.ReadDir(".", &entries), 0);
   EXPECT_TRUE(entries.empty());
 }
 
 TEST_F(DirectoryOpsTest, ReaddirOnFile) {
-  const char *name = "f.txt";
+  const std::string name = "f.txt";
   ASSERT_EQ(fixture_.CreateFile(name, kDefaultFileMode, kDefaultCreateFlags), 0);
-  ASSERT_EQ(fixture_.WriteFile(name, "data"), 0);
   std::vector<std::string> entries;
   ASSERT_EQ(fixture_.ReadDir(name, &entries), -1);
   EXPECT_EQ(errno, ENOTDIR);
@@ -176,27 +204,8 @@ TEST_F(DirectoryOpsTest, TruncateDir) {
 
 TEST_F(DirectoryOpsTest, OpenDirectoryFails) {
   ASSERT_EQ(fixture_.MkDir("d", kDefaultDirMode), 0);
-  int fd = fixture_.OpenFile("d", O_RDWR);
-  ASSERT_EQ(fd, -1);
+  ASSERT_EQ(fixture_.OpenFile("d", O_RDWR), -1);
   EXPECT_EQ(errno, EISDIR);
-}
-
-// ────────────────────────────────────────────────────────────────
-// Name length limits
-// ────────────────────────────────────────────────────────────────
-
-TEST_F(DirectoryOpsTest, MkdirNameAtLimit) {
-  auto limits = fixture_.GetLimits();
-  std::string name(limits.max_name_length, 'x');
-  ASSERT_EQ(fixture_.MkDir(name, kDefaultDirMode), 0);
-  ASSERT_EQ(fixture_.RmDir(name), 0);
-}
-
-TEST_F(DirectoryOpsTest, MkdirNameTooLong) {
-  auto limits = fixture_.GetLimits();
-  std::string name(limits.max_name_length + 1, 'x');
-  ASSERT_EQ(fixture_.MkDir(name, kDefaultDirMode), -1);
-  EXPECT_EQ(errno, ENAMETOOLONG);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -216,6 +225,51 @@ TEST_F(DirectoryOpsTest, SymlinkToDir) {
   EXPECT_EQ(target, "d");
 }
 
+TEST_F(DirectoryOpsTest, SymlinkToDirDereference) {
+  // stat follows the symlink: link_to_d should appear as a directory.
+  // Children of the target directory should be reachable through the symlink.
+  const std::string dir_name = "d";
+  const std::string link_name = "link_to_d";
+  const std::string file_path = dir_name + "/f.txt";
+  const std::string link_file_path = link_name + "/f.txt";
+  const auto content = Fixture::GenerateRandomData(kSmallContentLen, Fixture::RandomMode::kUpTo);
+
+  ASSERT_EQ(fixture_.MkDir(dir_name, kDefaultDirMode), 0);
+  ASSERT_EQ(fixture_.CreateFile(file_path, kDefaultFileMode, kDefaultCreateFlags), 0);
+  ASSERT_EQ(fixture_.WriteFile(file_path, content), 0);
+  ASSERT_EQ(fixture_.Symlink(dir_name, link_name), 0);
+
+  // stat on the symlink follows it — sees the target directory.
+  struct stat st;
+  ASSERT_EQ(fixture_.Stat(link_name, &st), 0);
+  EXPECT_TRUE(S_ISDIR(st.st_mode));
+
+  // Child file is accessible through the symlink.
+  ASSERT_EQ(fixture_.Stat(link_file_path, &st), 0);
+  EXPECT_TRUE(S_ISREG(st.st_mode));
+  EXPECT_TRUE(fixture_.FileEquals(link_file_path, content.size(), Fixture::Hash64(content)));
+}
+
+TEST_F(DirectoryOpsTest, SymlinkToDirCrossDir) {
+  // Relative symlink across directories dereferences correctly.
+  const std::string dir_a = "a";
+  const std::string dir_b = "b";
+  ASSERT_EQ(fixture_.MkDir(dir_a, kDefaultDirMode), 0);
+  ASSERT_EQ(fixture_.MkDir(dir_b, kDefaultDirMode), 0);
+
+  const std::string link_target = "../" + dir_a;
+  const std::string link_path = dir_b + "/link";
+  ASSERT_EQ(fixture_.Symlink(link_target, link_path), 0);
+
+  std::string target;
+  ASSERT_EQ(fixture_.Readlink(link_path, &target), 0);
+  EXPECT_EQ(target, link_target);
+
+  struct stat st;
+  ASSERT_EQ(fixture_.Stat(link_path, &st), 0);
+  EXPECT_TRUE(S_ISDIR(st.st_mode));
+}
+
 TEST_F(DirectoryOpsTest, HardlinkToDirFails) {
   // POSIX: hard-linking directories is not allowed.
   ASSERT_EQ(fixture_.MkDir("d", kDefaultDirMode), 0);
@@ -224,14 +278,6 @@ TEST_F(DirectoryOpsTest, HardlinkToDirFails) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Test helpers
-// ────────────────────────────────────────────────────────────────
-
-struct Child {
-  std::string name;
-  std::string content;
-  bool is_dir;
-};
 
 // ────────────────────────────────────────────────────────────────
 // Directory rename — same parent
@@ -244,10 +290,10 @@ TEST_F(DirectoryOpsTest, RenameDir) {
 
   const Child children[] = {
       {"sub", "", true},
-      {"a.txt", "alpha", false},
-      {"b.txt", "beta", false},
+      {"a.txt", Fixture::GenerateRandomData(kSmallContentLen, Fixture::RandomMode::kUpTo), false},
+      {"b.txt", Fixture::GenerateRandomData(kSmallContentLen, Fixture::RandomMode::kUpTo), false},
   };
-  for (const auto& c : children) {
+  for (const auto &c : children) {
     auto path = old_name + "/" + c.name;
     if (c.is_dir) {
       ASSERT_EQ(fixture_.MkDir(path, kDefaultDirMode), 0);
@@ -272,15 +318,14 @@ TEST_F(DirectoryOpsTest, RenameDir) {
   EXPECT_EQ(st.st_nlink, before.st_nlink);
   EXPECT_TRUE(fixture_.UmaskEquals(new_name, kDefaultDirMode));
 
-  for (const auto& c : children) {
+  for (const auto &c : children) {
     auto path = new_name + "/" + c.name;
     ASSERT_EQ(fixture_.Stat(path, &st), 0);
     if (c.is_dir) {
       EXPECT_TRUE(S_ISDIR(st.st_mode));
     } else {
       EXPECT_TRUE(S_ISREG(st.st_mode));
-      EXPECT_TRUE(fixture_.FileEquals(path, c.content.size(),
-                                      Fixture::Hash64(c.content)));
+      EXPECT_TRUE(fixture_.FileEquals(path, c.content.size(), Fixture::Hash64(c.content)));
     }
   }
 }
@@ -290,15 +335,17 @@ TEST_F(DirectoryOpsTest, RenameDir) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(DirectoryOpsTest, RenameDirCrossParent) {
+  const std::string old_path = "a/b";
+  const std::string new_path = "b";
   ASSERT_EQ(fixture_.MkDir("a", kDefaultDirMode), 0);
-  ASSERT_EQ(fixture_.MkDir("a/b", kDefaultDirMode), 0);
+  ASSERT_EQ(fixture_.MkDir(old_path, kDefaultDirMode), 0);
 
   const Child children[] = {
       {"sub", "", true},
-      {"f.txt", "data", false},
+      {"f.txt", Fixture::GenerateRandomData(kSmallContentLen, Fixture::RandomMode::kUpTo), false},
   };
-  for (const auto& c : children) {
-    auto path = "a/b/" + c.name;
+  for (const auto &c : children) {
+    auto path = old_path + "/" + c.name;
     if (c.is_dir) {
       ASSERT_EQ(fixture_.MkDir(path, kDefaultDirMode), 0);
     } else {
@@ -308,27 +355,26 @@ TEST_F(DirectoryOpsTest, RenameDirCrossParent) {
   }
 
   struct stat before;
-  ASSERT_EQ(fixture_.Stat("a/b", &before), 0);
+  ASSERT_EQ(fixture_.Stat(old_path, &before), 0);
 
-  ASSERT_EQ(fixture_.Rename("a/b", "b"), 0);
+  ASSERT_EQ(fixture_.Rename(old_path, new_path), 0);
 
   struct stat st;
-  ASSERT_EQ(fixture_.Stat("a/b", &st), -1);
+  ASSERT_EQ(fixture_.Stat(old_path, &st), -1);
   EXPECT_EQ(errno, ENOENT);
 
-  ASSERT_EQ(fixture_.Stat("b", &st), 0);
+  ASSERT_EQ(fixture_.Stat(new_path, &st), 0);
   EXPECT_EQ(st.st_ino, before.st_ino);
   EXPECT_TRUE(S_ISDIR(st.st_mode));
 
-  for (const auto& c : children) {
-    auto path = "b/" + c.name;
+  for (const auto &c : children) {
+    auto path = new_path + "/" + c.name;
     ASSERT_EQ(fixture_.Stat(path, &st), 0);
     if (c.is_dir) {
       EXPECT_TRUE(S_ISDIR(st.st_mode));
     } else {
       EXPECT_TRUE(S_ISREG(st.st_mode));
-      EXPECT_TRUE(fixture_.FileEquals(path, c.content.size(),
-                                      Fixture::Hash64(c.content)));
+      EXPECT_TRUE(fixture_.FileEquals(path, c.content.size(), Fixture::Hash64(c.content)));
     }
   }
 }
@@ -345,10 +391,10 @@ TEST_F(DirectoryOpsTest, RenameDirOverEmptyDir) {
 
   const Child children[] = {
       {"sub", "", true},
-      {"a.txt", "alpha", false},
-      {"b.txt", "beta", false},
+      {"a.txt", Fixture::GenerateRandomData(kSmallContentLen, Fixture::RandomMode::kUpTo), false},
+      {"b.txt", Fixture::GenerateRandomData(kSmallContentLen, Fixture::RandomMode::kUpTo), false},
   };
-  for (const auto& c : children) {
+  for (const auto &c : children) {
     auto path = src + "/" + c.name;
     if (c.is_dir) {
       ASSERT_EQ(fixture_.MkDir(path, kDefaultDirMode), 0);
@@ -371,15 +417,14 @@ TEST_F(DirectoryOpsTest, RenameDirOverEmptyDir) {
   EXPECT_EQ(st.st_ino, before.st_ino);
   EXPECT_TRUE(S_ISDIR(st.st_mode));
 
-  for (const auto& c : children) {
+  for (const auto &c : children) {
     auto path = dst + "/" + c.name;
     ASSERT_EQ(fixture_.Stat(path, &st), 0);
     if (c.is_dir) {
       EXPECT_TRUE(S_ISDIR(st.st_mode));
     } else {
       EXPECT_TRUE(S_ISREG(st.st_mode));
-      EXPECT_TRUE(fixture_.FileEquals(path, c.content.size(),
-                                      Fixture::Hash64(c.content)));
+      EXPECT_TRUE(fixture_.FileEquals(path, c.content.size(), Fixture::Hash64(c.content)));
     }
   }
 }
@@ -396,12 +441,12 @@ TEST_F(DirectoryOpsTest, RenameDirOverNonEmptyDir) {
 
   const Child src_children[] = {
       {"sub", "", true},
-      {"a.txt", "alpha", false},
+      {"a.txt", Fixture::GenerateRandomData(kSmallContentLen, Fixture::RandomMode::kUpTo), false},
   };
   const Child dst_children[] = {
-      {"child.txt", "x", false},
+      {"child.txt", Fixture::GenerateRandomData(kSmallContentLen, Fixture::RandomMode::kUpTo), false},
   };
-  auto populate = [&](const std::string& parent, const Child* children,
+  auto populate = [&](const std::string &parent, const Child *children,
                       size_t count) {
     for (size_t i = 0; i < count; ++i) {
       auto path = parent + "/" + children[i].name;
@@ -432,7 +477,7 @@ TEST_F(DirectoryOpsTest, RenameDirOverNonEmptyDir) {
   EXPECT_EQ(st.st_ino, dst_before.st_ino);
   EXPECT_TRUE(S_ISDIR(st.st_mode));
 
-  auto verify = [&](const std::string& parent, const Child* children,
+  auto verify = [&](const std::string &parent, const Child *children,
                     size_t count) {
     for (size_t i = 0; i < count; ++i) {
       auto path = parent + "/" + children[i].name;
@@ -441,8 +486,7 @@ TEST_F(DirectoryOpsTest, RenameDirOverNonEmptyDir) {
         EXPECT_TRUE(S_ISDIR(st.st_mode));
       } else {
         EXPECT_TRUE(S_ISREG(st.st_mode));
-        EXPECT_TRUE(fixture_.FileEquals(path, children[i].content.size(),
-                                        Fixture::Hash64(children[i].content)));
+        EXPECT_TRUE(fixture_.FileEquals(path, children[i].content.size(), Fixture::Hash64(children[i].content)));
       }
     }
   };
@@ -460,9 +504,9 @@ TEST_F(DirectoryOpsTest, RenameDirToSelf) {
 
   const Child children[] = {
       {"sub", "", true},
-      {"a.txt", "alpha", false},
+      {"a.txt", Fixture::GenerateRandomData(kSmallContentLen, Fixture::RandomMode::kUpTo), false},
   };
-  for (const auto& c : children) {
+  for (const auto &c : children) {
     auto path = name + "/" + c.name;
     if (c.is_dir) {
       ASSERT_EQ(fixture_.MkDir(path, kDefaultDirMode), 0);
@@ -482,7 +526,7 @@ TEST_F(DirectoryOpsTest, RenameDirToSelf) {
   EXPECT_EQ(after.st_ino, before.st_ino);
   EXPECT_EQ(after.st_mode, before.st_mode);
 
-  for (const auto& c : children) {
+  for (const auto &c : children) {
     auto path = name + "/" + c.name;
     struct stat st;
     ASSERT_EQ(fixture_.Stat(path, &st), 0);
@@ -490,8 +534,7 @@ TEST_F(DirectoryOpsTest, RenameDirToSelf) {
       EXPECT_TRUE(S_ISDIR(st.st_mode));
     } else {
       EXPECT_TRUE(S_ISREG(st.st_mode));
-      EXPECT_TRUE(fixture_.FileEquals(path, c.content.size(),
-                                      Fixture::Hash64(c.content)));
+      EXPECT_TRUE(fixture_.FileEquals(path, c.content.size(), Fixture::Hash64(c.content)));
     }
   }
 }

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -211,6 +212,14 @@ int RunMount() {
     signal_fd = Daemonize();
     if (signal_fd < 0) {
       return 1;
+    }
+    // Write the daemon PID to pidfile if requested (grandchild only).
+    const auto& pf = ConfigCenter::Instance().pidfile();
+    if (!pf.empty()) {
+      std::ofstream ofs(pf);
+      if (ofs) {
+        ofs << ::getpid() << '\n';
+      }
     }
   }
 

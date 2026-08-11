@@ -13,11 +13,13 @@
 
 #include <chrono>
 #include <climits>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <sstream>
 #include <thread>
 
@@ -63,9 +65,15 @@ bool Fixture::SetUp() {
 
   InitPaths();
 
-  if (!FormatVolume()) return false;
-  if (!StartMount()) return false;
-  if (!WaitForMount()) return false;
+  if (!FormatVolume()) {
+    return false;
+  }
+  if (!StartMount()) {
+    return false;
+  }
+  if (!WaitForMount()) {
+    return false;
+  }
 
   return true;
 }
@@ -135,6 +143,7 @@ bool Fixture::StartMount() {
       << " --volume-config-path " << vol_config_dir_
       << " --fuse-threads 2"
       << " --storage-async-threads 2"
+      << " --pidfile " << work_dir_ << "/swordfs.pid"
       << " " << mountpoint_
       << " 2>&1";
 
@@ -144,6 +153,16 @@ bool Fixture::StartMount() {
                  WEXITSTATUS(ret), cmd.str().c_str());
     return false;
   }
+
+  // Read the daemon PID written by --pidfile.  We cannot use
+  // getpid() here because system() forks; the daemon runs as a
+  // descendant of that fork, not as the test process.
+  std::string pidfile = work_dir_ + "/swordfs.pid";
+  std::ifstream pfs(pidfile);
+  if (pfs) {
+    pfs >> daemon_pid_;
+  }
+
   return true;
 }
 
@@ -165,7 +184,9 @@ bool Fixture::WaitForMount() {
 }
 
 bool Fixture::StopMount() {
-  if (!mounted_) return true;
+  if (!mounted_) {
+    return true;
+  }
   std::string cmd = "fusermount3 -u " + mountpoint_;
   if (std::system(cmd.c_str()) != 0) {
     // Force-unmount as fallback.
@@ -177,6 +198,21 @@ bool Fixture::StopMount() {
   }
   mounted_ = false;
   return true;
+}
+
+bool Fixture::IsDaemonGone() const {
+  if (daemon_pid_ <= 0) {
+    return false;
+  }
+  // fusermount3 -u returns before the daemon has fully exited;
+  // retry for up to 500 ms.
+  for (int i = 0; i < 10; ++i) {
+    if (kill(daemon_pid_, 0) != 0 && errno == ESRCH) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  return false;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -375,12 +411,16 @@ bool Fixture::IsMounted() {
   // Verify the mountpoint is actually a FUSE filesystem, not just
   // a regular directory on the host.
   struct statvfs sv{};
-  if (Statfs(&sv) != 0) return false;
+  if (Statfs(&sv) != 0) {
+    return false;
+  }
   return sv.f_type == FUSE_SUPER_MAGIC;
 }
 
 std::string Fixture::MountPath(const std::string &relpath) const {
-  if (relpath.empty() || relpath == ".") return mountpoint_;
+  if (relpath.empty() || relpath == ".") {
+    return mountpoint_;
+  }
   return mountpoint_ + "/" + relpath;
 }
 
@@ -426,6 +466,22 @@ uint64_t Fixture::Hash64(std::string_view data) {
   return folly::hash::SpookyHashV2::Hash64(data.data(), data.size(), 0);
 }
 
+std::string Fixture::GenerateRandomData(size_t len, RandomMode mode) {
+  thread_local std::mt19937_64 rng(std::random_device{}());
+  std::uniform_int_distribution<unsigned char> byte_dist;
+
+  if (mode == RandomMode::kUpTo) {
+    std::uniform_int_distribution<size_t> len_dist(1, len);
+    len = len_dist(rng);
+  }
+
+  std::string data(len, '\0');
+  for (size_t i = 0; i < len; ++i) {
+    data[i] = static_cast<char>(byte_dist(rng));
+  }
+  return data;
+}
+
 metadata::Limits Fixture::GetLimits() const {
   return metadata::IMetaEngine::GetLimits("memory://local");
 }
@@ -436,7 +492,9 @@ metadata::Limits Fixture::GetLimits() const {
 
 std::string Fixture::FindSwordfsBin() const {
   const char *env = std::getenv("SWORDFS_BIN");
-  if (env && env[0] != '\0') return env;
+  if (env && env[0] != '\0') {
+    return env;
+  }
 
   // Default: look alongside the test binary in the build directory.
   // The test binary is at build/swordfs_e2e_test, swordfs is at build/swordfs.

@@ -31,27 +31,15 @@ TEST(VfsImplTest, VolumeReturnsNonNullAfterInit) {
 // Not-yet-implemented methods — all return NotSupported
 // ────────────────────────────────────────────────────────────────
 
-#define EXPECT_NOT_SUPPORTED(call)         \
-  do {                                     \
-    auto status = (call);                  \
-    EXPECT_TRUE(status.IsNotSupported())   \
+#define EXPECT_NOT_SUPPORTED(call)              \
+  do {                                          \
+    auto status = (call);                       \
+    EXPECT_TRUE(status.IsNotSupported())        \
         << #call << " => " << status.message(); \
   } while (0)
 
-TEST(VfsImplTest, Readlink) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Readlink(1));
-}
-
 TEST(VfsImplTest, Mknod) {
   EXPECT_NOT_SUPPORTED(VfsImpl::Mknod(1, "test", 0644, 0));
-}
-
-TEST(VfsImplTest, Symlink) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Symlink("/target", 1, "link"));
-}
-
-TEST(VfsImplTest, Link) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Link(2, 1, "hardlink"));
 }
 
 TEST(VfsImplTest, Fsyncdir) {
@@ -142,26 +130,26 @@ namespace {
 
 class MockMetaEngine : public swordfs::metadata::IMetaEngine {
  public:
-  Status Lookup(InodeID, std::string_view, InodeID*,
-                struct stat*) override {
+  Status Lookup(InodeID, std::string_view, InodeID *,
+                struct stat *) override {
     return Status::OK();
   }
-  Status GetAttr(InodeID, struct stat* attr) override {
+  Status GetAttr(InodeID, struct stat *attr) override {
     std::memset(attr, 0, sizeof(*attr));
     return call_status_;
   }
   Status ReadDir(InodeID,
-                 std::vector<swordfs::metadata::SwordFsEntry>*) override {
+                 std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, mode_t, InodeID* child_ino,
-                struct stat* attr) override {
+  Status Create(InodeID, std::string_view, mode_t, InodeID *child_ino,
+                struct stat *attr) override {
     *child_ino = 100;
     std::memset(attr, 0, sizeof(*attr));
     return call_status_;
   }
-  Status MkDir(InodeID, std::string_view, mode_t, InodeID*,
-               struct stat*) override {
+  Status MkDir(InodeID, std::string_view, mode_t, InodeID *,
+               struct stat *) override {
     return Status::OK();
   }
   Status Unlink(InodeID, std::string_view) override {
@@ -174,13 +162,24 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
                 std::string_view, unsigned int) override {
     return Status::OK();
   }
-  Status SetAttr(InodeID, const struct stat*, int,
-                 struct stat*) override {
+  Status SetAttr(InodeID, const struct stat *, int,
+                 struct stat *) override {
     return Status::OK();
   }
-  Status StatFs(struct statvfs* stbuf) override {
+  Status StatFs(struct statvfs *stbuf) override {
     std::memset(stbuf, 0, sizeof(*stbuf));
     return call_status_;
+  }
+  Status Symlink(InodeID, std::string_view, const char *,
+                 InodeID *, struct stat *) override {
+    return Status::OK();
+  }
+  Status Link(InodeID, InodeID, std::string_view,
+              struct stat *) override {
+    return Status::OK();
+  }
+  Status Readlink(InodeID, std::string *) override {
+    return Status::OK();
   }
   Status Access(InodeID, int) override {
     return call_status_;
@@ -188,10 +187,10 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status Open(InodeID) override { return call_status_; }
   Status OpenDir(InodeID) override { return call_status_; }
   Status Forget(InodeID, uint64_t) override { return Status::OK(); }
-  Status AddChunk(InodeID, const swordfs::metadata::ChunkMeta&) override {
+  Status AddChunk(InodeID, const swordfs::metadata::ChunkMeta &) override {
     return Status::OK();
   }
-  Status FindChunk(InodeID, off_t, size_t, swordfs::metadata::ChunkMeta*) override {
+  Status FindChunk(InodeID, off_t, size_t, swordfs::metadata::ChunkMeta *) override {
     return Status::NotFound("");
   }
 
@@ -205,7 +204,7 @@ class VfsImplIntegrationTest : public ::testing::Test {
  protected:
   void SetUp() override {
     swordfs::volume::VolumeImpl::Initialize();
-    auto& vol = swordfs::volume::VolumeImpl::Instance();
+    auto &vol = swordfs::volume::VolumeImpl::Instance();
     auto mock = std::make_unique<MockMetaEngine>();
     mock_meta_ = mock.get();
     vol.set_meta_engine(std::move(mock));
@@ -216,7 +215,7 @@ class VfsImplIntegrationTest : public ::testing::Test {
     swordfs::volume::VolumeImpl::Initialize();
   }
 
-  MockMetaEngine* mock_meta_ = nullptr;
+  MockMetaEngine *mock_meta_ = nullptr;
 };
 
 }  // namespace
@@ -285,4 +284,23 @@ TEST_F(VfsImplIntegrationTest, GetattrSuccess) {
   struct stat attr;
   auto status = VfsImpl::Getattr(1, &attr);
   EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, ReadlinkSuccess) {
+  std::string target;
+  auto status = VfsImpl::Readlink(1, &target);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, SymlinkSuccess) {
+  fuse_entry_param entry{};
+  auto status = VfsImpl::Symlink("/target", 1, "link", &entry);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, LinkSuccess) {
+  fuse_entry_param entry{};
+  auto status = VfsImpl::Link(2, 1, "hardlink", &entry);
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(entry.ino, 2u) << "Link should preserve ino";
 }

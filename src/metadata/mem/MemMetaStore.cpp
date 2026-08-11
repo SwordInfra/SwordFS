@@ -121,7 +121,19 @@ Status MemMetaStore::RemoveEntry(InodeID parent_ino, std::string_view name) {
     return Status::NotEmpty("directory not empty");
 
   UnlinkEntryLocked(parent_ino, name);
-  DeleteInodeLocked(child->ino);
+
+  if (!child->IsDir()) {
+    // Decrement nlink; only delete the inode when no names remain.
+    // This is the hard-link semantic: each unlink removes one name,
+    // and the data survives until the last name is gone.
+    child->attr.st_nlink--;
+    if (child->attr.st_nlink == 0) {
+      DeleteInodeLocked(child->ino);
+    }
+  } else {
+    // Directories cannot be hard-linked; always delete.
+    DeleteInodeLocked(child->ino);
+  }
   return Status::OK();
 }
 
