@@ -22,6 +22,15 @@ Chunk::Chunk(metadata::InodeID ino, metadata::ChunkIndex index)
       index_(index),
       data_(volume::VolumeImpl::Instance().data_engine()) {}
 
+Chunk::Chunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t size)
+    : ino_(ino),
+      max_chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
+      wb_(0),
+      state_(State::kFlushed),
+      index_(index),
+      data_(volume::VolumeImpl::Instance().data_engine()),
+      flushed_size_(size) {}
+
 utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf &data) {
   if (!IsWriting()) {
     return utils::Status::InvalidArgument("Chunk::Write: chunk is sealed or flushed");
@@ -55,22 +64,26 @@ utils::Status Chunk::Flush() {
   }
 
   // Not yet sealed → seal now (write-then-flush without GetNextFlushable).
-  if (IsWriting()) Seal();
+  if (IsWriting()) {
+    Seal();
+  }
 
+  flushed_size_ = wb_.size();
   auto data = wb_.CloneBuf();
   auto status = data_->Put(ChunkKey(), std::move(data));
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: ino=" << ino_
                       << " chunk=" << index_
-                      << " size=" << wb_.size()
+                      << " size=" << flushed_size_
                       << " — " << status.message();
     return status;  // WriteBuf data preserved, chunk now sealed.
   }
 
   state_ = State::kFlushed;
+  wb_ = WriteBuf(0);  // free the 64 MiB buffer
   SWORDFS_LOG_INFO << "Flush uploaded: ino=" << ino_
                    << " chunk=" << index_
-                   << " size=" << wb_.size();
+                   << " size=" << flushed_size_;
   return utils::Status::OK();
 }
 
@@ -78,7 +91,7 @@ metadata::ChunkMeta Chunk::BuildMeta() const {
   metadata::ChunkMeta cm;
   cm.start_offset = StartOffset();
   cm.key = ChunkKey();
-  cm.size = wb_.size();
+  cm.size = IsFlushed() ? flushed_size_ : wb_.size();
   return cm;
 }
 

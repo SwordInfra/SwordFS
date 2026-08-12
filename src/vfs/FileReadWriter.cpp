@@ -54,7 +54,9 @@ class MultiChunkReadWriter {
   Status Collect() {
     for (auto &p : ops_) {
       p->baton.wait();
-      if (!p->status.ok()) return p->status;
+      if (!p->status.ok()) {
+        return p->status;
+      }
       total_ += p->bytes;
     }
     return Status::OK();
@@ -76,22 +78,31 @@ class MultiChunkReadWriter {
 }  // namespace
 
 // ────────────────────────────────────────────────────────────────
-// DirtyChunkHandler
+// ChunkMap
 // ────────────────────────────────────────────────────────────────
 
-chunk::Chunk *DirtyChunkHandler::Get(metadata::ChunkIndex idx, off_t off,
-                                     bool create_if_missing) {
+chunk::Chunk *ChunkMap::Get(metadata::ChunkIndex idx, off_t off,
+                            bool create_if_missing) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = chunks_.find(idx);
   if (it != chunks_.end() && off < it->second.EndOffset()) {
     return &it->second;
   }
-  if (!create_if_missing) return nullptr;
+  if (!create_if_missing) {
+    // Try metadata engine for flushed chunks not yet in map.
+    metadata::ChunkMeta cm;
+    auto status = meta_->FindChunk(ino_, off, chunk_size_, &cm);
+    if (status.ok()) {
+      it = chunks_.try_emplace(idx, ino_, idx, cm.size).first;
+      return &it->second;
+    }
+    return nullptr;
+  }
   it = chunks_.try_emplace(idx, ino_, idx).first;
   return &it->second;
 }
 
-chunk::Chunk *DirtyChunkHandler::GetNextFlushable() {
+chunk::Chunk *ChunkMap::GetNextFlushable() {
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto &[idx, c] : chunks_) {
     if (c.Flushable()) {
@@ -100,15 +111,6 @@ chunk::Chunk *DirtyChunkHandler::GetNextFlushable() {
     }
   }
   return nullptr;
-}
-
-void DirtyChunkHandler::Remove(metadata::ChunkIndex idx) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = chunks_.find(idx);
-  CHECK(it != chunks_.end()) << "Remove: chunk " << idx << " not found";
-  CHECK(it->second.IsFlushed())
-      << "Remove: chunk " << idx << " is not flushed";
-  chunks_.erase(it);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -120,7 +122,7 @@ FileReadWriter::FileReadWriter(InodeID ino)
       chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
       meta_(volume::VolumeImpl::Instance().meta_engine()),
       data_(volume::VolumeImpl::Instance().data_engine()),
-      dirty_(ino) {}
+      chunks_(ino, meta_, chunk_size_) {}
 
 // ────────────────────────────────────────────────────────────────
 // Write
@@ -136,7 +138,7 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
     metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(
         cur_off / static_cast<off_t>(chunk_size_));
 
-    auto &c = *dirty_.Get(idx, cur_off, /*create_if_missing=*/true);
+    auto &c = *chunks_.Get(idx, cur_off, /*create_if_missing=*/true);
 
     size_t room = chunk_size_ - (cur_off % chunk_size_);
     size_t n = std::min(remaining, room);
@@ -171,10 +173,10 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   size_t total = 0;
 
   while (remaining > 0) {
-    // 1) Check dirty chunks (in-memory write buffer).
+    // 1) Try the unified chunk map (dirty + flushed).
     metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(
         cur_off / static_cast<off_t>(chunk_size_));
-    auto *c = dirty_.Get(idx, cur_off, /*create_if_missing=*/false);
+    auto *c = chunks_.Get(idx, cur_off, /*create_if_missing=*/false);
     if (c) {
       off_t chunk_off = cur_off - c->StartOffset();
       size_t window_cap =
@@ -192,33 +194,7 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
       continue;
     }
 
-    // 2) Try the metadata engine (flushed chunks).
-    metadata::ChunkMeta cm;
-    auto status = meta_->FindChunk(ino_, cur_off, chunk_size_, &cm);
-    if (status.ok()) {
-      off_t chunk_end =
-          static_cast<off_t>(cm.start_offset + cm.size);
-      size_t window_cap =
-          std::min(remaining,
-                   static_cast<size_t>(chunk_end - cur_off));
-
-      auto window = folly::IOBuf::takeOwnership(
-          write_start + static_cast<size_t>(cur_off - off),
-          window_cap, static_cast<std::size_t>(0),
-          +[](void *, void *) {}, nullptr, true);
-      status = data_->Get(cm.key,
-                          static_cast<size_t>(cur_off - cm.start_offset),
-                          window_cap, window.get());
-      if (status.ok()) {
-        total += window->length();
-        remaining -= window->length();
-        cur_off += static_cast<off_t>(window->length());
-        continue;
-      }
-      // Chunk registered but not found in storage — fall through to hole.
-    }
-
-    // 3) Hole — fill with zeros up to the next chunk boundary.
+    // 2) Hole — fill with zeros up to the next chunk boundary.
     size_t hole =
         std::min(remaining,
                  chunk_size_ - static_cast<size_t>(cur_off % chunk_size_));
@@ -229,7 +205,9 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   }
 
   auto status = multi.Collect();
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
   total += multi.TotalBytes();
 
   out->append(total);
@@ -242,7 +220,7 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
 
 utils::Status FileReadWriter::Flush() {
   off_t file_end = 0;
-  while (auto *c = dirty_.GetNextFlushable()) {
+  while (auto *c = chunks_.GetNextFlushable()) {
     auto idx = c->index();
     auto status = c->Flush();
     if (!status.ok()) {
@@ -252,8 +230,11 @@ utils::Status FileReadWriter::Flush() {
       continue;  // keep the sealed chunk, try the next one
     }
     meta_->AddChunk(ino_, c->BuildMeta());
-    if (c->EndOffset() > file_end) file_end = c->EndOffset();
-    dirty_.Remove(idx);
+    if (c->EndOffset() > file_end) {
+      file_end = c->EndOffset();
+    }
+    // Chunk stays in the map with kFlushed state — future reads
+    // will route through Chunk::Read() → data_->Get().
   }
 
   // Update file size if the file grew.

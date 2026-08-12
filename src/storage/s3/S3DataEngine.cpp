@@ -73,11 +73,32 @@ void EnsureAwsSdkInit() {
 /// area so the SDK's ostream layer writes directly into the target.
 class PreallocatedOutputStreamBuf : public std::streambuf {
  public:
-  PreallocatedOutputStreamBuf(char* buffer, size_t capacity) {
+  PreallocatedOutputStreamBuf(char *buffer, size_t capacity) {
     setp(buffer, buffer + capacity);
   }
-  /// Number of bytes actually written into the buffer.
   size_t Written() const { return static_cast<size_t>(pptr() - pbase()); }
+
+ protected:
+  std::streamsize xsputn(const char *s, std::streamsize n) override {
+    auto avail = static_cast<std::streamsize>(epptr() - pptr());
+    auto actual = std::min(n, avail);
+    std::memcpy(pptr(), s, static_cast<size_t>(actual));
+    pbump(static_cast<int>(actual));
+    return actual;
+  }
+
+  int_type overflow(int_type ch) override { return traits_type::eof(); }
+
+  pos_type seekoff(off_type off, std::ios_base::seekdir dir,
+                   std::ios_base::openmode which) override {
+    if (which == std::ios_base::out && off == 0 &&
+        dir == std::ios_base::cur) {
+      return pptr() - pbase();
+    }
+    return pos_type(off_type(-1));
+  }
+
+  int sync() override { return std::streambuf::sync(); }
 };
 
 /// A self-contained Aws::IOStream that owns a PreallocatedOutputStreamBuf.
@@ -86,7 +107,7 @@ class PreallocatedOutputStreamBuf : public std::streambuf {
 /// and its streambuf.
 class PreallocatedResponseStream : public Aws::IOStream {
  public:
-  PreallocatedResponseStream(char* buffer, size_t capacity)
+  PreallocatedResponseStream(char *buffer, size_t capacity)
       : Aws::IOStream(&buf_), buf_(buffer, capacity) {}
 
   size_t Written() const { return buf_.Written(); }
@@ -135,8 +156,12 @@ bool S3DataEngine::Head(std::string_view key, size_t *size) {
     req.SetKey(ObjectKey(key));
 
     auto outcome = client_->HeadObject(req);
-    if (!outcome.IsSuccess()) return false;
-    if (size) *size = static_cast<size_t>(outcome.GetResult().GetContentLength());
+    if (!outcome.IsSuccess()) {
+      return false;
+    }
+    if (size) {
+      *size = static_cast<size_t>(outcome.GetResult().GetContentLength());
+    }
     return true;
   });
 }
@@ -185,7 +210,9 @@ Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size,
 
       if (offset > 0 || size > 0) {
         std::string range = "bytes=" + std::to_string(offset) + "-";
-        if (size > 0) range += std::to_string(offset + size - 1);
+        if (size > 0) {
+          range += std::to_string(offset + size - 1);
+        }
         req.SetRange(range);
       }
 
@@ -195,10 +222,10 @@ Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size,
       // The SDK calls the factory lazily when the response arrives
       // and writes the body into our buffer with no intermediate
       // std::string or memcpy.
-      req.SetResponseStreamFactory([out]() -> Aws::IOStream* {
+      req.SetResponseStreamFactory([out]() -> Aws::IOStream * {
         return Aws::New<PreallocatedResponseStream>(
             "GetObject",
-            reinterpret_cast<char*>(out->writableData()),
+            reinterpret_cast<char *>(out->writableData()),
             out->tailroom());
       });
 
@@ -253,7 +280,9 @@ Status S3DataEngine::Delete(std::string_view key) {
 }
 
 std::string S3DataEngine::ObjectKey(std::string_view key) const {
-  if (cfg_.prefix.empty()) return std::string(key);
+  if (cfg_.prefix.empty()) {
+    return std::string(key);
+  }
   return cfg_.prefix + "/" + std::string(key);
 }
 

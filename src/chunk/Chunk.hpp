@@ -33,6 +33,10 @@ public:
   /// Create a chunk ready to accept writes.
   Chunk(metadata::InodeID ino, metadata::ChunkIndex index);
 
+  /// Create a read-only chunk in kFlushed state for reading back
+  /// data from the storage engine via Read().
+  Chunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t size);
+
   /// Write |size| bytes from |data| at the given chunk-relative offset.
   /// Returns InvalidArgument if the write would exceed chunk bounds.
   utils::Status Write(off_t write_offset, const folly::IOBuf &data);
@@ -65,7 +69,8 @@ public:
     return static_cast<off_t>(index_) * static_cast<off_t>(max_chunk_size_);
   }
   off_t EndOffset() const {
-    return StartOffset() + static_cast<off_t>(wb_.size());
+    return StartOffset()
+        + static_cast<off_t>(IsFlushed() ? flushed_size_ : wb_.size());
   }
 
 private:
@@ -82,6 +87,7 @@ private:
   State state_;
   metadata::ChunkIndex index_;
   storage::IDataEngine *data_;
+  size_t flushed_size_ = 0;  // valid only when kFlushed
 };
 
 } // namespace swordfs::chunk

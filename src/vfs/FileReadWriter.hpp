@@ -36,37 +36,40 @@ class IDataEngine;
 namespace vfs {
 
 // ────────────────────────────────────────────────────────────────
-// DirtyChunkHandler — thread-safe manager of in-flight dirty chunks.
-// All synchronisation is internal; callers never see the mutex or
-// manipulate the chunk map directly.
+// ChunkMap — thread-safe manager of inode chunks (both dirty and
+// flushed).  All synchronisation is internal.  Flushed chunks are
+// not removed so reads can reach them directly via Chunk::Read().
 // ────────────────────────────────────────────────────────────────
 
-class DirtyChunkHandler {
+class ChunkMap {
  public:
   using Map = folly::F14FastMap<metadata::ChunkIndex, chunk::Chunk>;
 
-  explicit DirtyChunkHandler(metadata::InodeID ino) : ino_(ino) {}
+  ChunkMap(metadata::InodeID ino,
+           metadata::IMetaEngine *meta,
+           size_t chunk_size)
+      : ino_(ino), meta_(meta), chunk_size_(chunk_size) {}
 
-  /// Get the chunk at |idx|.  If |create_if_missing| is true, the
-  /// chunk is created when it does not exist or does not cover |off|.
-  /// Returns nullptr only when create_if_missing is false and no
-  /// matching chunk exists.  The returned pointer is valid only until
-  /// the next call to any non-const method.
+  /// Get the chunk at |idx|.  If the chunk is not in the map:
+  ///   - create_if_missing=true → create a writable chunk
+  ///   - create_if_missing=false → query FindChunk; if found, create
+  ///     a read-only (kFlushed) chunk.  Returns nullptr only when no
+  ///     matching chunk exists.
+  /// The pointer is valid only until the next non-const call.
   chunk::Chunk *Get(metadata::ChunkIndex idx,
                     off_t off,
                     bool create_if_missing);
 
   /// Return the next chunk that has data and is not yet sealed.
   /// Seals it before returning.  Returns nullptr when all chunks
-  /// have been flushed.  The pointer is valid until the next call
-  /// to any non-const method.
+  /// have been flushed.  The pointer is valid until the next
+  /// non-const call.
   chunk::Chunk *GetNextFlushable();
-
-  /// Remove the chunk at |idx| after a successful flush.
-  void Remove(metadata::ChunkIndex idx);
 
  private:
   metadata::InodeID ino_;
+  metadata::IMetaEngine *meta_;
+  size_t chunk_size_;
   mutable std::mutex mutex_;
   Map chunks_;
 };
@@ -97,7 +100,7 @@ class FileReadWriter {
   size_t chunk_size_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
-  DirtyChunkHandler dirty_;
+  ChunkMap chunks_;
 };
 
 }  // namespace vfs
