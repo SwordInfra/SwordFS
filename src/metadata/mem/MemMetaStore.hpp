@@ -85,7 +85,7 @@ class MemMetaStore {
   // ────────────────────────────────────────────────────────────────
 
   Status AddChunk(InodeID ino, const ChunkMeta &cm);
-  Status FindChunk(InodeID ino, off_t off, size_t chunk_size, ChunkMeta *cm);
+  Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm);
 
  private:
   // ────────────────────────────────────────────────────────────────
@@ -108,8 +108,8 @@ class MemMetaStore {
   folly::F14FastMap<InodeID, SwordFsInode *> inodes_;
   folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode *>> dirs_;
 
-  // Chunk metadata: inode → (start_offset → ChunkMeta).
-  folly::F14FastMap<InodeID, folly::F14FastMap<off_t, ChunkMeta>> chunks_;
+  // Chunk metadata: inode → (index → ChunkMeta).
+  folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, ChunkMeta>> chunks_;
 };
 
 }  // namespace swordfs::metadata

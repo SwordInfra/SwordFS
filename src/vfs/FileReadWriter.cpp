@@ -62,8 +62,6 @@ class MultiChunkReadWriter {
     return Status::OK();
   }
 
-  size_t TotalBytes() const { return total_; }
-
  private:
   struct Pending {
     folly::fibers::Baton baton;
@@ -78,31 +76,28 @@ class MultiChunkReadWriter {
 }  // namespace
 
 // ────────────────────────────────────────────────────────────────
-// ChunkMap
+// FileChunkManager
 // ────────────────────────────────────────────────────────────────
 
-chunk::Chunk *ChunkMap::Get(metadata::ChunkIndex idx, off_t off,
-                            bool create_if_missing) {
+chunk::Chunk *FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_missing) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = chunks_.find(idx);
-  if (it != chunks_.end() && off < it->second.EndOffset()) {
+  if (it != chunks_.end()) {
     return &it->second;
   }
-  if (!create_if_missing) {
-    // Try metadata engine for flushed chunks not yet in map.
-    metadata::ChunkMeta cm;
-    auto status = meta_->FindChunk(ino_, off, chunk_size_, &cm);
-    if (status.ok()) {
-      it = chunks_.try_emplace(idx, ino_, idx, cm.size).first;
-      return &it->second;
-    }
+  // Not cached — try lazy-load from metadata engine.
+  auto c = chunk::Chunk(ino_, idx);
+  auto status = c.Initialize();
+  if (!status.ok()) {
     return nullptr;
+  } else if (c.IsFlushed() || create_if_missing) {
+    it = chunks_.try_emplace(idx, std::move(c)).first;
+    return &it->second;
   }
-  it = chunks_.try_emplace(idx, ino_, idx).first;
-  return &it->second;
+  return nullptr;
 }
 
-chunk::Chunk *ChunkMap::GetNextFlushable() {
+chunk::Chunk *FileChunkManager::GetNextFlushable() {
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto &[idx, c] : chunks_) {
     if (c.Flushable()) {
@@ -122,7 +117,7 @@ FileReadWriter::FileReadWriter(InodeID ino)
       chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
       meta_(volume::VolumeImpl::Instance().meta_engine()),
       data_(volume::VolumeImpl::Instance().data_engine()),
-      chunks_(ino, meta_, chunk_size_) {}
+      chunks_(ino) {}
 
 // ────────────────────────────────────────────────────────────────
 // Write
@@ -138,19 +133,21 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
     metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(
         cur_off / static_cast<off_t>(chunk_size_));
 
-    auto &c = *chunks_.Get(idx, cur_off, /*create_if_missing=*/true);
+    auto *c = chunks_.Get(idx, /*create_if_missing=*/true);
+    if (!c) {
+      return utils::Status::Internal("FileReadWriter::Write: failed to get chunk");
+    }
 
     size_t room = chunk_size_ - (cur_off % chunk_size_);
     size_t n = std::min(remaining, room);
     auto slice = folly::IOBuf::takeOwnership(
-        const_cast<uint8_t *>(buf.data()) + (cur_off - off),
-        n, static_cast<std::size_t>(n),
-        +[](void *, void *) {}, nullptr, true);
-    auto status = c.Write(cur_off, *slice);
+        const_cast<uint8_t *>(buf.data()) + (cur_off - off), n, n,
+        +[](void *, void *) {}, nullptr, false);
+    auto status = c->Write(cur_off, *slice);
     if (!status.ok()) {
       SWORDFS_LOG_ERROR << "FileReadWriter::Write FAILED: ino=" << ino_
                         << " off=" << cur_off
-                        << " chunk=" << c.index() << " — "
+                        << " chunk=" << c->index() << " — "
                         << status.message();
       return status;
     }
@@ -165,28 +162,36 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
 // ────────────────────────────────────────────────────────────────
 
 utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
-  auto *const write_start = out->writableData();
-
   MultiChunkReadWriter multi;
   size_t remaining = size;
   off_t cur_off = off;
-  size_t total = 0;
+  auto *const write_start = out->writableData();
 
   while (remaining > 0) {
     // 1) Try the unified chunk map (dirty + flushed).
     metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(
         cur_off / static_cast<off_t>(chunk_size_));
-    auto *c = chunks_.Get(idx, cur_off, /*create_if_missing=*/false);
-    if (c) {
+    auto *c = chunks_.Get(idx, /*create_if_missing=*/false);
+
+    // cur_off may fall within the chunk's index range (e.g. a 64 MiB
+    // chunk that only has 500 bytes of data — offsets [500, 64 MiB)
+    // are holes that still map to the same idx).  We must guard with
+    // DataEnd() because `static_cast<size_t>(DataEnd - cur_off)`
+    // would overflow to a huge value when cur_off ≥ DataEnd, leading
+    // to a bogus window_cap and an infinite loop.
+    bool has_data = (c != nullptr) && (cur_off < c->DataEnd());
+
+    if (has_data) {
       off_t chunk_off = cur_off - c->StartOffset();
-      size_t window_cap =
-          std::min(remaining,
-                   static_cast<size_t>(c->EndOffset() - cur_off));
+      size_t window_cap = std::min(remaining, static_cast<size_t>(c->DataEnd() - cur_off));
+      CHECK(window_cap > 0) << "window_cap=0: cur_off=" << cur_off
+                            << " DataEnd=" << c->DataEnd()
+                            << " remaining=" << remaining;
 
       auto window = folly::IOBuf::takeOwnership(
           write_start + static_cast<size_t>(cur_off - off),
           window_cap, static_cast<std::size_t>(0),
-          +[](void *, void *) {}, nullptr, true);
+          +[](void *, void *) {}, nullptr, false);
 
       multi.SubmitRead(c, chunk_off, window_cap, std::move(window));
       remaining -= window_cap;
@@ -199,7 +204,6 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
         std::min(remaining,
                  chunk_size_ - static_cast<size_t>(cur_off % chunk_size_));
     std::memset(write_start + static_cast<size_t>(cur_off - off), 0, hole);
-    total += hole;
     remaining -= hole;
     cur_off += static_cast<off_t>(hole);
   }
@@ -208,9 +212,8 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   if (!status.ok()) {
     return status;
   }
-  total += multi.TotalBytes();
 
-  out->append(total);
+  out->append(size - remaining);
   return Status::OK();
 }
 
@@ -227,11 +230,10 @@ utils::Status FileReadWriter::Flush() {
       SWORDFS_LOG_ERROR << "FileReadWriter::Flush chunk FAILED: ino=" << ino_
                         << " chunk=" << idx
                         << " — " << status.message();
-      continue;  // keep the sealed chunk, try the next one
+      continue;
     }
-    meta_->AddChunk(ino_, c->BuildMeta());
-    if (c->EndOffset() > file_end) {
-      file_end = c->EndOffset();
+    if (c->DataEnd() > file_end) {
+      file_end = c->DataEnd();
     }
     // Chunk stays in the map with kFlushed state — future reads
     // will route through Chunk::Read() → data_->Get().

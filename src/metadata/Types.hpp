@@ -37,14 +37,20 @@ enum TimeField : uint8_t {
 struct SwordFsInode {
   InodeID ino;
   struct stat attr;
-  uint64_t nlookup = 0;  // reserved for future forget support
+  uint64_t nlookup = 0;        // reserved for future forget support
   std::string symlink_target;  // non-empty only for S_IFLNK
 
   void Touch(uint8_t fields) {
     time_t now = ::time(nullptr);
-    if (fields & kAtime) attr.st_atime = now;
-    if (fields & kMtime) attr.st_mtime = now;
-    if (fields & kCtime) attr.st_ctime = now;
+    if (fields & kAtime) {
+      attr.st_atime = now;
+    }
+    if (fields & kMtime) {
+      attr.st_mtime = now;
+    }
+    if (fields & kCtime) {
+      attr.st_ctime = now;
+    }
   }
 
   bool IsDir() const { return S_ISDIR(attr.st_mode); }
@@ -52,7 +58,9 @@ struct SwordFsInode {
   // POSIX access check. Returns true if uid/gid has the requested permissions
   // on this inode. Root (uid == 0) always has full access.
   bool CheckAccess(uid_t uid, gid_t gid, int mask) const {
-    if (uid == 0) return true;
+    if (uid == 0) {
+      return true;
+    }
 
     unsigned int access_bits;
     if (uid == attr.st_uid) {
@@ -69,9 +77,9 @@ struct SwordFsInode {
 
 /// Metadata for one flushed chunk.
 struct ChunkMeta {
-  off_t start_offset;  // file offset where this chunk begins
-  std::string key;     // storage key (e.g. "42/0")
-  size_t size;         // data size in bytes
+  ChunkIndex index;  // 0-based chunk number
+  std::string key;   // storage key (e.g. "42/0")
+  size_t size;       // data size in bytes
 };
 
 }  // namespace swordfs::metadata

@@ -36,29 +36,22 @@ class IDataEngine;
 namespace vfs {
 
 // ────────────────────────────────────────────────────────────────
-// ChunkMap — thread-safe manager of inode chunks (both dirty and
+// FileChunkManager — thread-safe manager of inode chunks (both dirty and
 // flushed).  All synchronisation is internal.  Flushed chunks are
 // not removed so reads can reach them directly via Chunk::Read().
 // ────────────────────────────────────────────────────────────────
 
-class ChunkMap {
+class FileChunkManager {
  public:
   using Map = folly::F14FastMap<metadata::ChunkIndex, chunk::Chunk>;
 
-  ChunkMap(metadata::InodeID ino,
-           metadata::IMetaEngine *meta,
-           size_t chunk_size)
-      : ino_(ino), meta_(meta), chunk_size_(chunk_size) {}
+  explicit FileChunkManager(metadata::InodeID ino) : ino_(ino) {}
 
-  /// Get the chunk at |idx|.  If the chunk is not in the map:
-  ///   - create_if_missing=true → create a writable chunk
-  ///   - create_if_missing=false → query FindChunk; if found, create
-  ///     a read-only (kFlushed) chunk.  Returns nullptr only when no
-  ///     matching chunk exists.
+  /// Get the chunk at |idx|.  If not in the map, creates and
+  /// initializes it.  Returns nullptr on error or when
+  /// create_if_missing=false and no flushed data exists.
   /// The pointer is valid only until the next non-const call.
-  chunk::Chunk *Get(metadata::ChunkIndex idx,
-                    off_t off,
-                    bool create_if_missing);
+  chunk::Chunk *Get(metadata::ChunkIndex idx, bool create_if_missing);
 
   /// Return the next chunk that has data and is not yet sealed.
   /// Seals it before returning.  Returns nullptr when all chunks
@@ -68,8 +61,6 @@ class ChunkMap {
 
  private:
   metadata::InodeID ino_;
-  metadata::IMetaEngine *meta_;
-  size_t chunk_size_;
   mutable std::mutex mutex_;
   Map chunks_;
 };
@@ -100,7 +91,7 @@ class FileReadWriter {
   size_t chunk_size_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
-  ChunkMap chunks_;
+  FileChunkManager chunks_;
 };
 
 }  // namespace vfs

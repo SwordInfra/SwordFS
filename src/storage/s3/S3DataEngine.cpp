@@ -76,6 +76,7 @@ class PreallocatedOutputStreamBuf : public std::streambuf {
   PreallocatedOutputStreamBuf(char *buffer, size_t capacity) {
     setp(buffer, buffer + capacity);
   }
+  /// Number of bytes actually written into the buffer.
   size_t Written() const { return static_cast<size_t>(pptr() - pbase()); }
 
  protected:

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -15,31 +16,39 @@
 #include "utils/Status.hpp"
 
 namespace swordfs {
+namespace metadata {
+class IMetaEngine;
+}
 namespace storage {
 class IDataEngine;
 }
-} // namespace swordfs
+}  // namespace swordfs
 
 namespace swordfs::chunk {
 
 class Chunk {
-public:
+ public:
   enum class State : uint8_t {
-    kWriting, // accepting writes
-    kSealed,  // no more writes, not yet in storage
-    kFlushed, // data successfully persisted to storage
+    kWriting,  // accepting writes
+    kSealed,   // no more writes, not yet in storage
+    kFlushed,  // data successfully persisted to storage
   };
 
   /// Create a chunk ready to accept writes.
   Chunk(metadata::InodeID ino, metadata::ChunkIndex index);
 
-  /// Create a read-only chunk in kFlushed state for reading back
-  /// data from the storage engine via Read().
-  Chunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t size);
+  /// Query VolumeImpl's meta engine for existing flushed metadata at
+  /// this chunk's start offset.  If found, transition to kFlushed;
+  /// otherwise stay in kWriting so the caller can write into it.
+  utils::Status Initialize();
 
   /// Write |size| bytes from |data| at the given chunk-relative offset.
   /// Returns InvalidArgument if the write would exceed chunk bounds.
   utils::Status Write(off_t write_offset, const folly::IOBuf &data);
+
+  /// Read up to |len| bytes starting at chunk-relative |off| into |out|.
+  /// The number of bytes copied is available via out->length() increase.
+  utils::Status Read(off_t off, size_t len, folly::IOBuf *out) const;
 
   /// Seal the chunk — no more writes accepted.
   void Seal();
@@ -48,15 +57,8 @@ public:
   /// Returns OK if there is nothing to flush.
   utils::Status Flush();
 
-  /// Read up to |len| bytes starting at chunk-relative |off| into |out|.
-  /// The number of bytes copied is available via out->length() increase.
-  utils::Status Read(off_t off, size_t len, folly::IOBuf *out) const;
-
-  /// Build a ChunkMeta snapshot for metadata registration.
-  metadata::ChunkMeta BuildMeta() const;
-
   bool IsFlushed() const { return state_ == State::kFlushed; }
-  bool Flushable() const { return state_ == State::kWriting && wb_.size() > 0; }
+  bool Flushable() const { return state_ == State::kWriting && wb_ && wb_->size() > 0; }
 
   // ──────────────────────────────────────────────────────────────
   // Accessors
@@ -68,26 +70,32 @@ public:
   off_t StartOffset() const {
     return static_cast<off_t>(index_) * static_cast<off_t>(max_chunk_size_);
   }
-  off_t EndOffset() const {
-    return StartOffset()
-        + static_cast<off_t>(IsFlushed() ? flushed_size_ : wb_.size());
+  off_t DataEnd() const {
+    if (IsFlushed()) {
+      return StartOffset() + static_cast<off_t>(flushed_size_);
+    }
+    return StartOffset() + static_cast<off_t>(wb_ ? wb_->size() : 0);
   }
 
-private:
+ private:
   bool IsWriting() const { return state_ == State::kWriting; }
+
+  /// Build a ChunkMeta snapshot for metadata registration.
+  metadata::ChunkMeta BuildMeta() const;
 
   std::string ChunkKey() const {
     return std::to_string(ino_) + "/" + std::to_string(index_);
   }
 
-private:
+ private:
   metadata::InodeID ino_;
   size_t max_chunk_size_;
-  WriteBuf wb_;
+  std::unique_ptr<WriteBuf> wb_;
   State state_;
   metadata::ChunkIndex index_;
   storage::IDataEngine *data_;
+  metadata::IMetaEngine *meta_;
   size_t flushed_size_ = 0;  // valid only when kFlushed
 };
 
-} // namespace swordfs::chunk
+}  // namespace swordfs::chunk

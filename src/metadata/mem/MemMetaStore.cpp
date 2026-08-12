@@ -345,29 +345,30 @@ bool MemMetaStore::IsDescendantOfImplLocked(InodeID current_ino,
 Status MemMetaStore::AddChunk(InodeID ino, const ChunkMeta &cm) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto &chunk_map = chunks_[ino];
-  if (chunk_map.count(cm.start_offset) > 0) {
+  if (chunk_map.count(cm.index) > 0) {
     return Status::AlreadyExists(
-        "chunk already exists at offset " + std::to_string(cm.start_offset));
+        "chunk already exists at index " + std::to_string(cm.index));
   }
-  chunk_map[cm.start_offset] = cm;
+  chunk_map[cm.index] = cm;
   return Status::OK();
 }
 
-Status MemMetaStore::FindChunk(InodeID ino, off_t off, size_t chunk_size,
-                               ChunkMeta *cm) {
+Status MemMetaStore::FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto ino_it = chunks_.find(ino);
   if (ino_it == chunks_.end()) {
     return Status::NotFound("no chunks for inode " + std::to_string(ino));
   }
-  off_t chunk_start = (off / static_cast<off_t>(chunk_size)) * static_cast<off_t>(chunk_size);
-  auto chunk_it = ino_it->second.find(chunk_start);
+  auto chunk_it = ino_it->second.find(idx);
   if (chunk_it == ino_it->second.end()) {
-    return Status::NotFound(
-        "chunk not found at offset " + std::to_string(chunk_start));
+    return Status::NotFound("chunk not found at index " + std::to_string(idx));
+  }
+  const auto& c = chunk_it->second;
+  if (c.index != idx) {
+    return Status::NotFound("chunk index mismatch");
   }
   if (cm) {
-    *cm = chunk_it->second;
+    *cm = c;
   }
   return Status::OK();
 }
