@@ -14,6 +14,8 @@
 #include "vfs/VfsImpl.hpp"
 #include "volume/VolumeImpl.hpp"
 
+using swordfs::metadata::ChunkIndex;
+using swordfs::metadata::ChunkMeta;
 using swordfs::metadata::InodeID;
 using swordfs::vfs::VfsImpl;
 
@@ -190,7 +192,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status AddChunk(InodeID, const swordfs::metadata::ChunkMeta &) override {
     return Status::OK();
   }
-  Status FindChunk(InodeID, off_t, size_t, swordfs::metadata::ChunkMeta *) override {
+  Status FindChunk(InodeID, ChunkIndex, ChunkMeta *) override {
     return Status::NotFound("");
   }
 

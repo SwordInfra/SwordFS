@@ -36,34 +36,28 @@ class IDataEngine;
 namespace vfs {
 
 // ────────────────────────────────────────────────────────────────
-// DirtyChunkHandler — thread-safe manager of in-flight dirty chunks.
-// All synchronisation is internal; callers never see the mutex or
-// manipulate the chunk map directly.
+// FileChunkManager — thread-safe manager of inode chunks (both dirty and
+// flushed).  All synchronisation is internal.  Flushed chunks are
+// not removed so reads can reach them directly via Chunk::Read().
 // ────────────────────────────────────────────────────────────────
 
-class DirtyChunkHandler {
+class FileChunkManager {
  public:
   using Map = folly::F14FastMap<metadata::ChunkIndex, chunk::Chunk>;
 
-  explicit DirtyChunkHandler(metadata::InodeID ino) : ino_(ino) {}
+  explicit FileChunkManager(metadata::InodeID ino) : ino_(ino) {}
 
-  /// Get the chunk at |idx|.  If |create_if_missing| is true, the
-  /// chunk is created when it does not exist or does not cover |off|.
-  /// Returns nullptr only when create_if_missing is false and no
-  /// matching chunk exists.  The returned pointer is valid only until
-  /// the next call to any non-const method.
-  chunk::Chunk *Get(metadata::ChunkIndex idx,
-                    off_t off,
-                    bool create_if_missing);
+  /// Get the chunk at |idx|.  If not in the map, creates and
+  /// initializes it.  Returns nullptr on error or when
+  /// create_if_missing=false and no flushed data exists.
+  /// The pointer is valid only until the next non-const call.
+  chunk::Chunk *Get(metadata::ChunkIndex idx, bool create_if_missing);
 
   /// Return the next chunk that has data and is not yet sealed.
   /// Seals it before returning.  Returns nullptr when all chunks
-  /// have been flushed.  The pointer is valid until the next call
-  /// to any non-const method.
+  /// have been flushed.  The pointer is valid until the next
+  /// non-const call.
   chunk::Chunk *GetNextFlushable();
-
-  /// Remove the chunk at |idx| after a successful flush.
-  void Remove(metadata::ChunkIndex idx);
 
  private:
   metadata::InodeID ino_;
@@ -97,7 +91,7 @@ class FileReadWriter {
   size_t chunk_size_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
-  DirtyChunkHandler dirty_;
+  FileChunkManager chunks_;
 };
 
 }  // namespace vfs

@@ -182,7 +182,7 @@ TEST_F(MemMetaImplRenameTest, RenameFileOverDirectoryFails) {
   impl_->MkDir(kRoot, "d", 0755, &d_ino, nullptr);
 
   Status st = impl_->Rename(kRoot, "f", kRoot, "d", 0);
-  EXPECT_EQ(st.code(), Status::kInvalidArgument) << st.message();
+  EXPECT_EQ(st.code(), Status::kIsDirectory) << st.message();
 }
 
 TEST_F(MemMetaImplRenameTest, RenameDirectoryOverFileFails) {
@@ -191,7 +191,7 @@ TEST_F(MemMetaImplRenameTest, RenameDirectoryOverFileFails) {
   impl_->MkDir(kRoot, "d", 0755, &d_ino, nullptr);
 
   Status st = impl_->Rename(kRoot, "d", kRoot, "f", 0);
-  EXPECT_EQ(st.code(), Status::kInvalidArgument) << st.message();
+  EXPECT_EQ(st.code(), Status::kNotDirectory) << st.message();
 }
 
 // ════════════════════════════════════════════════════════════════════

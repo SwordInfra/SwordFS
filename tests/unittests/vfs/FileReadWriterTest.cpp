@@ -20,9 +20,11 @@
 #include "metadata/Types.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Status.hpp"
+#include "vfs/FileHandleManager.hpp"
 #include "vfs/FileReadWriter.hpp"
 #include "volume/VolumeImpl.hpp"
 
+using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::ChunkMeta;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
@@ -169,18 +171,17 @@ class MockMetaEngine : public IMetaEngine {
   Status Forget(InodeID, uint64_t) override { return Status::OK(); }
 
   Status AddChunk(InodeID ino, const ChunkMeta &cm) override {
-    chunks_[ino][cm.start_offset] = cm;
+    chunks_[ino][cm.index] = cm;
     return Status::OK();
   }
 
-  Status FindChunk(InodeID ino, off_t off, size_t chunk_size,
+  Status FindChunk(InodeID ino, ChunkIndex idx,
                    ChunkMeta *cm) override {
     auto it = chunks_.find(ino);
     if (it == chunks_.end()) {
       return Status::NotFound("");
     }
-    off_t chunk_start = (off / static_cast<off_t>(chunk_size)) * static_cast<off_t>(chunk_size);
-    auto cit = it->second.find(chunk_start);
+    auto cit = it->second.find(idx);
     if (cit == it->second.end()) {
       return Status::NotFound("");
     }
@@ -195,7 +196,7 @@ class MockMetaEngine : public IMetaEngine {
  private:
   off_t file_size_ = 0;
   std::unordered_map<InodeID,
-                     std::unordered_map<off_t, ChunkMeta>>
+                     std::unordered_map<ChunkIndex, ChunkMeta>>
       chunks_;
 };
 
@@ -420,51 +421,65 @@ TEST_F(FileReadWriterTest, SparseReadWithMultipleHoles) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Flush → read from metadata
+// Shared FileReadWriter across file handles
 // ────────────────────────────────────────────────────────────────
+//
+// FileHandleManager ensures that two open() calls for the same inode
+// share a single FileReadWriter instance.  These tests verify that
+// writes through one handle are visible when reading through another.
 
-TEST_F(FileReadWriterTest, ReadAfterFlushUsesMetadata) {
+TEST_F(FileReadWriterTest, UnflushedWriteVisibleAcrossHandles) {
   RunInTestFiber([&] {
-    // Write to rw1, flush, then read from rw2 (same inode).
-    auto rw1 = Make();
-    ASSERT_TRUE(rw1.Write(Buf(Repeat('X', 500)), 0).ok());
-    ASSERT_TRUE(rw1.Flush().ok());
+    uint64_t fh1 = 0, fh2 = 0;
+    auto &mgr = swordfs::vfs::FileHandleManager::Instance();
+    ASSERT_TRUE(mgr.Open(kIno, &fh1).ok());
+    ASSERT_TRUE(mgr.Open(kIno, &fh2).ok());
 
-    auto rw2 = Make();
+    auto h1 = mgr.Find(fh1);
+    auto h2 = mgr.Find(fh2);
+    ASSERT_TRUE(h1.has_value());
+    ASSERT_TRUE(h2.has_value());
+    EXPECT_EQ(h1->file_readwriter.get(), h2->file_readwriter.get());
+
+    // Write through handle 1, read through handle 2 (same instance).
+    ASSERT_TRUE(h1->file_readwriter->Write(Buf(Repeat('Z', 300)), 100).ok());
     auto out = folly::IOBuf::create(kChunkSize);
-    ASSERT_TRUE(rw2.Read(500, 0, out.get()).ok());
+    ASSERT_TRUE(h2->file_readwriter->Read(300, 100, out.get()).ok());
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
                                out->length()),
-              Repeat('X', 500));
+              Repeat('Z', 300));
+
+    mgr.Release(fh1);
+    mgr.Release(fh2);
   });
 }
 
 // ────────────────────────────────────────────────────────────────
-// Shared FileReadWriter: same inode, different objects
+// Flushed data visible across handles (same FileReadWriter)
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileReadWriterTest, UnflushedWriteVisibleAcrossSameInode) {
+TEST_F(FileReadWriterTest, FlushedDataVisibleAcrossHandles) {
   RunInTestFiber([&] {
-    // Two FileReadWriters for the same inode share the same state
-    // via the inode-level writer (managed by FileHandleManager).
-    // Here we test at the unit level: writes through one object
-    // are visible to another because Read queries the metadata
-    // engine after flush.
-    //
-    // Before flush: only dirty chunks in the same writer are visible.
-    // After flush: chunks are registered in the metadata engine and
-    // visible to any FileReadWriter for the same inode.
+    uint64_t fh1 = 0, fh2 = 0;
+    auto &mgr = swordfs::vfs::FileHandleManager::Instance();
+    ASSERT_TRUE(mgr.Open(kIno, &fh1).ok());
+    ASSERT_TRUE(mgr.Open(kIno, &fh2).ok());
 
-    auto rw1 = Make();
-    ASSERT_TRUE(rw1.Write(Buf(Repeat('Z', 300)), 100).ok());
-    ASSERT_TRUE(rw1.Flush().ok());
+    auto h1 = mgr.Find(fh1);
+    auto h2 = mgr.Find(fh2);
 
-    // rw2 hits the metadata engine and finds the flushed chunk.
-    auto rw2 = Make();
+    // Write + flush through handle 1.
+    ASSERT_TRUE(h1->file_readwriter->Write(Buf(Repeat('X', 500)), 0).ok());
+    ASSERT_TRUE(h1->file_readwriter->Flush().ok());
+
+    // Read through handle 2 — same instance, flushed chunk in map.
     auto out = folly::IOBuf::create(kChunkSize);
-    ASSERT_TRUE(rw2.Read(300, 100, out.get()).ok());
+    ASSERT_TRUE(h2->file_readwriter->Read(500, 0, out.get()).ok());
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
                                out->length()),
-              Repeat('Z', 300));
+              Repeat('X', 500));
+
+    mgr.Release(fh1);
+    mgr.Release(fh2);
   });
 }

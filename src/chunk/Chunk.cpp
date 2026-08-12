@@ -8,6 +8,7 @@
 
 #include <cstring>
 
+#include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Logging.hpp"
 #include "volume/VolumeImpl.hpp"
@@ -17,16 +18,31 @@ namespace swordfs::chunk {
 Chunk::Chunk(metadata::InodeID ino, metadata::ChunkIndex index)
     : ino_(ino),
       max_chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
-      wb_(volume::VolumeImpl::Instance().chunk_size()),
-      state_(State::kWriting),
       index_(index),
-      data_(volume::VolumeImpl::Instance().data_engine()) {}
+      data_(volume::VolumeImpl::Instance().data_engine()),
+      meta_(volume::VolumeImpl::Instance().meta_engine()) {}
+
+utils::Status Chunk::Initialize() {
+  metadata::ChunkMeta cm;
+  auto status = meta_->FindChunk(ino_, index_, &cm);
+  if (status.ok()) {
+    state_ = State::kFlushed;
+    flushed_size_ = cm.size;
+    return Status::OK();
+  } else if (status.IsNotFound()) {
+    // create a chunk but not commit to metadata so only the local mount knows it.
+    state_ = State::kWriting;
+    wb_ = std::make_unique<WriteBuf>(volume::VolumeImpl::Instance().chunk_size());
+    return Status::OK();
+  }
+  return status;
+}
 
 utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf &data) {
   if (!IsWriting()) {
     return utils::Status::InvalidArgument("Chunk::Write: chunk is sealed or flushed");
   }
-  auto status = wb_.Write(write_offset - StartOffset(), data);
+  auto status = wb_->Write(write_offset - StartOffset(), data);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Chunk::Write FAILED: ino=" << ino_
                       << " index=" << index_ << " write_offset=" << write_offset
@@ -42,7 +58,7 @@ utils::Status Chunk::Read(off_t off, size_t len, folly::IOBuf *out) const {
   if (IsFlushed()) {
     return data_->Get(ChunkKey(), off, len, out);
   }
-  return wb_.CopyOut(off, len, out);
+  return wb_->CopyOut(off, len, out);
 }
 
 void Chunk::Seal() {
@@ -50,35 +66,44 @@ void Chunk::Seal() {
 }
 
 utils::Status Chunk::Flush() {
-  if (IsFlushed() || wb_.size() == 0) {
+  if (IsFlushed() || !wb_ || wb_->size() == 0) {
     return utils::Status::OK();
   }
 
-  // Not yet sealed → seal now (write-then-flush without GetNextFlushable).
-  if (IsWriting()) Seal();
+  if (IsWriting()) {
+    Seal();
+  }
 
-  auto data = wb_.CloneBuf();
+  flushed_size_ = wb_->size();
+  auto data = wb_->CloneBuf();
   auto status = data_->Put(ChunkKey(), std::move(data));
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: ino=" << ino_
                       << " chunk=" << index_
-                      << " size=" << wb_.size()
+                      << " size=" << flushed_size_
                       << " — " << status.message();
-    return status;  // WriteBuf data preserved, chunk now sealed.
+    return status;
   }
 
+  // free the dirty data buffer
   state_ = State::kFlushed;
-  SWORDFS_LOG_INFO << "Flush uploaded: ino=" << ino_
-                   << " chunk=" << index_
-                   << " size=" << wb_.size();
+  wb_.reset();
+
+  // Register with the metadata engine so future reads can locate
+  // this chunk via FindChunk.
+  meta_->AddChunk(ino_, BuildMeta());
+
+  SWORDFS_LOG_DEBUG << "Flush uploaded: ino=" << ino_
+                    << " chunk=" << index_
+                    << " size=" << flushed_size_;
   return utils::Status::OK();
 }
 
 metadata::ChunkMeta Chunk::BuildMeta() const {
   metadata::ChunkMeta cm;
-  cm.start_offset = StartOffset();
+  cm.index = index_;
   cm.key = ChunkKey();
-  cm.size = wb_.size();
+  cm.size = IsFlushed() ? flushed_size_ : (wb_ ? wb_->size() : 0);
   return cm;
 }
 

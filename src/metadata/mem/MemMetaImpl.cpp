@@ -754,9 +754,8 @@ Status MemMetaImpl::AddChunk(InodeID ino, const ChunkMeta &cm) {
   return store_.AddChunk(ino, cm);
 }
 
-Status MemMetaImpl::FindChunk(InodeID ino, off_t off, size_t chunk_size,
-                              ChunkMeta *cm) {
-  return store_.FindChunk(ino, off, chunk_size, cm);
+Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) {
+  return store_.FindChunk(ino, idx, cm);
 }
 
 }  // namespace swordfs::metadata

@@ -48,16 +48,15 @@ class MemMetaImpl : public IMetaEngine {
 
   // Link / symlink operations
   Status Symlink(InodeID parent_ino,
-                std::string_view name, const char* link,
-                InodeID* child_ino, struct stat* attr) override;
+                 std::string_view name, const char *link,
+                 InodeID *child_ino, struct stat *attr) override;
   Status Link(InodeID ino, InodeID newparent_ino,
-             std::string_view newname, struct stat* attr) override;
-  Status Readlink(InodeID ino, std::string* target) override;
+              std::string_view newname, struct stat *attr) override;
+  Status Readlink(InodeID ino, std::string *target) override;
 
   // Chunk metadata
-  Status AddChunk(InodeID ino, const ChunkMeta& cm) override;
-  Status FindChunk(InodeID ino, off_t off, size_t chunk_size,
-                   ChunkMeta* cm) override;
+  Status AddChunk(InodeID ino, const ChunkMeta &cm) override;
+  Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) override;
 
   // Volume operations
   Status StatFs(struct statvfs *stbuf) override;

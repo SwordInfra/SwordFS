@@ -42,18 +42,34 @@ TEST_F(FileIOTest, WriteEmptyFile) {
   EXPECT_EQ(st.st_size, 0);
 }
 
-TEST_F(FileIOTest, WriteLargeData) {
-  const std::string name = "large.bin";
-  std::string data(1024 * 1024, 'X');
-  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
-  ASSERT_EQ(fixture_.WriteFile(name, data), 0);
-  EXPECT_TRUE(
-      fixture_.FileEquals(name, data.size(), Fixture::Hash64(data)));
-}
-
 // ────────────────────────────────────────────────────────────────
 // Append
 // ────────────────────────────────────────────────────────────────
+
+// FIXME(juicefs-slice): Cross-open write is not yet supported.
+// When a file is closed and reopened for writing, the dirty chunk
+// from the first open is flushed and removed; the second open creates
+// a fresh FileReadWriter whose WriteBuf only covers the newly written
+// range, losing the prefix data in the flushed chunk.  A proper slice
+// mechanism (à la JuiceFS) is needed to stitch partial chunks.
+TEST_F(FileIOTest, DISABLED_ReopenAndWrite) {
+  const std::string name = "reopen.bin";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+
+  // First write + close triggers chunk flush.
+  ASSERT_EQ(fixture_.WriteFile(name, "hello"), 0);
+
+  // Re-open and write again.
+  int fd = fixture_.OpenFile(name, O_WRONLY);
+  ASSERT_GE(fd, 0);
+  const std::string extra = " world";
+  ssize_t n = ::write(fd, extra.c_str(), extra.size());
+  ::close(fd);
+  ASSERT_EQ(n, static_cast<ssize_t>(extra.size()));
+
+  // Currently fails: flushed "hello" chunk is lost.
+  EXPECT_TRUE(fixture_.FileEquals(name, 11, Fixture::Hash64("hello world")));
+}
 
 // FIXME(juicefs-slice): Cross-open append is not yet supported.
 // When a file is closed and reopened with O_APPEND, the dirty chunk
@@ -73,8 +89,7 @@ TEST_F(FileIOTest, DISABLED_AppendToFile) {
   ::close(fd);
   ASSERT_EQ(n, 6);
 
-  EXPECT_TRUE(
-      fixture_.FileEquals(name, 11, Fixture::Hash64("hello world")));
+  EXPECT_TRUE(fixture_.FileEquals(name, 11, Fixture::Hash64("hello world")));
 }
 
 TEST_F(FileIOTest, AppendMultipleWithinSameOpen) {

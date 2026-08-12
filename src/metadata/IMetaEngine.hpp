@@ -127,9 +127,9 @@ class IMetaEngine {
   /// the data via the data engine.
   virtual Status AddChunk(InodeID ino, const ChunkMeta& cm) = 0;
 
-  /// Find the chunk covering |off|.  Returns true and fills |*cm| if
-  /// a matching chunk is registered for the given inode.
-  virtual Status FindChunk(InodeID ino, off_t off, size_t chunk_size, ChunkMeta* cm) = 0;
+  /// Find the chunk at |idx|.  Returns OK and fills |*cm| if a
+  /// matching chunk is registered for the given inode.
+  virtual Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta* cm) = 0;
 };
 
 }  // namespace swordfs::metadata
