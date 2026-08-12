@@ -3,6 +3,8 @@
 
 #include "storage/DataEngineFactory.hpp"
 
+#include <cstdlib>
+
 #include "storage/IDataEngine.hpp"
 #include "storage/StorageUrl.hpp"
 #include "storage/s3/S3DataEngine.hpp"
@@ -27,7 +29,11 @@ utils::Status CreateDataEngine(
   if (url.scheme == "s3") {
     // bucket URL format: s3://<endpoint>/<bucket>[/<prefix>]
     S3Config s3_cfg;
-    s3_cfg.endpoint = "https://" + url.host;
+    // Respect SWORDFS_S3_NO_SSL to allow plain HTTP connections
+    // (e.g. against local MinIO in CI).
+    const char* no_ssl = std::getenv("SWORDFS_S3_NO_SSL");
+    const char* proto = (no_ssl && no_ssl[0] == '1') ? "http://" : "https://";
+    s3_cfg.endpoint = std::string(proto) + url.host;
     // Use region from volume config (defaults to "auto").
     s3_cfg.region = vol.region;
 

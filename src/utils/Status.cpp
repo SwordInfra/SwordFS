@@ -17,6 +17,8 @@ int Status::ToErrno() const {
       return EEXIST;
     case kNotDirectory:
       return ENOTDIR;
+    case kIsDirectory:
+      return EISDIR;
     case kInvalidArgument:
       return EINVAL;
     case kNotSupported:
@@ -25,12 +27,18 @@ int Status::ToErrno() const {
       return EIO;
     case kBusy:
       return EBUSY;
+    case kNotEmpty:
+      return ENOTEMPTY;
     case kNoSpace:
       return ENOSPC;
+    case kNotPermitted:
+      return EPERM;
     case kPermission:
       return EACCES;
     case kNoMemory:
       return ENOMEM;
+    case kNameTooLong:
+      return ENAMETOOLONG;
     default:
       return EIO;
   }

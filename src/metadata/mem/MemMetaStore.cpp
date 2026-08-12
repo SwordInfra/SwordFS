@@ -26,7 +26,7 @@ MemMetaStore::MemMetaStore() : next_ino_(FUSE_ROOT_ID + 1) {
 
 MemMetaStore::~MemMetaStore() {
   std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& [ino, ptr] : inodes_) {
+  for (auto &[ino, ptr] : inodes_) {
     delete ptr;
   }
 }
@@ -35,11 +35,15 @@ MemMetaStore::~MemMetaStore() {
 // Public API
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaStore::LookupInode(InodeID ino, SwordFsInode** out) {
+Status MemMetaStore::LookupInode(InodeID ino, SwordFsInode **out) {
   std::lock_guard<std::mutex> lock(mutex_);
-  SwordFsInode* inode = FindInodeLocked(ino);
-  if (!inode) return Status::NotFound("inode not found");
-  if (out) *out = inode;
+  SwordFsInode *inode = FindInodeLocked(ino);
+  if (!inode) {
+    return Status::NotFound("inode not found");
+  }
+  if (out) {
+    *out = inode;
+  }
   return Status::OK();
 }
 
@@ -49,39 +53,54 @@ size_t MemMetaStore::InodeCount() {
 }
 
 Status MemMetaStore::LookupEntry(InodeID parent_ino, std::string_view name,
-                                 SwordFsInode** out) {
+                                 SwordFsInode **out) {
   std::lock_guard<std::mutex> lock(mutex_);
-  SwordFsInode* parent = FindInodeLocked(parent_ino);
-  if (!parent) return Status::NotFound("parent directory not found");
-  if (!parent->IsDir()) return Status::NotDirectory("parent is not a directory");
-  SwordFsInode* inode = FindEntryLocked(parent_ino, name);
-  if (!inode) return Status::NotFound("entry not found");
-  if (out) *out = inode;
+  SwordFsInode *parent = FindInodeLocked(parent_ino);
+  if (!parent) {
+    return Status::NotFound("parent directory not found");
+  }
+  if (!parent->IsDir()) {
+    return Status::NotDirectory("parent is not a directory");
+  }
+  SwordFsInode *inode = FindEntryLocked(parent_ino, name);
+  if (!inode) {
+    return Status::NotFound("entry not found");
+  }
+  if (out) {
+    *out = inode;
+  }
   return Status::OK();
 }
 
 Status MemMetaStore::AddEntry(InodeID parent_ino, std::string_view name,
                               mode_t mode, uint64_t nlookup,
-                              SwordFsInode** out) {
+                              SwordFsInode **out) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  SwordFsInode* parent = FindInodeLocked(parent_ino);
-  if (!parent) return Status::NotFound("parent directory not found");
-  if (!parent->IsDir()) return Status::NotDirectory("parent is not a directory");
-  if (FindEntryLocked(parent_ino, name) != nullptr)
+  SwordFsInode *parent = FindInodeLocked(parent_ino);
+  if (!parent) {
+    return Status::NotFound("parent directory not found");
+  }
+  if (!parent->IsDir()) {
+    return Status::NotDirectory("parent is not a directory");
+  }
+  if (FindEntryLocked(parent_ino, name) != nullptr) {
     return Status::AlreadyExists("entry already exists");
+  }
 
-  auto& ctx = folly::fibers::local<swordfs::utils::SwordFsContext>();
+  auto &ctx = folly::fibers::local<swordfs::utils::SwordFsContext>();
   struct stat st = MakeStat(mode, ::time(nullptr));
   st.st_uid = ctx.uid;
   st.st_gid = parent->attr.st_gid;
   st.st_ino = next_ino_.fetch_add(1, std::memory_order_relaxed);
 
-  SwordFsInode* child = new SwordFsInode{st.st_ino, st, nlookup};
+  SwordFsInode *child = new SwordFsInode{st.st_ino, st, nlookup};
   InsertInodeLocked(child);
   LinkEntryLocked(parent_ino, name, child);
 
-  if (out) *out = child;
+  if (out) {
+    *out = child;
+  }
   return Status::OK();
 }
 
@@ -91,22 +110,32 @@ Status MemMetaStore::MoveEntry(InodeID old_parent_ino,
                                std::string_view new_name) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  SwordFsInode* old_parent = FindInodeLocked(old_parent_ino);
-  if (!old_parent) return Status::NotFound("old parent directory not found");
-  if (!old_parent->IsDir())
+  SwordFsInode *old_parent = FindInodeLocked(old_parent_ino);
+  if (!old_parent) {
+    return Status::NotFound("old parent directory not found");
+  }
+  if (!old_parent->IsDir()) {
     return Status::NotDirectory("old parent is not a directory");
-  if (FindEntryLocked(old_parent_ino, old_name) == nullptr)
+  }
+  if (FindEntryLocked(old_parent_ino, old_name) == nullptr) {
     return Status::NotFound("source entry not found");
+  }
 
-  SwordFsInode* new_parent = FindInodeLocked(new_parent_ino);
-  if (!new_parent) return Status::NotFound("new parent directory not found");
-  if (!new_parent->IsDir())
+  SwordFsInode *new_parent = FindInodeLocked(new_parent_ino);
+  if (!new_parent) {
+    return Status::NotFound("new parent directory not found");
+  }
+  if (!new_parent->IsDir()) {
     return Status::NotDirectory("new parent is not a directory");
-  if (FindEntryLocked(new_parent_ino, new_name) != nullptr)
+  }
+  if (FindEntryLocked(new_parent_ino, new_name) != nullptr) {
     return Status::AlreadyExists("target entry already exists");
+  }
 
-  SwordFsInode* child = UnlinkEntryLocked(old_parent_ino, old_name);
-  if (!child) return Status::Internal("unlink entry failed");
+  SwordFsInode *child = UnlinkEntryLocked(old_parent_ino, old_name);
+  if (!child) {
+    return Status::Internal("unlink entry failed");
+  }
   LinkEntryLocked(new_parent_ino, new_name, child);
   return Status::OK();
 }
@@ -114,28 +143,65 @@ Status MemMetaStore::MoveEntry(InodeID old_parent_ino,
 Status MemMetaStore::RemoveEntry(InodeID parent_ino, std::string_view name) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  SwordFsInode* child = FindEntryLocked(parent_ino, name);
-  if (!child) return Status::OK();  // idempotent
+  SwordFsInode *child = FindEntryLocked(parent_ino, name);
+  if (!child) {
+    return Status::OK();  // idempotent
+  }
 
-  if (child->IsDir() && !IsDirEmptyLocked(child->ino))
-    return Status::Busy("directory not empty");
+  if (child->IsDir() && !IsDirEmptyLocked(child->ino)) {
+    return Status::NotEmpty("directory not empty");
+  }
 
   UnlinkEntryLocked(parent_ino, name);
-  DeleteInodeLocked(child->ino);
+
+  if (!child->IsDir()) {
+    // Decrement nlink; only delete the inode when no names remain.
+    // This is the hard-link semantic: each unlink removes one name,
+    // and the data survives until the last name is gone.
+    child->attr.st_nlink--;
+    if (child->attr.st_nlink == 0) {
+      DeleteInodeLocked(child->ino);
+    }
+  } else {
+    // Directories cannot be hard-linked; always delete.
+    DeleteInodeLocked(child->ino);
+  }
+  return Status::OK();
+}
+
+Status MemMetaStore::LinkExistingEntry(InodeID parent_ino,
+                                       std::string_view name,
+                                       SwordFsInode *inode) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  SwordFsInode *parent = FindInodeLocked(parent_ino);
+  if (!parent) {
+    return Status::NotFound("parent directory not found");
+  }
+  if (!parent->IsDir()) {
+    return Status::NotDirectory("parent is not a directory");
+  }
+  if (FindEntryLocked(parent_ino, name) != nullptr) {
+    return Status::AlreadyExists("entry already exists");
+  }
+
+  inode->attr.st_nlink++;
+  LinkEntryLocked(parent_ino, name, inode);
   return Status::OK();
 }
 
 Status MemMetaStore::ListEntries(
     InodeID ino,
-    std::vector<std::pair<std::string, SwordFsInode*>>* entries) {
+    std::vector<std::pair<std::string, SwordFsInode *>> *entries) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  if (FindInodeLocked(ino) == nullptr)
+  if (FindInodeLocked(ino) == nullptr) {
     return Status::NotFound("directory not found");
+  }
 
   auto dir_it = dirs_.find(ino);
   if (dir_it != dirs_.end()) {
-    for (const auto& [name, child] : dir_it->second) {
+    for (const auto &[name, child] : dir_it->second) {
       entries->push_back({name, child});
     }
   }
@@ -175,8 +241,8 @@ Status MemMetaStore::SwapEntries(InodeID parent_a_ino, std::string_view name_a,
   //   - Cross-directory: each parent's entry table gets the other's inode.
   //   - Same-directory (different names): values are swapped.
   //   - Same-directory (same name): no-op (identical values).
-  SwordFsInode* inode_a = it_a->second;
-  SwordFsInode* inode_b = it_b->second;
+  SwordFsInode *inode_a = it_a->second;
+  SwordFsInode *inode_b = it_b->second;
   dir_a_it->second[std::string(name_a)] = inode_b;
   dir_b_it->second[std::string(name_b)] = inode_a;
 
@@ -187,12 +253,12 @@ Status MemMetaStore::SwapEntries(InodeID parent_a_ino, std::string_view name_a,
 // Private helpers — caller MUST hold mutex_
 // ────────────────────────────────────────────────────────────────
 
-SwordFsInode* MemMetaStore::FindInodeLocked(InodeID ino) {
+SwordFsInode *MemMetaStore::FindInodeLocked(InodeID ino) {
   auto it = inodes_.find(ino);
   return it != inodes_.end() ? it->second : nullptr;
 }
 
-void MemMetaStore::InsertInodeLocked(SwordFsInode* inode) {
+void MemMetaStore::InsertInodeLocked(SwordFsInode *inode) {
   inodes_[inode->ino] = inode;
   if (S_ISDIR(inode->attr.st_mode)) {
     dirs_.try_emplace(inode->ino);
@@ -208,26 +274,32 @@ void MemMetaStore::DeleteInodeLocked(InodeID ino) {
   }
 }
 
-SwordFsInode* MemMetaStore::FindEntryLocked(InodeID parent_ino,
+SwordFsInode *MemMetaStore::FindEntryLocked(InodeID parent_ino,
                                             std::string_view name) {
   auto dir_it = dirs_.find(parent_ino);
-  if (dir_it == dirs_.end()) return nullptr;
+  if (dir_it == dirs_.end()) {
+    return nullptr;
+  }
   auto it = dir_it->second.find(name);
   return it != dir_it->second.end() ? it->second : nullptr;
 }
 
 void MemMetaStore::LinkEntryLocked(InodeID parent_ino, std::string_view name,
-                                   SwordFsInode* inode) {
+                                   SwordFsInode *inode) {
   dirs_[parent_ino][std::string(name)] = inode;
 }
 
-SwordFsInode* MemMetaStore::UnlinkEntryLocked(InodeID parent_ino,
+SwordFsInode *MemMetaStore::UnlinkEntryLocked(InodeID parent_ino,
                                               std::string_view name) {
   auto dir_it = dirs_.find(parent_ino);
-  if (dir_it == dirs_.end()) return nullptr;
+  if (dir_it == dirs_.end()) {
+    return nullptr;
+  }
   auto it = dir_it->second.find(name);
-  if (it == dir_it->second.end()) return nullptr;
-  SwordFsInode* inode = it->second;
+  if (it == dir_it->second.end()) {
+    return nullptr;
+  }
+  SwordFsInode *inode = it->second;
   dir_it->second.erase(it);
   return inode;
 }
@@ -251,15 +323,54 @@ bool MemMetaStore::IsDescendantOfImplLocked(InodeID current_ino,
     stack.pop_back();
 
     auto it = dirs_.find(ino);
-    if (it == dirs_.end()) continue;
-    for (const auto& [_, child] : it->second) {
-      if (child->ino == target_ino) return true;
+    if (it == dirs_.end()) {
+      continue;
+    }
+    for (const auto &[_, child] : it->second) {
+      if (child->ino == target_ino) {
+        return true;
+      }
       if (child->IsDir()) {
         stack.push_back(child->ino);
       }
     }
   }
   return false;
+}
+
+// ────────────────────────────────────────────────────────────────
+// Chunk metadata
+// ────────────────────────────────────────────────────────────────
+
+Status MemMetaStore::AddChunk(InodeID ino, const ChunkMeta &cm) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto &chunk_map = chunks_[ino];
+  if (chunk_map.count(cm.index) > 0) {
+    return Status::AlreadyExists(
+        "chunk already exists at index " + std::to_string(cm.index));
+  }
+  chunk_map[cm.index] = cm;
+  return Status::OK();
+}
+
+Status MemMetaStore::FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto ino_it = chunks_.find(ino);
+  if (ino_it == chunks_.end()) {
+    return Status::NotFound("no chunks for inode " + std::to_string(ino));
+  }
+  auto chunk_it = ino_it->second.find(idx);
+  if (chunk_it == ino_it->second.end()) {
+    return Status::NotFound("chunk not found at index " + std::to_string(idx));
+  }
+  const auto& c = chunk_it->second;
+  if (c.index != idx) {
+    return Status::NotFound("chunk index mismatch");
+  }
+  if (cm) {
+    *cm = c;
+  }
+  return Status::OK();
 }
 
 }  // namespace swordfs::metadata

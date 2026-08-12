@@ -5,14 +5,19 @@
 
 #include <folly/fibers/Baton.h>
 #include <folly/io/IOBuf.h>
+#include <folly/logging/xlog.h>
 
 #include <algorithm>
 #include <vector>
 
 #include "chunk/Chunk.hpp"
-#include "chunk/ChunkManager.hpp"
-#include <folly/logging/xlog.h>
+#include "metadata/IMetaEngine.hpp"
+#include "storage/IDataEngine.hpp"
 #include "utils/Logging.hpp"
+#include "volume/VolumeImpl.hpp"
+
+#define FUSE_USE_VERSION 312
+#include <fuse_lowlevel.h>
 
 namespace swordfs::vfs {
 
@@ -26,7 +31,7 @@ namespace {
 
 class MultiChunkReadWriter {
  public:
-  using Status = FileReadWriter::Status;
+  using Status = utils::Status;
 
   /// Submit a read from |c| at chunk-relative |off| for up to |len|
   /// bytes into |window|.  |window| should be a takeOwnership IOBuf
@@ -35,7 +40,8 @@ class MultiChunkReadWriter {
                   std::unique_ptr<folly::IOBuf> window) {
     auto p = std::make_unique<Pending>();
     p->window = std::move(window);
-    folly::fibers::addTask([c, off, len, raw = p.get()] {
+    auto &fm = folly::fibers::FiberManager::getFiberManager();
+    fm.addTask([c, off, len, raw = p.get()] {
       raw->status = c->Read(off, len, raw->window.get());
       raw->bytes = raw->window->length();
       raw->baton.post();
@@ -48,13 +54,13 @@ class MultiChunkReadWriter {
   Status Collect() {
     for (auto &p : ops_) {
       p->baton.wait();
-      if (!p->status.ok()) return p->status;
+      if (!p->status.ok()) {
+        return p->status;
+      }
       total_ += p->bytes;
     }
     return Status::OK();
   }
-
-  size_t TotalBytes() const { return total_; }
 
  private:
   struct Pending {
@@ -69,37 +75,82 @@ class MultiChunkReadWriter {
 
 }  // namespace
 
-FileReadWriter::FileReadWriter(uint64_t fh, InodeID ino, size_t chunk_size)
-    : fh_(fh), ino_(ino), chunk_size_(chunk_size) {}
-
 // ────────────────────────────────────────────────────────────────
-// Write — split across chunk boundaries.
-//
-// Unlike Read, Write does NOT use concurrent fibers because:
-//   1. GetOrCreateChunk() mutates the chunk deque state and always
-//      returns dq.back() — concurrent calls would race on creation
-//      order and chunk indexing.
-//   2. Chunk::Write() is currently an in-memory memcpy; the real
-//      async work (seal + S3 upload) happens later in Flush().
+// FileChunkManager
 // ────────────────────────────────────────────────────────────────
 
-FileReadWriter::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
-  auto &mgr = chunk::ChunkManager::Instance();
+chunk::Chunk *FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_missing) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = chunks_.find(idx);
+  if (it != chunks_.end()) {
+    return &it->second;
+  }
+  // Not cached — try lazy-load from metadata engine.
+  auto c = chunk::Chunk(ino_, idx);
+  auto status = c.Initialize();
+  if (!status.ok()) {
+    return nullptr;
+  } else if (c.IsFlushed() || create_if_missing) {
+    it = chunks_.try_emplace(idx, std::move(c)).first;
+    return &it->second;
+  }
+  return nullptr;
+}
+
+chunk::Chunk *FileChunkManager::GetNextFlushable() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto &[idx, c] : chunks_) {
+    if (c.Flushable()) {
+      c.Seal();
+      return &c;
+    }
+  }
+  return nullptr;
+}
+
+// ────────────────────────────────────────────────────────────────
+// FileReadWriter
+// ────────────────────────────────────────────────────────────────
+
+FileReadWriter::FileReadWriter(InodeID ino)
+    : ino_(ino),
+      chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
+      meta_(volume::VolumeImpl::Instance().meta_engine()),
+      data_(volume::VolumeImpl::Instance().data_engine()),
+      chunks_(ino) {}
+
+// ────────────────────────────────────────────────────────────────
+// Write
+// ────────────────────────────────────────────────────────────────
+
+utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
   SWORDFS_LOG_DEBUG << "FileReadWriter::Write: ino=" << ino_
                     << " size=" << buf.length() << " off=" << off;
   size_t remaining = buf.length();
   off_t cur_off = off;
 
   while (remaining > 0) {
-    auto &c = mgr.GetOrCreateChunk(fh_, ino_, cur_off);
+    metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(
+        cur_off / static_cast<off_t>(chunk_size_));
+
+    auto *c = chunks_.Get(idx, /*create_if_missing=*/true);
+    if (!c) {
+      return utils::Status::Internal("FileReadWriter::Write: failed to get chunk");
+    }
+
     size_t room = chunk_size_ - (cur_off % chunk_size_);
     size_t n = std::min(remaining, room);
     auto slice = folly::IOBuf::takeOwnership(
-        const_cast<uint8_t*>(buf.data()) + (cur_off - off),
-        n, (std::size_t)n,
-        +[](void*, void*) {}, nullptr, true);
-    auto status = c.Write(cur_off, *slice);
-    if (!status.ok()) return status;
+        const_cast<uint8_t *>(buf.data()) + (cur_off - off), n, n,
+        +[](void *, void *) {}, nullptr, false);
+    auto status = c->Write(cur_off, *slice);
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "FileReadWriter::Write FAILED: ino=" << ino_
+                        << " off=" << cur_off
+                        << " chunk=" << c->index() << " — "
+                        << status.message();
+      return status;
+    }
     remaining -= n;
     cur_off += static_cast<off_t>(n);
   }
@@ -107,53 +158,62 @@ FileReadWriter::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off)
 }
 
 // ────────────────────────────────────────────────────────────────
-// Read — query ChunkManager singleton for in-flight chunks
+// Read
 // ────────────────────────────────────────────────────────────────
 
-FileReadWriter::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
-  auto &mgr = chunk::ChunkManager::Instance();
-  auto *const write_start = out->writableData();
-
+utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   MultiChunkReadWriter multi;
   size_t remaining = size;
   off_t cur_off = off;
-  size_t total = 0;
+  auto *const write_start = out->writableData();
 
   while (remaining > 0) {
-    auto *c = mgr.FindChunk(ino_, cur_off);
-    if (!c) {
-      size_t hole = std::min(remaining, chunk_size_);
-      std::memset(write_start + static_cast<size_t>(cur_off - off), 0, hole);
-      total += hole;
-      remaining -= hole;
-      cur_off += static_cast<off_t>(hole);
+    // 1) Try the unified chunk map (dirty + flushed).
+    metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(
+        cur_off / static_cast<off_t>(chunk_size_));
+    auto *c = chunks_.Get(idx, /*create_if_missing=*/false);
+
+    // cur_off may fall within the chunk's index range (e.g. a 64 MiB
+    // chunk that only has 500 bytes of data — offsets [500, 64 MiB)
+    // are holes that still map to the same idx).  We must guard with
+    // DataEnd() because `static_cast<size_t>(DataEnd - cur_off)`
+    // would overflow to a huge value when cur_off ≥ DataEnd, leading
+    // to a bogus window_cap and an infinite loop.
+    bool has_data = (c != nullptr) && (cur_off < c->DataEnd());
+
+    if (has_data) {
+      off_t chunk_off = cur_off - c->StartOffset();
+      size_t window_cap = std::min(remaining, static_cast<size_t>(c->DataEnd() - cur_off));
+      CHECK(window_cap > 0) << "window_cap=0: cur_off=" << cur_off
+                            << " DataEnd=" << c->DataEnd()
+                            << " remaining=" << remaining;
+
+      auto window = folly::IOBuf::takeOwnership(
+          write_start + static_cast<size_t>(cur_off - off),
+          window_cap, static_cast<std::size_t>(0),
+          +[](void *, void *) {}, nullptr, false);
+
+      multi.SubmitRead(c, chunk_off, window_cap, std::move(window));
+      remaining -= window_cap;
+      cur_off += static_cast<off_t>(window_cap);
       continue;
     }
 
-    off_t chunk_off = cur_off - c->StartOffset();
-    // Cap the window at the chunk's actual data extent — if the
-    // chunk is only partially filled, the remainder becomes a hole.
-    size_t window_cap = std::min(remaining,
-                                 static_cast<size_t>(c->EndOffset() - cur_off));
-
-    auto window = folly::IOBuf::takeOwnership(
-        write_start + static_cast<size_t>(cur_off - off),
-        window_cap,
-        (std::size_t)0,
-        +[](void *, void *) {},
-        nullptr,
-        true);
-
-    multi.SubmitRead(c, chunk_off, window_cap, std::move(window));
-    remaining -= window_cap;
-    cur_off += static_cast<off_t>(window_cap);
+    // 2) Hole — fill with zeros up to the next chunk boundary.
+    size_t hole =
+        std::min(remaining,
+                 chunk_size_ - static_cast<size_t>(cur_off % chunk_size_));
+    std::memset(write_start + static_cast<size_t>(cur_off - off), 0, hole);
+    remaining -= hole;
+    cur_off += static_cast<off_t>(hole);
   }
 
   auto status = multi.Collect();
-  if (!status.ok()) return status;
-  total += multi.TotalBytes();
+  if (!status.ok()) {
+    return status;
+  }
 
-  out->append(total);
+  out->append(size - remaining);
   return Status::OK();
 }
 
@@ -161,8 +221,36 @@ FileReadWriter::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf
 // Flush
 // ────────────────────────────────────────────────────────────────
 
-FileReadWriter::Status FileReadWriter::Flush() {
-  return chunk::ChunkManager::Instance().Flush(fh_);
+utils::Status FileReadWriter::Flush() {
+  off_t file_end = 0;
+  while (auto *c = chunks_.GetNextFlushable()) {
+    auto idx = c->index();
+    auto status = c->Flush();
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "FileReadWriter::Flush chunk FAILED: ino=" << ino_
+                        << " chunk=" << idx
+                        << " — " << status.message();
+      continue;
+    }
+    if (c->DataEnd() > file_end) {
+      file_end = c->DataEnd();
+    }
+    // Chunk stays in the map with kFlushed state — future reads
+    // will route through Chunk::Read() → data_->Get().
+  }
+
+  // Update file size if the file grew.
+  if (file_end > 0) {
+    struct stat attr;
+    if (meta_->GetAttr(ino_, &attr).ok() &&
+        file_end > attr.st_size) {
+      struct stat new_attr = {};
+      new_attr.st_size = file_end;
+      meta_->SetAttr(ino_, &new_attr, FUSE_SET_ATTR_SIZE, nullptr);
+    }
+  }
+
+  return Status::OK();
 }
 
 }  // namespace swordfs::vfs

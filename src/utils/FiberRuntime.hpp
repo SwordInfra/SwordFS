@@ -65,16 +65,12 @@ void ShutdownFiberRuntime();
 /// Returns the calling thread's FiberRuntime, or nullptr.
 FiberRuntime *ThisFiberRuntime();
 
-/// Asynchronously execute `fn` as a folly fiber.  Falls back to direct
-/// execution if the fiber runtime hasn't been initialised.
+/// Asynchronously execute `fn` as a folly fiber.
+/// Each calling thread automatically gets its own FiberRuntime on first use.
 template <typename Fn>
 void RunInFiber(Fn &&fn) {
+  InitFiberRuntime();
   auto *rt = ThisFiberRuntime();
-  if (rt == nullptr) {
-    // EventBase not initialised — execute directly (graceful fallback).
-    fn();
-    return;
-  }
   rt->Submit(std::forward<Fn>(fn));
 }
 

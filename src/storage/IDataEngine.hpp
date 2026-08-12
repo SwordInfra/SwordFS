@@ -17,10 +17,15 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 
 #include "utils/Status.hpp"
+
+namespace folly {
+class IOBuf;
+}
 
 using Status = swordfs::utils::Status;
 
@@ -57,17 +62,15 @@ class IDataEngine {
   /// @return true if the chunk exists.
   virtual bool Head(std::string_view key, size_t *size) = 0;
 
-  /// Write a chunk to the storage backend.
-  virtual Status Put(std::string_view key, std::string_view data) = 0;
+  /// Write a chunk to the storage backend.  Takes ownership of |data|.
+  virtual Status Put(std::string_view key,
+                     std::unique_ptr<folly::IOBuf> data) = 0;
 
-  /// Read all or part of a chunk.
-  ///
-  /// @param key    chunk key (opaque, engine-defined).
-  /// @param out    receives the chunk data.
-  /// @param offset byte offset within the chunk (0 = from start).
-  /// @param size   number of bytes to read (0 = until end).
-  virtual Status Get(std::string_view key, std::string *out,
-                     size_t offset = 0, size_t size = 0) = 0;
+  /// Read all or part of a chunk.  Data is written directly into
+  /// |out|, which must have tailroom() >= expected size.
+  virtual Status Get(std::string_view key,
+                     size_t offset, size_t size,
+                     folly::IOBuf* out) = 0;
 
   /// Delete a chunk (called by the garbage collector).
   virtual Status Delete(std::string_view key) = 0;

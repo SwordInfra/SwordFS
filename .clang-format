@@ -4,3 +4,4 @@ IncludeBlocks: Regroup
 ColumnLimit: 0
 AccessModifierOffset: -1
 PointerAlignment: Right
+InsertBraces: true

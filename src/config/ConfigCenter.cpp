@@ -19,15 +19,11 @@ void ConfigCenter::ConfigureOptions(CLI::App& app) {
       {"error", "ERR"},
   };
 
-  // Global flags and options
-  app.add_flag("-f,--foreground", foreground_, "Run in foreground");
+  // Global flags and options (shared by all subcommands)
   app.add_flag_callback("-V,--version", PrintVersion, "Show version information");
   app.add_option("--log-file", log_.path, "Log file path");
   app.add_option("--log-level", log_.level, "Log level (info, debug, warn, error)")
       ->transform(CLI::CheckedTransformer(kLogLevelMap, CLI::ignore_case));
-  app.add_option("--fuse-threads", fuse_threads_, "FUSE worker thread count")
-      ->check(CLI::PositiveNumber)
-      ->check(CLI::Range(1, static_cast<int>(std::thread::hardware_concurrency())));
 
   // Mount options
   RegisterMountOptions(app);
@@ -38,6 +34,7 @@ void ConfigCenter::ConfigureOptions(CLI::App& app) {
 
 void ConfigCenter::RegisterMountOptions(CLI::App& app) {
   auto cmd = app.add_subcommand("mount", "Mount a filesystem");
+  cmd->add_flag("-f,--foreground", foreground_, "Run in foreground");
   cmd->add_option("mountpoint", mountpoint_, "Mount point directory (created if needed)")
       ->required();
   cmd->add_option("--volume", volume_,
@@ -54,6 +51,10 @@ void ConfigCenter::RegisterMountOptions(CLI::App& app) {
   cmd->add_option("--storage-async-threads", storage_async_threads_,
                   "Thread pool size for async storage operations (default: CPU count)")
       ->check(CLI::PositiveNumber);
+  cmd->add_option("--fuse-threads", fuse_threads_, "FUSE worker thread count")
+      ->check(CLI::PositiveNumber)
+      ->check(CLI::Range(1, static_cast<int>(std::thread::hardware_concurrency())));
+  cmd->add_option("--pidfile", pidfile_, "Write daemon PID to this file");
 
   cmd->parse_complete_callback([this]() {
     if (volume_config_path_.empty() ==

@@ -37,7 +37,7 @@ class MemMetaStore {
 
   // Look up an inode by number.  The returned pointer is valid only
   // until the next call to any MemMetaStore method.
-  Status LookupInode(InodeID ino, SwordFsInode** out);
+  Status LookupInode(InodeID ino, SwordFsInode **out);
 
   // Return the total number of inodes currently stored.
   size_t InodeCount();
@@ -48,13 +48,13 @@ class MemMetaStore {
 
   // Look up a child entry by name. On success, *out receives the inode pointer.
   Status LookupEntry(InodeID parent_ino, std::string_view name,
-                     SwordFsInode** out);
+                     SwordFsInode **out);
 
   // Allocate a new inode and link it as a child of parent. Returns
   // AlreadyExists if the name already exists under that parent.
   Status AddEntry(InodeID parent_ino, std::string_view name,
                   mode_t mode, uint64_t nlookup,
-                  SwordFsInode** out);
+                  SwordFsInode **out);
 
   // Move an existing entry from old_parent/old_name to new_parent/new_name.
   // The inode is re-linked, not re-created.
@@ -65,9 +65,13 @@ class MemMetaStore {
   // for directories). A non-empty directory returns Busy.
   Status RemoveEntry(InodeID parent_ino, std::string_view name);
 
+  // Link an existing inode into a directory (hard link). Increments nlink.
+  Status LinkExistingEntry(InodeID parent_ino, std::string_view name,
+                           SwordFsInode* inode);
+
   // List all (name, inode-pointer) pairs in a directory.
   Status ListEntries(InodeID ino,
-                     std::vector<std::pair<std::string, SwordFsInode*>>* entries);
+                     std::vector<std::pair<std::string, SwordFsInode *>> *entries);
 
   // Return true if child is a descendant of ancestor.
   bool IsDescendantOf(InodeID ancestor_ino, InodeID child_ino) const;
@@ -76,26 +80,36 @@ class MemMetaStore {
   // entire duration (public API convention).
   Status SwapEntries(InodeID parent_a_ino, std::string_view name_a,
                      InodeID parent_b_ino, std::string_view name_b);
+  // ────────────────────────────────────────────────────────────────
+  // Chunk metadata
+  // ────────────────────────────────────────────────────────────────
+
+  Status AddChunk(InodeID ino, const ChunkMeta &cm);
+  Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm);
 
  private:
   // ────────────────────────────────────────────────────────────────
   // Private helpers — caller MUST hold mutex_
   // ────────────────────────────────────────────────────────────────
-  SwordFsInode* FindInodeLocked(InodeID ino);
-  void InsertInodeLocked(SwordFsInode* inode);
+  SwordFsInode *FindInodeLocked(InodeID ino);
+  void InsertInodeLocked(SwordFsInode *inode);
   void DeleteInodeLocked(InodeID ino);
-  SwordFsInode* FindEntryLocked(InodeID parent_ino, std::string_view name);
+  SwordFsInode *FindEntryLocked(InodeID parent_ino, std::string_view name);
   void LinkEntryLocked(InodeID parent_ino, std::string_view name,
-                       SwordFsInode* inode);
-  SwordFsInode* UnlinkEntryLocked(InodeID parent_ino, std::string_view name);
+                       SwordFsInode *inode);
+  SwordFsInode *UnlinkEntryLocked(InodeID parent_ino, std::string_view name);
   bool IsDirEmptyLocked(InodeID ino);
 
   bool IsDescendantOfImplLocked(InodeID current_ino, InodeID target_ino) const;
 
+ private:
   mutable std::mutex mutex_;
   std::atomic<InodeID> next_ino_;
-  folly::F14FastMap<InodeID, SwordFsInode*> inodes_;
-  folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode*>> dirs_;
+  folly::F14FastMap<InodeID, SwordFsInode *> inodes_;
+  folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode *>> dirs_;
+
+  // Chunk metadata: inode → (index → ChunkMeta).
+  folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, ChunkMeta>> chunks_;
 };
 
 }  // namespace swordfs::metadata

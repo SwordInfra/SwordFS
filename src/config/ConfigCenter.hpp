@@ -61,6 +61,8 @@ class ConfigCenter {
   bool foreground() const { return foreground_; }
   int fuse_threads() const { return fuse_threads_; }
   int storage_async_threads() const { return storage_async_threads_; }
+  /// Returns the pidfile path (mount subcommand, daemon mode).
+  const std::string& pidfile() const { return pidfile_; }
   /// Returns the mount point directory.
   const std::string& mountpoint() const { return mountpoint_; }
 
@@ -122,6 +124,7 @@ class ConfigCenter {
   std::string volume_;              // --volume (required for format)
   std::string volume_config_path_;  // --volume-config-path (required for memory)
   std::string fuse_opts_;           // -o FUSE mount options (e.g. allow_other,ro)
+  std::string pidfile_;             // --pidfile (mount daemon PID file)
   size_t chunk_size_ = 64ULL * 1024 * 1024;  // --chunk-size
 
   // Subcommands registered with the CLI::App.

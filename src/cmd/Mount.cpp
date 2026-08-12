@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -203,21 +204,31 @@ int RunMount() {
     return 1;
   }
 
-  // Load volume config and initialise engines.
-  swordfs::volume::VolumeImpl::Initialize();
-  auto status = swordfs::volume::VolumeImpl::Instance().LoadFrom(cfg);
-  if (!status.ok()) {
-    SWORDFS_PROMPT_INFO << "Error: " << status.message();
-    return 1;
-  }
-
-  // Daemonize by default; -f / --foreground disables this
-  int signal_fd = -1;  // pipe fd for child to signal mount success
+  // Daemonize before initialising the volume.  Volume
+  // initialisation creates threads; fork() must happen
+  // while the process is single-threaded.
+  int signal_fd = -1;
   if (!ConfigCenter::Instance().foreground()) {
     signal_fd = Daemonize();
     if (signal_fd < 0) {
       return 1;
     }
+    // Write the daemon PID to pidfile if requested (grandchild only).
+    const auto& pf = ConfigCenter::Instance().pidfile();
+    if (!pf.empty()) {
+      std::ofstream ofs(pf);
+      if (ofs) {
+        ofs << ::getpid() << '\n';
+      }
+    }
+  }
+
+  // Load volume config and initialise engines (after fork).
+  swordfs::volume::VolumeImpl::Initialize();
+  auto status = swordfs::volume::VolumeImpl::Instance().LoadFrom(cfg);
+  if (!status.ok()) {
+    SWORDFS_PROMPT_INFO << "Error: " << status.message();
+    return 1;
   }
 
   auto sub_command = ConfigCenter::Instance().SelectedSubCommand();
@@ -242,6 +253,8 @@ int RunMount() {
   if (ret != 0) {
     SWORDFS_PROMPT_FMT("Error: mount failed (code {})", ret);
   }
+
+  swordfs::volume::VolumeImpl::Instance().Shutdown();
   return ret;
 }
 
