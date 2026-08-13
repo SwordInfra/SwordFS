@@ -67,7 +67,7 @@ class MemMetaStore {
 
   // Link an existing inode into a directory (hard link). Increments nlink.
   Status LinkExistingEntry(InodeID parent_ino, std::string_view name,
-                           SwordFsInode* inode);
+                           SwordFsInode *inode);
 
   // List all (name, inode-pointer) pairs in a directory.
   Status ListEntries(InodeID ino,
@@ -86,6 +86,20 @@ class MemMetaStore {
 
   Status AddChunk(InodeID ino, const ChunkMeta &cm);
   Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm);
+
+  // Drop chunk metadata for data beyond |new_size|, truncating the
+  // chunk that straddles the new size.  A |new_size| of 0 removes all
+  // chunks.  Chunk byte ranges are derived from ChunkMeta::start_offset.
+  Status TruncateChunks(InodeID ino, size_t new_size);
+
+  // ────────────────────────────────────────────────────────────────
+  // Open-unlink reclaim
+  // ────────────────────────────────────────────────────────────────
+
+  // Delete |ino| and its data if the inode is orphaned (nlink==0).  No-op
+  // otherwise.  The open-fd count is tracked by the VFS layer; this method
+  // is called once that layer knows no fds remain.
+  Status ReclaimData(InodeID ino);
 
  private:
   // ────────────────────────────────────────────────────────────────

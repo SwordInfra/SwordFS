@@ -36,6 +36,7 @@ class MemMetaImpl : public IMetaEngine {
                  struct stat *out_attr) override;
   Status Access(InodeID ino, int mask) override;
   Status Open(InodeID ino) override;
+  Status ReclaimData(InodeID ino) override;
 
   // Directory operations
   Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) override;
@@ -57,6 +58,7 @@ class MemMetaImpl : public IMetaEngine {
   // Chunk metadata
   Status AddChunk(InodeID ino, const ChunkMeta &cm) override;
   Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) override;
+  Status Truncate(InodeID ino, size_t size) override;
 
   // Volume operations
   Status StatFs(struct statvfs *stbuf) override;

@@ -510,7 +510,6 @@ Status MemMetaImpl::SetAttr(InodeID ino,
   }
 
   auto &st = inode->attr;
-  bool size_changed = false;
   bool owner_changed = false;
 
   if (to_set & FUSE_SET_ATTR_MODE) {
@@ -529,10 +528,12 @@ Status MemMetaImpl::SetAttr(InodeID ino,
     st.st_gid = attr->st_gid;
   }
   if (to_set & FUSE_SET_ATTR_SIZE) {
-    if (st.st_size != attr->st_size) {
-      size_changed = true;
+    // Size changes delegate to Truncate, which updates the inode size,
+    // drops out-of-range chunk metadata, clears SUID/SGID, and bumps ctime.
+    auto status = Truncate(ino, static_cast<size_t>(attr->st_size));
+    if (!status.ok()) {
+      return status;
     }
-    st.st_size = attr->st_size;
   }
   if (to_set & FUSE_SET_ATTR_ATIME) {
     st.st_atime = attr->st_atime;
@@ -554,8 +555,9 @@ Status MemMetaImpl::SetAttr(InodeID ino,
     st.st_ctime = attr->st_ctime;
   }
 
-  if (size_changed || owner_changed) {
-    // Kill SUID/SGID if the owner or size changed (FUSE_CAP_HANDLE_KILLPRIV)
+  if (owner_changed) {
+    // Kill SUID/SGID if the owner changed (FUSE_CAP_HANDLE_KILLPRIV).
+    // Size changes already cleared SUID/SGID inside Truncate.
     KillSUID(&st);
   }
 
@@ -571,77 +573,91 @@ Status MemMetaImpl::SetAttr(InodeID ino,
 }
 
 Status MemMetaImpl::Symlink(InodeID parent_ino,
-                            std::string_view name, const char* link,
-                            InodeID* child_ino, struct stat* attr) {
+                            std::string_view name, const char *link,
+                            InodeID *child_ino, struct stat *attr) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("symlink name exceeds maximum length");
   }
 
-  SwordFsInode* parent = nullptr;
+  SwordFsInode *parent = nullptr;
   Status status = store_.LookupInode(parent_ino, &parent);
   if (!status.ok() || !parent || !parent->IsDir()) {
     return Status::NotDirectory("parent is not a directory");
   }
 
-  auto& ctx = folly::fibers::local<SwordFsContext>();
+  auto &ctx = folly::fibers::local<SwordFsContext>();
   if (!parent->CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
     return Status::Permission("access denied on parent");
   }
 
   mode_t link_mode = (S_IFLNK | 0777);
-  SwordFsInode* child = nullptr;
+  SwordFsInode *child = nullptr;
   status = store_.AddEntry(parent_ino, name, link_mode, 1, &child);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
 
   child->symlink_target = link;
   child->attr.st_size = child->symlink_target.size();
   parent->Touch(kMtime | kCtime);
 
-  if (child_ino) *child_ino = child->ino;
-  if (attr) *attr = child->attr;
+  if (child_ino) {
+    *child_ino = child->ino;
+  }
+  if (attr) {
+    *attr = child->attr;
+  }
   return Status::OK();
 }
 
 Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
-                         std::string_view newname, struct stat* attr) {
+                         std::string_view newname, struct stat *attr) {
   if (newname.size() > kMaxNameLength) {
     return Status::NameTooLong("link name exceeds maximum length");
   }
 
-  SwordFsInode* inode = nullptr;
+  SwordFsInode *inode = nullptr;
   Status status = store_.LookupInode(ino, &inode);
-  if (!status.ok()) return Status::NotFound("source inode not found");
+  if (!status.ok()) {
+    return Status::NotFound("source inode not found");
+  }
 
   // Directories cannot be hard-linked (POSIX).
   if (inode->IsDir()) {
     return Status::NotPermitted("cannot hard-link directory");
   }
 
-  SwordFsInode* newparent = nullptr;
+  SwordFsInode *newparent = nullptr;
   status = store_.LookupInode(newparent_ino, &newparent);
   if (!status.ok() || !newparent || !newparent->IsDir()) {
     return Status::NotDirectory("new parent is not a directory");
   }
 
-  auto& ctx = folly::fibers::local<SwordFsContext>();
+  auto &ctx = folly::fibers::local<SwordFsContext>();
   if (!newparent->CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
     return Status::Permission("access denied on new parent");
   }
 
   status = store_.LinkExistingEntry(newparent_ino, newname, inode);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
 
   newparent->Touch(kMtime | kCtime);
   inode->Touch(kCtime);
 
-  if (attr) *attr = inode->attr;
+  if (attr) {
+    *attr = inode->attr;
+  }
   return Status::OK();
 }
 
-Status MemMetaImpl::Readlink(InodeID ino, std::string* target) {
-  SwordFsInode* inode = nullptr;
+Status MemMetaImpl::Readlink(InodeID ino, std::string *target) {
+  SwordFsInode *inode = nullptr;
   Status status = store_.LookupInode(ino, &inode);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
 
   if (!S_ISLNK(inode->attr.st_mode)) {
     return Status::InvalidArgument("not a symbolic link");
@@ -716,6 +732,10 @@ Status MemMetaImpl::Open(InodeID ino) {
   return Status::OK();
 }
 
+Status MemMetaImpl::ReclaimData(InodeID ino) {
+  return store_.ReclaimData(ino);
+}
+
 Status MemMetaImpl::OpenDir(InodeID ino) {
   SwordFsInode *dir = nullptr;
   if (!store_.LookupInode(ino, &dir).ok() || !dir ||
@@ -756,6 +776,25 @@ Status MemMetaImpl::AddChunk(InodeID ino, const ChunkMeta &cm) {
 
 Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) {
   return store_.FindChunk(ino, idx, cm);
+}
+
+Status MemMetaImpl::Truncate(InodeID ino, size_t size) {
+  SwordFsInode *inode = nullptr;
+  store_.LookupInode(ino, &inode);
+  if (!inode) {
+    SWORDFS_LOG_ERROR << "Truncate: ino " << ino << " not found";
+    return Status::NotFound("inode not found");
+  }
+
+  auto &st = inode->attr;
+  if (st.st_size != static_cast<off_t>(size)) {
+    st.st_size = static_cast<off_t>(size);
+    // Size changes clear SUID/SGID (FUSE_CAP_HANDLE_KILLPRIV).
+    KillSUID(&st);
+    st.st_ctime = ::time(nullptr);
+  }
+
+  return store_.TruncateChunks(ino, size);
 }
 
 }  // namespace swordfs::metadata

@@ -42,41 +42,94 @@ TEST_F(FileIOTest, WriteEmptyFile) {
   EXPECT_EQ(st.st_size, 0);
 }
 
+TEST_F(FileIOTest, MultipleWritesAccumulate) {
+  const std::string name = "multi.bin";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR), 0);
+  int fd = fixture_.OpenFile(name, O_RDWR);
+  ASSERT_GE(fd, 0);
+
+  ASSERT_EQ(::write(fd, "hello", 5), 5);
+  ASSERT_EQ(::write(fd, " ", 1), 1);
+  ASSERT_EQ(::write(fd, "world", 5), 5);
+  ::close(fd);
+
+  EXPECT_TRUE(
+      fixture_.FileEquals(name, 11, Fixture::Hash64("hello world")));
+  struct stat st;
+  ASSERT_EQ(fixture_.Stat(name, &st), 0);
+  EXPECT_EQ(st.st_size, 11);
+}
+
+TEST_F(FileIOTest, Overwrite) {
+  const std::string name = "overwrite.bin";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR), 0);
+  int fd = fixture_.OpenFile(name, O_RDWR);
+  ASSERT_GE(fd, 0);
+
+  ASSERT_EQ(::write(fd, "hello", 5), 5);
+  // Seek back to start and overwrite.
+  ASSERT_EQ(::lseek(fd, 0, SEEK_SET), 0);
+  ASSERT_EQ(::write(fd, "HELLO", 5), 5);
+  ::close(fd);
+
+  EXPECT_TRUE(fixture_.FileEquals(name, 5, Fixture::Hash64("HELLO")));
+}
+
+TEST_F(FileIOTest, GapWrite) {
+  const std::string name = "gap.bin";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR), 0);
+  int fd = fixture_.OpenFile(name, O_RDWR);
+  ASSERT_GE(fd, 0);
+
+  ASSERT_EQ(::write(fd, "AAA", 3), 3);
+  // Seek forward, leaving a hole from offset 3 to 99.
+  ASSERT_EQ(::lseek(fd, 100, SEEK_SET), 100);
+  ASSERT_EQ(::write(fd, "BBB", 3), 3);
+  ::close(fd);
+
+  struct stat st;
+  ASSERT_EQ(fixture_.Stat(name, &st), 0);
+  EXPECT_EQ(st.st_size, 103);
+
+  // Verify the three segments: "AAA", hole of zeros, "BBB".
+  std::string content;
+  ASSERT_EQ(fixture_.ReadFile(name, &content), 0);
+  ASSERT_EQ(content.size(), 103u);
+  EXPECT_EQ(content.substr(0, 3), "AAA");
+  EXPECT_EQ(content.substr(3, 97), std::string(97, '\0'));
+  EXPECT_EQ(content.substr(100, 3), "BBB");
+}
+
 // ────────────────────────────────────────────────────────────────
 // Append
 // ────────────────────────────────────────────────────────────────
 
-// FIXME(juicefs-slice): Cross-open write is not yet supported.
-// When a file is closed and reopened for writing, the dirty chunk
-// from the first open is flushed and removed; the second open creates
-// a fresh FileReadWriter whose WriteBuf only covers the newly written
-// range, losing the prefix data in the flushed chunk.  A proper slice
-// mechanism (à la JuiceFS) is needed to stitch partial chunks.
-TEST_F(FileIOTest, DISABLED_ReopenAndWrite) {
+TEST_F(FileIOTest, ReopenAndWriteFails) {
   const std::string name = "reopen.bin";
   ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
 
-  // First write + close triggers chunk flush.
+  // First write + close triggers chunk flush (→ kFlushed).
   ASSERT_EQ(fixture_.WriteFile(name, "hello"), 0);
 
-  // Re-open and write again.
+  // Re-opening for write should fail because the flushed chunk is
+  // not writable.
   int fd = fixture_.OpenFile(name, O_WRONLY);
   ASSERT_GE(fd, 0);
   const std::string extra = " world";
   ssize_t n = ::write(fd, extra.c_str(), extra.size());
+  EXPECT_EQ(n, -1) << "expected write to fail on flushed chunk, got n=" << n;
+  EXPECT_EQ(errno, EINVAL) << "expected EINVAL";
   ::close(fd);
-  ASSERT_EQ(n, static_cast<ssize_t>(extra.size()));
 
-  // Currently fails: flushed "hello" chunk is lost.
-  EXPECT_TRUE(fixture_.FileEquals(name, 11, Fixture::Hash64("hello world")));
+  // Unchanged: still only "hello".
+  EXPECT_TRUE(fixture_.FileEquals(name, 5, Fixture::Hash64("hello")));
 }
 
-// FIXME(juicefs-slice): Cross-open append is not yet supported.
+// FIXME: Cross-open append is not yet supported.
 // When a file is closed and reopened with O_APPEND, the dirty chunk
 // from the first open is flushed and removed; the second open creates
 // a fresh FileReadWriter whose WriteBuf only covers the newly written
-// range, losing the prefix data in the flushed chunk.  A proper slice
-// mechanism (à la JuiceFS) is needed to stitch partial chunks.
+// range, losing the prefix data in the flushed chunk.
 TEST_F(FileIOTest, DISABLED_AppendToFile) {
   const std::string name = "append.txt";
   ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);

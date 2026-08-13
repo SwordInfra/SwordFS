@@ -95,19 +95,25 @@ class IMetaEngine {
 
   /// Create a symbolic link.
   virtual Status Symlink(InodeID parent_ino,
-                        std::string_view name, const char* link,
-                        InodeID* child_ino, struct stat* attr) = 0;
+                         std::string_view name, const char *link,
+                         InodeID *child_ino, struct stat *attr) = 0;
 
   /// Create a hard link to an existing inode.
   virtual Status Link(InodeID ino, InodeID newparent_ino,
-                     std::string_view newname, struct stat* attr) = 0;
+                      std::string_view newname, struct stat *attr) = 0;
 
   /// Read the target of a symbolic link.
-  virtual Status Readlink(InodeID ino, std::string* target) = 0;
+  virtual Status Readlink(InodeID ino, std::string *target) = 0;
 
   /// Open a regular file. Performs permission check and updates atime.
   /// Handle allocation is now managed by FileHandleManager.
   virtual Status Open(InodeID ino) = 0;
+
+  /// Reclaim the data of an inode that was unlinked while still open.
+  /// The VFS layer calls this once no open file descriptors remain.  The
+  /// metadata engine deletes the inode and its chunks only if the inode is
+  /// orphaned (nlink==0); otherwise this is a no-op.
+  virtual Status ReclaimData(InodeID ino) = 0;
 
   /// Open a directory for reading. Performs permission check and updates
   /// atime. Handle allocation is now managed by FileHandleManager.
@@ -125,11 +131,15 @@ class IMetaEngine {
   /// Register a flushed chunk.  The metadata engine stores the chunk
   /// key, size, and start offset so that subsequent reads can locate
   /// the data via the data engine.
-  virtual Status AddChunk(InodeID ino, const ChunkMeta& cm) = 0;
+  virtual Status AddChunk(InodeID ino, const ChunkMeta &cm) = 0;
 
   /// Find the chunk at |idx|.  Returns OK and fills |*cm| if a
   /// matching chunk is registered for the given inode.
-  virtual Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta* cm) = 0;
+  virtual Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) = 0;
+
+  /// Truncate |ino| to |size| bytes.  Updates the inode size and drops
+  /// chunk metadata for data beyond the new size.
+  virtual Status Truncate(InodeID ino, size_t size) = 0;
 };
 
 }  // namespace swordfs::metadata

@@ -108,6 +108,11 @@ chunk::Chunk *FileChunkManager::GetNextFlushable() {
   return nullptr;
 }
 
+void FileChunkManager::Clear() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  chunks_.clear();
+}
+
 // ────────────────────────────────────────────────────────────────
 // FileReadWriter
 // ────────────────────────────────────────────────────────────────
@@ -251,6 +256,17 @@ utils::Status FileReadWriter::Flush() {
   }
 
   return Status::OK();
+}
+
+utils::Status FileReadWriter::Truncate(size_t size) {
+  if (meta_) {
+    auto status = meta_->Truncate(ino_, size);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  chunks_.Clear();
+  return utils::Status::OK();
 }
 
 }  // namespace swordfs::vfs
