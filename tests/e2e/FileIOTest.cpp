@@ -125,6 +125,29 @@ TEST_F(FileIOTest, ReopenAndWriteFails) {
   EXPECT_TRUE(fixture_.FileEquals(name, 5, Fixture::Hash64("hello")));
 }
 
+// FIXME: O_SYNC/O_DSYNC write-through is not yet implemented.
+// O_SYNC requires every write() to be durable before it returns, i.e. the
+// touched chunk must be flushed on each write.  That is blocked by the same
+// overwrite-after-flush limitation as ReopenAndWriteFails: a flushed chunk
+// cannot accept further writes (no JuiceFS-style slice merge yet), so the
+// second write below would fail with EINVAL.  O_DIRECT (bypass the chunk
+// buffer) is a related gap.  Enable this test once slice/overwrite
+// semantics land and the O_SYNC/O_DSYNC/O_DIRECT paths are wired through
+// FileHandle → InodeHandle → FileReadWriter.
+TEST_F(FileIOTest, DISABLED_OSyncWriteIsDurable) {
+  const std::string name = "osync.bin";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  int fd = fixture_.OpenFile(name, O_WRONLY | O_SYNC);
+  ASSERT_GE(fd, 0);
+
+  // Each write must be durable on return — no explicit fsync needed.
+  ASSERT_EQ(::write(fd, "hello", 5), 5);
+  ASSERT_EQ(::write(fd, " world", 6), 6);
+  ::close(fd);
+
+  EXPECT_TRUE(fixture_.FileEquals(name, 11, Fixture::Hash64("hello world")));
+}
+
 // FIXME: Cross-open append is not yet supported.
 // When a file is closed and reopened with O_APPEND, the dirty chunk
 // from the first open is flushed and removed; the second open creates

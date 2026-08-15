@@ -193,15 +193,24 @@ class MockMetaEngine : public IMetaEngine {
   }
 
   Status Truncate(InodeID ino, size_t size) override {
+    ++truncate_calls;
+    if (!truncate_status_.ok()) {
+      return truncate_status_;
+    }
     chunks_.erase(ino);
     file_size_ = static_cast<off_t>(size);
     return Status::OK();
   }
 
   void set_file_size(off_t size) { file_size_ = size; }
+  void set_truncate_status(Status s) { truncate_status_ = s; }
+  off_t file_size() const { return file_size_; }
+
+  int truncate_calls = 0;
 
  private:
   off_t file_size_ = 0;
+  Status truncate_status_ = Status::OK();
   std::unordered_map<InodeID,
                      std::unordered_map<ChunkIndex, ChunkMeta>>
       chunks_;
@@ -494,5 +503,44 @@ TEST_F(FileReadWriterTest, FlushedDataVisibleAcrossHandles) {
 
     mgr.Release(fh1);
     mgr.Release(fh2);
+  });
+}
+
+// ────────────────────────────────────────────────────────────────
+// Truncate
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(FileReadWriterTest, TruncateCallsMetaEngine) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Truncate(1024).ok());
+    EXPECT_EQ(mock_meta_->truncate_calls, 1);
+    EXPECT_EQ(mock_meta_->file_size(), 1024);
+  });
+}
+
+TEST_F(FileReadWriterTest, TruncatePropagatesMetaError) {
+  RunInTestFiber([&] {
+    mock_meta_->set_truncate_status(Status::Internal("truncate failed"));
+    auto rw = Make();
+    auto status = rw.Truncate(1024);
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.code(), Status::kInternal);
+  });
+}
+
+TEST_F(FileReadWriterTest, TruncateDropsDirtyChunks) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
+
+    // Truncating to zero must drop the dirty chunk so a later read
+    // returns zeros instead of the previously written data.
+    ASSERT_TRUE(rw.Truncate(0).ok());
+    auto out = folly::IOBuf::create(kChunkSize);
+    ASSERT_TRUE(rw.Read(16, 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
+                               out->length()),
+              std::string(16, '\0'));
   });
 }

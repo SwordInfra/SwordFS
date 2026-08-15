@@ -35,10 +35,9 @@ class FileHandle {
   /// FileHandleManager.
   explicit FileHandle(std::shared_ptr<InodeHandle> handle);
 
-  /// Open a regular file.  Performs the meta-layer open (permission check
-  /// and atime update), allocates an fh via FileHandleManager, and applies
-  /// open-time semantics (O_TRUNC).  On success stores the new FileHandle in
-  /// |*out|.
+  /// Open a regular file.  Delegates the per-inode work (metadata fetch,
+  /// permission check) to the shared InodeHandle, allocates an fh via
+  /// FileHandleManager, and stores the new FileHandle in |*out|.
   static utils::Status Open(metadata::InodeID ino, int flags, FileHandle *out);
 
   utils::Status Read(size_t size, off_t off, folly::IOBuf *out);

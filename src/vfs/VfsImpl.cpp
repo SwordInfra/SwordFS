@@ -194,7 +194,7 @@ utils::Status VfsImpl::Flush(fuse_ino_t ino, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Flush: ino=" << ino << " fh=" << fh;
   auto handle = FileHandleManager::Instance().Find(fh);
   if (!handle) {
-    return Status::OK();
+    return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
   }
   return handle->Flush();
 }
@@ -210,7 +210,7 @@ utils::Status VfsImpl::Fsync(fuse_ino_t ino, int datasync, uint64_t fh) {
                     << " fh=" << fh;
   auto handle = FileHandleManager::Instance().Find(fh);
   if (!handle) {
-    return Status::OK();
+    return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
   }
   return handle->Flush();
 }
@@ -353,8 +353,8 @@ utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name,
   entry->attr = attr;
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
-  SWORDFS_LOG_INFO << "Create: ino=" << child_ino << " fh=" << handle.fh()
-                   << " name='" << name << "'";
+  SWORDFS_LOG_DEBUG << "Create: ino=" << child_ino << " fh=" << handle.fh()
+                    << " name='" << name << "'";
   return Status::OK();
 }
 

@@ -163,14 +163,13 @@ Status MemMetaStore::RemoveEntry(InodeID parent_ino, std::string_view name) {
     if (child->attr.st_nlink == 0) {
       auto handle = vfs::InodeHandleManager::Instance().Get(
           child->ino, /*create_if_missing=*/false);
-      if (handle && handle->IsOpen()) {
-        // Still has open file descriptors — defer reclaim until the
-        // last handle is closed (POSIX open-unlink semantics).  The
-        // orphaned flag lives on the VFS-side InodeHandle, not here.
-        handle->MarkOrphaned();
-      } else {
+      if (!handle || !handle->MarkOrphanedIfOpen()) {
         DeleteInodeLocked(child->ino);
+        return Status::OK();
       }
+      // Open fds remain — defer reclaim until the last close
+      // (POSIX open-unlink semantics).
+      return Status::OK();
     }
   } else {
     // Directories cannot be hard-linked; always delete.

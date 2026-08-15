@@ -5,9 +5,7 @@
 
 #include <folly/container/F14Map.h>
 
-#include "metadata/IMetaEngine.hpp"
 #include "vfs/InodeHandle.hpp"
-#include "volume/VolumeImpl.hpp"
 
 namespace swordfs::vfs {
 
@@ -26,20 +24,16 @@ FileHandle::FileHandle(std::shared_ptr<InodeHandle> handle)
 
 utils::Status FileHandle::Open(metadata::InodeID ino, int flags,
                                FileHandle *out) {
-  auto meta = volume::VolumeImpl::Instance().meta_engine();
-  // Permission check and atime update.  The VFS layer tracks open-fd counts
-  auto status = meta->Open(ino);
-  if (!status.ok()) {
-    return status;
-  }
-  auto inode_handle = InodeHandleManager::Instance().Get(ino, /*create_if_missing=*/true);
+  auto inode_handle =
+      InodeHandleManager::Instance().Get(ino, /*create_if_missing=*/true);
   if (!inode_handle) {
     return utils::Status::Internal("failed to get or create InodeHandle");
-  } else {
-    status = inode_handle->Open(flags);
-    if (!status.ok()) {
-      return status;
-    }
+  }
+  // Metadata fetch, permission check all live on the shared per-inode
+  // InodeHandle.
+  auto status = inode_handle->Open(flags);
+  if (!status.ok()) {
+    return status;
   }
 
   FileHandle handle{inode_handle};

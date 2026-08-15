@@ -711,6 +711,13 @@ Status MemMetaImpl::Open(InodeID ino) {
     return Status::NotFound("inode not found");
   }
 
+  // A file that has been fully unlinked (nlink == 0) can no longer be
+  // opened, even though in-flight open fds may still read/write it.
+  if (inode->attr.st_nlink == 0) {
+    SWORDFS_LOG_DEBUG << "Open: ino " << ino << " has been unlinked";
+    return Status::NotFound("inode has been unlinked");
+  }
+
   // Only regular files can be opened (directories use OpenDir, symlinks are
   // resolved by the kernel).
   if (!S_ISREG(inode->attr.st_mode)) {
