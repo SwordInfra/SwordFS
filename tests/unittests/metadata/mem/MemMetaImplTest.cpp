@@ -535,3 +535,71 @@ TEST_F(MemMetaImplTest, OpenRootSucceedsWithoutReadPerm) {
   Status s = impl_->Open(f_ino);
   EXPECT_TRUE(s.ok()) << s.message();
 }
+
+// ────────────────────────────────────────────────────────────────
+// Truncate
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(MemMetaImplTest, TruncateNotFound) {
+  Status status = impl_->Truncate(999, 0);
+  EXPECT_TRUE(status.IsNotFound());
+}
+
+TEST_F(MemMetaImplTest, TruncateUpdatesSizeAndClearsSuidSgid) {
+  InodeID f_ino = 0;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &f_ino, nullptr).ok());
+
+  // Give the file SUID/SGID without touching its size.
+  struct stat st{};
+  st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(f_ino, &st, FUSE_SET_ATTR_MODE, nullptr).ok());
+
+  ASSERT_TRUE(impl_->Truncate(f_ino, 1024).ok());
+
+  struct stat out{};
+  ASSERT_TRUE(impl_->GetAttr(f_ino, &out).ok());
+  EXPECT_EQ(out.st_size, 1024);
+  EXPECT_EQ(out.st_mode & S_ISUID, 0u);
+  EXPECT_EQ(out.st_mode & S_ISGID, 0u);
+}
+
+TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
+  InodeID f_ino = 0;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &f_ino, nullptr).ok());
+
+  struct stat st{};
+  st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(f_ino, &st, FUSE_SET_ATTR_MODE, nullptr).ok());
+  ASSERT_TRUE(impl_->Truncate(f_ino, 0).ok());  // size was already 0
+
+  struct stat out{};
+  ASSERT_TRUE(impl_->GetAttr(f_ino, &out).ok());
+  EXPECT_EQ(out.st_size, 0);
+  EXPECT_NE(out.st_mode & S_ISUID, 0u);
+  EXPECT_NE(out.st_mode & S_ISGID, 0u);
+}
+
+// ────────────────────────────────────────────────────────────────
+// SetAttr size change → Truncate
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
+  InodeID f_ino = 0;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &f_ino, nullptr).ok());
+
+  struct stat st{};
+  st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(f_ino, &st, FUSE_SET_ATTR_MODE, nullptr).ok());
+
+  struct stat attr{};
+  attr.st_size = 2048;
+  struct stat out{};
+  ASSERT_TRUE(impl_->SetAttr(f_ino, &attr, FUSE_SET_ATTR_SIZE, &out).ok());
+  EXPECT_EQ(out.st_size, 2048);
+  EXPECT_EQ(out.st_mode & S_ISUID, 0u);
+  EXPECT_EQ(out.st_mode & S_ISGID, 0u);
+}
+
+TEST_F(MemMetaImplTest, ReclaimDataMissingInodeIsNoOp) {
+  EXPECT_TRUE(impl_->ReclaimData(999).ok());
+}

@@ -12,9 +12,9 @@
 
 #include <fcntl.h>
 
-#include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 
 #include "metadata/Types.hpp"
@@ -30,11 +30,9 @@ class FileReadWriter;
 
 class InodeHandle {
  public:
-  InodeHandle(metadata::InodeID ino, std::shared_ptr<FileReadWriter> rw);
+  explicit InodeHandle(metadata::InodeID ino);
 
-  /// Acquire one open-fd reference and apply open-time semantics for
-  /// |flags| (e.g. O_TRUNC truncates the file to zero).  Called once,
-  /// right after the FileHandle is created.
+  /// Open one more file descriptor on this inode.
   utils::Status Open(int flags);
 
   utils::Status Read(size_t size, off_t off, folly::IOBuf *out);
@@ -48,24 +46,42 @@ class InodeHandle {
   /// reference is released.
   utils::Status Close();
 
-  /// Mark this inode as unlinked while still open.
-  void MarkOrphaned();
-
-  /// Return true if at least one open fd references this handle.
-  bool IsOpen() const;
+  /// Atomically mark this inode as orphaned (nlink==0) and report whether
+  /// open fds remain.  Returns true when at least one fd is still open, in
+  /// which case reclaim is deferred to the last Close(); returns false when
+  /// no fds are open, so the caller must reclaim immediately.
+  bool MarkOrphanedIfOpen();
 
   metadata::InodeID ino() const { return ino_; }
 
   /// Number of open file descriptors referencing this handle.
-  uint64_t open_count() const { return open_count_.load(); }
+  // Exposed for unit-test access only.
+  uint64_t open_count() const;
 
   // Exposed for unit-test access only.
   const std::shared_ptr<FileReadWriter> &rw() const { return rw_; }
 
  private:
+  // Result of ReleaseRef: whether this release dropped the open-fd count to
+  // zero, and whether the inode was orphaned (unlinked while open) at that
+  // moment.  Both are captured under state_mutex_ in a single atomic step.
+  struct ReleaseState {
+    bool is_last;
+    bool orphaned;
+  };
+
+  // Acquires one open-fd reference under state_mutex_.
+  void AcquireRef();
+
+  // Releases one open-fd reference and returns the resulting state, so
+  // Close() can flush on the last reference and reclaim exactly once when
+  // the last reference to an orphaned inode is released.
+  ReleaseState ReleaseRef();
+
   metadata::InodeID ino_;
   std::shared_ptr<FileReadWriter> rw_;
-  std::atomic<uint64_t> open_count_{0};
+  mutable std::mutex state_mutex_;
+  uint64_t open_count_{0};
   bool orphaned_ = false;
 };
 

@@ -4,6 +4,7 @@
 // Unit tests for FileHandle — the fh → FileHandle mapping and the
 // high-level Open/Create entry points.
 
+#include <folly/fibers/FiberManagerInternal.h>
 #include <gtest/gtest.h>
 
 #include <cstring>
@@ -13,6 +14,8 @@
 
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
+#include "metadata/mem/MemMetaImpl.hpp"
+#include "utils/Context.hpp"
 #include "utils/Status.hpp"
 #include "vfs/FileHandle.hpp"
 #include "volume/VolumeImpl.hpp"
@@ -61,15 +64,30 @@ class MockMetaEngine : public IMetaEngine {
   Status Link(InodeID, InodeID, std::string_view,
               struct stat *) override { return Status::OK(); }
   Status Readlink(InodeID, std::string *) override { return Status::OK(); }
-  Status Open(InodeID) override { return Status::OK(); }
-  Status ReclaimData(InodeID) override { return Status::OK(); }
+  Status Open(InodeID) override { return open_status; }
+  Status ReclaimData(InodeID) override {
+    ++reclaim_calls;
+    return reclaim_status;
+  }
   Status OpenDir(InodeID) override { return Status::OK(); }
   Status Forget(InodeID, uint64_t) override { return Status::OK(); }
   Status AddChunk(InodeID, const ChunkMeta &) override { return Status::OK(); }
   Status FindChunk(InodeID, ChunkIndex, ChunkMeta *) override {
     return Status::NotFound("no chunk");
   }
-  Status Truncate(InodeID, size_t) override { return Status::OK(); }
+  Status Truncate(InodeID, size_t size) override {
+    ++truncate_calls;
+    last_truncate_size = size;
+    return truncate_status;
+  }
+
+  // Observable state / injectable statuses for tests.
+  int truncate_calls = 0;
+  size_t last_truncate_size = 0;
+  int reclaim_calls = 0;
+  Status open_status = Status::OK();
+  Status truncate_status = Status::OK();
+  Status reclaim_status = Status::OK();
 
  private:
   InodeID next_ino_ = 1000;
@@ -79,8 +97,9 @@ class FileHandleTest : public ::testing::Test {
  protected:
   void SetUp() override {
     volume::VolumeImpl::Initialize();
-    volume::VolumeImpl::Instance().set_meta_engine(
-        std::make_unique<MockMetaEngine>());
+    auto meta = std::make_unique<MockMetaEngine>();
+    mock_meta_ = meta.get();
+    volume::VolumeImpl::Instance().set_meta_engine(std::move(meta));
   }
 
   void TearDown() override {
@@ -102,6 +121,7 @@ class FileHandleTest : public ::testing::Test {
   }
 
   std::vector<uint64_t> fhs_;
+  MockMetaEngine *mock_meta_ = nullptr;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -266,6 +286,105 @@ TEST_F(FileHandleTest, OpenDirAndReleaseDirLifecycle) {
   uint64_t dh2 = mgr.OpenDir(kIno);
   EXPECT_NE(dh, dh2);
   mgr.ReleaseDir(dh2);
+}
+
+// ────────────────────────────────────────────────────────────────
+// FileHandle::Open error propagation
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(FileHandleTest, OpenMetaFailurePropagates) {
+  mock_meta_->open_status = Status::Permission("denied");
+  FileHandle handle;
+  auto status = FileHandle::Open(42, 0, &handle);
+  EXPECT_TRUE(status.IsPermission());
+}
+
+TEST_F(FileHandleTest, OpenTruncateAppliesOTrunc) {
+  FileHandle handle;
+  auto status = FileHandle::Open(42, O_TRUNC, &handle);
+  ASSERT_TRUE(status.ok());
+  fhs_.push_back(handle.fh());
+  EXPECT_EQ(mock_meta_->truncate_calls, 1);
+  EXPECT_EQ(mock_meta_->last_truncate_size, 0u);
+}
+
+TEST_F(FileHandleTest, OpenTruncateFailurePropagates) {
+  mock_meta_->truncate_status = Status::Internal("truncate failed");
+  FileHandle handle;
+  auto status = FileHandle::Open(42, O_TRUNC, &handle);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), Status::kInternal);
+}
+
+// ────────────────────────────────────────────────────────────────
+// InodeHandleManager
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(FileHandleTest, InodeHandleGetMissingWithoutCreate) {
+  EXPECT_EQ(
+      InodeHandleManager::Instance().Get(9001, /*create_if_missing=*/false),
+      nullptr);
+}
+
+TEST_F(FileHandleTest, InodeHandleGetExistingTracksOpenCount) {
+  uint64_t fh = OpenHandle(9002);
+  auto inode_handle = InodeHandleManager::Instance().Get(9002, false);
+  ASSERT_NE(inode_handle, nullptr);
+  EXPECT_EQ(inode_handle->ino(), 9002);
+  EXPECT_EQ(inode_handle->open_count(), 1);
+}
+
+TEST_F(FileHandleTest, InodeHandleRecreatedAfterExpiry) {
+  {
+    auto inode_handle = InodeHandleManager::Instance().Get(9003, true);
+    ASSERT_NE(inode_handle, nullptr);
+  }
+  // All shared references dropped — the weak entry is expired, so a fresh
+  // InodeHandle must be created on the next lookup.
+  auto recreated = InodeHandleManager::Instance().Get(9003, true);
+  ASSERT_NE(recreated, nullptr);
+  EXPECT_EQ(recreated->ino(), 9003);
+}
+
+// ────────────────────────────────────────────────────────────────
+// InodeHandle open-unlink reclaim
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(FileHandleTest, CloseReclaimsOrphanedInode) {
+  FileHandle handle;
+  ASSERT_TRUE(FileHandle::Open(9004, 0, &handle).ok());
+  auto inode_handle = InodeHandleManager::Instance().Get(9004, false);
+  ASSERT_NE(inode_handle, nullptr);
+  EXPECT_TRUE(inode_handle->MarkOrphanedIfOpen());
+
+  FileHandleManager::Instance().Release(handle.fh());
+  EXPECT_EQ(mock_meta_->reclaim_calls, 1);
+}
+
+TEST_F(FileHandleTest, CloseOnlyReclaimsOnLastReference) {
+  FileHandle h1, h2;
+  ASSERT_TRUE(FileHandle::Open(9005, 0, &h1).ok());
+  ASSERT_TRUE(FileHandle::Open(9005, 0, &h2).ok());
+  auto inode_handle = InodeHandleManager::Instance().Get(9005, false);
+  ASSERT_NE(inode_handle, nullptr);
+  EXPECT_TRUE(inode_handle->MarkOrphanedIfOpen());
+
+  // First close: open count 2 → 1 — no reclaim yet.
+  FileHandleManager::Instance().Release(h1.fh());
+  EXPECT_EQ(mock_meta_->reclaim_calls, 0);
+  EXPECT_EQ(inode_handle->open_count(), 1);
+
+  // Final close: open count 1 → 0 — reclaim now.
+  FileHandleManager::Instance().Release(h2.fh());
+  EXPECT_EQ(mock_meta_->reclaim_calls, 1);
+  EXPECT_EQ(inode_handle->open_count(), 0);
+}
+
+TEST_F(FileHandleTest, MarkOrphanedIfOpenFalseWhenNoOpenFds) {
+  auto inode_handle = InodeHandleManager::Instance().Get(9006, true);
+  ASSERT_NE(inode_handle, nullptr);
+  EXPECT_FALSE(inode_handle->MarkOrphanedIfOpen());
+  EXPECT_EQ(inode_handle->open_count(), 0);
 }
 
 }  // namespace

@@ -105,8 +105,8 @@ class IMetaEngine {
   /// Read the target of a symbolic link.
   virtual Status Readlink(InodeID ino, std::string *target) = 0;
 
-  /// Open a regular file. Performs permission check and updates atime.
-  /// Handle allocation is now managed by FileHandleManager.
+  /// Open a regular file.  Performs the permission check (regular-file
+  /// validation + read permission) and updates atime.
   virtual Status Open(InodeID ino) = 0;
 
   /// Reclaim the data of an inode that was unlinked while still open.
