@@ -57,7 +57,9 @@ build() {
 
 start_minio() {
   echo "=== Starting MinIO container (${MINIO_CONTAINER}) ==="
-  ${DOCKER} rm -f "${MINIO_CONTAINER}" 2>/dev/null || true
+  # Use -v so the anonymous volume created for the image's VOLUME /data
+  # is removed along with the container (docker rm without -v leaks it).
+  ${DOCKER} rm -f -v "${MINIO_CONTAINER}" 2>/dev/null || true
   ${DOCKER} run -d --name "${MINIO_CONTAINER}" \
     -p "${MINIO_ENDPOINT##*:}:${MINIO_ENDPOINT##*:}" \
     -e MINIO_ROOT_USER="${MINIO_ROOT_USER}" \
@@ -80,7 +82,9 @@ start_minio() {
 
 stop_minio() {
   echo "=== Stopping MinIO container ==="
-  ${DOCKER} rm -f "${MINIO_CONTAINER}" 2>/dev/null || true
+  # Use -v so the anonymous volume created for the image's VOLUME /data
+  # is removed along with the container (docker rm without -v leaks it).
+  ${DOCKER} rm -f -v "${MINIO_CONTAINER}" 2>/dev/null || true
 }
 
 create_bucket() {
@@ -101,7 +105,11 @@ trap cleanup EXIT
 
 # ── Main ─────────────────────────────────────────────────────────
 
-setup_fuse
+# Skip FUSE setup (needs sudo) when the module is already available,
+# e.g. CI environments: SKIP_FUSE_SETUP=1 ./scripts/run-e2e.sh
+if [ -z "${SKIP_FUSE_SETUP:-}" ]; then
+  setup_fuse
+fi
 build
 start_minio
 create_bucket
