@@ -59,8 +59,12 @@ class FileChunkManager {
   /// non-const call.
   chunk::Chunk *GetNextFlushable();
 
-  /// Drop all cached chunks (used by truncate).
-  void Clear();
+  /// Truncate cached chunks to those below |new_last_idx|.  Chunks at
+  /// or beyond |new_last_idx| are dropped so reads re-load them from
+  /// metadata.  Chunks below remain so reads can still hit them
+  /// directly.  No-op when |new_last_idx| is the smallest representable
+  /// value.
+  void Truncate(metadata::ChunkIndex new_last_idx);
 
  private:
   metadata::InodeID ino_;

@@ -108,9 +108,15 @@ chunk::Chunk *FileChunkManager::GetNextFlushable() {
   return nullptr;
 }
 
-void FileChunkManager::Clear() {
+void FileChunkManager::Truncate(metadata::ChunkIndex new_last_idx) {
   std::lock_guard<std::mutex> lock(mutex_);
-  chunks_.clear();
+  for (auto it = chunks_.begin(); it != chunks_.end();) {
+    if (it->first >= new_last_idx) {
+      it = chunks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -259,13 +265,23 @@ utils::Status FileReadWriter::Flush() {
 }
 
 utils::Status FileReadWriter::Truncate(size_t size) {
-  if (meta_) {
-    auto status = meta_->Truncate(ino_, size);
-    if (!status.ok()) {
-      return status;
-    }
+  auto status = meta_->Truncate(ino_, size);
+  if (!status.ok()) {
+    return status;
   }
-  chunks_.Clear();
+  // Drop cached chunks at or beyond the new last chunk.  The chunk
+  // containing the truncated offset (if any) is kept and will be
+  // re-loaded from metadata on next access.  Chunks below it remain
+  // so reads can hit them directly.
+  if (chunk_size_ > 0) {
+    // The first chunk index beyond the truncated file size; cached
+    // chunks at or past this index are dropped.
+    const auto new_last_idx =
+        static_cast<metadata::ChunkIndex>((size + chunk_size_ - 1) / chunk_size_);
+    chunks_.Truncate(new_last_idx);
+  } else {
+    chunks_.Truncate(0);
+  }
   return utils::Status::OK();
 }
 
