@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "metadata/OpenHandleTracker.hpp"
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
 
@@ -30,6 +31,15 @@ class MemMetaStore {
  public:
   MemMetaStore();
   ~MemMetaStore();
+
+  // Bind a runtime open-handle tracker (production: the FUSE daemon's
+  // `vfs::InodeHandleManager`). The store takes a non-owning pointer;
+  // the caller must keep the tracker alive for the lifetime of this
+  // store. Passing nullptr restores the legacy "no deferred reclaim"
+  // behaviour (useful for tests that don't care about open-unlink).
+  void SetOpenHandleTracker(swordfs::metadata::OpenHandleTracker* t) {
+    handle_tracker_ = t;
+  }
 
   // ────────────────────────────────────────────────────────────────
   // Inode operations
@@ -119,6 +129,12 @@ class MemMetaStore {
  private:
   mutable std::mutex mutex_;
   std::atomic<InodeID> next_ino_;
+
+  // Optional runtime open-handle tracker. When non-null,
+  // `RemoveEntry` defers inode deletion until the tracker reports no
+  // remaining open file descriptors (POSIX open-unlink semantics).
+  // When null, the store behaves as before — immediate deletion.
+  OpenHandleTracker* handle_tracker_ = nullptr;
   folly::F14FastMap<InodeID, SwordFsInode *> inodes_;
   folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode *>> dirs_;
 

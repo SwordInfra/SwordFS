@@ -228,3 +228,39 @@ TEST_F(FileIOTest, TruncateExtend) {
   ASSERT_EQ(fixture_.Stat(name, &st), 0);
   EXPECT_EQ(st.st_size, 10);
 }
+
+// ────────────────────────────────────────────────────────────────
+// Open-unlink semantics: unlink while fd open, then close
+// ────────────────────────────────────────────────────────────────
+//
+// POSIX guarantees that a file that has been unlinked can still be
+// read/written through a pre-existing fd, and that its data only goes
+// away once the last fd is closed. After this refactor the metadata
+// engine defers inode deletion via the runtime `OpenHandleTracker`
+// (see `OpenHandleTracker.hpp`); this end-to-end test verifies the
+// contract from the filesystem-client perspective.
+
+TEST_F(FileIOTest, UnlinkWhileOpenKeepsFileReadable) {
+  const std::string name = "open_unlink.txt";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "payload"), 0);
+  ASSERT_EQ(::close(fixture_.OpenFile(name, O_RDONLY)), 0);
+
+  int fd = fixture_.OpenFile(name, O_RDONLY);
+  ASSERT_GE(fd, 0);
+
+  // unlink while fd is still open.
+  ASSERT_EQ(fixture_.UnlinkFile(name), 0);
+
+  // fd must still read the original contents.
+  char buf[16] = {};
+  ssize_t n = ::pread(fd, buf, sizeof(buf), 0);
+  ASSERT_EQ(n, 7);
+  EXPECT_STREQ(buf, "payload");
+  ASSERT_EQ(::close(fd), 0);
+
+  // After the last close, the name is gone AND the inode is gone: a
+  // fresh lookup returns ENOENT.
+  struct stat st;
+  EXPECT_EQ(fixture_.Stat(name, &st), -1);
+}

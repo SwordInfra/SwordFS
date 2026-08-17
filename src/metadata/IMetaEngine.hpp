@@ -24,6 +24,8 @@ using SwordFsContext = swordfs::utils::SwordFsContext;
 
 namespace swordfs::metadata {
 
+class OpenHandleTracker;
+
 /// Filesystem limits provided by each metadata engine.
 struct Limits {
   /// Maximum length of a single path component (POSIX NAME_MAX).
@@ -43,6 +45,17 @@ inline bool IsMemoryMode(std::string_view meta_url) {
 class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
+
+  // Inject a runtime open-handle tracker used by the engine to decide
+  // whether `RemoveEntry` may immediately delete an inode (no open
+  // handles) or must defer (POSIX open-unlink). The default
+  // implementation ignores the tracker and behaves as before; engines
+  // that want open-unlink semantics must override.
+  //
+  // The engine takes a non-owning pointer; the caller (typically
+  // `VolumeImpl`) owns the tracker and must keep it alive at least as
+  // long as the engine is in use.
+  virtual void SetOpenHandleTracker(OpenHandleTracker* /*tracker*/) {}
 
   /// Return limits for the given metadata engine type.
   static Limits GetLimits(std::string_view meta_url);

@@ -10,7 +10,6 @@
 #include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 #include "utils/Context.hpp"
-#include "vfs/InodeHandle.hpp"
 
 using Status = swordfs::utils::Status;
 
@@ -153,28 +152,36 @@ Status MemMetaStore::RemoveEntry(InodeID parent_ino, std::string_view name) {
     return Status::NotEmpty("directory not empty");
   }
 
+  // Stage 1: unlink the directory entry. The dentry is gone, but the
+  // inode (and its chunks) may still be needed by any open file
+  // descriptor; see Stage 2.
   UnlinkEntryLocked(parent_ino, name);
 
-  if (!child->IsDir()) {
-    // Decrement nlink; only delete the inode when no names remain.
-    // This is the hard-link semantic: each unlink removes one name,
-    // and the data survives until the last name is gone.
-    child->attr.st_nlink--;
-    if (child->attr.st_nlink == 0) {
-      auto handle = vfs::InodeHandleManager::Instance().Get(
-          child->ino, /*create_if_missing=*/false);
-      if (!handle || !handle->MarkOrphanedIfOpen()) {
-        DeleteInodeLocked(child->ino);
-        return Status::OK();
-      }
-      // Open fds remain — defer reclaim until the last close
-      // (POSIX open-unlink semantics).
-      return Status::OK();
-    }
-  } else {
-    // Directories cannot be hard-linked; always delete.
+  if (child->IsDir()) {
+    // Directories cannot be hard-linked; always delete immediately.
     DeleteInodeLocked(child->ino);
+    return Status::OK();
   }
+
+  // Hard-link semantic: each unlink removes one name; the inode (and
+  // its data) survives until the last name is gone AND no open
+  // file descriptor references it.
+  child->attr.st_nlink--;
+  if (child->attr.st_nlink != 0) {
+    return Status::OK();
+  }
+
+  // Stage 2: ask the runtime tracker whether any open fd still
+  // references this inode. If not, delete now. Otherwise mark the
+  // inode orphaned and let the last `Close` reclaim it via
+  // `ReclaimData`.
+  bool has_open = handle_tracker_ &&
+                  handle_tracker_->HasOpenHandles(child->ino);
+  if (has_open) {
+    handle_tracker_->MarkOrphaned(child->ino);
+    return Status::OK();
+  }
+  DeleteInodeLocked(child->ino);
   return Status::OK();
 }
 

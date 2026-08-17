@@ -63,29 +63,44 @@ utils::Status InodeHandle::Close() {
 }
 
 bool InodeHandle::MarkOrphanedIfOpen() {
-  std::lock_guard<std::mutex> lock(state_mutex_);
-  if (open_count_ == 0) {
-    return false;
+  // Atomically mark orphaned only when there is still an open fd.
+  // We loop until either we win the CAS on `orphaned_` or we observe
+  // that the open count has reached zero (in which case there is no
+  // orphan to mark). The loop body is bounded by the number of
+  // concurrent racing writers, which in practice is at most 1
+  // (unlink) vs 1 (close).
+  while (true) {
+    if (open_count_.load(std::memory_order_acquire) == 0) {
+      return false;
+    }
+    bool expected = false;
+    if (orphaned_.compare_exchange_weak(
+            expected, true,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+      return true;
+    }
+    // Someone else won the CAS; reload and retry.
   }
-  orphaned_ = true;
-  return true;
 }
 
 uint64_t InodeHandle::open_count() const {
-  std::lock_guard<std::mutex> lock(state_mutex_);
-  return open_count_;
+  // Lock-free read; safe because the only mutators (AcquireRef /
+  // ReleaseRef) do atomic increments/decrements on the same type.
+  return open_count_.load(std::memory_order_acquire);
 }
 
 void InodeHandle::AcquireRef() {
-  std::lock_guard<std::mutex> lock(state_mutex_);
-  ++open_count_;
+  open_count_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 InodeHandle::ReleaseState InodeHandle::ReleaseRef() {
-  std::lock_guard<std::mutex> lock(state_mutex_);
-  bool is_last = (--open_count_ == 0);
-  return {is_last, is_last && orphaned_};
+  uint64_t prev = open_count_.fetch_sub(1, std::memory_order_acq_rel);
+  bool is_last = (prev == 1);
+  bool was_orphaned = orphaned_.load(std::memory_order_acquire);
+  return {is_last, is_last && was_orphaned};
 }
+
 
 // ────────────────────────────────────────────────────────────────
 // InodeHandleManager
@@ -102,6 +117,31 @@ InodeHandleManager::InodeHandleManager()
 InodeHandleManager &InodeHandleManager::Instance() {
   static InodeHandleManager instance;
   return instance;
+}
+
+bool InodeHandleManager::HasOpenHandles(metadata::InodeID ino) {
+  // Lock-free check via weak_ptr + atomic open_count_. We only take
+  // the manager shared_lock to safely walk the map; once we hold a
+  // strong reference to the handle, all subsequent reads are atomic.
+  std::shared_ptr<InodeHandle> handle;
+  {
+    std::shared_lock lock(mutex_);
+    auto it = inode_handles_->find(ino);
+    if (it == inode_handles_->end()) return false;
+    handle = it->second.lock();
+  }
+  return handle && handle->open_count() > 0;
+}
+
+void InodeHandleManager::MarkOrphaned(metadata::InodeID ino) {
+  std::shared_ptr<InodeHandle> handle;
+  {
+    std::shared_lock lock(mutex_);
+    auto it = inode_handles_->find(ino);
+    if (it == inode_handles_->end()) return;
+    handle = it->second.lock();
+  }
+  if (handle) handle->MarkOrphanedIfOpen();
 }
 
 std::shared_ptr<InodeHandle> InodeHandleManager::Get(metadata::InodeID ino, bool create_if_missing) {
