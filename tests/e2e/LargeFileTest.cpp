@@ -164,3 +164,126 @@ TEST_F(LargeFileTest, DataVisibleAfterClose) {
 
   EXPECT_TRUE(fixture_.FileEquals("close.bin", 12, Fixture::Hash64("before close")));
 }
+
+// ────────────────────────────────────────────────────────────────
+// Truncate
+//
+// These tests target the chunk-cache eviction logic.  Writing
+// >= 2 chunks then truncating into the first chunk must keep the
+// earlier chunks' data intact (no spurious reads of holes or zeros).
+// ────────────────────────────────────────────────────────────────
+
+// Write two chunks, then truncate into the middle of the first chunk.
+// Earlier (kept) region must still read as the originally written 'A's.
+// This is the regression case for the unconditional Clear() bug.
+TEST_F(LargeFileTest, TruncateIntoFirstChunkKeepsEarlierData) {
+  constexpr size_t kFirstChunkBytes = 64ULL * 1024 * 1024;  // chunk 0
+  constexpr size_t kKeepBytes = 1024;                       // truncate into chunk 0
+
+  const char *name = "trunc_partial.bin";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  int fd = fixture_.OpenFile(name, O_RDWR);
+  ASSERT_GE(fd, 0);
+
+  // Fill chunk 0 fully with 'A'.
+  std::string chunk0(kFirstChunkBytes, 'A');
+  ASSERT_EQ(::pwrite(fd, chunk0.data(), chunk0.size(), 0),
+            static_cast<ssize_t>(chunk0.size()));
+  // Append a partial chunk 1 — only a few bytes of 'B'.
+  std::string chunk1_head(16, 'B');
+  ASSERT_EQ(::pwrite(fd, chunk1_head.data(), chunk1_head.size(),
+                     static_cast<off_t>(kFirstChunkBytes)),
+            static_cast<ssize_t>(chunk1_head.size()));
+  ::close(fd);
+
+  // Truncate into the middle of chunk 0, dropping chunk 1 entirely.
+  ASSERT_EQ(fixture_.Truncate(name, static_cast<off_t>(kKeepBytes)), 0);
+
+  struct stat st;
+  ASSERT_EQ(fixture_.Stat(name, &st), 0);
+  EXPECT_EQ(st.st_size, static_cast<off_t>(kKeepBytes));
+
+  // Bytes that should remain must still be 'A' — if the cache eviction
+  // logic had nuked chunk 0 as well, the file would now be a hole and
+  // read would return zeros.
+  fd = fixture_.OpenFile(name, O_RDONLY);
+  ASSERT_GE(fd, 0);
+  std::string buf(kKeepBytes, '\0');
+  ssize_t n = ::pread(fd, buf.data(), buf.size(), 0);
+  ASSERT_EQ(n, static_cast<ssize_t>(kKeepBytes));
+  EXPECT_EQ(buf, std::string(kKeepBytes, 'A'));
+  ::close(fd);
+}
+
+// Write two chunks, then truncate to a size that lands exactly on the
+// chunk boundary.  The whole first chunk must remain; only the second
+// chunk should be dropped.
+TEST_F(LargeFileTest, TruncateAtChunkBoundaryKeepsFirstChunk) {
+  constexpr size_t kFirstChunkBytes = 64ULL * 1024 * 1024;
+
+  const char *name = "trunc_boundary.bin";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  int fd = fixture_.OpenFile(name, O_RDWR);
+  ASSERT_GE(fd, 0);
+
+  std::string chunk0(kFirstChunkBytes, 'X');
+  ASSERT_EQ(::pwrite(fd, chunk0.data(), chunk0.size(), 0),
+            static_cast<ssize_t>(chunk0.size()));
+  std::string chunk1(32, 'Y');
+  ASSERT_EQ(::pwrite(fd, chunk1.data(), chunk1.size(),
+                     static_cast<off_t>(kFirstChunkBytes)),
+            static_cast<ssize_t>(chunk1.size()));
+  ::close(fd);
+
+  ASSERT_EQ(fixture_.Truncate(name, static_cast<off_t>(kFirstChunkBytes)), 0);
+
+  struct stat st;
+  ASSERT_EQ(fixture_.Stat(name, &st), 0);
+  EXPECT_EQ(st.st_size, static_cast<off_t>(kFirstChunkBytes));
+
+  fd = fixture_.OpenFile(name, O_RDONLY);
+  ASSERT_GE(fd, 0);
+  std::string buf(kFirstChunkBytes, '\0');
+  ssize_t n = ::pread(fd, buf.data(), buf.size(), 0);
+  ASSERT_EQ(n, static_cast<ssize_t>(kFirstChunkBytes));
+  EXPECT_EQ(buf, std::string(kFirstChunkBytes, 'X'));
+  ::close(fd);
+}
+
+// Truncating to a size LARGER than the current file should grow the
+// file without destroying already-cached chunks.  Reading back the
+// original region must still return the original data.
+TEST_F(LargeFileTest, TruncateExtendPreservesEarlierChunks) {
+  constexpr size_t kFirstChunkBytes = 64ULL * 1024 * 1024;
+
+  const char *name = "trunc_extend.bin";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  int fd = fixture_.OpenFile(name, O_RDWR);
+  ASSERT_GE(fd, 0);
+
+  std::string chunk0(kFirstChunkBytes, 'P');
+  ASSERT_EQ(::pwrite(fd, chunk0.data(), chunk0.size(), 0),
+            static_cast<ssize_t>(chunk0.size()));
+  std::string chunk1(32, 'Q');
+  ASSERT_EQ(::pwrite(fd, chunk1.data(), chunk1.size(),
+                     static_cast<off_t>(kFirstChunkBytes)),
+            static_cast<ssize_t>(chunk1.size()));
+  ::close(fd);
+
+  // Extend well past the end of chunk 1 (which sits at offset 64 MiB).
+  constexpr off_t kNewSize = 256ULL * 1024 * 1024;
+  ASSERT_EQ(fixture_.Truncate(name, kNewSize), 0);
+
+  struct stat st;
+  ASSERT_EQ(fixture_.Stat(name, &st), 0);
+  EXPECT_EQ(st.st_size, kNewSize);
+
+  // Original data must still be readable.
+  fd = fixture_.OpenFile(name, O_RDONLY);
+  ASSERT_GE(fd, 0);
+  std::string buf(kFirstChunkBytes, '\0');
+  ssize_t n = ::pread(fd, buf.data(), buf.size(), 0);
+  ASSERT_EQ(n, static_cast<ssize_t>(kFirstChunkBytes));
+  EXPECT_EQ(buf, std::string(kFirstChunkBytes, 'P'));
+  ::close(fd);
+}
