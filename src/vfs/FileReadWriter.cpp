@@ -52,8 +52,16 @@ class MultiChunkReadWriter {
   /// Block until all submitted reads finish.  Returns the first
   /// non-OK status, or OK.
   Status Collect() {
+    // 1. Wait for every fiber to finish.  Each fiber lambda dereferences
+    //    |raw| (a raw pointer into the matching Pending), so we must let
+    //    all of them complete before this object — and |ops_| — can be
+    //    destroyed.  Returning early after the first failure would leave
+    //    in-flight fibers writing into freed memory.
     for (auto &p : ops_) {
       p->baton.wait();
+    }
+    // 2. Now it is safe to inspect status / accumulate bytes.
+    for (auto &p : ops_) {
       if (!p->status.ok()) {
         return p->status;
       }
