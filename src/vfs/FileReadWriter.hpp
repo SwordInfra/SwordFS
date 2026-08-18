@@ -46,7 +46,8 @@ class FileChunkManager {
  public:
   using Map = folly::F14FastMap<metadata::ChunkIndex, chunk::Chunk>;
 
-  explicit FileChunkManager(metadata::InodeID ino) : ino_(ino) {}
+  FileChunkManager(metadata::InodeID ino, size_t chunk_size)
+      : ino_(ino), chunk_size_(chunk_size) {}
 
   /// Get the chunk at |idx|.  If not in the map, creates and
   /// initializes it.  Returns nullptr on error or when
@@ -70,6 +71,7 @@ class FileChunkManager {
 
  private:
   metadata::InodeID ino_;
+  size_t chunk_size_;
   mutable std::mutex mutex_;
   Map chunks_;
 };
@@ -98,6 +100,13 @@ class FileReadWriter {
   /// Truncate to |size| bytes.  Updates chunk metadata in the metadata
   /// engine and drops cached chunks.  Used by O_TRUNC (size=0).
   utils::Status Truncate(size_t size);
+
+  // Test-only hook: override the chunk size used for index calculations.
+  // Lets unit tests seed multiple chunks without writing >64 MiB.
+  void SetChunkSizeForTest(size_t cs) {
+    chunk_size_ = cs;
+    chunks_.SetChunkSizeForTest(cs);
+  }
 
  private:
   InodeID ino_;

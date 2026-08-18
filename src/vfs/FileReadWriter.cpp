@@ -94,7 +94,7 @@ chunk::Chunk *FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_mis
     return &it->second;
   }
   // Not cached — try lazy-load from metadata engine.
-  auto c = chunk::Chunk(ino_, idx);
+  auto c = chunk::Chunk(ino_, idx, chunk_size_);
   auto status = c.Initialize();
   if (!status.ok()) {
     return nullptr;
@@ -140,7 +140,7 @@ FileReadWriter::FileReadWriter(InodeID ino)
       chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
       meta_(volume::VolumeImpl::Instance().meta_engine()),
       data_(volume::VolumeImpl::Instance().data_engine()),
-      chunks_(ino) {}
+      chunks_(ino, chunk_size_) {}
 
 // ────────────────────────────────────────────────────────────────
 // Write

@@ -35,8 +35,11 @@ class Chunk {
     kFlushed,  // data successfully persisted to storage
   };
 
-  /// Create a chunk ready to accept writes.
-  Chunk(metadata::InodeID ino, metadata::ChunkIndex index);
+  /// Create a chunk ready to accept writes. The owning FileChunkManager
+  /// provides the per-file chunk size so that unit tests can drive
+  /// FileReadWriter with a smaller-than-default chunk_size.
+  Chunk(metadata::InodeID ino, metadata::ChunkIndex index,
+        size_t max_chunk_size);
 
   /// Query VolumeImpl's meta engine for existing flushed metadata at
   /// this chunk's start offset.  If found, transition to kFlushed;
