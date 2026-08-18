@@ -471,11 +471,14 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
         np->attr.st_nlink--;
       }
     } else {
-      // Overwriting a file: `Unlink` only detaches the directory
-      // entry; the inode (and its chunks) are still alive. Free them
-      // now since the rename is atomic and no fd can be holding the
-      // old name (the caller must have removed the only link).
-      store_.ReclaimData(existing->ino);
+      // Overwriting a file: `Unlink` only detaches the directory entry; the
+      // inode (and its chunks) are still alive. Free the inode here.
+      // The VFS layer (above) is responsible for issuing data-engine
+      // deletes before this returns, since by definition we are inside
+      // a rename and there cannot be any open fd on the overwritten
+      // path component (the original caller already removed the only
+      // link).
+      store_.ReclaimInode(existing->ino);
     }
   }
 
@@ -749,8 +752,12 @@ Status MemMetaImpl::Open(InodeID ino) {
   return Status::OK();
 }
 
-Status MemMetaImpl::ReclaimData(InodeID ino) {
-  return store_.ReclaimData(ino);
+Status MemMetaImpl::ReclaimInode(InodeID ino) {
+  return store_.ReclaimInode(ino);
+}
+
+Status MemMetaImpl::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
+  return store_.ListChunks(ino, out);
 }
 
 Status MemMetaImpl::OpenDir(InodeID ino) {

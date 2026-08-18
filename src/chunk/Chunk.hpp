@@ -13,6 +13,7 @@
 
 #include "chunk/WriteBuf.hpp"
 #include "metadata/Types.hpp"
+#include "utils/ChunkKey.hpp"
 #include "utils/Status.hpp"
 
 namespace swordfs {
@@ -83,8 +84,11 @@ class Chunk {
   /// Build a ChunkMeta snapshot for metadata registration.
   metadata::ChunkMeta BuildMeta() const;
 
+  // Canonical chunk object key. Delegates to utils::ChunkKey so the VFS
+  // layer (which deletes chunk objects on inode reclaim) and this class
+  // (which uploads/reads them) compute the same string.
   std::string ChunkKey() const {
-    return std::to_string(ino_) + "/" + std::to_string(index_);
+    return swordfs::utils::ChunkKey(ino_, index_);
   }
 
  private:

@@ -116,10 +116,14 @@ chunk::Chunk *FileChunkManager::GetNextFlushable() {
   return nullptr;
 }
 
-void FileChunkManager::Truncate(metadata::ChunkIndex new_last_idx) {
+void FileChunkManager::Truncate(metadata::ChunkIndex new_last_idx,
+                                std::vector<metadata::ChunkIndex> *dropped) {
   std::lock_guard<std::mutex> lock(mutex_);
   for (auto it = chunks_.begin(); it != chunks_.end();) {
     if (it->first >= new_last_idx) {
+      if (dropped) {
+        dropped->push_back(it->first);
+      }
       it = chunks_.erase(it);
     } else {
       ++it;
@@ -281,15 +285,35 @@ utils::Status FileReadWriter::Truncate(size_t size) {
   // containing the truncated offset (if any) is kept and will be
   // re-loaded from metadata on next access.  Chunks below it remain
   // so reads can hit them directly.
+  std::vector<metadata::ChunkIndex> dropped;
   if (chunk_size_ > 0) {
     // The first chunk index beyond the truncated file size; cached
     // chunks at or past this index are dropped.
     const auto new_last_idx =
         static_cast<metadata::ChunkIndex>((size + chunk_size_ - 1) / chunk_size_);
-    chunks_.Truncate(new_last_idx);
+    chunks_.Truncate(new_last_idx, &dropped);
   } else {
-    chunks_.Truncate(0);
+    chunks_.Truncate(0, &dropped);
   }
+
+  // Drop the now-orphaned chunk objects from the data engine. The
+  // metadata side already pruned its chunk map via meta_->Truncate(),
+  // but the actual S3 / object-storage objects would otherwise leak
+  // until a future GC pass picks them up. Failures are logged but not
+  // propagated — a missing chunk object is recoverable on next access
+  // (read of that chunk index returns NotFound), whereas a partial
+  // metadata truncate would corrupt the file size view.
+  if (data_ && !dropped.empty()) {
+    for (const auto idx : dropped) {
+      const auto key = utils::ChunkKey(ino_, idx);
+      auto st = data_->Delete(key);
+      if (!st.ok()) {
+        SWORDFS_LOG_ERROR << "FileReadWriter::Truncate: data->Delete("
+                          << key << ") failed: " << st.message();
+      }
+    }
+  }
+
   return utils::Status::OK();
 }
 

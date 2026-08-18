@@ -10,6 +10,7 @@
 #include <folly/io/async/EventBase.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -107,9 +108,26 @@ class MockDataEngine : public IDataEngine {
   }
 
   Status Delete(std::string_view key) override {
+    delete_calls.push_back(std::string(key));
     store_.erase(std::string(key));
-    return Status::OK();
+    return delete_status;
   }
+
+  // Public for tests: the chunks the data engine knows about. Useful
+  // for verifying that Truncate's data-engine Deletes match the chunks
+  // the metadata engine removed from its chunk map.
+  std::vector<std::string> StoredKeys() const {
+    std::vector<std::string> out;
+    out.reserve(store_.size());
+    for (const auto &[k, _] : store_) {
+      out.push_back(k);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+  }
+
+  std::vector<std::string> delete_calls;
+  Status delete_status = Status::OK();
 
  private:
   std::unordered_map<std::string, std::string> store_;
@@ -167,7 +185,10 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
   Status Open(InodeID) override { return Status::OK(); }
-  Status ReclaimData(InodeID) override { return Status::OK(); }
+  Status ReclaimInode(InodeID) override { return Status::OK(); }
+  Status ListChunks(InodeID, std::vector<ChunkMeta> *) override {
+    return Status::OK();
+  }
   Status OpenDir(InodeID) override { return Status::OK(); }
   Status Forget(InodeID, uint64_t) override { return Status::OK(); }
 
@@ -542,5 +563,80 @@ TEST_F(FileReadWriterTest, TruncateDropsDirtyChunks) {
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
                                out->length()),
               std::string(16, '\0'));
+  });
+}
+
+TEST_F(FileReadWriterTest, TruncateDeletesDroppedChunkObjects) {
+  // Truncating a multi-chunk file must ask the data engine to delete
+  // the chunk objects that no longer fit the new size. Without this,
+  // S3 objects would leak until a future GC pass picks them up.
+  //
+  // The default VolumeImpl chunk_size is 64 MiB, so seeding multiple
+  // chunks via the high-level Write API would require writing >64 MiB
+  // per chunk. Use the test-only chunk-size escape hatch on the volume
+  // singleton to shrink it for the duration of this test.
+  RunInTestFiber([&] {
+    auto &vol = swordfs::volume::VolumeImpl::Instance();
+    vol.set_chunk_size_for_test(kChunkSize);
+
+    auto rw = Make();
+
+    // Register three chunks with the mock metadata engine and seed
+    // them in the data engine so the truncate-side Delete has
+    // something to act on.
+    for (ChunkIndex i = 0; i < 3; ++i) {
+      ChunkMeta cm{};
+      cm.index = i;
+      cm.start_offset = i * kChunkSize;
+      cm.key = std::to_string(kIno) + "/" + std::to_string(i);
+      cm.size = kChunkSize;
+      ASSERT_TRUE(mock_meta_->AddChunk(kIno, cm).ok());
+      auto buf = std::make_unique<folly::IOBuf>(Buf(Repeat('A', kChunkSize)));
+      ASSERT_TRUE(mock_data_->Put(cm.key, std::move(buf)).ok());
+    }
+    // Materialise each chunk in FileChunkManager by reading it; the
+    // reader path uses chunks_.Get(idx, false) which still triggers
+    // Chunk::Initialize → meta->FindChunk → state kFlushed.
+    for (ChunkIndex i = 0; i < 3; ++i) {
+      auto out = folly::IOBuf::create(kChunkSize);
+      ASSERT_TRUE(rw.Read(kChunkSize, i * kChunkSize, out.get()).ok());
+    }
+    ASSERT_EQ(mock_data_->StoredKeys().size(), 3);
+
+    // Truncate to one byte — chunks 1 and 2 are dropped (their data
+    // no longer fits the new size), chunk 0 is kept alive.
+    ASSERT_TRUE(rw.Truncate(1).ok());
+
+    std::sort(mock_data_->delete_calls.begin(),
+              mock_data_->delete_calls.end());
+    EXPECT_EQ(mock_data_->delete_calls.size(), 2);
+    EXPECT_EQ(mock_data_->delete_calls[0],
+              std::to_string(kIno) + "/1");
+    EXPECT_EQ(mock_data_->delete_calls[1],
+              std::to_string(kIno) + "/2");
+    EXPECT_EQ(mock_data_->StoredKeys().size(), 1);
+    EXPECT_EQ(mock_data_->StoredKeys()[0],
+              std::to_string(kIno) + "/0");
+
+    // Restore the production chunk size so a later test in this
+    // fixture doesn't observe the override.
+    vol.clear_chunk_size_for_test();
+  });
+}
+
+TEST_F(FileReadWriterTest, TruncateToleratesDataDeleteFailure) {
+  // A failing per-chunk Delete must not poison the Truncate result;
+  // the metadata side already committed the new size.
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf(Repeat('B', kChunkSize * 2)), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    mock_data_->delete_status = Status::Internal("forced");
+
+    EXPECT_TRUE(rw.Truncate(0).ok());
+    // The metadata side dropped the chunks even though the data engine
+    // refused: that's the documented best-effort contract.
+    EXPECT_EQ(mock_meta_->truncate_calls, 1);
+    EXPECT_EQ(mock_meta_->file_size(), 0);
   });
 }

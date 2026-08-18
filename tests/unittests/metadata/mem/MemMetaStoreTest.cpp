@@ -207,8 +207,8 @@ TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   EXPECT_EQ(store_->InodeCount(), 2);
   EXPECT_TRUE(store_->LookupInode(ino, nullptr).ok());
 
-  // Caller follows up with ReclaimData to free the orphaned inode.
-  EXPECT_TRUE(store_->ReclaimData(ino).ok());
+  // Caller follows up with ReclaimInode to free the orphaned inode.
+  EXPECT_TRUE(store_->ReclaimInode(ino).ok());
   EXPECT_EQ(store_->InodeCount(), 1);
   EXPECT_TRUE(store_->LookupInode(ino, nullptr).IsNotFound());
 }
@@ -389,33 +389,92 @@ TEST_F(MemMetaStoreTest, TruncateChunksClampsStraddlingChunk) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// ReclaimData (open-unlink)
+// ReclaimInode (open-unlink)
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, ReclaimDataMissingInodeIsNoOp) {
-  EXPECT_TRUE(store_->ReclaimData(999).ok());
+TEST_F(MemMetaStoreTest, ReclaimInodeMissingInodeIsNoOp) {
+  EXPECT_TRUE(store_->ReclaimInode(999).ok());
 }
 
-TEST_F(MemMetaStoreTest, ReclaimDataDeletesOrphanedInode) {
+TEST_F(MemMetaStoreTest, ReclaimInodeDeletesOrphanedInode) {
   SwordFsInode *f = nullptr;
   store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
   InodeID ino = f->ino;
   f->attr.st_nlink = 0;  // simulate unlink while the inode is still retained
 
   EXPECT_EQ(store_->InodeCount(), 2);
-  ASSERT_TRUE(store_->ReclaimData(ino).ok());
+  ASSERT_TRUE(store_->ReclaimInode(ino).ok());
   EXPECT_EQ(store_->InodeCount(), 1);
   EXPECT_TRUE(store_->LookupInode(ino, nullptr).IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, ReclaimDataKeepsLinkedInode) {
+TEST_F(MemMetaStoreTest, ReclaimInodeKeepsLinkedInode) {
   SwordFsInode *f = nullptr;
   store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
   InodeID ino = f->ino;  // nlink == 1 — not orphaned
 
-  ASSERT_TRUE(store_->ReclaimData(ino).ok());
+  ASSERT_TRUE(store_->ReclaimInode(ino).ok());
   EXPECT_EQ(store_->InodeCount(), 2);
   SwordFsInode *out = nullptr;
   ASSERT_TRUE(store_->LookupInode(ino, &out).ok());
   EXPECT_EQ(out, f);
+}
+
+// ────────────────────────────────────────────────────────────────
+// ListChunks — drives the VFS coordinator's chunk enumeration path.
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(MemMetaStoreTest, ListChunksEmptyInodeIsOk) {
+  // No chunks registered: ListChunks must return an empty vector,
+  // not an error. The coordinator relies on this to distinguish
+  // "no data to delete" from "metadata failure".
+  SwordFsInode *f = nullptr;
+  store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
+
+  std::vector<ChunkMeta> out;
+  ASSERT_TRUE(store_->ListChunks(f->ino, &out).ok());
+  EXPECT_TRUE(out.empty());
+}
+
+TEST_F(MemMetaStoreTest, ListChunksNullOutIsError) {
+  // Defensive: callers must hand in a valid pointer. A null out
+  // would silently lose the chunks the coordinator needs to drive
+  // data-engine Deletes — better to fail loudly.
+  EXPECT_TRUE(store_->ListChunks(1, nullptr).code() == Status::kInvalidArgument);
+}
+
+TEST_F(MemMetaStoreTest, ListChunksReturnsRegisteredChunksInIndexOrder) {
+  constexpr uint64_t kChunkSize = 65536;
+  SwordFsInode *f = nullptr;
+  store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
+  InodeID ino = f->ino;
+
+  // Add three chunks out of order; the snapshot must be sorted by
+  // ChunkIndex so the coordinator's Delete calls follow the same
+  // order as a sequential reader would.
+  ChunkMeta c2{};
+  c2.index = 2;
+  c2.start_offset = 2 * kChunkSize;
+  c2.key = std::to_string(ino) + "/2";
+  c2.size = 100;
+  ChunkMeta c0{};
+  c0.index = 0;
+  c0.start_offset = 0;
+  c0.key = std::to_string(ino) + "/0";
+  c0.size = 100;
+  ChunkMeta c1{};
+  c1.index = 1;
+  c1.start_offset = kChunkSize;
+  c1.key = std::to_string(ino) + "/1";
+  c1.size = 100;
+  ASSERT_TRUE(store_->AddChunk(ino, c2).ok());
+  ASSERT_TRUE(store_->AddChunk(ino, c0).ok());
+  ASSERT_TRUE(store_->AddChunk(ino, c1).ok());
+
+  std::vector<ChunkMeta> out;
+  ASSERT_TRUE(store_->ListChunks(ino, &out).ok());
+  ASSERT_EQ(out.size(), 3);
+  EXPECT_EQ(out[0].index, 0);
+  EXPECT_EQ(out[1].index, 1);
+  EXPECT_EQ(out[2].index, 2);
 }

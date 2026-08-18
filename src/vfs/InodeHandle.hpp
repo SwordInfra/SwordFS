@@ -104,6 +104,20 @@ class InodeHandleManager {
   // it. Safe to call when no open fds exist (returns without effect).
   void MarkOrphaned(metadata::InodeID ino);
 
+  // Fully reclaim an orphaned inode: enumerate the chunk keys the
+  // metadata engine has registered for |ino|, delete the corresponding
+  // chunk objects from the data engine, then ask the metadata engine
+  // to drop the inode itself. This is the single entry point that the
+  // VFS layer uses to clean up an unlinked-but-live inode — both
+  // `VfsImpl::Unlink` (when no fd is open) and `InodeHandle::Close`
+  // (when the last fd goes away on an orphaned inode) funnel through it.
+  //
+  // Per-chunk data-engine delete failures are logged but do not abort the
+  // cleanup; the metadata engine still drops the inode so the filesystem
+  // view stays consistent. A background garbage collector (not yet
+  // implemented) is expected to pick up stranded objects.
+  static utils::Status ReclaimData(metadata::InodeID ino);
+
   /// Return the shared InodeHandle for |ino|.  Creates it (and its
   /// FileReadWriter) when |create_if_missing| is true.  Returns nullptr
   /// when |create_if_missing| is false and no handle exists.
