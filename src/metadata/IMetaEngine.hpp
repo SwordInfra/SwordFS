@@ -113,12 +113,25 @@ class IMetaEngine {
   /// validation + read permission) and updates atime.
   virtual Status Open(InodeID ino) = 0;
 
-  /// Reclaim the data of an inode that was previously unlinked. Called by
-  /// the VFS layer once it has verified no open file descriptor still
-  /// references the inode (e.g. from the last `Close` after an open-unlink).
-  /// The metadata engine deletes the inode and its chunks when its
-  /// nlink count has dropped to zero; otherwise this is a no-op.
-  virtual Status ReclaimData(InodeID ino) = 0;
+  /// Delete an inode that was previously unlinked. Called by the VFS layer
+  /// once it has verified no open file descriptor still references the
+  /// inode (e.g. from the last `Close` after an open-unlink). The metadata
+  /// engine removes the inode and its chunk-metadata map when nlink has
+  /// dropped to zero; otherwise this is a no-op.
+  ///
+  /// @important  This does NOT delete the chunk objects from the data
+  /// engine. The caller is responsible for invoking
+  /// `IDataEngine::Delete` on each chunk key first (use `ListChunks` to
+  /// enumerate). See `vfs::InodeHandle::ReclaimData` for the canonical
+  /// implementation of the full cleanup.
+  virtual Status ReclaimInode(InodeID ino) = 0;
+
+  /// Enumerate the chunk indices currently registered for |ino|. Fills
+  /// |*out| with `ChunkMeta` entries (by value) ordered by ascending
+  /// chunk index. Used by the VFS layer when reclaiming an inode to
+  /// compute the per-chunk object keys it must delete via the data
+  /// engine. Returns OK with `*out` empty if the inode has no chunks.
+  virtual Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out) = 0;
 
   /// Open a directory for reading. Performs permission check and updates
   /// atime. Handle allocation is now managed by FileHandleManager.

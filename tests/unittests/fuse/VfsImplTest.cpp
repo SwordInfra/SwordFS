@@ -187,7 +187,10 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     return call_status_;
   }
   Status Open(InodeID) override { return call_status_; }
-  Status ReclaimData(InodeID) override { return call_status_; }
+  Status ReclaimInode(InodeID) override { return call_status_; }
+  Status ListChunks(InodeID, std::vector<swordfs::metadata::ChunkMeta> *) override {
+    return Status::OK();
+  }
   Status OpenDir(InodeID) override { return call_status_; }
   Status Forget(InodeID, uint64_t) override { return Status::OK(); }
   Status AddChunk(InodeID, const swordfs::metadata::ChunkMeta &) override {

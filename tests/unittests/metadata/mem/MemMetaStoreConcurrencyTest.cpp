@@ -207,9 +207,9 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentRemoveAndAdd) {
       Status st = store_->Unlink(kRoot, "file_" + std::to_string(i));
       if (st.ok()) {
         ops_ok.fetch_add(1, std::memory_order_relaxed);
-        // Caller follows up with ReclaimData to free the orphaned
+        // Caller follows up with ReclaimInode to free the orphaned
         // inode (this mirrors what VfsImpl::Unlink does for a no-fd case).
-        store_->ReclaimData(inodes[i]);
+        store_->ReclaimInode(inodes[i]);
       } else {
         ops_fail.fetch_add(1, std::memory_order_relaxed);
       }

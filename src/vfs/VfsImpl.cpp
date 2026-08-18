@@ -101,26 +101,31 @@ utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name,
 }
 
 utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
-  // POSIX open-unlink decision lives here, not in the metadata engine:
-  // 1. Remove the directory entry (and decrement nlink). The inode stays
-  //    alive if any file descriptor still references it.
-  // 2. If no open fd remains, reclaim the inode and its chunks now via
-  //    `ReclaimData`. Otherwise mark the InodeHandle as orphaned and let
-  //    the last `Close` schedule the reclaim.
+  // POSIX unlink decision lives here, not in the metadata engine. Three
+  // states the inode can be in after `Unlink`:
+  //   - nlink > 0: at least one directory entry still references the
+  //     inode (hard-link). Do nothing — the chunk objects and inode
+  //     stay alive for the other names.
+  //   - nlink == 0 && no open fd: fully delete the chunks + the inode
+  //     now via `ReclaimData`.
+  //   - nlink == 0 && some fd still open: mark the InodeHandle as
+  //     orphaned and let the last `Close` call `ReclaimData`.
   //
   // Permission and sticky-bit checks are already enforced by
-  // `MemMetaImpl::Unlink` above the store, so we don't repeat them
-  // here.
+  // `MemMetaImpl::Unlink` above the store, so we don't repeat them here.
   auto *meta = VolumeImpl::Instance().meta_engine();
 
-  // Look up the child inode so we know what to reclaim later.
+  // Look up the child inode and its pre-unlink nlink so we can decide
+  // after the Unlink call whether anything is still pointing at it.
   InodeID child_ino = 0;
+  nlink_t nlink_before = 0;
   {
     struct stat attr;
     auto lookup_st = meta->Lookup(parent, name, &child_ino, &attr);
     if (!lookup_st.ok()) {
       return lookup_st;
     }
+    nlink_before = attr.st_nlink;
   }
 
   auto st = meta->Unlink(parent, name);
@@ -128,10 +133,20 @@ utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
     return st;
   }
 
+  // Hardlink still alive? Then the inode (and its chunks) belong to
+  // another name; leave them alone.
+  if (nlink_before > 1) {
+    return utils::Status::OK();
+  }
+
+  // nlink went 1 -> 0 (or was already 0 before this unlink, which only
+  // happens for an open-unlink race the kernel shouldn't produce).
   if (!vfs::InodeHandleManager::Instance().HasOpenHandles(child_ino)) {
     // No open fd references the inode; reclaim now while the metadata
-    // store still has the nlink==0 fact fresh.
-    return meta->ReclaimData(child_ino);
+    // store still has the nlink==0 fact fresh. ReclaimData removes both
+    // the chunk objects (via the data engine) and the inode (via the
+    // metadata engine).
+    return vfs::InodeHandleManager::ReclaimData(child_ino);
   }
   // Defer the actual cleanup until the last `Close`.
   vfs::InodeHandleManager::Instance().MarkOrphaned(child_ino);

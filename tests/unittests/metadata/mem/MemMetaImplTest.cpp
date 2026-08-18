@@ -600,8 +600,36 @@ TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
   EXPECT_EQ(out.st_mode & S_ISGID, 0u);
 }
 
-TEST_F(MemMetaImplTest, ReclaimDataMissingInodeIsNoOp) {
-  EXPECT_TRUE(impl_->ReclaimData(999).ok());
+TEST_F(MemMetaImplTest, ReclaimInodeMissingInodeIsNoOp) {
+  EXPECT_TRUE(impl_->ReclaimInode(999).ok());
+}
+
+// Unlink on a hard-linked inode must NOT touch the inode itself — the
+// other names (and any chunk objects they share) are still in use. The
+// e2e tests FileOpsTest.Hardlink* cover the POSIX contract end-to-end;
+// this single-engine test pins the metadata-only invariant.
+TEST_F(MemMetaImplTest, UnlinkOnHardlinkedInodeKeepsInodeAlive) {
+  InodeID f_ino = 0;
+  SetContext(0, 0);
+  ASSERT_TRUE(impl_->Create(kRoot, "orig", 0644, &f_ino, nullptr).ok());
+  ASSERT_TRUE(impl_->Link(f_ino, kRoot, "link", nullptr).ok());
+
+  // Sanity: both names now point to the same inode, nlink=2.
+  struct stat attr{};
+  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
+  ASSERT_EQ(attr.st_nlink, 2);
+
+  ASSERT_TRUE(impl_->Unlink(kRoot, "orig").ok());
+
+  // nlink must drop to 1, not zero, and the inode must still exist.
+  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
+  EXPECT_EQ(attr.st_nlink, 1);
+
+  // Unlinking the surviving name brings nlink to 0 and triggers
+  // ReclaimInode, which then drops the inode.
+  ASSERT_TRUE(impl_->Unlink(kRoot, "link").ok());
+  ASSERT_TRUE(impl_->ReclaimInode(f_ino).ok());
+  EXPECT_TRUE(impl_->GetAttr(f_ino, nullptr).IsNotFound());
 }
 
 // ────────────────────────────────────────────────────────────────
