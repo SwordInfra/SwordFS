@@ -69,11 +69,19 @@ class IMetaEngine {
                        InodeID *child_ino, struct stat *attr) = 0;
 
   /// POSIX unlink(2): detach the directory entry and decrement nlink.
-  /// Does NOT delete the inode or its data; the caller (typically
-  /// `VfsImpl::Unlink`) inspects the runtime open-fd count and decides
-  /// whether to follow up with `ReclaimData` (POSIX open-unlink: defer
-  /// the inode deletion when any fd is still open).
-  virtual Status Unlink(InodeID parent_ino, std::string_view name) = 0;
+  /// On success, *post_nlink receives the authoritative nlink value the
+  /// caller needs to decide what to do next:
+  ///   - For a directory: the entry is removed and the inode is dropped
+  ///     atomically; *post_nlink is set to 0 (the inode no longer exists).
+  ///   - For a file: *post_nlink is the post-decrement nlink (which may
+  ///     still be >0 if another hardlink name exists, or ==0 if this
+  ///     was the last name).
+  ///
+  /// This avoids the TOCTOU race of reading nlink before the unlink and
+  /// deciding afterwards: the store is the only thing that mutates
+  /// nlink on this thread, and we read it back under the same lock.
+  virtual Status Unlink(InodeID parent_ino, std::string_view name,
+                        nlink_t *post_nlink = nullptr) = 0;
 
   /// Remove an empty directory. Decrements parent nlink.
   virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;

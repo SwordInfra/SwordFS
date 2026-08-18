@@ -115,41 +115,37 @@ utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
   // `MemMetaImpl::Unlink` above the store, so we don't repeat them here.
   auto *meta = VolumeImpl::Instance().meta_engine();
 
-  // Look up the child inode and its pre-unlink nlink so we can decide
-  // after the Unlink call whether anything is still pointing at it.
+  // Look up the child inode id.
   InodeID child_ino = 0;
-  nlink_t nlink_before = 0;
-  {
-    struct stat attr;
-    auto lookup_st = meta->Lookup(parent, name, &child_ino, &attr);
-    if (!lookup_st.ok()) {
-      return lookup_st;
-    }
-    nlink_before = attr.st_nlink;
+  struct stat lookup_attr;
+  auto status = meta->Lookup(parent, name, &child_ino, &lookup_attr);
+  if (!status.ok()) {
+    return status;
   }
 
-  auto st = meta->Unlink(parent, name);
+  // meta->Unlink hands back the authoritative post-decrement nlink.
+  nlink_t post_nlink = 0;
+  auto st = meta->Unlink(parent, name, &post_nlink);
   if (!st.ok()) {
     return st;
   }
 
   // Hardlink still alive? Then the inode (and its chunks) belong to
   // another name; leave them alone.
-  if (nlink_before > 1) {
+  if (post_nlink > 0) {
     return utils::Status::OK();
   }
 
-  // nlink went 1 -> 0 (or was already 0 before this unlink, which only
-  // happens for an open-unlink race the kernel shouldn't produce).
-  if (!vfs::InodeHandleManager::Instance().HasOpenHandles(child_ino)) {
-    // No open fd references the inode; reclaim now while the metadata
-    // store still has the nlink==0 fact fresh. ReclaimData removes both
-    // the chunk objects (via the data engine) and the inode (via the
-    // metadata engine).
-    return vfs::InodeHandleManager::ReclaimData(child_ino);
+  auto handle = vfs::InodeHandleManager::Instance().Get(child_ino, /*create_if_missing=*/true);
+  if (!handle) {
+    return utils::Status::Internal("failed to get InodeHandle");
+  }
+  if (!handle->MarkOrphanedIfOpen()) {
+    // ReclaimData removes both the chunk objects (via the data engine)
+    // and the inode (via the metadata engine).
+    return handle->ReclaimData();
   }
   // Defer the actual cleanup until the last `Close`.
-  vfs::InodeHandleManager::Instance().MarkOrphaned(child_ino);
   return utils::Status::OK();
 }
 

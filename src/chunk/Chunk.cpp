@@ -15,12 +15,9 @@
 
 namespace swordfs::chunk {
 
-Chunk::Chunk(metadata::InodeID ino, metadata::ChunkIndex index,
-             size_t max_chunk_size)
+Chunk::Chunk(metadata::InodeID ino, metadata::ChunkIndex index)
     : ino_(ino),
-      max_chunk_size_(max_chunk_size == 0
-                          ? volume::VolumeImpl::Instance().chunk_size()
-                          : max_chunk_size),
+      max_chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
       index_(index),
       data_(volume::VolumeImpl::Instance().data_engine()),
       meta_(volume::VolumeImpl::Instance().meta_engine()) {}

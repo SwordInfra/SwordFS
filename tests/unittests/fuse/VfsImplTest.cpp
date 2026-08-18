@@ -154,7 +154,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
                struct stat *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view) override {
+  Status Unlink(InodeID, std::string_view, nlink_t *) override {
     return Status::OK();
   }
   Status RmDir(InodeID, std::string_view) override {

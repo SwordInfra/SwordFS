@@ -83,10 +83,12 @@ Status MemMetaImpl::Lookup(InodeID parent_ino,
 
 Status MemMetaImpl::GetAttr(InodeID ino, struct stat *attr) {
   SwordFsInode *inode = nullptr;
-  store_.LookupInode(ino, &inode);
-  if (!inode) {
+  Status status = store_.LookupInode(ino, &inode);
+  if (status.IsNotFound() || !inode) {
     SWORDFS_LOG_DEBUG << "GetAttr: ino " << ino << " not found";
     return Status::NotFound("inode not found");
+  } else if (!status.ok()) {
+    return status;
   }
   *attr = inode->attr;
   return Status::OK();
@@ -212,7 +214,8 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
 }
 
 Status MemMetaImpl::Unlink(InodeID parent_ino,
-                           std::string_view name) {
+                           std::string_view name,
+                           nlink_t *post_nlink) {
   SwordFsInode *parent = nullptr;
   if (!store_.LookupInode(parent_ino, &parent).ok() || !parent ||
       !parent->IsDir()) {
@@ -258,9 +261,10 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
   }
 
   // Unlink only detaches the directory entry and decrements nlink; the
-  // inode (and its data) survives until the caller (VfsImpl::Unlink or
-  // InodeHandle::Close) follows up with `ReclaimData`.
-  store_.Unlink(parent_ino, name);
+  // store hands back the authoritative post-decrement nlink in
+  // *post_nlink so the caller doesn't have to re-read it (avoiding the
+  // TOCTOU race that an unlink-before-read decision would have).
+  status = store_.Unlink(parent_ino, name, post_nlink);
 
   if (parent) {
     parent->Touch(kMtime | kCtime);
@@ -307,7 +311,7 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
     return Status::NotDirectory("not a directory");
   }
 
-  status = store_.Unlink(parent_ino, name);
+  status = store_.Unlink(parent_ino, name, nullptr);
   if (!status.ok()) {
     return status;
   }
@@ -460,7 +464,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
       }
     }
 
-    Status status = store_.Unlink(new_parent_ino, new_name);
+    Status status = store_.Unlink(new_parent_ino, new_name, nullptr);
     if (!status.ok()) {
       return status;
     }

@@ -9,6 +9,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 
 #include "utils/Status.hpp"
 #include "volume/VolumeConfig.hpp"
@@ -47,32 +48,44 @@ class VolumeImpl {
   static void Initialize();
 
   /// Return the singleton instance.  Must be called after Initialize().
-  static VolumeImpl& Instance();
+  static VolumeImpl &Instance();
 
   // ────────────────────────────────────────────────────────────────
   // Lifecycle
   // ────────────────────────────────────────────────────────────────
 
   /// Build config from CLI flags and persist to disk (format).
-  Status CreateFrom(const swordfs::config::ConfigCenter& cfg);
+  Status CreateFrom(const swordfs::config::ConfigCenter &cfg);
 
   /// Load config from persistent store and initialise both engines (mount).
-  Status LoadFrom(const swordfs::config::ConfigCenter& cfg);
+  Status LoadFrom(const swordfs::config::ConfigCenter &cfg);
 
   /// Explicitly tear down engines before static destruction.  Must be
   /// called before the process exits to avoid blocking in
   /// Aws::ShutdownAPI() when AWS SDK resources are still alive.
   void Shutdown();
 
-  const VolumeConfig& config() const { return config_; }
+  const VolumeConfig &config() const { return config_; }
 
-  /// Chunk size in bytes — immutable after format.
-  size_t chunk_size() const { return config_.chunk_size; }
+  /// Chunk size in bytes — normally immutable after format, but see
+  /// `set_chunk_size_for_test` for the unit-test escape hatch.
+  size_t chunk_size() const {
+    return chunk_size_override_.value_or(config_.chunk_size);
+  }
 
-  swordfs::metadata::IMetaEngine* meta_engine() const {
+  // Test-only override: lets unit tests shrink the chunk size so a
+  // single Write across multiple chunks doesn't need to push tens of
+  // MiB through the I/O stack. Production code paths never call this.
+  void set_chunk_size_for_test(size_t cs) { chunk_size_override_ = cs; }
+
+  // Test-only: clear the override so chunk_size() falls back to
+  // config_.chunk_size again.
+  void clear_chunk_size_for_test() { chunk_size_override_.reset(); }
+
+  swordfs::metadata::IMetaEngine *meta_engine() const {
     return meta_engine_.get();
   }
-  swordfs::storage::IDataEngine* data_engine() const {
+  swordfs::storage::IDataEngine *data_engine() const {
     return data_engine_.get();
   }
 
@@ -84,6 +97,9 @@ class VolumeImpl {
 
  private:
   VolumeConfig config_;
+  // Test-only override of config_.chunk_size; std::nullopt means
+  // "use config_.chunk_size". Production code never sets this.
+  std::optional<size_t> chunk_size_override_;
   std::unique_ptr<swordfs::metadata::IMetaEngine> meta_engine_;
   std::unique_ptr<swordfs::storage::IDataEngine> data_engine_;
 

@@ -94,7 +94,7 @@ chunk::Chunk *FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_mis
     return &it->second;
   }
   // Not cached — try lazy-load from metadata engine.
-  auto c = chunk::Chunk(ino_, idx, chunk_size_);
+  auto c = chunk::Chunk(ino_, idx);
   auto status = c.Initialize();
   if (!status.ok()) {
     return nullptr;
@@ -140,7 +140,7 @@ FileReadWriter::FileReadWriter(InodeID ino)
       chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
       meta_(volume::VolumeImpl::Instance().meta_engine()),
       data_(volume::VolumeImpl::Instance().data_engine()),
-      chunks_(ino, chunk_size_) {}
+      chunks_(ino) {}
 
 // ────────────────────────────────────────────────────────────────
 // Write
@@ -305,7 +305,7 @@ utils::Status FileReadWriter::Truncate(size_t size) {
   // metadata truncate would corrupt the file size view.
   if (data_ && !dropped.empty()) {
     for (const auto idx : dropped) {
-      const auto key = utils::ChunkKey(ino_, idx);
+      const auto key = chunk::FormatChunkKey(ino_, idx);
       auto st = data_->Delete(key);
       if (!st.ok()) {
         SWORDFS_LOG_ERROR << "FileReadWriter::Truncate: data->Delete("

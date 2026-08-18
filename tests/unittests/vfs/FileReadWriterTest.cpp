@@ -154,7 +154,7 @@ class MockMetaEngine : public IMetaEngine {
                 struct stat *) override { return Status::OK(); }
   Status MkDir(InodeID, std::string_view, mode_t, InodeID *,
                struct stat *) override { return Status::OK(); }
-  Status Unlink(InodeID, std::string_view) override { return Status::OK(); }
+  Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID,
                 std::string_view, unsigned int) override {
@@ -573,13 +573,13 @@ TEST_F(FileReadWriterTest, TruncateDeletesDroppedChunkObjects) {
   //
   // The default VolumeImpl chunk_size is 64 MiB, so seeding multiple
   // chunks via the high-level Write API would require writing >64 MiB
-  // per chunk. Instead we drive the FileChunkManager by hand: register
-  // the chunks on the metadata engine, mark them flushed by reading
-  // each one (which materialises them in the in-memory map with
-  // kFlushed state), and only then invoke Truncate.
+  // per chunk. Use the test-only chunk-size escape hatch on the volume
+  // singleton to shrink it for the duration of this test.
   RunInTestFiber([&] {
+    auto &vol = swordfs::volume::VolumeImpl::Instance();
+    vol.set_chunk_size_for_test(kChunkSize);
+
     auto rw = Make();
-    rw.SetChunkSizeForTest(kChunkSize);  // see FileReadWriter.hpp
 
     // Register three chunks with the mock metadata engine and seed
     // them in the data engine so the truncate-side Delete has
@@ -603,8 +603,8 @@ TEST_F(FileReadWriterTest, TruncateDeletesDroppedChunkObjects) {
     }
     ASSERT_EQ(mock_data_->StoredKeys().size(), 3);
 
-    // Truncate to one byte — all three chunks are dropped, all three
-    // data-engine objects must be Deleted.
+    // Truncate to one byte — chunks 1 and 2 are dropped (their data
+    // no longer fits the new size), chunk 0 is kept alive.
     ASSERT_TRUE(rw.Truncate(1).ok());
 
     std::sort(mock_data_->delete_calls.begin(),
@@ -614,11 +614,13 @@ TEST_F(FileReadWriterTest, TruncateDeletesDroppedChunkObjects) {
               std::to_string(kIno) + "/1");
     EXPECT_EQ(mock_data_->delete_calls[1],
               std::to_string(kIno) + "/2");
-    // Truncate-to-1 keeps chunk 0 alive (it still contains the
-    // partial write), drops everything beyond.
     EXPECT_EQ(mock_data_->StoredKeys().size(), 1);
     EXPECT_EQ(mock_data_->StoredKeys()[0],
               std::to_string(kIno) + "/0");
+
+    // Restore the production chunk size so a later test in this
+    // fixture doesn't observe the override.
+    vol.clear_chunk_size_for_test();
   });
 }
 

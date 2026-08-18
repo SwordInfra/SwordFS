@@ -142,12 +142,17 @@ Status MemMetaStore::MoveEntry(InodeID old_parent_ino,
   return Status::OK();
 }
 
-Status MemMetaStore::Unlink(InodeID parent_ino, std::string_view name) {
+Status MemMetaStore::Unlink(InodeID parent_ino, std::string_view name,
+                            nlink_t *post_nlink) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   SwordFsInode *child = FindEntryLocked(parent_ino, name);
   if (!child) {
-    return Status::OK();  // idempotent
+    // Idempotent: a parallel unlink already removed the entry.
+    if (post_nlink) {
+      *post_nlink = 0;
+    }
+    return Status::OK();
   }
 
   if (child->IsDir() && !IsDirEmptyLocked(child->ino)) {
@@ -163,6 +168,11 @@ Status MemMetaStore::Unlink(InodeID parent_ino, std::string_view name) {
   if (child->IsDir()) {
     // Directories cannot be hard-linked; always reclaim immediately.
     DeleteInodeLocked(child->ino);
+    if (post_nlink) {
+      // Inode is gone — surface 0 so the caller doesn't try to read
+      // further metadata for it.
+      *post_nlink = 0;
+    }
     return Status::OK();
   }
 
@@ -170,6 +180,12 @@ Status MemMetaStore::Unlink(InodeID parent_ino, std::string_view name) {
   // alive until the caller (VfsImpl::Unlink or InodeHandle::Close)
   // confirms no fd is open and calls ReclaimData.
   child->attr.st_nlink--;
+  if (post_nlink) {
+    // Read it back under the same lock so the caller sees the exact
+    // post-decrement value with no chance of a concurrent Link racing
+    // in between.
+    *post_nlink = child->attr.st_nlink;
+  }
   return Status::OK();
 }
 

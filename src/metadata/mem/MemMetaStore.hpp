@@ -68,7 +68,8 @@ class MemMetaStore {
   // descriptor still references the inode).
   // A non-empty directory returns Busy; "." / ".." are rejected via the
   // permission layer above.
-  Status Unlink(InodeID parent_ino, std::string_view name);
+  Status Unlink(InodeID parent_ino, std::string_view name,
+                nlink_t *post_nlink = nullptr);
 
   // Link an existing inode into a directory (hard link). Increments nlink.
   Status LinkExistingEntry(InodeID parent_ino, std::string_view name,

@@ -17,7 +17,9 @@
 #include <mutex>
 #include <shared_mutex>
 
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
+#include "storage/IDataEngine.hpp"
 #include "utils/Status.hpp"
 
 namespace folly {
@@ -52,6 +54,13 @@ class InodeHandle {
   /// open, so the caller must reclaim immediately.
   bool MarkOrphanedIfOpen();
 
+  /// Fully reclaim this inode: enumerate the chunk keys the metadata
+  /// engine has registered for it, delete the corresponding chunk
+  /// objects from the data engine, then ask the metadata engine to drop
+  /// the inode itself. The single entry point for cleanup once an inode
+  /// is no longer reachable from any directory entry.
+  utils::Status ReclaimData();
+
   metadata::InodeID ino() const { return ino_; }
 
   /// Number of open file descriptors referencing this handle.
@@ -80,6 +89,8 @@ class InodeHandle {
   ReleaseState ReleaseRef();
 
   metadata::InodeID ino_;
+  metadata::IMetaEngine *meta_;
+  storage::IDataEngine *data_;
   std::shared_ptr<FileReadWriter> rw_;
   mutable std::mutex state_mutex_;
   uint64_t open_count_{0};
@@ -89,34 +100,17 @@ class InodeHandle {
 // Opaque map type — defined in InodeHandle.cpp.
 struct InodeHandleMap;
 
-// InodeHandleManager — singleton mapping inode → InodeHandle. FileHandle
-// delegates InodeHandle creation here; the VFS layer (VfsImpl::Unlink,
-// InodeHandle::Close) consults the manager to decide whether the inode
-// has any open file descriptors before scheduling deferred reclaim.
+// InodeHandleManager — registry mapping inode → InodeHandle.
 class InodeHandleManager {
  public:
   static InodeHandleManager &Instance();
 
-  // Return true if any open file descriptor currently references |ino|.
-  bool HasOpenHandles(metadata::InodeID ino);
-
-  // Mark the ino's InodeHandle as orphaned if any fd still references
-  // it. Safe to call when no open fds exist (returns without effect).
-  void MarkOrphaned(metadata::InodeID ino);
-
-  // Fully reclaim an orphaned inode: enumerate the chunk keys the
-  // metadata engine has registered for |ino|, delete the corresponding
-  // chunk objects from the data engine, then ask the metadata engine
-  // to drop the inode itself. This is the single entry point that the
-  // VFS layer uses to clean up an unlinked-but-live inode — both
-  // `VfsImpl::Unlink` (when no fd is open) and `InodeHandle::Close`
-  // (when the last fd goes away on an orphaned inode) funnel through it.
-  //
-  // Per-chunk data-engine delete failures are logged but do not abort the
-  // cleanup; the metadata engine still drops the inode so the filesystem
-  // view stays consistent. A background garbage collector (not yet
-  // implemented) is expected to pick up stranded objects.
-  static utils::Status ReclaimData(metadata::InodeID ino);
+  /// (Re)initialize the registry — clears all per-inode state. Called
+  /// on the normal mount path before the FUSE session starts, and by
+  /// unit-test SetUp to drop leaked InodeHandles from a prior test
+  /// (which would otherwise leave stale open-counts and make
+  /// ReclaimData's guard refuse on arbitrary later inodes).
+  void Initialize();
 
   /// Return the shared InodeHandle for |ino|.  Creates it (and its
   /// FileReadWriter) when |create_if_missing| is true.  Returns nullptr
