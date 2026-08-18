@@ -34,6 +34,23 @@ using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
 using swordfs::utils::Status;
 
+// Minimal no-op data engine. The fixture needs to install one so the
+// CHECK(data_) in InodeHandle::ReclaimData does not fire on the
+// orphan-close reclaim path; the full FakeDataEngine (which records
+// Delete calls) lives below alongside the ReclaimData tests.
+class NoopDataEngine : public swordfs::storage::IDataEngine {
+ public:
+  swordfs::storage::DataEngineLimits Limits() const override { return {}; }
+  bool Head(std::string_view, size_t *) override { return false; }
+  Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
+    return Status::OK();
+  }
+  Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
+    return Status::OK();
+  }
+  Status Delete(std::string_view) override { return Status::OK(); }
+};
+
 // Minimal IMetaEngine — every op succeeds; Create fabricates an inode.
 class MockMetaEngine : public IMetaEngine {
  public:
@@ -121,6 +138,12 @@ class FileHandleTest : public ::testing::Test {
     auto meta = std::make_unique<MockMetaEngine>();
     mock_meta_ = meta.get();
     volume::VolumeImpl::Instance().set_meta_engine(std::move(meta));
+    // ReclaimData now requires a data engine (production invariant —
+    // --bucket is required). Tests that exercise the orphan-close
+    // reclaim path (e.g. CloseReclaimsOrphanedInode) would otherwise
+    // trip the CHECK(), so install a no-op fake here.
+    volume::VolumeImpl::Instance().set_data_engine(
+        std::make_unique<NoopDataEngine>());
   }
 
   void TearDown() override {
@@ -615,14 +638,18 @@ TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
   EXPECT_EQ(meta->last_reclaim_ino, 4242);
 }
 
-TEST_F(FileHandleTest, ReclaimDataWithNoDataEngineStillDropsInode) {
-  // If no data engine is configured (e.g. format-only mount), the
-  // coordinator must still drop the metadata side. This guards against
-  // the previous bug where a missing data engine left chunk metadata
-  // orphaned.
+TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
+  // Counterpart of ReclaimDataWithNoDataEngineStillDropsInode from the
+  // pre-CHECK() era. The data engine is now a hard requirement on the
+  // ReclaimData path (the production mount always installs one via
+  // `--bucket`); exercising the chunk-delete loop with a real (fake)
+  // data engine covers the same "delete every chunk + drop inode"
+  // contract that test used to assert.
   swordfs::volume::VolumeImpl::Initialize();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
+  auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
+  auto *data = data_up.get();
 
   swordfs::metadata::ChunkMeta c{};
   c.index = 0;
@@ -635,9 +662,12 @@ TEST_F(FileHandleTest, ReclaimDataWithNoDataEngineStillDropsInode) {
   auto &vol = swordfs::volume::VolumeImpl::Instance();
   vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(
       meta_up.release()));
-  // No data engine set.
+  vol.set_data_engine(
+      std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
   ASSERT_TRUE(ReclaimInode(99).ok());
+  EXPECT_EQ(data->delete_calls.size(), 1u);
+  EXPECT_EQ(data->delete_calls[0], "99/0");
   EXPECT_EQ(meta->list_chunks_calls, 1);
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
 }
@@ -645,9 +675,13 @@ TEST_F(FileHandleTest, ReclaimDataWithNoDataEngineStillDropsInode) {
 TEST_F(FileHandleTest, ReclaimDataCallsReclaimInodeEvenWhenChunkEmpty) {
   // Inode with zero registered chunks: the manager must still invoke
   // ReclaimInode so the inode is dropped from the metadata engine.
+  // A data engine is still required (see CHECK in ReclaimData) — even
+  // though no Delete call will be issued, the engine must be installed.
   swordfs::volume::VolumeImpl::Initialize();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
+  auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
+  auto *data = data_up.get();
 
   struct stat attr{};
   attr.st_nlink = 0;
@@ -656,11 +690,13 @@ TEST_F(FileHandleTest, ReclaimDataCallsReclaimInodeEvenWhenChunkEmpty) {
   auto &vol = swordfs::volume::VolumeImpl::Instance();
   vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(
       meta_up.release()));
-  // No data engine — the manager must tolerate this and proceed.
+  vol.set_data_engine(
+      std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
   ASSERT_TRUE(ReclaimInode(123).ok());
   EXPECT_EQ(meta->list_chunks_calls, 1);
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
+  EXPECT_TRUE(data->delete_calls.empty());
 }
 
 TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {

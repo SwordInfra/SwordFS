@@ -287,7 +287,7 @@ static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
 
   entries.insert(entries.begin(), {".", DT_DIR, ino});
   entries.insert(entries.begin() + 1,
-                 {"..", DT_DIR, (ino == FUSE_ROOT_ID) ? ino : 0});
+                 {"..", DT_DIR, (ino == metadata::kRootInodeId) ? ino : 0});
 
   std::vector<size_t> sizes(entries.size());
   size_t cap = 0;

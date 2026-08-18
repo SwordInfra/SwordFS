@@ -5,10 +5,8 @@
 // Validates the data layer that feeds into VfsImpl::Readdir/Readdirplus
 // (the FUSE formatting fix is in PR #23).
 
-#define FUSE_USE_VERSION 312
 #include <dirent.h>
 #include <folly/fibers/FiberManagerInternal.h>
-#include <fuse_lowlevel.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
@@ -24,7 +22,7 @@ using swordfs::metadata::SwordFsEntry;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
-static constexpr InodeID kRoot = FUSE_ROOT_ID;
+static constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
 
 class MemMetaImplReadDirTest : public ::testing::Test {
  protected:

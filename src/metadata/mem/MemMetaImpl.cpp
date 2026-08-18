@@ -3,14 +3,9 @@
 
 #include "metadata/mem/MemMetaImpl.hpp"
 
-#include "metadata/Types.hpp"
-#include "metadata/Utils.hpp"
-
-#define FUSE_USE_VERSION 312
 #include <dirent.h>
 #include <folly/fibers/FiberManagerInternal.h>
 #include <folly/logging/xlog.h>
-#include <fuse_lowlevel.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -18,6 +13,8 @@
 #include <cerrno>
 #include <cstring>
 
+#include "metadata/Types.hpp"
+#include "metadata/Utils.hpp"
 #include "utils/Logging.hpp"
 
 namespace swordfs::metadata {
@@ -297,7 +294,7 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
   }
 
   // Cannot remove the root directory by name
-  if (parent_ino == FUSE_ROOT_ID && key == ".") {
+  if (parent_ino == kRootInodeId && key == ".") {
     return Status::Busy("root directory is busy");
   }
 

@@ -3,9 +3,7 @@
 
 // Tests for MemMetaImpl permission checks.
 
-#define FUSE_USE_VERSION 312
 #include <folly/fibers/FiberManagerInternal.h>
-#include <fuse_lowlevel.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
@@ -18,7 +16,7 @@ using swordfs::metadata::MemMetaImpl;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
-static constexpr InodeID kRoot = FUSE_ROOT_ID;
+static constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
 static constexpr uid_t kOwner = 1000;
 static constexpr uid_t kOther = 2000;
 static constexpr gid_t kGroup = 100;

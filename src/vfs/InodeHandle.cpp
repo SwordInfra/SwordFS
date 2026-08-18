@@ -20,7 +20,9 @@ InodeHandle::InodeHandle(metadata::InodeID ino)
     : ino_(ino),
       meta_(volume::VolumeImpl::Instance().meta_engine()),
       data_(volume::VolumeImpl::Instance().data_engine()),
-      rw_(std::make_shared<FileReadWriter>(ino)) {}
+      rw_(std::make_shared<FileReadWriter>(ino)) {
+  CHECK(data_ != nullptr);
+}
 
 utils::Status InodeHandle::Open(int flags) {
   // Performs the open-time permission check and atime update.
@@ -186,13 +188,12 @@ utils::Status InodeHandle::ReclaimData() {
     SWORDFS_LOG_ERROR << "ReclaimData: ListChunks(" << ino_
                       << ") failed: " << status.message();
     return status;
-  } else {
-    for (const auto &cm : chunks) {
-      status = data_->Delete(cm.key);
-      if (!status.ok()) {
-        SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << cm.key
-                          << ") failed: " << status.message();
-      }
+  }
+  for (const auto &cm : chunks) {
+    status = data_->Delete(cm.key);
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << cm.key
+                        << ") failed: " << status.message();
     }
   }
 

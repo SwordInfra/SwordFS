@@ -225,7 +225,7 @@ TEST_F(FileOpsTest, StatRoot) {
   struct stat st;
   ASSERT_EQ(fixture_.Stat(".", &st), 0);
   EXPECT_TRUE(S_ISDIR(st.st_mode));
-  EXPECT_EQ(st.st_ino, static_cast<ino_t>(FUSE_ROOT_ID));
+  EXPECT_EQ(st.st_ino, static_cast<ino_t>(swordfs::metadata::kRootInodeId));
   EXPECT_EQ(st.st_nlink, static_cast<nlink_t>(2));
 }
 

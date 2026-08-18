@@ -22,6 +22,12 @@ struct SwordFsInode;
 using InodeID = uint64_t;
 using ChunkIndex = uint32_t;  // 0-based chunk number within a file
 
+/// Reserved inode id for the filesystem root. Value matches
+/// `FUSE_ROOT_ID` so VFS/FUSE code that already assumes `1` keeps
+/// working without translation; metadata code should refer to this
+/// constant (not the FUSE macro) so it stays ABI-neutral.
+constexpr InodeID kRootInodeId = 1;
+
 struct SwordFsEntry {
   std::string name;
   uint32_t type;  // DT_DIR, DT_REG, DT_LNK, etc.

@@ -16,9 +16,6 @@
 #include "utils/Logging.hpp"
 #include "volume/VolumeImpl.hpp"
 
-#define FUSE_USE_VERSION 312
-#include <fuse_lowlevel.h>
-
 namespace swordfs::vfs {
 
 namespace {
