@@ -79,7 +79,7 @@ class FileHandleManager {
   std::optional<FileHandle> Find(uint64_t fh);
 
   /// Flush and remove |fh|.  Called on release / close.
-  void Release(uint64_t fh);
+  utils::Status Release(uint64_t fh);
 
   /// Allocate a directory handle mapped to |ino|.
   uint64_t OpenDir(metadata::InodeID ino);

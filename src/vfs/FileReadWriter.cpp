@@ -243,6 +243,7 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
 
 utils::Status FileReadWriter::Flush() {
   off_t file_end = 0;
+  utils::Status first_error;
   while (auto *c = chunks_.GetNextFlushable()) {
     auto idx = c->index();
     auto status = c->Flush();
@@ -250,6 +251,9 @@ utils::Status FileReadWriter::Flush() {
       SWORDFS_LOG_ERROR << "FileReadWriter::Flush chunk FAILED: ino=" << ino_
                         << " chunk=" << idx
                         << " — " << status.message();
+      if (first_error.ok()) {
+        first_error = status;
+      }
       continue;
     }
     if (c->DataEnd() > file_end) {
@@ -258,15 +262,24 @@ utils::Status FileReadWriter::Flush() {
     // Chunk stays in the map with kFlushed state — future reads
     // will route through Chunk::Read() → data_->Get().
   }
+  if (!first_error.ok()) {
+    return first_error;
+  }
 
   // Update file size if the file grew.
   if (file_end > 0) {
     struct stat attr;
     if (meta_->GetAttr(ino_, &attr).ok() &&
         file_end > attr.st_size) {
-      struct stat new_attr = {};
-      new_attr.st_size = file_end;
-      meta_->SetAttr(ino_, &new_attr, FUSE_SET_ATTR_SIZE, nullptr);
+      struct stat new_attr = {
+          .st_size = file_end,
+      };
+      auto status =
+          meta_->SetAttr(ino_, &new_attr, FUSE_SET_ATTR_SIZE, nullptr);
+      if (!status.ok()) {
+        SWORDFS_LOG_ERROR << "FileReadWriter::Flush size update FAILED: ino="
+                          << ino_ << " — " << status.message();
+      }
     }
   }
 

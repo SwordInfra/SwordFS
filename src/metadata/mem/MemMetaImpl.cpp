@@ -108,9 +108,13 @@ Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
     return status;
   }
 
+  InodeID real_parent = dir->parent_ino;
+  entries->push_back({".", DT_DIR, ino, ino});
+  entries->push_back({"..", DT_DIR, real_parent, ino});
+
   for (const auto &[name, child_inode] : raw_entries) {
     entries->push_back(
-        {name, ModeToDt(child_inode->attr.st_mode), child_inode->ino});
+        {name, ModeToDt(child_inode->attr.st_mode), child_inode->ino, ino});
   }
 
   // Reading directory contents updates atime on the directory.

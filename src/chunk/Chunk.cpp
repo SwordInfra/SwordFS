@@ -85,13 +85,17 @@ utils::Status Chunk::Flush() {
     return status;
   }
 
-  // free the dirty data buffer
+  status = meta_->AddChunk(ino_, BuildMeta());
+  if (!status.ok()) {
+    SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: AddChunk ino=" << ino_
+                      << " chunk=" << index_
+                      << " size=" << flushed_size_
+                      << " — " << status.message();
+    return status;
+  }
+
   state_ = State::kFlushed;
   wb_.reset();
-
-  // Register with the metadata engine so future reads can locate
-  // this chunk via FindChunk.
-  meta_->AddChunk(ino_, BuildMeta());
 
   SWORDFS_LOG_DEBUG << "Flush uploaded: ino=" << ino_
                     << " chunk=" << index_
