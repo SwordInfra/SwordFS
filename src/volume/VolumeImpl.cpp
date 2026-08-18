@@ -8,11 +8,9 @@
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineFactory.hpp"
-#include "metadata/OpenHandleTracker.hpp"
 #include "storage/DataEngineFactory.hpp"
 #include "storage/IDataEngine.hpp"
 #include "storage/s3/S3DataEngine.hpp"
-#include "vfs/InodeHandle.hpp"
 
 namespace swordfs::volume {
 
@@ -85,19 +83,6 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
     if (!status.ok()) {
       return status;
     }
-  }
-
-  // Wire the metadata engine to the FUSE-side open-handle tracker so
-  // POSIX open-unlink semantics work: when `unlink` drops nlink to 0,
-  // the engine asks the tracker whether any fd is still open and
-  // defers inode deletion until the last `Close`. We inject after the
-  // engines are created so a future KV-backed tracker can be swapped
-  // in via `VolumeImpl::set_open_handle_tracker` (testing only) or
-  // wired by the daemon bootstrap.
-  if (meta_engine_) {
-    meta_engine_->SetOpenHandleTracker(
-        static_cast<swordfs::metadata::OpenHandleTracker*>(
-            &swordfs::vfs::InodeHandleManager::Instance()));
   }
 
   return Status::OK();

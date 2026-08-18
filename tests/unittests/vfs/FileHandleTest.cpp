@@ -388,36 +388,25 @@ TEST_F(FileHandleTest, MarkOrphanedIfOpenFalseWhenNoOpenFds) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// InodeHandleManager ↔ MemMetaStore open-unlink integration
+// InodeHandleManager::HasOpenHandles
 // ────────────────────────────────────────────────────────────────
 //
-// `VolumeImpl::LoadFrom` wires `InodeHandleManager::Instance()` into
-// the metadata engine as its OpenHandleTracker. The cases below verify
-// the full unlink-while-open → reclaim cycle without spinning up the
-// FUSE daemon: a real `InodeHandle` keeps the atomic open count > 0,
-// while a real `MemMetaStore` records `MarkOrphaned` via the tracker.
+// `VfsImpl::Unlink` consults `InodeHandleManager::HasOpenHandles` to
+// decide whether to defer the inode reclaim. The case below exercises
+// the manager's lifecycle: no entry → open fd → entry present →
+// close → entry absent.
 
-TEST_F(FileHandleTest, OpenHandleTrackerReflectsOpenCount) {
-  // Verify the InodeHandleManager ↔ MemMetaStore wiring used by
-  // VolumeImpl::LoadFrom: the tracker answers based on the
-  // atomic open_count_ on the InodeHandle and forwards MarkOrphaned
-  // to the per-handle CAS. We exercise the path directly through
-  // FileHandle::Open (which already talks to mock_meta_). To assert
-  // the deferred-reclaim contract end-to-end we drive the store
-  // ourselves between Open and Release.
-  auto store = std::make_unique<swordfs::metadata::MemMetaStore>();
-  store->SetOpenHandleTracker(&InodeHandleManager::Instance());
-
-  // FileHandle::Open routes through mock_meta_, so we only check
-  // that the manager reports the correct HasOpenHandles state at
-  // each lifecycle boundary.
+TEST_F(FileHandleTest, InodeHandleManagerHasOpenHandles) {
+  // No handle yet -> manager reports no open fds.
   InodeID test_ino = 9998;
   EXPECT_FALSE(InodeHandleManager::Instance().HasOpenHandles(test_ino));
 
+  // FileHandle::Open routes through mock_meta_ and creates the handle.
   FileHandle handle;
   ASSERT_TRUE(FileHandle::Open(test_ino, O_RDWR, &handle).ok());
   EXPECT_TRUE(InodeHandleManager::Instance().HasOpenHandles(test_ino));
 
+  // Release drops the entry.
   FileHandleManager::Instance().Release(handle.fh());
   EXPECT_FALSE(InodeHandleManager::Instance().HasOpenHandles(test_ino));
 }

@@ -24,8 +24,6 @@ using SwordFsContext = swordfs::utils::SwordFsContext;
 
 namespace swordfs::metadata {
 
-class OpenHandleTracker;
-
 /// Filesystem limits provided by each metadata engine.
 struct Limits {
   /// Maximum length of a single path component (POSIX NAME_MAX).
@@ -45,17 +43,6 @@ inline bool IsMemoryMode(std::string_view meta_url) {
 class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
-
-  // Inject a runtime open-handle tracker used by the engine to decide
-  // whether `RemoveEntry` may immediately delete an inode (no open
-  // handles) or must defer (POSIX open-unlink). The default
-  // implementation ignores the tracker and behaves as before; engines
-  // that want open-unlink semantics must override.
-  //
-  // The engine takes a non-owning pointer; the caller (typically
-  // `VolumeImpl`) owns the tracker and must keep it alive at least as
-  // long as the engine is in use.
-  virtual void SetOpenHandleTracker(OpenHandleTracker* /*tracker*/) {}
 
   /// Return limits for the given metadata engine type.
   static Limits GetLimits(std::string_view meta_url);
@@ -81,7 +68,11 @@ class IMetaEngine {
                        std::string_view name, mode_t mode,
                        InodeID *child_ino, struct stat *attr) = 0;
 
-  /// Remove a regular file.
+  /// POSIX unlink(2): detach the directory entry and decrement nlink.
+  /// Does NOT delete the inode or its data; the caller (typically
+  /// `VfsImpl::Unlink`) inspects the runtime open-fd count and decides
+  /// whether to follow up with `ReclaimData` (POSIX open-unlink: defer
+  /// the inode deletion when any fd is still open).
   virtual Status Unlink(InodeID parent_ino, std::string_view name) = 0;
 
   /// Remove an empty directory. Decrements parent nlink.
@@ -122,10 +113,11 @@ class IMetaEngine {
   /// validation + read permission) and updates atime.
   virtual Status Open(InodeID ino) = 0;
 
-  /// Reclaim the data of an inode that was unlinked while still open.
-  /// The VFS layer calls this once no open file descriptors remain.  The
-  /// metadata engine deletes the inode and its chunks only if the inode is
-  /// orphaned (nlink==0); otherwise this is a no-op.
+  /// Reclaim the data of an inode that was previously unlinked. Called by
+  /// the VFS layer once it has verified no open file descriptor still
+  /// references the inode (e.g. from the last `Close` after an open-unlink).
+  /// The metadata engine deletes the inode and its chunks when its
+  /// nlink count has dropped to zero; otherwise this is a no-op.
   virtual Status ReclaimData(InodeID ino) = 0;
 
   /// Open a directory for reading. Performs permission check and updates

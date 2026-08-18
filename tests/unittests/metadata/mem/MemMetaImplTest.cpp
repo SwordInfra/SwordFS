@@ -35,7 +35,7 @@ class MemMetaImplTest : public ::testing::Test {
 
   // Set the fiber-local context for the current thread.
   void SetContext(uid_t uid, gid_t gid) {
-    auto& ctx = folly::fibers::local<SwordFsContext>();
+    auto &ctx = folly::fibers::local<SwordFsContext>();
     ctx.uid = uid;
     ctx.gid = gid;
   }
@@ -78,7 +78,7 @@ class MemMetaImplTest : public ::testing::Test {
     impl_->SetAttr(ino, &st, FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID, nullptr);
   }
 
-  MemMetaImpl* impl_;
+  MemMetaImpl *impl_;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -602,4 +602,35 @@ TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
 
 TEST_F(MemMetaImplTest, ReclaimDataMissingInodeIsNoOp) {
   EXPECT_TRUE(impl_->ReclaimData(999).ok());
+}
+
+// ────────────────────────────────────────────────────────────────
+// Open-unlink behaviour: operations after Unlink (which keeps
+// nlink==0 but the inode alive) must continue to work for any fd
+// the VFS layer still has open on the inode. The metadata engine
+// must NOT refuse these ops just because nlink dropped to 0.
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(MemMetaImplTest, OpenAcceptsUnlinkedButLiveInode) {
+  // POSIX open-unlink: the directory entry is gone, but the inode
+  // stays alive because some fd is still referencing it. Subsequent
+  // meta-engine calls on the ino (Open/GetAttr/Access/...) must
+  // succeed so the VFS layer can re-open or continue to operate on
+  // the fd.
+  InodeID f_ino = 0;
+  SetContext(0, 0);
+  impl_->Create(kRoot, "f", 0644, &f_ino, nullptr);
+
+  // Detach the directory entry (nlink -> 0). The inode survives.
+  ASSERT_TRUE(impl_->Unlink(kRoot, "f").ok());
+
+  // Re-open via the inode number. This is the path /proc, dup-like
+  // syscalls, or any "already-have-an-fd" re-bind take. Must succeed.
+  EXPECT_TRUE(impl_->Open(f_ino).ok());
+
+  // GetAttr/Access must also succeed so existing fds keep working.
+  struct stat attr;
+  EXPECT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
+  EXPECT_TRUE(impl_->Access(f_ino, R_OK).ok());
+  EXPECT_TRUE(impl_->Access(f_ino, W_OK).ok());
 }

@@ -19,7 +19,6 @@
 #include <utility>
 #include <vector>
 
-#include "metadata/OpenHandleTracker.hpp"
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
 
@@ -31,15 +30,6 @@ class MemMetaStore {
  public:
   MemMetaStore();
   ~MemMetaStore();
-
-  // Bind a runtime open-handle tracker (production: the FUSE daemon's
-  // `vfs::InodeHandleManager`). The store takes a non-owning pointer;
-  // the caller must keep the tracker alive for the lifetime of this
-  // store. Passing nullptr restores the legacy "no deferred reclaim"
-  // behaviour (useful for tests that don't care about open-unlink).
-  void SetOpenHandleTracker(swordfs::metadata::OpenHandleTracker* t) {
-    handle_tracker_ = t;
-  }
 
   // ────────────────────────────────────────────────────────────────
   // Inode operations
@@ -71,9 +61,14 @@ class MemMetaStore {
   Status MoveEntry(InodeID old_parent_ino, std::string_view old_name,
                    InodeID new_parent_ino, std::string_view new_name);
 
-  // Remove a child entry by name and free the inode (and directory table,
-  // for directories). A non-empty directory returns Busy.
-  Status RemoveEntry(InodeID parent_ino, std::string_view name);
+  // POSIX unlink(2): remove the child entry from its parent and
+  // decrement nlink. Does NOT delete the inode or its data; that is
+  // the caller's responsibility (typically `VfsImpl::Unlink` will
+  // follow up with `ReclaimData` once it has confirmed no open file
+  // descriptor still references the inode).
+  // A non-empty directory returns Busy; "." / ".." are rejected via the
+  // permission layer above.
+  Status Unlink(InodeID parent_ino, std::string_view name);
 
   // Link an existing inode into a directory (hard link). Increments nlink.
   Status LinkExistingEntry(InodeID parent_ino, std::string_view name,
@@ -130,11 +125,6 @@ class MemMetaStore {
   mutable std::mutex mutex_;
   std::atomic<InodeID> next_ino_;
 
-  // Optional runtime open-handle tracker. When non-null,
-  // `RemoveEntry` defers inode deletion until the tracker reports no
-  // remaining open file descriptors (POSIX open-unlink semantics).
-  // When null, the store behaves as before — immediate deletion.
-  OpenHandleTracker* handle_tracker_ = nullptr;
   folly::F14FastMap<InodeID, SwordFsInode *> inodes_;
   folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode *>> dirs_;
 

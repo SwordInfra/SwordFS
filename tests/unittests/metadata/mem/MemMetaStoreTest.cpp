@@ -6,10 +6,6 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
-#include <unordered_map>
-#include <vector>
-
-#include "metadata/OpenHandleTracker.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 #include "utils/Status.hpp"
 
@@ -190,47 +186,56 @@ TEST_F(MemMetaStoreTest, MoveEntryTargetExists) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// RemoveEntry
+// Unlink
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, RemoveEntryDeletesInode) {
+TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
+  // Unlink only detaches the directory entry and decrements nlink.
+  // The inode survives until the caller (VfsImpl::Unlink or
+  // InodeHandle::Close) calls ReclaimData. Callers that want immediate
+  // cleanup of a single-name unlink invoke ReclaimData themselves.
   SwordFsInode *f = nullptr;
   store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
   InodeID ino = f->ino;
 
   EXPECT_EQ(store_->InodeCount(), 2);  // root + f
-  EXPECT_TRUE(store_->RemoveEntry(kRoot, "f").ok());
+  EXPECT_TRUE(store_->Unlink(kRoot, "f").ok());
 
   // Entry gone from directory
   EXPECT_TRUE(store_->LookupEntry(kRoot, "f", nullptr).IsNotFound());
-  // Inode freed
+  // Inode and its metadata stay alive (nlink == 0).
+  EXPECT_EQ(store_->InodeCount(), 2);
+  EXPECT_TRUE(store_->LookupInode(ino, nullptr).ok());
+
+  // Caller follows up with ReclaimData to free the orphaned inode.
+  EXPECT_TRUE(store_->ReclaimData(ino).ok());
   EXPECT_EQ(store_->InodeCount(), 1);
   EXPECT_TRUE(store_->LookupInode(ino, nullptr).IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, RemoveEntryIdempotent) {
-  EXPECT_TRUE(store_->RemoveEntry(kRoot, "nonexistent").ok());
+TEST_F(MemMetaStoreTest, UnlinkIdempotent) {
+  EXPECT_TRUE(store_->Unlink(kRoot, "nonexistent").ok());
   EXPECT_EQ(store_->InodeCount(), 1);
 }
 
-TEST_F(MemMetaStoreTest, RemoveEntryNonEmptyDirectory) {
+TEST_F(MemMetaStoreTest, UnlinkNonEmptyDirectory) {
   SwordFsInode *sub = nullptr;
   store_->AddEntry(kRoot, "sub", kDir, 0, &sub);
 
   // Add a file inside sub
   store_->AddEntry(sub->ino, "f", kRegFile, 0, nullptr);
 
-  Status st = store_->RemoveEntry(kRoot, "sub");
+  Status st = store_->Unlink(kRoot, "sub");
   EXPECT_TRUE(st.IsNotEmpty());
   EXPECT_EQ(store_->InodeCount(), 3);  // root + sub + f
 }
 
-TEST_F(MemMetaStoreTest, RemoveEntryEmptyDirectory) {
+TEST_F(MemMetaStoreTest, UnlinkEmptyDirectory) {
   SwordFsInode *sub = nullptr;
   store_->AddEntry(kRoot, "sub", kDir, 0, &sub);
-  InodeID sub_ino = sub->ino;  // save before RemoveEntry frees the pointer
+  InodeID sub_ino = sub->ino;  // save before Unlink frees the pointer
 
-  EXPECT_TRUE(store_->RemoveEntry(kRoot, "sub").ok());
+  EXPECT_TRUE(store_->Unlink(kRoot, "sub").ok());
   // Both sub and its dir entry table freed
   EXPECT_TRUE(store_->LookupInode(sub_ino, nullptr).IsNotFound());
   EXPECT_EQ(store_->InodeCount(), 1);
@@ -413,133 +418,4 @@ TEST_F(MemMetaStoreTest, ReclaimDataKeepsLinkedInode) {
   SwordFsInode *out = nullptr;
   ASSERT_TRUE(store_->LookupInode(ino, &out).ok());
   EXPECT_EQ(out, f);
-}
-
-// ────────────────────────────────────────────────────────────────
-// OpenHandleTracker integration (two-phase unlink reclaim)
-// ────────────────────────────────────────────────────────────────
-//
-// These tests verify the new `MemMetaStore::SetOpenHandleTracker` API
-// introduced when the metadata engine stopped reverse-calling the VFS
-// layer directly. The store now asks the tracker "are there still open
-// fds?" before deciding whether to delete an inode.
-
-namespace {
-
-// A minimal in-test tracker that returns whatever the test sets. The
-// tracker is queried via the public `IMetaEngine::SetOpenHandleTracker`
-// API so we also exercise the wiring path.
-class FakeOpenHandleTracker : public swordfs::metadata::OpenHandleTracker {
- public:
-  bool HasOpenHandles(InodeID ino) override {
-    auto it = open_set.find(ino);
-    return it != open_set.end() && it->second > 0;
-  }
-  void MarkOrphaned(InodeID ino) override {
-    // We don't model per-inode orphaned_ in the tracker; the store does
-    // its own nlink bookkeeping. Recording the call lets the test verify
-    // the deferred path was taken.
-    mark_orphaned_calls.push_back(ino);
-  }
-  std::unordered_map<InodeID, int> open_set;
-  std::vector<InodeID> mark_orphaned_calls;
-};
-
-}  // namespace
-
-TEST_F(MemMetaStoreTest, RemoveEntryNoTrackerDeletesImmediately) {
-  // No tracker bound: legacy immediate-delete behaviour must be preserved
-  // (this is the path exercised by every other test in this file).
-  SwordFsInode* f = nullptr;
-  store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
-  InodeID ino = f->ino;
-
-  ASSERT_TRUE(store_->RemoveEntry(kRoot, "f").ok());
-  EXPECT_TRUE(store_->LookupInode(ino, nullptr).IsNotFound());
-}
-
-TEST_F(MemMetaStoreTest, RemoveEntryWithTrackerDefersWhenOpen) {
-  FakeOpenHandleTracker tracker;
-  store_->SetOpenHandleTracker(&tracker);
-
-  SwordFsInode* f = nullptr;
-  store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
-  InodeID ino = f->ino;
-  tracker.open_set[ino] = 1;  // simulate one open fd
-
-  ASSERT_TRUE(store_->RemoveEntry(kRoot, "f").ok());
-
-  // The dentry must be gone, but the inode stays alive.
-  EXPECT_TRUE(store_->LookupEntry(kRoot, "f", nullptr).IsNotFound());
-  EXPECT_EQ(store_->InodeCount(), 2);
-  EXPECT_TRUE(store_->LookupInode(ino, nullptr).ok());
-
-  // The tracker must have been told to mark the inode orphaned.
-  ASSERT_EQ(tracker.mark_orphaned_calls.size(), 1);
-  EXPECT_EQ(tracker.mark_orphaned_calls.front(), ino);
-}
-
-TEST_F(MemMetaStoreTest, RemoveEntryWithTrackerNoFdDeletesImmediately) {
-  FakeOpenHandleTracker tracker;
-  store_->SetOpenHandleTracker(&tracker);
-
-  SwordFsInode* f = nullptr;
-  store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
-  InodeID ino = f->ino;
-  // No open fd registered with the tracker.
-
-  ASSERT_TRUE(store_->RemoveEntry(kRoot, "f").ok());
-  EXPECT_TRUE(store_->LookupInode(ino, nullptr).IsNotFound());
-  EXPECT_TRUE(tracker.mark_orphaned_calls.empty());
-}
-
-TEST_F(MemMetaStoreTest, RemoveEntryThenReclaimTwoPhase) {
-  // Full open-unlink cycle:
-  //   1) Open fd → tracker reports 1
-  //   2) unlink    → store defers, tracker.MarkOrphaned called
-  //   3) Close fd  → tracker reports 0
-  //   4) Reclaim   → store deletes the inode
-  FakeOpenHandleTracker tracker;
-  store_->SetOpenHandleTracker(&tracker);
-
-  SwordFsInode* f = nullptr;
-  store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
-  InodeID ino = f->ino;
-  tracker.open_set[ino] = 1;
-
-  // (1)+(2): unlink while open.
-  ASSERT_TRUE(store_->RemoveEntry(kRoot, "f").ok());
-  EXPECT_EQ(store_->InodeCount(), 2);
-  ASSERT_EQ(tracker.mark_orphaned_calls.size(), 1);
-
-  // (3): caller closes the fd; tracker now reports 0.
-  tracker.open_set[ino] = 0;
-
-  // (4): last close triggers ReclaimData.
-  ASSERT_TRUE(store_->ReclaimData(ino).ok());
-  EXPECT_EQ(store_->InodeCount(), 1);
-  EXPECT_TRUE(store_->LookupInode(ino, nullptr).IsNotFound());
-}
-
-TEST_F(MemMetaStoreTest, SetOpenHandleTrackerNullRestoresLegacy) {
-  // Setting the tracker back to nullptr re-enables immediate deletion
-  // for subsequent unlinks (does not retroactively change the previous
-  // call's outcome).
-  FakeOpenHandleTracker tracker;
-  store_->SetOpenHandleTracker(&tracker);
-
-  SwordFsInode* f = nullptr;
-  store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
-  InodeID ino = f->ino;
-  tracker.open_set[ino] = 1;
-  ASSERT_TRUE(store_->RemoveEntry(kRoot, "f").ok());
-  EXPECT_EQ(store_->InodeCount(), 2);
-
-  store_->SetOpenHandleTracker(nullptr);
-
-  SwordFsInode* f2 = nullptr;
-  store_->AddEntry(kRoot, "g", kRegFile, 0, &f2);
-  InodeID ino2 = f2->ino;
-  ASSERT_TRUE(store_->RemoveEntry(kRoot, "g").ok());
-  EXPECT_TRUE(store_->LookupInode(ino2, nullptr).IsNotFound());
 }

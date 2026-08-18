@@ -34,7 +34,7 @@ class MemMetaImplReadDirTest : public ::testing::Test {
   }
   void TearDown() override { delete impl_; }
 
-  MemMetaImpl* impl_;
+  MemMetaImpl *impl_;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ TEST_F(MemMetaImplReadDirTest, ReadDirWithEntries) {
 
   // Verify no duplicate names.
   std::set<std::string> names;
-  for (const auto& e : entries) {
+  for (const auto &e : entries) {
     EXPECT_TRUE(names.insert(e.name).second) << "Duplicate entry: " << e.name;
     EXPECT_GT(e.ino, kRoot);
     EXPECT_EQ(e.type, DT_REG);
@@ -101,7 +101,7 @@ TEST_F(MemMetaImplReadDirTest, ReadDirMixedTypes) {
   EXPECT_TRUE(impl_->ReadDir(kRoot, &entries).ok());
   EXPECT_EQ(entries.size(), 2);
 
-  for (const auto& e : entries) {
+  for (const auto &e : entries) {
     if (e.name == "file.txt") {
       EXPECT_EQ(e.type, DT_REG);
     } else if (e.name == "subdir") {
@@ -172,7 +172,7 @@ TEST_F(MemMetaImplReadDirTest, ReadDirLargeDirectory) {
 
   // All inodes should be unique.
   std::set<InodeID> inodes;
-  for (const auto& e : entries) {
+  for (const auto &e : entries) {
     inodes.insert(e.ino);
   }
   EXPECT_EQ(inodes.size(), kFiles) << "Duplicate inodes in ReadDir output";

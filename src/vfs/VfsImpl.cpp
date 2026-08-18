@@ -15,6 +15,7 @@
 #include "utils/Status.hpp"
 #include "vfs/FileHandle.hpp"
 #include "vfs/FileReadWriter.hpp"
+#include "vfs/InodeHandle.hpp"
 #include "volume/VolumeImpl.hpp"
 
 #define FUSE_USE_VERSION 312
@@ -100,7 +101,41 @@ utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name,
 }
 
 utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
-  return VolumeImpl::Instance().meta_engine()->Unlink(parent, name);
+  // POSIX open-unlink decision lives here, not in the metadata engine:
+  // 1. Remove the directory entry (and decrement nlink). The inode stays
+  //    alive if any file descriptor still references it.
+  // 2. If no open fd remains, reclaim the inode and its chunks now via
+  //    `ReclaimData`. Otherwise mark the InodeHandle as orphaned and let
+  //    the last `Close` schedule the reclaim.
+  //
+  // Permission and sticky-bit checks are already enforced by
+  // `MemMetaImpl::Unlink` above the store, so we don't repeat them
+  // here.
+  auto *meta = VolumeImpl::Instance().meta_engine();
+
+  // Look up the child inode so we know what to reclaim later.
+  InodeID child_ino = 0;
+  {
+    struct stat attr;
+    auto lookup_st = meta->Lookup(parent, name, &child_ino, &attr);
+    if (!lookup_st.ok()) {
+      return lookup_st;
+    }
+  }
+
+  auto st = meta->Unlink(parent, name);
+  if (!st.ok()) {
+    return st;
+  }
+
+  if (!vfs::InodeHandleManager::Instance().HasOpenHandles(child_ino)) {
+    // No open fd references the inode; reclaim now while the metadata
+    // store still has the nlink==0 fact fresh.
+    return meta->ReclaimData(child_ino);
+  }
+  // Defer the actual cleanup until the last `Close`.
+  vfs::InodeHandleManager::Instance().MarkOrphaned(child_ino);
+  return utils::Status::OK();
 }
 
 utils::Status VfsImpl::Rmdir(fuse_ino_t parent, const char *name) {

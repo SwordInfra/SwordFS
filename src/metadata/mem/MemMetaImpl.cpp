@@ -257,7 +257,10 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
     return Status::InvalidArgument("cannot unlink directory");
   }
 
-  store_.RemoveEntry(parent_ino, name);
+  // Unlink only detaches the directory entry and decrements nlink; the
+  // inode (and its data) survives until the caller (VfsImpl::Unlink or
+  // InodeHandle::Close) follows up with `ReclaimData`.
+  store_.Unlink(parent_ino, name);
 
   if (parent) {
     parent->Touch(kMtime | kCtime);
@@ -304,7 +307,7 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
     return Status::NotDirectory("not a directory");
   }
 
-  status = store_.RemoveEntry(parent_ino, name);
+  status = store_.Unlink(parent_ino, name);
   if (!status.ok()) {
     return status;
   }
@@ -457,7 +460,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
       }
     }
 
-    Status status = store_.RemoveEntry(new_parent_ino, new_name);
+    Status status = store_.Unlink(new_parent_ino, new_name);
     if (!status.ok()) {
       return status;
     }
@@ -467,6 +470,12 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
       if (np) {
         np->attr.st_nlink--;
       }
+    } else {
+      // Overwriting a file: `Unlink` only detaches the directory
+      // entry; the inode (and its chunks) are still alive. Free them
+      // now since the rename is atomic and no fd can be holding the
+      // old name (the caller must have removed the only link).
+      store_.ReclaimData(existing->ino);
     }
   }
 
@@ -711,13 +720,14 @@ Status MemMetaImpl::Open(InodeID ino) {
     return Status::NotFound("inode not found");
   }
 
-  // A file that has been fully unlinked (nlink == 0) can no longer be
-  // opened, even though in-flight open fds may still read/write it.
-  if (inode->attr.st_nlink == 0) {
-    SWORDFS_LOG_DEBUG << "Open: ino " << ino << " has been unlinked";
-    return Status::NotFound("inode has been unlinked");
-  }
-
+  // No `nlink == 0` check here. POSIX guarantees that an inode unlinked
+  // while still open can be read/written through existing fds; the VFS
+  // layer is also free to issue further Open() calls on the same inode
+  // (re-open through /proc or other inode-by-number paths). Rejecting
+  // `nlink == 0` here would break both cases. New opens by name go
+  // through Lookup() at the VFS layer and never reach this code path
+  // once the directory entry is gone.
+  //
   // Only regular files can be opened (directories use OpenDir, symlinks are
   // resolved by the kernel).
   if (!S_ISREG(inode->attr.st_mode)) {
