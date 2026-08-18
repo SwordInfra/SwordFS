@@ -17,6 +17,7 @@
 
 #include "chunk/Chunk.hpp"
 #include "metadata/Types.hpp"
+#include "utils/ChunkKey.hpp"
 #include "utils/Status.hpp"
 
 namespace folly {
@@ -45,7 +46,8 @@ class FileChunkManager {
  public:
   using Map = folly::F14FastMap<metadata::ChunkIndex, chunk::Chunk>;
 
-  explicit FileChunkManager(metadata::InodeID ino) : ino_(ino) {}
+  FileChunkManager(metadata::InodeID ino, size_t chunk_size)
+      : ino_(ino), chunk_size_(chunk_size) {}
 
   /// Get the chunk at |idx|.  If not in the map, creates and
   /// initializes it.  Returns nullptr on error or when
@@ -60,14 +62,19 @@ class FileChunkManager {
   chunk::Chunk *GetNextFlushable();
 
   /// Truncate cached chunks to those below |new_last_idx|.  Chunks at
-  /// or beyond |new_last_idx| are dropped so reads re-load them from
-  /// metadata.  Chunks below remain so reads can still hit them
-  /// directly.  No-op when |new_last_idx| is the smallest representable
-  /// value.
-  void Truncate(metadata::ChunkIndex new_last_idx);
+  /// or beyond |new_last_idx| are dropped (their indices are appended
+  /// to |*dropped| if non-null) so the caller can issue data-engine
+  /// Deletes. Chunks below remain so reads can still hit them directly.
+  /// No-op when |new_last_idx| is the smallest representable value.
+  void Truncate(metadata::ChunkIndex new_last_idx,
+                std::vector<metadata::ChunkIndex> *dropped);
+
+  /// Test-only hook: override the chunk size used for index calculations.
+  void SetChunkSizeForTest(size_t cs) { chunk_size_ = cs; }
 
  private:
   metadata::InodeID ino_;
+  size_t chunk_size_;
   mutable std::mutex mutex_;
   Map chunks_;
 };
@@ -96,6 +103,13 @@ class FileReadWriter {
   /// Truncate to |size| bytes.  Updates chunk metadata in the metadata
   /// engine and drops cached chunks.  Used by O_TRUNC (size=0).
   utils::Status Truncate(size_t size);
+
+  // Test-only hook: override the chunk size used for index calculations.
+  // Lets unit tests seed multiple chunks without writing >64 MiB.
+  void SetChunkSizeForTest(size_t cs) {
+    chunk_size_ = cs;
+    chunks_.SetChunkSizeForTest(cs);
+  }
 
  private:
   InodeID ino_;

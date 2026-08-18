@@ -15,9 +15,12 @@
 
 namespace swordfs::chunk {
 
-Chunk::Chunk(metadata::InodeID ino, metadata::ChunkIndex index)
+Chunk::Chunk(metadata::InodeID ino, metadata::ChunkIndex index,
+             size_t max_chunk_size)
     : ino_(ino),
-      max_chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
+      max_chunk_size_(max_chunk_size == 0
+                          ? volume::VolumeImpl::Instance().chunk_size()
+                          : max_chunk_size),
       index_(index),
       data_(volume::VolumeImpl::Instance().data_engine()),
       meta_(volume::VolumeImpl::Instance().meta_engine()) {}
@@ -32,7 +35,7 @@ utils::Status Chunk::Initialize() {
   } else if (status.IsNotFound()) {
     // create a chunk but not commit to metadata so only the local mount knows it.
     state_ = State::kWriting;
-    wb_ = std::make_unique<WriteBuf>(volume::VolumeImpl::Instance().chunk_size());
+    wb_ = std::make_unique<WriteBuf>(max_chunk_size_);
     return Status::OK();
   }
   return status;

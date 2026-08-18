@@ -7,6 +7,8 @@
 #include <folly/fibers/FiberManagerInternal.h>
 #include <fuse_lowlevel.h>
 
+#include <algorithm>
+
 #include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 #include "utils/Context.hpp"
@@ -409,7 +411,7 @@ Status MemMetaStore::TruncateChunks(InodeID ino, size_t new_size) {
 // Open-unlink reclaim
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaStore::ReclaimData(InodeID ino) {
+Status MemMetaStore::ReclaimInode(InodeID ino) {
   std::lock_guard<std::mutex> lock(mutex_);
   SwordFsInode *inode = FindInodeLocked(ino);
   if (!inode) {
@@ -418,6 +420,30 @@ Status MemMetaStore::ReclaimData(InodeID ino) {
   if (inode->attr.st_nlink == 0) {
     DeleteInodeLocked(ino);
   }
+  return Status::OK();
+}
+
+Status MemMetaStore::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
+  if (!out) {
+    return Status::InvalidArgument("null out");
+  }
+  out->clear();
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = chunks_.find(ino);
+  if (it == chunks_.end()) {
+    return Status::OK();
+  }
+  out->reserve(it->second.size());
+  for (const auto &[idx, cm] : it->second) {
+    out->push_back(cm);
+  }
+  // F14FastMap iteration order is unspecified; the contract for
+  // ListChunks is ascending ChunkIndex so a single audit log of
+  // deletes reads top-to-bottom. Sort by index to honour it.
+  std::sort(out->begin(), out->end(),
+            [](const ChunkMeta &a, const ChunkMeta &b) {
+              return a.index < b.index;
+            });
   return Status::OK();
 }
 
