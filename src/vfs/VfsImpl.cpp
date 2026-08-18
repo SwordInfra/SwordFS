@@ -5,15 +5,15 @@
 
 #include <dirent.h>
 #include <folly/io/IOBuf.h>
+#include <folly/logging/xlog.h>
 
 #include "config/ConfigCenter.hpp"
 #include "fuse/Limits.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
-#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
-#include "vfs/FileHandleManager.hpp"
+#include "vfs/FileHandle.hpp"
 #include "vfs/FileReadWriter.hpp"
 #include "volume/VolumeImpl.hpp"
 
@@ -44,8 +44,10 @@ utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name,
   InodeID child_ino;
   struct stat attr;
   Status status = VolumeImpl::Instance().meta_engine()->Lookup(parent, name, &child_ino,
-                                              &attr);
-  if (!status.ok()) return status;
+                                                               &attr);
+  if (!status.ok()) {
+    return status;
+  }
   *entry = {};
   entry->ino = child_ino;
   entry->attr = attr;
@@ -67,7 +69,7 @@ utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr,
   return VolumeImpl::Instance().meta_engine()->SetAttr(ino, attr, to_set, out_attr);
 }
 
-utils::Status VfsImpl::Readlink(fuse_ino_t ino, std::string* target) {
+utils::Status VfsImpl::Readlink(fuse_ino_t ino, std::string *target) {
   return VolumeImpl::Instance().meta_engine()->Readlink(ino, target);
 }
 
@@ -85,8 +87,10 @@ utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name,
   InodeID child_ino;
   struct stat attr;
   Status status = VolumeImpl::Instance().meta_engine()->MkDir(parent, name, mode,
-                                             &child_ino, &attr);
-  if (!status.ok()) return status;
+                                                              &child_ino, &attr);
+  if (!status.ok()) {
+    return status;
+  }
   *entry = {};
   entry->ino = child_ino;
   entry->attr = attr;
@@ -104,13 +108,15 @@ utils::Status VfsImpl::Rmdir(fuse_ino_t parent, const char *name) {
 }
 
 utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent,
-                               const char* name,
-                               fuse_entry_param* entry) {
+                               const char *name,
+                               fuse_entry_param *entry) {
   InodeID child_ino;
   struct stat attr;
   Status status = VolumeImpl::Instance().meta_engine()->Symlink(
       parent, name, link, &child_ino, &attr);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
   *entry = {};
   entry->ino = child_ino;
   entry->attr = attr;
@@ -126,12 +132,14 @@ utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
 }
 
 utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent,
-                            const char* newname,
-                            fuse_entry_param* entry) {
+                            const char *newname,
+                            fuse_entry_param *entry) {
   struct stat attr;
   Status status = VolumeImpl::Instance().meta_engine()->Link(
       ino, newparent, newname, &attr);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
   *entry = {};
   entry->ino = ino;
   entry->attr = attr;
@@ -141,20 +149,14 @@ utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent,
 }
 
 utils::Status VfsImpl::Open(fuse_ino_t ino, struct fuse_file_info *fi) {
-  // Permission check and atime update (fh allocation moved to FileHandleManager).
-  auto status = VolumeImpl::Instance().meta_engine()->Open(ino);
+  FileHandle handle;
+  auto status = FileHandle::Open(ino, fi->flags, &handle);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Open FAILED: ino=" << ino << " — " << status.message();
     return status;
   }
-  uint64_t fh;
-  status = FileHandleManager::Instance().Open(ino, &fh);
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Open FAILED: ino=" << ino << " — " << status.message();
-    return status;
-  }
-  SWORDFS_LOG_DEBUG << "Open: ino=" << ino << " fh=" << fh;
-  fi->fh = fh;
+  SWORDFS_LOG_DEBUG << "Open: ino=" << ino << " fh=" << handle.fh();
+  fi->fh = handle.fh();
   return Status::OK();
 }
 
@@ -166,8 +168,10 @@ utils::Status VfsImpl::Read(fuse_ino_t ino, size_t size, off_t off,
     return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
   }
   auto buf = folly::IOBuf::create(size);
-  auto status = handle->file_readwriter->Read(size, off, buf.get());
-  if (!status.ok()) return status;
+  auto status = handle->Read(size, off, buf.get());
+  if (!status.ok()) {
+    return status;
+  }
   *data = std::move(buf);
   return Status::OK();
 }
@@ -178,7 +182,7 @@ utils::Status VfsImpl::Write(fuse_ino_t ino, const folly::IOBuf &buf,
   if (!handle) {
     return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
   }
-  auto status = handle->file_readwriter->Write(buf, off);
+  auto status = handle->Write(buf, off);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "VfsImpl::Write FAILED: ino=" << ino
                       << " fh=" << fh << " — " << status.message();
@@ -189,13 +193,15 @@ utils::Status VfsImpl::Write(fuse_ino_t ino, const folly::IOBuf &buf,
 utils::Status VfsImpl::Flush(fuse_ino_t ino, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Flush: ino=" << ino << " fh=" << fh;
   auto handle = FileHandleManager::Instance().Find(fh);
-  if (!handle) return Status::OK();
-  return handle->file_readwriter->Flush();
+  if (!handle) {
+    return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
+  }
+  return handle->Flush();
 }
 
 utils::Status VfsImpl::Release(fuse_ino_t ino, uint64_t fh) {
-  FileHandleManager::Instance().Release(fh);
   SWORDFS_LOG_DEBUG << "Release: ino=" << ino << " fh=" << fh;
+  FileHandleManager::Instance().Release(fh);
   return Status::OK();
 }
 
@@ -203,14 +209,18 @@ utils::Status VfsImpl::Fsync(fuse_ino_t ino, int datasync, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Fsync: ino=" << ino << " datasync=" << datasync
                     << " fh=" << fh;
   auto handle = FileHandleManager::Instance().Find(fh);
-  if (!handle) return Status::OK();
-  return handle->file_readwriter->Flush();
+  if (!handle) {
+    return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
+  }
+  return handle->Flush();
 }
 
 utils::Status VfsImpl::Opendir(fuse_ino_t ino, uint64_t *fh) {
   // Permission check and atime update.
   auto status = VolumeImpl::Instance().meta_engine()->OpenDir(ino);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
   *fh = FileHandleManager::Instance().OpenDir(ino);
   return Status::OK();
 }
@@ -225,7 +235,9 @@ static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
 
   std::vector<SwordFsEntry> entries;
   Status status = meta->ReadDir(ino, &entries);
-  if (!status.ok()) return status;
+  if (!status.ok()) {
+    return status;
+  }
 
   entries.insert(entries.begin(), {".", DT_DIR, ino});
   entries.insert(entries.begin() + 1,
@@ -239,18 +251,23 @@ static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
   }
 
   char *buf = static_cast<char *>(std::malloc(cap));
-  if (!buf) return Status::NoMemory("readdir buffer");
+  if (!buf) {
+    return Status::NoMemory("readdir buffer");
+  }
 
   size_t pos = 0;
   for (size_t i = 0; i < entries.size() && pos < cap; ++i) {
     size_t n = add_entry(req, buf + pos, cap - pos,
                          entries[i], pos + sizes[i]);
-    if (n > cap - pos) break;
+    if (n > cap - pos) {
+      break;
+    }
     pos += n;
   }
 
-  if (static_cast<size_t>(off) < pos)
+  if (static_cast<size_t>(off) < pos) {
     out->assign(buf + off, std::min(pos - off, size));
+  }
   std::free(buf);
   return Status::OK();
 }
@@ -323,27 +340,21 @@ utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name,
                       << "' — " << status.message();
     return status;
   }
-  uint64_t fh;
-  status = VolumeImpl::Instance().meta_engine()->Open(child_ino);
+  FileHandle handle;
+  status = FileHandle::Open(child_ino, fi->flags, &handle);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Create: Open FAILED: ino=" << child_ino
                       << " — " << status.message();
     return status;
   }
-  status = FileHandleManager::Instance().Open(child_ino, &fh);
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Create: FileHandleManager::Open FAILED: ino=" << child_ino
-                      << " — " << status.message();
-    return status;
-  }
-  fi->fh = fh;
+  fi->fh = handle.fh();
   *entry = {};
   entry->ino = child_ino;
   entry->attr = attr;
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
-  SWORDFS_LOG_INFO << "Create: ino=" << child_ino << " fh=" << fh
-                   << " name='" << name << "'";
+  SWORDFS_LOG_DEBUG << "Create: ino=" << child_ino << " fh=" << handle.fh()
+                    << " name='" << name << "'";
   return Status::OK();
 }
 

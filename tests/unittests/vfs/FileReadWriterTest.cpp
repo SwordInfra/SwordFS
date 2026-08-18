@@ -20,7 +20,7 @@
 #include "metadata/Types.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Status.hpp"
-#include "vfs/FileHandleManager.hpp"
+#include "vfs/FileHandle.hpp"
 #include "vfs/FileReadWriter.hpp"
 #include "volume/VolumeImpl.hpp"
 
@@ -167,6 +167,7 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
   Status Open(InodeID) override { return Status::OK(); }
+  Status ReclaimData(InodeID) override { return Status::OK(); }
   Status OpenDir(InodeID) override { return Status::OK(); }
   Status Forget(InodeID, uint64_t) override { return Status::OK(); }
 
@@ -191,10 +192,25 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
 
+  Status Truncate(InodeID ino, size_t size) override {
+    ++truncate_calls;
+    if (!truncate_status_.ok()) {
+      return truncate_status_;
+    }
+    chunks_.erase(ino);
+    file_size_ = static_cast<off_t>(size);
+    return Status::OK();
+  }
+
   void set_file_size(off_t size) { file_size_ = size; }
+  void set_truncate_status(Status s) { truncate_status_ = s; }
+  off_t file_size() const { return file_size_; }
+
+  int truncate_calls = 0;
 
  private:
   off_t file_size_ = 0;
+  Status truncate_status_ = Status::OK();
   std::unordered_map<InodeID,
                      std::unordered_map<ChunkIndex, ChunkMeta>>
       chunks_;
@@ -432,19 +448,22 @@ TEST_F(FileReadWriterTest, UnflushedWriteVisibleAcrossHandles) {
   RunInTestFiber([&] {
     uint64_t fh1 = 0, fh2 = 0;
     auto &mgr = swordfs::vfs::FileHandleManager::Instance();
-    ASSERT_TRUE(mgr.Open(kIno, &fh1).ok());
-    ASSERT_TRUE(mgr.Open(kIno, &fh2).ok());
+    swordfs::vfs::FileHandle opened1, opened2;
+    ASSERT_TRUE(swordfs::vfs::FileHandle::Open(kIno, 0, &opened1).ok());
+    ASSERT_TRUE(swordfs::vfs::FileHandle::Open(kIno, 0, &opened2).ok());
+    fh1 = opened1.fh();
+    fh2 = opened2.fh();
 
     auto h1 = mgr.Find(fh1);
     auto h2 = mgr.Find(fh2);
     ASSERT_TRUE(h1.has_value());
     ASSERT_TRUE(h2.has_value());
-    EXPECT_EQ(h1->file_readwriter.get(), h2->file_readwriter.get());
+    EXPECT_EQ(h1->handle().get(), h2->handle().get());
 
     // Write through handle 1, read through handle 2 (same instance).
-    ASSERT_TRUE(h1->file_readwriter->Write(Buf(Repeat('Z', 300)), 100).ok());
+    ASSERT_TRUE(h1->Write(Buf(Repeat('Z', 300)), 100).ok());
     auto out = folly::IOBuf::create(kChunkSize);
-    ASSERT_TRUE(h2->file_readwriter->Read(300, 100, out.get()).ok());
+    ASSERT_TRUE(h2->Read(300, 100, out.get()).ok());
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
                                out->length()),
               Repeat('Z', 300));
@@ -462,24 +481,66 @@ TEST_F(FileReadWriterTest, FlushedDataVisibleAcrossHandles) {
   RunInTestFiber([&] {
     uint64_t fh1 = 0, fh2 = 0;
     auto &mgr = swordfs::vfs::FileHandleManager::Instance();
-    ASSERT_TRUE(mgr.Open(kIno, &fh1).ok());
-    ASSERT_TRUE(mgr.Open(kIno, &fh2).ok());
+    swordfs::vfs::FileHandle opened1, opened2;
+    ASSERT_TRUE(swordfs::vfs::FileHandle::Open(kIno, 0, &opened1).ok());
+    ASSERT_TRUE(swordfs::vfs::FileHandle::Open(kIno, 0, &opened2).ok());
+    fh1 = opened1.fh();
+    fh2 = opened2.fh();
 
     auto h1 = mgr.Find(fh1);
     auto h2 = mgr.Find(fh2);
 
     // Write + flush through handle 1.
-    ASSERT_TRUE(h1->file_readwriter->Write(Buf(Repeat('X', 500)), 0).ok());
-    ASSERT_TRUE(h1->file_readwriter->Flush().ok());
+    ASSERT_TRUE(h1->Write(Buf(Repeat('X', 500)), 0).ok());
+    ASSERT_TRUE(h1->Flush().ok());
 
     // Read through handle 2 — same instance, flushed chunk in map.
     auto out = folly::IOBuf::create(kChunkSize);
-    ASSERT_TRUE(h2->file_readwriter->Read(500, 0, out.get()).ok());
+    ASSERT_TRUE(h2->Read(500, 0, out.get()).ok());
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
                                out->length()),
               Repeat('X', 500));
 
     mgr.Release(fh1);
     mgr.Release(fh2);
+  });
+}
+
+// ────────────────────────────────────────────────────────────────
+// Truncate
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(FileReadWriterTest, TruncateCallsMetaEngine) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Truncate(1024).ok());
+    EXPECT_EQ(mock_meta_->truncate_calls, 1);
+    EXPECT_EQ(mock_meta_->file_size(), 1024);
+  });
+}
+
+TEST_F(FileReadWriterTest, TruncatePropagatesMetaError) {
+  RunInTestFiber([&] {
+    mock_meta_->set_truncate_status(Status::Internal("truncate failed"));
+    auto rw = Make();
+    auto status = rw.Truncate(1024);
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.code(), Status::kInternal);
+  });
+}
+
+TEST_F(FileReadWriterTest, TruncateDropsDirtyChunks) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
+
+    // Truncating to zero must drop the dirty chunk so a later read
+    // returns zeros instead of the previously written data.
+    ASSERT_TRUE(rw.Truncate(0).ok());
+    auto out = folly::IOBuf::create(kChunkSize);
+    ASSERT_TRUE(rw.Read(16, 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
+                               out->length()),
+              std::string(16, '\0'));
   });
 }

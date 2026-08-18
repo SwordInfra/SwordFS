@@ -10,6 +10,7 @@
 #include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 #include "utils/Context.hpp"
+#include "vfs/InodeHandle.hpp"
 
 using Status = swordfs::utils::Status;
 
@@ -160,7 +161,15 @@ Status MemMetaStore::RemoveEntry(InodeID parent_ino, std::string_view name) {
     // and the data survives until the last name is gone.
     child->attr.st_nlink--;
     if (child->attr.st_nlink == 0) {
-      DeleteInodeLocked(child->ino);
+      auto handle = vfs::InodeHandleManager::Instance().Get(
+          child->ino, /*create_if_missing=*/false);
+      if (!handle || !handle->MarkOrphanedIfOpen()) {
+        DeleteInodeLocked(child->ino);
+        return Status::OK();
+      }
+      // Open fds remain — defer reclaim until the last close
+      // (POSIX open-unlink semantics).
+      return Status::OK();
     }
   } else {
     // Directories cannot be hard-linked; always delete.
@@ -271,6 +280,7 @@ void MemMetaStore::DeleteInodeLocked(InodeID ino) {
     delete it->second;
     inodes_.erase(it);
     dirs_.erase(ino);
+    chunks_.erase(ino);
   }
 }
 
@@ -363,12 +373,57 @@ Status MemMetaStore::FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) {
   if (chunk_it == ino_it->second.end()) {
     return Status::NotFound("chunk not found at index " + std::to_string(idx));
   }
-  const auto& c = chunk_it->second;
+  const auto &c = chunk_it->second;
   if (c.index != idx) {
     return Status::NotFound("chunk index mismatch");
   }
   if (cm) {
     *cm = c;
+  }
+  return Status::OK();
+}
+
+Status MemMetaStore::TruncateChunks(InodeID ino, size_t new_size) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto ino_it = chunks_.find(ino);
+  if (ino_it == chunks_.end()) {
+    return Status::OK();
+  }
+  if (new_size == 0) {
+    chunks_.erase(ino_it);
+    return Status::OK();
+  }
+
+  auto &cmap = ino_it->second;
+  for (auto cit = cmap.begin(); cit != cmap.end();) {
+    const auto &cm = cit->second;
+    if (cm.start_offset >= new_size) {
+      // Chunk lies entirely beyond the new size — drop it.
+      cit = cmap.erase(cit);
+      continue;
+    }
+    // Chunk straddles the new size — clamp its size.
+    uint64_t new_chunk_size = new_size - cm.start_offset;
+    if (cm.size > new_chunk_size) {
+      cit->second.size = static_cast<size_t>(new_chunk_size);
+    }
+    ++cit;
+  }
+  return Status::OK();
+}
+
+// ────────────────────────────────────────────────────────────────
+// Open-unlink reclaim
+// ────────────────────────────────────────────────────────────────
+
+Status MemMetaStore::ReclaimData(InodeID ino) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  SwordFsInode *inode = FindInodeLocked(ino);
+  if (!inode) {
+    return Status::OK();  // already reclaimed
+  }
+  if (inode->attr.st_nlink == 0) {
+    DeleteInodeLocked(ino);
   }
   return Status::OK();
 }

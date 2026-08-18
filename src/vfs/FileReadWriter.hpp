@@ -59,6 +59,13 @@ class FileChunkManager {
   /// non-const call.
   chunk::Chunk *GetNextFlushable();
 
+  /// Truncate cached chunks to those below |new_last_idx|.  Chunks at
+  /// or beyond |new_last_idx| are dropped so reads re-load them from
+  /// metadata.  Chunks below remain so reads can still hit them
+  /// directly.  No-op when |new_last_idx| is the smallest representable
+  /// value.
+  void Truncate(metadata::ChunkIndex new_last_idx);
+
  private:
   metadata::InodeID ino_;
   mutable std::mutex mutex_;
@@ -85,6 +92,10 @@ class FileReadWriter {
   /// Seal and upload all dirty chunks, then register them with the
   /// metadata engine.
   utils::Status Flush();
+
+  /// Truncate to |size| bytes.  Updates chunk metadata in the metadata
+  /// engine and drops cached chunks.  Used by O_TRUNC (size=0).
+  utils::Status Truncate(size_t size);
 
  private:
   InodeID ino_;

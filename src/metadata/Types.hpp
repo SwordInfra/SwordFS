@@ -77,9 +77,10 @@ struct SwordFsInode {
 
 /// Metadata for one flushed chunk.
 struct ChunkMeta {
-  ChunkIndex index;  // 0-based chunk number
-  std::string key;   // storage key (e.g. "42/0")
-  size_t size;       // data size in bytes
+  ChunkIndex index;       // 0-based chunk number
+  uint64_t start_offset;  // file offset of the chunk's first byte
+  std::string key;        // storage key (e.g. "42/0")
+  size_t size;            // data size in bytes
 };
 
 }  // namespace swordfs::metadata

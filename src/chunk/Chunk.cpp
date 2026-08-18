@@ -102,6 +102,7 @@ utils::Status Chunk::Flush() {
 metadata::ChunkMeta Chunk::BuildMeta() const {
   metadata::ChunkMeta cm;
   cm.index = index_;
+  cm.start_offset = static_cast<uint64_t>(StartOffset());
   cm.key = ChunkKey();
   cm.size = IsFlushed() ? flushed_size_ : (wb_ ? wb_->size() : 0);
   return cm;

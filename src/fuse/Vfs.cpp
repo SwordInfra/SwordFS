@@ -6,6 +6,7 @@
 #include "fuse/Vfs.hpp"
 
 #include <dirent.h>
+#include <folly/logging/xlog.h>
 
 #include <cstddef>
 #include <cstdlib>
@@ -16,7 +17,6 @@
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "utils/FiberRuntime.hpp"
-#include <folly/logging/xlog.h>
 #include "utils/Logging.hpp"
 #include "vfs/VfsImpl.hpp"
 #include "volume/VolumeImpl.hpp"
@@ -48,16 +48,23 @@ void VfsHookFactory::SwordFsInit(void *userdata,
   conn->max_readahead = kMaxReadAheadSize;
   conn->time_gran = kTimeGran;
 
-  if (conn->capable & FUSE_CAP_WRITEBACK_CACHE)
-    fuse_set_feature_flag(conn, FUSE_CAP_WRITEBACK_CACHE);
-  if (conn->capable & FUSE_CAP_SPLICE_READ)
+  // Writeback cache is intentionally disabled: with it enabled the kernel
+  // answers writes from its own page cache, which masks daemon-side
+  // semantics (e.g. rejecting writes to flushed chunks, open-unlink).
+  fuse_unset_feature_flag(conn, FUSE_CAP_WRITEBACK_CACHE);
+
+  if (conn->capable & FUSE_CAP_SPLICE_READ) {
     fuse_set_feature_flag(conn, FUSE_CAP_SPLICE_READ);
-  if (conn->capable & FUSE_CAP_READDIRPLUS)
+  }
+  if (conn->capable & FUSE_CAP_READDIRPLUS) {
     fuse_set_feature_flag(conn, FUSE_CAP_READDIRPLUS);
-  if (conn->capable & FUSE_CAP_ASYNC_READ)
+  }
+  if (conn->capable & FUSE_CAP_ASYNC_READ) {
     fuse_set_feature_flag(conn, FUSE_CAP_ASYNC_READ);
-  if (conn->capable & FUSE_CAP_ATOMIC_O_TRUNC)
+  }
+  if (conn->capable & FUSE_CAP_ATOMIC_O_TRUNC) {
     fuse_set_feature_flag(conn, FUSE_CAP_ATOMIC_O_TRUNC);
+  }
 
   fuse_unset_feature_flag(conn, FUSE_CAP_SPLICE_WRITE);
 
@@ -206,7 +213,7 @@ void VfsHookFactory::SwordFsRename(fuse_req_t req, fuse_ino_t parent,
        newname = std::string(newname), flags] {
         SetRequestContext(req);
         auto status = VfsImpl::Rename(parent, name.c_str(), newparent,
-                                  newname.c_str(), flags);
+                                      newname.c_str(), flags);
         fuse_reply_err(req, status.ToErrno());
       });
 }
@@ -366,13 +373,16 @@ void VfsHookFactory::SwordFsReaddir(fuse_req_t req, fuse_ino_t ino,
       size_t n = fuse_add_direntry(req, buf + pos, cap - pos,
                                    entries[i].name.c_str(), &st,
                                    pos + sizes[i]);
-      if (n > cap - pos) break;
+      if (n > cap - pos) {
+        break;
+      }
       pos += n;
     }
-    if (static_cast<size_t>(off) < pos)
+    if (static_cast<size_t>(off) < pos) {
       fuse_reply_buf(req, buf + off, std::min(pos - off, size));
-    else
+    } else {
       fuse_reply_buf(req, nullptr, 0);
+    }
     std::free(buf);
   });
 }
@@ -418,7 +428,7 @@ void VfsHookFactory::SwordFsSetxattr(fuse_req_t req, fuse_ino_t ino,
        value = std::string(value, size), size, flags] {
         SetRequestContext(req);
         auto status = VfsImpl::Setxattr(ino, name.c_str(), value.data(),
-                                    size, flags);
+                                        size, flags);
         fuse_reply_err(req, status.ToErrno());
       });
 }
@@ -471,7 +481,7 @@ void VfsHookFactory::SwordFsCreate(fuse_req_t req, fuse_ino_t parent,
         SetRequestContext(req);
         fuse_entry_param entry;
         auto status = VfsImpl::Create(parent, name.c_str(), mode,
-                                       &entry, &fi);
+                                      &entry, &fi);
         if (!status.ok()) {
           fuse_reply_err(req, status.ToErrno());
           return;
@@ -520,8 +530,8 @@ void VfsHookFactory::SwordFsIoctl(fuse_req_t req, fuse_ino_t ino, unsigned int c
        in_buf_str = std::move(in_buf_str), in_bufsz, out_bufsz] {
         SetRequestContext(req);
         auto status = VfsImpl::Ioctl(ino, static_cast<int>(cmd), arg, fi, flags,
-                                 in_buf_str.empty() ? nullptr : in_buf_str.data(),
-                                 in_bufsz, out_bufsz);
+                                     in_buf_str.empty() ? nullptr : in_buf_str.data(),
+                                     in_bufsz, out_bufsz);
         fuse_reply_err(req, status.ToErrno());
       });
 }
@@ -626,13 +636,16 @@ void VfsHookFactory::SwordFsReaddirplus(fuse_req_t req, fuse_ino_t ino,
       size_t n = fuse_add_direntry_plus(req, buf + pos, cap - pos,
                                         entries[i].name.c_str(), &e,
                                         pos + sizes[i]);
-      if (n > cap - pos) break;
+      if (n > cap - pos) {
+        break;
+      }
       pos += n;
     }
-    if (static_cast<size_t>(off) < pos)
+    if (static_cast<size_t>(off) < pos) {
       fuse_reply_buf(req, buf + off, std::min(pos - off, size));
-    else
+    } else {
       fuse_reply_buf(req, nullptr, 0);
+    }
     std::free(buf);
   });
 }

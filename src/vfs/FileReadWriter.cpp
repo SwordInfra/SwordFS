@@ -52,8 +52,16 @@ class MultiChunkReadWriter {
   /// Block until all submitted reads finish.  Returns the first
   /// non-OK status, or OK.
   Status Collect() {
+    // 1. Wait for every fiber to finish.  Each fiber lambda dereferences
+    //    |raw| (a raw pointer into the matching Pending), so we must let
+    //    all of them complete before this object — and |ops_| — can be
+    //    destroyed.  Returning early after the first failure would leave
+    //    in-flight fibers writing into freed memory.
     for (auto &p : ops_) {
       p->baton.wait();
+    }
+    // 2. Now it is safe to inspect status / accumulate bytes.
+    for (auto &p : ops_) {
       if (!p->status.ok()) {
         return p->status;
       }
@@ -106,6 +114,17 @@ chunk::Chunk *FileChunkManager::GetNextFlushable() {
     }
   }
   return nullptr;
+}
+
+void FileChunkManager::Truncate(metadata::ChunkIndex new_last_idx) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto it = chunks_.begin(); it != chunks_.end();) {
+    if (it->first >= new_last_idx) {
+      it = chunks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -251,6 +270,27 @@ utils::Status FileReadWriter::Flush() {
   }
 
   return Status::OK();
+}
+
+utils::Status FileReadWriter::Truncate(size_t size) {
+  auto status = meta_->Truncate(ino_, size);
+  if (!status.ok()) {
+    return status;
+  }
+  // Drop cached chunks at or beyond the new last chunk.  The chunk
+  // containing the truncated offset (if any) is kept and will be
+  // re-loaded from metadata on next access.  Chunks below it remain
+  // so reads can hit them directly.
+  if (chunk_size_ > 0) {
+    // The first chunk index beyond the truncated file size; cached
+    // chunks at or past this index are dropped.
+    const auto new_last_idx =
+        static_cast<metadata::ChunkIndex>((size + chunk_size_ - 1) / chunk_size_);
+    chunks_.Truncate(new_last_idx);
+  } else {
+    chunks_.Truncate(0);
+  }
+  return utils::Status::OK();
 }
 
 }  // namespace swordfs::vfs
