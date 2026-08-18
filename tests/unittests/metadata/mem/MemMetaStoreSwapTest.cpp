@@ -4,8 +4,6 @@
 // Tests for MemMetaStore::SwapEntries — the atomic directory-entry swap
 // method added in PR #24 (RENAME_EXCHANGE support).
 
-#define FUSE_USE_VERSION 312
-#include <fuse_lowlevel.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
@@ -21,7 +19,7 @@ using swordfs::metadata::MemMetaStore;
 using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
 
-static constexpr InodeID kRoot = FUSE_ROOT_ID;
+static constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
 static constexpr mode_t kRegFile = S_IFREG | 0644;
 static constexpr mode_t kDir = S_IFDIR | 0755;
 
@@ -34,7 +32,7 @@ class MemMetaStoreSwapTest : public ::testing::Test {
   void SetUp() override { store_ = new MemMetaStore(); }
   void TearDown() override { delete store_; }
 
-  MemMetaStore* store_;
+  MemMetaStore *store_;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -54,7 +52,7 @@ TEST_F(MemMetaStoreSwapTest, CrossDirectorySwap) {
   EXPECT_TRUE(st.ok()) << st.message();
 
   // After swap: dir_a/x → fb, dir_b/y → fa
-  SwordFsInode* found = nullptr;
+  SwordFsInode *found = nullptr;
   EXPECT_TRUE(store_->LookupEntry(dir_a->ino, "x", &found).ok());
   EXPECT_EQ(found->ino, fb->ino);
 
@@ -75,7 +73,7 @@ TEST_F(MemMetaStoreSwapTest, SameDirectorySwapDifferentNames) {
   EXPECT_TRUE(st.ok()) << st.message();
 
   // After swap: root/alpha → fb, root/beta → fa
-  SwordFsInode* found = nullptr;
+  SwordFsInode *found = nullptr;
   EXPECT_TRUE(store_->LookupEntry(kRoot, "alpha", &found).ok());
   EXPECT_EQ(found->ino, fb->ino);
 
@@ -97,7 +95,7 @@ TEST_F(MemMetaStoreSwapTest, SwapFileWithDirectory) {
   EXPECT_TRUE(st.ok()) << st.message();
 
   // Verify pointers were swapped correctly.
-  SwordFsInode* found = nullptr;
+  SwordFsInode *found = nullptr;
   EXPECT_TRUE(store_->LookupEntry(kRoot, "f", &found).ok());
   EXPECT_TRUE(found->IsDir()) << "after swap, 'f' should be the directory";
 
@@ -110,7 +108,7 @@ TEST_F(MemMetaStoreSwapTest, SwapFileWithDirectory) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, SwapMissingSourceA) {
-  SwordFsInode* fb = nullptr;
+  SwordFsInode *fb = nullptr;
   store_->AddEntry(kRoot, "b", kRegFile, 0, &fb);
 
   Status st = store_->SwapEntries(kRoot, "no_such", kRoot, "b");
@@ -122,7 +120,7 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingSourceA) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, SwapMissingSourceB) {
-  SwordFsInode* fa = nullptr;
+  SwordFsInode *fa = nullptr;
   store_->AddEntry(kRoot, "a", kRegFile, 0, &fa);
 
   Status st = store_->SwapEntries(kRoot, "a", kRoot, "no_such");
@@ -134,7 +132,7 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingSourceB) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, SwapMissingParentA) {
-  SwordFsInode* fb = nullptr;
+  SwordFsInode *fb = nullptr;
   store_->AddEntry(kRoot, "b", kRegFile, 0, &fb);
 
   Status st = store_->SwapEntries(9999, "a", kRoot, "b");
@@ -146,7 +144,7 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingParentA) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, SwapMissingParentB) {
-  SwordFsInode* fa = nullptr;
+  SwordFsInode *fa = nullptr;
   store_->AddEntry(kRoot, "a", kRegFile, 0, &fa);
 
   Status st = store_->SwapEntries(kRoot, "a", 9999, "b");
@@ -175,7 +173,9 @@ TEST_F(MemMetaStoreSwapTest, ConcurrentSwapConsistency) {
     std::string src = "a" + std::to_string(idx + 1);
     std::string dst = "b" + std::to_string(idx + 1);
     Status st = store_->SwapEntries(kRoot, src, kRoot, dst);
-    if (st.ok()) ok_count.fetch_add(1, std::memory_order_relaxed);
+    if (st.ok()) {
+      ok_count.fetch_add(1, std::memory_order_relaxed);
+    }
   };
 
   std::thread t1(swapper, 0);
@@ -186,8 +186,8 @@ TEST_F(MemMetaStoreSwapTest, ConcurrentSwapConsistency) {
   EXPECT_EQ(ok_count.load(), 2) << "Both swaps should succeed (different entries)";
 
   // Verify all entries still exist (no pointers lost).
-  for (const auto& name : {"a1", "a2", "b1", "b2"}) {
-    SwordFsInode* found = nullptr;
+  for (const auto &name : {"a1", "a2", "b1", "b2"}) {
+    SwordFsInode *found = nullptr;
     EXPECT_TRUE(store_->LookupEntry(kRoot, name, &found).ok())
         << "Entry '" << name << "' lost after concurrent swaps";
   }
@@ -205,7 +205,7 @@ TEST_F(MemMetaStoreSwapTest, SwapSameEntryNoOp) {
   EXPECT_TRUE(st.ok()) << st.message();
 
   // Entry should still point to the same inode.
-  SwordFsInode* found = nullptr;
+  SwordFsInode *found = nullptr;
   EXPECT_TRUE(store_->LookupEntry(kRoot, "only", &found).ok());
   EXPECT_EQ(found->ino, f->ino);
 }
@@ -227,7 +227,7 @@ TEST_F(MemMetaStoreSwapTest, SwapDirectoriesCrossDirectory) {
   EXPECT_TRUE(st.ok()) << st.message();
 
   // After swap: root/a → dir_b, root/b → dir_a
-  SwordFsInode* found = nullptr;
+  SwordFsInode *found = nullptr;
   EXPECT_TRUE(store_->LookupEntry(kRoot, "a", &found).ok());
   EXPECT_EQ(found->ino, dir_b->ino);
 
@@ -236,7 +236,7 @@ TEST_F(MemMetaStoreSwapTest, SwapDirectoriesCrossDirectory) {
 
   // Children should still be accessible via the swapped directories.
   // dir_b (now at "a") should have "child_b"
-  std::vector<std::pair<std::string, SwordFsInode*>> entries;
+  std::vector<std::pair<std::string, SwordFsInode *>> entries;
   store_->ListEntries(dir_b->ino, &entries);
   EXPECT_EQ(entries.size(), 1);
   EXPECT_EQ(entries[0].first, "child_b");

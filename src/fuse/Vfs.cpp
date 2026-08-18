@@ -344,7 +344,7 @@ void VfsHookFactory::SwordFsReaddir(fuse_req_t req, fuse_ino_t ino,
     std::vector<swordfs::metadata::SwordFsEntry> entries;
     entries.push_back(swordfs::metadata::SwordFsEntry{".", DT_DIR, ino});
     entries.push_back(swordfs::metadata::SwordFsEntry{
-        "..", DT_DIR, ino == FUSE_ROOT_ID ? ino : 0});
+        "..", DT_DIR, ino == swordfs::metadata::kRootInodeId ? ino : 0});
     auto status = volume::VolumeImpl::Instance().meta_engine()->ReadDir(ino, &entries);
     if (!status.ok()) {
       fuse_reply_err(req, status.ToErrno());
@@ -601,7 +601,7 @@ void VfsHookFactory::SwordFsReaddirplus(fuse_req_t req, fuse_ino_t ino,
     std::vector<swordfs::metadata::SwordFsEntry> entries;
     entries.push_back(swordfs::metadata::SwordFsEntry{".", DT_DIR, ino});
     entries.push_back(swordfs::metadata::SwordFsEntry{
-        "..", DT_DIR, ino == FUSE_ROOT_ID ? ino : 0});
+        "..", DT_DIR, ino == swordfs::metadata::kRootInodeId ? ino : 0});
     auto status = volume::VolumeImpl::Instance().meta_engine()->ReadDir(ino, &entries);
     if (!status.ok()) {
       fuse_reply_err(req, status.ToErrno());

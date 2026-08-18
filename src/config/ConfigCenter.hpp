@@ -32,7 +32,7 @@ static void PrintVersion() {
 /// Describes one registered subcommand: its CLI::App handle and the closure
 /// that executes it (called after logging is initialized).
 struct SubCommand {
-  CLI::App* cmd;
+  CLI::App *cmd;
   std::function<int()> run;
 };
 
@@ -45,46 +45,46 @@ struct LogConfig {
 /// Process-wide configuration singleton.
 class ConfigCenter {
  public:
-  static ConfigCenter& Instance() {
+  static ConfigCenter &Instance() {
     static ConfigCenter instance;
     return instance;
   }
 
   /// Bind CLI options directly to ConfigCenter members.
-  void ConfigureOptions(CLI::App& app);
+  void ConfigureOptions(CLI::App &app);
   /// Returns the selected subcommand.
   std::optional<SubCommand> SelectedSubCommand() const;
 
   /// Returns the log configuration.
-  LogConfig& log() { return log_; }
+  LogConfig &log() { return log_; }
   /// Returns the foreground mode.
   bool foreground() const { return foreground_; }
   int fuse_threads() const { return fuse_threads_; }
   int storage_async_threads() const { return storage_async_threads_; }
   /// Returns the pidfile path (mount subcommand, daemon mode).
-  const std::string& pidfile() const { return pidfile_; }
+  const std::string &pidfile() const { return pidfile_; }
   /// Returns the mount point directory.
-  const std::string& mountpoint() const { return mountpoint_; }
+  const std::string &mountpoint() const { return mountpoint_; }
 
   /// Returns the metadata engine URL (e.g. memory://local, redis://host:port).
-  const std::string& meta_url() const { return meta_url_; }
-  void set_meta_url(const std::string& url) { meta_url_ = url; }
+  const std::string &meta_url() const { return meta_url_; }
+  void set_meta_url(const std::string &url) { meta_url_ = url; }
   /// Returns the data storage type (e.g. "s3", empty = none).
-  const std::string& storage_backend() const { return storage_backend_; }
+  const std::string &storage_backend() const { return storage_backend_; }
   /// Returns the bucket URL (e.g. "s3://endpoint/bucket/prefix").
-  const std::string& bucket_url() const { return bucket_url_; }
+  const std::string &bucket_url() const { return bucket_url_; }
   /// Returns the storage region (e.g. "auto", "us-east-1").
-  const std::string& storage_region() const { return storage_region_; }
+  const std::string &storage_region() const { return storage_region_; }
   /// Returns the chunk size in bytes (format subcommand).
   size_t chunk_size() const { return chunk_size_; }
   /// Returns the volume name (format and mount subcommands).
-  const std::string& volume() const { return volume_; }
-  void set_volume(const std::string& v) { volume_ = v; }
+  const std::string &volume() const { return volume_; }
+  void set_volume(const std::string &v) { volume_ = v; }
   /// Returns the volume config path (format subcommand positional arg).
-  const std::string& volume_config_path() const { return volume_config_path_; }
-  void set_volume_config_path(const std::string& p) { volume_config_path_ = p; }
+  const std::string &volume_config_path() const { return volume_config_path_; }
+  void set_volume_config_path(const std::string &p) { volume_config_path_ = p; }
   /// Returns the FUSE mount options string (e.g. "allow_other,ro").
-  const std::string& fuse_opts() const { return fuse_opts_; }
+  const std::string &fuse_opts() const { return fuse_opts_; }
 
   /// Reset all state (testing only).
   void Initialize() {
@@ -94,16 +94,16 @@ class ConfigCenter {
  private:
  public:
   ConfigCenter() = default;
-  ConfigCenter(ConfigCenter&&) = default;
-  ConfigCenter& operator=(ConfigCenter&&) = default;
+  ConfigCenter(ConfigCenter &&) = default;
+  ConfigCenter &operator=(ConfigCenter &&) = default;
 
  private:
-  ConfigCenter(const ConfigCenter&) = delete;
-  ConfigCenter& operator=(const ConfigCenter&) = delete;
+  ConfigCenter(const ConfigCenter &) = delete;
+  ConfigCenter &operator=(const ConfigCenter &) = delete;
   /// Register mount options with the CLI::App.
-  void RegisterMountOptions(CLI::App& app);
+  void RegisterMountOptions(CLI::App &app);
   /// Register format options with the CLI::App.
-  void RegisterFormatOptions(CLI::App& app);
+  void RegisterFormatOptions(CLI::App &app);
 
  private:
   LogConfig log_;
@@ -121,10 +121,10 @@ class ConfigCenter {
   std::string storage_region_;   // --storage-region
 
   // Volume configuration (format subcommand)
-  std::string volume_;              // --volume (required for format)
-  std::string volume_config_path_;  // --volume-config-path (required for memory)
-  std::string fuse_opts_;           // -o FUSE mount options (e.g. allow_other,ro)
-  std::string pidfile_;             // --pidfile (mount daemon PID file)
+  std::string volume_;                       // --volume (required for format)
+  std::string volume_config_path_;           // --volume-config-path (required for memory)
+  std::string fuse_opts_;                    // -o FUSE mount options (e.g. allow_other,ro)
+  std::string pidfile_;                      // --pidfile (mount daemon PID file)
   size_t chunk_size_ = 64ULL * 1024 * 1024;  // --chunk-size
 
   // Subcommands registered with the CLI::App.

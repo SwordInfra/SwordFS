@@ -1,29 +1,28 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include "metadata/Types.hpp"
-#include "utils/Logging.hpp"
-#define FUSE_USE_VERSION 312
+#include "metadata/mem/MemMetaStore.hpp"
+
 #include <folly/fibers/FiberManagerInternal.h>
-#include <fuse_lowlevel.h>
 
 #include <algorithm>
 
+#include "metadata/Types.hpp"
 #include "metadata/Utils.hpp"
-#include "metadata/mem/MemMetaStore.hpp"
 #include "utils/Context.hpp"
+#include "utils/Logging.hpp"
 
 using Status = swordfs::utils::Status;
 
 namespace swordfs::metadata {
 
-MemMetaStore::MemMetaStore() : next_ino_(FUSE_ROOT_ID + 1) {
+MemMetaStore::MemMetaStore() : next_ino_(kRootInodeId + 1) {
   std::lock_guard<std::mutex> lock(mutex_);
   time_t now = ::time(nullptr);
   struct stat root_st = MakeStat(S_IFDIR | 0755, now);
-  root_st.st_ino = FUSE_ROOT_ID;
-  inodes_[FUSE_ROOT_ID] = new SwordFsInode{FUSE_ROOT_ID, root_st, 0};
-  dirs_[FUSE_ROOT_ID] = {};
+  root_st.st_ino = kRootInodeId;
+  inodes_[kRootInodeId] = new SwordFsInode{kRootInodeId, root_st, 0};
+  dirs_[kRootInodeId] = {};
 }
 
 MemMetaStore::~MemMetaStore() {

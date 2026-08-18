@@ -6,8 +6,6 @@
 // public method holds mutex_ for its entire duration, making
 // check-then-act sequences atomic.
 
-#define FUSE_USE_VERSION 312
-#include <fuse_lowlevel.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
@@ -26,7 +24,7 @@ using swordfs::metadata::MemMetaStore;
 using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
 
-static constexpr InodeID kRoot = FUSE_ROOT_ID;
+static constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
 static constexpr mode_t kRegFile = S_IFREG | 0644;
 static constexpr mode_t kDir = S_IFDIR | 0755;
 

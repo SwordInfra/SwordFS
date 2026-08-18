@@ -11,6 +11,7 @@
 #include <memory>
 
 #include "metadata/IMetaEngine.hpp"
+#include "storage/IDataEngine.hpp"
 #include "vfs/VfsImpl.hpp"
 #include "volume/VolumeImpl.hpp"
 
@@ -18,6 +19,32 @@ using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::ChunkMeta;
 using swordfs::metadata::InodeID;
 using swordfs::vfs::VfsImpl;
+
+// Minimal no-op data engine. The VfsImplIntegrationTest fixture must
+// install one because every InodeHandle constructor asserts
+// CHECK(data_engine != nullptr) — the production mount path always
+// satisfies this (--bucket is required), but unit tests need to
+// provide their own.
+class NoopDataEngine : public swordfs::storage::IDataEngine {
+ public:
+  swordfs::storage::DataEngineLimits Limits() const override { return {}; }
+  bool Head(std::string_view, size_t *) override { return false; }
+  swordfs::utils::Status Put(std::string_view,
+                             std::unique_ptr<folly::IOBuf>) override {
+    return swordfs::utils::Status::OK();
+  }
+  swordfs::utils::Status Get(std::string_view, size_t, size_t,
+                             folly::IOBuf *) override {
+    return swordfs::utils::Status::OK();
+  }
+  swordfs::utils::Status Delete(std::string_view) override {
+    return swordfs::utils::Status::OK();
+  }
+};
+
+namespace folly {
+class IOBuf;
+}
 
 // ────────────────────────────────────────────────────────────────
 // Volume singleton access
@@ -215,6 +242,9 @@ class VfsImplIntegrationTest : public ::testing::Test {
     auto mock = std::make_unique<MockMetaEngine>();
     mock_meta_ = mock.get();
     vol.set_meta_engine(std::move(mock));
+    // InodeHandle's constructor asserts CHECK(data_engine != nullptr);
+    // install a no-op so the test paths that go through Open succeed.
+    vol.set_data_engine(std::make_unique<NoopDataEngine>());
   }
 
   void TearDown() override {
