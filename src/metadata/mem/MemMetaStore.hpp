@@ -61,9 +61,15 @@ class MemMetaStore {
   Status MoveEntry(InodeID old_parent_ino, std::string_view old_name,
                    InodeID new_parent_ino, std::string_view new_name);
 
-  // Remove a child entry by name and free the inode (and directory table,
-  // for directories). A non-empty directory returns Busy.
-  Status RemoveEntry(InodeID parent_ino, std::string_view name);
+  // POSIX unlink(2): remove the child entry from its parent and
+  // decrement nlink. Does NOT delete the inode or its data; that is
+  // the caller's responsibility (typically `VfsImpl::Unlink` will
+  // follow up with `ReclaimData` once it has confirmed no open file
+  // descriptor still references the inode).
+  // A non-empty directory returns Busy; "." / ".." are rejected via the
+  // permission layer above.
+  Status Unlink(InodeID parent_ino, std::string_view name,
+                nlink_t *post_nlink = nullptr);
 
   // Link an existing inode into a directory (hard link). Increments nlink.
   Status LinkExistingEntry(InodeID parent_ino, std::string_view name,
@@ -96,10 +102,16 @@ class MemMetaStore {
   // Open-unlink reclaim
   // ────────────────────────────────────────────────────────────────
 
-  // Delete |ino| and its data if the inode is orphaned (nlink==0).  No-op
-  // otherwise.  The open-fd count is tracked by the VFS layer; this method
-  // is called once that layer knows no fds remain.
-  Status ReclaimData(InodeID ino);
+  // Delete |ino| and its chunk-metadata map if the inode is orphaned
+  // (nlink==0). No-op otherwise. The chunk objects themselves are NOT
+  // deleted from the data engine here — the caller must enumerate the
+  // chunk keys via `ListChunks` and call `IDataEngine::Delete` on each.
+  Status ReclaimInode(InodeID ino);
+
+  // Snapshot every chunk registered for |ino|. The order is ascending
+  // chunk index so callers can issue data-engine Deletes in order and
+  // log replay matches insertion order.
+  Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out);
 
  private:
   // ────────────────────────────────────────────────────────────────
@@ -119,6 +131,7 @@ class MemMetaStore {
  private:
   mutable std::mutex mutex_;
   std::atomic<InodeID> next_ino_;
+
   folly::F14FastMap<InodeID, SwordFsInode *> inodes_;
   folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode *>> dirs_;
 

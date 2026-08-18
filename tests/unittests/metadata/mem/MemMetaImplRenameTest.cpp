@@ -6,9 +6,7 @@
 // - overwrite behaviors (file, empty directory)
 // - RENAME_NOREPLACE / RENAME_EXCHANGE flag handling (PR #24)
 
-#define FUSE_USE_VERSION 312
 #include <folly/fibers/FiberManagerInternal.h>
-#include <fuse_lowlevel.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
@@ -21,7 +19,7 @@ using swordfs::metadata::MemMetaImpl;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
-static constexpr InodeID kRoot = FUSE_ROOT_ID;
+static constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
 
 class MemMetaImplRenameTest : public ::testing::Test {
  protected:
@@ -31,7 +29,7 @@ class MemMetaImplRenameTest : public ::testing::Test {
   }
   void TearDown() override { delete impl_; }
 
-  MemMetaImpl* impl_;
+  MemMetaImpl *impl_;
 };
 
 // ════════════════════════════════════════════════════════════════════

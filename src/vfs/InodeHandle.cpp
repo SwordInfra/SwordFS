@@ -4,17 +4,25 @@
 #include "vfs/InodeHandle.hpp"
 
 #include <folly/container/F14Map.h>
+#include <folly/logging/xlog.h>
 
 #include <mutex>
 
 #include "metadata/IMetaEngine.hpp"
+#include "storage/IDataEngine.hpp"
+#include "utils/Logging.hpp"
 #include "vfs/FileReadWriter.hpp"
 #include "volume/VolumeImpl.hpp"
 
 namespace swordfs::vfs {
 
 InodeHandle::InodeHandle(metadata::InodeID ino)
-    : ino_(ino), rw_(std::make_shared<FileReadWriter>(ino)) {}
+    : ino_(ino),
+      meta_(volume::VolumeImpl::Instance().meta_engine()),
+      data_(volume::VolumeImpl::Instance().data_engine()),
+      rw_(std::make_shared<FileReadWriter>(ino)) {
+  CHECK(data_ != nullptr);
+}
 
 utils::Status InodeHandle::Open(int flags) {
   // Performs the open-time permission check and atime update.
@@ -52,12 +60,18 @@ utils::Status InodeHandle::Close() {
   if (!status.ok()) {
     return status;
   }
-  // Reclaim exactly once, when the last reference to an orphaned inode is
-  // released.  state.orphaned was snapshotted atomically with the
+
+  // Reclaim exactly once, when the last reference to an orphaned inode
+  // is released.  state.orphaned was snapshotted atomically with the
   // decrement inside ReleaseRef(), so this decision cannot race with
-  // MarkOrphanedIfOpen().
+  // MarkOrphanedIfOpen(). ReclaimData removes both the chunk objects
+  // (via the data engine) and the inode (via the metadata engine).
   if (state.orphaned) {
-    volume::VolumeImpl::Instance().meta_engine()->ReclaimData(ino_);
+    auto status = ReclaimData();
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "InodeHandle::Close: ReclaimData(" << ino_
+                        << ") failed: " << status.message();
+    }
   }
   return utils::Status::OK();
 }
@@ -104,6 +118,11 @@ InodeHandleManager &InodeHandleManager::Instance() {
   return instance;
 }
 
+void InodeHandleManager::Initialize() {
+  std::unique_lock lock(mutex_);
+  inode_handles_->clear();
+}
+
 std::shared_ptr<InodeHandle> InodeHandleManager::Get(metadata::InodeID ino, bool create_if_missing) {
   {
     std::shared_lock lock(mutex_);
@@ -124,6 +143,62 @@ std::shared_ptr<InodeHandle> InodeHandleManager::Get(metadata::InodeID ino, bool
   std::unique_lock lock(mutex_);
   (*inode_handles_)[ino] = handle;
   return handle;
+}
+
+utils::Status InodeHandle::ReclaimData() {
+  // Last-line-of-defence guards. Callers (VfsImpl::Unlink,
+  // InodeHandle::Close) are supposed to verify these *before* they call
+  // us, but they're racing with concurrent Link / Open on the same
+  // inode and may have made a decision on stale state. ReclaimData is
+  // the point of no return — once we Delete chunk objects from S3, no
+  // other thread can recover them — so we re-check here.
+  struct stat attr;
+  Status status = meta_->GetAttr(ino_, &attr);
+  if (status.IsNotFound()) {
+    // Inode already gone — a concurrent reclaim won the race. The
+    // chunk objects are presumably already deleted too. Idempotent
+    // success.
+    return utils::Status::OK();
+  } else if (!status.ok()) {
+    return status;
+  }
+
+  if (attr.st_nlink > 0) {
+    // Another directory entry still references this inode (a
+    // concurrent Link raced our Unlink). Refusing to reclaim keeps
+    // the chunk objects alive for the surviving name.
+    SWORDFS_LOG_WARN << "ReclaimData(" << ino_
+                     << ") refused: nlink=" << attr.st_nlink
+                     << " (>0). A concurrent Link won the race.";
+    return utils::Status::OK();
+  } else if (open_count_ > 0) {
+    // An fd is still open on this inode. The caller should have
+    // routed through MarkOrphaned instead — refuse to drop the
+    // underlying chunks/inode out from under it.
+    SWORDFS_LOG_WARN << "ReclaimData(" << ino_
+                     << ") refused: open handle still references it.";
+    return utils::Status::OK();
+  }
+
+  // 1. Enumerate every chunk the metadata engine still tracks for this
+  //    inode and issue a data-engine delete for each.
+  std::vector<metadata::ChunkMeta> chunks;
+  status = meta_->ListChunks(ino_, &chunks);
+  if (!status.ok()) {
+    SWORDFS_LOG_ERROR << "ReclaimData: ListChunks(" << ino_
+                      << ") failed: " << status.message();
+    return status;
+  }
+  for (const auto &cm : chunks) {
+    status = data_->Delete(cm.key);
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << cm.key
+                        << ") failed: " << status.message();
+    }
+  }
+
+  // 2. Drop the inode from the metadata engine.
+  return meta_->ReclaimInode(ino_);
 }
 
 }  // namespace swordfs::vfs

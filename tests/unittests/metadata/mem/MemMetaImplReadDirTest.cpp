@@ -5,10 +5,8 @@
 // Validates the data layer that feeds into VfsImpl::Readdir/Readdirplus
 // (the FUSE formatting fix is in PR #23).
 
-#define FUSE_USE_VERSION 312
 #include <dirent.h>
 #include <folly/fibers/FiberManagerInternal.h>
-#include <fuse_lowlevel.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
@@ -24,7 +22,7 @@ using swordfs::metadata::SwordFsEntry;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
-static constexpr InodeID kRoot = FUSE_ROOT_ID;
+static constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
 
 class MemMetaImplReadDirTest : public ::testing::Test {
  protected:
@@ -34,7 +32,7 @@ class MemMetaImplReadDirTest : public ::testing::Test {
   }
   void TearDown() override { delete impl_; }
 
-  MemMetaImpl* impl_;
+  MemMetaImpl *impl_;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -68,7 +66,7 @@ TEST_F(MemMetaImplReadDirTest, ReadDirWithEntries) {
 
   // Verify no duplicate names.
   std::set<std::string> names;
-  for (const auto& e : entries) {
+  for (const auto &e : entries) {
     EXPECT_TRUE(names.insert(e.name).second) << "Duplicate entry: " << e.name;
     EXPECT_GT(e.ino, kRoot);
     EXPECT_EQ(e.type, DT_REG);
@@ -101,7 +99,7 @@ TEST_F(MemMetaImplReadDirTest, ReadDirMixedTypes) {
   EXPECT_TRUE(impl_->ReadDir(kRoot, &entries).ok());
   EXPECT_EQ(entries.size(), 2);
 
-  for (const auto& e : entries) {
+  for (const auto &e : entries) {
     if (e.name == "file.txt") {
       EXPECT_EQ(e.type, DT_REG);
     } else if (e.name == "subdir") {
@@ -172,7 +170,7 @@ TEST_F(MemMetaImplReadDirTest, ReadDirLargeDirectory) {
 
   // All inodes should be unique.
   std::set<InodeID> inodes;
-  for (const auto& e : entries) {
+  for (const auto &e : entries) {
     inodes.insert(e.ino);
   }
   EXPECT_EQ(inodes.size(), kFiles) << "Duplicate inodes in ReadDir output";

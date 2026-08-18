@@ -1,8 +1,6 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#define FUSE_USE_VERSION 312
-#include <fuse_lowlevel.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
@@ -16,7 +14,7 @@ using swordfs::metadata::MemMetaStore;
 using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
 
-static constexpr InodeID kRoot = FUSE_ROOT_ID;
+static constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
 static constexpr mode_t kRegFile = S_IFREG | 0644;
 static constexpr mode_t kDir = S_IFDIR | 0755;
 
@@ -186,47 +184,56 @@ TEST_F(MemMetaStoreTest, MoveEntryTargetExists) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// RemoveEntry
+// Unlink
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, RemoveEntryDeletesInode) {
+TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
+  // Unlink only detaches the directory entry and decrements nlink.
+  // The inode survives until the caller (VfsImpl::Unlink or
+  // InodeHandle::Close) calls ReclaimData. Callers that want immediate
+  // cleanup of a single-name unlink invoke ReclaimData themselves.
   SwordFsInode *f = nullptr;
   store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
   InodeID ino = f->ino;
 
   EXPECT_EQ(store_->InodeCount(), 2);  // root + f
-  EXPECT_TRUE(store_->RemoveEntry(kRoot, "f").ok());
+  EXPECT_TRUE(store_->Unlink(kRoot, "f").ok());
 
   // Entry gone from directory
   EXPECT_TRUE(store_->LookupEntry(kRoot, "f", nullptr).IsNotFound());
-  // Inode freed
+  // Inode and its metadata stay alive (nlink == 0).
+  EXPECT_EQ(store_->InodeCount(), 2);
+  EXPECT_TRUE(store_->LookupInode(ino, nullptr).ok());
+
+  // Caller follows up with ReclaimInode to free the orphaned inode.
+  EXPECT_TRUE(store_->ReclaimInode(ino).ok());
   EXPECT_EQ(store_->InodeCount(), 1);
   EXPECT_TRUE(store_->LookupInode(ino, nullptr).IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, RemoveEntryIdempotent) {
-  EXPECT_TRUE(store_->RemoveEntry(kRoot, "nonexistent").ok());
+TEST_F(MemMetaStoreTest, UnlinkIdempotent) {
+  EXPECT_TRUE(store_->Unlink(kRoot, "nonexistent").ok());
   EXPECT_EQ(store_->InodeCount(), 1);
 }
 
-TEST_F(MemMetaStoreTest, RemoveEntryNonEmptyDirectory) {
+TEST_F(MemMetaStoreTest, UnlinkNonEmptyDirectory) {
   SwordFsInode *sub = nullptr;
   store_->AddEntry(kRoot, "sub", kDir, 0, &sub);
 
   // Add a file inside sub
   store_->AddEntry(sub->ino, "f", kRegFile, 0, nullptr);
 
-  Status st = store_->RemoveEntry(kRoot, "sub");
+  Status st = store_->Unlink(kRoot, "sub");
   EXPECT_TRUE(st.IsNotEmpty());
   EXPECT_EQ(store_->InodeCount(), 3);  // root + sub + f
 }
 
-TEST_F(MemMetaStoreTest, RemoveEntryEmptyDirectory) {
+TEST_F(MemMetaStoreTest, UnlinkEmptyDirectory) {
   SwordFsInode *sub = nullptr;
   store_->AddEntry(kRoot, "sub", kDir, 0, &sub);
-  InodeID sub_ino = sub->ino;  // save before RemoveEntry frees the pointer
+  InodeID sub_ino = sub->ino;  // save before Unlink frees the pointer
 
-  EXPECT_TRUE(store_->RemoveEntry(kRoot, "sub").ok());
+  EXPECT_TRUE(store_->Unlink(kRoot, "sub").ok());
   // Both sub and its dir entry table freed
   EXPECT_TRUE(store_->LookupInode(sub_ino, nullptr).IsNotFound());
   EXPECT_EQ(store_->InodeCount(), 1);
@@ -380,33 +387,92 @@ TEST_F(MemMetaStoreTest, TruncateChunksClampsStraddlingChunk) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// ReclaimData (open-unlink)
+// ReclaimInode (open-unlink)
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, ReclaimDataMissingInodeIsNoOp) {
-  EXPECT_TRUE(store_->ReclaimData(999).ok());
+TEST_F(MemMetaStoreTest, ReclaimInodeMissingInodeIsNoOp) {
+  EXPECT_TRUE(store_->ReclaimInode(999).ok());
 }
 
-TEST_F(MemMetaStoreTest, ReclaimDataDeletesOrphanedInode) {
+TEST_F(MemMetaStoreTest, ReclaimInodeDeletesOrphanedInode) {
   SwordFsInode *f = nullptr;
   store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
   InodeID ino = f->ino;
   f->attr.st_nlink = 0;  // simulate unlink while the inode is still retained
 
   EXPECT_EQ(store_->InodeCount(), 2);
-  ASSERT_TRUE(store_->ReclaimData(ino).ok());
+  ASSERT_TRUE(store_->ReclaimInode(ino).ok());
   EXPECT_EQ(store_->InodeCount(), 1);
   EXPECT_TRUE(store_->LookupInode(ino, nullptr).IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, ReclaimDataKeepsLinkedInode) {
+TEST_F(MemMetaStoreTest, ReclaimInodeKeepsLinkedInode) {
   SwordFsInode *f = nullptr;
   store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
   InodeID ino = f->ino;  // nlink == 1 — not orphaned
 
-  ASSERT_TRUE(store_->ReclaimData(ino).ok());
+  ASSERT_TRUE(store_->ReclaimInode(ino).ok());
   EXPECT_EQ(store_->InodeCount(), 2);
   SwordFsInode *out = nullptr;
   ASSERT_TRUE(store_->LookupInode(ino, &out).ok());
   EXPECT_EQ(out, f);
+}
+
+// ────────────────────────────────────────────────────────────────
+// ListChunks — drives the VFS coordinator's chunk enumeration path.
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(MemMetaStoreTest, ListChunksEmptyInodeIsOk) {
+  // No chunks registered: ListChunks must return an empty vector,
+  // not an error. The coordinator relies on this to distinguish
+  // "no data to delete" from "metadata failure".
+  SwordFsInode *f = nullptr;
+  store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
+
+  std::vector<ChunkMeta> out;
+  ASSERT_TRUE(store_->ListChunks(f->ino, &out).ok());
+  EXPECT_TRUE(out.empty());
+}
+
+TEST_F(MemMetaStoreTest, ListChunksNullOutIsError) {
+  // Defensive: callers must hand in a valid pointer. A null out
+  // would silently lose the chunks the coordinator needs to drive
+  // data-engine Deletes — better to fail loudly.
+  EXPECT_TRUE(store_->ListChunks(1, nullptr).code() == Status::kInvalidArgument);
+}
+
+TEST_F(MemMetaStoreTest, ListChunksReturnsRegisteredChunksInIndexOrder) {
+  constexpr uint64_t kChunkSize = 65536;
+  SwordFsInode *f = nullptr;
+  store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
+  InodeID ino = f->ino;
+
+  // Add three chunks out of order; the snapshot must be sorted by
+  // ChunkIndex so the coordinator's Delete calls follow the same
+  // order as a sequential reader would.
+  ChunkMeta c2{};
+  c2.index = 2;
+  c2.start_offset = 2 * kChunkSize;
+  c2.key = std::to_string(ino) + "/2";
+  c2.size = 100;
+  ChunkMeta c0{};
+  c0.index = 0;
+  c0.start_offset = 0;
+  c0.key = std::to_string(ino) + "/0";
+  c0.size = 100;
+  ChunkMeta c1{};
+  c1.index = 1;
+  c1.start_offset = kChunkSize;
+  c1.key = std::to_string(ino) + "/1";
+  c1.size = 100;
+  ASSERT_TRUE(store_->AddChunk(ino, c2).ok());
+  ASSERT_TRUE(store_->AddChunk(ino, c0).ok());
+  ASSERT_TRUE(store_->AddChunk(ino, c1).ok());
+
+  std::vector<ChunkMeta> out;
+  ASSERT_TRUE(store_->ListChunks(ino, &out).ok());
+  ASSERT_EQ(out.size(), 3);
+  EXPECT_EQ(out[0].index, 0);
+  EXPECT_EQ(out[1].index, 1);
+  EXPECT_EQ(out[2].index, 2);
 }

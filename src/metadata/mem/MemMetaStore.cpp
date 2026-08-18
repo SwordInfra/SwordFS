@@ -1,28 +1,28 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include "metadata/Types.hpp"
-#include "utils/Logging.hpp"
-#define FUSE_USE_VERSION 312
-#include <folly/fibers/FiberManagerInternal.h>
-#include <fuse_lowlevel.h>
-
-#include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
+
+#include <folly/fibers/FiberManagerInternal.h>
+
+#include <algorithm>
+
+#include "metadata/Types.hpp"
+#include "metadata/Utils.hpp"
 #include "utils/Context.hpp"
-#include "vfs/InodeHandle.hpp"
+#include "utils/Logging.hpp"
 
 using Status = swordfs::utils::Status;
 
 namespace swordfs::metadata {
 
-MemMetaStore::MemMetaStore() : next_ino_(FUSE_ROOT_ID + 1) {
+MemMetaStore::MemMetaStore() : next_ino_(kRootInodeId + 1) {
   std::lock_guard<std::mutex> lock(mutex_);
   time_t now = ::time(nullptr);
   struct stat root_st = MakeStat(S_IFDIR | 0755, now);
-  root_st.st_ino = FUSE_ROOT_ID;
-  inodes_[FUSE_ROOT_ID] = new SwordFsInode{FUSE_ROOT_ID, root_st, 0};
-  dirs_[FUSE_ROOT_ID] = {};
+  root_st.st_ino = kRootInodeId;
+  inodes_[kRootInodeId] = new SwordFsInode{kRootInodeId, root_st, 0};
+  dirs_[kRootInodeId] = {};
 }
 
 MemMetaStore::~MemMetaStore() {
@@ -141,39 +141,49 @@ Status MemMetaStore::MoveEntry(InodeID old_parent_ino,
   return Status::OK();
 }
 
-Status MemMetaStore::RemoveEntry(InodeID parent_ino, std::string_view name) {
+Status MemMetaStore::Unlink(InodeID parent_ino, std::string_view name,
+                            nlink_t *post_nlink) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   SwordFsInode *child = FindEntryLocked(parent_ino, name);
   if (!child) {
-    return Status::OK();  // idempotent
+    // Idempotent: a parallel unlink already removed the entry.
+    if (post_nlink) {
+      *post_nlink = 0;
+    }
+    return Status::OK();
   }
 
   if (child->IsDir() && !IsDirEmptyLocked(child->ino)) {
     return Status::NotEmpty("directory not empty");
   }
 
+  // Remove the directory entry. Decrement nlink to track the hard-link
+  // count. The inode (and its chunks) survive here; the caller decides
+  // whether to follow up with `ReclaimData` once it has confirmed no
+  // open file descriptor still references the inode.
   UnlinkEntryLocked(parent_ino, name);
 
-  if (!child->IsDir()) {
-    // Decrement nlink; only delete the inode when no names remain.
-    // This is the hard-link semantic: each unlink removes one name,
-    // and the data survives until the last name is gone.
-    child->attr.st_nlink--;
-    if (child->attr.st_nlink == 0) {
-      auto handle = vfs::InodeHandleManager::Instance().Get(
-          child->ino, /*create_if_missing=*/false);
-      if (!handle || !handle->MarkOrphanedIfOpen()) {
-        DeleteInodeLocked(child->ino);
-        return Status::OK();
-      }
-      // Open fds remain — defer reclaim until the last close
-      // (POSIX open-unlink semantics).
-      return Status::OK();
-    }
-  } else {
-    // Directories cannot be hard-linked; always delete.
+  if (child->IsDir()) {
+    // Directories cannot be hard-linked; always reclaim immediately.
     DeleteInodeLocked(child->ino);
+    if (post_nlink) {
+      // Inode is gone — surface 0 so the caller doesn't try to read
+      // further metadata for it.
+      *post_nlink = 0;
+    }
+    return Status::OK();
+  }
+
+  // File: decrement nlink only. If no names remain, the inode stays
+  // alive until the caller (VfsImpl::Unlink or InodeHandle::Close)
+  // confirms no fd is open and calls ReclaimData.
+  child->attr.st_nlink--;
+  if (post_nlink) {
+    // Read it back under the same lock so the caller sees the exact
+    // post-decrement value with no chance of a concurrent Link racing
+    // in between.
+    *post_nlink = child->attr.st_nlink;
   }
   return Status::OK();
 }
@@ -416,7 +426,7 @@ Status MemMetaStore::TruncateChunks(InodeID ino, size_t new_size) {
 // Open-unlink reclaim
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaStore::ReclaimData(InodeID ino) {
+Status MemMetaStore::ReclaimInode(InodeID ino) {
   std::lock_guard<std::mutex> lock(mutex_);
   SwordFsInode *inode = FindInodeLocked(ino);
   if (!inode) {
@@ -425,6 +435,30 @@ Status MemMetaStore::ReclaimData(InodeID ino) {
   if (inode->attr.st_nlink == 0) {
     DeleteInodeLocked(ino);
   }
+  return Status::OK();
+}
+
+Status MemMetaStore::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
+  if (!out) {
+    return Status::InvalidArgument("null out");
+  }
+  out->clear();
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = chunks_.find(ino);
+  if (it == chunks_.end()) {
+    return Status::OK();
+  }
+  out->reserve(it->second.size());
+  for (const auto &[idx, cm] : it->second) {
+    out->push_back(cm);
+  }
+  // F14FastMap iteration order is unspecified; the contract for
+  // ListChunks is ascending ChunkIndex so a single audit log of
+  // deletes reads top-to-bottom. Sort by index to honour it.
+  std::sort(out->begin(), out->end(),
+            [](const ChunkMeta &a, const ChunkMeta &b) {
+              return a.index < b.index;
+            });
   return Status::OK();
 }
 

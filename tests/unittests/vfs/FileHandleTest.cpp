@@ -5,19 +5,24 @@
 // high-level Open/Create entry points.
 
 #include <folly/fibers/FiberManagerInternal.h>
+#include <folly/logging/xlog.h>
 #include <gtest/gtest.h>
 
 #include <cstring>
 #include <memory>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
+#include "storage/IDataEngine.hpp"
 #include "utils/Context.hpp"
+#include "utils/Logging.hpp"
 #include "utils/Status.hpp"
 #include "vfs/FileHandle.hpp"
+#include "vfs/InodeHandle.hpp"
 #include "volume/VolumeImpl.hpp"
 
 namespace swordfs::vfs {
@@ -29,12 +34,37 @@ using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
 using swordfs::utils::Status;
 
+// Minimal no-op data engine. The fixture needs to install one so the
+// CHECK(data_) in InodeHandle::ReclaimData does not fire on the
+// orphan-close reclaim path; the full FakeDataEngine (which records
+// Delete calls) lives below alongside the ReclaimData tests.
+class NoopDataEngine : public swordfs::storage::IDataEngine {
+ public:
+  swordfs::storage::DataEngineLimits Limits() const override { return {}; }
+  bool Head(std::string_view, size_t *) override { return false; }
+  Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
+    return Status::OK();
+  }
+  Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
+    return Status::OK();
+  }
+  Status Delete(std::string_view) override { return Status::OK(); }
+};
+
 // Minimal IMetaEngine — every op succeeds; Create fabricates an inode.
 class MockMetaEngine : public IMetaEngine {
  public:
   Status Lookup(InodeID, std::string_view, InodeID *,
                 struct stat *) override { return Status::OK(); }
-  Status GetAttr(InodeID, struct stat *) override { return Status::OK(); }
+  Status GetAttr(InodeID, struct stat *attr) override {
+    // Default to nlink==0 so that callers which use GetAttr as a stand-in
+    // for a "does this inode still exist and is it orphaned?" probe
+    // (e.g. ReclaimData's last-line-of-defence guard) proceed instead
+    // of refusing on an uninitialised attr. Tests that need a specific
+    // nlink (or any other attr) install their own engine.
+    std::memset(attr, 0, sizeof(*attr));
+    return Status::OK();
+  }
   Status ReadDir(InodeID,
                  std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
@@ -49,12 +79,10 @@ class MockMetaEngine : public IMetaEngine {
   }
   Status MkDir(InodeID, std::string_view, mode_t, InodeID *,
                struct stat *) override { return Status::OK(); }
-  Status Unlink(InodeID, std::string_view) override { return Status::OK(); }
+  Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
-  Status Rename(InodeID, std::string_view, InodeID,
-                std::string_view, unsigned int) override {
-    return Status::OK();
-  }
+  Status Rename(InodeID, std::string_view, InodeID, std::string_view,
+                unsigned int) override { return Status::OK(); }
   Status SetAttr(InodeID, const struct stat *, int,
                  struct stat *) override { return Status::OK(); }
   Status StatFs(struct statvfs *) override { return Status::OK(); }
@@ -65,9 +93,12 @@ class MockMetaEngine : public IMetaEngine {
               struct stat *) override { return Status::OK(); }
   Status Readlink(InodeID, std::string *) override { return Status::OK(); }
   Status Open(InodeID) override { return open_status; }
-  Status ReclaimData(InodeID) override {
+  Status ReclaimInode(InodeID) override {
     ++reclaim_calls;
     return reclaim_status;
+  }
+  Status ListChunks(InodeID, std::vector<ChunkMeta> *) override {
+    return Status::OK();
   }
   Status OpenDir(InodeID) override { return Status::OK(); }
   Status Forget(InodeID, uint64_t) override { return Status::OK(); }
@@ -97,9 +128,22 @@ class FileHandleTest : public ::testing::Test {
  protected:
   void SetUp() override {
     volume::VolumeImpl::Initialize();
+    // Drop any per-inode state left by a prior test. The
+    // InodeHandleManager is a process-lifetime singleton; without this
+    // reset, leaked InodeHandles (especially with non-zero open_count)
+    // would make Get(ino, false) hand out stale handles and ReclaimData's
+    // last-line-of-defence guard refuse on arbitrary later inodes. The
+    // same Initialize() is also called on the production mount path.
+    InodeHandleManager::Instance().Initialize();
     auto meta = std::make_unique<MockMetaEngine>();
     mock_meta_ = meta.get();
     volume::VolumeImpl::Instance().set_meta_engine(std::move(meta));
+    // ReclaimData now requires a data engine (production invariant —
+    // --bucket is required). Tests that exercise the orphan-close
+    // reclaim path (e.g. CloseReclaimsOrphanedInode) would otherwise
+    // trip the CHECK(), so install a no-op fake here.
+    volume::VolumeImpl::Instance().set_data_engine(
+        std::make_unique<NoopDataEngine>());
   }
 
   void TearDown() override {
@@ -240,6 +284,11 @@ TEST_F(FileHandleTest, ConcurrentOpenAndFind) {
         EXPECT_TRUE(status.ok());
         auto found = FileHandleManager::Instance().Find(handle.fh());
         EXPECT_TRUE(found.has_value());
+        // Release eagerly: leaving 400 fh dangling across the test
+        // boundary corrupts later open-count assertions (Get(ino, false)
+        // would hand out handles with a non-zero open_count for these
+        // synthetic inodes).
+        FileHandleManager::Instance().Release(handle.fh());
       }
     });
   }
@@ -385,6 +434,436 @@ TEST_F(FileHandleTest, MarkOrphanedIfOpenFalseWhenNoOpenFds) {
   ASSERT_NE(inode_handle, nullptr);
   EXPECT_FALSE(inode_handle->MarkOrphanedIfOpen());
   EXPECT_EQ(inode_handle->open_count(), 0);
+}
+
+// ────────────────────────────────────────────────────────────────
+// InodeHandle open-fd tracking (VfsImpl::Unlink decision)
+// ────────────────────────────────────────────────────────────────
+//
+// `VfsImpl::Unlink` consults the per-inode InodeHandle (via
+// InodeHandleManager::Get) to decide whether to defer the inode
+// reclaim. The case below exercises the lifecycle: no handle → open fd
+// → handle present with open_count>0 → close → open_count back to 0.
+
+TEST_F(FileHandleTest, InodeHandleOpenFdTracking) {
+  // No handle yet -> Get without create reports absence.
+  InodeID test_ino = 9998;
+  EXPECT_EQ(InodeHandleManager::Instance().Get(test_ino, false), nullptr);
+
+  // FileHandle::Open routes through mock_meta_ and creates the handle.
+  FileHandle handle;
+  ASSERT_TRUE(FileHandle::Open(test_ino, O_RDWR, &handle).ok());
+  auto inode_handle = InodeHandleManager::Instance().Get(test_ino, false);
+  ASSERT_NE(inode_handle, nullptr);
+  EXPECT_GT(inode_handle->open_count(), 0u);
+
+  // Release drops the open fd; the handle's open_count reflects it.
+  FileHandleManager::Instance().Release(handle.fh());
+  EXPECT_EQ(inode_handle->open_count(), 0u);
+}
+
+// ────────────────────────────────────────────────────────────────
+// InodeHandle::ReclaimData — coordinator contract
+// ────────────────────────────────────────────────────────────────
+//
+// ReclaimData fans a single call out to both the metadata engine
+// (ListChunks + ReclaimInode) and the data engine (Delete per chunk
+// key). These tests assert that the call sequence matches the
+// documented contract; the per-engine behaviour is exercised by the
+// metadata- and data-engine unit tests.
+
+namespace {
+
+// Mock data engine: records every Delete call and lets the test inject
+// per-key failure responses.
+class FakeDataEngine : public swordfs::storage::IDataEngine {
+ public:
+  swordfs::storage::DataEngineLimits Limits() const override {
+    return {};
+  }
+  bool Head(std::string_view, size_t *) override { return false; }
+  Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
+    return Status::OK();
+  }
+  Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
+    return Status::OK();
+  }
+  Status Delete(std::string_view key) override {
+    delete_calls.push_back(std::string(key));
+    auto it = fail_keys.find(std::string(key));
+    if (it != fail_keys.end()) {
+      return it->second;
+    }
+    return Status::OK();
+  }
+  std::vector<std::string> delete_calls;
+  std::unordered_map<std::string, Status> fail_keys;
+};
+
+// Mock metadata engine: records ListChunks / ReclaimInode invocations
+// and returns a configurable chunk list + GetAttr (so the ReclaimData
+// guard sees the nlink value the test wants).
+class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
+ public:
+  Status Lookup(InodeID, std::string_view, InodeID *,
+                struct stat *) override { return Status::OK(); }
+  Status GetAttr(InodeID ino, struct stat *attr) override {
+    auto it = attrs.find(ino);
+    if (it == attrs.end()) {
+      return Status::NotFound("inode not found");
+    }
+    *attr = it->second;
+    return Status::OK();
+  }
+  void SetAttr(InodeID ino, struct stat attr) { attrs[ino] = attr; }
+  Status ReadDir(InodeID,
+                 std::vector<swordfs::metadata::SwordFsEntry> *) override {
+    return Status::OK();
+  }
+  Status Create(InodeID, std::string_view, mode_t, InodeID *,
+                struct stat *) override { return Status::OK(); }
+  Status MkDir(InodeID, std::string_view, mode_t, InodeID *,
+               struct stat *) override { return Status::OK(); }
+  Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
+  Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
+  Status Rename(InodeID, std::string_view, InodeID, std::string_view,
+                unsigned int) override { return Status::OK(); }
+  Status SetAttr(InodeID, const struct stat *, int,
+                 struct stat *) override { return Status::OK(); }
+  Status StatFs(struct statvfs *) override { return Status::OK(); }
+  Status Access(InodeID, int) override { return Status::OK(); }
+  Status Symlink(InodeID, std::string_view, const char *, InodeID *,
+                 struct stat *) override { return Status::OK(); }
+  Status Link(InodeID, InodeID, std::string_view,
+              struct stat *) override { return Status::OK(); }
+  Status Readlink(InodeID, std::string *) override { return Status::OK(); }
+  Status Open(InodeID) override { return Status::OK(); }
+  Status ReclaimInode(InodeID ino) override {
+    ++reclaim_inode_calls;
+    last_reclaim_ino = ino;
+    return Status::OK();
+  }
+  Status ListChunks(InodeID ino,
+                    std::vector<swordfs::metadata::ChunkMeta> *out) override {
+    ++list_chunks_calls;
+    last_list_ino = ino;
+    if (!list_chunks_status.ok()) {
+      return list_chunks_status;
+    }
+    *out = chunks;
+    return Status::OK();
+  }
+  Status OpenDir(InodeID) override { return Status::OK(); }
+  Status Forget(InodeID, uint64_t) override { return Status::OK(); }
+  Status AddChunk(InodeID, const swordfs::metadata::ChunkMeta &) override {
+    return Status::OK();
+  }
+  Status FindChunk(InodeID, swordfs::metadata::ChunkIndex,
+                   swordfs::metadata::ChunkMeta *) override {
+    return Status::NotFound("no chunk");
+  }
+  Status Truncate(InodeID, size_t) override { return Status::OK(); }
+
+  int list_chunks_calls = 0;
+  int reclaim_inode_calls = 0;
+  InodeID last_list_ino = 0;
+  InodeID last_reclaim_ino = 0;
+  Status list_chunks_status = Status::OK();
+  std::vector<swordfs::metadata::ChunkMeta> chunks;
+  std::unordered_map<InodeID, struct stat> attrs;
+};
+
+}  // namespace
+
+// Reclaim an inode through the InodeHandle API. The manager is now only
+// a registry, so callers fetch (or lazily create) the per-inode handle
+// and invoke its ReclaimData() instance method directly.
+static Status ReclaimInode(metadata::InodeID ino) {
+  auto handle = InodeHandleManager::Instance().Get(ino,
+                                                   /*create_if_missing=*/true);
+  if (!handle) {
+    return Status::Internal("failed to get or create InodeHandle");
+  }
+  return handle->ReclaimData();
+}
+
+TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
+  // Ensure the singleton exists before we touch it — the fixture's
+  // SetUp() normally does this, but a test run via --gtest_filter may
+  // bypass it.
+  swordfs::volume::VolumeImpl::Initialize();
+  auto meta_up = std::make_unique<TrackingMetaEngine>();
+  auto data_up = std::make_unique<FakeDataEngine>();
+  // Keep raw pointers around for assertions after the engines move into
+  // the volume singleton (which takes ownership).
+  auto *meta = meta_up.get();
+  auto *data = data_up.get();
+
+  // Seed two chunk records.
+  swordfs::metadata::ChunkMeta c0{};
+  c0.index = 0;
+  c0.start_offset = 0;
+  c0.key = "4242/0";
+  c0.size = 1024;
+  swordfs::metadata::ChunkMeta c1{};
+  c1.index = 1;
+  c1.start_offset = 65536;
+  c1.key = "4242/1";
+  c1.size = 2048;
+  meta->chunks = {c0, c1};
+  // Register the inode so ReclaimData's nlink guard sees nlink==0 and
+  // proceeds with the chunk enumeration.
+  struct stat attr{};
+  attr.st_nlink = 0;
+  meta->SetAttr(4242, attr);
+
+  // Install engines in the volume singleton so ReclaimData can find them.
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(
+      meta_up.release()));
+  vol.set_data_engine(
+      std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
+
+  ASSERT_TRUE(ReclaimInode(4242).ok());
+
+  // Order is ascending chunk index (ListChunks contract).
+  EXPECT_EQ(data->delete_calls.size(), 2);
+  EXPECT_EQ(data->delete_calls[0], "4242/0");
+  EXPECT_EQ(data->delete_calls[1], "4242/1");
+
+  // Both engines received exactly one call each.
+  EXPECT_EQ(meta->list_chunks_calls, 1);
+  EXPECT_EQ(meta->reclaim_inode_calls, 1);
+  EXPECT_EQ(meta->last_list_ino, 4242);
+  EXPECT_EQ(meta->last_reclaim_ino, 4242);
+}
+
+TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
+  // Counterpart of ReclaimDataWithNoDataEngineStillDropsInode from the
+  // pre-CHECK() era. The data engine is now a hard requirement on the
+  // ReclaimData path (the production mount always installs one via
+  // `--bucket`); exercising the chunk-delete loop with a real (fake)
+  // data engine covers the same "delete every chunk + drop inode"
+  // contract that test used to assert.
+  swordfs::volume::VolumeImpl::Initialize();
+  auto meta_up = std::make_unique<TrackingMetaEngine>();
+  auto data_up = std::make_unique<FakeDataEngine>();
+  auto *meta = meta_up.get();
+  auto *data = data_up.get();
+
+  swordfs::metadata::ChunkMeta c{};
+  c.index = 0;
+  c.key = "99/0";
+  meta->chunks = {c};
+  struct stat attr{};
+  attr.st_nlink = 0;
+  meta->SetAttr(99, attr);
+
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(
+      meta_up.release()));
+  vol.set_data_engine(
+      std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
+
+  ASSERT_TRUE(ReclaimInode(99).ok());
+  EXPECT_EQ(data->delete_calls.size(), 1u);
+  EXPECT_EQ(data->delete_calls[0], "99/0");
+  EXPECT_EQ(meta->list_chunks_calls, 1);
+  EXPECT_EQ(meta->reclaim_inode_calls, 1);
+}
+
+TEST_F(FileHandleTest, ReclaimDataCallsReclaimInodeEvenWhenChunkEmpty) {
+  // Inode with zero registered chunks: the manager must still invoke
+  // ReclaimInode so the inode is dropped from the metadata engine.
+  // A data engine is still required (see CHECK in ReclaimData) — even
+  // though no Delete call will be issued, the engine must be installed.
+  swordfs::volume::VolumeImpl::Initialize();
+  auto meta_up = std::make_unique<TrackingMetaEngine>();
+  auto data_up = std::make_unique<FakeDataEngine>();
+  auto *meta = meta_up.get();
+  auto *data = data_up.get();
+
+  struct stat attr{};
+  attr.st_nlink = 0;
+  meta->SetAttr(123, attr);
+
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(
+      meta_up.release()));
+  vol.set_data_engine(
+      std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
+
+  ASSERT_TRUE(ReclaimInode(123).ok());
+  EXPECT_EQ(meta->list_chunks_calls, 1);
+  EXPECT_EQ(meta->reclaim_inode_calls, 1);
+  EXPECT_TRUE(data->delete_calls.empty());
+}
+
+TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
+  // A failing per-chunk Delete must not stop the cleanup: every chunk
+  // gets attempted and ReclaimInode still runs. A stranded object is
+  // GC's job; the metadata view must converge regardless.
+  swordfs::volume::VolumeImpl::Initialize();
+  auto meta_up = std::make_unique<TrackingMetaEngine>();
+  auto data_up = std::make_unique<FakeDataEngine>();
+  auto *meta = meta_up.get();
+  auto *data = data_up.get();
+
+  swordfs::metadata::ChunkMeta c0{};
+  c0.index = 0;
+  c0.key = "1/0";
+  swordfs::metadata::ChunkMeta c1{};
+  c1.index = 1;
+  c1.key = "1/1";
+  meta->chunks = {c0, c1};
+  data->fail_keys["1/0"] = Status::Internal("forced");
+  struct stat attr{};
+  attr.st_nlink = 0;
+  meta->SetAttr(1, attr);
+
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(
+      meta_up.release()));
+  vol.set_data_engine(
+      std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
+
+  ASSERT_TRUE(ReclaimInode(1).ok());
+  // Both chunks were attempted despite the failure on "1/0".
+  EXPECT_EQ(data->delete_calls.size(), 2);
+  EXPECT_EQ(meta->reclaim_inode_calls, 1);
+}
+
+TEST_F(FileHandleTest, ReclaimDataPropagatesListChunksFailure) {
+  // If the metadata engine refuses to enumerate, the manager must
+  // surface that error and NOT invoke ReclaimInode (we don't know
+  // whether the inode exists from the manager's perspective).
+  swordfs::volume::VolumeImpl::Initialize();
+  auto meta_up = std::make_unique<TrackingMetaEngine>();
+  auto data_up = std::make_unique<FakeDataEngine>();
+  auto *meta = meta_up.get();
+  auto *data = data_up.get();
+  meta->list_chunks_status = Status::Internal("nope");
+  struct stat attr{};
+  attr.st_nlink = 0;
+  meta->SetAttr(42, attr);
+
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(
+      meta_up.release()));
+  vol.set_data_engine(
+      std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
+
+  auto st = ReclaimInode(42);
+  EXPECT_FALSE(st.ok());
+  EXPECT_EQ(meta->list_chunks_calls, 1);
+  EXPECT_EQ(meta->reclaim_inode_calls, 0);
+  EXPECT_TRUE(data->delete_calls.empty());
+}
+
+// ────────────────────────────────────────────────────────────────
+// ReclaimData guards — last-line-of-defence against stale-state callers.
+// ────────────────────────────────────────────────────────────────
+
+namespace {
+
+// Install engines with an ino whose nlink is whatever the test wants.
+// Returns raw pointers to both engines for assertions.
+struct Engines {
+  TrackingMetaEngine *meta;
+  FakeDataEngine *data;
+};
+
+Engines InstallEnginesForInode(InodeID ino, nlink_t nlink) {
+  auto meta_up = std::make_unique<TrackingMetaEngine>();
+  auto data_up = std::make_unique<FakeDataEngine>();
+  auto *meta = meta_up.get();
+  auto *data = data_up.get();
+
+  struct stat attr;
+  std::memset(&attr, 0, sizeof(attr));
+  attr.st_nlink = nlink;
+  meta->SetAttr(ino, attr);
+
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(
+      meta_up.release()));
+  vol.set_data_engine(
+      std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
+  return {meta, data};
+}
+
+}  // namespace
+
+TEST_F(FileHandleTest, ReclaimDataRefusesWhenNlinkStillPositive) {
+  // A caller (VfsImpl::Unlink racing a Link) decided nlink==0 and
+  // called ReclaimData, but a Link landed between its check and
+  // ours. The point of no return is here — refuse to drop the chunk
+  // objects from under the surviving hardlink name.
+  swordfs::volume::VolumeImpl::Initialize();
+  auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/2);
+  // Add a chunk so we'd have something to delete if the guard fell
+  // through; the absence of any delete is what we actually verify.
+  swordfs::metadata::ChunkMeta cm{};
+  cm.index = 0;
+  cm.key = "7/0";
+  meta->chunks = {cm};
+
+  ASSERT_TRUE(ReclaimInode(7).ok());
+  EXPECT_TRUE(data->delete_calls.empty())
+      << "ReclaimData must NOT delete chunk objects when a hardlink "
+         "still references the inode";
+  EXPECT_EQ(meta->reclaim_inode_calls, 0)
+      << "ReclaimData must NOT drop the inode while nlink > 0";
+}
+
+TEST_F(FileHandleTest, ReclaimDataRefusesWhileAnOpenHandleHoldsTheInode) {
+  // Caller forgot to route through MarkOrphaned — refuse so the
+  // open fd's reads continue to work. The data engine must see no
+  // Delete calls.
+  swordfs::volume::VolumeImpl::Initialize();
+  auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/0);
+
+  // Open a file handle on this inode. The fixture's MockMetaEngine
+  // lets everything through, so this just installs a tracked fh.
+  FileHandle fh;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDONLY, &fh).ok());
+  auto inode_handle = InodeHandleManager::Instance().Get(7, false);
+  ASSERT_NE(inode_handle, nullptr);
+  ASSERT_GT(inode_handle->open_count(), 0u);
+
+  ASSERT_TRUE(ReclaimInode(7).ok());
+  EXPECT_TRUE(data->delete_calls.empty())
+      << "ReclaimData must NOT delete chunk objects while a fd is open";
+  EXPECT_EQ(meta->reclaim_inode_calls, 0);
+
+  // Cleanup
+  FileHandleManager::Instance().Release(fh.fh());
+}
+
+TEST_F(FileHandleTest, ReclaimDataIsIdempotentWhenInodeAlreadyGone) {
+  // The metadata engine reports the inode as gone (NotFound on GetAttr).
+  // The InodeHandle::ReclaimData guard treats that as a no-op success:
+  // a concurrent reclaim has already finalised the cleanup on another
+  // thread. Without this guard, the manager would still call ListChunks
+  // and surface a NotFound to the caller as if it were a real failure.
+  swordfs::volume::VolumeImpl::Initialize();
+  auto meta_up = std::make_unique<TrackingMetaEngine>();
+  auto data_up = std::make_unique<FakeDataEngine>();
+  auto *meta = meta_up.get();
+  auto *data = data_up.get();
+  // Deliberately do NOT register any attrs for ino 42 — GetAttr
+  // returns NotFound.
+
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(
+      meta_up.release()));
+  vol.set_data_engine(
+      std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
+
+  ASSERT_TRUE(ReclaimInode(42).ok());
+  EXPECT_EQ(meta->list_chunks_calls, 0);
+  EXPECT_EQ(meta->reclaim_inode_calls, 0);
+  EXPECT_TRUE(data->delete_calls.empty());
 }
 
 }  // namespace

@@ -3,14 +3,9 @@
 
 #include "metadata/mem/MemMetaImpl.hpp"
 
-#include "metadata/Types.hpp"
-#include "metadata/Utils.hpp"
-
-#define FUSE_USE_VERSION 312
 #include <dirent.h>
 #include <folly/fibers/FiberManagerInternal.h>
 #include <folly/logging/xlog.h>
-#include <fuse_lowlevel.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -18,6 +13,8 @@
 #include <cerrno>
 #include <cstring>
 
+#include "metadata/Types.hpp"
+#include "metadata/Utils.hpp"
 #include "utils/Logging.hpp"
 
 namespace swordfs::metadata {
@@ -83,10 +80,12 @@ Status MemMetaImpl::Lookup(InodeID parent_ino,
 
 Status MemMetaImpl::GetAttr(InodeID ino, struct stat *attr) {
   SwordFsInode *inode = nullptr;
-  store_.LookupInode(ino, &inode);
-  if (!inode) {
+  Status status = store_.LookupInode(ino, &inode);
+  if (status.IsNotFound() || !inode) {
     SWORDFS_LOG_DEBUG << "GetAttr: ino " << ino << " not found";
     return Status::NotFound("inode not found");
+  } else if (!status.ok()) {
+    return status;
   }
   *attr = inode->attr;
   return Status::OK();
@@ -212,7 +211,8 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
 }
 
 Status MemMetaImpl::Unlink(InodeID parent_ino,
-                           std::string_view name) {
+                           std::string_view name,
+                           nlink_t *post_nlink) {
   SwordFsInode *parent = nullptr;
   if (!store_.LookupInode(parent_ino, &parent).ok() || !parent ||
       !parent->IsDir()) {
@@ -257,7 +257,11 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
     return Status::InvalidArgument("cannot unlink directory");
   }
 
-  store_.RemoveEntry(parent_ino, name);
+  // Unlink only detaches the directory entry and decrements nlink; the
+  // store hands back the authoritative post-decrement nlink in
+  // *post_nlink so the caller doesn't have to re-read it (avoiding the
+  // TOCTOU race that an unlink-before-read decision would have).
+  status = store_.Unlink(parent_ino, name, post_nlink);
 
   if (parent) {
     parent->Touch(kMtime | kCtime);
@@ -290,7 +294,7 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
   }
 
   // Cannot remove the root directory by name
-  if (parent_ino == FUSE_ROOT_ID && key == ".") {
+  if (parent_ino == kRootInodeId && key == ".") {
     return Status::Busy("root directory is busy");
   }
 
@@ -304,7 +308,7 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
     return Status::NotDirectory("not a directory");
   }
 
-  status = store_.RemoveEntry(parent_ino, name);
+  status = store_.Unlink(parent_ino, name, nullptr);
   if (!status.ok()) {
     return status;
   }
@@ -457,7 +461,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
       }
     }
 
-    Status status = store_.RemoveEntry(new_parent_ino, new_name);
+    Status status = store_.Unlink(new_parent_ino, new_name, nullptr);
     if (!status.ok()) {
       return status;
     }
@@ -467,6 +471,15 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
       if (np) {
         np->attr.st_nlink--;
       }
+    } else {
+      // Overwriting a file: `Unlink` only detaches the directory entry; the
+      // inode (and its chunks) are still alive. Free the inode here.
+      // The VFS layer (above) is responsible for issuing data-engine
+      // deletes before this returns, since by definition we are inside
+      // a rename and there cannot be any open fd on the overwritten
+      // path component (the original caller already removed the only
+      // link).
+      store_.ReclaimInode(existing->ino);
     }
   }
 
@@ -711,13 +724,14 @@ Status MemMetaImpl::Open(InodeID ino) {
     return Status::NotFound("inode not found");
   }
 
-  // A file that has been fully unlinked (nlink == 0) can no longer be
-  // opened, even though in-flight open fds may still read/write it.
-  if (inode->attr.st_nlink == 0) {
-    SWORDFS_LOG_DEBUG << "Open: ino " << ino << " has been unlinked";
-    return Status::NotFound("inode has been unlinked");
-  }
-
+  // No `nlink == 0` check here. POSIX guarantees that an inode unlinked
+  // while still open can be read/written through existing fds; the VFS
+  // layer is also free to issue further Open() calls on the same inode
+  // (re-open through /proc or other inode-by-number paths). Rejecting
+  // `nlink == 0` here would break both cases. New opens by name go
+  // through Lookup() at the VFS layer and never reach this code path
+  // once the directory entry is gone.
+  //
   // Only regular files can be opened (directories use OpenDir, symlinks are
   // resolved by the kernel).
   if (!S_ISREG(inode->attr.st_mode)) {
@@ -739,8 +753,12 @@ Status MemMetaImpl::Open(InodeID ino) {
   return Status::OK();
 }
 
-Status MemMetaImpl::ReclaimData(InodeID ino) {
-  return store_.ReclaimData(ino);
+Status MemMetaImpl::ReclaimInode(InodeID ino) {
+  return store_.ReclaimInode(ino);
+}
+
+Status MemMetaImpl::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
+  return store_.ListChunks(ino, out);
 }
 
 Status MemMetaImpl::OpenDir(InodeID ino) {

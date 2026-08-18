@@ -32,7 +32,7 @@ utils::Status Chunk::Initialize() {
   } else if (status.IsNotFound()) {
     // create a chunk but not commit to metadata so only the local mount knows it.
     state_ = State::kWriting;
-    wb_ = std::make_unique<WriteBuf>(volume::VolumeImpl::Instance().chunk_size());
+    wb_ = std::make_unique<WriteBuf>(max_chunk_size_);
     return Status::OK();
   }
   return status;

@@ -27,7 +27,8 @@ class MemMetaImpl : public IMetaEngine {
   Status Create(InodeID parent_ino,
                 std::string_view name, mode_t mode, InodeID *child_ino,
                 struct stat *attr) override;
-  Status Unlink(InodeID parent_ino, std::string_view name) override;
+  Status Unlink(InodeID parent_ino, std::string_view name,
+                nlink_t *post_nlink = nullptr) override;
   Status Rename(InodeID old_parent_ino,
                 std::string_view old_name, InodeID new_parent_ino,
                 std::string_view new_name, unsigned int flags) override;
@@ -36,7 +37,8 @@ class MemMetaImpl : public IMetaEngine {
                  struct stat *out_attr) override;
   Status Access(InodeID ino, int mask) override;
   Status Open(InodeID ino) override;
-  Status ReclaimData(InodeID ino) override;
+  Status ReclaimInode(InodeID ino) override;
+  Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out) override;
 
   // Directory operations
   Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) override;

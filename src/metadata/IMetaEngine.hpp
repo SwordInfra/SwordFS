@@ -68,8 +68,20 @@ class IMetaEngine {
                        std::string_view name, mode_t mode,
                        InodeID *child_ino, struct stat *attr) = 0;
 
-  /// Remove a regular file.
-  virtual Status Unlink(InodeID parent_ino, std::string_view name) = 0;
+  /// POSIX unlink(2): detach the directory entry and decrement nlink.
+  /// On success, *post_nlink receives the authoritative nlink value the
+  /// caller needs to decide what to do next:
+  ///   - For a directory: the entry is removed and the inode is dropped
+  ///     atomically; *post_nlink is set to 0 (the inode no longer exists).
+  ///   - For a file: *post_nlink is the post-decrement nlink (which may
+  ///     still be >0 if another hardlink name exists, or ==0 if this
+  ///     was the last name).
+  ///
+  /// This avoids the TOCTOU race of reading nlink before the unlink and
+  /// deciding afterwards: the store is the only thing that mutates
+  /// nlink on this thread, and we read it back under the same lock.
+  virtual Status Unlink(InodeID parent_ino, std::string_view name,
+                        nlink_t *post_nlink = nullptr) = 0;
 
   /// Remove an empty directory. Decrements parent nlink.
   virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;
@@ -109,11 +121,25 @@ class IMetaEngine {
   /// validation + read permission) and updates atime.
   virtual Status Open(InodeID ino) = 0;
 
-  /// Reclaim the data of an inode that was unlinked while still open.
-  /// The VFS layer calls this once no open file descriptors remain.  The
-  /// metadata engine deletes the inode and its chunks only if the inode is
-  /// orphaned (nlink==0); otherwise this is a no-op.
-  virtual Status ReclaimData(InodeID ino) = 0;
+  /// Delete an inode that was previously unlinked. Called by the VFS layer
+  /// once it has verified no open file descriptor still references the
+  /// inode (e.g. from the last `Close` after an open-unlink). The metadata
+  /// engine removes the inode and its chunk-metadata map when nlink has
+  /// dropped to zero; otherwise this is a no-op.
+  ///
+  /// @important  This does NOT delete the chunk objects from the data
+  /// engine. The caller is responsible for invoking
+  /// `IDataEngine::Delete` on each chunk key first (use `ListChunks` to
+  /// enumerate). See `vfs::InodeHandle::ReclaimData` for the canonical
+  /// implementation of the full cleanup.
+  virtual Status ReclaimInode(InodeID ino) = 0;
+
+  /// Enumerate the chunk indices currently registered for |ino|. Fills
+  /// |*out| with `ChunkMeta` entries (by value) ordered by ascending
+  /// chunk index. Used by the VFS layer when reclaiming an inode to
+  /// compute the per-chunk object keys it must delete via the data
+  /// engine. Returns OK with `*out` empty if the inode has no chunks.
+  virtual Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out) = 0;
 
   /// Open a directory for reading. Performs permission check and updates
   /// atime. Handle allocation is now managed by FileHandleManager.

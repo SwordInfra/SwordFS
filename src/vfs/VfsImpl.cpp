@@ -15,6 +15,7 @@
 #include "utils/Status.hpp"
 #include "vfs/FileHandle.hpp"
 #include "vfs/FileReadWriter.hpp"
+#include "vfs/InodeHandle.hpp"
 #include "volume/VolumeImpl.hpp"
 
 #define FUSE_USE_VERSION 312
@@ -100,7 +101,52 @@ utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name,
 }
 
 utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
-  return VolumeImpl::Instance().meta_engine()->Unlink(parent, name);
+  // POSIX unlink decision lives here, not in the metadata engine. Three
+  // states the inode can be in after `Unlink`:
+  //   - nlink > 0: at least one directory entry still references the
+  //     inode (hard-link). Do nothing — the chunk objects and inode
+  //     stay alive for the other names.
+  //   - nlink == 0 && no open fd: fully delete the chunks + the inode
+  //     now via `ReclaimData`.
+  //   - nlink == 0 && some fd still open: mark the InodeHandle as
+  //     orphaned and let the last `Close` call `ReclaimData`.
+  //
+  // Permission and sticky-bit checks are already enforced by
+  // `MemMetaImpl::Unlink` above the store, so we don't repeat them here.
+  auto *meta = VolumeImpl::Instance().meta_engine();
+
+  // Look up the child inode id.
+  InodeID child_ino = 0;
+  struct stat lookup_attr;
+  auto status = meta->Lookup(parent, name, &child_ino, &lookup_attr);
+  if (!status.ok()) {
+    return status;
+  }
+
+  // meta->Unlink hands back the authoritative post-decrement nlink.
+  nlink_t post_nlink = 0;
+  auto st = meta->Unlink(parent, name, &post_nlink);
+  if (!st.ok()) {
+    return st;
+  }
+
+  // Hardlink still alive? Then the inode (and its chunks) belong to
+  // another name; leave them alone.
+  if (post_nlink > 0) {
+    return utils::Status::OK();
+  }
+
+  auto handle = vfs::InodeHandleManager::Instance().Get(child_ino, /*create_if_missing=*/true);
+  if (!handle) {
+    return utils::Status::Internal("failed to get InodeHandle");
+  }
+  if (!handle->MarkOrphanedIfOpen()) {
+    // ReclaimData removes both the chunk objects (via the data engine)
+    // and the inode (via the metadata engine).
+    return handle->ReclaimData();
+  }
+  // Defer the actual cleanup until the last `Close`.
+  return utils::Status::OK();
 }
 
 utils::Status VfsImpl::Rmdir(fuse_ino_t parent, const char *name) {
@@ -241,7 +287,7 @@ static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
 
   entries.insert(entries.begin(), {".", DT_DIR, ino});
   entries.insert(entries.begin() + 1,
-                 {"..", DT_DIR, (ino == FUSE_ROOT_ID) ? ino : 0});
+                 {"..", DT_DIR, (ino == metadata::kRootInodeId) ? ino : 0});
 
   std::vector<size_t> sizes(entries.size());
   size_t cap = 0;

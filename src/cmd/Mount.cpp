@@ -26,6 +26,7 @@
 #include "fuse/Vfs.hpp"
 #include "utils/Fuse.hpp"
 #include "utils/Logging.hpp"
+#include "vfs/InodeHandle.hpp"
 #include "volume/VolumeImpl.hpp"
 
 using namespace swordfs::utils;
@@ -34,7 +35,7 @@ using namespace swordfs::config;
 namespace swordfs::cmd {
 
 // Mountpoint validation
-static int ValidateMountpoint(const std::string& mountpoint) {
+static int ValidateMountpoint(const std::string &mountpoint) {
   if (mountpoint.empty() || mountpoint[0] == '-') {
     SWORDFS_PROMPT_INFO << "Error: invalid mountpoint '" << mountpoint << "'";
     return -1;
@@ -143,7 +144,9 @@ static int Daemonize() {
     ::dup2(fd, STDIN_FILENO);
     ::dup2(fd, STDOUT_FILENO);
     ::dup2(fd, STDERR_FILENO);
-    if (fd > 2) ::close(fd);
+    if (fd > 2) {
+      ::close(fd);
+    }
   }
 
   return pipefd[1];
@@ -151,18 +154,18 @@ static int Daemonize() {
 
 // Build fuse_args from extra FUSE options only (e.g. -o allow_other).
 // The mountpoint is handled separately by fuse_session_mount().
-static FuseArgsGuard BuildFuseArgs(const std::vector<std::string>& extras) {
-  std::vector<char*> argv;
-  argv.push_back(const_cast<char*>("swordfs"));
-  for (const auto& e : extras) {
-    argv.push_back(const_cast<char*>(e.c_str()));
+static FuseArgsGuard BuildFuseArgs(const std::vector<std::string> &extras) {
+  std::vector<char *> argv;
+  argv.push_back(const_cast<char *>("swordfs"));
+  for (const auto &e : extras) {
+    argv.push_back(const_cast<char *>(e.c_str()));
   }
   return FuseArgsGuard(static_cast<int>(argv.size()), argv.data());
 }
 
 // Mount the filesystem via libfuse low-level API. Blocks until unmounted.
-static int Mount(const std::string& mountpoint,
-                 const std::vector<std::string>& extras, int signal_fd) {
+static int Mount(const std::string &mountpoint,
+                 const std::vector<std::string> &extras, int signal_fd) {
   FuseArgsGuard args(BuildFuseArgs(extras));
 
   FuseSessionGuard se(fuse_session_new(
@@ -189,7 +192,7 @@ static int Mount(const std::string& mountpoint,
     ::close(signal_fd);
   }
 
-  struct fuse_loop_config* loop_cfg = fuse_loop_cfg_create();
+  struct fuse_loop_config *loop_cfg = fuse_loop_cfg_create();
   fuse_loop_cfg_set_max_threads(loop_cfg, ConfigCenter::Instance().fuse_threads());
   int ret = fuse_session_loop_mt(se.get(), loop_cfg);
   fuse_loop_cfg_destroy(loop_cfg);
@@ -197,9 +200,9 @@ static int Mount(const std::string& mountpoint,
 }
 
 int RunMount() {
-  auto& cfg = ConfigCenter::Instance();
+  auto &cfg = ConfigCenter::Instance();
 
-  const std::string& mountpoint = cfg.mountpoint();
+  const std::string &mountpoint = cfg.mountpoint();
   if (ValidateMountpoint(mountpoint) != 0) {
     return 1;
   }
@@ -214,7 +217,7 @@ int RunMount() {
       return 1;
     }
     // Write the daemon PID to pidfile if requested (grandchild only).
-    const auto& pf = ConfigCenter::Instance().pidfile();
+    const auto &pf = ConfigCenter::Instance().pidfile();
     if (!pf.empty()) {
       std::ofstream ofs(pf);
       if (ofs) {
@@ -244,7 +247,7 @@ int RunMount() {
 
   // Build FUSE arguments from --log-level (if specified)
   std::vector<std::string> fuse_extras;
-  const std::string& opts = cfg.fuse_opts();
+  const std::string &opts = cfg.fuse_opts();
   if (!opts.empty()) {
     fuse_extras.push_back("-o");
     fuse_extras.push_back(opts);

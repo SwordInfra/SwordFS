@@ -26,6 +26,10 @@ class IDataEngine;
 
 namespace swordfs::chunk {
 
+inline std::string FormatChunkKey(metadata::InodeID ino, metadata::ChunkIndex idx) {
+  return std::to_string(ino) + "/" + std::to_string(idx);
+}
+
 class Chunk {
  public:
   enum class State : uint8_t {
@@ -84,7 +88,7 @@ class Chunk {
   metadata::ChunkMeta BuildMeta() const;
 
   std::string ChunkKey() const {
-    return std::to_string(ino_) + "/" + std::to_string(index_);
+    return FormatChunkKey(ino_, index_);
   }
 
  private:

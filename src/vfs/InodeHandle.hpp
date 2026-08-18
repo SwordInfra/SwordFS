@@ -17,7 +17,9 @@
 #include <mutex>
 #include <shared_mutex>
 
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
+#include "storage/IDataEngine.hpp"
 #include "utils/Status.hpp"
 
 namespace folly {
@@ -46,11 +48,18 @@ class InodeHandle {
   /// reference is released.
   utils::Status Close();
 
-  /// Atomically mark this inode as orphaned (nlink==0) and report whether
-  /// open fds remain.  Returns true when at least one fd is still open, in
-  /// which case reclaim is deferred to the last Close(); returns false when
-  /// no fds are open, so the caller must reclaim immediately.
+  /// Mark this inode as orphaned (nlink==0) if at least one fd is still
+  /// open. Returns true when at least one fd is still open (reclaim is
+  /// then deferred to the last Close()); returns false when no fds are
+  /// open, so the caller must reclaim immediately.
   bool MarkOrphanedIfOpen();
+
+  /// Fully reclaim this inode: enumerate the chunk keys the metadata
+  /// engine has registered for it, delete the corresponding chunk
+  /// objects from the data engine, then ask the metadata engine to drop
+  /// the inode itself. The single entry point for cleanup once an inode
+  /// is no longer reachable from any directory entry.
+  utils::Status ReclaimData();
 
   metadata::InodeID ino() const { return ino_; }
 
@@ -62,9 +71,10 @@ class InodeHandle {
   const std::shared_ptr<FileReadWriter> &rw() const { return rw_; }
 
  private:
-  // Result of ReleaseRef: whether this release dropped the open-fd count to
-  // zero, and whether the inode was orphaned (unlinked while open) at that
-  // moment.  Both are captured under state_mutex_ in a single atomic step.
+  // Result of ReleaseRef: whether this release dropped the open-fd count
+  // to zero, and whether the inode was orphaned (unlinked while open) at
+  // that moment. Both values are captured under state_mutex_ in a single
+  // critical section.
   struct ReleaseState {
     bool is_last;
     bool orphaned;
@@ -79,6 +89,8 @@ class InodeHandle {
   ReleaseState ReleaseRef();
 
   metadata::InodeID ino_;
+  metadata::IMetaEngine *meta_;
+  storage::IDataEngine *data_;
   std::shared_ptr<FileReadWriter> rw_;
   mutable std::mutex state_mutex_;
   uint64_t open_count_{0};
@@ -88,12 +100,17 @@ class InodeHandle {
 // Opaque map type — defined in InodeHandle.cpp.
 struct InodeHandleMap;
 
-// InodeHandleManager — singleton mapping inode → InodeHandle.  FileHandle
-// delegates InodeHandle creation here; the metadata layer looks up an
-// InodeHandle by inode number when it needs to mark it orphaned.
+// InodeHandleManager — registry mapping inode → InodeHandle.
 class InodeHandleManager {
  public:
   static InodeHandleManager &Instance();
+
+  /// (Re)initialize the registry — clears all per-inode state. Called
+  /// on the normal mount path before the FUSE session starts, and by
+  /// unit-test SetUp to drop leaked InodeHandles from a prior test
+  /// (which would otherwise leave stale open-counts and make
+  /// ReclaimData's guard refuse on arbitrary later inodes).
+  void Initialize();
 
   /// Return the shared InodeHandle for |ino|.  Creates it (and its
   /// FileReadWriter) when |create_if_missing| is true.  Returns nullptr
