@@ -31,9 +31,9 @@ class MemMetaImpl : public IMetaEngine {
                 nlink_t *post_nlink = nullptr) override;
   Status Rename(InodeID old_parent_ino,
                 std::string_view old_name, InodeID new_parent_ino,
-                std::string_view new_name, unsigned int flags) override;
+                std::string_view new_name, RenameFlag flags) override;
   Status SetAttr(InodeID ino,
-                 const struct stat *attr, int to_set,
+                 const struct stat *attr, SetAttrField fields,
                  struct stat *out_attr) override;
   Status Access(InodeID ino, int mask) override;
   Status Open(InodeID ino) override;

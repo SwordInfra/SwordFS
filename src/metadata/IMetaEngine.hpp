@@ -86,17 +86,17 @@ class IMetaEngine {
   /// Remove an empty directory. Decrements parent nlink.
   virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;
 
-  /// Rename (move) an entry between directories.
-  ///
-  /// flags may be 0 (normal POSIX rename), RENAME_NOREPLACE (fail if
-  /// target exists), or RENAME_EXCHANGE (atomically swap src and dst).
+  /// Rename (move) an entry between directories.  |flags| is a bitwise
+  /// OR of RenameFlag values.
   virtual Status Rename(InodeID old_parent_ino,
                         std::string_view old_name, InodeID new_parent_ino,
-                        std::string_view new_name, unsigned int flags) = 0;
+                        std::string_view new_name, RenameFlag flags) = 0;
 
-  /// Set attributes for an inode.
+  /// Set attributes for an inode.  |fields| is a bitwise OR of
+  /// SetAttrField values; only the bits set in |fields| are read from
+  /// |attr| and applied to the inode.
   virtual Status SetAttr(InodeID ino,
-                         const struct stat *attr, int to_set,
+                         const struct stat *attr, SetAttrField fields,
                          struct stat *out_attr) = 0;
 
   /// Get file system statistics.

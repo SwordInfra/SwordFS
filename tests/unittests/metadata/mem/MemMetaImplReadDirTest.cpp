@@ -18,6 +18,7 @@
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
+using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SwordFsEntry;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
@@ -131,7 +132,7 @@ TEST_F(MemMetaImplReadDirTest, ReadDirAfterMove) {
   impl_->Create(dir_a_ino, "target", 0644, &f_ino, nullptr);
 
   // Move a/target → b/target
-  impl_->Rename(dir_a_ino, "target", dir_b_ino, "target", 0);
+  impl_->Rename(dir_a_ino, "target", dir_b_ino, "target", RenameFlag::kNone);
 
   // Dir A should be empty (apart from "." and "..")
   std::vector<SwordFsEntry> entries_a;

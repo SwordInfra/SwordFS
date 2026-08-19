@@ -29,6 +29,8 @@ using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::ChunkMeta;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
+using swordfs::metadata::RenameFlag;
+using swordfs::metadata::SetAttrField;
 using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
 using swordfs::utils::Status;
@@ -157,12 +159,12 @@ class MockMetaEngine : public IMetaEngine {
   Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID,
-                std::string_view, unsigned int) override {
+                std::string_view, RenameFlag) override {
     return Status::OK();
   }
-  Status SetAttr(InodeID, const struct stat *attr, int to_set,
+  Status SetAttr(InodeID, const struct stat *attr, SetAttrField fields,
                  struct stat *out_attr) override {
-    if (to_set & FUSE_SET_ATTR_SIZE) {
+    if (HasSetAttrField(fields, SetAttrField::kSize)) {
       file_size_ = attr->st_size;
     }
     if (out_attr) {

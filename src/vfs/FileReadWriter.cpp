@@ -274,8 +274,8 @@ utils::Status FileReadWriter::Flush() {
       struct stat new_attr = {
           .st_size = file_end,
       };
-      auto status =
-          meta_->SetAttr(ino_, &new_attr, FUSE_SET_ATTR_SIZE, nullptr);
+      auto status = meta_->SetAttr(
+          ino_, &new_attr, metadata::SetAttrField::kSize, nullptr);
       if (!status.ok()) {
         SWORDFS_LOG_ERROR << "FileReadWriter::Flush size update FAILED: ino="
                           << ino_ << " — " << status.message();

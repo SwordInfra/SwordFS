@@ -13,6 +13,8 @@
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
+using swordfs::metadata::RenameFlag;
+using swordfs::metadata::SetAttrField;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -54,7 +56,7 @@ class MemMetaImplTest : public ::testing::Test {
     st.st_gid = kGroup;
     st.st_mode = S_IFDIR | mode;
     impl_->SetAttr(ino, &st,
-                   FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID | FUSE_SET_ATTR_MODE,
+                   SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kMode,
                    nullptr);
     return ino;
   }
@@ -64,7 +66,7 @@ class MemMetaImplTest : public ::testing::Test {
     SetContext(0, 0);
     struct stat st{};
     st.st_mode = S_IFDIR | mode;
-    impl_->SetAttr(ino, &st, FUSE_SET_ATTR_MODE, nullptr);
+    impl_->SetAttr(ino, &st, SetAttrField::kMode, nullptr);
   }
 
   // Change ownership of an existing directory.
@@ -73,7 +75,7 @@ class MemMetaImplTest : public ::testing::Test {
     struct stat st{};
     st.st_uid = uid;
     st.st_gid = gid;
-    impl_->SetAttr(ino, &st, FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID, nullptr);
+    impl_->SetAttr(ino, &st, SetAttrField::kUid | SetAttrField::kGid, nullptr);
   }
 
   MemMetaImpl *impl_;
@@ -347,7 +349,7 @@ TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnOldParent) {
   // Remove write from src
   SetDirMode(src_ino, 0500);
   SetContext(kOwner, kOtherGroup);
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", 0);
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
@@ -361,7 +363,7 @@ TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnNewParent) {
   // Remove write from dst
   SetDirMode(dst_ino, 0500);
   SetContext(kOwner, kOtherGroup);
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", 0);
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
@@ -375,7 +377,7 @@ TEST_F(MemMetaImplTest, RenameRootSucceedsRegardlessOfPerms) {
 
   // Root can rename even with no perms on either parent
   SetContext(0, 0);
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", 0);
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
 }
 
@@ -390,8 +392,8 @@ TEST_F(MemMetaImplTest, RenameNoReplaceSucceedsWhenTargetFree) {
   InodeID f_ino = 0;
   impl_->Create(src_ino, "f", 0644, &f_ino, nullptr);
 
-  // RENAME_NOREPLACE: target "f" under dst does not exist → succeed.
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RENAME_NOREPLACE);
+  // RenameFlag::kNoReplace: target "f" under dst does not exist → succeed.
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNoReplace);
   EXPECT_TRUE(st.ok()) << st.message();
 
   // Verify the file moved.
@@ -407,8 +409,8 @@ TEST_F(MemMetaImplTest, RenameNoReplaceFailsWhenTargetExists) {
   impl_->Create(src_ino, "f", 0644, &f1_ino, nullptr);
   impl_->Create(dst_ino, "f", 0644, &f2_ino, nullptr);
 
-  // RENAME_NOREPLACE: target "f" under dst EXISTS → EEXIST.
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RENAME_NOREPLACE);
+  // RenameFlag::kNoReplace: target "f" under dst EXISTS → EEXIST.
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNoReplace);
   EXPECT_TRUE(st.IsAlreadyExists()) << st.message();
 
   // Verify source file was NOT moved (still under src).
@@ -425,8 +427,8 @@ TEST_F(MemMetaImplTest, RenameExchangeSucceeds) {
   impl_->Create(src_ino, "a", 0644, &f1_ino, nullptr);
   impl_->Create(dst_ino, "b", 0644, &f2_ino, nullptr);
 
-  // RENAME_EXCHANGE: atomically swap "a" and "b".
-  Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RENAME_EXCHANGE);
+  // RenameFlag::kExchange: atomically swap "a" and "b".
+  Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
   EXPECT_TRUE(st.ok()) << st.message();
 
   // Verify: src/a now has inode f2_ino, dst/b now has inode f1_ino.
@@ -444,8 +446,8 @@ TEST_F(MemMetaImplTest, RenameExchangeFailsWhenTargetMissing) {
   InodeID f_ino = 0;
   impl_->Create(src_ino, "a", 0644, &f_ino, nullptr);
 
-  // RENAME_EXCHANGE: target "b" under dst does NOT exist → ENOENT.
-  Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RENAME_EXCHANGE);
+  // RenameFlag::kExchange: target "b" under dst does NOT exist → ENOENT.
+  Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
   EXPECT_TRUE(st.IsNotFound()) << st.message();
 }
 
@@ -460,8 +462,8 @@ TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
   InodeID dir_ino = 0;
   impl_->MkDir(dst_ino, "b", 0755, &dir_ino, nullptr);
 
-  // RENAME_EXCHANGE: file ↔ dir → EINVAL.
-  Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RENAME_EXCHANGE);
+  // RenameFlag::kExchange: file ↔ dir → EINVAL.
+  Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
   EXPECT_EQ(st.code(), swordfs::utils::Status::kInvalidArgument) << st.message();
 }
 
@@ -510,7 +512,7 @@ TEST_F(MemMetaImplTest, OpenRequiresReadPermission) {
   st.st_gid = kOtherGroup;
   st.st_mode = S_IFREG | 0200;  // -w-------
   impl_->SetAttr(f_ino, &st,
-                 FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID | FUSE_SET_ATTR_MODE,
+                 SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kMode,
                  nullptr);
 
   Status s = impl_->Open(f_ino);
@@ -527,7 +529,7 @@ TEST_F(MemMetaImplTest, OpenRootSucceedsWithoutReadPerm) {
   struct stat st{};
   st.st_mode = S_IFREG | 0000;
   SetContext(0, 0);
-  impl_->SetAttr(f_ino, &st, FUSE_SET_ATTR_MODE, nullptr);
+  impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr);
 
   SetContext(0, 0);
   Status s = impl_->Open(f_ino);
@@ -550,7 +552,7 @@ TEST_F(MemMetaImplTest, TruncateUpdatesSizeAndClearsSuidSgid) {
   // Give the file SUID/SGID without touching its size.
   struct stat st{};
   st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
-  ASSERT_TRUE(impl_->SetAttr(f_ino, &st, FUSE_SET_ATTR_MODE, nullptr).ok());
+  ASSERT_TRUE(impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr).ok());
 
   ASSERT_TRUE(impl_->Truncate(f_ino, 1024).ok());
 
@@ -567,7 +569,7 @@ TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
 
   struct stat st{};
   st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
-  ASSERT_TRUE(impl_->SetAttr(f_ino, &st, FUSE_SET_ATTR_MODE, nullptr).ok());
+  ASSERT_TRUE(impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr).ok());
   ASSERT_TRUE(impl_->Truncate(f_ino, 0).ok());  // size was already 0
 
   struct stat out{};
@@ -587,12 +589,12 @@ TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
 
   struct stat st{};
   st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
-  ASSERT_TRUE(impl_->SetAttr(f_ino, &st, FUSE_SET_ATTR_MODE, nullptr).ok());
+  ASSERT_TRUE(impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr).ok());
 
   struct stat attr{};
   attr.st_size = 2048;
   struct stat out{};
-  ASSERT_TRUE(impl_->SetAttr(f_ino, &attr, FUSE_SET_ATTR_SIZE, &out).ok());
+  ASSERT_TRUE(impl_->SetAttr(f_ino, &attr, SetAttrField::kSize, &out).ok());
   EXPECT_EQ(out.st_size, 2048);
   EXPECT_EQ(out.st_mode & S_ISUID, 0u);
   EXPECT_EQ(out.st_mode & S_ISGID, 0u);

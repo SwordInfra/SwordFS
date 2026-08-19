@@ -32,6 +32,8 @@ using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::ChunkMeta;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
+using swordfs::metadata::RenameFlag;
+using swordfs::metadata::SetAttrField;
 using swordfs::utils::Status;
 
 // Minimal no-op data engine. The fixture needs to install one so the
@@ -82,8 +84,8 @@ class MockMetaEngine : public IMetaEngine {
   Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID, std::string_view,
-                unsigned int) override { return Status::OK(); }
-  Status SetAttr(InodeID, const struct stat *, int,
+                RenameFlag) override { return Status::OK(); }
+  Status SetAttr(InodeID, const struct stat *, SetAttrField,
                  struct stat *) override { return Status::OK(); }
   Status StatFs(struct statvfs *) override { return Status::OK(); }
   Status Access(InodeID, int) override { return Status::OK(); }
@@ -527,8 +529,8 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
   Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID, std::string_view,
-                unsigned int) override { return Status::OK(); }
-  Status SetAttr(InodeID, const struct stat *, int,
+                RenameFlag) override { return Status::OK(); }
+  Status SetAttr(InodeID, const struct stat *, SetAttrField,
                  struct stat *) override { return Status::OK(); }
   Status StatFs(struct statvfs *) override { return Status::OK(); }
   Status Access(InodeID, int) override { return Status::OK(); }

@@ -31,10 +31,23 @@ using namespace swordfs::utils;
 using namespace swordfs::config;
 
 using swordfs::metadata::InodeID;
+using swordfs::metadata::RenameFlag;
+using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsEntry;
 using swordfs::volume::VolumeImpl;
 
 namespace swordfs::vfs {
+
+// Translate a FUSE_SET_ATTR_* bitmask to the metadata-layer
+// SetAttrField bitmask.  Bit values match exactly, so the conversion
+// is a 1:1 copy through a uint32_t view.
+inline SetAttrField FuseAttrToSetAttrField(int fuse_to_set) {
+  return static_cast<SetAttrField>(static_cast<uint32_t>(fuse_to_set));
+}
+
+inline RenameFlag FuseFlagsToRenameFlag(unsigned int fuse_flags) {
+  return static_cast<RenameFlag>(fuse_flags);
+}
 
 volume::VolumeImpl *VfsImpl::Volume() {
   return &volume::VolumeImpl::Instance();
@@ -67,7 +80,8 @@ utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
 
 utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr,
                                int to_set, struct stat *out_attr) {
-  return VolumeImpl::Instance().meta_engine()->SetAttr(ino, attr, to_set, out_attr);
+  SetAttrField fields = FuseAttrToSetAttrField(to_set);
+  return VolumeImpl::Instance().meta_engine()->SetAttr(ino, attr, fields, out_attr);
 }
 
 utils::Status VfsImpl::Readlink(fuse_ino_t ino, std::string *target) {
@@ -174,7 +188,9 @@ utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent,
 utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
                               fuse_ino_t newparent, const char *newname,
                               unsigned int flags) {
-  return VolumeImpl::Instance().meta_engine()->Rename(parent, name, newparent, newname, flags);
+  RenameFlag rename_flags = FuseFlagsToRenameFlag(flags);
+  auto meta = VolumeImpl::Instance().meta_engine();
+  return meta->Rename(parent, name, newparent, newname, rename_flags);
 }
 
 utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent,

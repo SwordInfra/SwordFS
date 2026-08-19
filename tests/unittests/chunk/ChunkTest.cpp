@@ -28,6 +28,8 @@ using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::ChunkMeta;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
+using swordfs::metadata::RenameFlag;
+using swordfs::metadata::SetAttrField;
 using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
 using swordfs::utils::Status;
@@ -56,10 +58,9 @@ class MissingMetaEngine final : public IMetaEngine {
   Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID, std::string_view,
-                unsigned) override { return Status::OK(); }
-  Status SetAttr(InodeID, const struct stat *, int, struct stat *) override {
-    return Status::OK();
-  }
+                RenameFlag) override { return Status::OK(); }
+  Status SetAttr(InodeID, const struct stat *, SetAttrField,
+                 struct stat *) override { return Status::OK(); }
   Status StatFs(struct statvfs *) override { return Status::OK(); }
   Status Access(InodeID, int) override { return Status::OK(); }
   Status Symlink(InodeID, std::string_view, const char *, InodeID *,
