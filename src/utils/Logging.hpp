@@ -59,8 +59,13 @@ void PromptFmt(fmt::format_string<Args...> fmt_str, Args &&...args) {
 
 namespace swordfs::utils {
 
-/// Initialize folly logging. Reads all settings (foreground mode,
-/// log_path, log_level) from ConfigCenter::Instance().
-void Init();
+struct LogConfig {
+  std::string path = "/var/log/swordfs.log";
+  std::string level = "INFO";
+};
+
+/// Initialize folly logging from the given config.  When |foreground|
+/// is true, logs go to stderr; otherwise they go to |log.path|.
+void InitLogging(const LogConfig &log, bool foreground);
 
 }  // namespace swordfs::utils

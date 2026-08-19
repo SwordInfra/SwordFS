@@ -1,49 +1,47 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// StorageRegistry — maps backend names to IDataEngine factory functions.
+// StorageRegistry — tracks which IDataEngine backend schemes are
+// available in this build.
 //
-// Each storage backend registers itself at static-init time via the
-// Register() helper.  ConfigCenter queries Available() to validate
-// the user's backend choice and Create() to instantiate it.
+// Each backend registers its scheme name at static-init time via
+// RegisterBackend.  CLI validators (e.g. ValidateBucketUrl) consult
+// Available() to reject unsupported schemes before any backend is
+// instantiated.
+//
+// Instantiation itself still goes through DataEngineFactory, which
+// dispatches on the scheme directly — StorageRegistry intentionally
+// doesn't carry a Factory, so backends stay free to construct
+// themselves however they like.
 
 #pragma once
 
-#include <functional>
-#include <memory>
 #include <string>
 #include <string_view>
-#include <unordered_map>
-
-#include "storage/IDataEngine.hpp"
+#include <unordered_set>
 
 namespace swordfs::storage {
 
-/// Registry of available IDataEngine backends.
+/// Registry of available IDataEngine backend schemes.
 class StorageRegistry {
  public:
-  using Factory = std::function<std::unique_ptr<IDataEngine>()>;
+  static StorageRegistry &Instance();
 
-  static StorageRegistry& Instance();
+  /// Register a backend scheme.  Called at static-init time.
+  void Register(std::string_view name);
 
-  /// Register a backend.  Called at static-init time.
-  void Register(std::string_view name, Factory factory);
-
-  /// Return true if a backend with the given name is registered.
+  /// Return true if a backend with the given scheme is registered.
   bool Available(std::string_view name) const;
-
-  /// Create an engine instance by name.  Returns nullptr if unknown.
-  std::unique_ptr<IDataEngine> Create(std::string_view name) const;
 
  private:
   StorageRegistry() = default;
-  std::unordered_map<std::string, Factory> factories_;
+  std::unordered_set<std::string> schemes_;
 };
 
-/// RAII helper: registers a backend at static-init time.
+/// RAII helper: registers a backend scheme at static-init time.
 struct RegisterBackend {
-  RegisterBackend(std::string_view name, StorageRegistry::Factory factory) {
-    StorageRegistry::Instance().Register(name, std::move(factory));
+  RegisterBackend(std::string_view name) {
+    StorageRegistry::Instance().Register(name);
   }
 };
 

@@ -2,7 +2,6 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include <folly/init/Init.h>
-
 #include <sys/resource.h>
 
 #include <CLI/CLI.hpp>
@@ -27,7 +26,7 @@ static void SetupProcessFromEnv() {
   }
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
   SetupProcessFromEnv();
 
   // Initialize folly but skip gflags parsing.
@@ -37,13 +36,13 @@ int main(int argc, char* argv[]) {
   app.allow_extras(false);
 
   // Bind CLI options to ConfigCenter members
-  auto& cfg = swordfs::config::ConfigCenter::Instance();
+  auto &cfg = swordfs::config::ConfigCenter::Instance();
   cfg.ConfigureOptions(app);
 
   // Parse CLI arguments
   try {
     app.parse(argc, argv);
-  } catch (const CLI::ParseError& e) {
+  } catch (const CLI::ParseError &e) {
     return app.exit(e);
   }
 
@@ -54,7 +53,10 @@ int main(int argc, char* argv[]) {
     std::cout << app.help();
     return 0;
   }
-  // Initialize logging only when executing a subcommand
-  swordfs::utils::Init();
+  // Initialize logging from ConfigCenter's parsed values.
+  swordfs::utils::LogConfig log_cfg;
+  log_cfg.path = cfg.log_path();
+  log_cfg.level = cfg.log_level();
+  swordfs::utils::InitLogging(log_cfg, cfg.foreground());
   return sub_command->run();
 }

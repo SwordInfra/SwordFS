@@ -28,32 +28,20 @@ class FiberThreadPool;
 
 namespace storage {
 
-struct S3Config {
-  std::string endpoint;  // e.g. "https://s3.amazonaws.com"
-  std::string region;    // e.g. "us-east-1"
-  std::string bucket;
-  std::string prefix;  // optional key prefix, e.g. "swordfs/chunks"
-};
-
 /// S3-compatible object storage engine using AWS SDK for C++.
-///
-/// Authentication is handled by the SDK's default credential chain
-/// (environment, ~/.aws/credentials, IAM role).
-///
-/// Thread safety: the AWS SDK S3Client is internally thread-safe
-/// (connection pool, default 25 connections).  No external locking
-/// is needed.
 class S3DataEngine : public IDataEngine {
  public:
-  explicit S3DataEngine(const S3Config& config);
+  S3DataEngine();
   ~S3DataEngine() override;
 
+  Status Initialize();
+
   DataEngineLimits Limits() const override;
-  bool Head(std::string_view key, size_t* size) override;
+  bool Head(std::string_view key, size_t *size) override;
   Status Put(std::string_view key,
              std::unique_ptr<folly::IOBuf> data) override;
   Status Get(std::string_view key, size_t offset, size_t size,
-             folly::IOBuf* out) override;
+             folly::IOBuf *out) override;
   Status Delete(std::string_view key) override;
 
   /// Return the S3 object key for a chunk identifier.
@@ -61,7 +49,13 @@ class S3DataEngine : public IDataEngine {
   std::string ObjectKey(std::string_view key) const;
 
  private:
-  S3Config cfg_;
+  Status ParseBucketUrl();
+
+ private:
+  std::string endpoint_;
+  std::string region_;
+  std::string bucket_;
+  std::string prefix_;
   std::shared_ptr<swordfs::utils::FiberThreadPool> pool_;
   std::unique_ptr<Aws::S3::S3Client> client_;
 };

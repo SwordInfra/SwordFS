@@ -14,7 +14,7 @@
 namespace swordfs::config {
 
 const CLI::Validator ValidateMetaUrl = CLI::Validator(
-    [](const std::string& input) -> std::string {
+    [](const std::string &input) -> std::string {
       if (input == swordfs::metadata::kMemoryMetaUrl) {
         return {};
       }
@@ -24,7 +24,7 @@ const CLI::Validator ValidateMetaUrl = CLI::Validator(
     "META_URL");
 
 const CLI::Validator ValidateBucketUrl = CLI::Validator(
-    [](const std::string& input) -> std::string {
+    [](const std::string &input) -> std::string {
       auto pos = input.find("://");
       if (pos == std::string::npos) {
         return "Bucket URL must have a scheme:// prefix, got: " + input;
@@ -44,8 +44,9 @@ const CLI::Validator ValidateBucketUrl = CLI::Validator(
       }
       if (url.path.empty() || url.path == "/") {
         return "Bucket URL is missing bucket name. "
-               "Expected format: " + scheme + "://<endpoint>/<bucket>, "
-               "got: " + input;
+               "Expected format: s3://<endpoint>/<bucket>, "
+               "got: " +
+               input;
       }
       return {};
     },

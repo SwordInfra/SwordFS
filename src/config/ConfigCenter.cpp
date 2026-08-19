@@ -21,8 +21,8 @@ void ConfigCenter::ConfigureOptions(CLI::App& app) {
 
   // Global flags and options (shared by all subcommands)
   app.add_flag_callback("-V,--version", PrintVersion, "Show version information");
-  app.add_option("--log-file", log_.path, "Log file path");
-  app.add_option("--log-level", log_.level, "Log level (info, debug, warn, error)")
+  app.add_option("--log-file", log_path_, "Log file path");
+  app.add_option("--log-level", log_level_, "Log level (info, debug, warn, error)")
       ->transform(CLI::CheckedTransformer(kLogLevelMap, CLI::ignore_case));
 
   // Mount options

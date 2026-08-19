@@ -37,11 +37,6 @@ struct SubCommand {
 };
 
 /// Logging-related configuration.
-struct LogConfig {
-  std::string path = "/var/log/swordfs.log";
-  std::string level = "INFO";
-};
-
 /// Process-wide configuration singleton.
 class ConfigCenter {
  public:
@@ -55,8 +50,10 @@ class ConfigCenter {
   /// Returns the selected subcommand.
   std::optional<SubCommand> SelectedSubCommand() const;
 
-  /// Returns the log configuration.
-  LogConfig &log() { return log_; }
+  /// Returns the log file path and level (set by --log-file / --log-level).
+  const std::string &log_path() const { return log_path_; }
+  const std::string &log_level() const { return log_level_; }
+
   /// Returns the foreground mode.
   bool foreground() const { return foreground_; }
   int fuse_threads() const { return fuse_threads_; }
@@ -71,10 +68,13 @@ class ConfigCenter {
   void set_meta_url(const std::string &url) { meta_url_ = url; }
   /// Returns the data storage type (e.g. "s3", empty = none).
   const std::string &storage_backend() const { return storage_backend_; }
+  void set_storage_backend(const std::string &b) { storage_backend_ = b; }
   /// Returns the bucket URL (e.g. "s3://endpoint/bucket/prefix").
   const std::string &bucket_url() const { return bucket_url_; }
+  void set_bucket_url(const std::string &u) { bucket_url_ = u; }
   /// Returns the storage region (e.g. "auto", "us-east-1").
   const std::string &storage_region() const { return storage_region_; }
+  void set_storage_region(const std::string &r) { storage_region_ = r; }
   /// Returns the chunk size in bytes (format subcommand).
   size_t chunk_size() const { return chunk_size_; }
   /// Returns the volume name (format and mount subcommands).
@@ -106,7 +106,9 @@ class ConfigCenter {
   void RegisterFormatOptions(CLI::App &app);
 
  private:
-  LogConfig log_;
+  // --log-file / --log-level
+  std::string log_path_ = "/var/log/swordfs.log";
+  std::string log_level_ = "INFO";
   // -f / --foreground: run in foreground
   bool foreground_ = false;
   int fuse_threads_ = 1;

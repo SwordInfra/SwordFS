@@ -19,20 +19,22 @@ std::string ParseOptions(std::vector<std::string> args) {
   CLI::App app{"SwordFS test"};
   app.allow_extras(false);
 
-  auto& cfg = swordfs::config::ConfigCenter::Instance();
+  auto &cfg = swordfs::config::ConfigCenter::Instance();
   cfg.Initialize();
   cfg.ConfigureOptions(app);
 
   // Convert to argc/argv as CLI11's vector-based parse can behave
   // differently from argc/argv-based parse in some versions.
-  std::vector<const char*> argv;
+  std::vector<const char *> argv;
   argv.reserve(args.size());
-  for (const auto& a : args) argv.push_back(a.c_str());
+  for (const auto &a : args) {
+    argv.push_back(a.c_str());
+  }
   int argc = static_cast<int>(argv.size());
 
   try {
     app.parse(argc, argv.data());
-  } catch (const CLI::ParseError& e) {
+  } catch (const CLI::ParseError &e) {
     return e.what();
   }
   return {};
