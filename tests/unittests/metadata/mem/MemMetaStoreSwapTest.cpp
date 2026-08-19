@@ -16,6 +16,7 @@
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaStore;
+using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
 
@@ -236,8 +237,10 @@ TEST_F(MemMetaStoreSwapTest, SwapDirectoriesCrossDirectory) {
 
   // Children should still be accessible via the swapped directories.
   // dir_b (now at "a") should have "child_b"
-  std::vector<std::pair<std::string, SwordFsInode *>> entries;
-  store_->ListEntries(dir_b->ino, &entries);
-  EXPECT_EQ(entries.size(), 1);
-  EXPECT_EQ(entries[0].first, "child_b");
+  std::vector<SwordFsEntry> entries;
+  EXPECT_TRUE(store_->ListEntries(dir_b->ino, &entries).ok());
+  EXPECT_EQ(entries.size(), 3);  // "child_b" + "." + ".."
+  EXPECT_EQ(entries[0].name, ".");
+  EXPECT_EQ(entries[1].name, "..");
+  EXPECT_EQ(entries[2].name, "child_b");
 }

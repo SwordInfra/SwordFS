@@ -32,7 +32,6 @@ struct SwordFsEntry {
   std::string name;
   uint32_t type;  // DT_DIR, DT_REG, DT_LNK, etc.
   InodeID ino;
-  InodeID parent_ino;
 };
 
 enum TimeField : uint8_t {
