@@ -21,6 +21,7 @@
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaStore;
+using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
 
@@ -268,14 +269,14 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddAndList) {
     while (!start.load(std::memory_order_acquire)) { /* spin */
     }
     for (int round = 0; round < 20; ++round) {
-      std::vector<std::pair<std::string, SwordFsInode *>> entries;
+      std::vector<SwordFsEntry> entries;
       Status st = store_->ListEntries(kRoot, &entries);
       if (st.ok()) {
         // Verify no duplicate names in the listing.
         std::set<std::string> names;
         bool duplicate = false;
-        for (const auto &[name, _] : entries) {
-          if (!names.insert(name).second) {
+        for (const auto &entry : entries) {
+          if (!names.insert(entry.name).second) {
             duplicate = true;
             break;
           }

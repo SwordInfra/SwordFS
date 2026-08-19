@@ -4,7 +4,9 @@
 #include "vfs/FileHandle.hpp"
 
 #include <folly/container/F14Map.h>
+#include <folly/logging/xlog.h>
 
+#include "utils/Logging.hpp"
 #include "vfs/InodeHandle.hpp"
 
 namespace swordfs::vfs {
@@ -38,6 +40,12 @@ utils::Status FileHandle::Open(metadata::InodeID ino, int flags,
 
   FileHandle handle{inode_handle};
   if (!FileHandleManager::Instance().Register(handle)) {
+    // Roll back the +1 open-count from inode_handle->Open above.
+    status = inode_handle->Close();
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "FileHandle::Open: rollback Close() failed: "
+                        << status.message();
+    }
     return utils::Status::Internal("failed to register file handle");
   }
   *out = handle;
@@ -88,18 +96,18 @@ std::optional<FileHandle> FileHandleManager::Find(uint64_t fh) {
   return std::nullopt;
 }
 
-void FileHandleManager::Release(uint64_t fh) {
+utils::Status FileHandleManager::Release(uint64_t fh) {
   std::shared_ptr<InodeHandle> inode_handle;
   {
     std::unique_lock lock(mutex_);
     auto it = files_->find(fh);
     if (it == files_->end()) {
-      return;
+      return utils::Status::OK();
     }
     inode_handle = it->second.handle();
     files_->erase(it);
   }
-  inode_handle->Close();
+  return inode_handle->Close();
 }
 
 uint64_t FileHandleManager::OpenDir(metadata::InodeID ino) {

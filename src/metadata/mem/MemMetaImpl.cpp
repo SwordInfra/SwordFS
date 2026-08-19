@@ -101,16 +101,12 @@ Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
     return Status::NotDirectory("not a directory");
   }
 
-  std::vector<std::pair<std::string, SwordFsInode *>> raw_entries;
-  status = store_.ListEntries(ino, &raw_entries);
+  // ListEntries returns the full directory listing including the
+  // synthetic "." and ".." entries.
+  status = store_.ListEntries(ino, entries);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "ReadDir: ino " << ino << " dir map not found";
     return status;
-  }
-
-  for (const auto &[name, child_inode] : raw_entries) {
-    entries->push_back(
-        {name, ModeToDt(child_inode->attr.st_mode), child_inode->ino});
   }
 
   // Reading directory contents updates atime on the directory.

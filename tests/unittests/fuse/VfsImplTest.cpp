@@ -124,22 +124,6 @@ TEST(VfsImplTest, RetrieveReply) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Readdir / Readdirplus — stubs that return OK
-// ────────────────────────────────────────────────────────────────
-
-TEST(VfsImplTest, Readdir) {
-  std::string buf;
-  auto status = VfsImpl::Readdir(1, 4096, 0, &buf);
-  EXPECT_TRUE(status.ok());
-}
-
-TEST(VfsImplTest, Readdirplus) {
-  std::string buf;
-  auto status = VfsImpl::Readdirplus(1, 4096, 0, &buf);
-  EXPECT_TRUE(status.ok());
-}
-
-// ────────────────────────────────────────────────────────────────
 // Forget / ForgetMulti — void methods, tested for no-crash
 // ────────────────────────────────────────────────────────────────
 
@@ -272,6 +256,18 @@ TEST_F(VfsImplIntegrationTest, OpendirPermissionDenied) {
   uint64_t fh = 0;
   auto status = VfsImpl::Opendir(1, &fh);
   EXPECT_TRUE(status.IsPermission()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, Readdir) {
+  std::string buf;
+  auto status = VfsImpl::Readdir(nullptr, 1, 4096, 0, &buf);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, Readdirplus) {
+  std::string buf;
+  auto status = VfsImpl::Readdirplus(nullptr, 1, 4096, 0, &buf);
+  EXPECT_TRUE(status.ok()) << status.message();
 }
 
 TEST_F(VfsImplIntegrationTest, ReleasedirSuccess) {

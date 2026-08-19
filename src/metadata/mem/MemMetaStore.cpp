@@ -3,6 +3,7 @@
 
 #include "metadata/mem/MemMetaStore.hpp"
 
+#include <dirent.h>
 #include <folly/fibers/FiberManagerInternal.h>
 
 #include <algorithm>
@@ -21,7 +22,8 @@ MemMetaStore::MemMetaStore() : next_ino_(kRootInodeId + 1) {
   time_t now = ::time(nullptr);
   struct stat root_st = MakeStat(S_IFDIR | 0755, now);
   root_st.st_ino = kRootInodeId;
-  inodes_[kRootInodeId] = new SwordFsInode{kRootInodeId, root_st, 0};
+  inodes_[kRootInodeId] =
+      new SwordFsInode{kRootInodeId, root_st, kRootInodeId, 0};
   dirs_[kRootInodeId] = {};
 }
 
@@ -95,7 +97,7 @@ Status MemMetaStore::AddEntry(InodeID parent_ino, std::string_view name,
   st.st_gid = parent->attr.st_gid;
   st.st_ino = next_ino_.fetch_add(1, std::memory_order_relaxed);
 
-  SwordFsInode *child = new SwordFsInode{st.st_ino, st, nlookup};
+  SwordFsInode *child = new SwordFsInode{st.st_ino, st, parent_ino, nlookup};
   InsertInodeLocked(child);
   LinkEntryLocked(parent_ino, name, child);
 
@@ -137,6 +139,7 @@ Status MemMetaStore::MoveEntry(InodeID old_parent_ino,
   if (!child) {
     return Status::Internal("unlink entry failed");
   }
+  child->parent_ino = new_parent_ino;
   LinkEntryLocked(new_parent_ino, new_name, child);
   return Status::OK();
 }
@@ -204,24 +207,35 @@ Status MemMetaStore::LinkExistingEntry(InodeID parent_ino,
     return Status::AlreadyExists("entry already exists");
   }
 
+  // NOTE: full POSIX hard-link semantics (parent tracking for "..",
+  // nlink accounting for the last reference) are not yet wired here.
+  // Future work: introduce an internal "pointer inode" record so that
+  // link(2) and unlink(2) keep the target's nlink in sync and resolve
+  // link attributes transparently.
   inode->attr.st_nlink++;
   LinkEntryLocked(parent_ino, name, inode);
   return Status::OK();
 }
 
-Status MemMetaStore::ListEntries(
-    InodeID ino,
-    std::vector<std::pair<std::string, SwordFsInode *>> *entries) {
+Status MemMetaStore::ListEntries(InodeID ino,
+                                 std::vector<SwordFsEntry> *entries) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  if (FindInodeLocked(ino) == nullptr) {
+  SwordFsInode *dir = FindInodeLocked(ino);
+  if (dir == nullptr) {
     return Status::NotFound("directory not found");
   }
+  if (!dir->IsDir()) {
+    return Status::NotDirectory("not a directory");
+  }
+
+  entries->push_back({".", DT_DIR, ino});
+  entries->push_back({"..", DT_DIR, dir->parent_ino});
 
   auto dir_it = dirs_.find(ino);
   if (dir_it != dirs_.end()) {
     for (const auto &[name, child] : dir_it->second) {
-      entries->push_back({name, child});
+      entries->push_back({name, ModeToDt(child->attr.st_mode), child->ino});
     }
   }
   return Status::OK();

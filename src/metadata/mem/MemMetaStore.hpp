@@ -75,9 +75,9 @@ class MemMetaStore {
   Status LinkExistingEntry(InodeID parent_ino, std::string_view name,
                            SwordFsInode *inode);
 
-  // List all (name, inode-pointer) pairs in a directory.
-  Status ListEntries(InodeID ino,
-                     std::vector<std::pair<std::string, SwordFsInode *>> *entries);
+  // List all entries in a directory, including the synthetic "."
+  // and "..".
+  Status ListEntries(InodeID ino, std::vector<SwordFsEntry> *entries);
 
   // Return true if child is a descendant of ancestor.
   bool IsDescendantOf(InodeID ancestor_ino, InodeID child_ino) const;

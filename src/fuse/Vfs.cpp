@@ -19,7 +19,6 @@
 #include "utils/FiberRuntime.hpp"
 #include "utils/Logging.hpp"
 #include "vfs/VfsImpl.hpp"
-#include "volume/VolumeImpl.hpp"
 
 using swordfs::vfs::VfsImpl;
 
@@ -341,49 +340,13 @@ void VfsHookFactory::SwordFsReaddir(fuse_req_t req, fuse_ino_t ino,
   (void)fi;
   ::swordfs::utils::RunInFiber([req, ino, size, off] {
     SetRequestContext(req);
-    std::vector<swordfs::metadata::SwordFsEntry> entries;
-    entries.push_back(swordfs::metadata::SwordFsEntry{".", DT_DIR, ino});
-    entries.push_back(swordfs::metadata::SwordFsEntry{
-        "..", DT_DIR, ino == swordfs::metadata::kRootInodeId ? ino : 0});
-    auto status = volume::VolumeImpl::Instance().meta_engine()->ReadDir(ino, &entries);
+    std::string buf;
+    auto status = VfsImpl::Readdir(req, ino, size, off, &buf);
     if (!status.ok()) {
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    size_t cap = 0;
-    std::vector<size_t> sizes(entries.size());
-    for (size_t i = 0; i < entries.size(); ++i) {
-      struct stat st = {};
-      st.st_ino = entries[i].ino;
-      st.st_mode = entries[i].type << 12;
-      sizes[i] = fuse_add_direntry(req, nullptr, 0,
-                                   entries[i].name.c_str(), &st, 0);
-      cap += sizes[i];
-    }
-    char *buf = static_cast<char *>(std::malloc(cap));
-    if (!buf) {
-      fuse_reply_err(req, ENOMEM);
-      return;
-    }
-    size_t pos = 0;
-    for (size_t i = 0; i < entries.size() && pos < cap; ++i) {
-      struct stat st = {};
-      st.st_ino = entries[i].ino;
-      st.st_mode = entries[i].type << 12;
-      size_t n = fuse_add_direntry(req, buf + pos, cap - pos,
-                                   entries[i].name.c_str(), &st,
-                                   pos + sizes[i]);
-      if (n > cap - pos) {
-        break;
-      }
-      pos += n;
-    }
-    if (static_cast<size_t>(off) < pos) {
-      fuse_reply_buf(req, buf + off, std::min(pos - off, size));
-    } else {
-      fuse_reply_buf(req, nullptr, 0);
-    }
-    std::free(buf);
+    fuse_reply_buf(req, buf.data(), buf.size());
   });
 }
 
@@ -598,55 +561,13 @@ void VfsHookFactory::SwordFsReaddirplus(fuse_req_t req, fuse_ino_t ino,
   (void)fi;
   ::swordfs::utils::RunInFiber([req, ino, size, off] {
     SetRequestContext(req);
-    std::vector<swordfs::metadata::SwordFsEntry> entries;
-    entries.push_back(swordfs::metadata::SwordFsEntry{".", DT_DIR, ino});
-    entries.push_back(swordfs::metadata::SwordFsEntry{
-        "..", DT_DIR, ino == swordfs::metadata::kRootInodeId ? ino : 0});
-    auto status = volume::VolumeImpl::Instance().meta_engine()->ReadDir(ino, &entries);
+    std::string buf;
+    auto status = VfsImpl::Readdirplus(req, ino, size, off, &buf);
     if (!status.ok()) {
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    size_t cap = 0;
-    std::vector<size_t> sizes(entries.size());
-    for (size_t i = 0; i < entries.size(); ++i) {
-      fuse_entry_param e = {};
-      e.ino = entries[i].ino;
-      e.attr.st_ino = entries[i].ino;
-      e.attr.st_mode = entries[i].type << 12;
-      e.attr_timeout = 86400;
-      e.entry_timeout = 86400;
-      sizes[i] = fuse_add_direntry_plus(req, nullptr, 0,
-                                        entries[i].name.c_str(), &e, 0);
-      cap += sizes[i];
-    }
-    char *buf = static_cast<char *>(std::malloc(cap));
-    if (!buf) {
-      fuse_reply_err(req, ENOMEM);
-      return;
-    }
-    size_t pos = 0;
-    for (size_t i = 0; i < entries.size() && pos < cap; ++i) {
-      fuse_entry_param e = {};
-      e.ino = entries[i].ino;
-      e.attr.st_ino = entries[i].ino;
-      e.attr.st_mode = entries[i].type << 12;
-      e.attr_timeout = 86400;
-      e.entry_timeout = 86400;
-      size_t n = fuse_add_direntry_plus(req, buf + pos, cap - pos,
-                                        entries[i].name.c_str(), &e,
-                                        pos + sizes[i]);
-      if (n > cap - pos) {
-        break;
-      }
-      pos += n;
-    }
-    if (static_cast<size_t>(off) < pos) {
-      fuse_reply_buf(req, buf + off, std::min(pos - off, size));
-    } else {
-      fuse_reply_buf(req, nullptr, 0);
-    }
-    std::free(buf);
+    fuse_reply_buf(req, buf.data(), buf.size());
   });
 }
 

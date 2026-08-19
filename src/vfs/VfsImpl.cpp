@@ -247,8 +247,7 @@ utils::Status VfsImpl::Flush(fuse_ino_t ino, uint64_t fh) {
 
 utils::Status VfsImpl::Release(fuse_ino_t ino, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Release: ino=" << ino << " fh=" << fh;
-  FileHandleManager::Instance().Release(fh);
-  return Status::OK();
+  return FileHandleManager::Instance().Release(fh);
 }
 
 utils::Status VfsImpl::Fsync(fuse_ino_t ino, int datasync, uint64_t fh) {
@@ -285,10 +284,6 @@ static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
     return status;
   }
 
-  entries.insert(entries.begin(), {".", DT_DIR, ino});
-  entries.insert(entries.begin() + 1,
-                 {"..", DT_DIR, (ino == metadata::kRootInodeId) ? ino : 0});
-
   std::vector<size_t> sizes(entries.size());
   size_t cap = 0;
   for (size_t i = 0; i < entries.size(); ++i) {
@@ -318,10 +313,36 @@ static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
   return Status::OK();
 }
 
-utils::Status VfsImpl::Readdir(fuse_ino_t ino, size_t size, off_t off,
-                               std::string *buf) {
-  // Need fuse_req_t for fuse_add_direntry.  The caller supplies context.
-  return Status::OK();  // stub — caller handles via Vfs.cpp directly
+utils::Status VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
+                               off_t off, std::string *buf) {
+  return ReaddirCommon(
+      req, ino, size, off, VolumeImpl::Instance().meta_engine(),
+      [](fuse_req_t r, char *p, size_t cap, const metadata::SwordFsEntry &e,
+         off_t next_off) {
+        struct stat st = {};
+        st.st_ino = e.ino;
+        st.st_mode = e.type << 12;
+        return fuse_add_direntry(r, p, cap, e.name.c_str(), &st, next_off);
+      },
+      buf);
+}
+
+utils::Status VfsImpl::Readdirplus(fuse_req_t req, fuse_ino_t ino,
+                                   size_t size, off_t off, std::string *buf) {
+  return ReaddirCommon(
+      req, ino, size, off, VolumeImpl::Instance().meta_engine(),
+      [](fuse_req_t r, char *p, size_t cap, const metadata::SwordFsEntry &e,
+         off_t next_off) {
+        fuse_entry_param ep = {};
+        ep.ino = e.ino;
+        ep.attr.st_ino = e.ino;
+        ep.attr.st_mode = e.type << 12;
+        ep.attr_timeout = 1.0;
+        ep.entry_timeout = 1.0;
+        return fuse_add_direntry_plus(r, p, cap, e.name.c_str(), &ep,
+                                      next_off);
+      },
+      buf);
 }
 
 utils::Status VfsImpl::Releasedir(fuse_ino_t ino, uint64_t fh) {
@@ -429,10 +450,25 @@ utils::Status VfsImpl::RetrieveReply(fuse_req_t /*req*/, void *cookie,
   return Status::NotSupported("retrieve_reply");
 }
 
-void VfsImpl::ForgetMulti(fuse_req_t /*req*/, size_t count,
+void VfsImpl::ForgetMulti(fuse_req_t req, size_t count,
                           struct fuse_forget_data *forgets) {
-  (void)count;
-  (void)forgets;
+  (void)req;
+  if (forgets == nullptr) {
+    return;
+  }
+  auto *meta = VolumeImpl::Instance().meta_engine();
+  for (size_t i = 0; i < count; ++i) {
+    const auto nlookup = static_cast<uint64_t>(forgets[i].nlookup);
+    if (nlookup == 0) {
+      continue;
+    }
+    auto status = meta->Forget(forgets[i].ino, nlookup);
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "ForgetMulti: Forget(ino=" << forgets[i].ino
+                        << ", nlookup=" << nlookup
+                        << ") failed: " << status.message();
+    }
+  }
 }
 
 utils::Status VfsImpl::Flock(fuse_ino_t ino,
@@ -452,17 +488,6 @@ utils::Status VfsImpl::Fallocate(fuse_ino_t ino, int mode,
   (void)length;
   (void)fi;
   return Status::NotSupported("fallocate");
-}
-
-utils::Status VfsImpl::Readdirplus(fuse_ino_t ino, size_t size, off_t off,
-                                   std::string *buf) {
-  // Readdirplus requires fuse_add_direntry_plus which is a FUSE API.
-  // Handled directly in Vfs.cpp; this stub returns empty.
-  (void)ino;
-  (void)size;
-  (void)off;
-  (void)buf;
-  return Status::OK();
 }
 
 utils::Status VfsImpl::Lseek(fuse_ino_t ino, off_t off, int whence,

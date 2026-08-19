@@ -43,9 +43,12 @@ TEST_F(MemMetaImplReadDirTest, ReadDirEmpty) {
   std::vector<SwordFsEntry> entries;
   Status st = impl_->ReadDir(kRoot, &entries);
   EXPECT_TRUE(st.ok()) << st.message();
-  // Root starts empty.  Note: "." and ".." are added at the VfsImpl
-  // level, not in ReadDir — so we expect 0 entries here.
-  EXPECT_EQ(entries.size(), 0);
+  // Root starts empty: ReadDir still emits "." and "..".
+  EXPECT_EQ(entries.size(), 2);
+  EXPECT_EQ(entries[0].name, ".");
+  EXPECT_EQ(entries[0].ino, kRoot);
+  EXPECT_EQ(entries[1].name, "..");
+  EXPECT_EQ(entries[1].ino, kRoot);  // root's parent is itself
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -62,12 +65,15 @@ TEST_F(MemMetaImplReadDirTest, ReadDirWithEntries) {
 
   std::vector<SwordFsEntry> entries;
   EXPECT_TRUE(impl_->ReadDir(kRoot, &entries).ok());
-  EXPECT_EQ(entries.size(), kFiles);
+  EXPECT_EQ(entries.size(), kFiles + 2);  // +2 for "." and ".."
 
   // Verify no duplicate names.
   std::set<std::string> names;
   for (const auto &e : entries) {
     EXPECT_TRUE(names.insert(e.name).second) << "Duplicate entry: " << e.name;
+    if (e.name == "." || e.name == "..") {
+      continue;
+    }
     EXPECT_GT(e.ino, kRoot);
     EXPECT_EQ(e.type, DT_REG);
   }
@@ -97,12 +103,14 @@ TEST_F(MemMetaImplReadDirTest, ReadDirMixedTypes) {
 
   std::vector<SwordFsEntry> entries;
   EXPECT_TRUE(impl_->ReadDir(kRoot, &entries).ok());
-  EXPECT_EQ(entries.size(), 2);
+  EXPECT_EQ(entries.size(), 4);  // 2 real + "." + ".."
 
   for (const auto &e : entries) {
     if (e.name == "file.txt") {
       EXPECT_EQ(e.type, DT_REG);
     } else if (e.name == "subdir") {
+      EXPECT_EQ(e.type, DT_DIR);
+    } else if (e.name == "." || e.name == "..") {
       EXPECT_EQ(e.type, DT_DIR);
     } else {
       FAIL() << "Unexpected entry: " << e.name;
@@ -125,17 +133,26 @@ TEST_F(MemMetaImplReadDirTest, ReadDirAfterMove) {
   // Move a/target → b/target
   impl_->Rename(dir_a_ino, "target", dir_b_ino, "target", 0);
 
-  // Dir A should be empty
+  // Dir A should be empty (apart from "." and "..")
   std::vector<SwordFsEntry> entries_a;
   impl_->ReadDir(dir_a_ino, &entries_a);
-  EXPECT_EQ(entries_a.size(), 0);
+  EXPECT_EQ(entries_a.size(), 2);
 
-  // Dir B should have "target"
+  // Dir B should have "target" + "." + ".."
   std::vector<SwordFsEntry> entries_b;
   impl_->ReadDir(dir_b_ino, &entries_b);
-  EXPECT_EQ(entries_b.size(), 1);
-  EXPECT_EQ(entries_b[0].name, "target");
-  EXPECT_EQ(entries_b[0].ino, f_ino);
+  EXPECT_EQ(entries_b.size(), 3);
+  // Find the real entry (skip "." and "..")
+  const SwordFsEntry *target_entry = nullptr;
+  for (const auto &e : entries_b) {
+    if (e.name != "." && e.name != "..") {
+      target_entry = &e;
+      break;
+    }
+  }
+  ASSERT_NE(target_entry, nullptr);
+  EXPECT_EQ(target_entry->name, "target");
+  EXPECT_EQ(target_entry->ino, f_ino);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -150,7 +167,7 @@ TEST_F(MemMetaImplReadDirTest, ReadDirAfterUnlink) {
 
   std::vector<SwordFsEntry> entries;
   impl_->ReadDir(kRoot, &entries);
-  EXPECT_EQ(entries.size(), 0);
+  EXPECT_EQ(entries.size(), 2);  // just "." and ".."
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -166,11 +183,14 @@ TEST_F(MemMetaImplReadDirTest, ReadDirLargeDirectory) {
 
   std::vector<SwordFsEntry> entries;
   EXPECT_TRUE(impl_->ReadDir(kRoot, &entries).ok());
-  EXPECT_EQ(entries.size(), kFiles);
+  EXPECT_EQ(entries.size(), kFiles + 2);
 
-  // All inodes should be unique.
+  // All real inodes should be unique.
   std::set<InodeID> inodes;
   for (const auto &e : entries) {
+    if (e.name == "." || e.name == "..") {
+      continue;
+    }
     inodes.insert(e.ino);
   }
   EXPECT_EQ(inodes.size(), kFiles) << "Duplicate inodes in ReadDir output";

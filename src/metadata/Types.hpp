@@ -43,6 +43,8 @@ enum TimeField : uint8_t {
 struct SwordFsInode {
   InodeID ino;
   struct stat attr;
+  // Directory the inode lives in.
+  InodeID parent_ino;
   uint64_t nlookup = 0;        // reserved for future forget support
   std::string symlink_target;  // non-empty only for S_IFLNK
 

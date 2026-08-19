@@ -11,6 +11,7 @@ using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::ChunkMeta;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaStore;
+using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
 
@@ -248,20 +249,20 @@ TEST_F(MemMetaStoreTest, ListEntriesSuccess) {
   store_->AddEntry(kRoot, "b.txt", kRegFile, 0, nullptr);
   store_->AddEntry(kRoot, "c", kDir, 0, nullptr);
 
-  std::vector<std::pair<std::string, SwordFsInode *>> entries;
+  std::vector<SwordFsEntry> entries;
   Status st = store_->ListEntries(kRoot, &entries);
   EXPECT_TRUE(st.ok());
-  EXPECT_EQ(entries.size(), 3);
+  EXPECT_EQ(entries.size(), 5);  // 3 real + "." + ".."
 }
 
 TEST_F(MemMetaStoreTest, ListEntriesEmptyDir) {
-  std::vector<std::pair<std::string, SwordFsInode *>> entries;
+  std::vector<SwordFsEntry> entries;
   EXPECT_TRUE(store_->ListEntries(kRoot, &entries).ok());
-  EXPECT_EQ(entries.size(), 0);
+  EXPECT_EQ(entries.size(), 2);  // just "." and ".."
 }
 
 TEST_F(MemMetaStoreTest, ListEntriesNotFound) {
-  std::vector<std::pair<std::string, SwordFsInode *>> entries;
+  std::vector<SwordFsEntry> entries;
   Status st = store_->ListEntries(42, &entries);
   EXPECT_TRUE(st.IsNotFound());
 }
