@@ -18,6 +18,8 @@
 using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::ChunkMeta;
 using swordfs::metadata::InodeID;
+using swordfs::metadata::RenameFlag;
+using swordfs::metadata::SetAttrField;
 using swordfs::vfs::VfsImpl;
 
 // Minimal no-op data engine. The VfsImplIntegrationTest fixture must
@@ -172,10 +174,10 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status Rename(InodeID, std::string_view, InodeID,
-                std::string_view, unsigned int) override {
+                std::string_view, RenameFlag) override {
     return Status::OK();
   }
-  Status SetAttr(InodeID, const struct stat *, int,
+  Status SetAttr(InodeID, const struct stat *, SetAttrField,
                  struct stat *) override {
     return Status::OK();
   }

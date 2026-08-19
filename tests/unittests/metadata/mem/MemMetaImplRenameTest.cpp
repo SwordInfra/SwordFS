@@ -16,6 +16,7 @@
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
+using swordfs::metadata::RenameFlag;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -40,7 +41,7 @@ TEST_F(MemMetaImplRenameTest, BasicRenameFile) {
   InodeID f_ino = 0;
   impl_->Create(kRoot, "old_name", 0644, &f_ino, nullptr);
 
-  Status st = impl_->Rename(kRoot, "old_name", kRoot, "new_name", 0);
+  Status st = impl_->Rename(kRoot, "old_name", kRoot, "new_name", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
 
   InodeID found = 0;
@@ -50,12 +51,12 @@ TEST_F(MemMetaImplRenameTest, BasicRenameFile) {
 }
 
 TEST_F(MemMetaImplRenameTest, RenameSourceNotFound) {
-  Status st = impl_->Rename(kRoot, "no_such", kRoot, "new", 0);
+  Status st = impl_->Rename(kRoot, "no_such", kRoot, "new", RenameFlag::kNone);
   EXPECT_TRUE(st.IsNotFound()) << st.message();
 }
 
 TEST_F(MemMetaImplRenameTest, RenameRefusesDot) {
-  Status st = impl_->Rename(kRoot, ".", kRoot, "new", 0);
+  Status st = impl_->Rename(kRoot, ".", kRoot, "new", RenameFlag::kNone);
   EXPECT_TRUE(st.IsBusy()) << "should refuse to rename '.'";
 }
 
@@ -65,7 +66,7 @@ TEST_F(MemMetaImplRenameTest, RenameRefusesDotDot) {
   InodeID f_ino = 0;
   impl_->Create(sub_ino, "f", 0644, &f_ino, nullptr);
 
-  Status st = impl_->Rename(sub_ino, "..", kRoot, "new", 0);
+  Status st = impl_->Rename(sub_ino, "..", kRoot, "new", RenameFlag::kNone);
   EXPECT_TRUE(st.IsBusy()) << "should refuse to rename '..'";
 }
 
@@ -78,7 +79,7 @@ TEST_F(MemMetaImplRenameTest, RenameOverwriteFile) {
   impl_->Create(kRoot, "src", 0644, &f1_ino, nullptr);
   impl_->Create(kRoot, "dst", 0644, &f2_ino, nullptr);
 
-  Status st = impl_->Rename(kRoot, "src", kRoot, "dst", 0);
+  Status st = impl_->Rename(kRoot, "src", kRoot, "dst", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
 
   InodeID found = 0;
@@ -102,7 +103,7 @@ TEST_F(MemMetaImplRenameTest, RenameOverwriteEmptyDirectory) {
   impl_->GetAttr(kRoot, &root_attr);
   nlink_t nlink_before = root_attr.st_nlink;
 
-  Status st = impl_->Rename(kRoot, "a", kRoot, "b", 0);
+  Status st = impl_->Rename(kRoot, "a", kRoot, "b", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
 
   impl_->GetAttr(kRoot, &root_attr);
@@ -125,7 +126,7 @@ TEST_F(MemMetaImplRenameTest, RenameDirectoryCrossDirectoryUpdatesNlink) {
   impl_->GetAttr(src_ino, &src_attr_before);
   impl_->GetAttr(dst_ino, &dst_attr_before);
 
-  Status st = impl_->Rename(src_ino, "sub", dst_ino, "sub", 0);
+  Status st = impl_->Rename(src_ino, "sub", dst_ino, "sub", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
 
   struct stat src_attr_after, dst_attr_after;
@@ -149,7 +150,7 @@ TEST_F(MemMetaImplRenameTest, RenameDirectorySameDirectoryNlinkUnchanged) {
   struct stat parent_before;
   impl_->GetAttr(dir_ino, &parent_before);
 
-  Status st = impl_->Rename(dir_ino, "sub", dir_ino, "renamed_sub", 0);
+  Status st = impl_->Rename(dir_ino, "sub", dir_ino, "renamed_sub", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
 
   struct stat parent_after;
@@ -166,7 +167,7 @@ TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoSubtreeFails) {
   impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
   impl_->MkDir(a_ino, "b", 0755, &b_ino, nullptr);
 
-  Status st = impl_->Rename(kRoot, "a", b_ino, "a", 0);
+  Status st = impl_->Rename(kRoot, "a", b_ino, "a", RenameFlag::kNone);
   EXPECT_EQ(st.code(), Status::kInvalidArgument) << st.message();
 }
 
@@ -179,7 +180,7 @@ TEST_F(MemMetaImplRenameTest, RenameFileOverDirectoryFails) {
   impl_->Create(kRoot, "f", 0644, &f_ino, nullptr);
   impl_->MkDir(kRoot, "d", 0755, &d_ino, nullptr);
 
-  Status st = impl_->Rename(kRoot, "f", kRoot, "d", 0);
+  Status st = impl_->Rename(kRoot, "f", kRoot, "d", RenameFlag::kNone);
   EXPECT_EQ(st.code(), Status::kIsDirectory) << st.message();
 }
 
@@ -188,7 +189,7 @@ TEST_F(MemMetaImplRenameTest, RenameDirectoryOverFileFails) {
   impl_->Create(kRoot, "f", 0644, &f_ino, nullptr);
   impl_->MkDir(kRoot, "d", 0755, &d_ino, nullptr);
 
-  Status st = impl_->Rename(kRoot, "d", kRoot, "f", 0);
+  Status st = impl_->Rename(kRoot, "d", kRoot, "f", RenameFlag::kNone);
   EXPECT_EQ(st.code(), Status::kNotDirectory) << st.message();
 }
 
@@ -203,7 +204,7 @@ TEST_F(MemMetaImplRenameTest, RenameOverwriteNonEmptyDirectoryFails) {
 
   impl_->Create(d2_ino, "child", 0644, nullptr, nullptr);
 
-  Status st = impl_->Rename(kRoot, "d1", kRoot, "d2", 0);
+  Status st = impl_->Rename(kRoot, "d1", kRoot, "d2", RenameFlag::kNone);
   EXPECT_TRUE(st.IsNotEmpty()) << st.message();
 }
 
@@ -232,7 +233,7 @@ TEST_F(MemMetaImplRenameTest, NlinkAccountingMultipleDirs) {
   impl_->GetAttr(a_ino, &a_before);
   impl_->GetAttr(c_ino, &c_before);
 
-  Status st = impl_->Rename(a_ino, "a1", c_ino, "a1", 0);
+  Status st = impl_->Rename(a_ino, "a1", c_ino, "a1", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
 
   struct stat a_after, c_after;

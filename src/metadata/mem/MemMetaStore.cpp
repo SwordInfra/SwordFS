@@ -22,8 +22,8 @@ MemMetaStore::MemMetaStore() : next_ino_(kRootInodeId + 1) {
   time_t now = ::time(nullptr);
   struct stat root_st = MakeStat(S_IFDIR | 0755, now);
   root_st.st_ino = kRootInodeId;
-  inodes_[kRootInodeId] =
-      new SwordFsInode{kRootInodeId, root_st, kRootInodeId, 0};
+  inodes_[kRootInodeId] = new SwordFsInode{
+      kRootInodeId, root_st, kRootInodeId, 0};
   dirs_[kRootInodeId] = {};
 }
 

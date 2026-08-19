@@ -110,7 +110,7 @@ Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
   }
 
   // Reading directory contents updates atime on the directory.
-  dir->Touch(kAtime);
+  dir->Touch(SetAttrField::kAtime);
   return Status::OK();
 }
 
@@ -145,7 +145,7 @@ Status MemMetaImpl::Create(InodeID parent_ino,
   }
 
   // Parent directory mtime/ctime must be updated after a child is created.
-  parent->Touch(kMtime | kCtime);
+  parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
   if (child_ino) {
     *child_ino = child->ino;
@@ -192,7 +192,7 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
     parent->attr.st_nlink++;
   }
 
-  parent->Touch(kMtime | kCtime);
+  parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
   if (child_ino) {
     *child_ino = child->ino;
@@ -260,7 +260,7 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
   status = store_.Unlink(parent_ino, name, post_nlink);
 
   if (parent) {
-    parent->Touch(kMtime | kCtime);
+    parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
   }
 
   SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name
@@ -315,7 +315,7 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
     parent->attr.st_nlink--;
   }
 
-  parent->Touch(kMtime | kCtime);
+  parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
   SWORDFS_LOG_DEBUG << "RmDir: parent=" << parent_ino << " name='" << name
                     << "' ino=" << target->ino;
@@ -324,7 +324,7 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
 
 Status MemMetaImpl::Rename(InodeID old_parent_ino,
                            std::string_view old_name, InodeID new_parent_ino,
-                           std::string_view new_name, unsigned int flags) {
+                           std::string_view new_name, RenameFlag flags) {
   std::string old_key(old_name);
   std::string new_key(new_name);
 
@@ -382,15 +382,13 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
   SwordFsInode *existing = nullptr;
   bool target_exists = store_.LookupEntry(new_parent_ino, new_name, &existing).ok();
 
-  // RENAME_NOREPLACE (1): fail if target already exists.
-  if (flags & RENAME_NOREPLACE) {
+  if (HasRenameFlag(flags, RenameFlag::kNoReplace)) {
     if (target_exists) {
-      return Status::AlreadyExists("target exists and RENAME_NOREPLACE was set");
+      return Status::AlreadyExists("target exists and RenameFlag::kNoReplace was set");
     }
   }
 
-  // RENAME_EXCHANGE (2): atomically swap the two entries.
-  if (flags & RENAME_EXCHANGE) {
+  if (HasRenameFlag(flags, RenameFlag::kExchange)) {
     if (!target_exists) {
       return Status::NotFound("target does not exist for RENAME_EXCHANGE");
     }
@@ -420,13 +418,13 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
     }
 
     // Update timestamps.
-    moved->Touch(kCtime);
-    existing->Touch(kCtime);
+    moved->Touch(SetAttrField::kCtime);
+    existing->Touch(SetAttrField::kCtime);
     if (op) {
-      op->Touch(kMtime | kCtime);
+      op->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
     }
     if (np) {
-      np->Touch(kMtime | kCtime);
+      np->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
     }
     if (old_parent_ino != new_parent_ino && np != op) {
       // If new parent is different, and also different from old parent,
@@ -495,12 +493,12 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
   }
 
   // ctime of the moved inode is updated on rename
-  moved->Touch(kCtime);
+  moved->Touch(SetAttrField::kCtime);
   if (op) {
-    op->Touch(kMtime | kCtime);
+    op->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
   }
   if (np) {
-    np->Touch(kMtime | kCtime);
+    np->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
   }
 
   SWORDFS_LOG_DEBUG << "Rename: " << old_parent_ino << "/'" << old_name
@@ -509,7 +507,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
 }
 
 Status MemMetaImpl::SetAttr(InodeID ino,
-                            const struct stat *attr, int to_set,
+                            const struct stat *attr, SetAttrField fields,
                             struct stat *out_attr) {
   SwordFsInode *inode = nullptr;
   store_.LookupInode(ino, &inode);
@@ -521,22 +519,22 @@ Status MemMetaImpl::SetAttr(InodeID ino,
   auto &st = inode->attr;
   bool owner_changed = false;
 
-  if (to_set & FUSE_SET_ATTR_MODE) {
+  if (HasSetAttrField(fields, SetAttrField::kMode)) {
     st.st_mode = (st.st_mode & S_IFMT) | (attr->st_mode & 07777);
   }
-  if (to_set & FUSE_SET_ATTR_UID) {
+  if (HasSetAttrField(fields, SetAttrField::kUid)) {
     if (st.st_uid != attr->st_uid) {
       owner_changed = true;
     }
     st.st_uid = attr->st_uid;
   }
-  if (to_set & FUSE_SET_ATTR_GID) {
+  if (HasSetAttrField(fields, SetAttrField::kGid)) {
     if (st.st_gid != attr->st_gid) {
       owner_changed = true;
     }
     st.st_gid = attr->st_gid;
   }
-  if (to_set & FUSE_SET_ATTR_SIZE) {
+  if (HasSetAttrField(fields, SetAttrField::kSize)) {
     // Size changes delegate to Truncate, which updates the inode size,
     // drops out-of-range chunk metadata, clears SUID/SGID, and bumps ctime.
     auto status = Truncate(ino, static_cast<size_t>(attr->st_size));
@@ -544,23 +542,23 @@ Status MemMetaImpl::SetAttr(InodeID ino,
       return status;
     }
   }
-  if (to_set & FUSE_SET_ATTR_ATIME) {
+  if (HasSetAttrField(fields, SetAttrField::kAtime)) {
     st.st_atime = attr->st_atime;
     st.st_atim.tv_nsec = attr->st_atim.tv_nsec;
   }
-  if (to_set & FUSE_SET_ATTR_MTIME) {
+  if (HasSetAttrField(fields, SetAttrField::kMtime)) {
     st.st_mtime = attr->st_mtime;
     st.st_mtim.tv_nsec = attr->st_mtim.tv_nsec;
   }
-  if (to_set & FUSE_SET_ATTR_ATIME_NOW) {
+  if (HasSetAttrField(fields, SetAttrField::kAtimeNow)) {
     st.st_atime = ::time(nullptr);
     st.st_atim.tv_nsec = 0;
   }
-  if (to_set & FUSE_SET_ATTR_MTIME_NOW) {
+  if (HasSetAttrField(fields, SetAttrField::kMtimeNow)) {
     st.st_mtime = ::time(nullptr);
     st.st_mtim.tv_nsec = 0;
   }
-  if (to_set & FUSE_SET_ATTR_CTIME) {
+  if (HasSetAttrField(fields, SetAttrField::kCtime)) {
     st.st_ctime = attr->st_ctime;
   }
 
@@ -571,7 +569,7 @@ Status MemMetaImpl::SetAttr(InodeID ino,
   }
 
   // Update ctime unless it was explicitly set
-  if (!(to_set & FUSE_SET_ATTR_CTIME)) {
+  if (!HasSetAttrField(fields, SetAttrField::kCtime)) {
     st.st_ctime = ::time(nullptr);
   }
 
@@ -608,7 +606,7 @@ Status MemMetaImpl::Symlink(InodeID parent_ino,
 
   child->symlink_target = link;
   child->attr.st_size = child->symlink_target.size();
-  parent->Touch(kMtime | kCtime);
+  parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
   if (child_ino) {
     *child_ino = child->ino;
@@ -652,8 +650,8 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
     return status;
   }
 
-  newparent->Touch(kMtime | kCtime);
-  inode->Touch(kCtime);
+  newparent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  inode->Touch(SetAttrField::kCtime);
 
   if (attr) {
     *attr = inode->attr;
@@ -766,7 +764,7 @@ Status MemMetaImpl::OpenDir(InodeID ino) {
   }
 
   // Update atime on the directory.
-  dir->Touch(kAtime);
+  dir->Touch(SetAttrField::kAtime);
 
   return Status::OK();
 }
