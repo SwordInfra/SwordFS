@@ -93,10 +93,16 @@ class IMetaEngine {
   virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;
 
   /// Rename (move) an entry between directories.  |flags| is a bitwise
-  /// OR of RenameFlag values.
+  /// OR of RenameFlag values.  When |result| is non-null and the rename
+  /// replaced an existing non-directory entry, the implementation fills
+  /// |*result| as part of the same atomic mutation so the caller can
+  /// reclaim the overwritten inode's data without a second lookup.
+  /// Engines that cannot report the overwritten inode may leave
+  /// |*result| untouched.
   virtual Status Rename(InodeID old_parent_ino,
                         std::string_view old_name, InodeID new_parent_ino,
-                        std::string_view new_name, RenameFlag flags) = 0;
+                        std::string_view new_name, RenameFlag flags,
+                        RenameResult *result = nullptr) = 0;
 
   /// Set attributes for an inode.  |fields| is a bitwise OR of
   /// SetAttrField values; only the bits set in |fields| are read from

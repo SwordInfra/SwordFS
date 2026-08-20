@@ -86,6 +86,15 @@ enum class RenameFlag : uint32_t {
   kExchange = 1u << 1,
 };
 
+// Result of a rename that replaced an existing non-directory entry.
+// The metadata transaction owns the atomic mutation; the VFS layer uses
+// this result to decide whether the overwritten inode's data needs to be
+// reclaimed without performing a second lookup.
+struct RenameResult {
+  InodeID overwritten_ino = 0;
+  nlink_t overwritten_post_nlink = 0;
+};
+
 inline bool HasSetAttrField(SetAttrField fields, SetAttrField field) {
   return (static_cast<uint32_t>(fields) & static_cast<uint32_t>(field)) != 0;
 }

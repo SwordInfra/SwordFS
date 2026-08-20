@@ -30,6 +30,7 @@ using swordfs::metadata::ChunkMeta;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::RenameFlag;
+using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
 using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
@@ -159,7 +160,7 @@ class MockMetaEngine : public IMetaEngine {
   Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID,
-                std::string_view, RenameFlag) override {
+                std::string_view, RenameFlag, RenameResult *) override {
     return Status::OK();
   }
   Status SetAttr(InodeID, const struct stat *attr, SetAttrField fields,

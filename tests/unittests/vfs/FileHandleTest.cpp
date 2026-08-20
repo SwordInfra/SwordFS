@@ -33,6 +33,7 @@ using swordfs::metadata::ChunkMeta;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::RenameFlag;
+using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
 using swordfs::utils::Status;
 
@@ -84,7 +85,7 @@ class MockMetaEngine : public IMetaEngine {
   Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID, std::string_view,
-                RenameFlag) override { return Status::OK(); }
+                RenameFlag, RenameResult *) override { return Status::OK(); }
   Status SetAttr(InodeID, const struct stat *, SetAttrField,
                  struct stat *) override { return Status::OK(); }
   Status StatFs(struct statvfs *) override { return Status::OK(); }
@@ -529,7 +530,7 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
   Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID, std::string_view,
-                RenameFlag) override { return Status::OK(); }
+                RenameFlag, RenameResult *) override { return Status::OK(); }
   Status SetAttr(InodeID, const struct stat *, SetAttrField,
                  struct stat *) override { return Status::OK(); }
   Status StatFs(struct statvfs *) override { return Status::OK(); }

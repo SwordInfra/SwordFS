@@ -17,6 +17,7 @@
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
 using swordfs::metadata::RenameFlag;
+using swordfs::metadata::RenameResult;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -74,19 +75,27 @@ TEST_F(MemMetaImplRenameTest, RenameRefusesDotDot) {
 // Rename: overwrite existing file
 // ════════════════════════════════════════════════════════════════════
 
-TEST_F(MemMetaImplRenameTest, RenameOverwriteFile) {
+TEST_F(MemMetaImplRenameTest, RenameOverwriteFileReportsVictim) {
   InodeID f1_ino = 0, f2_ino = 0;
   impl_->Create(kRoot, "src", 0644, &f1_ino, nullptr);
   impl_->Create(kRoot, "dst", 0644, &f2_ino, nullptr);
 
-  Status st = impl_->Rename(kRoot, "src", kRoot, "dst", RenameFlag::kNone);
+  RenameResult result;
+  Status st = impl_->Rename(kRoot, "src", kRoot, "dst", RenameFlag::kNone,
+                            &result);
   EXPECT_TRUE(st.ok()) << st.message();
+  EXPECT_EQ(result.overwritten_ino, f2_ino);
+  EXPECT_EQ(result.overwritten_post_nlink, 0);
 
   InodeID found = 0;
   EXPECT_TRUE(impl_->Lookup(kRoot, "dst", &found, nullptr).ok());
   EXPECT_EQ(found, f1_ino);
 
+  // The metadata transaction must not reclaim the overwritten file itself:
+  // the VFS layer needs to decide whether an open handle still references it.
   struct stat attr;
+  EXPECT_TRUE(impl_->GetAttr(f2_ino, &attr).ok());
+  EXPECT_TRUE(impl_->ReclaimInode(f2_ino).ok());
   EXPECT_TRUE(impl_->GetAttr(f2_ino, &attr).IsNotFound());
 }
 
