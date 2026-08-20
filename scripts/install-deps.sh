@@ -34,8 +34,9 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 DEPS_PREFIX="${DEPS_PREFIX:-/usr/local}"
+# shellcheck source=native-deps-cache.env
+. "$SCRIPT_DIR/native-deps-cache.env"
 FOLLY_SRC="$PROJECT_DIR/build/folly-src"
-FOLLY_VER="v2026.07.20.00"
 
 echo "==> Checking system packages..."
 
@@ -210,7 +211,7 @@ if [ "$FOLLY_INSTALLED" = false ]; then
     mkdir -p "$FOLLY_SRC/build"
     cd "$FOLLY_SRC/build"
     cmake .. \
-      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
       -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
       -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
       -DBoost_NO_BOOST_CMAKE=ON \
@@ -233,7 +234,6 @@ fi  # --skip-heavy
 
 echo "==> Checking AWS SDK for C++..."
 
-AWS_SDK_VER="1.11.540"
 AWS_SDK_SRC="$PROJECT_DIR/build/aws-sdk-src"
 
 if [ "$SKIP_HEAVY" = true ]; then
@@ -280,12 +280,12 @@ if [ "$AWS_SDK_INSTALLED" = false ]; then
     mkdir -p "$AWS_SDK_SRC/build"
     cd "$AWS_SDK_SRC/build"
     cmake .. \
-      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
       -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
       -DCMAKE_C_COMPILER=clang \
       -DCMAKE_CXX_COMPILER=clang++ \
-      -DBUILD_ONLY="s3" \
-      -DBUILD_SHARED_LIBS=OFF \
+      -DBUILD_ONLY="$AWS_SDK_BUILD_ONLY" \
+      -DBUILD_SHARED_LIBS="$AWS_SDK_BUILD_SHARED_LIBS" \
       -DOPENSSL_USE_STATIC_LIBS=OFF \
       -DENABLE_TESTING=OFF \
       -DAUTORUN_UNIT_TESTS=OFF \

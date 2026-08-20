@@ -18,12 +18,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .deps/install
-          key: swordfs-native-deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-deps.sh') }}
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native-deps-cache.env') }}
 
       - name: Install dependencies
-        env:
-          DEPS_PREFIX: ${{ github.workspace }}/.deps/install
-        run: sudo bash scripts/install-deps.sh
+        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
 
       - name: Install CI tools
         run: sudo apt-get install -y -qq lcov clang-tidy
