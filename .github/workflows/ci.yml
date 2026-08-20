@@ -14,7 +14,15 @@ jobs:
         with:
           submodules: false
 
+      - name: Restore native dependency cache
+        uses: actions/cache@v4
+        with:
+          path: .deps/install
+          key: swordfs-native-deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-deps.sh') }}
+
       - name: Install dependencies
+        env:
+          DEPS_PREFIX: ${{ github.workspace }}/.deps/install
         run: sudo bash scripts/install-deps.sh
 
       - name: Install CI tools
@@ -23,7 +31,7 @@ jobs:
       - name: Configure
         run: |
           sudo rm -rf build
-          cmake --preset default -DCMAKE_CXX_FLAGS="--coverage" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+          cmake --preset default -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install" -DCMAKE_CXX_FLAGS="--coverage" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
 
       - name: Build
         run: cmake --build build --target swordfs swordfs_test swordfs_e2e_test

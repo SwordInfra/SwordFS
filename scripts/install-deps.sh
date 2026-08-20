@@ -33,6 +33,7 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+DEPS_PREFIX="${DEPS_PREFIX:-/usr/local}"
 FOLLY_SRC="$PROJECT_DIR/build/folly-src"
 FOLLY_VER="v2026.07.20.00"
 
@@ -123,7 +124,7 @@ find_package(folly REQUIRED)
 message(STATUS "folly OK")
 CMEOF
   cd "$TMPDIR"
-  if cmake . > /dev/null 2>&1; then
+  if cmake -DCMAKE_PREFIX_PATH="$DEPS_PREFIX" . > /dev/null 2>&1; then
     rm -rf "$TMPDIR"
     return 0
   fi
@@ -140,7 +141,7 @@ find_package(AWSSDK REQUIRED COMPONENTS s3)
 message(STATUS "AWSSDK OK")
 CMEOF
   cd "$TMPDIR"
-  if cmake . > /dev/null 2>&1; then
+  if cmake -DCMAKE_PREFIX_PATH="$DEPS_PREFIX" . > /dev/null 2>&1; then
     rm -rf "$TMPDIR"
     return 0
   fi
@@ -160,12 +161,9 @@ else
 
 FOLLY_INSTALLED=false
 if [ "$FORCE" = false ]; then
-  if [ -f /usr/local/lib/cmake/folly/folly-config.cmake ] || \
-     [ -f /usr/lib/cmake/folly/folly-config.cmake ]; then
+  if [ -f "$DEPS_PREFIX/lib/cmake/folly/folly-config.cmake" ]; then
     # Also verify the actual library file exists (not just cmake config).
-    if [ -f /usr/local/lib/libfolly.a ] || [ -f /usr/local/lib/libfolly.so ] || \
-       [ -f /usr/lib/libfolly.a ] || [ -f /usr/lib/libfolly.so ] || \
-       [ -f /usr/lib/x86_64-linux-gnu/libfolly.so ]; then
+    if [ -f "$DEPS_PREFIX/lib/libfolly.a" ] || [ -f "$DEPS_PREFIX/lib/libfolly.so" ]; then
       echo "==> folly cmake config and library found, verifying..."
       if verify_folly; then
         echo "==> folly verified OK, skipping."
@@ -213,7 +211,7 @@ if [ "$FOLLY_INSTALLED" = false ]; then
     cd "$FOLLY_SRC/build"
     cmake .. \
       -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
       -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
       -DBoost_NO_BOOST_CMAKE=ON \
       -DBoost_SYSTEM_FOUND=ON
@@ -244,10 +242,10 @@ else
 
 AWS_SDK_INSTALLED=false
 if [ "$FORCE" = false ]; then
-  if [ -f /usr/local/lib/cmake/aws-cpp-sdk-s3/aws-cpp-sdk-s3-config.cmake ]; then
+  if [ -f "$DEPS_PREFIX/lib/cmake/aws-cpp-sdk-s3/aws-cpp-sdk-s3-config.cmake" ]; then
     # Also verify the actual core library exists (not just cmake config).
-    if [ -f /usr/local/lib/libaws-cpp-sdk-core.a ] || \
-       [ -f /usr/local/lib/libaws-cpp-sdk-core.so ]; then
+    if [ -f "$DEPS_PREFIX/lib/libaws-cpp-sdk-core.a" ] || \
+       [ -f "$DEPS_PREFIX/lib/libaws-cpp-sdk-core.so" ]; then
       echo "==> AWS SDK cmake config and library found, verifying..."
       if verify_aws_sdk; then
         echo "==> AWS SDK verified OK, skipping."
@@ -283,7 +281,7 @@ if [ "$AWS_SDK_INSTALLED" = false ]; then
     cd "$AWS_SDK_SRC/build"
     cmake .. \
       -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
       -DCMAKE_C_COMPILER=clang \
       -DCMAKE_CXX_COMPILER=clang++ \
       -DBUILD_ONLY="s3" \
@@ -304,4 +302,5 @@ fi
 
 fi  # --skip-heavy
 
-echo "==> Done. You can now build SwordFS with: cmake --preset default"
+echo "==> Done. Dependencies installed under: $DEPS_PREFIX"
+echo "==> You can now build SwordFS with: cmake --preset default"
