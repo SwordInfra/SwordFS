@@ -52,6 +52,10 @@ Status MemMetaTxn::LookupInode(InodeID ino, SwordFsInode *out) {
   return Status::OK();
 }
 
+size_t MemMetaTxn::InodeCount() {
+  return store_->inodes_.size();
+}
+
 Status MemMetaTxn::WriteAttr(InodeID ino, const struct stat *attr) {
   if (!attr) {
     return Status::InvalidArgument("null attr");
@@ -444,94 +448,6 @@ Status MemMetaTxn::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
               return a.index < b.index;
             });
   return Status::OK();
-}
-
-// ────────────────────────────────────────────────────────────────
-// Public API — each method is a single-primitive transaction.
-// ────────────────────────────────────────────────────────────────
-
-Status MemMetaStore::LookupInode(InodeID ino, SwordFsInode *out) {
-  return Transact([&](MemMetaTxn &txn) { return txn.LookupInode(ino, out); });
-}
-
-size_t MemMetaStore::InodeCount() {
-  return Transact([&](MemMetaTxn &) { return inodes_.size(); });
-}
-
-Status MemMetaStore::LookupEntry(InodeID parent_ino, std::string_view name,
-                                 SwordFsInode *out) {
-  return Transact(
-      [&](MemMetaTxn &txn) { return txn.LookupEntry(parent_ino, name, out); });
-}
-
-Status MemMetaStore::AddEntry(InodeID parent_ino, std::string_view name,
-                              mode_t mode, uint64_t nlookup,
-                              SwordFsInode *out) {
-  return Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(parent_ino, name, mode, nlookup, out);
-  });
-}
-
-Status MemMetaStore::MoveEntry(InodeID old_parent_ino,
-                               std::string_view old_name,
-                               InodeID new_parent_ino,
-                               std::string_view new_name) {
-  return Transact([&](MemMetaTxn &txn) {
-    return txn.MoveEntry(old_parent_ino, old_name, new_parent_ino, new_name);
-  });
-}
-
-Status MemMetaStore::Unlink(InodeID parent_ino, std::string_view name,
-                            nlink_t *post_nlink) {
-  return Transact(
-      [&](MemMetaTxn &txn) { return txn.Unlink(parent_ino, name, post_nlink); });
-}
-
-Status MemMetaStore::LinkExistingEntry(InodeID parent_ino,
-                                       std::string_view name, InodeID ino) {
-  return Transact(
-      [&](MemMetaTxn &txn) { return txn.LinkExistingEntry(parent_ino, name, ino); });
-}
-
-Status MemMetaStore::ListEntries(InodeID ino,
-                                 std::vector<SwordFsEntry> *entries) {
-  return Transact(
-      [&](MemMetaTxn &txn) { return txn.ListEntries(ino, entries); });
-}
-
-bool MemMetaStore::IsDescendantOf(InodeID ancestor_ino, InodeID child_ino) {
-  return Transact(
-      [&](MemMetaTxn &txn) { return txn.IsDescendantOf(ancestor_ino, child_ino); });
-}
-
-Status MemMetaStore::SwapEntries(InodeID parent_a_ino,
-                                 std::string_view name_a,
-                                 InodeID parent_b_ino,
-                                 std::string_view name_b) {
-  return Transact([&](MemMetaTxn &txn) {
-    return txn.SwapEntries(parent_a_ino, name_a, parent_b_ino, name_b);
-  });
-}
-
-Status MemMetaStore::AddChunk(InodeID ino, const ChunkMeta &cm) {
-  return Transact([&](MemMetaTxn &txn) { return txn.AddChunk(ino, cm); });
-}
-
-Status MemMetaStore::FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) {
-  return Transact([&](MemMetaTxn &txn) { return txn.FindChunk(ino, idx, cm); });
-}
-
-Status MemMetaStore::TruncateChunks(InodeID ino, size_t new_size) {
-  return Transact(
-      [&](MemMetaTxn &txn) { return txn.TruncateChunks(ino, new_size); });
-}
-
-Status MemMetaStore::ReclaimInode(InodeID ino) {
-  return Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
-}
-
-Status MemMetaStore::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
-  return Transact([&](MemMetaTxn &txn) { return txn.ListChunks(ino, out); });
 }
 
 // ────────────────────────────────────────────────────────────────

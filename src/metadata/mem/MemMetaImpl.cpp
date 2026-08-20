@@ -778,7 +778,9 @@ Status MemMetaImpl::StatFs(struct statvfs *stbuf) {
   stbuf->f_blocks = 268435456;  // ~1 TiB
   stbuf->f_bfree = 268435456;
   stbuf->f_bavail = 268435456;
-  stbuf->f_files = store_.InodeCount();
+  store_.Transact([&](MemMetaTxn &txn) {
+    stbuf->f_files = txn.InodeCount();
+  });
   stbuf->f_ffree = limits.max_free_inodes;
   return Status::OK();
 }
@@ -846,11 +848,11 @@ Status MemMetaImpl::Open(InodeID ino) {
 }
 
 Status MemMetaImpl::ReclaimInode(InodeID ino) {
-  return store_.ReclaimInode(ino);
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
 }
 
 Status MemMetaImpl::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
-  return store_.ListChunks(ino, out);
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.ListChunks(ino, out); });
 }
 
 Status MemMetaImpl::OpenDir(InodeID ino) {
@@ -894,11 +896,12 @@ Status MemMetaImpl::Forget(InodeID ino,
 // ────────────────────────────────────────────────────────────────
 
 Status MemMetaImpl::AddChunk(InodeID ino, const ChunkMeta &cm) {
-  return store_.AddChunk(ino, cm);
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.AddChunk(ino, cm); });
 }
 
 Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) {
-  return store_.FindChunk(ino, idx, cm);
+  return store_.Transact(
+      [&](MemMetaTxn &txn) { return txn.FindChunk(ino, idx, cm); });
 }
 
 // TruncateInTxn runs inside an existing transaction (the caller's

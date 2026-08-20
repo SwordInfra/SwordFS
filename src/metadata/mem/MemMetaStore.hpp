@@ -4,10 +4,10 @@
 // Combined inode + directory manager for the memory backend.
 //
 // Transaction model:
-//   All composition happens inside MemMetaStore::Transact().  The
-//   callback receives a MemMetaTxn handle whose methods are the store's
-//   primitive operations; the whole callback is one atomic step (for
-//   the memory backend: a single critical section over mutex_).
+//   Transact() is the ONLY public entry point.  The callback receives a
+//   MemMetaTxn handle whose methods are the store's primitive
+//   operations; the whole callback is one atomic step (for the memory
+//   backend: a single critical section over mutex_).
 //
 //   The transaction interface uses VALUE SEMANTICS: reads hand out
 //   snapshot copies of SwordFsInode and writes go through explicit
@@ -56,6 +56,13 @@ class MemMetaTxn {
   // Look up an inode by number.  On success, *out receives a snapshot
   // copy of the inode record.
   Status LookupInode(InodeID ino, SwordFsInode *out);
+
+  // Return the total number of inodes currently stored.
+  size_t InodeCount();
+
+  // ────────────────────────────────────────────────────────────────
+  // Inode writes (by ino)
+  // ────────────────────────────────────────────────────────────────
 
   // Overwrite the inode's full attribute record.  Callers are expected
   // to read-modify-write: take a snapshot via LookupInode, mutate the
@@ -159,96 +166,16 @@ class MemMetaStore {
   // whole callback executes as a single atomic step with respect to all
   // other transactions (memory backend: while holding mutex_).
   //
-  // This is the seam where a future KV/Redis backend maps the same
-  // callback shape onto a real transaction.
+  // This is the store's ONLY operation entry point — single operations
+  // are simply single-primitive transactions.  It is also the seam
+  // where a future KV/Redis backend maps the same callback shape onto
+  // a real transaction.
   template <typename F>
   decltype(auto) Transact(F&& f) {
     std::lock_guard<std::mutex> lock(mutex_);
     MemMetaTxn txn(this);
     return std::forward<F>(f)(txn);
   }
-
-  // ────────────────────────────────────────────────────────────────
-  // Single-operation convenience API
-  // ────────────────────────────────────────────────────────────────
-  // Each of these wraps exactly one primitive in its own transaction.
-  // Callers composing multiple operations MUST use Transact() instead.
-  // Read methods hand out snapshot copies — never pointers into
-  // store-owned memory.
-
-  // Look up an inode by number; *out receives a snapshot copy.
-  Status LookupInode(InodeID ino, SwordFsInode *out);
-
-  // Return the total number of inodes currently stored.
-  size_t InodeCount();
-
-  // Look up a child entry by name; *out receives a snapshot copy.
-  Status LookupEntry(InodeID parent_ino, std::string_view name,
-                     SwordFsInode *out);
-
-  // Allocate a new inode and link it as a child of parent.  Returns
-  // AlreadyExists if the name already exists under that parent.
-  Status AddEntry(InodeID parent_ino, std::string_view name,
-                  mode_t mode, uint64_t nlookup,
-                  SwordFsInode *out);
-
-  // Move an existing entry from old_parent/old_name to new_parent/new_name.
-  // The inode is re-linked, not re-created.
-  Status MoveEntry(InodeID old_parent_ino, std::string_view old_name,
-                   InodeID new_parent_ino, std::string_view new_name);
-
-  // POSIX unlink(2): remove the child entry from its parent and
-  // decrement nlink. Does NOT delete the inode or its data; that is
-  // the caller's responsibility (typically `VfsImpl::Unlink` will
-  // follow up with `ReclaimData` once it has confirmed no open file
-  // descriptor still references the inode).
-  // A non-empty directory returns Busy; "." / ".." are rejected via the
-  // permission layer above.
-  Status Unlink(InodeID parent_ino, std::string_view name,
-                nlink_t *post_nlink = nullptr);
-
-  // Link an existing inode (by ino) into a directory (hard link).
-  // Increments nlink.
-  Status LinkExistingEntry(InodeID parent_ino, std::string_view name,
-                           InodeID ino);
-
-  // List all entries in a directory, including the synthetic "."
-  // and "..".
-  Status ListEntries(InodeID ino, std::vector<SwordFsEntry> *entries);
-
-  // Return true if child is a descendant of ancestor.
-  bool IsDescendantOf(InodeID ancestor_ino, InodeID child_ino);
-
-  // Atomically swap two directory entries.
-  Status SwapEntries(InodeID parent_a_ino, std::string_view name_a,
-                     InodeID parent_b_ino, std::string_view name_b);
-
-  // ────────────────────────────────────────────────────────────────
-  // Chunk metadata
-  // ────────────────────────────────────────────────────────────────
-
-  Status AddChunk(InodeID ino, const ChunkMeta &cm);
-  Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm);
-
-  // Drop chunk metadata for data beyond |new_size|, truncating the
-  // chunk that straddles the new size.  A |new_size| of 0 removes all
-  // chunks.  Chunk byte ranges are derived from ChunkMeta::start_offset.
-  Status TruncateChunks(InodeID ino, size_t new_size);
-
-  // ────────────────────────────────────────────────────────────────
-  // Open-unlink reclaim
-  // ────────────────────────────────────────────────────────────────
-
-  // Delete |ino| and its chunk-metadata map if the inode is orphaned
-  // (nlink==0). No-op otherwise. The chunk objects themselves are NOT
-  // deleted from the data engine here — the caller must enumerate the
-  // chunk keys via `ListChunks` and call `IDataEngine::Delete` on each.
-  Status ReclaimInode(InodeID ino);
-
-  // Snapshot every chunk registered for |ino|. The order is ascending
-  // chunk index so callers can issue data-engine Deletes in order and
-  // log replay matches insertion order.
-  Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out);
 
  private:
   // MemMetaTxn forwards to these helpers; its lifetime is exactly one
