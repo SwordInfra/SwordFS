@@ -5,11 +5,11 @@
 
 #include <fcntl.h>
 #include <folly/FileUtil.h>
-#include <folly/logging/xlog.h>
 #include <folly/logging/FileHandlerFactory.h>
 #include <folly/logging/Init.h>
 #include <folly/logging/LogLevel.h>
 #include <folly/logging/LoggerDB.h>
+#include <folly/logging/xlog.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -17,19 +17,17 @@
 #include <stdexcept>
 #include <string>
 
-#include "config/ConfigCenter.hpp"
-
 namespace swordfs::utils {
 
-void checkLogLevel(const std::string& level) {
+void checkLogLevel(const std::string &level) {
   try {
     folly::stringToLogLevel(level);
-  } catch (const std::range_error& e) {
+  } catch (const std::range_error &e) {
     SWORDFS_PROMPT_EXIT << "Error: invalid log level: " << level;
   }
 }
 
-void checkLogFilePath(const std::string& path) {
+void checkLogFilePath(const std::string &path) {
   if (path.empty()) {
     SWORDFS_PROMPT_EXIT << "Error: log file path is empty";
   }
@@ -42,22 +40,20 @@ void checkLogFilePath(const std::string& path) {
   ::close(fd);
 }
 
-void Init() {
+void InitLogging(const LogConfig &log, bool foreground) {
   folly::LoggerDB::get().registerHandlerFactory(
       std::make_unique<folly::FileHandlerFactory>());
 
-  auto& cfg = swordfs::config::ConfigCenter::Instance();
-  checkLogLevel(cfg.log().level);
+  checkLogLevel(log.level);
 
-  if (cfg.foreground()) {
+  if (foreground) {
     folly::initLogging(".=INFO:default; default=stream:stream=stderr");
   } else {
-    checkLogFilePath(cfg.log().path);
-    std::string config = ".=" + cfg.log().level +
-                         ":default; default=file:path=" + cfg.log().path;
+    checkLogFilePath(log.path);
+    std::string config = ".=" + log.level +
+                         ":default; default=file:path=" + log.path;
     folly::initLogging(config.c_str());
-    SWORDFS_LOG_INFO << "Logging to " << cfg.log().path << " at level "
-                     << cfg.log().level;
+    SWORDFS_LOG_INFO << "Logging to " << log.path << " at level " << log.level;
   }
 }
 

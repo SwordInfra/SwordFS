@@ -15,10 +15,16 @@
 #include <folly/io/IOBuf.h>
 #include <folly/logging/xlog.h>
 
+#include <thread>
+
 #include "config/ConfigCenter.hpp"
 #include "storage/StorageRegistry.hpp"
+#include "storage/StorageUrl.hpp"
+#include "storage/s3/S3StreamBuf.hpp"
 #include "utils/FiberThreadPool.hpp"
 #include "utils/Logging.hpp"
+#include "volume/VolumeConfig.hpp"
+#include "volume/VolumeImpl.hpp"
 
 namespace swordfs::storage {
 
@@ -56,76 +62,28 @@ void EnsureAwsSdkInit() {
   (void)guard;
 }
 
-// ────────────────────────────────────────────────────────────────
-// Zero-copy stream helpers for AWS SDK I/O.
-//
-// Goal: eliminate intermediate std::string / memcpy when moving
-// data between folly::IOBuf and the AWS SDK's HTTP layer.
-//
-//   • Put:  SDK reads  from our IOBuf → use PreallocatedStreamBuf
-//           (already provided by AWS SDK).
-//   • Get:  SDK writes into our IOBuf → use PreallocatedOutputStreamBuf
-//           + SetResponseStreamFactory to redirect the response body.
-// ────────────────────────────────────────────────────────────────
-
-/// A std::streambuf that writes into a caller-provided buffer.
-/// Unlike PreallocatedStreamBuf (read-only), this exposes the put
-/// area so the SDK's ostream layer writes directly into the target.
-class PreallocatedOutputStreamBuf : public std::streambuf {
- public:
-  PreallocatedOutputStreamBuf(char *buffer, size_t capacity) {
-    setp(buffer, buffer + capacity);
-  }
-  /// Number of bytes actually written into the buffer.
-  size_t Written() const { return static_cast<size_t>(pptr() - pbase()); }
-
- protected:
-  std::streamsize xsputn(const char *s, std::streamsize n) override {
-    auto avail = static_cast<std::streamsize>(epptr() - pptr());
-    auto actual = std::min(n, avail);
-    std::memcpy(pptr(), s, static_cast<size_t>(actual));
-    pbump(static_cast<int>(actual));
-    return actual;
-  }
-
-  int_type overflow(int_type ch) override { return traits_type::eof(); }
-
-  pos_type seekoff(off_type off, std::ios_base::seekdir dir,
-                   std::ios_base::openmode which) override {
-    if (which == std::ios_base::out && off == 0 &&
-        dir == std::ios_base::cur) {
-      return pptr() - pbase();
-    }
-    return pos_type(off_type(-1));
-  }
-
-  int sync() override { return std::streambuf::sync(); }
-};
-
-/// A self-contained Aws::IOStream that owns a PreallocatedOutputStreamBuf.
-/// Instances are created by the response-stream factory and destroyed by
-/// the SDK via Aws::Delete, which correctly tears down both the stream
-/// and its streambuf.
-class PreallocatedResponseStream : public Aws::IOStream {
- public:
-  PreallocatedResponseStream(char *buffer, size_t capacity)
-      : Aws::IOStream(&buf_), buf_(buffer, capacity) {}
-
-  size_t Written() const { return buf_.Written(); }
-
- private:
-  PreallocatedOutputStreamBuf buf_;
-};
-
 }  // namespace
 
-S3DataEngine::S3DataEngine(const S3Config &config)
-    : cfg_(config),
-      pool_(std::make_shared<utils::FiberThreadPool>(
-          static_cast<size_t>(config::ConfigCenter::Instance().storage_async_threads()))) {
+// Register the "s3" scheme so config validators know this backend is
+// available (StorageRegistry only tracks existence, not factories).
+RegisterBackend kS3Backend{"s3"};
+
+S3DataEngine::S3DataEngine() = default;
+
+Status S3DataEngine::Initialize() {
+  auto status = ParseBucketUrl();
+  if (!status.ok()) {
+    return status;
+  }
+
+  int n = swordfs::config::ConfigCenter::Instance().storage_async_threads();
+  pool_ = std::make_shared<utils::FiberThreadPool>(
+      n > 0 ? static_cast<size_t>(n)
+            : std::thread::hardware_concurrency());
+
   EnsureAwsSdkInit();
   Aws::S3::S3ClientConfiguration aws_cfg;
-  aws_cfg.endpointOverride = cfg_.endpoint;
+  aws_cfg.endpointOverride = endpoint_;
   // Use path-style addressing by default (http://<host>/<bucket>/<key>)
   // for MinIO and other S3-compatible stores.  Set
   // SWORDFS_S3_VIRTUAL_HOSTED=1 to switch to virtual-hosted style
@@ -135,13 +93,50 @@ S3DataEngine::S3DataEngine(const S3Config &config)
   // Only override region if explicitly provided; otherwise let the SDK
   // resolve it via the default chain (AWS_DEFAULT_REGION env var,
   // ~/.aws/config, IAM role, etc.).
-  if (!cfg_.region.empty()) {
-    aws_cfg.region = cfg_.region;
+  if (!region_.empty()) {
+    aws_cfg.region = region_;
   }
   client_ = std::make_unique<Aws::S3::S3Client>(std::move(aws_cfg));
+  return Status::OK();
+}
 
-  SWORDFS_LOG_INFO << "S3DataEngine: endpoint=" << cfg_.endpoint
-                   << " bucket=" << cfg_.bucket;
+Status S3DataEngine::ParseBucketUrl() {
+  auto &vol = swordfs::volume::VolumeImpl::Instance().config();
+  using swordfs::utils::StorageUrl;
+  StorageUrl url;
+  if (!StorageUrl::Parse(vol.bucket, &url) || url.scheme != "s3") {
+    return Status::InvalidArgument("invalid bucket URL: " + vol.bucket);
+  }
+
+  // Respect SWORDFS_S3_NO_SSL to allow plain HTTP connections
+  // (e.g. against local MinIO in CI).
+  const char *no_ssl = std::getenv("SWORDFS_S3_NO_SSL");
+  const char *proto = (no_ssl && no_ssl[0] == '1') ? "http://" : "https://";
+  endpoint_ = std::string(proto) + url.host;
+  region_ = vol.region;
+
+  // First path segment is bucket, rest is prefix.
+  std::string path = url.path;
+  if (!path.empty() && path[0] == '/') {
+    path = path.substr(1);
+  }
+  auto slash = path.find('/');
+  if (slash == std::string::npos) {
+    bucket_ = std::move(path);
+  } else {
+    bucket_ = path.substr(0, slash);
+    prefix_ = path.substr(slash + 1);
+  }
+  if (bucket_.empty()) {
+    return Status::InvalidArgument(
+        "bucket URL is missing bucket name. "
+        "Expected format: s3://<endpoint>/<bucket>[/<prefix>], "
+        "got: " +
+        vol.bucket);
+  }
+  SWORDFS_LOG_INFO << "S3DataEngine: endpoint=" << endpoint_
+                   << " bucket=" << bucket_;
+  return Status::OK();
 }
 
 DataEngineLimits S3DataEngine::Limits() const {
@@ -153,7 +148,7 @@ DataEngineLimits S3DataEngine::Limits() const {
 bool S3DataEngine::Head(std::string_view key, size_t *size) {
   return pool_->Run([this, key, size] {
     Aws::S3::Model::HeadObjectRequest req;
-    req.SetBucket(cfg_.bucket);
+    req.SetBucket(bucket_);
     req.SetKey(ObjectKey(key));
 
     auto outcome = client_->HeadObject(req);
@@ -171,7 +166,7 @@ Status S3DataEngine::Put(std::string_view key, std::unique_ptr<folly::IOBuf> dat
   try {
     return pool_->Run([this, key, d = std::move(data)] {
       Aws::S3::Model::PutObjectRequest req;
-      req.SetBucket(cfg_.bucket);
+      req.SetBucket(bucket_);
       req.SetKey(ObjectKey(key));
 
       // Wrap the IOBuf's existing memory instead of copying into a
@@ -206,7 +201,7 @@ Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size,
   try {
     return pool_->Run([this, key, out, offset, size] {
       Aws::S3::Model::GetObjectRequest req;
-      req.SetBucket(cfg_.bucket);
+      req.SetBucket(bucket_);
       req.SetKey(ObjectKey(key));
 
       if (offset > 0 || size > 0) {
@@ -267,7 +262,7 @@ Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size,
 Status S3DataEngine::Delete(std::string_view key) {
   return pool_->Run([this, key] {
     Aws::S3::Model::DeleteObjectRequest req;
-    req.SetBucket(cfg_.bucket);
+    req.SetBucket(bucket_);
     req.SetKey(ObjectKey(key));
 
     auto outcome = client_->DeleteObject(req);
@@ -281,24 +276,10 @@ Status S3DataEngine::Delete(std::string_view key) {
 }
 
 std::string S3DataEngine::ObjectKey(std::string_view key) const {
-  if (cfg_.prefix.empty()) {
+  if (prefix_.empty()) {
     return std::string(key);
   }
-  return cfg_.prefix + "/" + std::string(key);
+  return prefix_ + "/" + std::string(key);
 }
-
-// ── Backend registration ───────────────────────────────────────────────
-
-namespace {
-
-// Register "s3" backend — uses a default config; the real S3Config is
-// populated from ConfigCenter before the first mount.
-static swordfs::storage::RegisterBackend kS3Backend(
-    "s3", []() -> std::unique_ptr<swordfs::storage::IDataEngine> {
-      return std::make_unique<swordfs::storage::S3DataEngine>(
-          swordfs::storage::S3Config{});
-    });
-
-}  // anonymous namespace
 
 }  // namespace swordfs::storage

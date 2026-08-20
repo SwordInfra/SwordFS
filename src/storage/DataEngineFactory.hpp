@@ -1,7 +1,8 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// DataEngineFactory — creates a configured IDataEngine from a VolumeConfig.
+// DataEngineFactory — routes a VolumeConfig to the appropriate
+// concrete IDataEngine based on the bucket URL's scheme.
 
 #pragma once
 
@@ -19,11 +20,8 @@ namespace storage {
 
 class IDataEngine;
 
-/// Create the data engine described by a VolumeConfig.
-///
-/// |out| is set to nullptr when vol.bucket is empty (no data engine
-/// needed).  Returns an error Status when the bucket URL is invalid
-/// or the scheme is unsupported.
+/// Build the data engine described by |vol|, dispatching to the
+/// concrete engine based on the bucket URL scheme.
 utils::Status CreateDataEngine(const volume::VolumeConfig &vol,
                                std::unique_ptr<IDataEngine> *out);
 
