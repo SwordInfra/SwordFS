@@ -208,7 +208,8 @@ utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
       // The metadata rename has already committed, so returning an error
       // here would report a failed rename for a state that is already
       // visible. Cleanup is best-effort after the metadata transaction;
-      // log the failure and let a later cleanup/reconciliation path retry.
+      // log the failure. A future orphan-data reconciliation mechanism
+      // should provide retry/repair for cleanup failures.
       SWORDFS_LOG_ERROR << "Rename: failed to get InodeHandle for overwritten "
                         << "inode " << result.overwritten_ino
                         << "; rename has already committed";
