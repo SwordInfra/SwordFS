@@ -31,6 +31,10 @@ void SwordFsInode::Touch(SetAttrField fields) {
 
 bool SwordFsInode::IsDir() const { return S_ISDIR(attr.st_mode); }
 
+bool SwordFsInode::IsRegular() const { return S_ISREG(attr.st_mode); }
+
+bool SwordFsInode::IsSymlink() const { return S_ISLNK(attr.st_mode); }
+
 bool SwordFsInode::CheckAccess(uid_t uid, gid_t gid, int mask) const {
   if (uid == 0) {
     return true;
@@ -46,6 +50,14 @@ bool SwordFsInode::CheckAccess(uid_t uid, gid_t gid, int mask) const {
   }
   return (access_bits & static_cast<unsigned int>(mask)) ==
          static_cast<unsigned int>(mask);
+}
+
+bool SwordFsInode::CheckStickyDelete(uid_t uid,
+                                     const SwordFsInode &target) const {
+  if (!(attr.st_mode & S_ISVTX)) {
+    return true;
+  }
+  return uid == 0 || uid == attr.st_uid || uid == target.attr.st_uid;
 }
 
 }  // namespace swordfs::metadata

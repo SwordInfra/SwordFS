@@ -18,8 +18,8 @@ namespace swordfs::metadata {
 
 class MemMetaImpl : public IMetaEngine {
  public:
-  MemMetaImpl();
-  ~MemMetaImpl() override;
+  MemMetaImpl() = default;
+  ~MemMetaImpl() override = default;
 
   // Entry operations
   Status Lookup(InodeID parent_ino,

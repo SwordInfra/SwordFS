@@ -27,16 +27,6 @@ constexpr size_t kMaxFreeInodes = UINT64_MAX;
 
 }  // namespace
 
-// ────────────────────────────────────────────────────────────────
-// MemMetaImpl
-// ────────────────────────────────────────────────────────────────
-
-MemMetaImpl::MemMetaImpl() {
-}
-
-MemMetaImpl::~MemMetaImpl() {
-}
-
 // Transaction model: every method below runs its mutation as a single
 // store_.Transact() script (or delegates to a single store call, which
 // is its own transaction), so each IMetaEngine operation is atomic.
@@ -48,6 +38,19 @@ MemMetaImpl::~MemMetaImpl() {
 // script a pure read-snapshot -> compute -> write-back function — safe
 // to re-execute, which is exactly what an optimistic-transaction
 // (WATCH/MULTI/EXEC) KV backend does on conflict.
+//
+// Lookup idiom: check the Lookup status first and return it unchanged
+// (a missing inode is NotFound, NOT NotDirectory), then test the type
+// predicate on the snapshot:
+//
+//   SwordFsInode parent;
+//   Status status = txn.LookupInode(parent_ino, &parent);
+//   if (!status.ok()) {
+//     return status;
+//   }
+//   if (!parent.IsDir()) {
+//     return Status::NotDirectory("parent is not a directory");
+//   }
 
 // ────────────────────────────────────────────────────────────────
 // Public API
@@ -101,11 +104,13 @@ Status MemMetaImpl::GetAttr(InodeID ino, struct stat *attr) {
 
 Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
+    // ListEntries itself validates that |ino| exists and is a directory
+    // (NotFound / NotDirectory), and returns the full listing including
+    // the synthetic "." and ".." entries.
     Status status = txn.ListEntries(ino, entries);
     if (!status.ok()) {
       return status;
     }
-
     // Reading directory contents updates atime on the directory.
     return txn.TouchInode(ino, SetAttrField::kAtime);
   });
@@ -135,23 +140,18 @@ Status MemMetaImpl::Create(InodeID parent_ino,
     if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
     }
-
     // Check permissions: need write+execute on the parent directory
     if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
       return Status::Permission("access denied on parent");
     }
 
     mode_t file_mode = (S_IFREG | (mode & 0777));
-
     status = txn.AddEntry(parent_ino, name, file_mode, 1, &child);
     if (!status.ok()) {
       return status;
     }
-
-    // Parent directory mtime/ctime must be updated after a child is
-    // created.
-    return txn.TouchInode(parent_ino,
-                          SetAttrField::kMtime | SetAttrField::kCtime);
+    // Parent directory mtime/ctime must be updated after a child is created.
+    return txn.TouchInode(parent_ino, SetAttrField::kMtime | SetAttrField::kCtime);
   });
 
   if (!status.ok()) {
@@ -159,9 +159,9 @@ Status MemMetaImpl::Create(InodeID parent_ino,
                       << "' failed: " << status.message();
     return status;
   }
+
   SWORDFS_LOG_DEBUG << "Create: parent=" << parent_ino << " name='" << name
                     << "' -> ino=" << child.ino;
-
   if (child_ino) {
     *child_ino = child.ino;
   }
@@ -182,7 +182,11 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
   SwordFsInode child;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode parent;
-    if (!txn.LookupInode(parent_ino, &parent).ok() || !parent.IsDir()) {
+    Status status = txn.LookupInode(parent_ino, &parent);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
     }
 
@@ -191,8 +195,7 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
     }
 
     mode_t dir_mode = (S_IFDIR | (mode & 0777));
-
-    Status status = txn.AddEntry(parent_ino, name, dir_mode, 1, &child);
+    status = txn.AddEntry(parent_ino, name, dir_mode, 1, &child);
     if (!status.ok()) {
       return status;
     }
@@ -203,9 +206,7 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
     if (!status.ok()) {
       return status;
     }
-
-    return txn.TouchInode(parent_ino,
-                          SetAttrField::kMtime | SetAttrField::kCtime);
+    return txn.TouchInode(parent_ino, SetAttrField::kMtime | SetAttrField::kCtime);
   });
 
   if (!status.ok()) {
@@ -213,6 +214,7 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
                       << "' failed: " << status.message();
     return status;
   }
+
   SWORDFS_LOG_DEBUG << "MkDir: parent=" << parent_ino << " name='" << name
                     << "' -> ino=" << child.ino;
 
@@ -228,10 +230,8 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
 Status MemMetaImpl::Unlink(InodeID parent_ino,
                            std::string_view name,
                            nlink_t *post_nlink) {
-  std::string key(name);
-
   // Refuse to unlink "." or ".."
-  if (key == "." || key == "..") {
+  if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot unlink . or ..");
   }
 
@@ -239,7 +239,11 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
   InodeID target_ino = 0;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode parent;
-    if (!txn.LookupInode(parent_ino, &parent).ok() || !parent.IsDir()) {
+    Status status = txn.LookupInode(parent_ino, &parent);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
     }
 
@@ -249,19 +253,18 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
     }
 
     SwordFsInode target;
-    Status status = txn.LookupEntry(parent_ino, name, &target);
+    status = txn.LookupEntry(parent_ino, name, &target);
     if (!status.ok()) {
       return status;
     }
 
-    // Sticky bit on directory: only the owner, directory owner, or root
-    // can unlink entries.
-    if ((parent.attr.st_mode & S_ISVTX) && ctx.uid != 0 &&
-        ctx.uid != parent.attr.st_uid && ctx.uid != target.attr.st_uid) {
+    // Sticky bit on the parent directory: only root, the directory
+    // owner, or the entry's owner can unlink entries.
+    if (!parent.CheckStickyDelete(ctx.uid, target)) {
       return Status::Permission("sticky bit denied");
     }
 
-    if (S_ISDIR(target.attr.st_mode)) {
+    if (target.IsDir()) {
       return Status::InvalidArgument("cannot unlink directory");
     }
 
@@ -276,8 +279,7 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
       return status;
     }
 
-    return txn.TouchInode(parent_ino,
-                          SetAttrField::kMtime | SetAttrField::kCtime);
+    return txn.TouchInode(parent_ino, SetAttrField::kMtime | SetAttrField::kCtime);
   });
 
   if (!status.ok()) {
@@ -292,23 +294,20 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
 
 Status MemMetaImpl::RmDir(InodeID parent_ino,
                           std::string_view name) {
-  std::string key(name);
-
   // Cannot remove "." or ".."
-  if (key == "." || key == "..") {
+  if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot remove . or ..");
-  }
-
-  // Cannot remove the root directory by name
-  if (parent_ino == kRootInodeId && key == ".") {
-    return Status::Busy("root directory is busy");
   }
 
   const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
   InodeID target_ino = 0;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode parent;
-    if (!txn.LookupInode(parent_ino, &parent).ok() || !parent.IsDir()) {
+    Status status = txn.LookupInode(parent_ino, &parent);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
     }
 
@@ -317,12 +316,18 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
     }
 
     SwordFsInode target;
-    Status status = txn.LookupEntry(parent_ino, name, &target);
+    status = txn.LookupEntry(parent_ino, name, &target);
     if (!status.ok()) {
       return status;
     }
 
-    if (!S_ISDIR(target.attr.st_mode)) {
+    // Sticky bit on the parent directory: only root, the directory
+    // owner, or the entry's owner can remove entries.
+    if (!parent.CheckStickyDelete(ctx.uid, target)) {
+      return Status::Permission("sticky bit denied");
+    }
+
+    if (!target.IsDir()) {
       return Status::NotDirectory("not a directory");
     }
 
@@ -357,16 +362,13 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
 Status MemMetaImpl::Rename(InodeID old_parent_ino,
                            std::string_view old_name, InodeID new_parent_ino,
                            std::string_view new_name, RenameFlag flags) {
-  std::string old_key(old_name);
-  std::string new_key(new_name);
-
   if (new_name.size() > kMaxNameLength) {
     return Status::NameTooLong("target name exceeds maximum length");
   }
 
   // "." and ".." cannot be renamed
-  if (old_key == "." || old_key == ".." || new_key == "." ||
-      new_key == "..") {
+  if (old_name == "." || old_name == ".." || new_name == "." ||
+      new_name == "..") {
     return Status::Busy("cannot rename . or ..");
   }
 
@@ -376,23 +378,29 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
   // runs as one transaction so concurrent observers can never see an
   // intermediate state (e.g. target unlinked but source not yet moved).
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
-    // Both parents must be directories
-    SwordFsInode op;
-    Status status = txn.LookupInode(old_parent_ino, &op);
-    if (!status.ok() || !op.IsDir()) {
+    // Both parents must exist and be directories.
+    SwordFsInode old_parent;
+    Status status = txn.LookupInode(old_parent_ino, &old_parent);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!old_parent.IsDir()) {
       return Status::NotDirectory("old parent is not a directory");
     }
-    SwordFsInode np;
-    status = txn.LookupInode(new_parent_ino, &np);
-    if (!status.ok() || !np.IsDir()) {
+    SwordFsInode new_parent;
+    status = txn.LookupInode(new_parent_ino, &new_parent);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!new_parent.IsDir()) {
       return Status::NotDirectory("new parent is not a directory");
     }
 
     // Check write+execute permission on both parents
-    if (!op.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
+    if (!old_parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
       return Status::Permission("access denied on old parent");
     }
-    if (!np.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
+    if (!new_parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
       return Status::Permission("access denied on new parent");
     }
 
@@ -402,8 +410,14 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
       return Status::NotFound("source entry not found");
     }
 
+    // Sticky bit on the old parent: only root, the directory owner, or
+    // the entry's owner can move entries out of it.
+    if (!old_parent.CheckStickyDelete(ctx.uid, moved)) {
+      return Status::Permission("sticky bit denied on source");
+    }
+
     InodeID ino = moved.ino;
-    bool is_dir = S_ISDIR(moved.attr.st_mode);
+    bool is_dir = moved.IsDir();
 
     // Cannot move a directory into itself or its own subtree.  The
     // descendant check alone misses the direct self-move
@@ -426,12 +440,19 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
       }
     }
 
+    // Sticky bit on the new parent: overwriting or exchanging away an
+    // existing entry removes it from that directory, so it requires the
+    // same ownership as a delete.
+    if (target_exists && !new_parent.CheckStickyDelete(ctx.uid, existing)) {
+      return Status::Permission("sticky bit denied on target");
+    }
+
     if (HasRenameFlag(flags, RenameFlag::kExchange)) {
       if (!target_exists) {
         return Status::NotFound("target does not exist for RENAME_EXCHANGE");
       }
 
-      bool existing_is_dir = S_ISDIR(existing.attr.st_mode);
+      bool existing_is_dir = existing.IsDir();
       if (existing_is_dir != is_dir) {
         return Status::InvalidArgument(
             "cannot exchange directory with non-directory");
@@ -464,7 +485,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
         return Status::OK();
       }
 
-      bool existing_is_dir = S_ISDIR(existing.attr.st_mode);
+      bool existing_is_dir = existing.IsDir();
 
       // Cannot replace a directory with a file or vice versa
       if (existing_is_dir != is_dir) {
@@ -536,7 +557,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
 Status MemMetaImpl::SetAttr(InodeID ino,
                             const struct stat *attr, SetAttrField fields,
                             struct stat *out_attr) {
-  struct stat result {};
+  struct stat result{};
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode inode;
     Status status = txn.LookupInode(ino, &inode);
@@ -638,7 +659,10 @@ Status MemMetaImpl::Symlink(InodeID parent_ino,
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode parent;
     Status status = txn.LookupInode(parent_ino, &parent);
-    if (!status.ok() || !parent.IsDir()) {
+    if (!status.ok()) {
+      return status;
+    }
+    if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
     }
 
@@ -690,7 +714,7 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     Status status = txn.LookupInode(ino, &inode);
     if (!status.ok()) {
-      return Status::NotFound("source inode not found");
+      return status;
     }
 
     // Directories cannot be hard-linked (POSIX).
@@ -700,7 +724,10 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
 
     SwordFsInode newparent;
     status = txn.LookupInode(newparent_ino, &newparent);
-    if (!status.ok() || !newparent.IsDir()) {
+    if (!status.ok()) {
+      return status;
+    }
+    if (!newparent.IsDir()) {
       return Status::NotDirectory("new parent is not a directory");
     }
 
@@ -743,7 +770,7 @@ Status MemMetaImpl::Readlink(InodeID ino, std::string *target) {
       return status;
     }
 
-    if (!S_ISLNK(inode.attr.st_mode)) {
+    if (!inode.IsSymlink()) {
       return Status::InvalidArgument("not a symbolic link");
     }
 
@@ -761,7 +788,7 @@ Status MemMetaImpl::Readlink(InodeID ino, std::string *target) {
 Status MemMetaImpl::StatFs(struct statvfs *stbuf) {
   std::memset(stbuf, 0, sizeof(*stbuf));
 
-  struct Limits limits = GetLimits();
+  Limits limits = GetLimits();
   stbuf->f_namemax = limits.max_name_length;
   stbuf->f_frsize = 4096;
   stbuf->f_bsize = 4096;
@@ -817,7 +844,7 @@ Status MemMetaImpl::Open(InodeID ino) {
     //
     // Only regular files can be opened (directories use OpenDir, symlinks
     // are resolved by the kernel).
-    if (!S_ISREG(inode.attr.st_mode)) {
+    if (!inode.IsRegular()) {
       return Status::NotDirectory("not a regular file");
     }
 

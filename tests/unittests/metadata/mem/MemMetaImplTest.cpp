@@ -341,6 +341,40 @@ TEST_F(MemMetaImplTest, UnlinkStickyBitRootCanDelete) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// RmDir sticky-bit checks
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(MemMetaImplTest, RmDirStickyBitOwnerCanDelete) {
+  // Sticky dir owned by kOther, writable for all.
+  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
+  SetDirOwner(dir_ino, kOther, kGroup);
+
+  // kOwner creates a subdirectory inside (so kOwner owns the entry).
+  SetContext(kOwner, kOtherGroup);
+  InodeID sub_ino = 0;
+  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, &sub_ino, nullptr).ok());
+
+  // The entry's owner can remove it from someone else's sticky dir.
+  EXPECT_TRUE(impl_->RmDir(dir_ino, "sub").ok());
+}
+
+TEST_F(MemMetaImplTest, RmDirStickyBitNonOwnerCannotDelete) {
+  // Sticky dir owned by kOther, writable for all.
+  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
+  SetDirOwner(dir_ino, kOther, kGroup);
+
+  // kOwner creates a subdirectory inside.
+  SetContext(kOwner, kOtherGroup);
+  InodeID sub_ino = 0;
+  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, &sub_ino, nullptr).ok());
+
+  // A third user cannot remove kOwner's subdirectory.
+  SetContext(3000, kOtherGroup);
+  Status st = impl_->RmDir(dir_ino, "sub");
+  EXPECT_TRUE(st.IsPermission()) << st.message();
+}
+
+// ────────────────────────────────────────────────────────────────
 // Rename permission checks
 // ────────────────────────────────────────────────────────────────
 
@@ -384,6 +418,45 @@ TEST_F(MemMetaImplTest, RenameRootSucceedsRegardlessOfPerms) {
   SetContext(0, 0);
   Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
+}
+
+TEST_F(MemMetaImplTest, RenameStickyBitNonOwnerCannotMoveOut) {
+  // Sticky src dir owned by kOther, writable for all; dst fully open.
+  InodeID src_ino = MakeOwnedDir(kRoot, "src", 01777);
+  SetDirOwner(src_ino, kOther, kGroup);
+  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0777);
+
+  // kOwner creates the file in the sticky src (so kOwner owns it).
+  SetContext(kOwner, kOtherGroup);
+  InodeID f_ino = 0;
+  ASSERT_TRUE(impl_->Create(src_ino, "f", 0644, &f_ino, nullptr).ok());
+
+  // A third user cannot move kOwner's file out of kOther's sticky dir.
+  SetContext(3000, kOtherGroup);
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
+  EXPECT_TRUE(st.IsPermission()) << st.message();
+}
+
+TEST_F(MemMetaImplTest, RenameStickyBitCannotOverwriteOthersFile) {
+  // dst is a sticky dir owned by kOther and already holds kOther's file;
+  // src is fully open.
+  InodeID src_ino = MakeOwnedDir(kRoot, "src", 0777);
+  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 01777);
+  SetDirOwner(dst_ino, kOther, kGroup);
+
+  // The victim file in dst is owned by kOther.
+  SetContext(kOther, kOtherGroup);
+  InodeID victim_ino = 0;
+  ASSERT_TRUE(impl_->Create(dst_ino, "f", 0644, &victim_ino, nullptr).ok());
+
+  // kOwner's file in src.
+  SetContext(kOwner, kOtherGroup);
+  InodeID f_ino = 0;
+  ASSERT_TRUE(impl_->Create(src_ino, "f", 0644, &f_ino, nullptr).ok());
+
+  // kOwner may not overwrite kOther's file in kOther's sticky dir.
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
+  EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
 // ────────────────────────────────────────────────────────────────

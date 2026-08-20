@@ -135,10 +135,18 @@ struct SwordFsInode {
   void Touch(SetAttrField fields);
 
   bool IsDir() const;
+  bool IsRegular() const;
+  bool IsSymlink() const;
 
   // POSIX access check. Returns true if uid/gid has the requested permissions
   // on this inode. Root (uid == 0) always has full access.
   bool CheckAccess(uid_t uid, gid_t gid, int mask) const;
+
+  // Sticky-bit (S_ISVTX) deletion check, called on the containing
+  // directory: returns true if |uid| may unlink/rename |target| within
+  // it — i.e. the bit is clear, or uid is root, the directory owner, or
+  // the entry's owner.
+  bool CheckStickyDelete(uid_t uid, const SwordFsInode &target) const;
 };
 
 }  // namespace swordfs::metadata
