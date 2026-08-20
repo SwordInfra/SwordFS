@@ -247,3 +247,57 @@ TEST_F(MemMetaImplRenameTest, NlinkAccountingMultipleDirs) {
   impl_->GetAttr(kRoot, &root_final);
   EXPECT_EQ(root_final.st_nlink, root_after_create.st_nlink);
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Rename: directory into itself (META-01)
+// ════════════════════════════════════════════════════════════════════
+
+TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoItselfFails) {
+  InodeID a_ino = 0;
+  impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
+
+  // Rename "a" to become a child of itself (mv a a/x).  The descendant
+  // check alone misses this because IsDescendantOf(a, a) is false.
+  Status status = impl_->Rename(kRoot, "a", a_ino, "x", RenameFlag::kNone);
+  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+
+  // The directory must still be reachable from the root, unchanged.
+  InodeID found = 0;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "a", &found, nullptr).ok());
+  EXPECT_EQ(found, a_ino);
+  struct stat attr;
+  ASSERT_TRUE(impl_->GetAttr(a_ino, &attr).ok());
+  EXPECT_TRUE(S_ISDIR(attr.st_mode));
+}
+
+TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoOwnSubtreeStillFails) {
+  InodeID a_ino = 0, b_ino = 0;
+  impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
+  impl_->MkDir(a_ino, "b", 0755, &b_ino, nullptr);
+
+  Status status = impl_->Rename(kRoot, "a", b_ino, "x", RenameFlag::kNone);
+  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+
+  InodeID found = 0;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "a", &found, nullptr).ok());
+  EXPECT_EQ(found, a_ino);
+}
+
+TEST_F(MemMetaImplRenameTest, RenameExchangeDirectoryIntoItselfFails) {
+  InodeID a_ino = 0, b_ino = 0;
+  impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
+  impl_->MkDir(a_ino, "b", 0755, &b_ino, nullptr);
+
+  // Exchange root/a with a/b: the moved directory's new parent would be
+  // itself.  The EXCHANGE path runs the same cycle check.
+  Status status =
+      impl_->Rename(kRoot, "a", a_ino, "b", RenameFlag::kExchange);
+  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+
+  // Both entries must be untouched.
+  InodeID found = 0;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "a", &found, nullptr).ok());
+  EXPECT_EQ(found, a_ino);
+  EXPECT_TRUE(impl_->Lookup(a_ino, "b", &found, nullptr).ok());
+  EXPECT_EQ(found, b_ino);
+}

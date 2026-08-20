@@ -1,6 +1,10 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
+// Tests for MemMetaStore.  The store interface uses value semantics:
+// read methods (LookupInode/LookupEntry/AddEntry) hand out snapshot
+// COPIES of SwordFsInode, never pointers into store-owned memory.
+
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
@@ -34,11 +38,10 @@ class MemMetaStoreTest : public ::testing::Test {
 TEST_F(MemMetaStoreTest, ConstructorCreatesRoot) {
   EXPECT_EQ(store_->InodeCount(), 1);
 
-  SwordFsInode *root = nullptr;
+  SwordFsInode root;
   EXPECT_TRUE(store_->LookupInode(kRoot, &root).ok());
-  ASSERT_NE(root, nullptr);
-  EXPECT_TRUE(root->IsDir());
-  EXPECT_EQ(root->ino, kRoot);
+  EXPECT_TRUE(root.IsDir());
+  EXPECT_EQ(root.ino, kRoot);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -46,10 +49,9 @@ TEST_F(MemMetaStoreTest, ConstructorCreatesRoot) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreTest, LookupInodeNotFound) {
-  SwordFsInode *out = nullptr;
-  Status st = store_->LookupInode(999, &out);
-  EXPECT_TRUE(st.IsNotFound());
-  EXPECT_EQ(out, nullptr);
+  SwordFsInode out;
+  Status status = store_->LookupInode(999, &out);
+  EXPECT_TRUE(status.IsNotFound());
 }
 
 TEST_F(MemMetaStoreTest, LookupInodeWithNullOut) {
@@ -61,49 +63,43 @@ TEST_F(MemMetaStoreTest, LookupInodeWithNullOut) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreTest, AddEntryCreatesFile) {
-  SwordFsInode *child = nullptr;
-  Status st = store_->AddEntry(kRoot, "hello.txt", kRegFile, 0, &child);
+  SwordFsInode child;
+  Status status = store_->AddEntry(kRoot, "hello.txt", kRegFile, 0, &child);
 
-  EXPECT_TRUE(st.ok());
-  ASSERT_NE(child, nullptr);
-  EXPECT_FALSE(child->IsDir());
-  EXPECT_GT(child->ino, 0);
+  EXPECT_TRUE(status.ok());
+  EXPECT_FALSE(child.IsDir());
+  EXPECT_GT(child.ino, 0);
   EXPECT_EQ(store_->InodeCount(), 2);
 }
 
 TEST_F(MemMetaStoreTest, AddEntryCreatesDirectory) {
-  SwordFsInode *child = nullptr;
-  Status st = store_->AddEntry(kRoot, "subdir", kDir, 0, &child);
+  SwordFsInode child;
+  Status status = store_->AddEntry(kRoot, "subdir", kDir, 0, &child);
 
-  EXPECT_TRUE(st.ok());
-  ASSERT_NE(child, nullptr);
-  EXPECT_TRUE(child->IsDir());
+  EXPECT_TRUE(status.ok());
+  EXPECT_TRUE(child.IsDir());
 }
 
 TEST_F(MemMetaStoreTest, AddEntryAlreadyExists) {
-  SwordFsInode *dummy = nullptr;
-  store_->AddEntry(kRoot, "file", kRegFile, 0, &dummy);
+  store_->AddEntry(kRoot, "file", kRegFile, 0, nullptr);
 
-  SwordFsInode *out = nullptr;
-  Status st = store_->AddEntry(kRoot, "file", kRegFile, 0, &out);
-  EXPECT_TRUE(st.IsAlreadyExists());
+  Status status = store_->AddEntry(kRoot, "file", kRegFile, 0, nullptr);
+  EXPECT_TRUE(status.IsAlreadyExists());
 }
 
 TEST_F(MemMetaStoreTest, AddEntryParentNotFound) {
-  SwordFsInode *out = nullptr;
-  Status st = store_->AddEntry(42, "orphan", kRegFile, 0, &out);
-  EXPECT_TRUE(st.IsNotFound());
+  Status status = store_->AddEntry(42, "orphan", kRegFile, 0, nullptr);
+  EXPECT_TRUE(status.IsNotFound());
 }
 
 TEST_F(MemMetaStoreTest, AddEntryParentNotDirectory) {
   // Create a regular file first
-  SwordFsInode *f = nullptr;
+  SwordFsInode f;
   store_->AddEntry(kRoot, "regular", kRegFile, 0, &f);
 
   // Try to add a child under the regular file
-  SwordFsInode *out = nullptr;
-  Status st = store_->AddEntry(f->ino, "nested", kRegFile, 0, &out);
-  EXPECT_TRUE(st.IsNotDirectory());
+  Status status = store_->AddEntry(f.ino, "nested", kRegFile, 0, nullptr);
+  EXPECT_TRUE(status.IsNotDirectory());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -111,19 +107,18 @@ TEST_F(MemMetaStoreTest, AddEntryParentNotDirectory) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreTest, LookupEntryFound) {
-  SwordFsInode *created = nullptr;
+  SwordFsInode created;
   store_->AddEntry(kRoot, "found", kRegFile, 0, &created);
 
-  SwordFsInode *out = nullptr;
-  Status st = store_->LookupEntry(kRoot, "found", &out);
-  EXPECT_TRUE(st.ok());
-  EXPECT_EQ(out, created);
+  SwordFsInode out;
+  Status status = store_->LookupEntry(kRoot, "found", &out);
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(out.ino, created.ino);
 }
 
 TEST_F(MemMetaStoreTest, LookupEntryNotFound) {
-  SwordFsInode *out = nullptr;
-  Status st = store_->LookupEntry(kRoot, "nonexistent", &out);
-  EXPECT_TRUE(st.IsNotFound());
+  Status status = store_->LookupEntry(kRoot, "nonexistent", nullptr);
+  EXPECT_TRUE(status.IsNotFound());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -132,56 +127,57 @@ TEST_F(MemMetaStoreTest, LookupEntryNotFound) {
 
 TEST_F(MemMetaStoreTest, MoveEntrySuccess) {
   // Create dir: root/sub/
-  SwordFsInode *sub = nullptr;
+  SwordFsInode sub;
   store_->AddEntry(kRoot, "sub", kDir, 0, &sub);
 
   // Create file under root
-  SwordFsInode *f1 = nullptr;
+  SwordFsInode f1;
   store_->AddEntry(kRoot, "f1", kRegFile, 0, &f1);
 
   // Move root/f1 → root/sub/f1
-  Status st = store_->MoveEntry(kRoot, "f1", sub->ino, "f1");
-  EXPECT_TRUE(st.ok());
+  Status status = store_->MoveEntry(kRoot, "f1", sub.ino, "f1");
+  EXPECT_TRUE(status.ok());
 
   // Old location is gone
-  SwordFsInode *out = nullptr;
-  EXPECT_TRUE(store_->LookupEntry(kRoot, "f1", &out).IsNotFound());
+  EXPECT_TRUE(store_->LookupEntry(kRoot, "f1", nullptr).IsNotFound());
 
-  // New location has it
-  SwordFsInode *moved = nullptr;
-  EXPECT_TRUE(store_->LookupEntry(sub->ino, "f1", &moved).ok());
-  EXPECT_EQ(moved, f1);  // same pointer — re-linked, not copied
+  // New location has it, with the same ino — re-linked, not copied
+  SwordFsInode moved;
+  EXPECT_TRUE(store_->LookupEntry(sub.ino, "f1", &moved).ok());
+  EXPECT_EQ(moved.ino, f1.ino);
+  // ... and its parent pointer followed the move
+  EXPECT_EQ(moved.parent_ino, sub.ino);
 }
 
 TEST_F(MemMetaStoreTest, MoveEntryOldParentNotFound) {
-  SwordFsInode *sub = nullptr;
+  SwordFsInode sub;
   store_->AddEntry(kRoot, "dst", kDir, 0, &sub);
 
-  Status st = store_->MoveEntry(999, "f", sub->ino, "f");
-  EXPECT_TRUE(st.IsNotFound());
+  Status status = store_->MoveEntry(999, "f", sub.ino, "f");
+  EXPECT_TRUE(status.IsNotFound());
 }
 
 TEST_F(MemMetaStoreTest, MoveEntryNewParentNotFound) {
-  SwordFsInode *f = nullptr;
+  SwordFsInode f;
   store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
 
-  Status st = store_->MoveEntry(kRoot, "f", 999, "f");
-  EXPECT_TRUE(st.IsNotFound());
+  Status status = store_->MoveEntry(kRoot, "f", 999, "f");
+  EXPECT_TRUE(status.IsNotFound());
 }
 
 TEST_F(MemMetaStoreTest, MoveEntryTargetExists) {
-  SwordFsInode *d1 = nullptr;
+  SwordFsInode d1;
   store_->AddEntry(kRoot, "d1", kDir, 0, &d1);
 
-  SwordFsInode *d2 = nullptr;
+  SwordFsInode d2;
   store_->AddEntry(kRoot, "d2", kDir, 0, &d2);
 
   // Both have a "f" entry
-  store_->AddEntry(d1->ino, "f", kRegFile, 0, nullptr);
-  store_->AddEntry(d2->ino, "f", kRegFile, 0, nullptr);
+  store_->AddEntry(d1.ino, "f", kRegFile, 0, nullptr);
+  store_->AddEntry(d2.ino, "f", kRegFile, 0, nullptr);
 
-  Status st = store_->MoveEntry(d1->ino, "f", d2->ino, "f");
-  EXPECT_TRUE(st.IsAlreadyExists());
+  Status status = store_->MoveEntry(d1.ino, "f", d2.ino, "f");
+  EXPECT_TRUE(status.IsAlreadyExists());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -193,9 +189,9 @@ TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   // The inode survives until the caller (VfsImpl::Unlink or
   // InodeHandle::Close) calls ReclaimData. Callers that want immediate
   // cleanup of a single-name unlink invoke ReclaimData themselves.
-  SwordFsInode *f = nullptr;
+  SwordFsInode f;
   store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
-  InodeID ino = f->ino;
+  InodeID ino = f.ino;
 
   EXPECT_EQ(store_->InodeCount(), 2);  // root + f
   EXPECT_TRUE(store_->Unlink(kRoot, "f").ok());
@@ -218,21 +214,21 @@ TEST_F(MemMetaStoreTest, UnlinkIdempotent) {
 }
 
 TEST_F(MemMetaStoreTest, UnlinkNonEmptyDirectory) {
-  SwordFsInode *sub = nullptr;
+  SwordFsInode sub;
   store_->AddEntry(kRoot, "sub", kDir, 0, &sub);
 
   // Add a file inside sub
-  store_->AddEntry(sub->ino, "f", kRegFile, 0, nullptr);
+  store_->AddEntry(sub.ino, "f", kRegFile, 0, nullptr);
 
-  Status st = store_->Unlink(kRoot, "sub");
-  EXPECT_TRUE(st.IsNotEmpty());
+  Status status = store_->Unlink(kRoot, "sub");
+  EXPECT_TRUE(status.IsNotEmpty());
   EXPECT_EQ(store_->InodeCount(), 3);  // root + sub + f
 }
 
 TEST_F(MemMetaStoreTest, UnlinkEmptyDirectory) {
-  SwordFsInode *sub = nullptr;
+  SwordFsInode sub;
   store_->AddEntry(kRoot, "sub", kDir, 0, &sub);
-  InodeID sub_ino = sub->ino;  // save before Unlink frees the pointer
+  InodeID sub_ino = sub.ino;
 
   EXPECT_TRUE(store_->Unlink(kRoot, "sub").ok());
   // Both sub and its dir entry table freed
@@ -250,8 +246,8 @@ TEST_F(MemMetaStoreTest, ListEntriesSuccess) {
   store_->AddEntry(kRoot, "c", kDir, 0, nullptr);
 
   std::vector<SwordFsEntry> entries;
-  Status st = store_->ListEntries(kRoot, &entries);
-  EXPECT_TRUE(st.ok());
+  Status status = store_->ListEntries(kRoot, &entries);
+  EXPECT_TRUE(status.ok());
   EXPECT_EQ(entries.size(), 5);  // 3 real + "." + ".."
 }
 
@@ -263,8 +259,8 @@ TEST_F(MemMetaStoreTest, ListEntriesEmptyDir) {
 
 TEST_F(MemMetaStoreTest, ListEntriesNotFound) {
   std::vector<SwordFsEntry> entries;
-  Status st = store_->ListEntries(42, &entries);
-  EXPECT_TRUE(st.IsNotFound());
+  Status status = store_->ListEntries(42, &entries);
+  EXPECT_TRUE(status.IsNotFound());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -272,32 +268,32 @@ TEST_F(MemMetaStoreTest, ListEntriesNotFound) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreTest, IsDescendantOfDirectChild) {
-  SwordFsInode *sub = nullptr;
+  SwordFsInode sub;
   store_->AddEntry(kRoot, "sub", kDir, 0, &sub);
 
-  EXPECT_TRUE(store_->IsDescendantOf(kRoot, sub->ino));
+  EXPECT_TRUE(store_->IsDescendantOf(kRoot, sub.ino));
 }
 
 TEST_F(MemMetaStoreTest, IsDescendantOfGrandchild) {
-  SwordFsInode *sub = nullptr;
+  SwordFsInode sub;
   store_->AddEntry(kRoot, "sub", kDir, 0, &sub);
-  SwordFsInode *leaf = nullptr;
-  store_->AddEntry(sub->ino, "nested", kRegFile, 0, &leaf);
+  SwordFsInode leaf;
+  store_->AddEntry(sub.ino, "nested", kRegFile, 0, &leaf);
 
-  EXPECT_TRUE(store_->IsDescendantOf(kRoot, leaf->ino));
-  EXPECT_TRUE(store_->IsDescendantOf(sub->ino, leaf->ino));
+  EXPECT_TRUE(store_->IsDescendantOf(kRoot, leaf.ino));
+  EXPECT_TRUE(store_->IsDescendantOf(sub.ino, leaf.ino));
 }
 
 TEST_F(MemMetaStoreTest, IsDescendantOfNotDescendant) {
-  SwordFsInode *a = nullptr;
+  SwordFsInode a;
   store_->AddEntry(kRoot, "a", kDir, 0, &a);
-  SwordFsInode *b = nullptr;
+  SwordFsInode b;
   store_->AddEntry(kRoot, "b", kDir, 0, &b);
-  SwordFsInode *leaf = nullptr;
-  store_->AddEntry(b->ino, "leaf", kRegFile, 0, &leaf);
+  SwordFsInode leaf;
+  store_->AddEntry(b.ino, "leaf", kRegFile, 0, &leaf);
 
   // leaf is under b, not under a
-  EXPECT_FALSE(store_->IsDescendantOf(a->ino, leaf->ino));
+  EXPECT_FALSE(store_->IsDescendantOf(a.ino, leaf.ino));
 }
 
 TEST_F(MemMetaStoreTest, IsDescendantOfSelf) {
@@ -396,10 +392,12 @@ TEST_F(MemMetaStoreTest, ReclaimInodeMissingInodeIsNoOp) {
 }
 
 TEST_F(MemMetaStoreTest, ReclaimInodeDeletesOrphanedInode) {
-  SwordFsInode *f = nullptr;
+  SwordFsInode f;
   store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
-  InodeID ino = f->ino;
-  f->attr.st_nlink = 0;  // simulate unlink while the inode is still retained
+  InodeID ino = f.ino;
+
+  // Unlink detaches the entry and drops nlink to 0; the inode survives.
+  ASSERT_TRUE(store_->Unlink(kRoot, "f").ok());
 
   EXPECT_EQ(store_->InodeCount(), 2);
   ASSERT_TRUE(store_->ReclaimInode(ino).ok());
@@ -408,15 +406,15 @@ TEST_F(MemMetaStoreTest, ReclaimInodeDeletesOrphanedInode) {
 }
 
 TEST_F(MemMetaStoreTest, ReclaimInodeKeepsLinkedInode) {
-  SwordFsInode *f = nullptr;
+  SwordFsInode f;
   store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
-  InodeID ino = f->ino;  // nlink == 1 — not orphaned
+  InodeID ino = f.ino;  // nlink == 1 — not orphaned
 
   ASSERT_TRUE(store_->ReclaimInode(ino).ok());
   EXPECT_EQ(store_->InodeCount(), 2);
-  SwordFsInode *out = nullptr;
+  SwordFsInode out;
   ASSERT_TRUE(store_->LookupInode(ino, &out).ok());
-  EXPECT_EQ(out, f);
+  EXPECT_EQ(out.ino, f.ino);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -427,11 +425,11 @@ TEST_F(MemMetaStoreTest, ListChunksEmptyInodeIsOk) {
   // No chunks registered: ListChunks must return an empty vector,
   // not an error. The coordinator relies on this to distinguish
   // "no data to delete" from "metadata failure".
-  SwordFsInode *f = nullptr;
+  SwordFsInode f;
   store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
 
   std::vector<ChunkMeta> out;
-  ASSERT_TRUE(store_->ListChunks(f->ino, &out).ok());
+  ASSERT_TRUE(store_->ListChunks(f.ino, &out).ok());
   EXPECT_TRUE(out.empty());
 }
 
@@ -444,9 +442,9 @@ TEST_F(MemMetaStoreTest, ListChunksNullOutIsError) {
 
 TEST_F(MemMetaStoreTest, ListChunksReturnsRegisteredChunksInIndexOrder) {
   constexpr uint64_t kChunkSize = 65536;
-  SwordFsInode *f = nullptr;
+  SwordFsInode f;
   store_->AddEntry(kRoot, "f", kRegFile, 0, &f);
-  InodeID ino = f->ino;
+  InodeID ino = f.ino;
 
   // Add three chunks out of order; the snapshot must be sorted by
   // ChunkIndex so the coordinator's Delete calls follow the same

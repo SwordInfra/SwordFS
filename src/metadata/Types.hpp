@@ -121,12 +121,13 @@ inline RenameFlag &operator|=(RenameFlag &a, RenameFlag b) {
 // in Types.cpp so the header stays free of inline definitions.
 
 struct SwordFsInode {
-  InodeID ino;
-  struct stat attr;
-  InodeID parent_ino;          // Directory the inode lives in.
-  uint64_t nlookup = 0;        // reserved for future forget support
-  std::string symlink_target;  // non-empty only for S_IFLNK
+  InodeID ino = 0;
+  struct stat attr {};
+  InodeID parent_ino = 0;        // Directory the inode lives in.
+  uint64_t nlookup = 0;          // reserved for future forget support
+  std::string symlink_target;    // non-empty only for S_IFLNK
 
+  SwordFsInode() = default;
   SwordFsInode(InodeID ino, struct stat attr, InodeID parent_ino,
                uint64_t nlookup, std::string symlink_target = std::string{});
 

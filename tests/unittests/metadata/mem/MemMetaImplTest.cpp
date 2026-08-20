@@ -1,11 +1,16 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// Tests for MemMetaImpl permission checks.
+// Tests for MemMetaImpl: permission checks, open-unlink behaviour, and
+// operation-level atomicity under concurrency.
 
 #include <folly/fibers/FiberManagerInternal.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
+
+#include <atomic>
+#include <barrier>
+#include <thread>
 
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "utils/Context.hpp"
@@ -661,4 +666,122 @@ TEST_F(MemMetaImplTest, OpenAcceptsUnlinkedButLiveInode) {
   EXPECT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
   EXPECT_TRUE(impl_->Access(f_ino, R_OK).ok());
   EXPECT_TRUE(impl_->Access(f_ino, W_OK).ok());
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Concurrency — operation-level atomicity (META-02/META-03)
+// ════════════════════════════════════════════════════════════════════
+// Every MemMetaImpl method runs as a single MemMetaStore::Transact()
+// script, so concurrent observers can never see an intermediate state
+// and no SwordFsInode is touched outside a transaction.
+
+// ────────────────────────────────────────────────────────────────
+// META-03: rename-overwrite must have no observable gap
+// ────────────────────────────────────────────────────────────────
+// A rename that overwrites "dst" unlinks the old target and moves the
+// source into place as ONE atomic step.  A concurrent Create("dst")
+// must therefore ALWAYS fail with AlreadyExists — if it ever succeeds,
+// it observed the intermediate state (target gone, source not yet
+// moved), which is exactly the data-loss window from META-03.
+
+TEST_F(MemMetaImplTest, ConcurrentRenameOverwriteHasNoObservableGap) {
+  constexpr int kRounds = 500;
+
+  SetContext(0, 0);
+  ASSERT_TRUE(impl_->Create(kRoot, "dst", 0644, nullptr, nullptr).ok());
+
+  std::atomic<int> create_succeeded{0};
+  std::atomic<int> rename_failed{0};
+  std::atomic<bool> stop{false};
+  std::barrier gate(3);
+
+  // Creator: keeps probing whether "dst" can be created.
+  std::thread creator([&]() {
+    gate.arrive_and_wait();
+    while (!stop.load(std::memory_order_relaxed)) {
+      Status status = impl_->Create(kRoot, "dst", 0644, nullptr, nullptr);
+      if (status.ok()) {
+        create_succeeded.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  });
+
+  // Renamer: repeatedly overwrites "dst" with a fresh "src".
+  std::thread renamer([&]() {
+    gate.arrive_and_wait();
+    for (int i = 0; i < kRounds; ++i) {
+      Status status = impl_->Create(kRoot, "src", 0644, nullptr, nullptr);
+      if (!status.ok()) {
+        rename_failed.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      status = impl_->Rename(kRoot, "src", kRoot, "dst", RenameFlag::kNone);
+      if (!status.ok()) {
+        rename_failed.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  });
+
+  gate.arrive_and_wait();
+  renamer.join();
+  stop.store(true, std::memory_order_relaxed);
+  creator.join();
+
+  EXPECT_EQ(create_succeeded.load(), 0)
+      << "rename-overwrite was observable mid-flight (META-03)";
+  EXPECT_EQ(rename_failed.load(), 0);
+
+  // "dst" must still resolve to a live inode.
+  InodeID found = 0;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "dst", &found, nullptr).ok());
+}
+
+// ────────────────────────────────────────────────────────────────
+// META-02/META-03: concurrent exchanges never lose an inode
+// ────────────────────────────────────────────────────────────────
+// Two threads keep exchanging a <-> b and b <-> a.  Both names always
+// exist, so every exchange must succeed, and afterwards both names must
+// resolve to the two original inodes — none may be lost or duplicated.
+
+TEST_F(MemMetaImplTest, ConcurrentExchangeKeepsBothInodes) {
+  constexpr int kRounds = 500;
+
+  SetContext(0, 0);
+  InodeID a_ino = 0, b_ino = 0;
+  ASSERT_TRUE(impl_->Create(kRoot, "a", 0644, &a_ino, nullptr).ok());
+  ASSERT_TRUE(impl_->Create(kRoot, "b", 0644, &b_ino, nullptr).ok());
+
+  std::atomic<int> failures{0};
+  std::barrier gate(3);
+
+  auto worker = [&](const char *from, const char *to) {
+    gate.arrive_and_wait();
+    for (int i = 0; i < kRounds; ++i) {
+      Status status =
+          impl_->Rename(kRoot, from, kRoot, to, RenameFlag::kExchange);
+      if (!status.ok()) {
+        failures.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  };
+
+  std::thread t1(worker, "a", "b");
+  std::thread t2(worker, "b", "a");
+  gate.arrive_and_wait();
+  t1.join();
+  t2.join();
+
+  EXPECT_EQ(failures.load(), 0);
+
+  InodeID found_a = 0, found_b = 0;
+  ASSERT_TRUE(impl_->Lookup(kRoot, "a", &found_a, nullptr).ok());
+  ASSERT_TRUE(impl_->Lookup(kRoot, "b", &found_b, nullptr).ok());
+  EXPECT_NE(found_a, found_b);
+  EXPECT_TRUE((found_a == a_ino && found_b == b_ino) ||
+              (found_a == b_ino && found_b == a_ino));
+
+  // Both inodes must still have readable attributes (no dangling state).
+  struct stat attr;
+  EXPECT_TRUE(impl_->GetAttr(found_a, &attr).ok());
+  EXPECT_TRUE(impl_->GetAttr(found_b, &attr).ok());
 }

@@ -2,7 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Memory-backed IMetaEngine implementation — thin facade around MemMetaStore
-// that adds locking, file/dir handle accounting, and permission checks.
+// that adds file/dir handle accounting and permission checks.  Transactions
+// are owned by the store: each method here runs as a single
+// MemMetaStore::Transact() script so every IMetaEngine operation is atomic.
 
 #pragma once
 
@@ -68,8 +70,9 @@ class MemMetaImpl : public IMetaEngine {
   static Limits GetLimits();
 
  private:
-  // Helpers
-  void KillSUID(struct stat *st);
+  // Truncate within an existing transaction (the caller's Transact()
+  // scope).
+  Status TruncateInTxn(MemMetaTxn &txn, InodeID ino, size_t size);
 
  private:
   MemMetaStore store_;

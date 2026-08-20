@@ -38,4 +38,13 @@ uint32_t ModeToDt(mode_t mode) {
   return DT_UNKNOWN;
 }
 
+void KillSUID(struct stat *st) {
+  if (st->st_mode & S_ISUID) {
+    st->st_mode &= ~S_ISUID;
+  }
+  if (st->st_mode & S_ISGID) {
+    st->st_mode &= ~S_ISGID;
+  }
+}
+
 }  // namespace swordfs::metadata

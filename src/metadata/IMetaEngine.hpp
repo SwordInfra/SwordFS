@@ -40,6 +40,12 @@ inline bool IsMemoryMode(std::string_view meta_url) {
   return meta_url == kMemoryMetaUrl;
 }
 
+/// Concurrency contract: every method on this interface must be atomic
+/// and thread-safe.  Concurrent observers must never see an intermediate
+/// state of a composite operation (e.g. a Rename whose target has been
+/// unlinked but whose source has not yet been moved).  For KV-backed
+/// implementations each method is expected to map onto a single
+/// transaction.
 class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
