@@ -175,23 +175,23 @@ Status MemMetaTxn::AdjustNlink(InodeID ino, int delta) {
   return Status::OK();
 }
 
-Status MemMetaTxn::AddNlookup(InodeID ino, int64_t delta) {
+Status MemMetaTxn::IncrementNlookup(InodeID ino, uint64_t count) {
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
     return Status::NotFound("inode not found");
   }
-  if (delta < 0) {
-    const uint64_t decrement =
-        static_cast<uint64_t>(-(delta + 1)) + 1;
-    inode->nlookup = decrement >= inode->nlookup
-                         ? 0
-                         : inode->nlookup - decrement;
-  } else {
-    const uint64_t increment = static_cast<uint64_t>(delta);
-    inode->nlookup = UINT64_MAX - inode->nlookup < increment
-                         ? UINT64_MAX
-                         : inode->nlookup + increment;
+  inode->nlookup = UINT64_MAX - inode->nlookup < count
+                       ? UINT64_MAX
+                       : inode->nlookup + count;
+  return Status::OK();
+}
+
+Status MemMetaTxn::DecrementNlookup(InodeID ino, uint64_t count) {
+  SwordFsInode *inode = FindInode(ino);
+  if (!inode) {
+    return Status::NotFound("inode not found");
   }
+  inode->nlookup = count >= inode->nlookup ? 0 : inode->nlookup - count;
   return Status::OK();
 }
 

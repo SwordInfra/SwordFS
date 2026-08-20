@@ -70,7 +70,7 @@ Status MemMetaImpl::Lookup(InodeID parent_ino,
     }
     // Increment lookup count so forget() can track when the kernel is
     // done referencing this inode.
-    return txn.AddNlookup(child.ino, 1);
+    return txn.IncrementNlookup(child.ino, 1);
   });
 
   if (!status.ok()) {
@@ -554,7 +554,7 @@ Status MemMetaImpl::Forget(InodeID ino,
                            uint64_t nlookup) {
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     // Subtract with saturation at zero.
-    return txn.AddNlookup(ino, -static_cast<int64_t>(nlookup));
+    return txn.DecrementNlookup(ino, nlookup);
   });
   // A missing inode is fine (the kernel may forget an inode we already
   // reclaimed).

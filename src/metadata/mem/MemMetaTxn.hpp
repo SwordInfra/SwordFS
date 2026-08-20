@@ -72,10 +72,11 @@ class MemMetaTxn {
   // Add |delta| (may be negative) to the inode's nlink.
   Status AdjustNlink(InodeID ino, int delta);
 
-  // Add |delta| (may be negative) to the inode's lookup count.
-  // The count saturates at zero: subtracting more than the current
-  // value leaves it at 0.
-  Status AddNlookup(InodeID ino, int64_t delta);
+  // Increment the inode's lookup count, saturating at UINT64_MAX.
+  Status IncrementNlookup(InodeID ino, uint64_t count);
+
+  // Decrement the inode's lookup count, saturating at zero.
+  Status DecrementNlookup(InodeID ino, uint64_t count);
 
   // Set the symlink target of |ino| and update st_size to match.
   Status SetSymlinkTarget(InodeID ino, std::string_view target);

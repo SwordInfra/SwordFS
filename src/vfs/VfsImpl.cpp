@@ -205,10 +205,20 @@ utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
     auto handle = vfs::InodeHandleManager::Instance().Get(
         result.overwritten_ino, /*create_if_missing=*/true);
     if (!handle) {
-      return utils::Status::Internal("failed to get InodeHandle");
-    }
-    if (!handle->MarkOrphanedIfOpen()) {
-      return handle->ReclaimData();
+      // The metadata rename has already committed, so returning an error
+      // here would report a failed rename for a state that is already
+      // visible. Cleanup is best-effort after the metadata transaction;
+      // log the failure and let a later cleanup/reconciliation path retry.
+      SWORDFS_LOG_ERROR << "Rename: failed to get InodeHandle for overwritten "
+                        << "inode " << result.overwritten_ino
+                        << "; rename has already committed";
+    } else if (!handle->MarkOrphanedIfOpen()) {
+      auto cleanup_status = handle->ReclaimData();
+      if (!cleanup_status.ok()) {
+        SWORDFS_LOG_ERROR << "Rename: cleanup of overwritten inode "
+                          << result.overwritten_ino << " failed: "
+                          << cleanup_status.message();
+      }
     }
   }
   return utils::Status::OK();
