@@ -101,18 +101,7 @@ Status MemMetaImpl::GetAttr(InodeID ino, struct stat *attr) {
 
 Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
-    SwordFsInode dir;
-    Status status = txn.LookupInode(ino, &dir);
-    if (!status.ok()) {
-      return status;
-    }
-    if (!dir.IsDir()) {
-      return Status::NotDirectory("not a directory");
-    }
-
-    // ListEntries returns the full directory listing including the
-    // synthetic "." and ".." entries.
-    status = txn.ListEntries(ino, entries);
+    Status status = txn.ListEntries(ino, entries);
     if (!status.ok()) {
       return status;
     }
@@ -727,8 +716,11 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
     txn.TouchInode(newparent_ino, SetAttrField::kMtime | SetAttrField::kCtime);
     txn.TouchInode(ino, SetAttrField::kCtime);
 
-    // Re-read so the returned snapshot reflects the incremented nlink.
-    return txn.LookupInode(ino, &inode);
+    // Mirror the link side effects into the local snapshot for the out
+    // param (same pattern as Symlink) instead of re-reading the inode.
+    inode.attr.st_nlink++;
+    inode.attr.st_ctime = ::time(nullptr);
+    return Status::OK();
   });
 
   if (!status.ok()) {
