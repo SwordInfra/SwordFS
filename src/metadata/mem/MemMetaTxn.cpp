@@ -49,6 +49,102 @@ size_t MemMetaTxn::InodeCount() {
   return store_->inodes_.size();
 }
 
+Status MemMetaTxn::SetAttr(InodeID ino, const struct stat *attr,
+                           SetAttrField fields, struct stat *out_attr) {
+  if (!attr) {
+    return Status::InvalidArgument("null attr");
+  }
+  SwordFsInode *inode = FindInode(ino);
+  if (!inode) {
+    return Status::NotFound("inode not found");
+  }
+
+  struct stat st = inode->attr;
+  bool owner_changed = false;
+  bool size_changed = false;
+
+  if (HasSetAttrField(fields, SetAttrField::kMode)) {
+    st.st_mode = (st.st_mode & S_IFMT) | (attr->st_mode & 07777);
+  }
+  if (HasSetAttrField(fields, SetAttrField::kUid)) {
+    owner_changed = owner_changed || st.st_uid != attr->st_uid;
+    st.st_uid = attr->st_uid;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kGid)) {
+    owner_changed = owner_changed || st.st_gid != attr->st_gid;
+    st.st_gid = attr->st_gid;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kSize)) {
+    if (attr->st_size < 0) {
+      return Status::InvalidArgument("negative file size");
+    }
+    size_changed = st.st_size != attr->st_size;
+    st.st_size = attr->st_size;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kAtime)) {
+    st.st_atime = attr->st_atime;
+    st.st_atim.tv_nsec = attr->st_atim.tv_nsec;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kMtime)) {
+    st.st_mtime = attr->st_mtime;
+    st.st_mtim.tv_nsec = attr->st_mtim.tv_nsec;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kAtimeNow)) {
+    st.st_atime = ::time(nullptr);
+    st.st_atim.tv_nsec = 0;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kMtimeNow)) {
+    st.st_mtime = ::time(nullptr);
+    st.st_mtim.tv_nsec = 0;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kCtime)) {
+    st.st_ctime = attr->st_ctime;
+  }
+
+  if (size_changed || owner_changed) {
+    KillSUID(&st);
+  }
+  if (!HasSetAttrField(fields, SetAttrField::kCtime)) {
+    st.st_ctime = ::time(nullptr);
+  }
+
+  Status status = WriteAttr(ino, &st);
+  if (!status.ok()) {
+    return status;
+  }
+  if (size_changed) {
+    status = TruncateChunks(ino, static_cast<size_t>(st.st_size));
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  if (out_attr) {
+    *out_attr = st;
+  }
+  return Status::OK();
+}
+
+Status MemMetaTxn::Truncate(InodeID ino, size_t size) {
+  SwordFsInode *inode = FindInode(ino);
+  if (!inode) {
+    return Status::NotFound("inode not found");
+  }
+  if (inode->attr.st_size == static_cast<off_t>(size)) {
+    return Status::OK();
+  }
+
+  struct stat st = inode->attr;
+  st.st_size = static_cast<off_t>(size);
+  KillSUID(&st);
+  st.st_ctime = ::time(nullptr);
+
+  Status status = WriteAttr(ino, &st);
+  if (!status.ok()) {
+    return status;
+  }
+  return TruncateChunks(ino, size);
+}
+
 Status MemMetaTxn::WriteAttr(InodeID ino, const struct stat *attr) {
   if (!attr) {
     return Status::InvalidArgument("null attr");
@@ -84,10 +180,17 @@ Status MemMetaTxn::AddNlookup(InodeID ino, int64_t delta) {
   if (!inode) {
     return Status::NotFound("inode not found");
   }
-  if (delta < 0 && static_cast<uint64_t>(-delta) >= inode->nlookup) {
-    inode->nlookup = 0;
+  if (delta < 0) {
+    const uint64_t decrement =
+        static_cast<uint64_t>(-(delta + 1)) + 1;
+    inode->nlookup = decrement >= inode->nlookup
+                         ? 0
+                         : inode->nlookup - decrement;
   } else {
-    inode->nlookup += delta;
+    const uint64_t increment = static_cast<uint64_t>(delta);
+    inode->nlookup = UINT64_MAX - inode->nlookup < increment
+                         ? UINT64_MAX
+                         : inode->nlookup + increment;
   }
   return Status::OK();
 }
@@ -161,7 +264,11 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
 Status MemMetaTxn::MoveEntry(InodeID old_parent_ino,
                              std::string_view old_name,
                              InodeID new_parent_ino,
-                             std::string_view new_name, bool overwrite) {
+                             std::string_view new_name, bool overwrite,
+                             RenameResult *result) {
+  if (result) {
+    *result = {};
+  }
   SwordFsInode *old_parent = FindInode(old_parent_ino);
   if (!old_parent) {
     return Status::NotFound("old parent directory not found");
@@ -207,18 +314,19 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino,
       }
       return Status::NotDirectory("target is not a directory");
     }
-    // Unlink detaches the victim; a directory victim must be empty and
-    // is reclaimed by Unlink itself, a file victim's inode survives
-    // until its nlink drops to zero (hard links keep it alive).
+    // Unlink detaches the victim. Empty directories are reclaimed by
+    // Unlink itself; file inodes survive when their last name disappears
+    // so the VFS layer can perform the same open-fd-aware data cleanup it
+    // uses for unlink(2).
+    const InodeID victim_ino = victim->ino;
     Status status = Unlink(new_parent_ino, new_name, nullptr);
     if (!status.ok()) {
       return status;
     }
-    // Free the overwritten file's inode and chunk metadata.  The VFS
-    // layer is responsible for issuing data-engine deletes — by the
-    // time a rename overwrites a path there cannot be any open fd on
-    // the victim (its only link was just removed).
-    ReclaimInode(victim->ino);
+    if (result && !victim->IsDir()) {
+      result->overwritten_ino = victim_ino;
+      result->overwritten_post_nlink = victim->attr.st_nlink;
+    }
   }
 
   UnlinkEntry(old_parent_ino, old_name);
@@ -243,11 +351,7 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name,
                           nlink_t *post_nlink) {
   SwordFsInode *child = FindEntry(parent_ino, name);
   if (!child) {
-    // Idempotent: a parallel unlink already removed the entry.
-    if (post_nlink) {
-      *post_nlink = 0;
-    }
-    return Status::OK();
+    return Status::NotFound("entry not found");
   }
 
   if (child->IsDir() && !IsDirEmpty(child->ino)) {
@@ -291,7 +395,8 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name,
 }
 
 Status MemMetaTxn::LinkExistingEntry(InodeID parent_ino,
-                                     std::string_view name, InodeID ino) {
+                                     std::string_view name, InodeID ino,
+                                     SwordFsInode *out) {
   SwordFsInode *parent = FindInode(parent_ino);
   if (!parent) {
     return Status::NotFound("parent directory not found");
@@ -307,15 +412,13 @@ Status MemMetaTxn::LinkExistingEntry(InodeID parent_ino,
     return Status::NotFound("inode not found");
   }
 
-  // NOTE: full POSIX hard-link semantics (parent tracking for "..",
-  // nlink accounting for the last reference) are not yet wired here.
-  // Future work: introduce an internal "pointer inode" record so that
-  // link(2) and unlink(2) keep the target's nlink in sync and resolve
-  // link attributes transparently.
   inode->attr.st_nlink++;
   LinkEntry(parent_ino, name, inode);
   inode->Touch(SetAttrField::kCtime);
   parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  if (out) {
+    *out = *inode;
+  }
   return Status::OK();
 }
 

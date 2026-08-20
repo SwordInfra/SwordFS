@@ -98,6 +98,19 @@ class IMetaEngine {
                         std::string_view old_name, InodeID new_parent_ino,
                         std::string_view new_name, RenameFlag flags) = 0;
 
+  // Extended rename API. Implementations that can report an overwritten
+  // inode should fill |result| as part of the same atomic mutation. The
+  // default implementation preserves compatibility with metadata engines
+  // that only implement the basic rename operation.
+  virtual Status Rename(InodeID old_parent_ino, std::string_view old_name,
+                        InodeID new_parent_ino, std::string_view new_name,
+                        RenameFlag flags, RenameResult *result) {
+    if (result) {
+      *result = {};
+    }
+    return Rename(old_parent_ino, old_name, new_parent_ino, new_name, flags);
+  }
+
   /// Set attributes for an inode.  |fields| is a bitwise OR of
   /// SetAttrField values; only the bits set in |fields| are read from
   /// |attr| and applied to the inode.

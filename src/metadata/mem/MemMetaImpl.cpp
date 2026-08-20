@@ -27,16 +27,14 @@ constexpr size_t kMaxFreeInodes = UINT64_MAX;
 
 }  // namespace
 
-// Transaction model: every method below runs its mutation as a single
-// store_.Transact() script, so each IMetaEngine operation is atomic.
+// Transaction model: every method below runs its metadata mutation as a
+// single store_.Transact() script, so each IMetaEngine operation is atomic.
 //
-// Discipline: a Transact() script contains ONLY MemMetaTxn primitives
-// plus pure decisions on the value snapshots they return.  Logging,
-// ambient state (folly fiber-local context), and anything else with
-// side effects happens outside the transaction.  This keeps every
-// script a pure read-snapshot -> compute -> write-back function — safe
-// to re-execute, which is exactly what an optimistic-transaction
-// (WATCH/MULTI/EXEC) KV backend does on conflict.
+// Discipline: a Transact() script contains MemMetaTxn semantic operations
+// plus pure policy decisions on value snapshots. Logging and ambient
+// context are captured outside the transaction. MemMetaTxn owns metadata
+// state transitions that must remain atomic; this layer should not replay
+// their bookkeeping by hand.
 //
 // Division of labour: the primitives maintain the tree's structural
 // invariants (parent nlink on directory link/unlink/move, mtime/ctime
@@ -214,6 +212,17 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
 Status MemMetaImpl::Rename(InodeID old_parent_ino,
                            std::string_view old_name, InodeID new_parent_ino,
                            std::string_view new_name, RenameFlag flags) {
+  return Rename(old_parent_ino, old_name, new_parent_ino, new_name, flags,
+                nullptr);
+}
+
+Status MemMetaImpl::Rename(InodeID old_parent_ino,
+                           std::string_view old_name, InodeID new_parent_ino,
+                           std::string_view new_name, RenameFlag flags,
+                           RenameResult *result) {
+  if (result) {
+    *result = {};
+  }
   if (new_name.size() > kMaxNameLength) {
     return Status::NameTooLong("target name exceeds maximum length");
   }
@@ -300,7 +309,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
     // victim removal are all enforced by MoveEntry; kNoReplace simply
     // withholds overwrite permission.
     return txn.MoveEntry(old_parent_ino, old_name, new_parent_ino, new_name,
-                         !HasRenameFlag(flags, RenameFlag::kNoReplace));
+                         !HasRenameFlag(flags, RenameFlag::kNoReplace), result);
   });
 
   if (!status.ok()) {
@@ -319,81 +328,7 @@ Status MemMetaImpl::SetAttr(InodeID ino,
                             struct stat *out_attr) {
   struct stat result{};
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
-    SwordFsInode inode;
-    Status status = txn.LookupInode(ino, &inode);
-    if (!status.ok()) {
-      return status;
-    }
-
-    // Read-modify-write on a local snapshot; written back once below.
-    struct stat st = inode.attr;
-    bool owner_changed = false;
-
-    if (HasSetAttrField(fields, SetAttrField::kMode)) {
-      st.st_mode = (st.st_mode & S_IFMT) | (attr->st_mode & 07777);
-    }
-    if (HasSetAttrField(fields, SetAttrField::kUid)) {
-      if (st.st_uid != attr->st_uid) {
-        owner_changed = true;
-      }
-      st.st_uid = attr->st_uid;
-    }
-    if (HasSetAttrField(fields, SetAttrField::kGid)) {
-      if (st.st_gid != attr->st_gid) {
-        owner_changed = true;
-      }
-      st.st_gid = attr->st_gid;
-    }
-    if (HasSetAttrField(fields, SetAttrField::kSize)) {
-      if (st.st_size != attr->st_size) {
-        st.st_size = attr->st_size;
-        // Size changes clear SUID/SGID (FUSE_CAP_HANDLE_KILLPRIV).
-        KillSUID(&st);
-      }
-      // Drop out-of-range chunk metadata.
-      status = txn.TruncateChunks(ino, static_cast<size_t>(attr->st_size));
-      if (!status.ok()) {
-        return status;
-      }
-    }
-    if (HasSetAttrField(fields, SetAttrField::kAtime)) {
-      st.st_atime = attr->st_atime;
-      st.st_atim.tv_nsec = attr->st_atim.tv_nsec;
-    }
-    if (HasSetAttrField(fields, SetAttrField::kMtime)) {
-      st.st_mtime = attr->st_mtime;
-      st.st_mtim.tv_nsec = attr->st_mtim.tv_nsec;
-    }
-    if (HasSetAttrField(fields, SetAttrField::kAtimeNow)) {
-      st.st_atime = ::time(nullptr);
-      st.st_atim.tv_nsec = 0;
-    }
-    if (HasSetAttrField(fields, SetAttrField::kMtimeNow)) {
-      st.st_mtime = ::time(nullptr);
-      st.st_mtim.tv_nsec = 0;
-    }
-    if (HasSetAttrField(fields, SetAttrField::kCtime)) {
-      st.st_ctime = attr->st_ctime;
-    }
-
-    if (owner_changed) {
-      // Kill SUID/SGID if the owner changed (FUSE_CAP_HANDLE_KILLPRIV).
-      KillSUID(&st);
-    }
-
-    // Update ctime unless it was explicitly set
-    if (!HasSetAttrField(fields, SetAttrField::kCtime)) {
-      st.st_ctime = ::time(nullptr);
-    }
-
-    // Single write-back makes the whole SetAttr atomic.
-    status = txn.WriteAttr(ino, &st);
-    if (!status.ok()) {
-      return status;
-    }
-
-    result = st;
-    return Status::OK();
+    return txn.SetAttr(ino, attr, fields, &result);
   });
 
   if (!status.ok()) {
@@ -719,16 +654,7 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
       return Status::Permission("access denied on new parent");
     }
 
-    status = txn.LinkExistingEntry(newparent_ino, newname, ino);
-    if (!status.ok()) {
-      return status;
-    }
-
-    // Mirror the link side effects into the local snapshot for the out
-    // param (same pattern as Symlink) instead of re-reading the inode.
-    inode.attr.st_nlink++;
-    inode.attr.st_ctime = ::time(nullptr);
-    return Status::OK();
+    return txn.LinkExistingEntry(newparent_ino, newname, ino, &inode);
   });
 
   if (!status.ok()) {
@@ -782,34 +708,9 @@ Status MemMetaImpl::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
   return store_.Transact([&](MemMetaTxn &txn) { return txn.ListChunks(ino, out); });
 }
 
-// TruncateInTxn runs inside an existing transaction (the caller's
-// Transact() scope, e.g. from the public Truncate below).
-Status MemMetaImpl::TruncateInTxn(MemMetaTxn &txn, InodeID ino,
-                                  size_t size) {
-  SwordFsInode inode;
-  Status status = txn.LookupInode(ino, &inode);
-  if (!status.ok()) {
-    return status;
-  }
-
-  struct stat st = inode.attr;
-  if (st.st_size != static_cast<off_t>(size)) {
-    st.st_size = static_cast<off_t>(size);
-    // Size changes clear SUID/SGID (FUSE_CAP_HANDLE_KILLPRIV).
-    KillSUID(&st);
-    st.st_ctime = ::time(nullptr);
-    status = txn.WriteAttr(ino, &st);
-    if (!status.ok()) {
-      return status;
-    }
-  }
-
-  return txn.TruncateChunks(ino, size);
-}
-
 Status MemMetaImpl::Truncate(InodeID ino, size_t size) {
   Status status = store_.Transact(
-      [&](MemMetaTxn &txn) { return TruncateInTxn(txn, ino, size); });
+      [&](MemMetaTxn &txn) { return txn.Truncate(ino, size); });
   if (!status.ok()) {
     SWORDFS_LOG_DEBUG << "Truncate: ino " << ino << " to " << size
                       << " failed: " << status.message();

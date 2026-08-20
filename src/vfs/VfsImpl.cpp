@@ -190,7 +190,28 @@ utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
                               unsigned int flags) {
   RenameFlag rename_flags = FuseFlagsToRenameFlag(flags);
   auto meta = VolumeImpl::Instance().meta_engine();
-  return meta->Rename(parent, name, newparent, newname, rename_flags);
+  metadata::RenameResult result;
+  auto status = meta->Rename(parent, name, newparent, newname, rename_flags,
+                             &result);
+  if (!status.ok()) {
+    return status;
+  }
+
+  // A rename-overwrite can orphan the replaced file just like unlink(2).
+  // The metadata transaction deliberately does not reclaim it because it
+  // cannot know whether an open file descriptor still references it. Let
+  // InodeHandle perform the same data/inode cleanup used by unlink.
+  if (result.overwritten_ino != 0 && result.overwritten_post_nlink == 0) {
+    auto handle = vfs::InodeHandleManager::Instance().Get(
+        result.overwritten_ino, /*create_if_missing=*/true);
+    if (!handle) {
+      return utils::Status::Internal("failed to get InodeHandle");
+    }
+    if (!handle->MarkOrphanedIfOpen()) {
+      return handle->ReclaimData();
+    }
+  }
+  return utils::Status::OK();
 }
 
 utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent,

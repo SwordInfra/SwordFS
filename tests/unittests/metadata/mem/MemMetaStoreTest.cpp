@@ -250,10 +250,10 @@ TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, UnlinkIdempotent) {
+TEST_F(MemMetaStoreTest, UnlinkMissingEntryReturnsNotFound) {
   Status status = store_->Transact(
       [&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "nonexistent"); });
-  EXPECT_TRUE(status.ok());
+  EXPECT_TRUE(status.IsNotFound());
   size_t count = store_->Transact(
       [&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(count, 1);

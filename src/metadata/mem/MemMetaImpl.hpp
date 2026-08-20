@@ -34,6 +34,10 @@ class MemMetaImpl : public IMetaEngine {
   Status Rename(InodeID old_parent_ino,
                 std::string_view old_name, InodeID new_parent_ino,
                 std::string_view new_name, RenameFlag flags) override;
+  Status Rename(InodeID old_parent_ino,
+                std::string_view old_name, InodeID new_parent_ino,
+                std::string_view new_name, RenameFlag flags,
+                RenameResult *result) override;
   Status SetAttr(InodeID ino,
                  const struct stat *attr, SetAttrField fields,
                  struct stat *out_attr) override;
@@ -68,11 +72,6 @@ class MemMetaImpl : public IMetaEngine {
   Status StatFs(struct statvfs *stbuf) override;
 
   static Limits GetLimits();
-
- private:
-  // Truncate within an existing transaction (the caller's Transact()
-  // scope).
-  Status TruncateInTxn(MemMetaTxn &txn, InodeID ino, size_t size);
 
  private:
   MemMetaStore store_;

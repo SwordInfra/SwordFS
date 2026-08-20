@@ -11,12 +11,10 @@
 //
 //   The transaction interface uses VALUE SEMANTICS: reads hand out
 //   snapshot copies of SwordFsInode and writes go through explicit
-//   by-ino mutation primitives (TouchInode, AdjustNlink, WriteAttr,
-//   ...).  No pointers into store-owned memory ever escape a
-//   transaction, so a transaction script is a pure
-//   read-snapshot -> compute -> write-back function.  This is the shape
-//   a future KV/Redis backend maps onto a real transaction (optimistic
-//   WATCH/MULTI/EXEC retry, or a Lua script).
+//   by-ino semantic mutation primitives (SetAttr, Truncate,
+//   TouchInode, AdjustNlink, ...). No pointers into store-owned memory
+//   ever escape a transaction, so callers do not have to replay metadata
+//   bookkeeping around individual mutations.
 
 #pragma once
 
