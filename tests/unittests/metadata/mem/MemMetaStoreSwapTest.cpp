@@ -397,3 +397,50 @@ TEST_F(MemMetaStoreSwapTest, SwapAcrossDifferentParentsUpdatesParentIno) {
   EXPECT_EQ(entries[1].name, "..");
   EXPECT_EQ(entries[1].ino, p1.ino);
 }
+
+// ────────────────────────────────────────────────────────────────
+// SwapEntry: a directory can never land inside its own subtree
+// ────────────────────────────────────────────────────────────────
+// RENAME_EXCHANGE must reject cycles just like a plain rename does —
+// in both directions.
+
+TEST_F(MemMetaStoreSwapTest, SwapDirectoryIntoOwnSubtreeFails) {
+  // Build root/b/x/a: dir_a is a descendant of dir_b.
+  SwordFsInode dir_b;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "b", kDir, 0, &dir_b);
+  });
+  SwordFsInode dir_x;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(dir_b.ino, "x", kDir, 0, &dir_x);
+  });
+  SwordFsInode dir_a;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(dir_x.ino, "a", kDir, 0, &dir_a);
+  });
+
+  // Swapping dir_b into dir_a's slot puts dir_b inside its own subtree.
+  Status status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(kRoot, "b", dir_x.ino, "a");
+  });
+  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+
+  // Same cycle from the other direction.
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(dir_x.ino, "a", kRoot, "b");
+  });
+  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+
+  // The tree must be left untouched.
+  SwordFsInode found;
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(kRoot, "b", &found);
+  });
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(found.ino, dir_b.ino);
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(dir_x.ino, "a", &found);
+  });
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(found.ino, dir_a.ino);
+}

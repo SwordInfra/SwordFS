@@ -162,7 +162,7 @@ TEST_F(MemMetaStoreTest, MoveEntrySuccess) {
 
   // Move root/f1 → root/sub/f1
   Status status = store_->Transact([&](MemMetaTxn &txn) {
-    return txn.MoveEntry(kRoot, "f1", sub.ino, "f1");
+    return txn.MoveEntry(kRoot, "f1", sub.ino, "f1", false);
   });
   EXPECT_TRUE(status.ok());
 
@@ -182,7 +182,7 @@ TEST_F(MemMetaStoreTest, MoveEntryOldParentNotFound) {
   Add(kRoot, "dst", kDir, &sub);
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
-    return txn.MoveEntry(999, "f", sub.ino, "f");
+    return txn.MoveEntry(999, "f", sub.ino, "f", false);
   });
   EXPECT_TRUE(status.IsNotFound());
 }
@@ -192,7 +192,7 @@ TEST_F(MemMetaStoreTest, MoveEntryNewParentNotFound) {
   Add(kRoot, "f", kRegFile, &f);
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
-    return txn.MoveEntry(kRoot, "f", 999, "f");
+    return txn.MoveEntry(kRoot, "f", 999, "f", false);
   });
   EXPECT_TRUE(status.IsNotFound());
 }
@@ -209,7 +209,7 @@ TEST_F(MemMetaStoreTest, MoveEntryTargetExists) {
   Add(d2.ino, "f", kRegFile);
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
-    return txn.MoveEntry(d1.ino, "f", d2.ino, "f");
+    return txn.MoveEntry(d1.ino, "f", d2.ino, "f", false);
   });
   EXPECT_TRUE(status.IsAlreadyExists());
 }

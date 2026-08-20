@@ -13,6 +13,15 @@
 // keeps them — but they may go stale with respect to later transactions.
 // This is the shape a future KV/Redis backend maps onto a real
 // transaction (optimistic WATCH/MULTI/EXEC retry, or a Lua script).
+//
+// Primitives maintain the tree's STRUCTURAL INVARIANTS themselves:
+//   - creating/removing a subdirectory entry adjusts the parent's
+//     nlink (the child's ".." backlink);
+//   - moving an entry across parents adjusts both parents' nlink;
+//   - any entry-list change bumps the parent directories' mtime/ctime;
+//   - re-linking an inode (move/swap/link) bumps its ctime.
+// Callers compose primitives for POLICY (permissions, POSIX error
+// codes, flag dispatch) and never repeat this bookkeeping.
 
 #pragma once
 
@@ -79,23 +88,43 @@ class MemMetaTxn {
   // Allocate a new inode and link it as a child of parent.  Returns
   // AlreadyExists if the name already exists under that parent.  On
   // success, *out receives a snapshot copy of the new inode.
+  // Linking a subdirectory also increments the parent's nlink (the new
+  // ".." backlink); any successful link bumps the parent's mtime/ctime.
   Status AddEntry(InodeID parent_ino, std::string_view name,
                   mode_t mode, uint64_t nlookup, SwordFsInode *out);
 
   // Move an existing entry from old_parent/old_name to
   // new_parent/new_name.  The inode is re-linked, not re-created.
+  //
+  // The primitive enforces the tree's structural integrity itself:
+  // a directory can never be moved into itself or its own subtree
+  // (InvalidArgument), and moving onto itself — the same inode,
+  // possibly through another hard link — is a no-op.
+  //
+  // When |overwrite| is false an existing target yields AlreadyExists.
+  // When true, the target is atomically replaced: a directory target
+  // must be empty (NotEmpty) and is reclaimed by the unlink; a file
+  // target's inode is reclaimed once its nlink drops to zero.  A
+  // directory/non-directory mismatch yields IsDirectory / NotDirectory.
+  //
+  // Moving a directory across parents adjusts both parents' nlink;
+  // bumps both parents' mtime/ctime and the moved inode's ctime.
   Status MoveEntry(InodeID old_parent_ino, std::string_view old_name,
-                   InodeID new_parent_ino, std::string_view new_name);
+                   InodeID new_parent_ino, std::string_view new_name,
+                   bool overwrite);
 
   // POSIX unlink(2): remove the child entry from its parent and
   // decrement nlink.  Does NOT delete file inodes or their data; that
   // is the caller's responsibility.  Empty-directory targets are
-  // reclaimed immediately; a non-empty directory returns NotEmpty.
+  // reclaimed immediately (and the parent loses the ".." backlink);
+  // a non-empty directory returns NotEmpty.  Any successful removal
+  // bumps the parent's mtime/ctime.
   Status Unlink(InodeID parent_ino, std::string_view name,
                 nlink_t *post_nlink = nullptr);
 
   // Link an existing inode (by ino) into a directory (hard link).
-  // Increments nlink.
+  // Increments the inode's nlink; bumps the inode's ctime and the
+  // parent's mtime/ctime.
   Status LinkExistingEntry(InodeID parent_ino, std::string_view name,
                            InodeID ino);
 
@@ -106,7 +135,13 @@ class MemMetaTxn {
   // Return true if child is a descendant of ancestor.
   bool IsDescendantOf(InodeID ancestor_ino, InodeID child_ino) const;
 
-  // Swap two directory entries.
+  // Swap two directory entries.  Keeps both inodes' parent_ino in sync
+  // with their new locations; bumps both inodes' ctime and both
+  // parents' mtime/ctime.  Needs no nlink adjustment: each parent
+  // loses one entry and gains one.
+  //
+  // Structural integrity is enforced here: neither directory may end
+  // up inside its own subtree (InvalidArgument).
   Status SwapEntries(InodeID parent_a_ino, std::string_view name_a,
                      InodeID parent_b_ino, std::string_view name_b);
 

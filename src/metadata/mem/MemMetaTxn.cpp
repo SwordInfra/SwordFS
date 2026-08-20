@@ -23,6 +23,15 @@ namespace swordfs::metadata {
 // Transaction primitives.  Every method runs with the store lock
 // held; the transaction is the Transact() callback's lifetime.
 // Reads return snapshot copies; writes are by-ino.
+//
+// Primitives maintain the tree's STRUCTURAL INVARIANTS themselves:
+//   - creating/removing a subdirectory entry adjusts the parent's
+//     nlink (the child's ".." backlink);
+//   - moving an entry across parents adjusts both parents' nlink;
+//   - any entry-list change bumps the parent directories' mtime/ctime;
+//   - re-linking an inode (move/swap/link) bumps its ctime.
+// Callers compose primitives for POLICY (permissions, POSIX error
+// codes, flag dispatch) and never repeat this bookkeeping.
 // ────────────────────────────────────────────────────────────────
 
 Status MemMetaTxn::LookupInode(InodeID ino, SwordFsInode *out) {
@@ -136,6 +145,13 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
   InsertInode(child);
   LinkEntry(parent_ino, name, child);
 
+  // A new subdirectory's ".." is an additional hard link to the parent,
+  // and the entry-list change bumps the parent's mtime/ctime.
+  if (child->IsDir()) {
+    parent->attr.st_nlink++;
+  }
+  parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+
   if (out) {
     *out = *child;
   }
@@ -145,7 +161,7 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
 Status MemMetaTxn::MoveEntry(InodeID old_parent_ino,
                              std::string_view old_name,
                              InodeID new_parent_ino,
-                             std::string_view new_name) {
+                             std::string_view new_name, bool overwrite) {
   SwordFsInode *old_parent = FindInode(old_parent_ino);
   if (!old_parent) {
     return Status::NotFound("old parent directory not found");
@@ -153,10 +169,6 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino,
   if (!old_parent->IsDir()) {
     return Status::NotDirectory("old parent is not a directory");
   }
-  if (FindEntry(old_parent_ino, old_name) == nullptr) {
-    return Status::NotFound("source entry not found");
-  }
-
   SwordFsInode *new_parent = FindInode(new_parent_ino);
   if (!new_parent) {
     return Status::NotFound("new parent directory not found");
@@ -164,16 +176,66 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino,
   if (!new_parent->IsDir()) {
     return Status::NotDirectory("new parent is not a directory");
   }
-  if (FindEntry(new_parent_ino, new_name) != nullptr) {
-    return Status::AlreadyExists("target entry already exists");
+
+  SwordFsInode *child = FindEntry(old_parent_ino, old_name);
+  if (!child) {
+    return Status::NotFound("source entry not found");
   }
 
-  SwordFsInode *child = UnlinkEntry(old_parent_ino, old_name);
-  if (!child) {
-    return Status::Internal("unlink entry failed");
+  // A directory can never be moved into itself or its own subtree —
+  // that would create a cycle.  (The descendant check alone misses the
+  // direct self-move new_parent_ino == child->ino.)
+  if (child->IsDir() &&
+      (new_parent_ino == child->ino ||
+       IsDescendantOf(child->ino, new_parent_ino))) {
+    return Status::InvalidArgument("cannot move directory into itself");
   }
+
+  if (SwordFsInode *victim = FindEntry(new_parent_ino, new_name)) {
+    if (!overwrite) {
+      return Status::AlreadyExists("target entry already exists");
+    }
+    // Rename onto itself — the same inode, possibly through another
+    // hard link — is a no-op.
+    if (victim == child) {
+      return Status::OK();
+    }
+    // Cannot replace a directory with a non-directory or vice versa.
+    if (victim->IsDir() != child->IsDir()) {
+      if (victim->IsDir()) {
+        return Status::IsDirectory("target is a directory");
+      }
+      return Status::NotDirectory("target is not a directory");
+    }
+    // Unlink detaches the victim; a directory victim must be empty and
+    // is reclaimed by Unlink itself, a file victim's inode survives
+    // until its nlink drops to zero (hard links keep it alive).
+    Status status = Unlink(new_parent_ino, new_name, nullptr);
+    if (!status.ok()) {
+      return status;
+    }
+    // Free the overwritten file's inode and chunk metadata.  The VFS
+    // layer is responsible for issuing data-engine deletes — by the
+    // time a rename overwrites a path there cannot be any open fd on
+    // the victim (its only link was just removed).
+    ReclaimInode(victim->ino);
+  }
+
+  UnlinkEntry(old_parent_ino, old_name);
   child->parent_ino = new_parent_ino;
   LinkEntry(new_parent_ino, new_name, child);
+
+  // Moving a directory re-parents its "..": the old parent loses a hard
+  // link and the new parent gains one.  (Same-parent moves change no
+  // nlink.)
+  if (child->IsDir() && old_parent_ino != new_parent_ino) {
+    old_parent->attr.st_nlink--;
+    new_parent->attr.st_nlink++;
+  }
+  // Both entry lists changed; the re-linked inode's ctime bumps.
+  old_parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  new_parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  child->Touch(SetAttrField::kCtime);
   return Status::OK();
 }
 
@@ -192,14 +254,20 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name,
     return Status::NotEmpty("directory not empty");
   }
 
+  SwordFsInode *parent = FindInode(parent_ino);
+
   // Remove the directory entry. Decrement nlink to track the hard-link
   // count. The inode (and its chunks) survive here; the caller decides
   // whether to follow up with `ReclaimData` once it has confirmed no
   // open file descriptor still references the inode.
   UnlinkEntry(parent_ino, name);
+  parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
   if (child->IsDir()) {
-    // Directories cannot be hard-linked; always reclaim immediately.
+    // The removed subdirectory's ".." no longer points back at the
+    // parent, so the parent loses a hard link.  Directories cannot be
+    // hard-linked; always reclaim immediately.
+    parent->attr.st_nlink--;
     DeleteInode(child->ino);
     if (post_nlink) {
       // Inode is gone — surface 0 so the caller doesn't try to read
@@ -246,6 +314,8 @@ Status MemMetaTxn::LinkExistingEntry(InodeID parent_ino,
   // link attributes transparently.
   inode->attr.st_nlink++;
   LinkEntry(parent_ino, name, inode);
+  inode->Touch(SetAttrField::kCtime);
+  parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
   return Status::OK();
 }
 
@@ -323,13 +393,29 @@ Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a,
     return Status::NotFound("source entry B not found");
   }
 
+  SwordFsInode *inode_a = it_a->second;
+  SwordFsInode *inode_b = it_b->second;
+
+  // Neither directory may end up inside its own subtree — a swap that
+  // places a directory beneath itself would create a cycle.  Both
+  // directions must be checked: a swap moves A under parent_b AND B
+  // under parent_a.
+  if (inode_a->IsDir() &&
+      (parent_b_ino == inode_a->ino ||
+       IsDescendantOf(inode_a->ino, parent_b_ino))) {
+    return Status::InvalidArgument("cannot move directory into itself");
+  }
+  if (inode_b->IsDir() &&
+      (parent_a_ino == inode_b->ino ||
+       IsDescendantOf(inode_b->ino, parent_a_ino))) {
+    return Status::InvalidArgument("cannot move directory into itself");
+  }
+
   // Atomically swap the inode pointers.  The two-step assignment handles
   // both same-directory and cross-directory swaps correctly:
   //   - Cross-directory: each parent's entry table gets the other's inode.
   //   - Same-directory (different names): values are swapped.
   //   - Same-directory (same name): no-op (identical values).
-  SwordFsInode *inode_a = it_a->second;
-  SwordFsInode *inode_b = it_b->second;
   dir_a_it->second[std::string(name_a)] = inode_b;
   dir_b_it->second[std::string(name_b)] = inode_a;
 
@@ -337,8 +423,17 @@ Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a,
   // entries produced by ListEntries point at the right parent.  (For a
   // same-directory swap both parents are identical, so this is a no-op;
   // for same-entry swaps inode_a == inode_b and the values match too.)
+  // No nlink adjustment is needed: each parent loses one entry and gains
+  // one.
   inode_a->parent_ino = parent_b_ino;
   inode_b->parent_ino = parent_a_ino;
+
+  // Both entries were re-linked: bump ctime on the inodes and
+  // mtime/ctime on the parent directories.
+  inode_a->Touch(SetAttrField::kCtime);
+  inode_b->Touch(SetAttrField::kCtime);
+  FindInode(parent_a_ino)->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  FindInode(parent_b_ino)->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
   return Status::OK();
 }

@@ -301,3 +301,27 @@ TEST_F(MemMetaImplRenameTest, RenameExchangeDirectoryIntoItselfFails) {
   EXPECT_TRUE(impl_->Lookup(a_ino, "b", &found, nullptr).ok());
   EXPECT_EQ(found, b_ino);
 }
+
+TEST_F(MemMetaImplRenameTest, RenameExchangeWithAncestorDirectoryFails) {
+  // Build root/b/x/a: dir b is an ancestor of dir a.
+  InodeID b_ino = 0, x_ino = 0, a_ino = 0;
+  impl_->MkDir(kRoot, "b", 0755, &b_ino, nullptr);
+  impl_->MkDir(b_ino, "x", 0755, &x_ino, nullptr);
+  impl_->MkDir(x_ino, "a", 0755, &a_ino, nullptr);
+
+  // Exchange x/a with root/b: dir b would land inside its own subtree.
+  // The source-side check (a into b) passes here — only the symmetric
+  // check catches this direction.
+  Status status =
+      impl_->Rename(x_ino, "a", kRoot, "b", RenameFlag::kExchange);
+  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+
+  // The whole subtree must be untouched.
+  InodeID found = 0;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "b", &found, nullptr).ok());
+  EXPECT_EQ(found, b_ino);
+  EXPECT_TRUE(impl_->Lookup(b_ino, "x", &found, nullptr).ok());
+  EXPECT_EQ(found, x_ino);
+  EXPECT_TRUE(impl_->Lookup(x_ino, "a", &found, nullptr).ok());
+  EXPECT_EQ(found, a_ino);
+}

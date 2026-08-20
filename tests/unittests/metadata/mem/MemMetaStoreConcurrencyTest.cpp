@@ -161,7 +161,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveEntryAtomicity) {
     // Each thread tries to move the same file to a unique destination name
     std::string new_name = "moved_" + std::to_string(tid);
     Status status = store_->Transact([&](MemMetaTxn &txn) {
-      return txn.MoveEntry(src_dir.ino, "target", dst_dir.ino, new_name);
+      return txn.MoveEntry(src_dir.ino, "target", dst_dir.ino, new_name, false);
     });
     if (status.ok()) {
       moved_count.fetch_add(1, std::memory_order_relaxed);
@@ -373,7 +373,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveToSameTarget) {
   auto mover_a = [&]() {
     gate.arrive_and_wait();
     Status status = store_->Transact([&](MemMetaTxn &txn) {
-      return txn.MoveEntry(dir_a.ino, "file", dir_dst.ino, "winner");
+      return txn.MoveEntry(dir_a.ino, "file", dir_dst.ino, "winner", false);
     });
     if (status.ok()) {
       moved.fetch_add(1, std::memory_order_relaxed);
@@ -385,7 +385,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveToSameTarget) {
   auto mover_b = [&]() {
     gate.arrive_and_wait();
     Status status = store_->Transact([&](MemMetaTxn &txn) {
-      return txn.MoveEntry(dir_b.ino, "file", dir_dst.ino, "winner");
+      return txn.MoveEntry(dir_b.ino, "file", dir_dst.ino, "winner", false);
     });
     if (status.ok()) {
       moved.fetch_add(1, std::memory_order_relaxed);
