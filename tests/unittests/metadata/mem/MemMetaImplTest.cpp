@@ -1,11 +1,16 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// Tests for MemMetaImpl permission checks.
+// Tests for MemMetaImpl: permission checks, open-unlink behaviour, and
+// operation-level atomicity under concurrency.
 
 #include <folly/fibers/FiberManagerInternal.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
+
+#include <atomic>
+#include <barrier>
+#include <thread>
 
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "utils/Context.hpp"
@@ -336,6 +341,40 @@ TEST_F(MemMetaImplTest, UnlinkStickyBitRootCanDelete) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// RmDir sticky-bit checks
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(MemMetaImplTest, RmDirStickyBitOwnerCanDelete) {
+  // Sticky dir owned by kOther, writable for all.
+  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
+  SetDirOwner(dir_ino, kOther, kGroup);
+
+  // kOwner creates a subdirectory inside (so kOwner owns the entry).
+  SetContext(kOwner, kOtherGroup);
+  InodeID sub_ino = 0;
+  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, &sub_ino, nullptr).ok());
+
+  // The entry's owner can remove it from someone else's sticky dir.
+  EXPECT_TRUE(impl_->RmDir(dir_ino, "sub").ok());
+}
+
+TEST_F(MemMetaImplTest, RmDirStickyBitNonOwnerCannotDelete) {
+  // Sticky dir owned by kOther, writable for all.
+  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
+  SetDirOwner(dir_ino, kOther, kGroup);
+
+  // kOwner creates a subdirectory inside.
+  SetContext(kOwner, kOtherGroup);
+  InodeID sub_ino = 0;
+  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, &sub_ino, nullptr).ok());
+
+  // A third user cannot remove kOwner's subdirectory.
+  SetContext(3000, kOtherGroup);
+  Status st = impl_->RmDir(dir_ino, "sub");
+  EXPECT_TRUE(st.IsPermission()) << st.message();
+}
+
+// ────────────────────────────────────────────────────────────────
 // Rename permission checks
 // ────────────────────────────────────────────────────────────────
 
@@ -379,6 +418,45 @@ TEST_F(MemMetaImplTest, RenameRootSucceedsRegardlessOfPerms) {
   SetContext(0, 0);
   Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
+}
+
+TEST_F(MemMetaImplTest, RenameStickyBitNonOwnerCannotMoveOut) {
+  // Sticky src dir owned by kOther, writable for all; dst fully open.
+  InodeID src_ino = MakeOwnedDir(kRoot, "src", 01777);
+  SetDirOwner(src_ino, kOther, kGroup);
+  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0777);
+
+  // kOwner creates the file in the sticky src (so kOwner owns it).
+  SetContext(kOwner, kOtherGroup);
+  InodeID f_ino = 0;
+  ASSERT_TRUE(impl_->Create(src_ino, "f", 0644, &f_ino, nullptr).ok());
+
+  // A third user cannot move kOwner's file out of kOther's sticky dir.
+  SetContext(3000, kOtherGroup);
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
+  EXPECT_TRUE(st.IsPermission()) << st.message();
+}
+
+TEST_F(MemMetaImplTest, RenameStickyBitCannotOverwriteOthersFile) {
+  // dst is a sticky dir owned by kOther and already holds kOther's file;
+  // src is fully open.
+  InodeID src_ino = MakeOwnedDir(kRoot, "src", 0777);
+  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 01777);
+  SetDirOwner(dst_ino, kOther, kGroup);
+
+  // The victim file in dst is owned by kOther.
+  SetContext(kOther, kOtherGroup);
+  InodeID victim_ino = 0;
+  ASSERT_TRUE(impl_->Create(dst_ino, "f", 0644, &victim_ino, nullptr).ok());
+
+  // kOwner's file in src.
+  SetContext(kOwner, kOtherGroup);
+  InodeID f_ino = 0;
+  ASSERT_TRUE(impl_->Create(src_ino, "f", 0644, &f_ino, nullptr).ok());
+
+  // kOwner may not overwrite kOther's file in kOther's sticky dir.
+  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
+  EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -661,4 +739,122 @@ TEST_F(MemMetaImplTest, OpenAcceptsUnlinkedButLiveInode) {
   EXPECT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
   EXPECT_TRUE(impl_->Access(f_ino, R_OK).ok());
   EXPECT_TRUE(impl_->Access(f_ino, W_OK).ok());
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Concurrency — operation-level atomicity (META-02/META-03)
+// ════════════════════════════════════════════════════════════════════
+// Every MemMetaImpl method runs as a single MemMetaStore::Transact()
+// script, so concurrent observers can never see an intermediate state
+// and no SwordFsInode is touched outside a transaction.
+
+// ────────────────────────────────────────────────────────────────
+// META-03: rename-overwrite must have no observable gap
+// ────────────────────────────────────────────────────────────────
+// A rename that overwrites "dst" unlinks the old target and moves the
+// source into place as ONE atomic step.  A concurrent Create("dst")
+// must therefore ALWAYS fail with AlreadyExists — if it ever succeeds,
+// it observed the intermediate state (target gone, source not yet
+// moved), which is exactly the data-loss window from META-03.
+
+TEST_F(MemMetaImplTest, ConcurrentRenameOverwriteHasNoObservableGap) {
+  constexpr int kRounds = 500;
+
+  SetContext(0, 0);
+  ASSERT_TRUE(impl_->Create(kRoot, "dst", 0644, nullptr, nullptr).ok());
+
+  std::atomic<int> create_succeeded{0};
+  std::atomic<int> rename_failed{0};
+  std::atomic<bool> stop{false};
+  std::barrier gate(3);
+
+  // Creator: keeps probing whether "dst" can be created.
+  std::thread creator([&]() {
+    gate.arrive_and_wait();
+    while (!stop.load(std::memory_order_relaxed)) {
+      Status status = impl_->Create(kRoot, "dst", 0644, nullptr, nullptr);
+      if (status.ok()) {
+        create_succeeded.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  });
+
+  // Renamer: repeatedly overwrites "dst" with a fresh "src".
+  std::thread renamer([&]() {
+    gate.arrive_and_wait();
+    for (int i = 0; i < kRounds; ++i) {
+      Status status = impl_->Create(kRoot, "src", 0644, nullptr, nullptr);
+      if (!status.ok()) {
+        rename_failed.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      status = impl_->Rename(kRoot, "src", kRoot, "dst", RenameFlag::kNone);
+      if (!status.ok()) {
+        rename_failed.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  });
+
+  gate.arrive_and_wait();
+  renamer.join();
+  stop.store(true, std::memory_order_relaxed);
+  creator.join();
+
+  EXPECT_EQ(create_succeeded.load(), 0)
+      << "rename-overwrite was observable mid-flight (META-03)";
+  EXPECT_EQ(rename_failed.load(), 0);
+
+  // "dst" must still resolve to a live inode.
+  InodeID found = 0;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "dst", &found, nullptr).ok());
+}
+
+// ────────────────────────────────────────────────────────────────
+// META-02/META-03: concurrent exchanges never lose an inode
+// ────────────────────────────────────────────────────────────────
+// Two threads keep exchanging a <-> b and b <-> a.  Both names always
+// exist, so every exchange must succeed, and afterwards both names must
+// resolve to the two original inodes — none may be lost or duplicated.
+
+TEST_F(MemMetaImplTest, ConcurrentExchangeKeepsBothInodes) {
+  constexpr int kRounds = 500;
+
+  SetContext(0, 0);
+  InodeID a_ino = 0, b_ino = 0;
+  ASSERT_TRUE(impl_->Create(kRoot, "a", 0644, &a_ino, nullptr).ok());
+  ASSERT_TRUE(impl_->Create(kRoot, "b", 0644, &b_ino, nullptr).ok());
+
+  std::atomic<int> failures{0};
+  std::barrier gate(3);
+
+  auto worker = [&](const char *from, const char *to) {
+    gate.arrive_and_wait();
+    for (int i = 0; i < kRounds; ++i) {
+      Status status =
+          impl_->Rename(kRoot, from, kRoot, to, RenameFlag::kExchange);
+      if (!status.ok()) {
+        failures.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  };
+
+  std::thread t1(worker, "a", "b");
+  std::thread t2(worker, "b", "a");
+  gate.arrive_and_wait();
+  t1.join();
+  t2.join();
+
+  EXPECT_EQ(failures.load(), 0);
+
+  InodeID found_a = 0, found_b = 0;
+  ASSERT_TRUE(impl_->Lookup(kRoot, "a", &found_a, nullptr).ok());
+  ASSERT_TRUE(impl_->Lookup(kRoot, "b", &found_b, nullptr).ok());
+  EXPECT_NE(found_a, found_b);
+  EXPECT_TRUE((found_a == a_ino && found_b == b_ino) ||
+              (found_a == b_ino && found_b == a_ino));
+
+  // Both inodes must still have readable attributes (no dangling state).
+  struct stat attr;
+  EXPECT_TRUE(impl_->GetAttr(found_a, &attr).ok());
+  EXPECT_TRUE(impl_->GetAttr(found_b, &attr).ok());
 }

@@ -70,10 +70,6 @@ utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name,
   return Status::OK();
 }
 
-void VfsImpl::Forget(fuse_ino_t ino, uint64_t nlookup) {
-  VolumeImpl::Instance().meta_engine()->Forget(ino, nlookup);
-}
-
 utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
   return VolumeImpl::Instance().meta_engine()->GetAttr(ino, attr);
 }
@@ -190,7 +186,39 @@ utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
                               unsigned int flags) {
   RenameFlag rename_flags = FuseFlagsToRenameFlag(flags);
   auto meta = VolumeImpl::Instance().meta_engine();
-  return meta->Rename(parent, name, newparent, newname, rename_flags);
+  metadata::RenameResult result;
+  auto status = meta->Rename(parent, name, newparent, newname, rename_flags,
+                             &result);
+  if (!status.ok()) {
+    return status;
+  }
+
+  // A rename-overwrite can orphan the replaced file just like unlink(2).
+  // The metadata transaction deliberately does not reclaim it because it
+  // cannot know whether an open file descriptor still references it. Let
+  // InodeHandle perform the same data/inode cleanup used by unlink.
+  if (result.overwritten_ino != 0 && result.overwritten_post_nlink == 0) {
+    auto handle = vfs::InodeHandleManager::Instance().Get(
+        result.overwritten_ino, /*create_if_missing=*/true);
+    if (!handle) {
+      // The metadata rename has already committed, so returning an error
+      // here would report a failed rename for a state that is already
+      // visible. Cleanup is best-effort after the metadata transaction;
+      // log the failure. A future orphan-data reconciliation mechanism
+      // should provide retry/repair for cleanup failures.
+      SWORDFS_LOG_ERROR << "Rename: failed to get InodeHandle for overwritten "
+                        << "inode " << result.overwritten_ino
+                        << "; rename has already committed";
+    } else if (!handle->MarkOrphanedIfOpen()) {
+      auto cleanup_status = handle->ReclaimData();
+      if (!cleanup_status.ok()) {
+        SWORDFS_LOG_ERROR << "Rename: cleanup of overwritten inode "
+                          << result.overwritten_ino << " failed: "
+                          << cleanup_status.message();
+      }
+    }
+  }
+  return utils::Status::OK();
 }
 
 utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent,
@@ -464,27 +492,6 @@ utils::Status VfsImpl::RetrieveReply(fuse_req_t /*req*/, void *cookie,
   (void)offset;
   (void)bufv;
   return Status::NotSupported("retrieve_reply");
-}
-
-void VfsImpl::ForgetMulti(fuse_req_t req, size_t count,
-                          struct fuse_forget_data *forgets) {
-  (void)req;
-  if (forgets == nullptr) {
-    return;
-  }
-  auto *meta = VolumeImpl::Instance().meta_engine();
-  for (size_t i = 0; i < count; ++i) {
-    const auto nlookup = static_cast<uint64_t>(forgets[i].nlookup);
-    if (nlookup == 0) {
-      continue;
-    }
-    auto status = meta->Forget(forgets[i].ino, nlookup);
-    if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "ForgetMulti: Forget(ino=" << forgets[i].ino
-                        << ", nlookup=" << nlookup
-                        << ") failed: " << status.message();
-    }
-  }
 }
 
 utils::Status VfsImpl::Flock(fuse_ino_t ino,

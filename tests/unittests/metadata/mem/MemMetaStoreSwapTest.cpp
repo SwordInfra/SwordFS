@@ -1,8 +1,9 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// Tests for MemMetaStore::SwapEntries — the atomic directory-entry swap
-// method added in PR #24 (RENAME_EXCHANGE support).
+// Tests for MemMetaTxn::SwapEntries — the atomic directory-entry swap
+// primitive backing RENAME_EXCHANGE (PR #24).  Like the production
+// code, the tests go through MemMetaStore::Transact() exclusively.
 
 #include <gtest/gtest.h>
 #include <sys/stat.h>
@@ -10,12 +11,14 @@
 #include <atomic>
 #include <barrier>
 #include <thread>
+#include <vector>
 
 #include "metadata/mem/MemMetaStore.hpp"
 #include "utils/Status.hpp"
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaStore;
+using swordfs::metadata::MemMetaTxn;
 using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
@@ -41,24 +44,40 @@ class MemMetaStoreSwapTest : public ::testing::Test {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, CrossDirectorySwap) {
-  SwordFsInode *dir_a = nullptr, *dir_b = nullptr;
-  store_->AddEntry(kRoot, "a", kDir, 0, &dir_a);
-  store_->AddEntry(kRoot, "b", kDir, 0, &dir_b);
+  SwordFsInode dir_a, dir_b;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "a", kDir, &dir_a);
+  });
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "b", kDir, &dir_b);
+  });
 
-  SwordFsInode *fa = nullptr, *fb = nullptr;
-  store_->AddEntry(dir_a->ino, "x", kRegFile, 0, &fa);
-  store_->AddEntry(dir_b->ino, "y", kRegFile, 0, &fb);
+  SwordFsInode fa, fb;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(dir_a.ino, "x", kRegFile, &fa);
+  });
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(dir_b.ino, "y", kRegFile, &fb);
+  });
 
-  Status st = store_->SwapEntries(dir_a->ino, "x", dir_b->ino, "y");
-  EXPECT_TRUE(st.ok()) << st.message();
+  Status status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(dir_a.ino, "x", dir_b.ino, "y");
+  });
+  EXPECT_TRUE(status.ok()) << status.message();
 
   // After swap: dir_a/x → fb, dir_b/y → fa
-  SwordFsInode *found = nullptr;
-  EXPECT_TRUE(store_->LookupEntry(dir_a->ino, "x", &found).ok());
-  EXPECT_EQ(found->ino, fb->ino);
+  SwordFsInode found;
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(dir_a.ino, "x", &found);
+  });
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(found.ino, fb.ino);
 
-  EXPECT_TRUE(store_->LookupEntry(dir_b->ino, "y", &found).ok());
-  EXPECT_EQ(found->ino, fa->ino);
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(dir_b.ino, "y", &found);
+  });
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(found.ino, fa.ino);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -66,42 +85,65 @@ TEST_F(MemMetaStoreSwapTest, CrossDirectorySwap) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, SameDirectorySwapDifferentNames) {
-  SwordFsInode *fa = nullptr, *fb = nullptr;
-  store_->AddEntry(kRoot, "alpha", kRegFile, 0, &fa);
-  store_->AddEntry(kRoot, "beta", kRegFile, 0, &fb);
+  SwordFsInode fa, fb;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "alpha", kRegFile, &fa);
+  });
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "beta", kRegFile, &fb);
+  });
 
-  Status st = store_->SwapEntries(kRoot, "alpha", kRoot, "beta");
-  EXPECT_TRUE(st.ok()) << st.message();
+  Status status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(kRoot, "alpha", kRoot, "beta");
+  });
+  EXPECT_TRUE(status.ok()) << status.message();
 
   // After swap: root/alpha → fb, root/beta → fa
-  SwordFsInode *found = nullptr;
-  EXPECT_TRUE(store_->LookupEntry(kRoot, "alpha", &found).ok());
-  EXPECT_EQ(found->ino, fb->ino);
+  SwordFsInode found;
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(kRoot, "alpha", &found);
+  });
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(found.ino, fb.ino);
 
-  EXPECT_TRUE(store_->LookupEntry(kRoot, "beta", &found).ok());
-  EXPECT_EQ(found->ino, fa->ino);
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(kRoot, "beta", &found);
+  });
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(found.ino, fa.ino);
 }
 
 // ────────────────────────────────────────────────────────────────
 // Swap file and directory (should succeed at the store level —
 // type checking is done at the MemMetaImpl layer)
-// ────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, SwapFileWithDirectory) {
-  SwordFsInode *file = nullptr, *subdir = nullptr;
-  store_->AddEntry(kRoot, "f", kRegFile, 0, &file);
-  store_->AddEntry(kRoot, "d", kDir, 0, &subdir);
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "f", kRegFile, nullptr);
+  });
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "d", kDir, nullptr);
+  });
 
-  Status st = store_->SwapEntries(kRoot, "f", kRoot, "d");
-  EXPECT_TRUE(st.ok()) << st.message();
+  Status status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(kRoot, "f", kRoot, "d");
+  });
+  EXPECT_TRUE(status.ok()) << status.message();
 
-  // Verify pointers were swapped correctly.
-  SwordFsInode *found = nullptr;
-  EXPECT_TRUE(store_->LookupEntry(kRoot, "f", &found).ok());
-  EXPECT_TRUE(found->IsDir()) << "after swap, 'f' should be the directory";
+  // Verify entries were swapped correctly.
+  SwordFsInode found;
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(kRoot, "f", &found);
+  });
+  EXPECT_TRUE(status.ok());
+  EXPECT_TRUE(found.IsDir()) << "after swap, 'f' should be the directory";
 
-  EXPECT_TRUE(store_->LookupEntry(kRoot, "d", &found).ok());
-  EXPECT_FALSE(found->IsDir()) << "after swap, 'd' should be the file";
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(kRoot, "d", &found);
+  });
+  EXPECT_TRUE(status.ok());
+  EXPECT_FALSE(found.IsDir()) << "after swap, 'd' should be the file";
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -109,11 +151,14 @@ TEST_F(MemMetaStoreSwapTest, SwapFileWithDirectory) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, SwapMissingSourceA) {
-  SwordFsInode *fb = nullptr;
-  store_->AddEntry(kRoot, "b", kRegFile, 0, &fb);
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "b", kRegFile, nullptr);
+  });
 
-  Status st = store_->SwapEntries(kRoot, "no_such", kRoot, "b");
-  EXPECT_TRUE(st.IsNotFound()) << st.message();
+  Status status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(kRoot, "no_such", kRoot, "b");
+  });
+  EXPECT_TRUE(status.IsNotFound()) << status.message();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -121,11 +166,14 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingSourceA) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, SwapMissingSourceB) {
-  SwordFsInode *fa = nullptr;
-  store_->AddEntry(kRoot, "a", kRegFile, 0, &fa);
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "a", kRegFile, nullptr);
+  });
 
-  Status st = store_->SwapEntries(kRoot, "a", kRoot, "no_such");
-  EXPECT_TRUE(st.IsNotFound()) << st.message();
+  Status status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(kRoot, "a", kRoot, "no_such");
+  });
+  EXPECT_TRUE(status.IsNotFound()) << status.message();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -133,11 +181,14 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingSourceB) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, SwapMissingParentA) {
-  SwordFsInode *fb = nullptr;
-  store_->AddEntry(kRoot, "b", kRegFile, 0, &fb);
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "b", kRegFile, nullptr);
+  });
 
-  Status st = store_->SwapEntries(9999, "a", kRoot, "b");
-  EXPECT_TRUE(st.IsNotFound()) << st.message();
+  Status status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(9999, "a", kRoot, "b");
+  });
+  EXPECT_TRUE(status.IsNotFound()) << status.message();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -145,11 +196,14 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingParentA) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, SwapMissingParentB) {
-  SwordFsInode *fa = nullptr;
-  store_->AddEntry(kRoot, "a", kRegFile, 0, &fa);
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "a", kRegFile, nullptr);
+  });
 
-  Status st = store_->SwapEntries(kRoot, "a", 9999, "b");
-  EXPECT_TRUE(st.IsNotFound()) << st.message();
+  Status status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(kRoot, "a", 9999, "b");
+  });
+  EXPECT_TRUE(status.IsNotFound()) << status.message();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -158,13 +212,18 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingParentB) {
 
 TEST_F(MemMetaStoreSwapTest, ConcurrentSwapConsistency) {
   // Set up two pairs to swap concurrently.
-  SwordFsInode *fa1 = nullptr, *fa2 = nullptr;
-  store_->AddEntry(kRoot, "a1", kRegFile, 0, &fa1);
-  store_->AddEntry(kRoot, "a2", kRegFile, 0, &fa2);
-
-  SwordFsInode *fb1 = nullptr, *fb2 = nullptr;
-  store_->AddEntry(kRoot, "b1", kRegFile, 0, &fb1);
-  store_->AddEntry(kRoot, "b2", kRegFile, 0, &fb2);
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "a1", kRegFile, nullptr);
+  });
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "a2", kRegFile, nullptr);
+  });
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "b1", kRegFile, nullptr);
+  });
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "b2", kRegFile, nullptr);
+  });
 
   std::atomic<int> ok_count{0};
   std::barrier gate(2);
@@ -173,8 +232,10 @@ TEST_F(MemMetaStoreSwapTest, ConcurrentSwapConsistency) {
     gate.arrive_and_wait();
     std::string src = "a" + std::to_string(idx + 1);
     std::string dst = "b" + std::to_string(idx + 1);
-    Status st = store_->SwapEntries(kRoot, src, kRoot, dst);
-    if (st.ok()) {
+    Status status = store_->Transact([&](MemMetaTxn &txn) {
+      return txn.SwapEntries(kRoot, src, kRoot, dst);
+    });
+    if (status.ok()) {
       ok_count.fetch_add(1, std::memory_order_relaxed);
     }
   };
@@ -184,13 +245,15 @@ TEST_F(MemMetaStoreSwapTest, ConcurrentSwapConsistency) {
   t1.join();
   t2.join();
 
-  EXPECT_EQ(ok_count.load(), 2) << "Both swaps should succeed (different entries)";
+  EXPECT_EQ(ok_count.load(), 2)
+      << "Both swaps should succeed (different entries)";
 
-  // Verify all entries still exist (no pointers lost).
+  // Verify all entries still exist (no entries lost).
   for (const auto &name : {"a1", "a2", "b1", "b2"}) {
-    SwordFsInode *found = nullptr;
-    EXPECT_TRUE(store_->LookupEntry(kRoot, name, &found).ok())
-        << "Entry '" << name << "' lost after concurrent swaps";
+    Status status = store_->Transact([&](MemMetaTxn &txn) {
+      return txn.LookupEntry(kRoot, name, nullptr);
+    });
+    EXPECT_TRUE(status.ok()) << "Entry '" << name << "' lost after concurrent swaps";
   }
 }
 
@@ -199,16 +262,23 @@ TEST_F(MemMetaStoreSwapTest, ConcurrentSwapConsistency) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, SwapSameEntryNoOp) {
-  SwordFsInode *f = nullptr;
-  store_->AddEntry(kRoot, "only", kRegFile, 0, &f);
+  SwordFsInode f;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "only", kRegFile, &f);
+  });
 
-  Status st = store_->SwapEntries(kRoot, "only", kRoot, "only");
-  EXPECT_TRUE(st.ok()) << st.message();
+  Status status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(kRoot, "only", kRoot, "only");
+  });
+  EXPECT_TRUE(status.ok()) << status.message();
 
   // Entry should still point to the same inode.
-  SwordFsInode *found = nullptr;
-  EXPECT_TRUE(store_->LookupEntry(kRoot, "only", &found).ok());
-  EXPECT_EQ(found->ino, f->ino);
+  SwordFsInode found;
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(kRoot, "only", &found);
+  });
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(found.ino, f.ino);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -216,31 +286,161 @@ TEST_F(MemMetaStoreSwapTest, SwapSameEntryNoOp) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreSwapTest, SwapDirectoriesCrossDirectory) {
-  SwordFsInode *dir_a = nullptr, *dir_b = nullptr;
-  store_->AddEntry(kRoot, "a", kDir, 0, &dir_a);
-  store_->AddEntry(kRoot, "b", kDir, 0, &dir_b);
+  SwordFsInode dir_a, dir_b;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "a", kDir, &dir_a);
+  });
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "b", kDir, &dir_b);
+  });
 
   // Add children inside each
-  store_->AddEntry(dir_a->ino, "child_a", kRegFile, 0, nullptr);
-  store_->AddEntry(dir_b->ino, "child_b", kRegFile, 0, nullptr);
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(dir_a.ino, "child_a", kRegFile, nullptr);
+  });
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(dir_b.ino, "child_b", kRegFile, nullptr);
+  });
 
-  Status st = store_->SwapEntries(kRoot, "a", kRoot, "b");
-  EXPECT_TRUE(st.ok()) << st.message();
+  Status status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(kRoot, "a", kRoot, "b");
+  });
+  EXPECT_TRUE(status.ok()) << status.message();
 
   // After swap: root/a → dir_b, root/b → dir_a
-  SwordFsInode *found = nullptr;
-  EXPECT_TRUE(store_->LookupEntry(kRoot, "a", &found).ok());
-  EXPECT_EQ(found->ino, dir_b->ino);
+  SwordFsInode found;
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(kRoot, "a", &found);
+  });
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(found.ino, dir_b.ino);
 
-  EXPECT_TRUE(store_->LookupEntry(kRoot, "b", &found).ok());
-  EXPECT_EQ(found->ino, dir_a->ino);
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(kRoot, "b", &found);
+  });
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(found.ino, dir_a.ino);
 
   // Children should still be accessible via the swapped directories.
   // dir_b (now at "a") should have "child_b"
   std::vector<SwordFsEntry> entries;
-  EXPECT_TRUE(store_->ListEntries(dir_b->ino, &entries).ok());
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.ListEntries(dir_b.ino, &entries);
+  });
+  EXPECT_TRUE(status.ok());
   EXPECT_EQ(entries.size(), 3);  // "child_b" + "." + ".."
   EXPECT_EQ(entries[0].name, ".");
   EXPECT_EQ(entries[1].name, "..");
   EXPECT_EQ(entries[2].name, "child_b");
+}
+
+// ────────────────────────────────────────────────────────────────
+// SwapEntry: swap across different parents updates parent_ino (META-04)
+// ────────────────────────────────────────────────────────────────
+// The previous "cross-directory" test above actually swaps within the
+// same parent (kRoot/kRoot).  This test swaps two directories that live
+// under DIFFERENT parents and verifies each inode's parent_ino follows
+// the swap, so ListEntries synthesizes the correct ".." entry.
+
+TEST_F(MemMetaStoreSwapTest, SwapAcrossDifferentParentsUpdatesParentIno) {
+  SwordFsInode p1, p2;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "p1", kDir, &p1);
+  });
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "p2", kDir, &p2);
+  });
+
+  SwordFsInode dir_a, dir_b;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(p1.ino, "a", kDir, &dir_a);
+  });
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(p2.ino, "b", kDir, &dir_b);
+  });
+
+  Status status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(p1.ino, "a", p2.ino, "b");
+  });
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // After the swap: p1/a -> dir_b, p2/b -> dir_a.  Snapshots taken
+  // before the swap are stale by definition, so re-read the inodes.
+  SwordFsInode found;
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupInode(dir_a.ino, &found);
+  });
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(found.parent_ino, p2.ino);
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupInode(dir_b.ino, &found);
+  });
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(found.parent_ino, p1.ino);
+
+  // The synthetic ".." entry must point at the new parent.
+  std::vector<SwordFsEntry> entries;
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.ListEntries(dir_a.ino, &entries);
+  });
+  ASSERT_TRUE(status.ok());
+  ASSERT_GE(entries.size(), 2);
+  EXPECT_EQ(entries[1].name, "..");
+  EXPECT_EQ(entries[1].ino, p2.ino);
+
+  entries.clear();
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.ListEntries(dir_b.ino, &entries);
+  });
+  ASSERT_TRUE(status.ok());
+  ASSERT_GE(entries.size(), 2);
+  EXPECT_EQ(entries[1].name, "..");
+  EXPECT_EQ(entries[1].ino, p1.ino);
+}
+
+// ────────────────────────────────────────────────────────────────
+// SwapEntry: a directory can never land inside its own subtree
+// ────────────────────────────────────────────────────────────────
+// RENAME_EXCHANGE must reject cycles just like a plain rename does —
+// in both directions.
+
+TEST_F(MemMetaStoreSwapTest, SwapDirectoryIntoOwnSubtreeFails) {
+  // Build root/b/x/a: dir_a is a descendant of dir_b.
+  SwordFsInode dir_b;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(kRoot, "b", kDir, &dir_b);
+  });
+  SwordFsInode dir_x;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(dir_b.ino, "x", kDir, &dir_x);
+  });
+  SwordFsInode dir_a;
+  store_->Transact([&](MemMetaTxn &txn) {
+    return txn.AddEntry(dir_x.ino, "a", kDir, &dir_a);
+  });
+
+  // Swapping dir_b into dir_a's slot puts dir_b inside its own subtree.
+  Status status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(kRoot, "b", dir_x.ino, "a");
+  });
+  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+
+  // Same cycle from the other direction.
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.SwapEntries(dir_x.ino, "a", kRoot, "b");
+  });
+  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+
+  // The tree must be left untouched.
+  SwordFsInode found;
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(kRoot, "b", &found);
+  });
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(found.ino, dir_b.ino);
+  status = store_->Transact([&](MemMetaTxn &txn) {
+    return txn.LookupEntry(dir_x.ino, "a", &found);
+  });
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(found.ino, dir_a.ino);
 }

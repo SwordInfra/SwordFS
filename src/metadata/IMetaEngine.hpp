@@ -40,6 +40,12 @@ inline bool IsMemoryMode(std::string_view meta_url) {
   return meta_url == kMemoryMetaUrl;
 }
 
+/// Concurrency contract: every method on this interface must be atomic
+/// and thread-safe.  Concurrent observers must never see an intermediate
+/// state of a composite operation (e.g. a Rename whose target has been
+/// unlinked but whose source has not yet been moved).  For KV-backed
+/// implementations each method is expected to map onto a single
+/// transaction.
 class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
@@ -87,10 +93,16 @@ class IMetaEngine {
   virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;
 
   /// Rename (move) an entry between directories.  |flags| is a bitwise
-  /// OR of RenameFlag values.
+  /// OR of RenameFlag values.  When |result| is non-null and the rename
+  /// replaced an existing non-directory entry, the implementation fills
+  /// |*result| as part of the same atomic mutation so the caller can
+  /// reclaim the overwritten inode's data without a second lookup.
+  /// Engines that cannot report the overwritten inode may leave
+  /// |*result| untouched.
   virtual Status Rename(InodeID old_parent_ino,
                         std::string_view old_name, InodeID new_parent_ino,
-                        std::string_view new_name, RenameFlag flags) = 0;
+                        std::string_view new_name, RenameFlag flags,
+                        RenameResult *result = nullptr) = 0;
 
   /// Set attributes for an inode.  |fields| is a bitwise OR of
   /// SetAttrField values; only the bits set in |fields| are read from
@@ -144,11 +156,6 @@ class IMetaEngine {
   /// Open a directory for reading. Performs permission check and updates
   /// atime. Handle allocation is now managed by FileHandleManager.
   virtual Status OpenDir(InodeID ino) = 0;
-
-  /// Decrement the inode's lookup count by nlookup. Called in response to
-  /// FUSE forget requests. The caller may free or reuse the inode's backend
-  /// resources when the count reaches zero.
-  virtual Status Forget(InodeID ino, uint64_t nlookup) = 0;
 
   // ────────────────────────────────────────────────────────────────
   // Chunk metadata

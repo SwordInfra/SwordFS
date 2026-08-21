@@ -86,6 +86,15 @@ enum class RenameFlag : uint32_t {
   kExchange = 1u << 1,
 };
 
+// Result of a rename that replaced an existing non-directory entry.
+// The metadata transaction owns the atomic mutation; the VFS layer uses
+// this result to decide whether the overwritten inode's data needs to be
+// reclaimed without performing a second lookup.
+struct RenameResult {
+  InodeID overwritten_ino = 0;
+  nlink_t overwritten_post_nlink = 0;
+};
+
 inline bool HasSetAttrField(SetAttrField fields, SetAttrField field) {
   return (static_cast<uint32_t>(fields) & static_cast<uint32_t>(field)) != 0;
 }
@@ -121,23 +130,31 @@ inline RenameFlag &operator|=(RenameFlag &a, RenameFlag b) {
 // in Types.cpp so the header stays free of inline definitions.
 
 struct SwordFsInode {
-  InodeID ino;
-  struct stat attr;
-  InodeID parent_ino;          // Directory the inode lives in.
-  uint64_t nlookup = 0;        // reserved for future forget support
-  std::string symlink_target;  // non-empty only for S_IFLNK
+  InodeID ino = 0;
+  struct stat attr {};
+  InodeID parent_ino = 0;        // Directory the inode lives in.
+  std::string symlink_target;    // non-empty only for S_IFLNK
 
+  SwordFsInode() = default;
   SwordFsInode(InodeID ino, struct stat attr, InodeID parent_ino,
-               uint64_t nlookup, std::string symlink_target = std::string{});
+               std::string symlink_target = std::string{});
 
   // Bump one or more inode timestamps to now.
   void Touch(SetAttrField fields);
 
   bool IsDir() const;
+  bool IsRegular() const;
+  bool IsSymlink() const;
 
   // POSIX access check. Returns true if uid/gid has the requested permissions
   // on this inode. Root (uid == 0) always has full access.
   bool CheckAccess(uid_t uid, gid_t gid, int mask) const;
+
+  // Sticky-bit (S_ISVTX) deletion check, called on the containing
+  // directory: returns true if |uid| may unlink/rename |target| within
+  // it — i.e. the bit is clear, or uid is root, the directory owner, or
+  // the entry's owner.
+  bool CheckStickyDelete(uid_t uid, const SwordFsInode &target) const;
 };
 
 }  // namespace swordfs::metadata

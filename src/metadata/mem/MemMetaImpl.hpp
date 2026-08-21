@@ -2,7 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Memory-backed IMetaEngine implementation — thin facade around MemMetaStore
-// that adds locking, file/dir handle accounting, and permission checks.
+// that adds file/dir handle accounting and permission checks.  Transactions
+// are owned by the store: each method here runs as a single
+// MemMetaStore::Transact() script so every IMetaEngine operation is atomic.
 
 #pragma once
 
@@ -16,8 +18,8 @@ namespace swordfs::metadata {
 
 class MemMetaImpl : public IMetaEngine {
  public:
-  MemMetaImpl();
-  ~MemMetaImpl() override;
+  MemMetaImpl() = default;
+  ~MemMetaImpl() override = default;
 
   // Entry operations
   Status Lookup(InodeID parent_ino,
@@ -31,14 +33,14 @@ class MemMetaImpl : public IMetaEngine {
                 nlink_t *post_nlink = nullptr) override;
   Status Rename(InodeID old_parent_ino,
                 std::string_view old_name, InodeID new_parent_ino,
-                std::string_view new_name, RenameFlag flags) override;
+                std::string_view new_name, RenameFlag flags,
+                RenameResult *result = nullptr) override;
   Status SetAttr(InodeID ino,
                  const struct stat *attr, SetAttrField fields,
                  struct stat *out_attr) override;
   Status Access(InodeID ino, int mask) override;
   Status Open(InodeID ino) override;
   Status ReclaimInode(InodeID ino) override;
-  Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out) override;
 
   // Directory operations
   Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) override;
@@ -47,7 +49,6 @@ class MemMetaImpl : public IMetaEngine {
                struct stat *attr) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
   Status OpenDir(InodeID ino) override;
-  Status Forget(InodeID ino, uint64_t nlookup) override;
 
   // Link / symlink operations
   Status Symlink(InodeID parent_ino,
@@ -60,16 +61,13 @@ class MemMetaImpl : public IMetaEngine {
   // Chunk metadata
   Status AddChunk(InodeID ino, const ChunkMeta &cm) override;
   Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) override;
+  Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out) override;
   Status Truncate(InodeID ino, size_t size) override;
 
   // Volume operations
   Status StatFs(struct statvfs *stbuf) override;
 
   static Limits GetLimits();
-
- private:
-  // Helpers
-  void KillSUID(struct stat *st);
 
  private:
   MemMetaStore store_;
