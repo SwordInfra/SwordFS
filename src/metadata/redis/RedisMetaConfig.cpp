@@ -45,6 +45,9 @@ utils::Status ParseRedisMetaUrl(std::string_view meta_url,
   if (authority_and_path.empty()) {
     return utils::Status::InvalidArgument("Redis metadata URL has no host");
   }
+  // TODO(#111): accept the volume query parameter once the Redis key schema
+  // and volume namespace are implemented. Phase 0 intentionally rejects query
+  // components rather than silently ignoring them.
   if (authority_and_path.find_first_of("?#") != std::string_view::npos) {
     return utils::Status::InvalidArgument(
         "Redis metadata URL does not support query or fragment components");
@@ -79,17 +82,37 @@ utils::Status ParseRedisMetaUrl(std::string_view meta_url,
   if (host_and_port.empty()) {
     return utils::Status::InvalidArgument("Redis metadata URL has no host");
   }
-  const auto colon = host_and_port.rfind(':');
-  if (colon == std::string_view::npos) {
-    parsed.host = std::string(host_and_port);
-  } else {
-    parsed.host = std::string(host_and_port.substr(0, colon));
-    uint32_t port = 0;
-    if (!ParseUnsigned(host_and_port.substr(colon + 1), &port) || port == 0 ||
-        port > std::numeric_limits<uint16_t>::max()) {
-      return utils::Status::InvalidArgument("Redis metadata URL has invalid port");
+  if (host_and_port.front() == '[') {
+    const auto closing = host_and_port.find(']');
+    if (closing == std::string_view::npos) {
+      return utils::Status::InvalidArgument("Redis metadata URL has invalid IPv6 host");
     }
-    parsed.port = static_cast<uint16_t>(port);
+    parsed.host = std::string(host_and_port.substr(1, closing - 1));
+    const auto suffix = host_and_port.substr(closing + 1);
+    if (!suffix.empty()) {
+      if (!suffix.starts_with(':')) {
+        return utils::Status::InvalidArgument("Redis metadata URL has invalid IPv6 host");
+      }
+      uint32_t port = 0;
+      if (!ParseUnsigned(suffix.substr(1), &port) || port == 0 ||
+          port > std::numeric_limits<uint16_t>::max()) {
+        return utils::Status::InvalidArgument("Redis metadata URL has invalid port");
+      }
+      parsed.port = static_cast<uint16_t>(port);
+    }
+  } else {
+    const auto colon = host_and_port.rfind(':');
+    if (colon == std::string_view::npos) {
+      parsed.host = std::string(host_and_port);
+    } else {
+      parsed.host = std::string(host_and_port.substr(0, colon));
+      uint32_t port = 0;
+      if (!ParseUnsigned(host_and_port.substr(colon + 1), &port) || port == 0 ||
+          port > std::numeric_limits<uint16_t>::max()) {
+        return utils::Status::InvalidArgument("Redis metadata URL has invalid port");
+      }
+      parsed.port = static_cast<uint16_t>(port);
+    }
   }
   if (parsed.host.empty()) {
     return utils::Status::InvalidArgument("Redis metadata URL has no host");

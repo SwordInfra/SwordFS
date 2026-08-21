@@ -5,6 +5,9 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
 
 #include <sw/redis++/redis++.h>
 
@@ -12,6 +15,28 @@
 #include "utils/Status.hpp"
 
 namespace swordfs::metadata {
+
+// One optimistic Redis transaction attempt. All WATCH, reads, MULTI, queued
+// writes and EXEC operations use the same dedicated Redis client/connection.
+// The object is only valid for the lifetime of RedisMetaStore::Transact().
+class RedisMetaTxn {
+ public:
+  utils::Status Watch(std::string_view key);
+  utils::Status Get(std::string_view key, std::optional<std::string>* value);
+  utils::Status Set(std::string_view key, std::string_view value);
+
+ private:
+  friend class RedisMetaStore;
+  explicit RedisMetaTxn(std::unique_ptr<sw::redis::Redis> redis);
+
+  utils::Status BeginWrite();
+  void Discard() noexcept;
+  utils::Status Commit();
+
+  std::unique_ptr<sw::redis::Redis> redis_;
+  std::optional<sw::redis::Transaction> transaction_;
+  bool has_writes_ = false;
+};
 
 class RedisMetaStore {
  public:
@@ -24,15 +49,14 @@ class RedisMetaStore {
 
   utils::Status Ping();
 
-  // Runs one optimistic transaction attempt at a time. The callback must only
-  // queue writes after calling MULTI and must return Busy to request a retry.
-  // Connection failures before EXEC are retried. A failure while waiting for an
-  // EXEC response is intentionally returned as an ambiguous commit.
-  utils::Status Transact(
-      const std::function<utils::Status(sw::redis::Transaction&)>& callback,
-      int max_attempts = kDefaultMaxAttempts);
+  // Runs an optimistic transaction. Every attempt owns one dedicated Redis
+  // connection so WATCH, reads, MULTI, queued writes and EXEC share the same
+  // connection. Busy and WATCH conflicts retry with bounded backoff.
+  utils::Status Transact(const std::function<utils::Status(RedisMetaTxn&)>& callback,
+                         int max_attempts = kDefaultMaxAttempts);
 
  private:
+  RedisMetaConfig config_;
   std::unique_ptr<sw::redis::Redis> redis_;
 };
 

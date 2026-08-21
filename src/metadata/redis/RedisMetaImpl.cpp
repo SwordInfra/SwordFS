@@ -3,7 +3,10 @@
 
 #include "metadata/redis/RedisMetaImpl.hpp"
 
+#include <exception>
 #include <utility>
+
+#include <sw/redis++/redis++.h>
 
 #include "metadata/redis/RedisMetaStore.hpp"
 
@@ -26,13 +29,21 @@ utils::Status RedisMetaImpl::Create(const RedisMetaConfig& config,
   if (out == nullptr) {
     return utils::Status::InvalidArgument("Redis metadata engine output is null");
   }
-  auto impl = std::make_unique<RedisMetaImpl>(config);
-  auto status = impl->store_->Ping();
-  if (!status.ok()) {
-    return status;
+  try {
+    auto impl = std::make_unique<RedisMetaImpl>(config);
+    auto status = impl->store_->Ping();
+    if (!status.ok()) {
+      return status;
+    }
+    *out = std::move(impl);
+    return utils::Status::OK();
+  } catch (const sw::redis::Error& error) {
+    return utils::Status::IOError("Redis metadata initialization failed: " +
+                                  std::string(error.what()));
+  } catch (const std::exception& error) {
+    return utils::Status::IOError("Redis metadata initialization failed: " +
+                                  std::string(error.what()));
   }
-  *out = std::move(impl);
-  return utils::Status::OK();
 }
 
 Limits RedisMetaImpl::GetLimits() {
