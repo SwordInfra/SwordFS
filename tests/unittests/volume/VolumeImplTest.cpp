@@ -44,11 +44,11 @@ TEST_F(VolumeImplTest, CreateFromSucceeds) {
   EXPECT_TRUE(vol.CreateFrom(cfg).ok());
 }
 
-TEST_F(VolumeImplTest, CreateFromUnsupportedEngine) {
+TEST_F(VolumeImplTest, CreateFromRedisEngine) {
   auto cfg = makeConfig("redis://localhost:6379/0", tmpdir_);
   VolumeImpl vol;
   Status st = vol.CreateFrom(cfg);
-  EXPECT_FALSE(st.ok());
+  EXPECT_TRUE(st.ok()) << st.message();
 }
 
 TEST_F(VolumeImplTest, CreateFromNoConfigPathSkipsWrite) {

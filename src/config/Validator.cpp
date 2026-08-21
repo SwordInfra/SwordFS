@@ -8,6 +8,7 @@
 #include <string>
 
 #include "metadata/IMetaEngine.hpp"
+#include "metadata/redis/RedisMetaConfig.hpp"
 #include "storage/StorageRegistry.hpp"
 #include "storage/StorageUrl.hpp"
 
@@ -18,8 +19,13 @@ const CLI::Validator ValidateMetaUrl = CLI::Validator(
       if (input == swordfs::metadata::kMemoryMetaUrl) {
         return {};
       }
+      swordfs::metadata::RedisMetaConfig config;
+      if (swordfs::metadata::IsRedisMetaUrl(input)) {
+        auto status = swordfs::metadata::ParseRedisMetaUrl(input, &config);
+        return status.ok() ? "" : status.message();
+      }
       return "Unsupported metadata engine '" + input +
-             "'. Supported: memory://local";
+             "'. Supported: memory://local, redis://host[:port][/db]";
     },
     "META_URL");
 
