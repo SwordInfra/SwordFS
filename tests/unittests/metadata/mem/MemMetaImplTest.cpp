@@ -671,11 +671,11 @@ TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
 
   struct stat attr{};
   attr.st_size = 2048;
-  struct stat out{};
+  swordfs::metadata::SwordFsInode out{};
   ASSERT_TRUE(impl_->SetAttr(f_ino, &attr, SetAttrField::kSize, &out).ok());
-  EXPECT_EQ(out.st_size, 2048);
-  EXPECT_EQ(out.st_mode & S_ISUID, 0u);
-  EXPECT_EQ(out.st_mode & S_ISGID, 0u);
+  EXPECT_EQ(out.attr.st_size, 2048);
+  EXPECT_EQ(out.attr.st_mode & S_ISUID, 0u);
+  EXPECT_EQ(out.attr.st_mode & S_ISGID, 0u);
 }
 
 TEST_F(MemMetaImplTest, ReclaimInodeMissingInodeIsNoOp) {

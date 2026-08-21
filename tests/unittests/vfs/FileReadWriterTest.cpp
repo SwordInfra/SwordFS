@@ -32,6 +32,7 @@ using swordfs::metadata::InodeID;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
+using swordfs::metadata::SwordFsInode;
 using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
 using swordfs::utils::Status;
@@ -142,21 +143,29 @@ class MockDataEngine : public IDataEngine {
 
 class MockMetaEngine : public IMetaEngine {
  public:
-  Status Lookup(InodeID, std::string_view, InodeID *,
-                struct stat *) override { return Status::OK(); }
-  Status GetAttr(InodeID, struct stat *attr) override {
-    std::memset(attr, 0, sizeof(*attr));
-    attr->st_size = file_size_;
+  Status Lookup(InodeID, std::string_view, SwordFsInode *out) override {
+    if (out) {
+      *out = {};
+    }
+    return Status::OK();
+  }
+  Status GetInode(InodeID, SwordFsInode *out) override {
+    if (out) {
+      *out = {};
+      out->attr.st_size = file_size_;
+    }
     return Status::OK();
   }
   Status ReadDir(InodeID,
                  std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, mode_t, InodeID *,
-                struct stat *) override { return Status::OK(); }
-  Status MkDir(InodeID, std::string_view, mode_t, InodeID *,
-               struct stat *) override { return Status::OK(); }
+  Status Create(InodeID, std::string_view, mode_t, SwordFsInode *) override {
+    return Status::OK();
+  }
+  Status MkDir(InodeID, std::string_view, mode_t, SwordFsInode *) override {
+    return Status::OK();
+  }
   Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID,
@@ -164,24 +173,24 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
   Status SetAttr(InodeID, const struct stat *attr, SetAttrField fields,
-                 struct stat *out_attr) override {
+                 SwordFsInode *out) override {
     if (HasSetAttrField(fields, SetAttrField::kSize)) {
       file_size_ = attr->st_size;
     }
-    if (out_attr) {
-      std::memset(out_attr, 0, sizeof(*out_attr));
-      out_attr->st_size = file_size_;
+    if (out) {
+      *out = {};
+      out->attr.st_size = file_size_;
     }
     return Status::OK();
   }
   Status StatFs(struct statvfs *) override { return Status::OK(); }
   Status Access(InodeID, int) override { return Status::OK(); }
   Status Symlink(InodeID, std::string_view, const char *,
-                 InodeID *, struct stat *) override {
+                 SwordFsInode *) override {
     return Status::OK();
   }
   Status Link(InodeID, InodeID, std::string_view,
-              struct stat *) override {
+              SwordFsInode *) override {
     return Status::OK();
   }
   Status Readlink(InodeID, std::string *) override {
