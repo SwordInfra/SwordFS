@@ -8,12 +8,10 @@
 namespace swordfs::metadata {
 
 SwordFsInode::SwordFsInode(InodeID ino, struct stat attr,
-                           InodeID parent_ino, uint64_t nlookup,
-                           std::string symlink_target)
+                           InodeID parent_ino, std::string symlink_target)
     : ino(ino),
       attr(attr),
       parent_ino(parent_ino),
-      nlookup(nlookup),
       symlink_target(std::move(symlink_target)) {}
 
 void SwordFsInode::Touch(SetAttrField fields) {

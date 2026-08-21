@@ -104,7 +104,6 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return Status::OK(); }
-  Status Forget(InodeID, uint64_t) override { return Status::OK(); }
   Status AddChunk(InodeID, const ChunkMeta &) override { return Status::OK(); }
   Status FindChunk(InodeID, ChunkIndex, ChunkMeta *) override {
     return Status::NotFound("no chunk");
@@ -557,7 +556,6 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return Status::OK(); }
-  Status Forget(InodeID, uint64_t) override { return Status::OK(); }
   Status AddChunk(InodeID, const swordfs::metadata::ChunkMeta &) override {
     return Status::OK();
   }

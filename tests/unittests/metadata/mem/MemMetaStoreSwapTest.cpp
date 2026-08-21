@@ -46,18 +46,18 @@ class MemMetaStoreSwapTest : public ::testing::Test {
 TEST_F(MemMetaStoreSwapTest, CrossDirectorySwap) {
   SwordFsInode dir_a, dir_b;
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "a", kDir, 0, &dir_a);
+    return txn.AddEntry(kRoot, "a", kDir, &dir_a);
   });
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "b", kDir, 0, &dir_b);
+    return txn.AddEntry(kRoot, "b", kDir, &dir_b);
   });
 
   SwordFsInode fa, fb;
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(dir_a.ino, "x", kRegFile, 0, &fa);
+    return txn.AddEntry(dir_a.ino, "x", kRegFile, &fa);
   });
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(dir_b.ino, "y", kRegFile, 0, &fb);
+    return txn.AddEntry(dir_b.ino, "y", kRegFile, &fb);
   });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
@@ -87,10 +87,10 @@ TEST_F(MemMetaStoreSwapTest, CrossDirectorySwap) {
 TEST_F(MemMetaStoreSwapTest, SameDirectorySwapDifferentNames) {
   SwordFsInode fa, fb;
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "alpha", kRegFile, 0, &fa);
+    return txn.AddEntry(kRoot, "alpha", kRegFile, &fa);
   });
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "beta", kRegFile, 0, &fb);
+    return txn.AddEntry(kRoot, "beta", kRegFile, &fb);
   });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
@@ -120,10 +120,10 @@ TEST_F(MemMetaStoreSwapTest, SameDirectorySwapDifferentNames) {
 
 TEST_F(MemMetaStoreSwapTest, SwapFileWithDirectory) {
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "f", kRegFile, 0, nullptr);
+    return txn.AddEntry(kRoot, "f", kRegFile, nullptr);
   });
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "d", kDir, 0, nullptr);
+    return txn.AddEntry(kRoot, "d", kDir, nullptr);
   });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
@@ -152,7 +152,7 @@ TEST_F(MemMetaStoreSwapTest, SwapFileWithDirectory) {
 
 TEST_F(MemMetaStoreSwapTest, SwapMissingSourceA) {
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "b", kRegFile, 0, nullptr);
+    return txn.AddEntry(kRoot, "b", kRegFile, nullptr);
   });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
@@ -167,7 +167,7 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingSourceA) {
 
 TEST_F(MemMetaStoreSwapTest, SwapMissingSourceB) {
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "a", kRegFile, 0, nullptr);
+    return txn.AddEntry(kRoot, "a", kRegFile, nullptr);
   });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
@@ -182,7 +182,7 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingSourceB) {
 
 TEST_F(MemMetaStoreSwapTest, SwapMissingParentA) {
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "b", kRegFile, 0, nullptr);
+    return txn.AddEntry(kRoot, "b", kRegFile, nullptr);
   });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
@@ -197,7 +197,7 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingParentA) {
 
 TEST_F(MemMetaStoreSwapTest, SwapMissingParentB) {
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "a", kRegFile, 0, nullptr);
+    return txn.AddEntry(kRoot, "a", kRegFile, nullptr);
   });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
@@ -213,16 +213,16 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingParentB) {
 TEST_F(MemMetaStoreSwapTest, ConcurrentSwapConsistency) {
   // Set up two pairs to swap concurrently.
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "a1", kRegFile, 0, nullptr);
+    return txn.AddEntry(kRoot, "a1", kRegFile, nullptr);
   });
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "a2", kRegFile, 0, nullptr);
+    return txn.AddEntry(kRoot, "a2", kRegFile, nullptr);
   });
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "b1", kRegFile, 0, nullptr);
+    return txn.AddEntry(kRoot, "b1", kRegFile, nullptr);
   });
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "b2", kRegFile, 0, nullptr);
+    return txn.AddEntry(kRoot, "b2", kRegFile, nullptr);
   });
 
   std::atomic<int> ok_count{0};
@@ -264,7 +264,7 @@ TEST_F(MemMetaStoreSwapTest, ConcurrentSwapConsistency) {
 TEST_F(MemMetaStoreSwapTest, SwapSameEntryNoOp) {
   SwordFsInode f;
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "only", kRegFile, 0, &f);
+    return txn.AddEntry(kRoot, "only", kRegFile, &f);
   });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
@@ -288,18 +288,18 @@ TEST_F(MemMetaStoreSwapTest, SwapSameEntryNoOp) {
 TEST_F(MemMetaStoreSwapTest, SwapDirectoriesCrossDirectory) {
   SwordFsInode dir_a, dir_b;
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "a", kDir, 0, &dir_a);
+    return txn.AddEntry(kRoot, "a", kDir, &dir_a);
   });
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "b", kDir, 0, &dir_b);
+    return txn.AddEntry(kRoot, "b", kDir, &dir_b);
   });
 
   // Add children inside each
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(dir_a.ino, "child_a", kRegFile, 0, nullptr);
+    return txn.AddEntry(dir_a.ino, "child_a", kRegFile, nullptr);
   });
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(dir_b.ino, "child_b", kRegFile, 0, nullptr);
+    return txn.AddEntry(dir_b.ino, "child_b", kRegFile, nullptr);
   });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
@@ -345,18 +345,18 @@ TEST_F(MemMetaStoreSwapTest, SwapDirectoriesCrossDirectory) {
 TEST_F(MemMetaStoreSwapTest, SwapAcrossDifferentParentsUpdatesParentIno) {
   SwordFsInode p1, p2;
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "p1", kDir, 0, &p1);
+    return txn.AddEntry(kRoot, "p1", kDir, &p1);
   });
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "p2", kDir, 0, &p2);
+    return txn.AddEntry(kRoot, "p2", kDir, &p2);
   });
 
   SwordFsInode dir_a, dir_b;
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(p1.ino, "a", kDir, 0, &dir_a);
+    return txn.AddEntry(p1.ino, "a", kDir, &dir_a);
   });
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(p2.ino, "b", kDir, 0, &dir_b);
+    return txn.AddEntry(p2.ino, "b", kDir, &dir_b);
   });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) {
@@ -408,15 +408,15 @@ TEST_F(MemMetaStoreSwapTest, SwapDirectoryIntoOwnSubtreeFails) {
   // Build root/b/x/a: dir_a is a descendant of dir_b.
   SwordFsInode dir_b;
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "b", kDir, 0, &dir_b);
+    return txn.AddEntry(kRoot, "b", kDir, &dir_b);
   });
   SwordFsInode dir_x;
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(dir_b.ino, "x", kDir, 0, &dir_x);
+    return txn.AddEntry(dir_b.ino, "x", kDir, &dir_x);
   });
   SwordFsInode dir_a;
   store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(dir_x.ino, "a", kDir, 0, &dir_a);
+    return txn.AddEntry(dir_x.ino, "a", kDir, &dir_a);
   });
 
   // Swapping dir_b into dir_a's slot puts dir_b inside its own subtree.

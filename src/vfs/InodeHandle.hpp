@@ -112,8 +112,8 @@ class InodeHandleManager {
   /// ReclaimData's guard refuse on arbitrary later inodes).
   void Initialize();
 
-  /// Return the shared InodeHandle for |ino|.  Creates it (and its
-  /// FileReadWriter) when |create_if_missing| is true.  Returns nullptr
+  /// Return the shared InodeHandle for |ino|. Creates it (and its
+  /// FileReadWriter) when |create_if_missing| is true. Returns nullptr
   /// when |create_if_missing| is false and no handle exists.
   std::shared_ptr<InodeHandle> Get(metadata::InodeID ino, bool create_if_missing);
 

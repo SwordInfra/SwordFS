@@ -49,7 +49,6 @@ class MemMetaImpl : public IMetaEngine {
                struct stat *attr) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
   Status OpenDir(InodeID ino) override;
-  Status Forget(InodeID ino, uint64_t nlookup) override;
 
   // Link / symlink operations
   Status Symlink(InodeID parent_ino,

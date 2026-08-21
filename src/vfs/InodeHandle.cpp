@@ -138,9 +138,14 @@ std::shared_ptr<InodeHandle> InodeHandleManager::Get(metadata::InodeID ino, bool
     return nullptr;
   }
 
-  auto handle = std::make_shared<InodeHandle>(ino);
-
   std::unique_lock lock(mutex_);
+  auto it = inode_handles_->find(ino);
+  if (it != inode_handles_->end()) {
+    if (auto handle = it->second.lock()) {
+      return handle;
+    }
+  }
+  auto handle = std::make_shared<InodeHandle>(ino);
   (*inode_handles_)[ino] = handle;
   return handle;
 }

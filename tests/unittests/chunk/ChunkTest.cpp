@@ -76,7 +76,6 @@ class MissingMetaEngine final : public IMetaEngine {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return Status::OK(); }
-  Status Forget(InodeID, uint64_t) override { return Status::OK(); }
   Status AddChunk(InodeID, const ChunkMeta &) override { return Status::OK(); }
   Status Truncate(InodeID, size_t) override { return Status::OK(); }
 };

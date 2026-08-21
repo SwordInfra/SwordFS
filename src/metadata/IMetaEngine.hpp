@@ -157,11 +157,6 @@ class IMetaEngine {
   /// atime. Handle allocation is now managed by FileHandleManager.
   virtual Status OpenDir(InodeID ino) = 0;
 
-  /// Decrement the inode's lookup count by nlookup. Called in response to
-  /// FUSE forget requests. The caller may free or reuse the inode's backend
-  /// resources when the count reaches zero.
-  virtual Status Forget(InodeID ino, uint64_t nlookup) = 0;
-
   // ────────────────────────────────────────────────────────────────
   // Chunk metadata
   // ────────────────────────────────────────────────────────────────
