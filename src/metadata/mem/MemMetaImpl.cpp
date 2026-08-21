@@ -68,9 +68,7 @@ Status MemMetaImpl::Lookup(InodeID parent_ino,
     if (!status.ok()) {
       return status;
     }
-    // Increment lookup count so forget() can track when the kernel is
-    // done referencing this inode.
-    return txn.IncrementNlookup(child.ino, 1);
+    return Status::OK();
   });
 
   if (!status.ok()) {
@@ -129,7 +127,7 @@ Status MemMetaImpl::Create(InodeID parent_ino,
     }
 
     mode_t file_mode = (S_IFREG | (mode & 0777));
-    return txn.AddEntry(parent_ino, name, file_mode, 1, &child);
+    return txn.AddEntry(parent_ino, name, file_mode, &child);
   });
 
   if (!status.ok()) {
@@ -451,7 +449,7 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
     }
 
     mode_t dir_mode = (S_IFDIR | (mode & 0777));
-    return txn.AddEntry(parent_ino, name, dir_mode, 1, &child);
+    return txn.AddEntry(parent_ino, name, dir_mode, &child);
   });
 
   if (!status.ok()) {
@@ -550,20 +548,6 @@ Status MemMetaImpl::OpenDir(InodeID ino) {
   return status;
 }
 
-Status MemMetaImpl::Forget(InodeID ino,
-                           uint64_t nlookup) {
-  Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
-    // Subtract with saturation at zero.
-    return txn.DecrementNlookup(ino, nlookup);
-  });
-  // A missing inode is fine (the kernel may forget an inode we already
-  // reclaimed).
-  if (status.IsNotFound()) {
-    return Status::OK();
-  }
-  return status;
-}
-
 // ────────────────────────────────────────────────────────────────
 // Link / symlink operations
 // ────────────────────────────────────────────────────────────────
@@ -592,7 +576,7 @@ Status MemMetaImpl::Symlink(InodeID parent_ino,
     }
 
     mode_t link_mode = (S_IFLNK | 0777);
-    status = txn.AddEntry(parent_ino, name, link_mode, 1, &child);
+    status = txn.AddEntry(parent_ino, name, link_mode, &child);
     if (!status.ok()) {
       return status;
     }
