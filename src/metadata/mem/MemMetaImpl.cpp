@@ -211,9 +211,6 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
                            std::string_view old_name, InodeID new_parent_ino,
                            std::string_view new_name, RenameFlag flags,
                            RenameResult *result) {
-  if (result) {
-    *result = {};
-  }
   if (new_name.size() > kMaxNameLength) {
     return Status::NameTooLong("target name exceeds maximum length");
   }
