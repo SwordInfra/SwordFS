@@ -30,17 +30,21 @@ TEST(ValidateMetaUrlTest, EmptyString) {
   EXPECT_FALSE(ValidateMetaUrl("").empty());
 }
 
+TEST(ValidateMetaUrlTest, ValidRedisUrl) {
+  EXPECT_TRUE(ValidateMetaUrl("redis://localhost").empty());
+  EXPECT_TRUE(ValidateMetaUrl("redis://user:secret@localhost:6380/3").empty());
+}
+
 TEST(ValidateMetaUrlTest, UnknownValue) {
-  EXPECT_FALSE(ValidateMetaUrl("redis://localhost").empty());
+  EXPECT_FALSE(ValidateMetaUrl("redis://localhost:0").empty());
   EXPECT_FALSE(ValidateMetaUrl("postgres://host/db").empty());
   EXPECT_FALSE(ValidateMetaUrl("not-a-valid-url").empty());
 }
 
-TEST(ValidateMetaUrlTest, ErrorMessageContainsScheme) {
-  std::string err = ValidateMetaUrl("redis://localhost");
-  EXPECT_NE(err.find("redis"), std::string::npos);
-  EXPECT_NE(err.find("Supported"), std::string::npos)
-      << "Error message should mention 'Supported': " << err;
+TEST(ValidateMetaUrlTest, InvalidRedisUrlHasHelpfulError) {
+  std::string err = ValidateMetaUrl("redis://localhost:0");
+  EXPECT_NE(err.find("invalid port"), std::string::npos)
+      << "Error should describe the invalid Redis URL: " << err;
 }
 
 // ================================================================
