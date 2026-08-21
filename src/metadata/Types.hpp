@@ -133,12 +133,11 @@ struct SwordFsInode {
   InodeID ino = 0;
   struct stat attr {};
   InodeID parent_ino = 0;        // Directory the inode lives in.
-  uint64_t nlookup = 0;          // reserved for future forget support
   std::string symlink_target;    // non-empty only for S_IFLNK
 
   SwordFsInode() = default;
   SwordFsInode(InodeID ino, struct stat attr, InodeID parent_ino,
-               uint64_t nlookup, std::string symlink_target = std::string{});
+               std::string symlink_target = std::string{});
 
   // Bump one or more inode timestamps to now.
   void Touch(SetAttrField fields);

@@ -36,7 +36,7 @@ class MemMetaStoreTest : public ::testing::Test {
   Status Add(InodeID parent_ino, std::string_view name, mode_t mode,
              SwordFsInode *out = nullptr) {
     return store_->Transact([&](MemMetaTxn &txn) {
-      return txn.AddEntry(parent_ino, name, mode, 0, out);
+      return txn.AddEntry(parent_ino, name, mode, out);
     });
   }
   Status Lookup(InodeID ino, SwordFsInode *out = nullptr) {

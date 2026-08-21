@@ -105,9 +105,6 @@ class IMetaEngine {
   virtual Status Rename(InodeID old_parent_ino, std::string_view old_name,
                         InodeID new_parent_ino, std::string_view new_name,
                         RenameFlag flags, RenameResult *result) {
-    if (result) {
-      *result = {};
-    }
     return Rename(old_parent_ino, old_name, new_parent_ino, new_name, flags);
   }
 
@@ -163,11 +160,6 @@ class IMetaEngine {
   /// Open a directory for reading. Performs permission check and updates
   /// atime. Handle allocation is now managed by FileHandleManager.
   virtual Status OpenDir(InodeID ino) = 0;
-
-  /// Decrement the inode's lookup count by nlookup. Called in response to
-  /// FUSE forget requests. The caller may free or reuse the inode's backend
-  /// resources when the count reaches zero.
-  virtual Status Forget(InodeID ino, uint64_t nlookup) = 0;
 
   // ────────────────────────────────────────────────────────────────
   // Chunk metadata

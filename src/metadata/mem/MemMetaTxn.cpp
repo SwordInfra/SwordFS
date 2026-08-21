@@ -175,26 +175,6 @@ Status MemMetaTxn::AdjustNlink(InodeID ino, int delta) {
   return Status::OK();
 }
 
-Status MemMetaTxn::IncrementNlookup(InodeID ino, uint64_t count) {
-  SwordFsInode *inode = FindInode(ino);
-  if (!inode) {
-    return Status::NotFound("inode not found");
-  }
-  inode->nlookup = UINT64_MAX - inode->nlookup < count
-                       ? UINT64_MAX
-                       : inode->nlookup + count;
-  return Status::OK();
-}
-
-Status MemMetaTxn::DecrementNlookup(InodeID ino, uint64_t count) {
-  SwordFsInode *inode = FindInode(ino);
-  if (!inode) {
-    return Status::NotFound("inode not found");
-  }
-  inode->nlookup = count >= inode->nlookup ? 0 : inode->nlookup - count;
-  return Status::OK();
-}
-
 Status MemMetaTxn::SetSymlinkTarget(InodeID ino, std::string_view target) {
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
@@ -225,8 +205,7 @@ Status MemMetaTxn::LookupEntry(InodeID parent_ino, std::string_view name,
 }
 
 Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
-                            mode_t mode, uint64_t nlookup,
-                            SwordFsInode *out) {
+                            mode_t mode, SwordFsInode *out) {
   SwordFsInode *parent = FindInode(parent_ino);
   if (!parent) {
     return Status::NotFound("parent directory not found");
@@ -244,7 +223,7 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
   st.st_gid = parent->attr.st_gid;
   st.st_ino = store_->next_ino_.fetch_add(1, std::memory_order_relaxed);
 
-  SwordFsInode *child = new SwordFsInode{st.st_ino, st, parent_ino, nlookup};
+  SwordFsInode *child = new SwordFsInode{st.st_ino, st, parent_ino};
   InsertInode(child);
   LinkEntry(parent_ino, name, child);
 
@@ -266,9 +245,6 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino,
                              InodeID new_parent_ino,
                              std::string_view new_name, bool overwrite,
                              RenameResult *result) {
-  if (result) {
-    *result = {};
-  }
   SwordFsInode *old_parent = FindInode(old_parent_ino);
   if (!old_parent) {
     return Status::NotFound("old parent directory not found");

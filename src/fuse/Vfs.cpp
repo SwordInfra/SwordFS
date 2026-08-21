@@ -91,12 +91,6 @@ void VfsHookFactory::SwordFsLookup(fuse_req_t req, fuse_ino_t parent,
       });
 }
 
-void VfsHookFactory::SwordFsForget(fuse_req_t req, fuse_ino_t ino,
-                                   uint64_t nlookup) {
-  ::swordfs::utils::RunInFiber(
-      [ino, nlookup] { VfsImpl::Forget(ino, nlookup); });
-}
-
 void VfsHookFactory::SwordFsGetattr(fuse_req_t req, fuse_ino_t ino,
                                     struct fuse_file_info *fi) {
   (void)fi;
@@ -525,16 +519,6 @@ void VfsHookFactory::SwordFsRetrieveReply(fuse_req_t req, void *cookie,
   fuse_reply_err(req, status.ToErrno());
 }
 
-void VfsHookFactory::SwordFsForgetMulti(fuse_req_t req, size_t count,
-                                        struct fuse_forget_data *forgets) {
-  std::vector<fuse_forget_data> forgets_copy(forgets, forgets + count);
-  ::swordfs::utils::RunInFiber(
-      [req, count,
-       forgets_copy = std::move(forgets_copy)]() mutable {
-        VfsImpl::ForgetMulti(req, count, forgets_copy.data());
-      });
-}
-
 void VfsHookFactory::SwordFsFlock(fuse_req_t req, fuse_ino_t ino,
                                   struct fuse_file_info *fi, int op) {
   ::swordfs::utils::RunInFiber([req, ino, fi, op] {
@@ -614,13 +598,18 @@ void VfsHookFactory::SwordFsStatx(fuse_req_t req, fuse_ino_t ino, int flags,
 }
 
 // Operation table
+//
+// FORGET notifications are intentionally not handled. SwordFS currently has no
+// inode-scoped runtime resource whose lifetime depends on FUSE lookup counts.
+// If that changes (for example, cache eviction tied to inode lifetime), add an
+// explicit FORGET lifecycle policy rather than treating these callbacks as
+// mandatory bookkeeping.
 
 const struct fuse_lowlevel_ops &VfsHookFactory::get_ops() {
   static const struct fuse_lowlevel_ops kOps = {
       .init = SwordFsInit,
       .destroy = SwordFsDestroy,
       .lookup = SwordFsLookup,
-      .forget = SwordFsForget,
       .getattr = SwordFsGetattr,
       .setattr = SwordFsSetattr,
       .readlink = SwordFsReadlink,
@@ -655,7 +644,6 @@ const struct fuse_lowlevel_ops &VfsHookFactory::get_ops() {
       .poll = SwordFsPoll,
       .write_buf = nullptr,  // not implemented — force kernel to use .write
       .retrieve_reply = SwordFsRetrieveReply,
-      .forget_multi = SwordFsForgetMulti,
       .flock = SwordFsFlock,
       .fallocate = SwordFsFallocate,
       .readdirplus = SwordFsReaddirplus,

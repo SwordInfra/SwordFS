@@ -68,9 +68,7 @@ Status MemMetaImpl::Lookup(InodeID parent_ino,
     if (!status.ok()) {
       return status;
     }
-    // Increment lookup count so forget() can track when the kernel is
-    // done referencing this inode.
-    return txn.IncrementNlookup(child.ino, 1);
+    return Status::OK();
   });
 
   if (!status.ok()) {
@@ -120,16 +118,13 @@ Status MemMetaImpl::Create(InodeID parent_ino,
     if (!status.ok()) {
       return status;
     }
-    if (!parent.IsDir()) {
-      return Status::NotDirectory("parent is not a directory");
-    }
     // Check permissions: need write+execute on the parent directory
     if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
       return Status::Permission("access denied on parent");
     }
 
     mode_t file_mode = (S_IFREG | (mode & 0777));
-    return txn.AddEntry(parent_ino, name, file_mode, 1, &child);
+    return txn.AddEntry(parent_ino, name, file_mode, &child);
   });
 
   if (!status.ok()) {
@@ -270,7 +265,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
     SwordFsInode moved;
     status = txn.LookupEntry(old_parent_ino, old_name, &moved);
     if (!status.ok()) {
-      return Status::NotFound("source entry not found");
+      return status;
     }
 
     // Sticky bit on the old parent: only root, the directory owner, or
@@ -421,7 +416,7 @@ Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "ReadDir: ino " << ino
+    SWORDFS_LOG_DEBUG << "ReadDir: ino " << ino
                       << " failed: " << status.message();
   }
   return status;
@@ -442,16 +437,13 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
     if (!status.ok()) {
       return status;
     }
-    if (!parent.IsDir()) {
-      return Status::NotDirectory("parent is not a directory");
-    }
 
     if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
       return Status::Permission("access denied on parent");
     }
 
     mode_t dir_mode = (S_IFDIR | (mode & 0777));
-    return txn.AddEntry(parent_ino, name, dir_mode, 1, &child);
+    return txn.AddEntry(parent_ino, name, dir_mode, &child);
   });
 
   if (!status.ok()) {
@@ -544,22 +536,8 @@ Status MemMetaImpl::OpenDir(InodeID ino) {
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "OpenDir: ino " << ino
+    SWORDFS_LOG_DEBUG << "OpenDir: ino " << ino
                       << " failed: " << status.message();
-  }
-  return status;
-}
-
-Status MemMetaImpl::Forget(InodeID ino,
-                           uint64_t nlookup) {
-  Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
-    // Subtract with saturation at zero.
-    return txn.DecrementNlookup(ino, nlookup);
-  });
-  // A missing inode is fine (the kernel may forget an inode we already
-  // reclaimed).
-  if (status.IsNotFound()) {
-    return Status::OK();
   }
   return status;
 }
@@ -583,16 +561,13 @@ Status MemMetaImpl::Symlink(InodeID parent_ino,
     if (!status.ok()) {
       return status;
     }
-    if (!parent.IsDir()) {
-      return Status::NotDirectory("parent is not a directory");
-    }
 
     if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
       return Status::Permission("access denied on parent");
     }
 
     mode_t link_mode = (S_IFLNK | 0777);
-    status = txn.AddEntry(parent_ino, name, link_mode, 1, &child);
+    status = txn.AddEntry(parent_ino, name, link_mode, &child);
     if (!status.ok()) {
       return status;
     }

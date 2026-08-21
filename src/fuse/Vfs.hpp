@@ -37,7 +37,6 @@ class VfsHookFactory {
   static void SwordFsDestroy(void *userdata);
   static void SwordFsLookup(fuse_req_t req, fuse_ino_t parent,
                             const char *name);
-  static void SwordFsForget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup);
   static void SwordFsGetattr(fuse_req_t req, fuse_ino_t ino,
                              struct fuse_file_info *fi);
   static void SwordFsSetattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
@@ -109,8 +108,6 @@ class VfsHookFactory {
   static void SwordFsRetrieveReply(fuse_req_t req, void *cookie,
                                    fuse_ino_t ino, off_t offset,
                                    struct fuse_bufvec *bufv);
-  static void SwordFsForgetMulti(fuse_req_t req, size_t count,
-                                 struct fuse_forget_data *forgets);
   static void SwordFsFlock(fuse_req_t req, fuse_ino_t ino,
                            struct fuse_file_info *fi, int op);
   static void SwordFsFallocate(fuse_req_t req, fuse_ino_t ino, int mode,

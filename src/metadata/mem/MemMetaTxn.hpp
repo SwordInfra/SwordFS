@@ -72,12 +72,6 @@ class MemMetaTxn {
   // Add |delta| (may be negative) to the inode's nlink.
   Status AdjustNlink(InodeID ino, int delta);
 
-  // Increment the inode's lookup count, saturating at UINT64_MAX.
-  Status IncrementNlookup(InodeID ino, uint64_t count);
-
-  // Decrement the inode's lookup count, saturating at zero.
-  Status DecrementNlookup(InodeID ino, uint64_t count);
-
   // Set the symlink target of |ino| and update st_size to match.
   Status SetSymlinkTarget(InodeID ino, std::string_view target);
 
@@ -96,7 +90,8 @@ class MemMetaTxn {
   // Linking a subdirectory also increments the parent's nlink (the new
   // ".." backlink); any successful link bumps the parent's mtime/ctime.
   Status AddEntry(InodeID parent_ino, std::string_view name,
-                  mode_t mode, uint64_t nlookup, SwordFsInode *out);
+                  mode_t mode, SwordFsInode *out);
+
 
   // Move an existing entry from old_parent/old_name to
   // new_parent/new_name.  The inode is re-linked, not re-created.

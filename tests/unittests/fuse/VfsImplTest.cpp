@@ -205,7 +205,6 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return call_status_; }
-  Status Forget(InodeID, uint64_t) override { return Status::OK(); }
   Status AddChunk(InodeID, const swordfs::metadata::ChunkMeta &) override {
     return Status::OK();
   }
