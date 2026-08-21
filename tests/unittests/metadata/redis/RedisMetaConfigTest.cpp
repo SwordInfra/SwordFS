@@ -31,6 +31,20 @@ TEST(RedisMetaConfigTest, ParsesAuthenticationPortAndDatabase) {
   EXPECT_EQ(*config.password, "secret");
 }
 
+TEST(RedisMetaConfigTest, ParsesIpv6Host) {
+  RedisMetaConfig config;
+  const auto status = ParseRedisMetaUrl("redis://[::1]", &config);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(config.host, "::1");
+  EXPECT_EQ(config.port, 6379);
+
+  const auto port_status = ParseRedisMetaUrl("redis://[2001:db8::1]:6380/2", &config);
+  ASSERT_TRUE(port_status.ok()) << port_status.message();
+  EXPECT_EQ(config.host, "2001:db8::1");
+  EXPECT_EQ(config.port, 6380);
+  EXPECT_EQ(config.db, 2);
+}
+
 TEST(RedisMetaConfigTest, ParsesPasswordOnlyAuthentication) {
   RedisMetaConfig config;
   auto status = ParseRedisMetaUrl("redis://:secret@127.0.0.1/1", &config);
