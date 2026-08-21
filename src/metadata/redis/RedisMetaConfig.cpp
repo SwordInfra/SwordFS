@@ -3,29 +3,13 @@
 
 #include "metadata/redis/RedisMetaConfig.hpp"
 
-#include <charconv>
-#include <climits>
-
+#include <folly/Conv.h>
 #include <folly/Uri.h>
 
 namespace swordfs::metadata {
 namespace {
 
 constexpr std::string_view kRedisScheme = "redis://";
-
-bool ParseUnsigned(std::string_view value, uint32_t* out) {
-  if (value.empty()) {
-    return false;
-  }
-  uint32_t parsed = 0;
-  const auto result = std::from_chars(value.data(), value.data() + value.size(),
-                                      parsed);
-  if (result.ec != std::errc() || result.ptr != value.data() + value.size()) {
-    return false;
-  }
-  *out = parsed;
-  return true;
-}
 
 }  // namespace
 
@@ -86,11 +70,11 @@ utils::Status ParseRedisMetaUrl(std::string_view meta_url,
       return utils::Status::InvalidArgument("Redis metadata URL has invalid database path");
     }
     path.remove_prefix(1);
-    uint32_t db = 0;
-    if (!ParseUnsigned(path, &db) || db > static_cast<uint32_t>(INT_MAX)) {
+    const auto db = folly::tryTo<int>(path);
+    if (!db.hasValue() || db.value() < 0) {
       return utils::Status::InvalidArgument("Redis metadata URL has invalid database");
     }
-    parsed.db = static_cast<int>(db);
+    parsed.db = db.value();
   }
 
   *config = std::move(parsed);
