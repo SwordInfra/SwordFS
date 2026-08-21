@@ -27,6 +27,26 @@ struct SwordFsInode;
 using InodeID = uint64_t;
 using ChunkIndex = uint32_t;  // 0-based chunk number within a file
 
+// The logical type of a filesystem entry. Permissions are represented
+// separately so metadata APIs do not expose POSIX file-type bit encoding.
+enum class FileType {
+  kRegular,
+  kDirectory,
+  kSymlink,
+};
+
+inline mode_t ToMode(FileType type) {
+  switch (type) {
+    case FileType::kRegular:
+      return S_IFREG;
+    case FileType::kDirectory:
+      return S_IFDIR;
+    case FileType::kSymlink:
+      return S_IFLNK;
+  }
+  return 0;
+}
+
 /// Reserved inode id for the filesystem root. Value matches
 /// `FUSE_ROOT_ID` so VFS/FUSE code that already assumes `1` keeps
 /// working without translation; metadata code should refer to this

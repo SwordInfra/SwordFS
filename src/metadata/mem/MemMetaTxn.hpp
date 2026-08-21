@@ -84,18 +84,14 @@ class MemMetaTxn {
   Status LookupEntry(InodeID parent_ino, std::string_view name,
                      SwordFsInode *out);
 
-  // Allocate a new inode and link it as a child of parent.  Returns
-  // AlreadyExists if the name already exists under that parent.  On
-  // success, *out receives a snapshot copy of the new inode.
-  // Linking a subdirectory also increments the parent's nlink (the new
-  // ".." backlink); any successful link bumps the parent's mtime/ctime.
-  // Create a new entry under |parent_ino|. Structural validation and
-  // parent metadata bookkeeping are owned by this primitive. If |mode|
-  // has no file-type bits, it is treated as a regular file; callers only
-  // need to provide permission bits for regular-file creation.
-  Status AddEntry(InodeID parent_ino, std::string_view name, mode_t mode,
-                  SwordFsInode *out);
-
+  // Create and link a new entry under |parent_ino|. The entry type and
+  // permissions are explicit; this primitive owns structural validation and
+  // parent metadata bookkeeping. Linking a subdirectory increments the
+  // parent's nlink for the new ".." backlink, and any successful link bumps
+  // the parent's mtime/ctime. On success, *out receives a snapshot copy of
+  // the new inode.
+  Status AddEntry(InodeID parent_ino, std::string_view name, FileType type,
+                  mode_t permissions, SwordFsInode *out);
 
   // Move an existing entry from old_parent/old_name to
   // new_parent/new_name.  The inode is re-linked, not re-created.

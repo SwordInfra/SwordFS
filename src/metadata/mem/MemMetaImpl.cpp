@@ -107,7 +107,7 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name,
       return Status::Permission("access denied on parent");
     }
 
-    return txn.AddEntry(parent_ino, name, mode, &child);
+    return txn.AddEntry(parent_ino, name, FileType::kRegular, mode, &child);
   });
 
   if (!status.ok()) {
@@ -414,8 +414,7 @@ Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name,
       return Status::Permission("access denied on parent");
     }
 
-    mode_t dir_mode = (S_IFDIR | (mode & 0777));
-    return txn.AddEntry(parent_ino, name, dir_mode, &child);
+    return txn.AddEntry(parent_ino, name, FileType::kDirectory, mode, &child);
   });
 
   if (!status.ok()) {
@@ -534,8 +533,8 @@ Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name,
       return Status::Permission("access denied on parent");
     }
 
-    mode_t link_mode = (S_IFLNK | 0777);
-    status = txn.AddEntry(parent_ino, name, link_mode, &child);
+    status = txn.AddEntry(parent_ino, name, FileType::kSymlink, 0777,
+                          &child);
     if (!status.ok()) {
       return status;
     }
@@ -563,7 +562,7 @@ Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name,
 }
 
 Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
-                         std::string_view newname, SwordFsInode *out_inode) {
+                         std::string_view newname, SwordFsInode *out) {
   if (newname.size() > kMaxNameLength) {
     return Status::NameTooLong("link name exceeds maximum length");
   }
@@ -599,8 +598,8 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
                       << "' failed: " << status.message();
     return status;
   }
-  if (out_inode) {
-    *out_inode = inode;
+  if (out) {
+    *out = inode;
   }
   return Status::OK();
 }

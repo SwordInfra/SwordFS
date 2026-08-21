@@ -15,6 +15,7 @@
 
 using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::ChunkMeta;
+using swordfs::metadata::FileType;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaStore;
 using swordfs::metadata::MemMetaTxn;
@@ -23,8 +24,10 @@ using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
 
 static constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
-static constexpr mode_t kRegFile = S_IFREG | 0644;
-static constexpr mode_t kDir = S_IFDIR | 0755;
+static constexpr FileType kRegFile = FileType::kRegular;
+static constexpr FileType kDir = FileType::kDirectory;
+static constexpr mode_t kRegPermissions = 0644;
+static constexpr mode_t kDirPermissions = 0755;
 
 class MemMetaStoreTest : public ::testing::Test {
  protected:
@@ -33,11 +36,17 @@ class MemMetaStoreTest : public ::testing::Test {
 
   // Single-primitive transaction convenience wrappers, so individual
   // assertions read like production call sites.
-  Status Add(InodeID parent_ino, std::string_view name, mode_t mode,
-             SwordFsInode *out = nullptr) {
+  Status Add(InodeID parent_ino, std::string_view name, FileType type,
+             mode_t permissions, SwordFsInode *out = nullptr) {
     return store_->Transact([&](MemMetaTxn &txn) {
-      return txn.AddEntry(parent_ino, name, mode, out);
+      return txn.AddEntry(parent_ino, name, type, permissions, out);
     });
+  }
+  Status Add(InodeID parent_ino, std::string_view name, FileType type,
+             SwordFsInode *out = nullptr) {
+    const mode_t permissions =
+        type == FileType::kDirectory ? kDirPermissions : kRegPermissions;
+    return Add(parent_ino, name, type, permissions, out);
   }
   Status Lookup(InodeID ino, SwordFsInode *out = nullptr) {
     return store_->Transact(
