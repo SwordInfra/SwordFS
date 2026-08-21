@@ -70,15 +70,7 @@ utils::Status RedisMetaTxn::Get(std::string_view key,
   }
 }
 
-utils::Status RedisMetaTxn::BeginWrite() {
-  return utils::Status::OK();
-}
-
 utils::Status RedisMetaTxn::Set(std::string_view key, std::string_view value) {
-  auto status = BeginWrite();
-  if (!status.ok()) {
-    return status;
-  }
   try {
     transaction_->set(std::string(key), std::string(value));
     has_writes_ = true;
