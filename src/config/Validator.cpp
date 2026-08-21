@@ -19,8 +19,8 @@ const CLI::Validator ValidateMetaUrl = CLI::Validator(
       if (input == swordfs::metadata::kMemoryMetaUrl) {
         return {};
       }
-      swordfs::metadata::RedisMetaConfig config;
       if (swordfs::metadata::IsRedisMetaUrl(input)) {
+        swordfs::metadata::RedisMetaConfig config;
         auto status = swordfs::metadata::ParseRedisMetaUrl(input, &config);
         return status.ok() ? "" : status.message();
       }

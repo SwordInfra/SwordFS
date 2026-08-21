@@ -6,8 +6,9 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
-#include <random>
 #include <thread>
+
+#include <folly/Random.h>
 
 namespace swordfs::metadata {
 namespace {
@@ -31,9 +32,8 @@ void Backoff(int attempt) {
   constexpr int kMaxDelayMs = 32;
   const int exponent = std::min(attempt, 5);
   const int max_delay = std::min(kBaseDelayMs << exponent, kMaxDelayMs);
-  thread_local std::minstd_rand rng(std::random_device{}());
-  std::uniform_int_distribution<int> delay(0, max_delay);
-  std::this_thread::sleep_for(std::chrono::milliseconds(delay(rng)));
+  const auto delay = folly::Random::rand32(max_delay + 1);
+  std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 }
 
 utils::Status RedisError(const char* operation, const sw::redis::Error& error) {
