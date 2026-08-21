@@ -18,7 +18,10 @@ namespace swordfs::metadata {
 
 // One optimistic Redis transaction attempt. All WATCH, reads, MULTI, queued
 // writes and EXEC operations use the same dedicated Redis client/connection.
-// The object is only valid for the lifetime of RedisMetaStore::Transact().
+// Call Watch() and all reads before the first Set(): the first queued write
+// opens MULTI, after which Redis no longer returns ordinary read replies and
+// rejects WATCH. The object is only valid for the lifetime of
+// RedisMetaStore::Transact().
 class RedisMetaTxn {
  public:
   utils::Status Watch(std::string_view key);
@@ -29,7 +32,6 @@ class RedisMetaTxn {
   friend class RedisMetaStore;
   explicit RedisMetaTxn(std::unique_ptr<sw::redis::Redis> redis);
 
-  utils::Status BeginWrite();
   void Discard() noexcept;
   utils::Status Commit();
 
@@ -52,6 +54,11 @@ class RedisMetaStore {
   // Runs an optimistic transaction. Every attempt owns one dedicated Redis
   // connection so WATCH, reads, MULTI, queued writes and EXEC share the same
   // connection. Busy and WATCH conflicts retry with bounded backoff.
+  //
+  // Known Phase 0 limitation: attempts create a fresh Redis client/connection
+  // instead of reusing a connection pool. This favors simple connection
+  // ownership and correctness; connection reuse should be revisited in the
+  // Phase 6 performance work.
   utils::Status Transact(const std::function<utils::Status(RedisMetaTxn&)>& callback,
                          int max_attempts = kDefaultMaxAttempts);
 
