@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(SwordFS VERSION 0.1.0 LANGUAGES CXX)
 
+include(FetchContent)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -28,6 +30,36 @@ find_package(folly REQUIRED)
 # fuse3 (system package, install via: apt install libfuse3-dev)
 find_library(FUSE3_LIBRARY fuse3 REQUIRED)
 find_path(FUSE3_INCLUDE_DIR fuse.h PATH_SUFFIXES fuse3)
+
+# Redis metadata backend.  Prefer a system redis-plus-plus installation, but
+# fetch a pinned release for reproducible developer and CI builds.
+find_package(redis++ CONFIG QUIET)
+if(NOT TARGET redis++)
+  # hiredis 1.2 still declares compatibility with very old CMake releases.
+  # CMake 4 requires an explicit policy compatibility floor.
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+  FetchContent_Declare(
+    hiredis
+    GIT_REPOSITORY https://github.com/redis/hiredis.git
+    GIT_TAG v1.2.0
+  )
+  FetchContent_MakeAvailable(hiredis)
+  # redis-plus-plus discovers hiredis through find_package(). When hiredis is
+  # supplied by FetchContent, provide the fallback variables explicitly.
+  file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/redis-hiredis-include)
+  file(CREATE_LINK ${hiredis_SOURCE_DIR}
+       ${CMAKE_BINARY_DIR}/redis-hiredis-include/hiredis SYMBOLIC)
+  set(HIREDIS_HEADER ${CMAKE_BINARY_DIR}/redis-hiredis-include CACHE PATH "" FORCE)
+  set(HIREDIS_LIB hiredis CACHE STRING "" FORCE)
+  FetchContent_Declare(
+    redis_plus_plus
+    GIT_REPOSITORY https://github.com/sewenew/redis-plus-plus.git
+    GIT_TAG 1.3.15
+  )
+  set(REDIS_PLUS_PLUS_BUILD_TEST OFF CACHE BOOL "" FORCE)
+  set(REDIS_PLUS_PLUS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(redis_plus_plus)
+endif()
 
 # ============================================================
 # Version header
@@ -75,6 +107,7 @@ target_link_libraries(swordfs_lib PUBLIC
   ${AWSSDK_LINK_LIBRARIES}
   Folly::folly
   ${FUSE3_LIBRARY}
+  redis++
 )
 if(JITTERENTROPY_LIB)
   target_link_libraries(swordfs_lib PUBLIC ${JITTERENTROPY_LIB})
@@ -101,7 +134,6 @@ target_link_libraries(swordfs PRIVATE swordfs_lib)
 # Tests
 # ============================================================
 
-include(FetchContent)
 FetchContent_Declare(
   googletest
   GIT_REPOSITORY https://github.com/google/googletest.git
