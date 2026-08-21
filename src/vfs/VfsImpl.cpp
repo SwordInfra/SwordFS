@@ -70,10 +70,6 @@ utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name,
   return Status::OK();
 }
 
-void VfsImpl::Forget(fuse_ino_t ino, uint64_t nlookup) {
-  VolumeImpl::Instance().meta_engine()->Forget(ino, nlookup);
-}
-
 utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
   return VolumeImpl::Instance().meta_engine()->GetAttr(ino, attr);
 }
@@ -496,27 +492,6 @@ utils::Status VfsImpl::RetrieveReply(fuse_req_t /*req*/, void *cookie,
   (void)offset;
   (void)bufv;
   return Status::NotSupported("retrieve_reply");
-}
-
-void VfsImpl::ForgetMulti(fuse_req_t req, size_t count,
-                          struct fuse_forget_data *forgets) {
-  (void)req;
-  if (forgets == nullptr) {
-    return;
-  }
-  auto *meta = VolumeImpl::Instance().meta_engine();
-  for (size_t i = 0; i < count; ++i) {
-    const auto nlookup = static_cast<uint64_t>(forgets[i].nlookup);
-    if (nlookup == 0) {
-      continue;
-    }
-    auto status = meta->Forget(forgets[i].ino, nlookup);
-    if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "ForgetMulti: Forget(ino=" << forgets[i].ino
-                        << ", nlookup=" << nlookup
-                        << ") failed: " << status.message();
-    }
-  }
 }
 
 utils::Status VfsImpl::Flock(fuse_ino_t ino,

@@ -21,19 +21,29 @@
 #include <folly/container/F14Map.h>
 
 #include <atomic>
+#include <ctime>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
 
 #include "metadata/Types.hpp"
+#include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaTxn.hpp"
 
 namespace swordfs::metadata {
 
 class MemMetaStore {
  public:
-  MemMetaStore();
-  ~MemMetaStore();
+  MemMetaStore() : next_ino_(kRootInodeId + 1) {
+    time_t now = ::time(nullptr);
+    struct stat root_st = MakeStat(S_IFDIR | 0755, now);
+    root_st.st_ino = kRootInodeId;
+    inodes_[kRootInodeId] =
+        std::make_unique<SwordFsInode>(kRootInodeId, root_st, kRootInodeId);
+    dirs_[kRootInodeId] = {};
+  }
+  ~MemMetaStore() = default;
 
   // Run |f| as one atomic transaction.  The callback receives a
   // MemMetaTxn whose methods are the store's primitive operations; the
@@ -59,7 +69,7 @@ class MemMetaStore {
   mutable std::mutex mutex_;
   std::atomic<InodeID> next_ino_;
 
-  folly::F14FastMap<InodeID, SwordFsInode *> inodes_;
+  folly::F14FastMap<InodeID, std::unique_ptr<SwordFsInode>> inodes_;
   folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode *>> dirs_;
 
   // Chunk metadata: inode → (index → ChunkMeta).

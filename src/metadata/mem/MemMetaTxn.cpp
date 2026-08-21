@@ -175,26 +175,6 @@ Status MemMetaTxn::AdjustNlink(InodeID ino, int delta) {
   return Status::OK();
 }
 
-Status MemMetaTxn::IncrementNlookup(InodeID ino, uint64_t count) {
-  SwordFsInode *inode = FindInode(ino);
-  if (!inode) {
-    return Status::NotFound("inode not found");
-  }
-  inode->nlookup = UINT64_MAX - inode->nlookup < count
-                       ? UINT64_MAX
-                       : inode->nlookup + count;
-  return Status::OK();
-}
-
-Status MemMetaTxn::DecrementNlookup(InodeID ino, uint64_t count) {
-  SwordFsInode *inode = FindInode(ino);
-  if (!inode) {
-    return Status::NotFound("inode not found");
-  }
-  inode->nlookup = count >= inode->nlookup ? 0 : inode->nlookup - count;
-  return Status::OK();
-}
-
 Status MemMetaTxn::SetSymlinkTarget(InodeID ino, std::string_view target) {
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
@@ -225,8 +205,7 @@ Status MemMetaTxn::LookupEntry(InodeID parent_ino, std::string_view name,
 }
 
 Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
-                            mode_t mode, uint64_t nlookup,
-                            SwordFsInode *out) {
+                            mode_t mode, SwordFsInode *out) {
   SwordFsInode *parent = FindInode(parent_ino);
   if (!parent) {
     return Status::NotFound("parent directory not found");
@@ -244,19 +223,20 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
   st.st_gid = parent->attr.st_gid;
   st.st_ino = store_->next_ino_.fetch_add(1, std::memory_order_relaxed);
 
-  SwordFsInode *child = new SwordFsInode{st.st_ino, st, parent_ino, nlookup};
-  InsertInode(child);
-  LinkEntry(parent_ino, name, child);
+  auto child = std::make_unique<SwordFsInode>(st.st_ino, st, parent_ino);
+  SwordFsInode *child_ptr = child.get();
+  InsertInode(std::move(child));
+  LinkEntry(parent_ino, name, child_ptr);
 
   // A new subdirectory's ".." is an additional hard link to the parent,
   // and the entry-list change bumps the parent's mtime/ctime.
-  if (child->IsDir()) {
+  if (child_ptr->IsDir()) {
     parent->attr.st_nlink++;
   }
   parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
   if (out) {
-    *out = *child;
+    *out = *child_ptr;
   }
   return Status::OK();
 }
@@ -640,20 +620,21 @@ Status MemMetaTxn::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
 
 SwordFsInode *MemMetaTxn::FindInode(InodeID ino) {
   auto it = store_->inodes_.find(ino);
-  return it != store_->inodes_.end() ? it->second : nullptr;
+  return it != store_->inodes_.end() ? it->second.get() : nullptr;
 }
 
-void MemMetaTxn::InsertInode(SwordFsInode *inode) {
-  store_->inodes_[inode->ino] = inode;
-  if (S_ISDIR(inode->attr.st_mode)) {
-    store_->dirs_.try_emplace(inode->ino);
+void MemMetaTxn::InsertInode(std::unique_ptr<SwordFsInode> inode) {
+  InodeID ino = inode->ino;
+  bool is_dir = S_ISDIR(inode->attr.st_mode);
+  store_->inodes_[ino] = std::move(inode);
+  if (is_dir) {
+    store_->dirs_.try_emplace(ino);
   }
 }
 
 void MemMetaTxn::DeleteInode(InodeID ino) {
   auto it = store_->inodes_.find(ino);
   if (it != store_->inodes_.end()) {
-    delete it->second;
     store_->inodes_.erase(it);
     store_->dirs_.erase(ino);
     store_->chunks_.erase(ino);

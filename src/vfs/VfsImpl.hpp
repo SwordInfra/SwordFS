@@ -36,7 +36,6 @@ class VfsImpl {
 
   static utils::Status Lookup(fuse_ino_t parent, const char *name,
                               fuse_entry_param *entry);
-  static void Forget(fuse_ino_t ino, uint64_t nlookup);
   static utils::Status Getattr(fuse_ino_t ino, struct stat *attr);
   static utils::Status Setattr(fuse_ino_t ino, struct stat *attr, int to_set,
                                struct stat *out_attr);
@@ -87,8 +86,6 @@ class VfsImpl {
   static utils::Status RetrieveReply(fuse_req_t req, void *cookie,
                                      fuse_ino_t ino, off_t offset,
                                      struct fuse_bufvec *bufv);
-  static void ForgetMulti(fuse_req_t req, size_t count,
-                          struct fuse_forget_data *forgets);
   static utils::Status Flock(fuse_ino_t ino, struct fuse_file_info *fi, int op);
   static utils::Status Fallocate(fuse_ino_t ino, int mode, off_t offset,
                                  off_t length, struct fuse_file_info *fi);

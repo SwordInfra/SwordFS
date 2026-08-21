@@ -124,13 +124,11 @@ void InodeHandleManager::Initialize() {
 }
 
 std::shared_ptr<InodeHandle> InodeHandleManager::Get(metadata::InodeID ino, bool create_if_missing) {
-  {
-    std::shared_lock lock(mutex_);
-    auto it = inode_handles_->find(ino);
-    if (it != inode_handles_->end()) {
-      if (auto handle = it->second.lock()) {
-        return handle;
-      }
+  std::unique_lock lock(mutex_);
+  auto it = inode_handles_->find(ino);
+  if (it != inode_handles_->end()) {
+    if (auto handle = it->second.lock()) {
+      return handle;
     }
   }
 
@@ -139,8 +137,6 @@ std::shared_ptr<InodeHandle> InodeHandleManager::Get(metadata::InodeID ino, bool
   }
 
   auto handle = std::make_shared<InodeHandle>(ino);
-
-  std::unique_lock lock(mutex_);
   (*inode_handles_)[ino] = handle;
   return handle;
 }
