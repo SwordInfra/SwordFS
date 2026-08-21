@@ -59,9 +59,8 @@ constexpr size_t kMaxFreeInodes = UINT64_MAX;
 // Entry operations
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaImpl::Lookup(InodeID parent_ino,
-                           std::string_view name, InodeID *child_ino,
-                           struct stat *attr) {
+Status MemMetaImpl::Lookup(InodeID parent_ino, std::string_view name,
+                           SwordFsInode *out) {
   SwordFsInode child;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     Status status = txn.LookupEntry(parent_ino, name, &child);
@@ -79,33 +78,31 @@ Status MemMetaImpl::Lookup(InodeID parent_ino,
   SWORDFS_LOG_DEBUG << "Lookup: parent=" << parent_ino << " name='" << name
                     << "' -> ino=" << child.ino;
 
-  if (child_ino) {
-    *child_ino = child.ino;
-  }
-  if (attr) {
-    *attr = child.attr;
+  if (out) {
+    *out = child;
   }
   return Status::OK();
 }
 
-Status MemMetaImpl::GetAttr(InodeID ino, struct stat *attr) {
+Status MemMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
   SwordFsInode inode;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     return txn.LookupInode(ino, &inode);
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "GetAttr: ino " << ino
+    SWORDFS_LOG_DEBUG << "GetInode: ino " << ino
                       << " failed: " << status.message();
     return status;
   }
-  *attr = inode.attr;
+  if (out) {
+    *out = inode;
+  }
   return Status::OK();
 }
 
-Status MemMetaImpl::Create(InodeID parent_ino,
-                           std::string_view name, mode_t mode,
-                           InodeID *child_ino, struct stat *attr) {
+Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name,
+                           mode_t mode, SwordFsInode *out) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("file name exceeds maximum length");
   }
@@ -138,11 +135,8 @@ Status MemMetaImpl::Create(InodeID parent_ino,
 
   SWORDFS_LOG_DEBUG << "Create: parent=" << parent_ino << " name='" << name
                     << "' -> ino=" << child.ino;
-  if (child_ino) {
-    *child_ino = child.ino;
-  }
-  if (attr) {
-    *attr = child.attr;
+  if (out) {
+    *out = child;
   }
   return Status::OK();
 }
@@ -314,12 +308,15 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
   return Status::OK();
 }
 
-Status MemMetaImpl::SetAttr(InodeID ino,
-                            const struct stat *attr, SetAttrField fields,
-                            struct stat *out_attr) {
-  struct stat result{};
+Status MemMetaImpl::SetAttr(InodeID ino, const struct stat *attr,
+                            SetAttrField fields, SwordFsInode *out) {
+  SwordFsInode result;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
-    return txn.SetAttr(ino, attr, fields, &result);
+    Status status = txn.SetAttr(ino, attr, fields, nullptr);
+    if (!status.ok()) {
+      return status;
+    }
+    return txn.LookupInode(ino, &result);
   });
 
   if (!status.ok()) {
@@ -327,8 +324,8 @@ Status MemMetaImpl::SetAttr(InodeID ino,
                       << " failed: " << status.message();
     return status;
   }
-  if (out_attr) {
-    *out_attr = result;
+  if (out) {
+    *out = result;
   }
   return Status::OK();
 }
@@ -418,9 +415,8 @@ Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
   return status;
 }
 
-Status MemMetaImpl::MkDir(InodeID parent_ino,
-                          std::string_view name, mode_t mode,
-                          InodeID *child_ino, struct stat *attr) {
+Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name,
+                          mode_t mode, SwordFsInode *out) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("directory name exceeds maximum length");
   }
@@ -454,11 +450,8 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
   SWORDFS_LOG_DEBUG << "MkDir: parent=" << parent_ino << " name='" << name
                     << "' -> ino=" << child.ino;
 
-  if (child_ino) {
-    *child_ino = child.ino;
-  }
-  if (attr) {
-    *attr = child.attr;
+  if (out) {
+    *out = child;
   }
   return Status::OK();
 }
@@ -545,9 +538,8 @@ Status MemMetaImpl::OpenDir(InodeID ino) {
 // Link / symlink operations
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaImpl::Symlink(InodeID parent_ino,
-                            std::string_view name, const char *link,
-                            InodeID *child_ino, struct stat *attr) {
+Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name,
+                            const char *link, SwordFsInode *out) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("symlink name exceeds maximum length");
   }
@@ -590,17 +582,14 @@ Status MemMetaImpl::Symlink(InodeID parent_ino,
     return status;
   }
 
-  if (child_ino) {
-    *child_ino = child.ino;
-  }
-  if (attr) {
-    *attr = child.attr;
+  if (out) {
+    *out = child;
   }
   return Status::OK();
 }
 
 Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
-                         std::string_view newname, struct stat *attr) {
+                         std::string_view newname, SwordFsInode *out) {
   if (newname.size() > kMaxNameLength) {
     return Status::NameTooLong("link name exceeds maximum length");
   }
@@ -640,8 +629,8 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
                       << "' failed: " << status.message();
     return status;
   }
-  if (attr) {
-    *attr = inode.attr;
+  if (out) {
+    *out = inode;
   }
   return Status::OK();
 }
