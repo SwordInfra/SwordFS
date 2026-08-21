@@ -148,8 +148,8 @@ utils::Status InodeHandle::ReclaimData() {
   // inode and may have made a decision on stale state. ReclaimData is
   // the point of no return — once we Delete chunk objects from S3, no
   // other thread can recover them — so we re-check here.
-  struct stat attr;
-  Status status = meta_->GetAttr(ino_, &attr);
+  metadata::SwordFsInode inode;
+  Status status = meta_->GetInode(ino_, &inode);
   if (status.IsNotFound()) {
     // Inode already gone — a concurrent reclaim won the race. The
     // chunk objects are presumably already deleted too. Idempotent
@@ -159,12 +159,12 @@ utils::Status InodeHandle::ReclaimData() {
     return status;
   }
 
-  if (attr.st_nlink > 0) {
+  if (inode.attr.st_nlink > 0) {
     // Another directory entry still references this inode (a
     // concurrent Link raced our Unlink). Refusing to reclaim keeps
     // the chunk objects alive for the surviving name.
     SWORDFS_LOG_WARN << "ReclaimData(" << ino_
-                     << ") refused: nlink=" << attr.st_nlink
+                     << ") refused: nlink=" << inode.attr.st_nlink
                      << " (>0). A concurrent Link won the race.";
     return utils::Status::OK();
   } else if (open_count_ > 0) {

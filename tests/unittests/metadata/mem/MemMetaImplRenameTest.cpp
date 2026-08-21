@@ -18,20 +18,65 @@ using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
+using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
 static constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
 
+class TestMemMetaImpl : public MemMetaImpl {
+ public:
+  using MemMetaImpl::Create;
+  using MemMetaImpl::Lookup;
+  using MemMetaImpl::MkDir;
+
+  Status Create(InodeID parent_ino, std::string_view name, mode_t mode,
+                InodeID *ino, struct stat *attr) {
+    SwordFsInode out;
+    Status status = MemMetaImpl::Create(parent_ino, name, mode, (ino || attr) ? &out : nullptr);
+    if (status.ok()) {
+      if (ino) *ino = out.ino;
+      if (attr) *attr = out.attr;
+    }
+    return status;
+  }
+  Status MkDir(InodeID parent_ino, std::string_view name, mode_t mode,
+               InodeID *ino, struct stat *attr) {
+    SwordFsInode out;
+    Status status = MemMetaImpl::MkDir(parent_ino, name, mode, (ino || attr) ? &out : nullptr);
+    if (status.ok()) {
+      if (ino) *ino = out.ino;
+      if (attr) *attr = out.attr;
+    }
+    return status;
+  }
+  Status Lookup(InodeID parent_ino, std::string_view name,
+                InodeID *ino, struct stat *attr) {
+    SwordFsInode out;
+    Status status = MemMetaImpl::Lookup(parent_ino, name, &out);
+    if (status.ok()) {
+      if (ino) *ino = out.ino;
+      if (attr) *attr = out.attr;
+    }
+    return status;
+  }
+  Status GetAttr(InodeID ino, struct stat *attr) {
+    SwordFsInode out;
+    Status status = MemMetaImpl::GetInode(ino, attr ? &out : nullptr);
+    if (status.ok() && attr) *attr = out.attr;
+    return status;
+  }
+};
+
 class MemMetaImplRenameTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    impl_ = new MemMetaImpl();
+    impl_ = new TestMemMetaImpl();
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
   void TearDown() override { delete impl_; }
 
-  MemMetaImpl *impl_;
+  TestMemMetaImpl *impl_;
 };
 
 // ════════════════════════════════════════════════════════════════════

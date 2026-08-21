@@ -60,7 +60,7 @@ class MemMetaTxn {
   // Apply the requested SetAttr fields atomically. Size changes also
   // update chunk metadata and apply the killpriv/ctime rules.
   Status SetAttr(InodeID ino, const struct stat *attr, SetAttrField fields,
-                 struct stat *out_attr = nullptr);
+                 SwordFsInode *out = nullptr);
 
   // Truncate an inode atomically: update st_size, apply killpriv/ctime,
   // and drop or clamp chunk metadata beyond the new size.

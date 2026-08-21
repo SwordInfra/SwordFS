@@ -268,9 +268,9 @@ utils::Status FileReadWriter::Flush() {
 
   // Update file size if the file grew.
   if (file_end > 0) {
-    struct stat attr;
-    if (meta_->GetAttr(ino_, &attr).ok() &&
-        file_end > attr.st_size) {
+    metadata::SwordFsInode inode;
+    if (meta_->GetInode(ino_, &inode).ok() &&
+        file_end > inode.attr.st_size) {
       struct stat new_attr = {
           .st_size = file_end,
       };
