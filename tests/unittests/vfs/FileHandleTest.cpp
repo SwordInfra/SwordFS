@@ -57,8 +57,8 @@ class NoopDataEngine : public swordfs::storage::IDataEngine {
 // Minimal IMetaEngine — every op succeeds; Create fabricates an inode.
 class MockMetaEngine : public IMetaEngine {
  public:
-  Status Lookup(InodeID, std::string_view, InodeID *,
-                struct stat *) override { return Status::OK(); }
+  Status Lookup(InodeID, std::string_view,
+                swordfs::metadata::SwordFsInode *) override { return Status::OK(); }
   Status GetAttr(InodeID, struct stat *attr) override {
     // Default to nlink==0 so that callers which use GetAttr as a stand-in
     // for a "does this inode still exist and is it orphaned?" probe
@@ -72,16 +72,16 @@ class MockMetaEngine : public IMetaEngine {
                  std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, mode_t, InodeID *child_ino,
-                struct stat *attr) override {
-    *child_ino = next_ino_++;
-    std::memset(attr, 0, sizeof(*attr));
-    attr->st_ino = *child_ino;
-    attr->st_mode = S_IFREG | 0644;
+  Status Create(InodeID, std::string_view, mode_t,
+                swordfs::metadata::SwordFsInode *inode) override {
+    inode->ino = next_ino_++;
+    std::memset(&inode->attr, 0, sizeof(inode->attr));
+    inode->attr.st_ino = inode->ino;
+    inode->attr.st_mode = S_IFREG | 0644;
     return Status::OK();
   }
-  Status MkDir(InodeID, std::string_view, mode_t, InodeID *,
-               struct stat *) override { return Status::OK(); }
+  Status MkDir(InodeID, std::string_view, mode_t,
+               swordfs::metadata::SwordFsInode *) override { return Status::OK(); }
   Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID, std::string_view,
@@ -90,10 +90,10 @@ class MockMetaEngine : public IMetaEngine {
                  struct stat *) override { return Status::OK(); }
   Status StatFs(struct statvfs *) override { return Status::OK(); }
   Status Access(InodeID, int) override { return Status::OK(); }
-  Status Symlink(InodeID, std::string_view, const char *, InodeID *,
-                 struct stat *) override { return Status::OK(); }
+  Status Symlink(InodeID, std::string_view, const char *,
+                 swordfs::metadata::SwordFsInode *) override { return Status::OK(); }
   Status Link(InodeID, InodeID, std::string_view,
-              struct stat *) override { return Status::OK(); }
+              swordfs::metadata::SwordFsInode *) override { return Status::OK(); }
   Status Readlink(InodeID, std::string *) override { return Status::OK(); }
   Status Open(InodeID) override { return open_status; }
   Status ReclaimInode(InodeID) override {
@@ -507,8 +507,8 @@ class FakeDataEngine : public swordfs::storage::IDataEngine {
 // guard sees the nlink value the test wants).
 class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
  public:
-  Status Lookup(InodeID, std::string_view, InodeID *,
-                struct stat *) override { return Status::OK(); }
+  Status Lookup(InodeID, std::string_view,
+                swordfs::metadata::SwordFsInode *) override { return Status::OK(); }
   Status GetAttr(InodeID ino, struct stat *attr) override {
     auto it = attrs.find(ino);
     if (it == attrs.end()) {
@@ -522,10 +522,10 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
                  std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, mode_t, InodeID *,
-                struct stat *) override { return Status::OK(); }
-  Status MkDir(InodeID, std::string_view, mode_t, InodeID *,
-               struct stat *) override { return Status::OK(); }
+  Status Create(InodeID, std::string_view, mode_t,
+                swordfs::metadata::SwordFsInode *) override { return Status::OK(); }
+  Status MkDir(InodeID, std::string_view, mode_t,
+               swordfs::metadata::SwordFsInode *) override { return Status::OK(); }
   Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID, std::string_view,
@@ -534,10 +534,10 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
                  struct stat *) override { return Status::OK(); }
   Status StatFs(struct statvfs *) override { return Status::OK(); }
   Status Access(InodeID, int) override { return Status::OK(); }
-  Status Symlink(InodeID, std::string_view, const char *, InodeID *,
-                 struct stat *) override { return Status::OK(); }
+  Status Symlink(InodeID, std::string_view, const char *,
+                 swordfs::metadata::SwordFsInode *) override { return Status::OK(); }
   Status Link(InodeID, InodeID, std::string_view,
-              struct stat *) override { return Status::OK(); }
+              swordfs::metadata::SwordFsInode *) override { return Status::OK(); }
   Status Readlink(InodeID, std::string *) override { return Status::OK(); }
   Status Open(InodeID) override { return Status::OK(); }
   Status ReclaimInode(InodeID ino) override {

@@ -218,6 +218,9 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
   }
 
   auto &ctx = folly::fibers::local<swordfs::utils::SwordFsContext>();
+  if ((mode & S_IFMT) == 0) {
+    mode |= S_IFREG;
+  }
   struct stat st = MakeStat(mode, ::time(nullptr));
   st.st_uid = ctx.uid;
   st.st_gid = parent->attr.st_gid;

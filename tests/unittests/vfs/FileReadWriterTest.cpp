@@ -142,8 +142,8 @@ class MockDataEngine : public IDataEngine {
 
 class MockMetaEngine : public IMetaEngine {
  public:
-  Status Lookup(InodeID, std::string_view, InodeID *,
-                struct stat *) override { return Status::OK(); }
+  Status Lookup(InodeID, std::string_view,
+                swordfs::metadata::SwordFsInode *) override { return Status::OK(); }
   Status GetAttr(InodeID, struct stat *attr) override {
     std::memset(attr, 0, sizeof(*attr));
     attr->st_size = file_size_;
@@ -153,10 +153,10 @@ class MockMetaEngine : public IMetaEngine {
                  std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, mode_t, InodeID *,
-                struct stat *) override { return Status::OK(); }
-  Status MkDir(InodeID, std::string_view, mode_t, InodeID *,
-               struct stat *) override { return Status::OK(); }
+  Status Create(InodeID, std::string_view, mode_t,
+                swordfs::metadata::SwordFsInode *) override { return Status::OK(); }
+  Status MkDir(InodeID, std::string_view, mode_t,
+               swordfs::metadata::SwordFsInode *) override { return Status::OK(); }
   Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID,
@@ -177,11 +177,11 @@ class MockMetaEngine : public IMetaEngine {
   Status StatFs(struct statvfs *) override { return Status::OK(); }
   Status Access(InodeID, int) override { return Status::OK(); }
   Status Symlink(InodeID, std::string_view, const char *,
-                 InodeID *, struct stat *) override {
+                 swordfs::metadata::SwordFsInode *) override {
     return Status::OK();
   }
   Status Link(InodeID, InodeID, std::string_view,
-              struct stat *) override {
+              swordfs::metadata::SwordFsInode *) override {
     return Status::OK();
   }
   Status Readlink(InodeID, std::string *) override {

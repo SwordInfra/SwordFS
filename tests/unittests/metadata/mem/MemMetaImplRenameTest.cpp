@@ -18,6 +18,7 @@ using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
+using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -39,16 +40,16 @@ class MemMetaImplRenameTest : public ::testing::Test {
 // ════════════════════════════════════════════════════════════════════
 
 TEST_F(MemMetaImplRenameTest, BasicRenameFile) {
-  InodeID f_ino = 0;
-  impl_->Create(kRoot, "old_name", 0644, &f_ino, nullptr);
+  SwordFsInode f;
+  impl_->Create(kRoot, "old_name", 0644, &f);
 
   Status st = impl_->Rename(kRoot, "old_name", kRoot, "new_name", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
 
-  InodeID found = 0;
-  EXPECT_TRUE(impl_->Lookup(kRoot, "old_name", &found, nullptr).IsNotFound());
-  EXPECT_TRUE(impl_->Lookup(kRoot, "new_name", &found, nullptr).ok());
-  EXPECT_EQ(found, f_ino);
+  SwordFsInode found;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "old_name", &found).IsNotFound());
+  EXPECT_TRUE(impl_->Lookup(kRoot, "new_name", &found).ok());
+  EXPECT_EQ(found.ino, f.ino);
 }
 
 TEST_F(MemMetaImplRenameTest, RenameSourceNotFound) {
@@ -62,12 +63,12 @@ TEST_F(MemMetaImplRenameTest, RenameRefusesDot) {
 }
 
 TEST_F(MemMetaImplRenameTest, RenameRefusesDotDot) {
-  InodeID sub_ino = 0;
-  impl_->MkDir(kRoot, "sub", 0755, &sub_ino, nullptr);
-  InodeID f_ino = 0;
-  impl_->Create(sub_ino, "f", 0644, &f_ino, nullptr);
+  SwordFsInode sub;
+  impl_->MkDir(kRoot, "sub", 0755, &sub);
+  SwordFsInode f;
+  impl_->Create(sub.ino, "f", 0644, &f);
 
-  Status st = impl_->Rename(sub_ino, "..", kRoot, "new", RenameFlag::kNone);
+  Status st = impl_->Rename(sub.ino, "..", kRoot, "new", RenameFlag::kNone);
   EXPECT_TRUE(st.IsBusy()) << "should refuse to rename '..'";
 }
 
@@ -76,27 +77,27 @@ TEST_F(MemMetaImplRenameTest, RenameRefusesDotDot) {
 // ════════════════════════════════════════════════════════════════════
 
 TEST_F(MemMetaImplRenameTest, RenameOverwriteFileReportsVictim) {
-  InodeID f1_ino = 0, f2_ino = 0;
-  impl_->Create(kRoot, "src", 0644, &f1_ino, nullptr);
-  impl_->Create(kRoot, "dst", 0644, &f2_ino, nullptr);
+  SwordFsInode f1, f2;
+  impl_->Create(kRoot, "src", 0644, &f1);
+  impl_->Create(kRoot, "dst", 0644, &f2);
 
   RenameResult result;
   Status st = impl_->Rename(kRoot, "src", kRoot, "dst", RenameFlag::kNone,
                             &result);
   EXPECT_TRUE(st.ok()) << st.message();
-  EXPECT_EQ(result.overwritten_ino, f2_ino);
+  EXPECT_EQ(result.overwritten_ino, f2.ino);
   EXPECT_EQ(result.overwritten_post_nlink, 0);
 
-  InodeID found = 0;
-  EXPECT_TRUE(impl_->Lookup(kRoot, "dst", &found, nullptr).ok());
-  EXPECT_EQ(found, f1_ino);
+  SwordFsInode found;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "dst", &found).ok());
+  EXPECT_EQ(found.ino, f1.ino);
 
   // The metadata transaction must not reclaim the overwritten file itself:
   // the VFS layer needs to decide whether an open handle still references it.
   struct stat attr;
-  EXPECT_TRUE(impl_->GetAttr(f2_ino, &attr).ok());
-  EXPECT_TRUE(impl_->ReclaimInode(f2_ino).ok());
-  EXPECT_TRUE(impl_->GetAttr(f2_ino, &attr).IsNotFound());
+  EXPECT_TRUE(impl_->GetAttr(f2.ino, &attr).ok());
+  EXPECT_TRUE(impl_->ReclaimInode(f2.ino).ok());
+  EXPECT_TRUE(impl_->GetAttr(f2.ino, &attr).IsNotFound());
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -104,9 +105,9 @@ TEST_F(MemMetaImplRenameTest, RenameOverwriteFileReportsVictim) {
 // ════════════════════════════════════════════════════════════════════
 
 TEST_F(MemMetaImplRenameTest, RenameOverwriteEmptyDirectory) {
-  InodeID dir1_ino = 0, dir2_ino = 0;
-  impl_->MkDir(kRoot, "a", 0755, &dir1_ino, nullptr);
-  impl_->MkDir(kRoot, "b", 0755, &dir2_ino, nullptr);
+  SwordFsInode dir1, dir2;
+  impl_->MkDir(kRoot, "a", 0755, &dir1);
+  impl_->MkDir(kRoot, "b", 0755, &dir2);
 
   struct stat root_attr;
   impl_->GetAttr(kRoot, &root_attr);
@@ -124,23 +125,23 @@ TEST_F(MemMetaImplRenameTest, RenameOverwriteEmptyDirectory) {
 // ════════════════════════════════════════════════════════════════════
 
 TEST_F(MemMetaImplRenameTest, RenameDirectoryCrossDirectoryUpdatesNlink) {
-  InodeID src_ino = 0, dst_ino = 0;
-  impl_->MkDir(kRoot, "src", 0755, &src_ino, nullptr);
-  impl_->MkDir(kRoot, "dst", 0755, &dst_ino, nullptr);
+  SwordFsInode src, dst;
+  impl_->MkDir(kRoot, "src", 0755, &src);
+  impl_->MkDir(kRoot, "dst", 0755, &dst);
 
-  InodeID sub_ino = 0;
-  impl_->MkDir(src_ino, "sub", 0755, &sub_ino, nullptr);
+  SwordFsInode sub;
+  impl_->MkDir(src.ino, "sub", 0755, &sub);
 
   struct stat src_attr_before, dst_attr_before;
-  impl_->GetAttr(src_ino, &src_attr_before);
-  impl_->GetAttr(dst_ino, &dst_attr_before);
+  impl_->GetAttr(src.ino, &src_attr_before);
+  impl_->GetAttr(dst.ino, &dst_attr_before);
 
-  Status st = impl_->Rename(src_ino, "sub", dst_ino, "sub", RenameFlag::kNone);
+  Status st = impl_->Rename(src.ino, "sub", dst.ino, "sub", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
 
   struct stat src_attr_after, dst_attr_after;
-  impl_->GetAttr(src_ino, &src_attr_after);
-  impl_->GetAttr(dst_ino, &dst_attr_after);
+  impl_->GetAttr(src.ino, &src_attr_after);
+  impl_->GetAttr(dst.ino, &dst_attr_after);
 
   EXPECT_EQ(src_attr_after.st_nlink, src_attr_before.st_nlink - 1);
   EXPECT_EQ(dst_attr_after.st_nlink, dst_attr_before.st_nlink + 1);
@@ -151,19 +152,19 @@ TEST_F(MemMetaImplRenameTest, RenameDirectoryCrossDirectoryUpdatesNlink) {
 // ════════════════════════════════════════════════════════════════════
 
 TEST_F(MemMetaImplRenameTest, RenameDirectorySameDirectoryNlinkUnchanged) {
-  InodeID dir_ino = 0;
-  impl_->MkDir(kRoot, "parent", 0755, &dir_ino, nullptr);
-  InodeID sub_ino = 0;
-  impl_->MkDir(dir_ino, "sub", 0755, &sub_ino, nullptr);
+  SwordFsInode dir;
+  impl_->MkDir(kRoot, "parent", 0755, &dir);
+  SwordFsInode sub;
+  impl_->MkDir(dir.ino, "sub", 0755, &sub);
 
   struct stat parent_before;
-  impl_->GetAttr(dir_ino, &parent_before);
+  impl_->GetAttr(dir.ino, &parent_before);
 
-  Status st = impl_->Rename(dir_ino, "sub", dir_ino, "renamed_sub", RenameFlag::kNone);
+  Status st = impl_->Rename(dir.ino, "sub", dir.ino, "renamed_sub", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
 
   struct stat parent_after;
-  impl_->GetAttr(dir_ino, &parent_after);
+  impl_->GetAttr(dir.ino, &parent_after);
   EXPECT_EQ(parent_after.st_nlink, parent_before.st_nlink);
 }
 
@@ -172,11 +173,11 @@ TEST_F(MemMetaImplRenameTest, RenameDirectorySameDirectoryNlinkUnchanged) {
 // ════════════════════════════════════════════════════════════════════
 
 TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoSubtreeFails) {
-  InodeID a_ino = 0, b_ino = 0;
-  impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
-  impl_->MkDir(a_ino, "b", 0755, &b_ino, nullptr);
+  SwordFsInode a, b;
+  impl_->MkDir(kRoot, "a", 0755, &a);
+  impl_->MkDir(a.ino, "b", 0755, &b);
 
-  Status st = impl_->Rename(kRoot, "a", b_ino, "a", RenameFlag::kNone);
+  Status st = impl_->Rename(kRoot, "a", b.ino, "a", RenameFlag::kNone);
   EXPECT_EQ(st.code(), Status::kInvalidArgument) << st.message();
 }
 
@@ -185,18 +186,18 @@ TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoSubtreeFails) {
 // ════════════════════════════════════════════════════════════════════
 
 TEST_F(MemMetaImplRenameTest, RenameFileOverDirectoryFails) {
-  InodeID f_ino = 0, d_ino = 0;
-  impl_->Create(kRoot, "f", 0644, &f_ino, nullptr);
-  impl_->MkDir(kRoot, "d", 0755, &d_ino, nullptr);
+  SwordFsInode f, d;
+  impl_->Create(kRoot, "f", 0644, &f);
+  impl_->MkDir(kRoot, "d", 0755, &d);
 
   Status st = impl_->Rename(kRoot, "f", kRoot, "d", RenameFlag::kNone);
   EXPECT_EQ(st.code(), Status::kIsDirectory) << st.message();
 }
 
 TEST_F(MemMetaImplRenameTest, RenameDirectoryOverFileFails) {
-  InodeID f_ino = 0, d_ino = 0;
-  impl_->Create(kRoot, "f", 0644, &f_ino, nullptr);
-  impl_->MkDir(kRoot, "d", 0755, &d_ino, nullptr);
+  SwordFsInode f, d;
+  impl_->Create(kRoot, "f", 0644, &f);
+  impl_->MkDir(kRoot, "d", 0755, &d);
 
   Status st = impl_->Rename(kRoot, "d", kRoot, "f", RenameFlag::kNone);
   EXPECT_EQ(st.code(), Status::kNotDirectory) << st.message();
@@ -207,11 +208,11 @@ TEST_F(MemMetaImplRenameTest, RenameDirectoryOverFileFails) {
 // ════════════════════════════════════════════════════════════════════
 
 TEST_F(MemMetaImplRenameTest, RenameOverwriteNonEmptyDirectoryFails) {
-  InodeID d1_ino = 0, d2_ino = 0;
-  impl_->MkDir(kRoot, "d1", 0755, &d1_ino, nullptr);
-  impl_->MkDir(kRoot, "d2", 0755, &d2_ino, nullptr);
+  SwordFsInode d1, d2;
+  impl_->MkDir(kRoot, "d1", 0755, &d1);
+  impl_->MkDir(kRoot, "d2", 0755, &d2);
 
-  impl_->Create(d2_ino, "child", 0644, nullptr, nullptr);
+  impl_->Create(d2.ino, "child", 0644, nullptr);
 
   Status st = impl_->Rename(kRoot, "d1", kRoot, "d2", RenameFlag::kNone);
   EXPECT_TRUE(st.IsNotEmpty()) << st.message();
@@ -226,28 +227,28 @@ TEST_F(MemMetaImplRenameTest, NlinkAccountingMultipleDirs) {
   impl_->GetAttr(kRoot, &root_before);
   nlink_t initial = root_before.st_nlink;
 
-  InodeID a_ino = 0, b_ino = 0, c_ino = 0;
-  impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
-  impl_->MkDir(kRoot, "b", 0755, &b_ino, nullptr);
-  impl_->MkDir(kRoot, "c", 0755, &c_ino, nullptr);
+  SwordFsInode a, b, c;
+  impl_->MkDir(kRoot, "a", 0755, &a);
+  impl_->MkDir(kRoot, "b", 0755, &b);
+  impl_->MkDir(kRoot, "c", 0755, &c);
 
   struct stat root_after_create;
   impl_->GetAttr(kRoot, &root_after_create);
   EXPECT_EQ(root_after_create.st_nlink, initial + 3);
 
-  impl_->MkDir(a_ino, "a1", 0755, nullptr, nullptr);
-  impl_->MkDir(b_ino, "b1", 0755, nullptr, nullptr);
+  impl_->MkDir(a.ino, "a1", 0755, nullptr);
+  impl_->MkDir(b.ino, "b1", 0755, nullptr);
 
   struct stat a_before, c_before;
-  impl_->GetAttr(a_ino, &a_before);
-  impl_->GetAttr(c_ino, &c_before);
+  impl_->GetAttr(a.ino, &a_before);
+  impl_->GetAttr(c.ino, &c_before);
 
-  Status st = impl_->Rename(a_ino, "a1", c_ino, "a1", RenameFlag::kNone);
+  Status st = impl_->Rename(a.ino, "a1", c.ino, "a1", RenameFlag::kNone);
   EXPECT_TRUE(st.ok()) << st.message();
 
   struct stat a_after, c_after;
-  impl_->GetAttr(a_ino, &a_after);
-  impl_->GetAttr(c_ino, &c_after);
+  impl_->GetAttr(a.ino, &a_after);
+  impl_->GetAttr(c.ino, &c_after);
 
   EXPECT_EQ(a_after.st_nlink, a_before.st_nlink - 1);
   EXPECT_EQ(c_after.st_nlink, c_before.st_nlink + 1);
@@ -262,75 +263,75 @@ TEST_F(MemMetaImplRenameTest, NlinkAccountingMultipleDirs) {
 // ════════════════════════════════════════════════════════════════════
 
 TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoItselfFails) {
-  InodeID a_ino = 0;
-  impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
+  SwordFsInode a;
+  impl_->MkDir(kRoot, "a", 0755, &a);
 
   // Rename "a" to become a child of itself (mv a a/x).  The descendant
   // check alone misses this because IsDescendantOf(a, a) is false.
-  Status status = impl_->Rename(kRoot, "a", a_ino, "x", RenameFlag::kNone);
+  Status status = impl_->Rename(kRoot, "a", a.ino, "x", RenameFlag::kNone);
   EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
 
   // The directory must still be reachable from the root, unchanged.
-  InodeID found = 0;
-  EXPECT_TRUE(impl_->Lookup(kRoot, "a", &found, nullptr).ok());
-  EXPECT_EQ(found, a_ino);
+  SwordFsInode found;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "a", &found).ok());
+  EXPECT_EQ(found.ino, a.ino);
   struct stat attr;
-  ASSERT_TRUE(impl_->GetAttr(a_ino, &attr).ok());
+  ASSERT_TRUE(impl_->GetAttr(a.ino, &attr).ok());
   EXPECT_TRUE(S_ISDIR(attr.st_mode));
 }
 
 TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoOwnSubtreeStillFails) {
-  InodeID a_ino = 0, b_ino = 0;
-  impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
-  impl_->MkDir(a_ino, "b", 0755, &b_ino, nullptr);
+  SwordFsInode a, b;
+  impl_->MkDir(kRoot, "a", 0755, &a);
+  impl_->MkDir(a.ino, "b", 0755, &b);
 
-  Status status = impl_->Rename(kRoot, "a", b_ino, "x", RenameFlag::kNone);
+  Status status = impl_->Rename(kRoot, "a", b.ino, "x", RenameFlag::kNone);
   EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
 
-  InodeID found = 0;
-  EXPECT_TRUE(impl_->Lookup(kRoot, "a", &found, nullptr).ok());
-  EXPECT_EQ(found, a_ino);
+  SwordFsInode found;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "a", &found).ok());
+  EXPECT_EQ(found.ino, a.ino);
 }
 
 TEST_F(MemMetaImplRenameTest, RenameExchangeDirectoryIntoItselfFails) {
-  InodeID a_ino = 0, b_ino = 0;
-  impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
-  impl_->MkDir(a_ino, "b", 0755, &b_ino, nullptr);
+  SwordFsInode a, b;
+  impl_->MkDir(kRoot, "a", 0755, &a);
+  impl_->MkDir(a.ino, "b", 0755, &b);
 
   // Exchange root/a with a/b: the moved directory's new parent would be
   // itself.  The EXCHANGE path runs the same cycle check.
   Status status =
-      impl_->Rename(kRoot, "a", a_ino, "b", RenameFlag::kExchange);
+      impl_->Rename(kRoot, "a", a.ino, "b", RenameFlag::kExchange);
   EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
 
   // Both entries must be untouched.
-  InodeID found = 0;
-  EXPECT_TRUE(impl_->Lookup(kRoot, "a", &found, nullptr).ok());
-  EXPECT_EQ(found, a_ino);
-  EXPECT_TRUE(impl_->Lookup(a_ino, "b", &found, nullptr).ok());
-  EXPECT_EQ(found, b_ino);
+  SwordFsInode found;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "a", &found).ok());
+  EXPECT_EQ(found.ino, a.ino);
+  EXPECT_TRUE(impl_->Lookup(a.ino, "b", &found).ok());
+  EXPECT_EQ(found.ino, b.ino);
 }
 
 TEST_F(MemMetaImplRenameTest, RenameExchangeWithAncestorDirectoryFails) {
   // Build root/b/x/a: dir b is an ancestor of dir a.
-  InodeID b_ino = 0, x_ino = 0, a_ino = 0;
-  impl_->MkDir(kRoot, "b", 0755, &b_ino, nullptr);
-  impl_->MkDir(b_ino, "x", 0755, &x_ino, nullptr);
-  impl_->MkDir(x_ino, "a", 0755, &a_ino, nullptr);
+  SwordFsInode b, x, a;
+  impl_->MkDir(kRoot, "b", 0755, &b);
+  impl_->MkDir(b.ino, "x", 0755, &x);
+  impl_->MkDir(x.ino, "a", 0755, &a);
 
   // Exchange x/a with root/b: dir b would land inside its own subtree.
   // The source-side check (a into b) passes here — only the symmetric
   // check catches this direction.
   Status status =
-      impl_->Rename(x_ino, "a", kRoot, "b", RenameFlag::kExchange);
+      impl_->Rename(x.ino, "a", kRoot, "b", RenameFlag::kExchange);
   EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
 
   // The whole subtree must be untouched.
-  InodeID found = 0;
-  EXPECT_TRUE(impl_->Lookup(kRoot, "b", &found, nullptr).ok());
-  EXPECT_EQ(found, b_ino);
-  EXPECT_TRUE(impl_->Lookup(b_ino, "x", &found, nullptr).ok());
-  EXPECT_EQ(found, x_ino);
-  EXPECT_TRUE(impl_->Lookup(x_ino, "a", &found, nullptr).ok());
-  EXPECT_EQ(found, a_ino);
+  SwordFsInode found;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "b", &found).ok());
+  EXPECT_EQ(found.ino, b.ino);
+  EXPECT_TRUE(impl_->Lookup(b.ino, "x", &found).ok());
+  EXPECT_EQ(found.ino, x.ino);
+  EXPECT_TRUE(impl_->Lookup(x.ino, "a", &found).ok());
+  EXPECT_EQ(found.ino, a.ino);
 }

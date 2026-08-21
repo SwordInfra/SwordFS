@@ -18,6 +18,7 @@
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
+using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
 using swordfs::utils::Status;
@@ -29,10 +30,54 @@ static constexpr uid_t kOther = 2000;
 static constexpr gid_t kGroup = 100;
 static constexpr gid_t kOtherGroup = 200;
 
+class TestMemMetaImpl : public MemMetaImpl {
+ public:
+  Status Create(InodeID parent, std::string_view name, mode_t mode,
+                InodeID *ino, struct stat *attr = nullptr) {
+    SwordFsInode inode;
+    Status status = MemMetaImpl::Create(parent, name, mode, &inode);
+    if (status.ok()) {
+      if (ino != nullptr) *ino = inode.ino;
+      if (attr != nullptr) *attr = inode.attr;
+    }
+    return status;
+  }
+
+  Status MkDir(InodeID parent, std::string_view name, mode_t mode,
+               InodeID *ino, struct stat *attr = nullptr) {
+    SwordFsInode inode;
+    Status status = MemMetaImpl::MkDir(parent, name, mode, &inode);
+    if (status.ok()) {
+      if (ino != nullptr) *ino = inode.ino;
+      if (attr != nullptr) *attr = inode.attr;
+    }
+    return status;
+  }
+
+  Status Lookup(InodeID parent, std::string_view name, InodeID *ino,
+                struct stat *attr = nullptr) {
+    SwordFsInode inode;
+    Status status = MemMetaImpl::Lookup(parent, name, &inode);
+    if (status.ok()) {
+      if (ino != nullptr) *ino = inode.ino;
+      if (attr != nullptr) *attr = inode.attr;
+    }
+    return status;
+  }
+
+  Status Link(InodeID ino, InodeID parent, std::string_view name,
+              struct stat *attr = nullptr) {
+    SwordFsInode inode;
+    Status status = MemMetaImpl::Link(ino, parent, name, &inode);
+    if (status.ok() && attr != nullptr) *attr = inode.attr;
+    return status;
+  }
+};
+
 class MemMetaImplTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    impl_ = new MemMetaImpl();
+    impl_ = new TestMemMetaImpl();
     // Default context is root (uid=0, gid=0).
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
@@ -83,7 +128,7 @@ class MemMetaImplTest : public ::testing::Test {
     impl_->SetAttr(ino, &st, SetAttrField::kUid | SetAttrField::kGid, nullptr);
   }
 
-  MemMetaImpl *impl_;
+  TestMemMetaImpl *impl_;
 };
 
 // ────────────────────────────────────────────────────────────────

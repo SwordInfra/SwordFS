@@ -89,8 +89,12 @@ class MemMetaTxn {
   // success, *out receives a snapshot copy of the new inode.
   // Linking a subdirectory also increments the parent's nlink (the new
   // ".." backlink); any successful link bumps the parent's mtime/ctime.
-  Status AddEntry(InodeID parent_ino, std::string_view name,
-                  mode_t mode, SwordFsInode *out);
+  // Create a new entry under |parent_ino|. Structural validation and
+  // parent metadata bookkeeping are owned by this primitive. If |mode|
+  // has no file-type bits, it is treated as a regular file; callers only
+  // need to provide permission bits for regular-file creation.
+  Status AddEntry(InodeID parent_ino, std::string_view name, mode_t mode,
+                  SwordFsInode *out);
 
 
   // Move an existing entry from old_parent/old_name to

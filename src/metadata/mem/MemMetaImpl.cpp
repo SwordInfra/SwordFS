@@ -42,26 +42,12 @@ constexpr size_t kMaxFreeInodes = UINT64_MAX;
 // contributes POLICY: name validation, permission and sticky checks,
 // cycle prevention, rename flags, and POSIX error codes.
 //
-// Lookup idiom: check the Lookup status first and return it unchanged
-// (a missing inode is NotFound, NOT NotDirectory), then test the type
-// predicate on the snapshot:
-//
-//   SwordFsInode parent;
-//   Status status = txn.LookupInode(parent_ino, &parent);
-//   if (!status.ok()) {
-//     return status;
-//   }
-//   if (!parent.IsDir()) {
-//     return Status::NotDirectory("parent is not a directory");
-//   }
-
 // ────────────────────────────────────────────────────────────────
 // Entry operations
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaImpl::Lookup(InodeID parent_ino,
-                           std::string_view name, InodeID *child_ino,
-                           struct stat *attr) {
+Status MemMetaImpl::Lookup(InodeID parent_ino, std::string_view name,
+                           SwordFsInode *inode) {
   SwordFsInode child;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     Status status = txn.LookupEntry(parent_ino, name, &child);
@@ -79,11 +65,8 @@ Status MemMetaImpl::Lookup(InodeID parent_ino,
   SWORDFS_LOG_DEBUG << "Lookup: parent=" << parent_ino << " name='" << name
                     << "' -> ino=" << child.ino;
 
-  if (child_ino) {
-    *child_ino = child.ino;
-  }
-  if (attr) {
-    *attr = child.attr;
+  if (inode) {
+    *inode = child;
   }
   return Status::OK();
 }
@@ -99,13 +82,14 @@ Status MemMetaImpl::GetAttr(InodeID ino, struct stat *attr) {
                       << " failed: " << status.message();
     return status;
   }
-  *attr = inode.attr;
+  if (attr) {
+    *attr = inode.attr;
+  }
   return Status::OK();
 }
 
-Status MemMetaImpl::Create(InodeID parent_ino,
-                           std::string_view name, mode_t mode,
-                           InodeID *child_ino, struct stat *attr) {
+Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name,
+                           mode_t mode, SwordFsInode *inode) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("file name exceeds maximum length");
   }
@@ -118,16 +102,12 @@ Status MemMetaImpl::Create(InodeID parent_ino,
     if (!status.ok()) {
       return status;
     }
-    if (!parent.IsDir()) {
-      return Status::NotDirectory("parent is not a directory");
-    }
     // Check permissions: need write+execute on the parent directory
     if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
       return Status::Permission("access denied on parent");
     }
 
-    mode_t file_mode = (S_IFREG | (mode & 0777));
-    return txn.AddEntry(parent_ino, name, file_mode, &child);
+    return txn.AddEntry(parent_ino, name, mode, &child);
   });
 
   if (!status.ok()) {
@@ -138,11 +118,8 @@ Status MemMetaImpl::Create(InodeID parent_ino,
 
   SWORDFS_LOG_DEBUG << "Create: parent=" << parent_ino << " name='" << name
                     << "' -> ino=" << child.ino;
-  if (child_ino) {
-    *child_ino = child.ino;
-  }
-  if (attr) {
-    *attr = child.attr;
+  if (inode) {
+    *inode = child;
   }
   return Status::OK();
 }
@@ -418,9 +395,8 @@ Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
   return status;
 }
 
-Status MemMetaImpl::MkDir(InodeID parent_ino,
-                          std::string_view name, mode_t mode,
-                          InodeID *child_ino, struct stat *attr) {
+Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name,
+                          mode_t mode, SwordFsInode *inode) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("directory name exceeds maximum length");
   }
@@ -432,9 +408,6 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
     Status status = txn.LookupInode(parent_ino, &parent);
     if (!status.ok()) {
       return status;
-    }
-    if (!parent.IsDir()) {
-      return Status::NotDirectory("parent is not a directory");
     }
 
     if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
@@ -454,11 +427,8 @@ Status MemMetaImpl::MkDir(InodeID parent_ino,
   SWORDFS_LOG_DEBUG << "MkDir: parent=" << parent_ino << " name='" << name
                     << "' -> ino=" << child.ino;
 
-  if (child_ino) {
-    *child_ino = child.ino;
-  }
-  if (attr) {
-    *attr = child.attr;
+  if (inode) {
+    *inode = child;
   }
   return Status::OK();
 }
@@ -545,9 +515,8 @@ Status MemMetaImpl::OpenDir(InodeID ino) {
 // Link / symlink operations
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaImpl::Symlink(InodeID parent_ino,
-                            std::string_view name, const char *link,
-                            InodeID *child_ino, struct stat *attr) {
+Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name,
+                            const char *link, SwordFsInode *inode) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("symlink name exceeds maximum length");
   }
@@ -559,9 +528,6 @@ Status MemMetaImpl::Symlink(InodeID parent_ino,
     Status status = txn.LookupInode(parent_ino, &parent);
     if (!status.ok()) {
       return status;
-    }
-    if (!parent.IsDir()) {
-      return Status::NotDirectory("parent is not a directory");
     }
 
     if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
@@ -590,17 +556,14 @@ Status MemMetaImpl::Symlink(InodeID parent_ino,
     return status;
   }
 
-  if (child_ino) {
-    *child_ino = child.ino;
-  }
-  if (attr) {
-    *attr = child.attr;
+  if (inode) {
+    *inode = child;
   }
   return Status::OK();
 }
 
 Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
-                         std::string_view newname, struct stat *attr) {
+                         std::string_view newname, SwordFsInode *out_inode) {
   if (newname.size() > kMaxNameLength) {
     return Status::NameTooLong("link name exceeds maximum length");
   }
@@ -623,10 +586,6 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
     if (!status.ok()) {
       return status;
     }
-    if (!newparent.IsDir()) {
-      return Status::NotDirectory("new parent is not a directory");
-    }
-
     if (!newparent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
       return Status::Permission("access denied on new parent");
     }
@@ -640,8 +599,8 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
                       << "' failed: " << status.message();
     return status;
   }
-  if (attr) {
-    *attr = inode.attr;
+  if (out_inode) {
+    *out_inode = inode;
   }
   return Status::OK();
 }
