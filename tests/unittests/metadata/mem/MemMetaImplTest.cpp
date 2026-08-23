@@ -13,11 +13,13 @@
 #include <thread>
 
 #include "metadata/mem/MemMetaImpl.hpp"
+#include "TestMemMetaImpl.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
+using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsInode;
@@ -29,50 +31,6 @@ static constexpr uid_t kOwner = 1000;
 static constexpr uid_t kOther = 2000;
 static constexpr gid_t kGroup = 100;
 static constexpr gid_t kOtherGroup = 200;
-
-class TestMemMetaImpl : public MemMetaImpl {
- public:
-  using MemMetaImpl::Create;
-  using MemMetaImpl::Lookup;
-  using MemMetaImpl::MkDir;
-
-  Status Create(InodeID parent_ino, std::string_view name, mode_t mode,
-                InodeID *ino, struct stat *attr) {
-    SwordFsInode out;
-    Status status = MemMetaImpl::Create(parent_ino, name, mode, (ino || attr) ? &out : nullptr);
-    if (status.ok()) {
-      if (ino) *ino = out.ino;
-      if (attr) *attr = out.attr;
-    }
-    return status;
-  }
-  Status MkDir(InodeID parent_ino, std::string_view name, mode_t mode,
-               InodeID *ino, struct stat *attr) {
-    SwordFsInode out;
-    Status status = MemMetaImpl::MkDir(parent_ino, name, mode, (ino || attr) ? &out : nullptr);
-    if (status.ok()) {
-      if (ino) *ino = out.ino;
-      if (attr) *attr = out.attr;
-    }
-    return status;
-  }
-  Status Lookup(InodeID parent_ino, std::string_view name,
-                InodeID *ino, struct stat *attr) {
-    SwordFsInode out;
-    Status status = MemMetaImpl::Lookup(parent_ino, name, &out);
-    if (status.ok()) {
-      if (ino) *ino = out.ino;
-      if (attr) *attr = out.attr;
-    }
-    return status;
-  }
-  Status GetAttr(InodeID ino, struct stat *attr) {
-    SwordFsInode out;
-    Status status = MemMetaImpl::GetInode(ino, attr ? &out : nullptr);
-    if (status.ok() && attr) *attr = out.attr;
-    return status;
-  }
-};
 
 class MemMetaImplTest : public ::testing::Test {
  protected:
