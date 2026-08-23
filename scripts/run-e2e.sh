@@ -8,6 +8,7 @@
 #
 # Usage:
 #   ./scripts/run-e2e.sh
+#   METADATA_URL=redis://127.0.0.1:6379/15 ./scripts/run-e2e.sh
 #   ./scripts/run-e2e.sh --gtest_filter='BasicOpsTest.*'
 # ────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -24,6 +25,9 @@ S3_BUCKET="${S3_BUCKET:-swordfs-e2e}"
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 MINIO_CONTAINER="${MINIO_CONTAINER:-swordfs-e2e-minio}"
+METADATA_URL="${METADATA_URL:-memory://local}"
+REDIS_CONTAINER="${REDIS_CONTAINER:-swordfs-e2e-redis}"
+REDIS_IMAGE="${REDIS_IMAGE:-redis:7-alpine}"
 
 # Auto-detect docker command (fall back to sudo if needed).
 if docker ps >/dev/null 2>&1; then
@@ -87,6 +91,37 @@ stop_minio() {
   ${DOCKER} rm -f -v "${MINIO_CONTAINER}" 2>/dev/null || true
 }
 
+# ── Redis ────────────────────────────────────────────────────────
+
+start_redis() {
+  local redis_host redis_port
+  redis_host="${REDIS_HOST:-127.0.0.1}"
+  redis_port="${REDIS_PORT:-6379}"
+
+  echo "=== Starting Redis container (${REDIS_CONTAINER}) ==="
+  ${DOCKER} rm -f "${REDIS_CONTAINER}" 2>/dev/null || true
+  ${DOCKER} run -d --name "${REDIS_CONTAINER}" \
+    -p "${redis_host}:${redis_port}:6379" \
+    "${REDIS_IMAGE}"
+
+  echo "=== Waiting for Redis ==="
+  for i in $(seq 1 30); do
+    if ${DOCKER} exec "${REDIS_CONTAINER}" redis-cli ping 2>/dev/null | grep -q '^PONG$'; then
+      echo "Redis is ready."
+      return 0
+    fi
+    echo "  ... waiting (${i}/30)"
+    sleep 1
+  done
+  echo "ERROR: Redis did not become healthy."
+  return 1
+}
+
+stop_redis() {
+  echo "=== Stopping Redis container ==="
+  ${DOCKER} rm -f "${REDIS_CONTAINER}" 2>/dev/null || true
+}
+
 create_bucket() {
   echo "=== Creating bucket ${S3_BUCKET} ==="
   ${DOCKER} exec "${MINIO_CONTAINER}" \
@@ -99,6 +134,7 @@ create_bucket() {
 # ── Cleanup ──────────────────────────────────────────────────────
 
 cleanup() {
+  stop_redis
   stop_minio
 }
 trap cleanup EXIT
@@ -114,11 +150,20 @@ build
 start_minio
 create_bucket
 
+if [[ "${METADATA_URL}" == redis://* ]]; then
+  if [[ "${METADATA_URL}" != redis://127.0.0.1:6379/* && "${METADATA_URL}" != redis://localhost:6379/* ]]; then
+    echo "ERROR: Redis E2E currently expects METADATA_URL on 127.0.0.1:6379 or localhost:6379."
+    exit 1
+  fi
+  start_redis
+fi
+
 echo "=== Running E2E tests ==="
 cd "$PROJECT_DIR"
 
 SWORDFS_S3_NO_SSL=1 \
 SWORDFS_E2E_S3_BUCKET="s3://${MINIO_ENDPOINT}/${S3_BUCKET}" \
+SWORDFS_METADATA_URL="${METADATA_URL}" \
 SWORDFS_BIN="${SWORDFS_BIN}" \
 AWS_DEFAULT_REGION=auto \
 AWS_ACCESS_KEY_ID="${MINIO_ROOT_USER}" \

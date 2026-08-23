@@ -92,6 +92,11 @@ void Fixture::TearDown() {
 // ────────────────────────────────────────────────────────────────
 
 bool Fixture::FormatVolume() {
+  const char *metadata_url = std::getenv("SWORDFS_METADATA_URL");
+  if (!metadata_url || metadata_url[0] == '\0') {
+    metadata_url = "memory://local";
+  }
+
   std::error_code ec;
   std::filesystem::create_directories(vol_config_dir_, ec);
   if (ec) {
@@ -107,7 +112,7 @@ bool Fixture::FormatVolume() {
       << " --log-file " << LogPath()
       << " format"
       << " --volume " << volume_name_
-      << " --meta memory://local"
+      << " --meta " << metadata_url
       << " --bucket " << bucket_url_
       << " --volume-config-path " << vol_config_dir_
       << " 2>&1";
@@ -483,7 +488,9 @@ std::string Fixture::GenerateRandomData(size_t len, RandomMode mode) {
 }
 
 metadata::Limits Fixture::GetLimits() const {
-  return metadata::IMetaEngine::GetLimits("memory://local");
+  const char *metadata_url = std::getenv("SWORDFS_METADATA_URL");
+  return metadata::IMetaEngine::GetLimits(
+      metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local");
 }
 
 // ────────────────────────────────────────────────────────────────

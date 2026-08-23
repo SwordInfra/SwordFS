@@ -1,5 +1,11 @@
 # Agent Instructions
 
+## Dependency and Library Reuse
+
+- **Prefer existing libraries over reimplementing functionality.** Before writing custom parsing, conversion, randomization, synchronization, string, container, or utility code, check whether Folly or an existing SwordFS utility already provides the required capability.
+- **Use Folly wherever it is a suitable fit.** SwordFS already depends heavily on Folly; avoid introducing hand-written helpers that duplicate Folly functionality. Keep custom logic only for SwordFS-specific semantics or when the Folly API cannot express the required behavior.
+- When reviewing code, explicitly look for opportunities to replace custom utility code with existing Folly/SwordFS facilities.
+
 ## Editing Rules
 
 - **NEVER use `sed`, `python`, `awk`, or any external command for direct file editing.** All file modifications MUST go through the `replace_string_in_file` tool so every change is visible and reviewable. This includes bulk find-and-replace operations — use `multi_replace_string_in_file` instead.

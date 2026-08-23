@@ -48,6 +48,9 @@ TEST(RedisMetaStoreTest, StandalonePingAndWatchReadMultiExec) {
   ASSERT_TRUE(status.ok()) << status.message();
 
   const std::string key = "swordfs:phase0:watch-read-write";
+  sw::redis::Redis cleanup(ConnectionOptions(config));
+  cleanup.del(key);
+
   status = store.Transact([&](RedisMetaTxn& transaction) {
     auto txn_status = transaction.Watch(key);
     if (!txn_status.ok()) {
@@ -76,6 +79,7 @@ TEST(RedisMetaStoreTest, StandalonePingAndWatchReadMultiExec) {
     return utils::Status::OK();
   });
   EXPECT_TRUE(status.ok()) << status.message();
+  cleanup.del(key);
 }
 
 TEST(RedisMetaStoreTest, RetriesWatchConflict) {
@@ -114,6 +118,7 @@ TEST(RedisMetaStoreTest, RetriesWatchConflict) {
   const auto committed = other.get(key);
   ASSERT_TRUE(committed.has_value());
   EXPECT_EQ(*committed, "committed");
+  other.del(key);
 }
 
 TEST(RedisMetaStoreTest, RetriesExplicitPreCommitFailure) {
@@ -133,6 +138,46 @@ TEST(RedisMetaStoreTest, RetriesExplicitPreCommitFailure) {
   });
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(attempts, 2);
+}
+
+TEST(RedisMetaStoreTest, RejectsNonPositiveMaxAttemptsWithoutRedis) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  RedisMetaStore store(config);
+  for (const int max_attempts : {0, -1}) {
+    const auto status = store.Transact(
+        [](RedisMetaTxn&) { return utils::Status::OK(); }, max_attempts);
+    EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
+  }
+}
+
+TEST(RedisMetaStoreTest, RetriesUntilLimitIsExceeded) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  RedisMetaStore store(config);
+  int attempts = 0;
+  const auto status = store.Transact(
+      [&](RedisMetaTxn&) {
+        ++attempts;
+        return utils::Status::Busy("retry");
+      },
+      3);
+  EXPECT_TRUE(status.IsBusy());
+  EXPECT_EQ(attempts, 3);
+}
+
+TEST(RedisMetaStoreTest, ReadOnlyTransactionCommitsAsNoOp) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaStore store(config);
+  const auto status = store.Transact([](RedisMetaTxn& transaction) {
+    std::optional<std::string> value;
+    return transaction.Get("swordfs:phase0:read-only", &value);
+  });
+  EXPECT_TRUE(status.ok()) << status.message();
 }
 
 TEST(RedisMetaStoreTest, PreservesCallbackErrorWithoutQueuedWrite) {

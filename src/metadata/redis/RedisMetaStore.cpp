@@ -18,6 +18,8 @@ sw::redis::ConnectionOptions MakeConnectionOptions(const RedisMetaConfig& config
   options.host = config.host;
   options.port = config.port;
   options.db = config.db;
+  options.connect_timeout = std::chrono::seconds(2);
+  options.socket_timeout = std::chrono::seconds(5);
   if (config.username.has_value()) {
     options.user = *config.username;
   }
@@ -43,15 +45,17 @@ utils::Status RedisError(const char* operation, const sw::redis::Error& error) {
 
 }  // namespace
 
-RedisMetaTxn::RedisMetaTxn(std::unique_ptr<sw::redis::Redis> redis)
-    : redis_(std::move(redis)) {
-  transaction_.emplace(redis_->transaction());
-}
+RedisMetaTxn::RedisMetaTxn(sw::redis::Redis& redis)
+    : transaction_(redis.transaction()) {}
 
 utils::Status RedisMetaTxn::Watch(std::string_view key) {
   try {
     transaction_->redis().watch(std::string(key));
     return utils::Status::OK();
+  } catch (const sw::redis::TimeoutError&) {
+    throw;
+  } catch (const sw::redis::ClosedError&) {
+    throw;
   } catch (const sw::redis::Error& error) {
     return RedisError("WATCH", error);
   }
@@ -65,6 +69,10 @@ utils::Status RedisMetaTxn::Get(std::string_view key,
   try {
     *value = transaction_->redis().get(std::string(key));
     return utils::Status::OK();
+  } catch (const sw::redis::TimeoutError&) {
+    throw;
+  } catch (const sw::redis::ClosedError&) {
+    throw;
   } catch (const sw::redis::Error& error) {
     return RedisError("GET", error);
   }
@@ -75,6 +83,10 @@ utils::Status RedisMetaTxn::Set(std::string_view key, std::string_view value) {
     transaction_->set(std::string(key), std::string(value));
     has_writes_ = true;
     return utils::Status::OK();
+  } catch (const sw::redis::TimeoutError&) {
+    throw;
+  } catch (const sw::redis::ClosedError&) {
+    throw;
   } catch (const sw::redis::Error& error) {
     return RedisError("SET", error);
   }
@@ -100,6 +112,8 @@ utils::Status RedisMetaTxn::Commit() {
   } catch (const sw::redis::WatchError&) {
     return utils::Status::Busy("Redis watched key changed");
   } catch (const sw::redis::TimeoutError& error) {
+    // TODO(#115): expose an explicit ambiguous-commit status so callers do
+    // not need to classify this condition from the error message.
     return utils::Status::IOError(
         "Redis transaction commit is ambiguous after EXEC: " +
         std::string(error.what()));
@@ -113,8 +127,7 @@ utils::Status RedisMetaTxn::Commit() {
 }
 
 RedisMetaStore::RedisMetaStore(const RedisMetaConfig& config)
-    : config_(config),
-      redis_(std::make_unique<sw::redis::Redis>(MakeConnectionOptions(config))) {}
+    : redis_(std::make_unique<sw::redis::Redis>(MakeConnectionOptions(config))) {}
 
 utils::Status RedisMetaStore::Ping() {
   try {
@@ -134,8 +147,7 @@ utils::Status RedisMetaStore::Transact(
 
   for (int attempt = 0; attempt < max_attempts; ++attempt) {
     try {
-      RedisMetaTxn transaction(
-          std::make_unique<sw::redis::Redis>(MakeConnectionOptions(config_)));
+      RedisMetaTxn transaction(*redis_);
       auto status = callback(transaction);
       if (!status.ok()) {
         transaction.Discard();

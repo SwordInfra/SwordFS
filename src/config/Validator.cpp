@@ -8,6 +8,7 @@
 #include <string>
 
 #include "metadata/IMetaEngine.hpp"
+#include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "storage/StorageRegistry.hpp"
 #include "storage/StorageUrl.hpp"
@@ -16,16 +17,28 @@ namespace swordfs::config {
 
 const CLI::Validator ValidateMetaUrl = CLI::Validator(
     [](const std::string &input) -> std::string {
-      if (input == swordfs::metadata::kMemoryMetaUrl) {
-        return {};
+      const auto pos = input.find("://");
+      if (pos == std::string::npos) {
+        return "Unsupported metadata engine '" + input + "'";
       }
-      if (swordfs::metadata::IsRedisMetaUrl(input)) {
+      std::string scheme = input.substr(0, pos);
+      std::transform(scheme.begin(), scheme.end(), scheme.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+      if (!swordfs::metadata::MetaEngineRegistry::Instance().Available(
+              scheme)) {
+        return "Unsupported metadata engine '" + scheme + "'";
+      }
+      if (scheme == "memory") {
+        return input == swordfs::metadata::kMemoryMetaUrl
+                   ? ""
+                   : "Invalid memory metadata URL: " + input;
+      }
+      if (scheme == "redis") {
         swordfs::metadata::RedisMetaConfig config;
         auto status = swordfs::metadata::ParseRedisMetaUrl(input, &config);
         return status.ok() ? "" : status.message();
       }
-      return "Unsupported metadata engine '" + input +
-             "'. Supported: memory://local, redis://host[:port][/db]";
+      return {};
     },
     "META_URL");
 
