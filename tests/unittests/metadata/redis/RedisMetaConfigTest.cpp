@@ -16,6 +16,10 @@ TEST(RedisMetaConfigTest, ParsesHostWithDefaults) {
   EXPECT_EQ(config.db, 0);
   EXPECT_FALSE(config.username.has_value());
   EXPECT_FALSE(config.password.has_value());
+
+  status = ParseRedisMetaUrl("redis://localhost/", &config);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(config.db, 0);
 }
 
 TEST(RedisMetaConfigTest, ParsesAuthenticationPortAndDatabase) {
@@ -56,7 +60,8 @@ TEST(RedisMetaConfigTest, ParsesPasswordOnlyAuthentication) {
 
 TEST(RedisMetaConfigTest, RejectsInvalidUrls) {
   for (const auto url : {"memory://local", "redis://", "redis://:6379",
-                         "redis://host:0", "redis://host:70000",
+                         "redis://host:0", "redis://host:00", "redis://host:000",
+                         "redis://host:", "redis://host:70000",
                          "redis://host/not-a-db", "redis://host?x=1"}) {
     RedisMetaConfig config;
     auto status = ParseRedisMetaUrl(url, &config);

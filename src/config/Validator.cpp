@@ -8,6 +8,7 @@
 #include <string>
 
 #include "metadata/IMetaEngine.hpp"
+#include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "storage/StorageRegistry.hpp"
 #include "storage/StorageUrl.hpp"
@@ -25,7 +26,9 @@ const CLI::Validator ValidateMetaUrl = CLI::Validator(
         return status.ok() ? "" : status.message();
       }
       return "Unsupported metadata engine '" + input +
-             "'. Supported: memory://local, redis://host[:port][/db]";
+             "'. Supported: " +
+             swordfs::metadata::MetaEngineRegistry::Instance()
+                 .SupportedUrlSyntaxes();
     },
     "META_URL");
 

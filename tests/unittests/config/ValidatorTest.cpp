@@ -37,8 +37,12 @@ TEST(ValidateMetaUrlTest, ValidRedisUrl) {
 
 TEST(ValidateMetaUrlTest, UnknownValue) {
   EXPECT_FALSE(ValidateMetaUrl("redis://localhost:0").empty());
-  EXPECT_FALSE(ValidateMetaUrl("postgres://host/db").empty());
-  EXPECT_FALSE(ValidateMetaUrl("not-a-valid-url").empty());
+  const auto unsupported = ValidateMetaUrl("postgres://host/db");
+  EXPECT_NE(unsupported.find("Supported:"), std::string::npos);
+
+  const auto err = ValidateMetaUrl("not-a-valid-url");
+  EXPECT_NE(err.find("memory://local"), std::string::npos);
+  EXPECT_NE(err.find("redis://host[:port][/db]"), std::string::npos);
 }
 
 TEST(ValidateMetaUrlTest, InvalidRedisUrlHasHelpfulError) {

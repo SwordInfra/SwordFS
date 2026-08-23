@@ -27,14 +27,14 @@ class RedisMetaImpl : public IMetaEngine {
                               std::unique_ptr<RedisMetaImpl>* out);
   static Limits GetLimits();
 
-  Status Lookup(InodeID parent_ino, std::string_view name, InodeID* child_ino,
-                struct stat* attr) override;
-  Status GetAttr(InodeID ino, struct stat* attr) override;
+  Status Lookup(InodeID parent_ino, std::string_view name,
+                SwordFsInode* out) override;
+  Status GetInode(InodeID ino, SwordFsInode* out) override;
   Status ReadDir(InodeID ino, std::vector<SwordFsEntry>* entries) override;
   Status Create(InodeID parent_ino, std::string_view name, mode_t mode,
-                InodeID* child_ino, struct stat* attr) override;
+                SwordFsInode* out) override;
   Status MkDir(InodeID parent_ino, std::string_view name, mode_t mode,
-               InodeID* child_ino, struct stat* attr) override;
+               SwordFsInode* out) override;
   Status Unlink(InodeID parent_ino, std::string_view name,
                 nlink_t* post_nlink) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
@@ -42,13 +42,13 @@ class RedisMetaImpl : public IMetaEngine {
                 InodeID new_parent_ino, std::string_view new_name,
                 RenameFlag flags, RenameResult* result) override;
   Status SetAttr(InodeID ino, const struct stat* attr, SetAttrField fields,
-                 struct stat* out_attr) override;
+                 SwordFsInode* out) override;
   Status StatFs(struct statvfs* stbuf) override;
   Status Access(InodeID ino, int mask) override;
   Status Symlink(InodeID parent_ino, std::string_view name, const char* link,
-                 InodeID* child_ino, struct stat* attr) override;
+                 SwordFsInode* out) override;
   Status Link(InodeID ino, InodeID newparent_ino, std::string_view newname,
-              struct stat* attr) override;
+              SwordFsInode* out) override;
   Status Readlink(InodeID ino, std::string* target) override;
   Status Open(InodeID ino) override;
   Status ReclaimInode(InodeID ino) override;
