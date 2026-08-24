@@ -61,8 +61,7 @@ constexpr size_t kMaxFreeInodes = UINT64_MAX;
 // Entry operations
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaImpl::Lookup(InodeID parent_ino, std::string_view name,
-                           SwordFsInode *out) {
+Status MemMetaImpl::Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) {
   SwordFsInode child;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     Status status = txn.LookupEntry(parent_ino, name, &child);
@@ -73,12 +72,10 @@ Status MemMetaImpl::Lookup(InodeID parent_ino, std::string_view name,
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "Lookup: parent=" << parent_ino << " name='" << name
-                      << "' failed: " << status.message();
+    SWORDFS_LOG_DEBUG << "Lookup: parent=" << parent_ino << " name='" << name << "' failed: " << status.message();
     return status;
   }
-  SWORDFS_LOG_DEBUG << "Lookup: parent=" << parent_ino << " name='" << name
-                    << "' -> ino=" << child.ino;
+  SWORDFS_LOG_DEBUG << "Lookup: parent=" << parent_ino << " name='" << name << "' -> ino=" << child.ino;
 
   if (out) {
     *out = child;
@@ -88,13 +85,10 @@ Status MemMetaImpl::Lookup(InodeID parent_ino, std::string_view name,
 
 Status MemMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
   SwordFsInode inode;
-  Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
-    return txn.LookupInode(ino, &inode);
-  });
+  Status status = store_.Transact([&](MemMetaTxn &txn) -> Status { return txn.LookupInode(ino, &inode); });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "GetInode: ino " << ino
-                      << " failed: " << status.message();
+    SWORDFS_LOG_DEBUG << "GetInode: ino " << ino << " failed: " << status.message();
     return status;
   }
   if (out) {
@@ -103,8 +97,7 @@ Status MemMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
   return Status::OK();
 }
 
-Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name,
-                           mode_t mode, SwordFsInode *out) {
+Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, mode_t mode, SwordFsInode *out) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("file name exceeds maximum length");
   }
@@ -130,22 +123,18 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name,
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "Create: parent=" << parent_ino << " name='" << name
-                      << "' failed: " << status.message();
+    SWORDFS_LOG_DEBUG << "Create: parent=" << parent_ino << " name='" << name << "' failed: " << status.message();
     return status;
   }
 
-  SWORDFS_LOG_DEBUG << "Create: parent=" << parent_ino << " name='" << name
-                    << "' -> ino=" << child.ino;
+  SWORDFS_LOG_DEBUG << "Create: parent=" << parent_ino << " name='" << name << "' -> ino=" << child.ino;
   if (out) {
     *out = child;
   }
   return Status::OK();
 }
 
-Status MemMetaImpl::Unlink(InodeID parent_ino,
-                           std::string_view name,
-                           nlink_t *post_nlink) {
+Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, nlink_t *post_nlink) {
   // Refuse to unlink "." or ".."
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot unlink . or ..");
@@ -194,19 +183,15 @@ Status MemMetaImpl::Unlink(InodeID parent_ino,
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name
-                      << "' failed: " << status.message();
+    SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name << "' failed: " << status.message();
     return status;
   }
-  SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name
-                    << "' ino=" << target_ino;
+  SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name << "' ino=" << target_ino;
   return Status::OK();
 }
 
-Status MemMetaImpl::Rename(InodeID old_parent_ino,
-                           std::string_view old_name, InodeID new_parent_ino,
-                           std::string_view new_name, RenameFlag flags,
-                           RenameResult *result) {
+Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
+    std::string_view new_name, RenameFlag flags, RenameResult *result) {
   if (result) {
     *result = {};
   }
@@ -215,8 +200,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
   }
 
   // "." and ".." cannot be renamed
-  if (old_name == "." || old_name == ".." || new_name == "." ||
-      new_name == "..") {
+  if (old_name == "." || old_name == ".." || new_name == "." || new_name == "..") {
     return Status::Busy("cannot rename . or ..");
   }
 
@@ -267,8 +251,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
     }
 
     SwordFsInode existing;
-    bool target_exists =
-        txn.LookupEntry(new_parent_ino, new_name, &existing).ok();
+    bool target_exists = txn.LookupEntry(new_parent_ino, new_name, &existing).ok();
 
     // Sticky bit on the new parent: overwriting or exchanging away an
     // existing entry removes it from that directory, so it requires the
@@ -285,41 +268,35 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino,
         return Status::NotFound("target does not exist for RENAME_EXCHANGE");
       }
       if (existing.IsDir() != moved.IsDir()) {
-        return Status::InvalidArgument(
-            "cannot exchange directory with non-directory");
+        return Status::InvalidArgument("cannot exchange directory with non-directory");
       }
-      return txn.SwapEntries(old_parent_ino, old_name, new_parent_ino,
-                             new_name);
+      return txn.SwapEntries(old_parent_ino, old_name, new_parent_ino, new_name);
     }
 
     // Cycle prevention, the self-rename no-op, victim type checks and
     // victim removal are all enforced by MoveEntry; kNoReplace simply
     // withholds overwrite permission.
-    return txn.MoveEntry(old_parent_ino, old_name, new_parent_ino, new_name,
-                         !HasRenameFlag(flags, RenameFlag::kNoReplace), result);
+    return txn.MoveEntry(
+        old_parent_ino, old_name, new_parent_ino, new_name, !HasRenameFlag(flags, RenameFlag::kNoReplace), result);
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "Rename: " << old_parent_ino << "/'" << old_name
-                      << "' -> " << new_parent_ino << "/'" << new_name
-                      << "' failed: " << status.message();
+    SWORDFS_LOG_DEBUG << "Rename: " << old_parent_ino << "/'" << old_name << "' -> " << new_parent_ino << "/'"
+                      << new_name << "' failed: " << status.message();
     return status;
   }
-  SWORDFS_LOG_DEBUG << "Rename: " << old_parent_ino << "/'" << old_name
-                    << "' -> " << new_parent_ino << "/'" << new_name << "'";
+  SWORDFS_LOG_DEBUG << "Rename: " << old_parent_ino << "/'" << old_name << "' -> " << new_parent_ino << "/'" << new_name
+                    << "'";
   return Status::OK();
 }
 
-Status MemMetaImpl::SetAttr(InodeID ino, const struct stat *attr,
-                            SetAttrField fields, SwordFsInode *out) {
+Status MemMetaImpl::SetAttr(InodeID ino, const struct stat *attr, SetAttrField fields, SwordFsInode *out) {
   SwordFsInode result;
-  Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
-    return txn.SetAttr(ino, attr, fields, out ? &result : nullptr);
-  });
+  Status status = store_.Transact(
+      [&](MemMetaTxn &txn) -> Status { return txn.SetAttr(ino, attr, fields, out ? &result : nullptr); });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "SetAttr: ino " << ino
-                      << " failed: " << status.message();
+    SWORDFS_LOG_DEBUG << "SetAttr: ino " << ino << " failed: " << status.message();
     return status;
   }
   if (out) {
@@ -379,8 +356,7 @@ Status MemMetaImpl::Open(InodeID ino) {
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "Open: ino " << ino
-                      << " failed: " << status.message();
+    SWORDFS_LOG_DEBUG << "Open: ino " << ino << " failed: " << status.message();
   }
   return status;
 }
@@ -407,14 +383,12 @@ Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "ReadDir: ino " << ino
-                      << " failed: " << status.message();
+    SWORDFS_LOG_ERROR << "ReadDir: ino " << ino << " failed: " << status.message();
   }
   return status;
 }
 
-Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name,
-                          mode_t mode, SwordFsInode *out) {
+Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, mode_t mode, SwordFsInode *out) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("directory name exceeds maximum length");
   }
@@ -440,13 +414,11 @@ Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name,
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "MkDir: parent=" << parent_ino << " name='" << name
-                      << "' failed: " << status.message();
+    SWORDFS_LOG_DEBUG << "MkDir: parent=" << parent_ino << " name='" << name << "' failed: " << status.message();
     return status;
   }
 
-  SWORDFS_LOG_DEBUG << "MkDir: parent=" << parent_ino << " name='" << name
-                    << "' -> ino=" << child.ino;
+  SWORDFS_LOG_DEBUG << "MkDir: parent=" << parent_ino << " name='" << name << "' -> ino=" << child.ino;
 
   if (out) {
     *out = child;
@@ -454,8 +426,7 @@ Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name,
   return Status::OK();
 }
 
-Status MemMetaImpl::RmDir(InodeID parent_ino,
-                          std::string_view name) {
+Status MemMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
   // Cannot remove "." or ".."
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot remove . or ..");
@@ -501,12 +472,10 @@ Status MemMetaImpl::RmDir(InodeID parent_ino,
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "RmDir: parent=" << parent_ino << " name='" << name
-                      << "' failed: " << status.message();
+    SWORDFS_LOG_DEBUG << "RmDir: parent=" << parent_ino << " name='" << name << "' failed: " << status.message();
     return status;
   }
-  SWORDFS_LOG_DEBUG << "RmDir: parent=" << parent_ino << " name='" << name
-                    << "' ino=" << target_ino;
+  SWORDFS_LOG_DEBUG << "RmDir: parent=" << parent_ino << " name='" << name << "' ino=" << target_ino;
   return Status::OK();
 }
 
@@ -526,8 +495,7 @@ Status MemMetaImpl::OpenDir(InodeID ino) {
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "OpenDir: ino " << ino
-                      << " failed: " << status.message();
+    SWORDFS_LOG_ERROR << "OpenDir: ino " << ino << " failed: " << status.message();
   }
   return status;
 }
@@ -536,8 +504,7 @@ Status MemMetaImpl::OpenDir(InodeID ino) {
 // Link / symlink operations
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name,
-                            const char *link, SwordFsInode *out) {
+Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, const char *link, SwordFsInode *out) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("symlink name exceeds maximum length");
   }
@@ -575,8 +542,7 @@ Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name,
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "Symlink: parent=" << parent_ino << " name='" << name
-                      << "' failed: " << status.message();
+    SWORDFS_LOG_DEBUG << "Symlink: parent=" << parent_ino << " name='" << name << "' failed: " << status.message();
     return status;
   }
 
@@ -586,8 +552,7 @@ Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name,
   return Status::OK();
 }
 
-Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
-                         std::string_view newname, SwordFsInode *out) {
+Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) {
   if (newname.size() > kMaxNameLength) {
     return Status::NameTooLong("link name exceeds maximum length");
   }
@@ -622,8 +587,7 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino,
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "Link: ino=" << ino << " parent=" << newparent_ino
-                      << " name='" << newname
+    SWORDFS_LOG_DEBUG << "Link: ino=" << ino << " parent=" << newparent_ino << " name='" << newname
                       << "' failed: " << status.message();
     return status;
   }
@@ -650,8 +614,7 @@ Status MemMetaImpl::Readlink(InodeID ino, std::string *target) {
   });
 
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "Readlink: ino " << ino
-                      << " failed: " << status.message();
+    SWORDFS_LOG_DEBUG << "Readlink: ino " << ino << " failed: " << status.message();
   }
   return status;
 }
@@ -673,11 +636,9 @@ Status MemMetaImpl::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
 }
 
 Status MemMetaImpl::Truncate(InodeID ino, size_t size) {
-  Status status = store_.Transact(
-      [&](MemMetaTxn &txn) { return txn.Truncate(ino, size); });
+  Status status = store_.Transact([&](MemMetaTxn &txn) { return txn.Truncate(ino, size); });
   if (!status.ok()) {
-    SWORDFS_LOG_DEBUG << "Truncate: ino " << ino << " to " << size
-                      << " failed: " << status.message();
+    SWORDFS_LOG_DEBUG << "Truncate: ino " << ino << " to " << size << " failed: " << status.message();
   }
   return status;
 }
@@ -698,9 +659,7 @@ Status MemMetaImpl::StatFs(struct statvfs *stbuf) {
   stbuf->f_blocks = 268435456;  // ~1 TiB
   stbuf->f_bfree = 268435456;
   stbuf->f_bavail = 268435456;
-  store_.Transact([&](MemMetaTxn &txn) {
-    stbuf->f_files = txn.InodeCount();
-  });
+  store_.Transact([&](MemMetaTxn &txn) { stbuf->f_files = txn.InodeCount(); });
   stbuf->f_ffree = limits.max_free_inodes;
   return Status::OK();
 }

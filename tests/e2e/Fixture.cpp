@@ -108,7 +108,8 @@ bool Fixture::FormatVolume() {
   // CLI path end-to-end.
   std::ostringstream cmd;
   cmd << FindSwordfsBin() << " --log-file " << LogPath() << " format"
-      << " --volume " << volume_name_ << " --meta " << metadata_url << " --bucket " << bucket_url_ << " --volume-config-path " << vol_config_dir_ << " 2>&1";
+      << " --volume " << volume_name_ << " --meta " << metadata_url << " --bucket " << bucket_url_
+      << " --volume-config-path " << vol_config_dir_ << " 2>&1";
 
   int ret = std::system(cmd.str().c_str());
   if (ret != 0) {
@@ -403,21 +404,25 @@ std::string Fixture::MountPath(const std::string &relpath) const {
   ::umask(old);
   mode_t expected = expected_mask & ~old;
   if ((st.st_mode & 0777) != expected) {
-    return ::testing::AssertionFailure() << "umask mismatch for " << relpath << ": expected " << std::oct << expected << ", got " << (st.st_mode & 0777);
+    return ::testing::AssertionFailure() << "umask mismatch for " << relpath << ": expected " << std::oct << expected
+                                         << ", got " << (st.st_mode & 0777);
   }
   return ::testing::AssertionSuccess();
 }
 
-::testing::AssertionResult Fixture::FileEquals(const std::string &relpath, size_t expected_size, uint64_t expected_hash) {
+::testing::AssertionResult Fixture::FileEquals(
+    const std::string &relpath, size_t expected_size, uint64_t expected_hash) {
   std::string actual;
   if (ReadFile(relpath, &actual) != 0) {
-    return ::testing::AssertionFailure() << "Failed to read \"" << relpath << "\": " << std::strerror(errno) << " (errno=" << errno << ")";
+    return ::testing::AssertionFailure() << "Failed to read \"" << relpath << "\": " << std::strerror(errno)
+                                         << " (errno=" << errno << ")";
   }
   uint64_t actual_hash = Hash64(actual);
   if (actual.size() != expected_size || actual_hash != expected_hash) {
     return ::testing::AssertionFailure() << "File mismatch for \"" << relpath << "\""
-                                         << "\n  Expected: size=" << expected_size << " hash=0x" << std::hex << expected_hash
-                                         << "\n  Actual:   size=" << std::dec << actual.size() << " hash=0x" << std::hex << actual_hash;
+                                         << "\n  Expected: size=" << expected_size << " hash=0x" << std::hex
+                                         << expected_hash << "\n  Actual:   size=" << std::dec << actual.size()
+                                         << " hash=0x" << std::hex << actual_hash;
   }
   return ::testing::AssertionSuccess();
 }

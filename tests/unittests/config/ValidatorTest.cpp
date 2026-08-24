@@ -64,7 +64,8 @@ TEST(ValidateBucketUrlTest, ValidBucketUrlWithPrefix) {
 TEST(ValidateBucketUrlTest, MissingBucketName) {
   std::string err = ValidateBucketUrl("s3://endpoint.example.com");
   EXPECT_FALSE(err.empty());
-  EXPECT_NE(err.find("missing bucket name"), std::string::npos) << "Error should mention 'missing bucket name': " << err;
+  EXPECT_NE(err.find("missing bucket name"), std::string::npos)
+      << "Error should mention 'missing bucket name': " << err;
 }
 
 TEST(ValidateBucketUrlTest, EmptyString) {

@@ -23,7 +23,8 @@ protected:
     std::system(("rm -rf " + tmpdir_).c_str());
   }
 
-  ConfigCenter makeConfig(const std::string &meta_url, const std::string &vol_path, const std::string &vol_name = "testvol") {
+  ConfigCenter makeConfig(
+      const std::string &meta_url, const std::string &vol_path, const std::string &vol_name = "testvol") {
     ConfigCenter cfg;
     cfg.set_meta_url(meta_url);
     cfg.set_volume_config_path(vol_path);

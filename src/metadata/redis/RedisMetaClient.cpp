@@ -4,6 +4,8 @@
 #include "metadata/redis/RedisMetaClient.hpp"
 
 #include <folly/Random.h>
+#include <folly/fibers/Baton.h>
+#include <folly/fibers/FiberManagerInternal.h>
 
 #include <algorithm>
 #include <chrono>
@@ -11,6 +13,7 @@
 #include <thread>
 
 #include "metadata/redis/RedisMetaTxn.hpp"
+#include "utils/Logging.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -35,8 +38,13 @@ void Backoff(int attempt, std::chrono::milliseconds base_delay) {
   constexpr int kMaxDelayMs = 1000;
   const int exponent = std::min(attempt, 10);
   const auto max_delay = std::min(base_delay * (1 << exponent), std::chrono::milliseconds(kMaxDelayMs));
-  const auto delay = folly::Random::rand64(max_delay.count() + 1);
-  std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+  const auto delay = std::chrono::milliseconds(folly::Random::rand64(max_delay.count() + 1));
+  if (folly::fibers::FiberManager::getFiberManagerUnsafe() != nullptr) {
+    folly::fibers::Baton baton;
+    baton.try_wait_for(delay);
+  } else {
+    std::this_thread::sleep_for(delay);
+  }
 }
 
 utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
@@ -45,7 +53,8 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
 
 }  // namespace
 
-RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config) : retry_attempts_(config.retry_attempts), retry_backoff_(config.retry_backoff) {
+RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config)
+    : retry_attempts_(config.retry_attempts), retry_backoff_(config.retry_backoff) {
   sw::redis::ConnectionPoolOptions pool_options;
   pool_options.size = config.pool_size;
   pool_options.wait_timeout = config.pool_wait_timeout;
@@ -53,6 +62,10 @@ RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config) : retry_attempts
 }
 
 utils::Status RedisMetaClient::Ping() {
+  if (retry_attempts_ <= 0) {
+    return utils::Status::InvalidArgument("retry_attempts must be positive");
+  }
+
   try {
     redis_->ping();
     return utils::Status::OK();
@@ -62,10 +75,6 @@ utils::Status RedisMetaClient::Ping() {
 }
 
 utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
-  if (retry_attempts_ <= 0) {
-    return utils::Status::InvalidArgument("retry_attempts must be positive");
-  }
-
   const int attempts = retry_attempts_;
 
   for (int attempt = 0; attempt < attempts; ++attempt) {

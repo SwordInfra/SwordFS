@@ -58,7 +58,9 @@ TEST(RedisMetaConfigTest, ParsesIpv6Host) {
 TEST(RedisMetaConfigTest, ParsesClientOptions) {
   RedisMetaConfig config;
   const auto status = ParseRedisMetaUrl(
-      "redis://localhost/0?connect_timeout=250ms&socket_timeout=3s&pool_size=16&pool_wait_timeout=2s&retry_attempts=5&retry_backoff=40ms", &config);
+      "redis://localhost/"
+      "0?connect_timeout=250ms&socket_timeout=3s&pool_size=16&pool_wait_timeout=2s&retry_attempts=5&retry_backoff=40ms",
+      &config);
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(config.connect_timeout, std::chrono::milliseconds(250));
   EXPECT_EQ(config.socket_timeout, std::chrono::seconds(3));
@@ -69,9 +71,10 @@ TEST(RedisMetaConfigTest, ParsesClientOptions) {
 }
 
 TEST(RedisMetaConfigTest, RejectsInvalidClientOptions) {
-  for (const auto url : {"redis://localhost?connect_timeout=0s", "redis://localhost?socket_timeout=-1s", "redis://localhost?pool_size=0",
-           "redis://localhost?pool_wait_timeout=0s", "redis://localhost?retry_attempts=0", "redis://localhost?retry_backoff=abc", "redis://localhost?unknown=1",
-           "redis://localhost?pool_size=abc"}) {
+  for (const auto url :
+      {"redis://localhost?connect_timeout=0s", "redis://localhost?socket_timeout=-1s", "redis://localhost?pool_size=0",
+          "redis://localhost?pool_wait_timeout=0s", "redis://localhost?retry_attempts=0",
+          "redis://localhost?retry_backoff=abc", "redis://localhost?unknown=1", "redis://localhost?pool_size=abc"}) {
     RedisMetaConfig config;
     auto status = ParseRedisMetaUrl(url, &config);
     EXPECT_FALSE(status.ok()) << url;
@@ -88,8 +91,8 @@ TEST(RedisMetaConfigTest, ParsesPasswordOnlyAuthentication) {
 }
 
 TEST(RedisMetaConfigTest, RejectsInvalidUrls) {
-  for (const auto url : {"memory://local", "redis://", "redis://:6379", "redis://host:0", "redis://host:00", "redis://host:000",
-           "redis://host:", "redis://host:70000", "redis://host/not-a-db", "redis://host?x=1"}) {
+  for (const auto url : {"memory://local", "redis://", "redis://:6379", "redis://host:0", "redis://host:00",
+           "redis://host:000", "redis://host:", "redis://host:70000", "redis://host/not-a-db", "redis://host?x=1"}) {
     RedisMetaConfig config;
     auto status = ParseRedisMetaUrl(url, &config);
     EXPECT_FALSE(status.ok()) << url;

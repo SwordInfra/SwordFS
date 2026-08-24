@@ -3,7 +3,10 @@
 
 #include "metadata/redis/RedisMetaTxn.hpp"
 
+#include <folly/logging/xlog.h>
+
 #include "metadata/redis/RedisMetaClient.hpp"
+#include "utils/Logging.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -14,7 +17,11 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
 
 }  // namespace
 
-RedisMetaTxn::RedisMetaTxn(sw::redis::Redis &redis) : transaction_(redis.transaction(false, false)) {
+RedisMetaTxn::RedisMetaTxn(sw::redis::Redis &redis)
+    // piped=false: issue commands directly on the transaction connection.
+    // new_connection=false: check out the connection from Redis's pool so
+    // WATCH, reads, MULTI, queued writes, and EXEC use the same connection.
+    : transaction_(redis.transaction(false, false)) {
 }
 
 utils::Status RedisMetaTxn::Watch(std::string_view key) {
@@ -80,10 +87,10 @@ utils::Status RedisMetaTxn::Commit() {
   } catch (const sw::redis::WatchError &) {
     return utils::Status::Busy("Redis watched key changed");
   } catch (const sw::redis::TimeoutError &error) {
-    // TODO(#115): expose an explicit ambiguous-commit status so callers do
-    // not need to classify this condition from the error message.
+    SWORDFS_LOG_WARN << "Redis transaction EXEC timed out; commit result is ambiguous: " << error.what();
     return utils::Status::IOError("Redis transaction commit is ambiguous after EXEC: " + std::string(error.what()));
   } catch (const sw::redis::ClosedError &error) {
+    SWORDFS_LOG_WARN << "Redis transaction EXEC connection closed; commit result is ambiguous: " << error.what();
     return utils::Status::IOError("Redis transaction commit is ambiguous after EXEC: " + std::string(error.what()));
   } catch (const sw::redis::Error &error) {
     return RedisError("transaction EXEC", error);

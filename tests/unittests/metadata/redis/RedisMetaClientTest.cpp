@@ -140,13 +140,13 @@ TEST(RedisMetaClientTest, RetriesExplicitPreCommitFailure) {
   EXPECT_EQ(attempts, 2);
 }
 
-TEST(RedisMetaClientTest, RejectsNonPositiveRetryAttemptsWithoutRedis) {
+TEST(RedisMetaClientTest, RejectsNonPositiveRetryAttemptsDuringInitialization) {
   RedisMetaConfig config;
   config.host = "127.0.0.1";
   for (const int retry_attempts : {0, -1}) {
     config.retry_attempts = retry_attempts;
     RedisMetaClient store(config);
-    const auto status = store.Transact([](RedisMetaTxn &) { return utils::Status::OK(); });
+    const auto status = store.Ping();
     EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
   }
 }

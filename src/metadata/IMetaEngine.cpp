@@ -3,10 +3,10 @@
 
 #include "metadata/IMetaEngine.hpp"
 
+#include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/redis/RedisMetaImpl.hpp"
-#include "metadata/Utils.hpp"
 
 namespace swordfs::metadata {
 

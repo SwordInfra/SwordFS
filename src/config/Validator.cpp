@@ -7,10 +7,10 @@
 
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
+#include "metadata/Utils.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "storage/StorageRegistry.hpp"
 #include "storage/StorageUrl.hpp"
-#include "metadata/Utils.hpp"
 
 namespace swordfs::config {
 
