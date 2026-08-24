@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <stdexcept>
 #include <thread>
 
 #include "config/ConfigCenter.hpp"
@@ -53,6 +54,9 @@ RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config)
           static_cast<size_t>(swordfs::config::ConfigCenter::Instance().meta_thread_count()))),
       retry_attempts_(config.retry_attempts),
       retry_backoff_(config.retry_backoff) {
+  if (retry_attempts_ <= 0) {
+    throw std::invalid_argument("retry_attempts must be positive");
+  }
   sw::redis::ConnectionPoolOptions pool_options;
   pool_options.size = config.pool_size;
   pool_options.wait_timeout = config.pool_wait_timeout;
@@ -62,10 +66,6 @@ RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config)
 RedisMetaClient::~RedisMetaClient() = default;
 
 utils::Status RedisMetaClient::Ping() {
-  if (retry_attempts_ <= 0) {
-    return utils::Status::InvalidArgument("retry_attempts must be positive");
-  }
-
   return pool_->Run([this] {
     try {
       redis_->ping();

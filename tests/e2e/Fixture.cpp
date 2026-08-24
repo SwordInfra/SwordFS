@@ -23,7 +23,10 @@
 #include <sstream>
 #include <thread>
 
+#include <memory>
+
 #include "metadata/IMetaEngine.hpp"
+#include "metadata/MetaEngineFactory.hpp"
 
 namespace swordfs {
 namespace e2e {
@@ -135,7 +138,7 @@ bool Fixture::StartMount() {
   cmd << FindSwordfsBin() << " --log-file " << LogPath() << " mount "
       << " --volume " << volume_name_ << " --meta memory://local"
       << " --volume-config-path " << vol_config_dir_ << " --fuse-threads 2"
-      << " --storage-async-threads 2"
+      << " --storage-thread-count 2"
       << " --pidfile " << work_dir_ << "/swordfs.pid"
       << " " << mountpoint_ << " 2>&1";
 
@@ -449,7 +452,15 @@ std::string Fixture::GenerateRandomData(size_t len, RandomMode mode) {
 
 metadata::Limits Fixture::GetLimits() const {
   const char *metadata_url = std::getenv("SWORDFS_METADATA_URL");
-  return metadata::IMetaEngine::GetLimits(metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local");
+  const auto url = metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local";
+
+  std::unique_ptr<metadata::IMetaEngine> engine;
+  auto status = metadata::CreateMetaEngine(url, &engine);
+  if (!status.ok()) {
+    ADD_FAILURE() << "Failed to create metadata engine: " << status.message();
+    return {};
+  }
+  return engine->GetLimits();
 }
 
 // ────────────────────────────────────────────────────────────────

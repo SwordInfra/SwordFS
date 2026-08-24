@@ -28,6 +28,7 @@ using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::ChunkMeta;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
+using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
@@ -42,6 +43,7 @@ namespace {
 // transitions to kWriting and allocates a write buffer.
 class MissingMetaEngine final : public IMetaEngine {
  public:
+  Limits GetLimits() const override { return {}; }
   Status FindChunk(InodeID, ChunkIndex, ChunkMeta *) override {
     return Status::NotFound("no chunk");
   }

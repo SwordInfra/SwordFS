@@ -21,7 +21,6 @@
 #include <folly/fibers/Baton.h>
 #include <folly/fibers/FiberManagerInternal.h>
 #include <folly/futures/Future.h>
-#include <folly/logging/xlog.h>
 
 #include <exception>
 #include <memory>
@@ -46,37 +45,21 @@ class FiberThreadPool {
         << "FiberThreadPool::Run() must be called from a fiber";
 
     using Result = decltype(fn());
+    folly::Try<Result> result;
     folly::fibers::Baton baton;
-    std::exception_ptr ex;
-    if constexpr (std::is_void_v<Result>) {
-      folly::via(pool_.get(), [&baton, &ex, fn = std::forward<Fn>(fn)]() mutable {
-        try {
-          fn();
-        } catch (...) {
-          ex = std::current_exception();
-        }
-        baton.post();
-      });
-      baton.wait();
-      if (ex) {
-        std::rethrow_exception(ex);
-      }
-      return;
-    } else {
-      Result result;
-    folly::via(pool_.get(), [&baton, &ex, &result, fn = std::forward<Fn>(fn)]() mutable {
-      try {
-        result = fn();
-      } catch (...) {
-        ex = std::current_exception();
-      }
+
+    folly::via(pool_.get(), [&] {
+      result = folly::makeTryWith([&] { return fn(); });
       baton.post();
     });
+
     baton.wait();
-    if (ex) {
-      std::rethrow_exception(ex);
-    }
-      return result;
+
+    if constexpr (std::is_void_v<Result>) {
+      result.throwIfFailed();
+      return;
+    } else {
+      return std::move(result).value();
     }
   }
 

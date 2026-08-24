@@ -35,6 +35,11 @@ private:
   void Discard() noexcept;
   utils::Status Commit();
 
+  // Finish a read-only transaction with a harmless queued command so
+  // redis-plus-plus returns the checked-out pooled connection instead of
+  // invalidating it when QueuedRedis is destroyed.
+  utils::Status ReleaseConnection();
+
   std::optional<sw::redis::Transaction> transaction_;
   bool has_writes_ = false;
 };

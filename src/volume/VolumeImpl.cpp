@@ -8,10 +8,8 @@
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineFactory.hpp"
-#include "metadata/Utils.hpp"
 #include "storage/DataEngineFactory.hpp"
 #include "storage/IDataEngine.hpp"
-#include "storage/s3/S3DataEngine.hpp"
 
 namespace swordfs::volume {
 
@@ -68,12 +66,7 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
   }
 
   // Create engines.
-  std::string scheme;
-  status = swordfs::metadata::ParseUrlScheme(config_.meta_url, &scheme);
-  if (!status.ok()) {
-    return status;
-  }
-  status = swordfs::metadata::CreateMetaEngine(scheme, config_.meta_url, &meta_engine_);
+  status = swordfs::metadata::CreateMetaEngine(config_.meta_url, &meta_engine_);
   if (!status.ok()) {
     return status;
   }

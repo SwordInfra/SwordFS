@@ -3,17 +3,17 @@
 
 // Unit tests for FiberThreadPool.
 
+#include <folly/fibers/Baton.h>
+#include <folly/fibers/FiberManagerMap.h>
+#include <folly/io/async/EventBase.h>
 #include <gtest/gtest.h>
 
 #include <atomic>
 #include <chrono>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <folly/io/async/EventBase.h>
-#include <folly/fibers/Baton.h>
-#include <folly/fibers/FiberManagerMap.h>
 
 #include "utils/FiberThreadPool.hpp"
 
@@ -63,6 +63,11 @@ TEST(FiberThreadPoolTest, RunVoidFunction) {
   int counter = 0;
   RunInFiber([&] { pool.Run([&counter] { ++counter; }); });
   EXPECT_EQ(counter, 1);
+}
+
+TEST(FiberThreadPoolTest, RunPropagatesException) {
+  FiberThreadPool pool(1);
+  RunInFiber([&] { EXPECT_THROW(pool.Run([] { throw std::runtime_error("worker failure"); }), std::runtime_error); });
 }
 
 // ────────────────────────────────────────────────────────────────
