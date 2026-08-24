@@ -20,8 +20,7 @@ bool IsRedisMetaUrl(std::string_view meta_url) {
   return meta_url.starts_with(kRedisScheme);
 }
 
-utils::Status ParseRedisMetaUrl(std::string_view meta_url,
-                                RedisMetaConfig* config) {
+utils::Status ParseRedisMetaUrl(std::string_view meta_url, RedisMetaConfig *config) {
   if (config == nullptr) {
     return utils::Status::InvalidArgument("Redis metadata config is null");
   }
@@ -29,12 +28,11 @@ utils::Status ParseRedisMetaUrl(std::string_view meta_url,
     return utils::Status::InvalidArgument("Redis metadata URL must start with redis://");
   }
 
-  folly::Expected<folly::Uri, folly::UriFormatError> uri_result =
-      folly::Uri::tryFromString(meta_url);
+  folly::Expected<folly::Uri, folly::UriFormatError> uri_result = folly::Uri::tryFromString(meta_url);
   if (!uri_result.hasValue()) {
     return utils::Status::InvalidArgument("Redis metadata URL is malformed");
   }
-  const auto& uri = uri_result.value();
+  const auto &uri = uri_result.value();
   if (uri.scheme() != "redis") {
     return utils::Status::InvalidArgument("Redis metadata URL must use redis scheme");
   }
@@ -45,8 +43,7 @@ utils::Status ParseRedisMetaUrl(std::string_view meta_url,
   // and volume namespace are implemented. Phase 0 intentionally rejects query
   // components rather than silently ignoring them.
   if (!uri.query().empty() || !uri.fragment().empty()) {
-    return utils::Status::InvalidArgument(
-        "Redis metadata URL does not support query or fragment components");
+    return utils::Status::InvalidArgument("Redis metadata URL does not support query or fragment components");
   }
 
   RedisMetaConfig parsed;

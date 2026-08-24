@@ -1,11 +1,11 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
+#include <gtest/gtest.h>
+
 #include <cstdlib>
 #include <optional>
 #include <string>
-
-#include <gtest/gtest.h>
 
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/redis/RedisMetaStore.hpp"
@@ -13,12 +13,12 @@
 namespace swordfs::metadata {
 namespace {
 
-const char* RedisTestUrl() {
+const char *RedisTestUrl() {
   return std::getenv("SWORDFS_REDIS_TEST_URL");
 }
 
-bool ParseTestConfig(RedisMetaConfig* config) {
-  const char* url = RedisTestUrl();
+bool ParseTestConfig(RedisMetaConfig *config) {
+  const char *url = RedisTestUrl();
   if (url == nullptr) {
     return false;
   }
@@ -27,7 +27,7 @@ bool ParseTestConfig(RedisMetaConfig* config) {
   return status.ok();
 }
 
-sw::redis::ConnectionOptions ConnectionOptions(const RedisMetaConfig& config) {
+sw::redis::ConnectionOptions ConnectionOptions(const RedisMetaConfig &config) {
   sw::redis::ConnectionOptions options;
   options.host = config.host;
   options.port = config.port;
@@ -51,7 +51,7 @@ TEST(RedisMetaStoreTest, StandalonePingAndWatchReadMultiExec) {
   sw::redis::Redis cleanup(ConnectionOptions(config));
   cleanup.del(key);
 
-  status = store.Transact([&](RedisMetaTxn& transaction) {
+  status = store.Transact([&](RedisMetaTxn &transaction) {
     auto txn_status = transaction.Watch(key);
     if (!txn_status.ok()) {
       return txn_status;
@@ -67,7 +67,7 @@ TEST(RedisMetaStoreTest, StandalonePingAndWatchReadMultiExec) {
   });
   ASSERT_TRUE(status.ok()) << status.message();
 
-  status = store.Transact([&](RedisMetaTxn& transaction) {
+  status = store.Transact([&](RedisMetaTxn &transaction) {
     std::optional<std::string> value;
     auto txn_status = transaction.Get(key, &value);
     if (!txn_status.ok()) {
@@ -94,7 +94,7 @@ TEST(RedisMetaStoreTest, RetriesWatchConflict) {
 
   RedisMetaStore store(config);
   int attempts = 0;
-  const auto status = store.Transact([&](RedisMetaTxn& transaction) {
+  const auto status = store.Transact([&](RedisMetaTxn &transaction) {
     ++attempts;
     auto txn_status = transaction.Watch(key);
     if (!txn_status.ok()) {
@@ -129,7 +129,7 @@ TEST(RedisMetaStoreTest, RetriesExplicitPreCommitFailure) {
 
   RedisMetaStore store(config);
   int attempts = 0;
-  const auto status = store.Transact([&](RedisMetaTxn& transaction) {
+  const auto status = store.Transact([&](RedisMetaTxn &transaction) {
     ++attempts;
     if (attempts == 1) {
       return utils::Status::Busy("retry");
@@ -145,8 +145,7 @@ TEST(RedisMetaStoreTest, RejectsNonPositiveMaxAttemptsWithoutRedis) {
   config.host = "127.0.0.1";
   RedisMetaStore store(config);
   for (const int max_attempts : {0, -1}) {
-    const auto status = store.Transact(
-        [](RedisMetaTxn&) { return utils::Status::OK(); }, max_attempts);
+    const auto status = store.Transact([](RedisMetaTxn &) { return utils::Status::OK(); }, max_attempts);
     EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
   }
 }
@@ -157,7 +156,7 @@ TEST(RedisMetaStoreTest, RetriesUntilLimitIsExceeded) {
   RedisMetaStore store(config);
   int attempts = 0;
   const auto status = store.Transact(
-      [&](RedisMetaTxn&) {
+      [&](RedisMetaTxn &) {
         ++attempts;
         return utils::Status::Busy("retry");
       },
@@ -173,7 +172,7 @@ TEST(RedisMetaStoreTest, ReadOnlyTransactionCommitsAsNoOp) {
   }
 
   RedisMetaStore store(config);
-  const auto status = store.Transact([](RedisMetaTxn& transaction) {
+  const auto status = store.Transact([](RedisMetaTxn &transaction) {
     std::optional<std::string> value;
     return transaction.Get("swordfs:phase0:read-only", &value);
   });
@@ -187,7 +186,7 @@ TEST(RedisMetaStoreTest, PreservesCallbackErrorWithoutQueuedWrite) {
   }
 
   RedisMetaStore store(config);
-  const auto status = store.Transact([](RedisMetaTxn& transaction) {
+  const auto status = store.Transact([](RedisMetaTxn &transaction) {
     std::optional<std::string> value;
     const auto get_status = transaction.Get("swordfs:phase0:missing", &value);
     if (!get_status.ok()) {

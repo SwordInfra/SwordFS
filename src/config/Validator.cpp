@@ -22,16 +22,12 @@ const CLI::Validator ValidateMetaUrl = CLI::Validator(
         return "Unsupported metadata engine '" + input + "'";
       }
       std::string scheme = input.substr(0, pos);
-      std::transform(scheme.begin(), scheme.end(), scheme.begin(),
-                     [](unsigned char c) { return std::tolower(c); });
-      if (!swordfs::metadata::MetaEngineRegistry::Instance().Available(
-              scheme)) {
+      std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char c) { return std::tolower(c); });
+      if (!swordfs::metadata::MetaEngineRegistry::Instance().Available(scheme)) {
         return "Unsupported metadata engine '" + scheme + "'";
       }
       if (scheme == "memory") {
-        return input == swordfs::metadata::kMemoryMetaUrl
-                   ? ""
-                   : "Invalid memory metadata URL: " + input;
+        return input == swordfs::metadata::kMemoryMetaUrl ? "" : "Invalid memory metadata URL: " + input;
       }
       if (scheme == "redis") {
         swordfs::metadata::RedisMetaConfig config;
@@ -49,8 +45,7 @@ const CLI::Validator ValidateBucketUrl = CLI::Validator(
         return "Bucket URL must have a scheme:// prefix, got: " + input;
       }
       std::string scheme = input.substr(0, pos);
-      std::transform(scheme.begin(), scheme.end(), scheme.begin(),
-                     [](unsigned char c) { return std::tolower(c); });
+      std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char c) { return std::tolower(c); });
       if (!swordfs::storage::StorageRegistry::Instance().Available(scheme)) {
         return "Unsupported bucket scheme '" + scheme + "', got: " + input;
       }

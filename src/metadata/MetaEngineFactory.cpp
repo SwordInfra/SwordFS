@@ -12,8 +12,7 @@
 
 namespace swordfs::metadata {
 
-utils::Status CreateMetaEngine(std::string_view meta_url,
-                               std::unique_ptr<IMetaEngine>* out) {
+utils::Status CreateMetaEngine(std::string_view meta_url, std::unique_ptr<IMetaEngine> *out) {
   if (IsMemoryMode(meta_url)) {
     *out = std::make_unique<MemMetaImpl>();
     return utils::Status::OK();
@@ -32,8 +31,7 @@ utils::Status CreateMetaEngine(std::string_view meta_url,
     *out = std::move(redis);
     return utils::Status::OK();
   }
-  return utils::Status::NotSupported(
-      "unsupported metadata engine: " + std::string(meta_url));
+  return utils::Status::NotSupported("unsupported metadata engine: " + std::string(meta_url));
 }
 
 }  // namespace swordfs::metadata

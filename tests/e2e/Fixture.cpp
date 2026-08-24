@@ -58,8 +58,8 @@ Fixture::~Fixture() {
 bool Fixture::SetUp() {
   if (base_bucket_url_.empty()) {
     std::fprintf(stderr,
-                 "E2E: SWORDFS_E2E_S3_BUCKET is not set or empty. "
-                 "E2E tests require a valid S3 bucket URL.\n");
+        "E2E: SWORDFS_E2E_S3_BUCKET is not set or empty. "
+        "E2E tests require a valid S3 bucket URL.\n");
     return false;
   }
 
@@ -100,27 +100,19 @@ bool Fixture::FormatVolume() {
   std::error_code ec;
   std::filesystem::create_directories(vol_config_dir_, ec);
   if (ec) {
-    std::fprintf(stderr, "E2E: failed to create %s: %s\n",
-                 vol_config_dir_.c_str(), ec.message().c_str());
+    std::fprintf(stderr, "E2E: failed to create %s: %s\n", vol_config_dir_.c_str(), ec.message().c_str());
     return false;
   }
 
   // Shell out to the `swordfs format` binary to exercise the real
   // CLI path end-to-end.
   std::ostringstream cmd;
-  cmd << FindSwordfsBin()
-      << " --log-file " << LogPath()
-      << " format"
-      << " --volume " << volume_name_
-      << " --meta " << metadata_url
-      << " --bucket " << bucket_url_
-      << " --volume-config-path " << vol_config_dir_
-      << " 2>&1";
+  cmd << FindSwordfsBin() << " --log-file " << LogPath() << " format"
+      << " --volume " << volume_name_ << " --meta " << metadata_url << " --bucket " << bucket_url_ << " --volume-config-path " << vol_config_dir_ << " 2>&1";
 
   int ret = std::system(cmd.str().c_str());
   if (ret != 0) {
-    std::fprintf(stderr, "E2E: format failed (exit=%d): %s\n",
-                 WEXITSTATUS(ret), cmd.str().c_str());
+    std::fprintf(stderr, "E2E: format failed (exit=%d): %s\n", WEXITSTATUS(ret), cmd.str().c_str());
     return false;
   }
   return true;
@@ -134,28 +126,21 @@ bool Fixture::StartMount() {
   std::error_code ec;
   std::filesystem::create_directories(mountpoint_, ec);
   if (ec) {
-    std::fprintf(stderr, "E2E: failed to create %s: %s\n",
-                 mountpoint_.c_str(), ec.message().c_str());
+    std::fprintf(stderr, "E2E: failed to create %s: %s\n", mountpoint_.c_str(), ec.message().c_str());
     return false;
   }
 
   std::ostringstream cmd;
-  cmd << FindSwordfsBin()
-      << " --log-file " << LogPath()
-      << " mount "
-      << " --volume " << volume_name_
-      << " --meta memory://local"
-      << " --volume-config-path " << vol_config_dir_
-      << " --fuse-threads 2"
+  cmd << FindSwordfsBin() << " --log-file " << LogPath() << " mount "
+      << " --volume " << volume_name_ << " --meta memory://local"
+      << " --volume-config-path " << vol_config_dir_ << " --fuse-threads 2"
       << " --storage-async-threads 2"
       << " --pidfile " << work_dir_ << "/swordfs.pid"
-      << " " << mountpoint_
-      << " 2>&1";
+      << " " << mountpoint_ << " 2>&1";
 
   int ret = std::system(cmd.str().c_str());
   if (ret != 0) {
-    std::fprintf(stderr, "E2E: mount failed (exit=%d): %s\n",
-                 WEXITSTATUS(ret), cmd.str().c_str());
+    std::fprintf(stderr, "E2E: mount failed (exit=%d): %s\n", WEXITSTATUS(ret), cmd.str().c_str());
     return false;
   }
 
@@ -183,8 +168,7 @@ bool Fixture::WaitForMount() {
     std::this_thread::sleep_for(std::chrono::microseconds(kDelayUs));
   }
 
-  std::fprintf(stderr, "E2E: timed out waiting for mount at %s\n",
-               mountpoint_.c_str());
+  std::fprintf(stderr, "E2E: timed out waiting for mount at %s\n", mountpoint_.c_str());
   return false;
 }
 
@@ -226,8 +210,7 @@ bool Fixture::IsDaemonGone() const {
 
 int Fixture::Stat(const std::string &relpath, struct stat *st) const {
   if (::stat(MountPath(relpath).c_str(), st) != 0) {
-    std::fprintf(stderr, "E2E: stat(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: stat(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -235,8 +218,7 @@ int Fixture::Stat(const std::string &relpath, struct stat *st) const {
 
 int Fixture::Lstat(const std::string &relpath, struct stat *st) const {
   if (::lstat(MountPath(relpath).c_str(), st) != 0) {
-    std::fprintf(stderr, "E2E: lstat(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: lstat(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -251,8 +233,7 @@ int Fixture::Statfs(struct statvfs *sv) const {
 
 int Fixture::Access(const std::string &relpath, int mode) {
   if (::access(MountPath(relpath).c_str(), mode) != 0) {
-    std::fprintf(stderr, "E2E: access(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: access(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -261,8 +242,7 @@ int Fixture::Access(const std::string &relpath, int mode) {
 int Fixture::CreateFile(const std::string &relpath, mode_t mode, int flags) {
   int fd = ::open(MountPath(relpath).c_str(), flags, mode);
   if (fd < 0) {
-    std::fprintf(stderr, "E2E: open(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: open(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   ::close(fd);
@@ -272,8 +252,7 @@ int Fixture::CreateFile(const std::string &relpath, mode_t mode, int flags) {
 int Fixture::OpenFile(const std::string &relpath, int flags) {
   int fd = ::open(MountPath(relpath).c_str(), flags);
   if (fd < 0) {
-    std::fprintf(stderr, "E2E: open(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: open(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return fd;
@@ -281,24 +260,20 @@ int Fixture::OpenFile(const std::string &relpath, int flags) {
 
 int Fixture::ReadFile(const std::string &relpath, std::string *out) {
   if (!folly::readFile(MountPath(relpath).c_str(), *out)) {
-    std::fprintf(stderr, "E2E: read(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: read(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
 }
 
-int Fixture::WriteFile(const std::string &relpath,
-                       const std::string &data) {
+int Fixture::WriteFile(const std::string &relpath, const std::string &data) {
   std::string path = MountPath(relpath);
   if (::access(path.c_str(), F_OK) != 0) {
-    std::fprintf(stderr, "E2E: write(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: write(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   if (!folly::writeFile(data, path.c_str())) {
-    std::fprintf(stderr, "E2E: write(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: write(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -308,8 +283,7 @@ int Fixture::ReadDir(const std::string &relpath, std::vector<std::string> *entri
   entries->clear();
   DIR *dp = ::opendir(MountPath(relpath).c_str());
   if (!dp) {
-    std::fprintf(stderr, "E2E: opendir(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: opendir(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   struct dirent *de;
@@ -325,8 +299,7 @@ int Fixture::ReadDir(const std::string &relpath, std::vector<std::string> *entri
 
 int Fixture::UnlinkFile(const std::string &relpath) {
   if (::unlink(MountPath(relpath).c_str()) != 0) {
-    std::fprintf(stderr, "E2E: unlink(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: unlink(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -334,8 +307,7 @@ int Fixture::UnlinkFile(const std::string &relpath) {
 
 int Fixture::MkDir(const std::string &relpath, mode_t mode) {
   if (::mkdir(MountPath(relpath).c_str(), mode) != 0) {
-    std::fprintf(stderr, "E2E: mkdir(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: mkdir(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -343,8 +315,7 @@ int Fixture::MkDir(const std::string &relpath, mode_t mode) {
 
 int Fixture::RmDir(const std::string &relpath) {
   if (::rmdir(MountPath(relpath).c_str()) != 0) {
-    std::fprintf(stderr, "E2E: rmdir(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: rmdir(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -352,8 +323,7 @@ int Fixture::RmDir(const std::string &relpath) {
 
 int Fixture::Rename(const std::string &oldpath, const std::string &newpath) {
   if (::rename(MountPath(oldpath).c_str(), MountPath(newpath).c_str()) != 0) {
-    std::fprintf(stderr, "E2E: rename(%s -> %s) failed: %s\n",
-                 oldpath.c_str(), newpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: rename(%s -> %s) failed: %s\n", oldpath.c_str(), newpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -361,8 +331,7 @@ int Fixture::Rename(const std::string &oldpath, const std::string &newpath) {
 
 int Fixture::Symlink(const std::string &target, const std::string &linkpath) {
   if (::symlink(target.c_str(), MountPath(linkpath).c_str()) != 0) {
-    std::fprintf(stderr, "E2E: symlink(%s -> %s) failed: %s\n",
-                 linkpath.c_str(), target.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: symlink(%s -> %s) failed: %s\n", linkpath.c_str(), target.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -370,8 +339,7 @@ int Fixture::Symlink(const std::string &target, const std::string &linkpath) {
 
 int Fixture::HardLink(const std::string &oldpath, const std::string &newpath) {
   if (::link(MountPath(oldpath).c_str(), MountPath(newpath).c_str()) != 0) {
-    std::fprintf(stderr, "E2E: link(%s -> %s) failed: %s\n",
-                 oldpath.c_str(), newpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: link(%s -> %s) failed: %s\n", oldpath.c_str(), newpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -381,8 +349,7 @@ int Fixture::Readlink(const std::string &relpath, std::string *target) {
   char buf[PATH_MAX];
   ssize_t len = ::readlink(MountPath(relpath).c_str(), buf, sizeof(buf) - 1);
   if (len < 0) {
-    std::fprintf(stderr, "E2E: readlink(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: readlink(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   buf[len] = '\0';
@@ -392,8 +359,7 @@ int Fixture::Readlink(const std::string &relpath, std::string *target) {
 
 int Fixture::Chmod(const std::string &relpath, mode_t mode) {
   if (::chmod(MountPath(relpath).c_str(), mode) != 0) {
-    std::fprintf(stderr, "E2E: chmod(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: chmod(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -401,8 +367,7 @@ int Fixture::Chmod(const std::string &relpath, mode_t mode) {
 
 int Fixture::Truncate(const std::string &relpath, off_t length) {
   if (::truncate(MountPath(relpath).c_str(), length) != 0) {
-    std::fprintf(stderr, "E2E: truncate(%s) failed: %s\n",
-                 relpath.c_str(), std::strerror(errno));
+    std::fprintf(stderr, "E2E: truncate(%s) failed: %s\n", relpath.c_str(), std::strerror(errno));
     return -1;
   }
   return 0;
@@ -429,40 +394,30 @@ std::string Fixture::MountPath(const std::string &relpath) const {
   return mountpoint_ + "/" + relpath;
 }
 
-::testing::AssertionResult Fixture::UmaskEquals(
-    const std::string &relpath, mode_t expected_mask) const {
+::testing::AssertionResult Fixture::UmaskEquals(const std::string &relpath, mode_t expected_mask) const {
   struct stat st;
   if (::stat(MountPath(relpath).c_str(), &st) != 0) {
-    return ::testing::AssertionFailure()
-           << "stat(" << relpath << ") failed: " << std::strerror(errno);
+    return ::testing::AssertionFailure() << "stat(" << relpath << ") failed: " << std::strerror(errno);
   }
   mode_t old = ::umask(0);
   ::umask(old);
   mode_t expected = expected_mask & ~old;
   if ((st.st_mode & 0777) != expected) {
-    return ::testing::AssertionFailure()
-           << "umask mismatch for " << relpath
-           << ": expected " << std::oct << expected
-           << ", got " << (st.st_mode & 0777);
+    return ::testing::AssertionFailure() << "umask mismatch for " << relpath << ": expected " << std::oct << expected << ", got " << (st.st_mode & 0777);
   }
   return ::testing::AssertionSuccess();
 }
 
-::testing::AssertionResult Fixture::FileEquals(
-    const std::string &relpath, size_t expected_size,
-    uint64_t expected_hash) {
+::testing::AssertionResult Fixture::FileEquals(const std::string &relpath, size_t expected_size, uint64_t expected_hash) {
   std::string actual;
   if (ReadFile(relpath, &actual) != 0) {
-    return ::testing::AssertionFailure()
-           << "Failed to read \"" << relpath << "\": "
-           << std::strerror(errno) << " (errno=" << errno << ")";
+    return ::testing::AssertionFailure() << "Failed to read \"" << relpath << "\": " << std::strerror(errno) << " (errno=" << errno << ")";
   }
   uint64_t actual_hash = Hash64(actual);
   if (actual.size() != expected_size || actual_hash != expected_hash) {
-    return ::testing::AssertionFailure()
-           << "File mismatch for \"" << relpath << "\""
-           << "\n  Expected: size=" << expected_size << " hash=0x" << std::hex << expected_hash
-           << "\n  Actual:   size=" << std::dec << actual.size() << " hash=0x" << std::hex << actual_hash;
+    return ::testing::AssertionFailure() << "File mismatch for \"" << relpath << "\""
+                                         << "\n  Expected: size=" << expected_size << " hash=0x" << std::hex << expected_hash
+                                         << "\n  Actual:   size=" << std::dec << actual.size() << " hash=0x" << std::hex << actual_hash;
   }
   return ::testing::AssertionSuccess();
 }
@@ -489,8 +444,7 @@ std::string Fixture::GenerateRandomData(size_t len, RandomMode mode) {
 
 metadata::Limits Fixture::GetLimits() const {
   const char *metadata_url = std::getenv("SWORDFS_METADATA_URL");
-  return metadata::IMetaEngine::GetLimits(
-      metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local");
+  return metadata::IMetaEngine::GetLimits(metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local");
 }
 
 // ────────────────────────────────────────────────────────────────

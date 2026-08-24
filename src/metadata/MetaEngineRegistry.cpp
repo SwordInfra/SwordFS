@@ -7,7 +7,7 @@
 
 namespace swordfs::metadata {
 
-MetaEngineRegistry& MetaEngineRegistry::Instance() {
+MetaEngineRegistry &MetaEngineRegistry::Instance() {
   static MetaEngineRegistry registry;
   return registry;
 }
@@ -17,10 +17,7 @@ void MetaEngineRegistry::Register(std::string_view name) {
 }
 
 bool MetaEngineRegistry::Available(std::string_view name) const {
-  return std::any_of(engines_.begin(), engines_.end(),
-                     [name](std::string_view engine) {
-                       return engine == name;
-                     });
+  return std::any_of(engines_.begin(), engines_.end(), [name](std::string_view engine) { return engine == name; });
 }
 
 }  // namespace swordfs::metadata

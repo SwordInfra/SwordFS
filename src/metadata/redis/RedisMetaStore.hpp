@@ -3,13 +3,13 @@
 
 #pragma once
 
+#include <sw/redis++/redis++.h>
+
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
-
-#include <sw/redis++/redis++.h>
 
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "utils/Status.hpp"
@@ -23,14 +23,14 @@ namespace swordfs::metadata {
 // rejects WATCH. The object is only valid for the lifetime of
 // RedisMetaStore::Transact().
 class RedisMetaTxn {
- public:
+public:
   utils::Status Watch(std::string_view key);
-  utils::Status Get(std::string_view key, std::optional<std::string>* value);
+  utils::Status Get(std::string_view key, std::optional<std::string> *value);
   utils::Status Set(std::string_view key, std::string_view value);
 
- private:
+private:
   friend class RedisMetaStore;
-  explicit RedisMetaTxn(sw::redis::Redis& redis);
+  explicit RedisMetaTxn(sw::redis::Redis &redis);
 
   void Discard() noexcept;
   utils::Status Commit();
@@ -40,13 +40,13 @@ class RedisMetaTxn {
 };
 
 class RedisMetaStore {
- public:
+public:
   static constexpr int kDefaultMaxAttempts = 8;
 
-  explicit RedisMetaStore(const RedisMetaConfig& config);
+  explicit RedisMetaStore(const RedisMetaConfig &config);
 
-  RedisMetaStore(const RedisMetaStore&) = delete;
-  RedisMetaStore& operator=(const RedisMetaStore&) = delete;
+  RedisMetaStore(const RedisMetaStore &) = delete;
+  RedisMetaStore &operator=(const RedisMetaStore &) = delete;
 
   utils::Status Ping();
 
@@ -54,10 +54,9 @@ class RedisMetaStore {
   // connection so WATCH, reads, MULTI, queued writes and EXEC share the same
   // connection. Busy and WATCH conflicts retry with bounded backoff.
   //
-  utils::Status Transact(const std::function<utils::Status(RedisMetaTxn&)>& callback,
-                         int max_attempts = kDefaultMaxAttempts);
+  utils::Status Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback, int max_attempts = kDefaultMaxAttempts);
 
- private:
+private:
   std::unique_ptr<sw::redis::Redis> redis_;
 };
 

@@ -1,7 +1,14 @@
 BasedOnStyle: Google
 SortIncludes: true
 IncludeBlocks: Regroup
-ColumnLimit: 0
-AccessModifierOffset: -1
+ColumnLimit: 160
+IndentWidth: 2
+ContinuationIndentWidth: 4
+AlignAfterOpenBracket: DontAlign
+BinPackArguments: true
+BinPackParameters: true
+BreakBeforeBinaryOperators: None
+AccessModifierOffset: -2
 PointerAlignment: Right
+AllowShortFunctionsOnASingleLine: None
 InsertBraces: true

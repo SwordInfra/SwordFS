@@ -28,13 +28,11 @@ VolumeImpl &VolumeImpl::Instance() {
   return *instance_;
 }
 
-void VolumeImpl::set_meta_engine(
-    std::unique_ptr<swordfs::metadata::IMetaEngine> meta) {
+void VolumeImpl::set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine> meta) {
   meta_engine_ = std::move(meta);
 }
 
-void VolumeImpl::set_data_engine(
-    std::unique_ptr<swordfs::storage::IDataEngine> data) {
+void VolumeImpl::set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine> data) {
   data_engine_ = std::move(data);
 }
 
@@ -43,11 +41,9 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
   if (!swordfs::metadata::IsMemoryMode(config_.meta_url)) {
     swordfs::metadata::RedisMetaConfig redis_config;
     if (!swordfs::metadata::IsRedisMetaUrl(config_.meta_url)) {
-      return Status::InvalidArgument(
-          "unsupported metadata engine: " + config_.meta_url);
+      return Status::InvalidArgument("unsupported metadata engine: " + config_.meta_url);
     }
-    auto status = swordfs::metadata::ParseRedisMetaUrl(config_.meta_url,
-                                                        &redis_config);
+    auto status = swordfs::metadata::ParseRedisMetaUrl(config_.meta_url, &redis_config);
     if (!status.ok()) {
       return status;
     }

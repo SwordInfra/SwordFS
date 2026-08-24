@@ -38,18 +38,15 @@ TEST(ValidateMetaUrlTest, ValidRedisUrl) {
 TEST(ValidateMetaUrlTest, UnknownValue) {
   EXPECT_FALSE(ValidateMetaUrl("redis://localhost:0").empty());
   const auto unsupported = ValidateMetaUrl("postgres://host/db");
-  EXPECT_NE(unsupported.find("Unsupported metadata engine 'postgres'"),
-            std::string::npos);
+  EXPECT_NE(unsupported.find("Unsupported metadata engine 'postgres'"), std::string::npos);
 
   const auto err = ValidateMetaUrl("not-a-valid-url");
-  EXPECT_NE(err.find("Unsupported metadata engine 'not-a-valid-url'"),
-            std::string::npos);
+  EXPECT_NE(err.find("Unsupported metadata engine 'not-a-valid-url'"), std::string::npos);
 }
 
 TEST(ValidateMetaUrlTest, InvalidRedisUrlHasHelpfulError) {
   std::string err = ValidateMetaUrl("redis://localhost:0");
-  EXPECT_NE(err.find("invalid port"), std::string::npos)
-      << "Error should describe the invalid Redis URL: " << err;
+  EXPECT_NE(err.find("invalid port"), std::string::npos) << "Error should describe the invalid Redis URL: " << err;
 }
 
 // ================================================================
@@ -67,8 +64,7 @@ TEST(ValidateBucketUrlTest, ValidBucketUrlWithPrefix) {
 TEST(ValidateBucketUrlTest, MissingBucketName) {
   std::string err = ValidateBucketUrl("s3://endpoint.example.com");
   EXPECT_FALSE(err.empty());
-  EXPECT_NE(err.find("missing bucket name"), std::string::npos)
-      << "Error should mention 'missing bucket name': " << err;
+  EXPECT_NE(err.find("missing bucket name"), std::string::npos) << "Error should mention 'missing bucket name': " << err;
 }
 
 TEST(ValidateBucketUrlTest, EmptyString) {

@@ -10,8 +10,8 @@ namespace swordfs::metadata {
 
 /// Registry of metadata engines available in this build.
 class MetaEngineRegistry {
- public:
-  static MetaEngineRegistry& Instance();
+public:
+  static MetaEngineRegistry &Instance();
 
   /// Register a metadata engine. Called at static initialization time.
   void Register(std::string_view name);
@@ -19,7 +19,7 @@ class MetaEngineRegistry {
   /// Return whether a metadata engine with the given name is registered.
   bool Available(std::string_view name) const;
 
- private:
+private:
   MetaEngineRegistry() = default;
   std::vector<std::string_view> engines_;
 };

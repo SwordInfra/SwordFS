@@ -21,7 +21,6 @@ struct RedisMetaConfig {
 };
 
 bool IsRedisMetaUrl(std::string_view meta_url);
-utils::Status ParseRedisMetaUrl(std::string_view meta_url,
-                                RedisMetaConfig* config);
+utils::Status ParseRedisMetaUrl(std::string_view meta_url, RedisMetaConfig *config);
 
 }  // namespace swordfs::metadata
