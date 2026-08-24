@@ -3,8 +3,6 @@
 
 #include "metadata/MetaEngineRegistry.hpp"
 
-#include <algorithm>
-
 namespace swordfs::metadata {
 
 MetaEngineRegistry &MetaEngineRegistry::Instance() {
@@ -27,16 +25,6 @@ utils::Status MetaEngineRegistry::Create(std::string_view name, std::string_view
     return utils::Status::NotSupported("unsupported metadata engine: " + std::string(name));
   }
   return it->second.factory(meta_url, out);
-}
-
-std::vector<std::string> MetaEngineRegistry::Names() const {
-  std::vector<std::string> names;
-  names.reserve(engines_.size());
-  for (const auto &[name, _] : engines_) {
-    names.push_back(name);
-  }
-  std::sort(names.begin(), names.end());
-  return names;
 }
 
 }  // namespace swordfs::metadata
