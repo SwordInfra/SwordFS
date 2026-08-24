@@ -62,7 +62,7 @@ class MemMetaImpl : public IMetaEngine {
   // Volume operations
   Status StatFs(struct statvfs *stbuf) override;
 
-  static Limits GetLimits();
+  Limits GetLimits() const override;
 
  private:
   MemMetaStore store_;

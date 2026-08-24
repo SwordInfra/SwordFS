@@ -40,7 +40,7 @@ utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::unique_ptr<I
   }
 }
 
-RegisterMetaEngine kRedisMetaEngine{"redis", CreateRedisMetaEngine, RedisMetaImpl::GetLimits};
+RegisterMetaEngine kRedisMetaEngine{"redis", CreateRedisMetaEngine};
 }  // namespace
 
 RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config) : client_(std::make_unique<RedisMetaClient>(config)) {
@@ -56,7 +56,7 @@ utils::Status RedisMetaImpl::Initialize() {
   }
 }
 
-Limits RedisMetaImpl::GetLimits() {
+Limits RedisMetaImpl::GetLimits() const {
   return {.max_name_length = 255, .max_free_inodes = SIZE_MAX};
 }
 

@@ -12,8 +12,8 @@ MetaEngineRegistry &MetaEngineRegistry::Instance() {
   return registry;
 }
 
-void MetaEngineRegistry::Register(std::string_view name, Factory factory, LimitsProvider limits) {
-  engines_.emplace(std::string(name), Entry{factory, limits});
+void MetaEngineRegistry::Register(std::string_view name, Factory factory) {
+  engines_.emplace(std::string(name), Entry{factory});
 }
 
 bool MetaEngineRegistry::Available(std::string_view name) const {
@@ -27,14 +27,6 @@ utils::Status MetaEngineRegistry::Create(std::string_view name, std::string_view
     return utils::Status::NotSupported("unsupported metadata engine: " + std::string(name));
   }
   return it->second.factory(meta_url, out);
-}
-
-Limits MetaEngineRegistry::GetLimits(std::string_view name) const {
-  const auto it = engines_.find(std::string(name));
-  if (it == engines_.end()) {
-    return Limits{};
-  }
-  return it->second.limits();
 }
 
 std::vector<std::string> MetaEngineRegistry::Names() const {

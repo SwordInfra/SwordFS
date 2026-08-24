@@ -21,12 +21,4 @@ utils::Status CreateMetaEngine(std::string_view meta_url, std::unique_ptr<IMetaE
   return MetaEngineRegistry::Instance().Create(scheme, meta_url, out);
 }
 
-Limits GetMetaEngineLimits(std::string_view meta_url) {
-  std::string scheme;
-  if (!ParseUrlScheme(meta_url, &scheme).ok()) {
-    return Limits{};
-  }
-  return MetaEngineRegistry::Instance().GetLimits(scheme);
-}
-
 }  // namespace swordfs::metadata
