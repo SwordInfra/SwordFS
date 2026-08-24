@@ -42,6 +42,9 @@ class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
 
+  /// Return filesystem limits provided by this metadata engine.
+  virtual Limits GetLimits() const = 0;
+
   /// Look up a child entry by name.
   virtual Status Lookup(InodeID parent_ino, std::string_view name,
                         SwordFsInode *out) = 0;

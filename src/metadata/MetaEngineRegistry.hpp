@@ -20,26 +20,21 @@ class IMetaEngine;
 class MetaEngineRegistry {
 public:
   using Factory = utils::Status (*)(std::string_view meta_url, std::unique_ptr<IMetaEngine> *out);
-  using LimitsProvider = Limits (*)();
 
   struct Entry {
     Factory factory;
-    LimitsProvider limits;
   };
 
   static MetaEngineRegistry &Instance();
 
   /// Register a metadata engine. Called at static initialization time.
-  void Register(std::string_view name, Factory factory, LimitsProvider limits);
+  void Register(std::string_view name, Factory factory);
 
   /// Return whether a metadata engine with the given name is registered.
   bool Available(std::string_view name) const;
 
   /// Create a metadata engine using its registered factory.
   utils::Status Create(std::string_view name, std::string_view meta_url, std::unique_ptr<IMetaEngine> *out) const;
-
-  /// Return the filesystem limits provided by a registered engine.
-  Limits GetLimits(std::string_view name) const;
 
   /// Return the names of all registered metadata engines.
   std::vector<std::string> Names() const;
@@ -51,9 +46,8 @@ private:
 
 /// RAII helper for registering a metadata engine at static initialization.
 struct RegisterMetaEngine {
-  RegisterMetaEngine(std::string_view name, MetaEngineRegistry::Factory factory,
-                     MetaEngineRegistry::LimitsProvider limits) {
-    MetaEngineRegistry::Instance().Register(name, factory, limits);
+  RegisterMetaEngine(std::string_view name, MetaEngineRegistry::Factory factory) {
+    MetaEngineRegistry::Instance().Register(name, factory);
   }
 };
 

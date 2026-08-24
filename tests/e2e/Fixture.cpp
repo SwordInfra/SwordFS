@@ -23,6 +23,8 @@
 #include <sstream>
 #include <thread>
 
+#include <memory>
+
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineFactory.hpp"
 
@@ -450,7 +452,15 @@ std::string Fixture::GenerateRandomData(size_t len, RandomMode mode) {
 
 metadata::Limits Fixture::GetLimits() const {
   const char *metadata_url = std::getenv("SWORDFS_METADATA_URL");
-  return metadata::GetMetaEngineLimits(metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local");
+  const auto url = metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local";
+
+  std::unique_ptr<metadata::IMetaEngine> engine;
+  auto status = metadata::CreateMetaEngine(url, &engine);
+  if (!status.ok()) {
+    ADD_FAILURE() << "Failed to create metadata engine: " << status.message();
+    return {};
+  }
+  return engine->GetLimits();
 }
 
 // ────────────────────────────────────────────────────────────────

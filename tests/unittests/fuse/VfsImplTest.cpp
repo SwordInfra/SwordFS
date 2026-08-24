@@ -18,6 +18,7 @@
 using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::ChunkMeta;
 using swordfs::metadata::InodeID;
+using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
@@ -147,6 +148,7 @@ namespace {
 
 class MockMetaEngine : public swordfs::metadata::IMetaEngine {
  public:
+  Limits GetLimits() const override { return {}; }
   Status Lookup(InodeID, std::string_view, SwordFsInode *out) override {
     if (out) {
       *out = {};
