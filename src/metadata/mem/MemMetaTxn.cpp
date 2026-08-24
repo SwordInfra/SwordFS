@@ -50,7 +50,7 @@ size_t MemMetaTxn::InodeCount() {
 }
 
 Status MemMetaTxn::SetAttr(InodeID ino, const struct stat *attr,
-                           SetAttrField fields, struct stat *out_attr) {
+                           SetAttrField fields, SwordFsInode *out) {
   if (!attr) {
     return Status::InvalidArgument("null attr");
   }
@@ -118,8 +118,8 @@ Status MemMetaTxn::SetAttr(InodeID ino, const struct stat *attr,
       return status;
     }
   }
-  if (out_attr) {
-    *out_attr = st;
+  if (out) {
+    *out = *inode;
   }
   return Status::OK();
 }

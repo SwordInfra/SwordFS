@@ -13,13 +13,16 @@
 #include <thread>
 
 #include "metadata/mem/MemMetaImpl.hpp"
+#include "TestMemMetaImpl.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
+using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
+using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -32,7 +35,7 @@ static constexpr gid_t kOtherGroup = 200;
 class MemMetaImplTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    impl_ = new MemMetaImpl();
+    impl_ = new TestMemMetaImpl();
     // Default context is root (uid=0, gid=0).
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
@@ -53,8 +56,9 @@ class MemMetaImplTest : public ::testing::Test {
   // Must be called while context is root.
   InodeID MakeOwnedDir(InodeID parent_ino, std::string_view name, mode_t mode) {
     SetContext(0, 0);  // root
-    InodeID ino = 0;
-    impl_->MkDir(parent_ino, name, mode, &ino, nullptr);
+    SwordFsInode inode;
+    impl_->MkDir(parent_ino, name, mode, &inode);
+    InodeID ino = inode.ino;
     // Change ownership to kOwner:kGroup
     struct stat st{};
     st.st_uid = kOwner;
@@ -74,6 +78,37 @@ class MemMetaImplTest : public ::testing::Test {
     impl_->SetAttr(ino, &st, SetAttrField::kMode, nullptr);
   }
 
+  Status CreateFile(InodeID parent_ino, std::string_view name, mode_t mode,
+                    InodeID *ino = nullptr) {
+    SwordFsInode inode;
+    Status status = impl_->Create(parent_ino, name, mode, ino ? &inode : nullptr);
+    if (status.ok() && ino) *ino = inode.ino;
+    return status;
+  }
+
+  Status MakeDir(InodeID parent_ino, std::string_view name, mode_t mode,
+                 InodeID *ino = nullptr) {
+    SwordFsInode inode;
+    Status status = impl_->MkDir(parent_ino, name, mode, ino ? &inode : nullptr);
+    if (status.ok() && ino) *ino = inode.ino;
+    return status;
+  }
+
+  Status LookupInode(InodeID parent_ino, std::string_view name,
+                     InodeID *ino) {
+    SwordFsInode inode;
+    Status status = impl_->Lookup(parent_ino, name, &inode);
+    if (status.ok() && ino) *ino = inode.ino;
+    return status;
+  }
+
+  Status GetInodeAttr(InodeID ino, struct stat *attr) {
+    SwordFsInode inode;
+    Status status = impl_->GetInode(ino, &inode);
+    if (status.ok() && attr) *attr = inode.attr;
+    return status;
+  }
+
   // Change ownership of an existing directory.
   void SetDirOwner(InodeID ino, uid_t uid, gid_t gid) {
     SetContext(0, 0);
@@ -83,7 +118,7 @@ class MemMetaImplTest : public ::testing::Test {
     impl_->SetAttr(ino, &st, SetAttrField::kUid | SetAttrField::kGid, nullptr);
   }
 
-  MemMetaImpl *impl_;
+  TestMemMetaImpl *impl_;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -94,8 +129,8 @@ TEST_F(MemMetaImplTest, CreateOwnerWithWriteAndExecSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
   SetContext(kOwner, kOtherGroup);
 
-  InodeID ino = 0;
-  Status st = impl_->Create(dir_ino, "f", 0644, &ino, nullptr);
+  SwordFsInode inode;
+  Status st = impl_->Create(dir_ino, "f", 0644, &inode);
   EXPECT_TRUE(st.ok()) << st.message();
 }
 
@@ -103,8 +138,8 @@ TEST_F(MemMetaImplTest, CreateOwnerWithoutWriteFails) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0500);  // r-x, no write
   SetContext(kOwner, kOtherGroup);
 
-  InodeID ino = 0;
-  Status st = impl_->Create(dir_ino, "f", 0644, &ino, nullptr);
+  SwordFsInode inode;
+  Status st = impl_->Create(dir_ino, "f", 0644, &inode);
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
@@ -112,8 +147,8 @@ TEST_F(MemMetaImplTest, CreateOwnerWithoutExecFails) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0600);  // rw-, no exec
   SetContext(kOwner, kOtherGroup);
 
-  InodeID ino = 0;
-  Status st = impl_->Create(dir_ino, "f", 0644, &ino, nullptr);
+  SwordFsInode inode;
+  Status st = impl_->Create(dir_ino, "f", 0644, &inode);
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
@@ -121,8 +156,8 @@ TEST_F(MemMetaImplTest, CreateOwnerNoPermsFails) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0000);
   SetContext(kOwner, kOtherGroup);
 
-  InodeID ino = 0;
-  Status st = impl_->Create(dir_ino, "f", 0644, &ino, nullptr);
+  SwordFsInode inode;
+  Status st = impl_->Create(dir_ino, "f", 0644, &inode);
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
@@ -130,8 +165,8 @@ TEST_F(MemMetaImplTest, CreateRootAlwaysSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0000);  // no perms at all
   SetContext(0, 0);                                  // root
 
-  InodeID ino = 0;
-  Status st = impl_->Create(dir_ino, "f", 0644, &ino, nullptr);
+  SwordFsInode inode;
+  Status st = impl_->Create(dir_ino, "f", 0644, &inode);
   EXPECT_TRUE(st.ok()) << st.message();
 }
 
@@ -141,8 +176,7 @@ TEST_F(MemMetaImplTest, CreateGroupMemberWithWriteExecSucceeds) {
   SetDirOwner(dir_ino, kOther, kGroup);
   SetContext(kOther, kGroup);
 
-  InodeID ino = 0;
-  Status st = impl_->Create(dir_ino, "f", 0644, &ino, nullptr);
+  Status st = impl_->Create(dir_ino, "f", 0644, nullptr);
   EXPECT_TRUE(st.ok()) << st.message();
 }
 
@@ -151,8 +185,7 @@ TEST_F(MemMetaImplTest, CreateGroupMemberWithoutWriteFails) {
   // Caller is in kGroup but is NOT the owner (kOwner=1000).
   SetContext(3000, kGroup);
 
-  InodeID ino = 0;
-  Status st = impl_->Create(dir_ino, "f", 0644, &ino, nullptr);
+  Status st = impl_->Create(dir_ino, "f", 0644, nullptr);
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
@@ -162,8 +195,7 @@ TEST_F(MemMetaImplTest, CreateOtherWithWriteExecSucceeds) {
   SetDirOwner(dir_ino, kOwner, kGroup);
   SetContext(kOther, kOtherGroup);
 
-  InodeID ino = 0;
-  Status st = impl_->Create(dir_ino, "f", 0644, &ino, nullptr);
+  Status st = impl_->Create(dir_ino, "f", 0644, nullptr);
   EXPECT_TRUE(st.ok()) << st.message();
 }
 
@@ -172,8 +204,7 @@ TEST_F(MemMetaImplTest, CreateOtherWithoutWriteFails) {
   SetDirOwner(dir_ino, kOwner, kGroup);
   SetContext(kOther, kOtherGroup);
 
-  InodeID ino = 0;
-  Status st = impl_->Create(dir_ino, "f", 0644, &ino, nullptr);
+  Status st = impl_->Create(dir_ino, "f", 0644, nullptr);
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
@@ -185,8 +216,7 @@ TEST_F(MemMetaImplTest, MkDirPermissionDeniedWithoutWrite) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0500);  // no write for owner
   SetContext(kOwner, kOtherGroup);
 
-  InodeID ino = 0;
-  Status st = impl_->MkDir(dir_ino, "sub", 0755, &ino, nullptr);
+  Status st = impl_->MkDir(dir_ino, "sub", 0755, nullptr);
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
@@ -194,8 +224,7 @@ TEST_F(MemMetaImplTest, MkDirRootAlwaysSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0000);
   SetContext(0, 0);
 
-  InodeID ino = 0;
-  Status st = impl_->MkDir(dir_ino, "sub", 0755, &ino, nullptr);
+  Status st = impl_->MkDir(dir_ino, "sub", 0755, nullptr);
   EXPECT_TRUE(st.ok()) << st.message();
 }
 
@@ -264,8 +293,7 @@ TEST_F(MemMetaImplTest, UnlinkOwnerWithWriteSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
   // Create a file owned by kOwner (the creator)
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
-  impl_->Create(dir_ino, "f", 0644, &f_ino, nullptr);
+  impl_->Create(dir_ino, "f", 0644, nullptr);
 
   EXPECT_TRUE(impl_->Unlink(dir_ino, "f").ok());
 }
@@ -273,8 +301,7 @@ TEST_F(MemMetaImplTest, UnlinkOwnerWithWriteSucceeds) {
 TEST_F(MemMetaImplTest, UnlinkWithoutWriteOnParentFails) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
-  impl_->Create(dir_ino, "f", 0644, &f_ino, nullptr);
+  impl_->Create(dir_ino, "f", 0644, nullptr);
 
   // Remove write from parent, keep exec
   SetDirMode(dir_ino, 0500);
@@ -290,8 +317,7 @@ TEST_F(MemMetaImplTest, UnlinkWithoutWriteOnParentFails) {
 TEST_F(MemMetaImplTest, UnlinkStickyBitOwnerCanDelete) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01700);  // sticky + rwx for owner
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
-  impl_->Create(dir_ino, "f", 0644, &f_ino, nullptr);
+  impl_->Create(dir_ino, "f", 0644, nullptr);
 
   // The file's owner is kOwner (since kOwner created it).
   // kOwner is also the dir owner.
@@ -305,8 +331,7 @@ TEST_F(MemMetaImplTest, UnlinkStickyBitFileOwnerCanDelete) {
 
   // File owned by kOwner (created by kOwner in a writable sticky dir)
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
-  impl_->Create(dir_ino, "f", 0644, &f_ino, nullptr);
+  impl_->Create(dir_ino, "f", 0644, nullptr);
 
   // kOwner tries to delete their own file from kOther's sticky dir
   EXPECT_TRUE(impl_->Unlink(dir_ino, "f").ok());
@@ -319,8 +344,7 @@ TEST_F(MemMetaImplTest, UnlinkStickyBitNonOwnerCannotDelete) {
 
   // File owned by kOwner
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
-  impl_->Create(dir_ino, "f", 0644, &f_ino, nullptr);
+  impl_->Create(dir_ino, "f", 0644, nullptr);
 
   // Now a third user (kOther3) tries to delete kOwner's file
   SetContext(3000, kOtherGroup);
@@ -332,8 +356,7 @@ TEST_F(MemMetaImplTest, UnlinkStickyBitRootCanDelete) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
   SetDirOwner(dir_ino, kOther, kGroup);
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
-  impl_->Create(dir_ino, "f", 0644, &f_ino, nullptr);
+  impl_->Create(dir_ino, "f", 0644, nullptr);
 
   // Root can always delete
   SetContext(0, 0);
@@ -382,8 +405,7 @@ TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnOldParent) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0777);  // writable for all
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
-  impl_->Create(src_ino, "f", 0644, &f_ino, nullptr);
+  impl_->Create(src_ino, "f", 0644, nullptr);
 
   // Remove write from src
   SetDirMode(src_ino, 0500);
@@ -396,8 +418,7 @@ TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnNewParent) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0777);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
-  impl_->Create(src_ino, "f", 0644, &f_ino, nullptr);
+  impl_->Create(src_ino, "f", 0644, nullptr);
 
   // Remove write from dst
   SetDirMode(dst_ino, 0500);
@@ -410,9 +431,8 @@ TEST_F(MemMetaImplTest, RenameRootSucceedsRegardlessOfPerms) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0000);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0000);
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
   SetContext(0, 0);
-  impl_->Create(src_ino, "f", 0644, &f_ino, nullptr);
+  impl_->Create(src_ino, "f", 0644, nullptr);
 
   // Root can rename even with no perms on either parent
   SetContext(0, 0);
@@ -428,8 +448,7 @@ TEST_F(MemMetaImplTest, RenameStickyBitNonOwnerCannotMoveOut) {
 
   // kOwner creates the file in the sticky src (so kOwner owns it).
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
-  ASSERT_TRUE(impl_->Create(src_ino, "f", 0644, &f_ino, nullptr).ok());
+  ASSERT_TRUE(impl_->Create(src_ino, "f", 0644, nullptr).ok());
 
   // A third user cannot move kOwner's file out of kOther's sticky dir.
   SetContext(3000, kOtherGroup);
@@ -446,13 +465,11 @@ TEST_F(MemMetaImplTest, RenameStickyBitCannotOverwriteOthersFile) {
 
   // The victim file in dst is owned by kOther.
   SetContext(kOther, kOtherGroup);
-  InodeID victim_ino = 0;
-  ASSERT_TRUE(impl_->Create(dst_ino, "f", 0644, &victim_ino, nullptr).ok());
+  ASSERT_TRUE(impl_->Create(dst_ino, "f", 0644, nullptr).ok());
 
   // kOwner's file in src.
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
-  ASSERT_TRUE(impl_->Create(src_ino, "f", 0644, &f_ino, nullptr).ok());
+  ASSERT_TRUE(impl_->Create(src_ino, "f", 0644, nullptr).ok());
 
   // kOwner may not overwrite kOther's file in kOther's sticky dir.
   Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
@@ -468,7 +485,7 @@ TEST_F(MemMetaImplTest, RenameNoReplaceSucceedsWhenTargetFree) {
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
   InodeID f_ino = 0;
-  impl_->Create(src_ino, "f", 0644, &f_ino, nullptr);
+  CreateFile(src_ino, "f", 0644, &f_ino);
 
   // RenameFlag::kNoReplace: target "f" under dst does not exist → succeed.
   Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNoReplace);
@@ -484,8 +501,8 @@ TEST_F(MemMetaImplTest, RenameNoReplaceFailsWhenTargetExists) {
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
   InodeID f1_ino = 0, f2_ino = 0;
-  impl_->Create(src_ino, "f", 0644, &f1_ino, nullptr);
-  impl_->Create(dst_ino, "f", 0644, &f2_ino, nullptr);
+  CreateFile(src_ino, "f", 0644, &f1_ino);
+  CreateFile(dst_ino, "f", 0644, &f2_ino);
 
   // RenameFlag::kNoReplace: target "f" under dst EXISTS → EEXIST.
   Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNoReplace);
@@ -493,7 +510,7 @@ TEST_F(MemMetaImplTest, RenameNoReplaceFailsWhenTargetExists) {
 
   // Verify source file was NOT moved (still under src).
   InodeID found = 0;
-  EXPECT_TRUE(impl_->Lookup(src_ino, "f", &found, nullptr).ok());
+  EXPECT_TRUE(LookupInode(src_ino, "f", &found).ok());
   EXPECT_EQ(f1_ino, found);
 }
 
@@ -502,8 +519,8 @@ TEST_F(MemMetaImplTest, RenameExchangeSucceeds) {
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
   InodeID f1_ino = 0, f2_ino = 0;
-  impl_->Create(src_ino, "a", 0644, &f1_ino, nullptr);
-  impl_->Create(dst_ino, "b", 0644, &f2_ino, nullptr);
+  CreateFile(src_ino, "a", 0644, &f1_ino);
+  CreateFile(dst_ino, "b", 0644, &f2_ino);
 
   // RenameFlag::kExchange: atomically swap "a" and "b".
   Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
@@ -511,9 +528,9 @@ TEST_F(MemMetaImplTest, RenameExchangeSucceeds) {
 
   // Verify: src/a now has inode f2_ino, dst/b now has inode f1_ino.
   InodeID found = 0;
-  EXPECT_TRUE(impl_->Lookup(src_ino, "a", &found, nullptr).ok());
+  EXPECT_TRUE(LookupInode(src_ino, "a", &found).ok());
   EXPECT_EQ(f2_ino, found);
-  EXPECT_TRUE(impl_->Lookup(dst_ino, "b", &found, nullptr).ok());
+  EXPECT_TRUE(LookupInode(dst_ino, "b", &found).ok());
   EXPECT_EQ(f1_ino, found);
 }
 
@@ -521,8 +538,7 @@ TEST_F(MemMetaImplTest, RenameExchangeFailsWhenTargetMissing) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
-  InodeID f_ino = 0;
-  impl_->Create(src_ino, "a", 0644, &f_ino, nullptr);
+  CreateFile(src_ino, "a", 0644);
 
   // RenameFlag::kExchange: target "b" under dst does NOT exist → ENOENT.
   Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
@@ -533,12 +549,10 @@ TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
-  InodeID f_ino = 0;
-  impl_->Create(src_ino, "a", 0644, &f_ino, nullptr);
+  CreateFile(src_ino, "a", 0644);
 
   // Create a directory under dst with same name.
-  InodeID dir_ino = 0;
-  impl_->MkDir(dst_ino, "b", 0755, &dir_ino, nullptr);
+  MakeDir(dst_ino, "b", 0755);
 
   // RenameFlag::kExchange: file ↔ dir → EINVAL.
   Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
@@ -552,8 +566,7 @@ TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
 TEST_F(MemMetaImplTest, RmDirRequiresWriteExecOnParent) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "parent", 0700);
   SetContext(kOwner, kOtherGroup);
-  InodeID sub_ino = 0;
-  impl_->MkDir(dir_ino, "sub", 0755, &sub_ino, nullptr);
+  MakeDir(dir_ino, "sub", 0755);
 
   // Remove write from parent
   SetDirMode(dir_ino, 0500);
@@ -565,8 +578,7 @@ TEST_F(MemMetaImplTest, RmDirRequiresWriteExecOnParent) {
 TEST_F(MemMetaImplTest, RmDirRootAlwaysSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "parent", 0000);
   SetContext(0, 0);
-  InodeID sub_ino = 0;
-  impl_->MkDir(dir_ino, "sub", 0755, &sub_ino, nullptr);
+  MakeDir(dir_ino, "sub", 0755);
 
   SetDirMode(dir_ino, 0000);
   SetContext(0, 0);
@@ -581,8 +593,7 @@ TEST_F(MemMetaImplTest, OpenRequiresReadPermission) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
   SetContext(kOwner, kOtherGroup);
   InodeID f_ino = 0;
-  struct stat f_attr;
-  impl_->Create(dir_ino, "f", 0644, &f_ino, &f_attr);
+  ASSERT_TRUE(CreateFile(dir_ino, "f", 0644, &f_ino).ok());
 
   // Remove read from the file owner
   struct stat st{};
@@ -601,7 +612,7 @@ TEST_F(MemMetaImplTest, OpenRootSucceedsWithoutReadPerm) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
   SetContext(kOwner, kOtherGroup);
   InodeID f_ino = 0;
-  impl_->Create(dir_ino, "f", 0644, &f_ino, nullptr);
+  CreateFile(dir_ino, "f", 0644, &f_ino);
 
   // Remove all perms
   struct stat st{};
@@ -625,7 +636,7 @@ TEST_F(MemMetaImplTest, TruncateNotFound) {
 
 TEST_F(MemMetaImplTest, TruncateUpdatesSizeAndClearsSuidSgid) {
   InodeID f_ino = 0;
-  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &f_ino, nullptr).ok());
+  ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
 
   // Give the file SUID/SGID without touching its size.
   struct stat st{};
@@ -643,7 +654,7 @@ TEST_F(MemMetaImplTest, TruncateUpdatesSizeAndClearsSuidSgid) {
 
 TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
   InodeID f_ino = 0;
-  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &f_ino, nullptr).ok());
+  ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
 
   struct stat st{};
   st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
@@ -663,7 +674,7 @@ TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
 
 TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
   InodeID f_ino = 0;
-  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &f_ino, nullptr).ok());
+  ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
 
   struct stat st{};
   st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
@@ -671,11 +682,11 @@ TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
 
   struct stat attr{};
   attr.st_size = 2048;
-  struct stat out{};
+  swordfs::metadata::SwordFsInode out{};
   ASSERT_TRUE(impl_->SetAttr(f_ino, &attr, SetAttrField::kSize, &out).ok());
-  EXPECT_EQ(out.st_size, 2048);
-  EXPECT_EQ(out.st_mode & S_ISUID, 0u);
-  EXPECT_EQ(out.st_mode & S_ISGID, 0u);
+  EXPECT_EQ(out.attr.st_size, 2048);
+  EXPECT_EQ(out.attr.st_mode & S_ISUID, 0u);
+  EXPECT_EQ(out.attr.st_mode & S_ISGID, 0u);
 }
 
 TEST_F(MemMetaImplTest, ReclaimInodeMissingInodeIsNoOp) {

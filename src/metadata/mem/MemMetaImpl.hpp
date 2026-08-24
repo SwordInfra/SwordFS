@@ -22,40 +22,35 @@ class MemMetaImpl : public IMetaEngine {
   ~MemMetaImpl() override = default;
 
   // Entry operations
-  Status Lookup(InodeID parent_ino,
-                std::string_view name, InodeID *child_ino,
-                struct stat *attr) override;
-  Status GetAttr(InodeID ino, struct stat *attr) override;
-  Status Create(InodeID parent_ino,
-                std::string_view name, mode_t mode, InodeID *child_ino,
-                struct stat *attr) override;
+  Status Lookup(InodeID parent_ino, std::string_view name,
+                SwordFsInode *out) override;
+  Status GetInode(InodeID ino, SwordFsInode *out) override;
+  Status Create(InodeID parent_ino, std::string_view name, mode_t mode,
+                SwordFsInode *out) override;
   Status Unlink(InodeID parent_ino, std::string_view name,
                 nlink_t *post_nlink = nullptr) override;
   Status Rename(InodeID old_parent_ino,
                 std::string_view old_name, InodeID new_parent_ino,
                 std::string_view new_name, RenameFlag flags,
                 RenameResult *result = nullptr) override;
-  Status SetAttr(InodeID ino,
-                 const struct stat *attr, SetAttrField fields,
-                 struct stat *out_attr) override;
+  Status SetAttr(InodeID ino, const struct stat *attr,
+                 SetAttrField fields, SwordFsInode *out) override;
   Status Access(InodeID ino, int mask) override;
   Status Open(InodeID ino) override;
   Status ReclaimInode(InodeID ino) override;
 
   // Directory operations
   Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) override;
-  Status MkDir(InodeID parent_ino,
-               std::string_view name, mode_t mode, InodeID *child_ino,
-               struct stat *attr) override;
+  Status MkDir(InodeID parent_ino, std::string_view name, mode_t mode,
+               SwordFsInode *out) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
   Status OpenDir(InodeID ino) override;
 
   // Link / symlink operations
-  Status Symlink(InodeID parent_ino,
-                 std::string_view name, const char *link,
-                 InodeID *child_ino, struct stat *attr) override;
+  Status Symlink(InodeID parent_ino, std::string_view name,
+                 const char *link, SwordFsInode *out) override;
   Status Link(InodeID ino, InodeID newparent_ino,
-              std::string_view newname, struct stat *attr) override;
+              std::string_view newname, SwordFsInode *out) override;
   Status Readlink(InodeID ino, std::string *target) override;
 
   // Chunk metadata

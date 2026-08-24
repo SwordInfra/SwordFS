@@ -33,6 +33,7 @@ using namespace swordfs::config;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
+using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsEntry;
 using swordfs::volume::VolumeImpl;
 
@@ -55,29 +56,38 @@ volume::VolumeImpl *VfsImpl::Volume() {
 
 utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name,
                               fuse_entry_param *entry) {
-  InodeID child_ino;
-  struct stat attr;
-  Status status = VolumeImpl::Instance().meta_engine()->Lookup(parent, name, &child_ino,
-                                                               &attr);
+  SwordFsInode child;
+  Status status = VolumeImpl::Instance().meta_engine()->Lookup(parent, name, &child);
   if (!status.ok()) {
     return status;
   }
   *entry = {};
-  entry->ino = child_ino;
-  entry->attr = attr;
+  entry->ino = child.ino;
+  entry->attr = child.attr;
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
 }
 
 utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
-  return VolumeImpl::Instance().meta_engine()->GetAttr(ino, attr);
+  SwordFsInode inode;
+  Status status = VolumeImpl::Instance().meta_engine()->GetInode(ino, &inode);
+  if (status.ok()) {
+    *attr = inode.attr;
+  }
+  return status;
 }
 
 utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr,
                                int to_set, struct stat *out_attr) {
   SetAttrField fields = FuseAttrToSetAttrField(to_set);
-  return VolumeImpl::Instance().meta_engine()->SetAttr(ino, attr, fields, out_attr);
+  SwordFsInode inode;
+  Status status = VolumeImpl::Instance().meta_engine()->SetAttr(
+      ino, attr, fields, out_attr ? &inode : nullptr);
+  if (status.ok() && out_attr) {
+    *out_attr = inode.attr;
+  }
+  return status;
 }
 
 utils::Status VfsImpl::Readlink(fuse_ino_t ino, std::string *target) {
@@ -95,16 +105,15 @@ utils::Status VfsImpl::Mknod(fuse_ino_t parent, const char *name,
 
 utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name,
                              mode_t mode, fuse_entry_param *entry) {
-  InodeID child_ino;
-  struct stat attr;
+  SwordFsInode child;
   Status status = VolumeImpl::Instance().meta_engine()->MkDir(parent, name, mode,
-                                                              &child_ino, &attr);
+                                                              &child);
   if (!status.ok()) {
     return status;
   }
   *entry = {};
-  entry->ino = child_ino;
-  entry->attr = attr;
+  entry->ino = child.ino;
+  entry->attr = child.attr;
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -125,10 +134,9 @@ utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
   // `MemMetaImpl::Unlink` above the store, so we don't repeat them here.
   auto *meta = VolumeImpl::Instance().meta_engine();
 
-  // Look up the child inode id.
-  InodeID child_ino = 0;
-  struct stat lookup_attr;
-  auto status = meta->Lookup(parent, name, &child_ino, &lookup_attr);
+  // Look up the child inode.
+  SwordFsInode child;
+  auto status = meta->Lookup(parent, name, &child);
   if (!status.ok()) {
     return status;
   }
@@ -146,7 +154,7 @@ utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
     return utils::Status::OK();
   }
 
-  auto handle = vfs::InodeHandleManager::Instance().Get(child_ino, /*create_if_missing=*/true);
+  auto handle = vfs::InodeHandleManager::Instance().Get(child.ino, /*create_if_missing=*/true);
   if (!handle) {
     return utils::Status::Internal("failed to get InodeHandle");
   }
@@ -166,16 +174,15 @@ utils::Status VfsImpl::Rmdir(fuse_ino_t parent, const char *name) {
 utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent,
                                const char *name,
                                fuse_entry_param *entry) {
-  InodeID child_ino;
-  struct stat attr;
+  SwordFsInode child;
   Status status = VolumeImpl::Instance().meta_engine()->Symlink(
-      parent, name, link, &child_ino, &attr);
+      parent, name, link, &child);
   if (!status.ok()) {
     return status;
   }
   *entry = {};
-  entry->ino = child_ino;
-  entry->attr = attr;
+  entry->ino = child.ino;
+  entry->attr = child.attr;
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -224,15 +231,15 @@ utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
 utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent,
                             const char *newname,
                             fuse_entry_param *entry) {
-  struct stat attr;
+  SwordFsInode inode;
   Status status = VolumeImpl::Instance().meta_engine()->Link(
-      ino, newparent, newname, &attr);
+      ino, newparent, newname, &inode);
   if (!status.ok()) {
     return status;
   }
   *entry = {};
-  entry->ino = ino;
-  entry->attr = attr;
+  entry->ino = inode.ino;
+  entry->attr = inode.attr;
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -443,28 +450,28 @@ utils::Status VfsImpl::Access(fuse_ino_t ino, int mask) {
 utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name,
                               mode_t mode, fuse_entry_param *entry,
                               struct fuse_file_info *fi) {
-  InodeID child_ino;
-  struct stat attr;
-  Status status = VolumeImpl::Instance().meta_engine()->Create(parent, name, mode, &child_ino, &attr);
+  SwordFsInode child;
+  Status status = VolumeImpl::Instance().meta_engine()->Create(parent, name, mode,
+                                                                &child);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Create FAILED: parent=" << parent << " name='" << name
                       << "' — " << status.message();
     return status;
   }
   FileHandle handle;
-  status = FileHandle::Open(child_ino, fi->flags, &handle);
+  status = FileHandle::Open(child.ino, fi->flags, &handle);
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Create: Open FAILED: ino=" << child_ino
+    SWORDFS_LOG_ERROR << "Create: Open FAILED: ino=" << child.ino
                       << " — " << status.message();
     return status;
   }
   fi->fh = handle.fh();
   *entry = {};
-  entry->ino = child_ino;
-  entry->attr = attr;
+  entry->ino = child.ino;
+  entry->attr = child.attr;
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
-  SWORDFS_LOG_DEBUG << "Create: ino=" << child_ino << " fh=" << handle.fh()
+  SWORDFS_LOG_DEBUG << "Create: ino=" << child.ino << " fh=" << handle.fh()
                     << " name='" << name << "'";
   return Status::OK();
 }

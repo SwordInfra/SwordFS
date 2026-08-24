@@ -54,25 +54,22 @@ class IMetaEngine {
   static Limits GetLimits(std::string_view meta_url);
 
   /// Look up a child entry by name.
-  virtual Status Lookup(InodeID parent_ino,
-                        std::string_view name, InodeID *child_ino,
-                        struct stat *attr) = 0;
+  virtual Status Lookup(InodeID parent_ino, std::string_view name,
+                        SwordFsInode *out) = 0;
 
-  /// Get attributes for an inode.
-  virtual Status GetAttr(InodeID ino, struct stat *attr) = 0;
+  /// Get an inode metadata snapshot.
+  virtual Status GetInode(InodeID ino, SwordFsInode *out) = 0;
 
   /// List all entries in a directory.
   virtual Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) = 0;
 
   /// Create a regular file.
-  virtual Status Create(InodeID parent_ino,
-                        std::string_view name, mode_t mode,
-                        InodeID *child_ino, struct stat *attr) = 0;
+  virtual Status Create(InodeID parent_ino, std::string_view name,
+                        mode_t mode, SwordFsInode *out) = 0;
 
   /// Create a directory. Increments parent nlink to account for "..".
-  virtual Status MkDir(InodeID parent,
-                       std::string_view name, mode_t mode,
-                       InodeID *child_ino, struct stat *attr) = 0;
+  virtual Status MkDir(InodeID parent_ino, std::string_view name,
+                       mode_t mode, SwordFsInode *out) = 0;
 
   /// POSIX unlink(2): detach the directory entry and decrement nlink.
   /// On success, *post_nlink receives the authoritative nlink value the
@@ -107,9 +104,8 @@ class IMetaEngine {
   /// Set attributes for an inode.  |fields| is a bitwise OR of
   /// SetAttrField values; only the bits set in |fields| are read from
   /// |attr| and applied to the inode.
-  virtual Status SetAttr(InodeID ino,
-                         const struct stat *attr, SetAttrField fields,
-                         struct stat *out_attr) = 0;
+  virtual Status SetAttr(InodeID ino, const struct stat *attr,
+                         SetAttrField fields, SwordFsInode *out) = 0;
 
   /// Get file system statistics.
   virtual Status StatFs(struct statvfs *stbuf) = 0;
@@ -118,13 +114,12 @@ class IMetaEngine {
   virtual Status Access(InodeID ino, int mask) = 0;
 
   /// Create a symbolic link.
-  virtual Status Symlink(InodeID parent_ino,
-                         std::string_view name, const char *link,
-                         InodeID *child_ino, struct stat *attr) = 0;
+  virtual Status Symlink(InodeID parent_ino, std::string_view name,
+                         const char *link, SwordFsInode *out) = 0;
 
   /// Create a hard link to an existing inode.
   virtual Status Link(InodeID ino, InodeID newparent_ino,
-                      std::string_view newname, struct stat *attr) = 0;
+                      std::string_view newname, SwordFsInode *out) = 0;
 
   /// Read the target of a symbolic link.
   virtual Status Readlink(InodeID ino, std::string *target) = 0;

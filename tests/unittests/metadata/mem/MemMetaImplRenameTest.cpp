@@ -11,13 +11,16 @@
 #include <sys/stat.h>
 
 #include "metadata/mem/MemMetaImpl.hpp"
+#include "TestMemMetaImpl.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
+using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
+using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -26,12 +29,12 @@ static constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
 class MemMetaImplRenameTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    impl_ = new MemMetaImpl();
+    impl_ = new TestMemMetaImpl();
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
   void TearDown() override { delete impl_; }
 
-  MemMetaImpl *impl_;
+  TestMemMetaImpl *impl_;
 };
 
 // ════════════════════════════════════════════════════════════════════
