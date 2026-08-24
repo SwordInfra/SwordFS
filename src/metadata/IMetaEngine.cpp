@@ -18,7 +18,7 @@ Limits IMetaEngine::GetLimits(std::string_view meta_url) {
   if (IsMemoryMode(meta_url)) {
     return MemMetaImpl::GetLimits();
   }
-  if (IsRedisMetaUrl(meta_url)) {
+  if (meta_url.starts_with("redis://")) {
     return RedisMetaImpl::GetLimits();
   }
   return Limits{};

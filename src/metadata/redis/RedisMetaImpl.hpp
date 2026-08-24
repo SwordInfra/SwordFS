@@ -10,7 +10,7 @@
 
 namespace swordfs::metadata {
 
-class RedisMetaStore;
+class RedisMetaClient;
 
 // Phase 0 Redis metadata engine. It establishes the Redis connection and
 // transaction infrastructure; metadata schema and IMetaEngine operations are
@@ -50,7 +50,7 @@ public:
   Status Truncate(InodeID ino, size_t size) override;
 
 private:
-  std::unique_ptr<RedisMetaStore> store_;
+  std::unique_ptr<RedisMetaClient> client_;
 };
 
 }  // namespace swordfs::metadata

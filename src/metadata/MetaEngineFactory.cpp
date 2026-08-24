@@ -17,7 +17,7 @@ utils::Status CreateMetaEngine(std::string_view meta_url, std::unique_ptr<IMetaE
     *out = std::make_unique<MemMetaImpl>();
     return utils::Status::OK();
   }
-  if (IsRedisMetaUrl(meta_url)) {
+  if (meta_url.starts_with("redis://")) {
     RedisMetaConfig config;
     auto status = ParseRedisMetaUrl(meta_url, &config);
     if (!status.ok()) {

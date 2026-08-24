@@ -3,7 +3,7 @@
 
 #include "metadata/redis/RedisMetaTxn.hpp"
 
-#include "metadata/redis/RedisMetaStore.hpp"
+#include "metadata/redis/RedisMetaClient.hpp"
 
 namespace swordfs::metadata {
 namespace {

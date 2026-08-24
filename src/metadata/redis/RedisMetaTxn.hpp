@@ -13,14 +13,14 @@
 
 namespace swordfs::metadata {
 
-class RedisMetaStore;
+class RedisMetaClient;
 
 // One optimistic Redis transaction attempt. All WATCH, reads, MULTI, queued
 // writes and EXEC operations use the same dedicated Redis connection.
 // Call Watch() and all reads before the first Set(): the first queued write
 // opens MULTI, after which Redis no longer returns ordinary read replies and
 // rejects WATCH. The object is only valid for the lifetime of
-// RedisMetaStore::Transact().
+// RedisMetaClient::Transact().
 class RedisMetaTxn {
 public:
   utils::Status Watch(std::string_view key);
@@ -28,7 +28,7 @@ public:
   utils::Status Set(std::string_view key, std::string_view value);
 
 private:
-  friend class RedisMetaStore;
+  friend class RedisMetaClient;
   explicit RedisMetaTxn(sw::redis::Redis &redis);
 
   void Discard() noexcept;

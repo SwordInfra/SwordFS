@@ -8,7 +8,7 @@
 #include <exception>
 #include <utility>
 
-#include "metadata/redis/RedisMetaStore.hpp"
+#include "metadata/redis/RedisMetaClient.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -19,7 +19,7 @@ Status NotImplemented() {
 
 }  // namespace
 
-RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config) : store_(std::make_unique<RedisMetaStore>(config)) {
+RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config) : client_(std::make_unique<RedisMetaClient>(config)) {
 }
 
 RedisMetaImpl::~RedisMetaImpl() = default;
@@ -30,7 +30,7 @@ utils::Status RedisMetaImpl::Create(const RedisMetaConfig &config, std::unique_p
   }
   try {
     auto impl = std::make_unique<RedisMetaImpl>(config);
-    auto status = impl->store_->Ping();
+    auto status = impl->client_->Ping();
     if (!status.ok()) {
       return status;
     }

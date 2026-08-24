@@ -40,7 +40,7 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
   config_.meta_url = cfg.meta_url();
   if (!swordfs::metadata::IsMemoryMode(config_.meta_url)) {
     swordfs::metadata::RedisMetaConfig redis_config;
-    if (!swordfs::metadata::IsRedisMetaUrl(config_.meta_url)) {
+    if (!config_.meta_url.starts_with("redis://")) {
       return Status::InvalidArgument("unsupported metadata engine: " + config_.meta_url);
     }
     auto status = swordfs::metadata::ParseRedisMetaUrl(config_.meta_url, &redis_config);

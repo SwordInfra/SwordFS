@@ -1,7 +1,7 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include "metadata/redis/RedisMetaStore.hpp"
+#include "metadata/redis/RedisMetaClient.hpp"
 
 #include <folly/Random.h>
 
@@ -46,10 +46,10 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
 
 }  // namespace
 
-RedisMetaStore::RedisMetaStore(const RedisMetaConfig &config) : redis_(std::make_unique<sw::redis::Redis>(MakeConnectionOptions(config))) {
+RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config) : redis_(std::make_unique<sw::redis::Redis>(MakeConnectionOptions(config))) {
 }
 
-utils::Status RedisMetaStore::Ping() {
+utils::Status RedisMetaClient::Ping() {
   try {
     redis_->ping();
     return utils::Status::OK();
@@ -58,7 +58,7 @@ utils::Status RedisMetaStore::Ping() {
   }
 }
 
-utils::Status RedisMetaStore::Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback, int max_attempts) {
+utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback, int max_attempts) {
   if (max_attempts <= 0) {
     return utils::Status::InvalidArgument("max_attempts must be positive");
   }

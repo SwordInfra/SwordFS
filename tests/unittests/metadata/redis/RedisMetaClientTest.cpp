@@ -7,8 +7,8 @@
 #include <optional>
 #include <string>
 
+#include "metadata/redis/RedisMetaClient.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
-#include "metadata/redis/RedisMetaStore.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -37,13 +37,13 @@ sw::redis::ConnectionOptions ConnectionOptions(const RedisMetaConfig &config) {
 
 }  // namespace
 
-TEST(RedisMetaStoreTest, StandalonePingAndWatchReadMultiExec) {
+TEST(RedisMetaClientTest, StandalonePingAndWatchReadMultiExec) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  RedisMetaStore store(config);
+  RedisMetaClient store(config);
   auto status = store.Ping();
   ASSERT_TRUE(status.ok()) << status.message();
 
@@ -82,7 +82,7 @@ TEST(RedisMetaStoreTest, StandalonePingAndWatchReadMultiExec) {
   cleanup.del(key);
 }
 
-TEST(RedisMetaStoreTest, RetriesWatchConflict) {
+TEST(RedisMetaClientTest, RetriesWatchConflict) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
@@ -92,7 +92,7 @@ TEST(RedisMetaStoreTest, RetriesWatchConflict) {
   sw::redis::Redis other(ConnectionOptions(config));
   other.set(key, "before");
 
-  RedisMetaStore store(config);
+  RedisMetaClient store(config);
   int attempts = 0;
   const auto status = store.Transact([&](RedisMetaTxn &transaction) {
     ++attempts;
@@ -121,13 +121,13 @@ TEST(RedisMetaStoreTest, RetriesWatchConflict) {
   other.del(key);
 }
 
-TEST(RedisMetaStoreTest, RetriesExplicitPreCommitFailure) {
+TEST(RedisMetaClientTest, RetriesExplicitPreCommitFailure) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  RedisMetaStore store(config);
+  RedisMetaClient store(config);
   int attempts = 0;
   const auto status = store.Transact([&](RedisMetaTxn &transaction) {
     ++attempts;
@@ -140,20 +140,20 @@ TEST(RedisMetaStoreTest, RetriesExplicitPreCommitFailure) {
   EXPECT_EQ(attempts, 2);
 }
 
-TEST(RedisMetaStoreTest, RejectsNonPositiveMaxAttemptsWithoutRedis) {
+TEST(RedisMetaClientTest, RejectsNonPositiveMaxAttemptsWithoutRedis) {
   RedisMetaConfig config;
   config.host = "127.0.0.1";
-  RedisMetaStore store(config);
+  RedisMetaClient store(config);
   for (const int max_attempts : {0, -1}) {
     const auto status = store.Transact([](RedisMetaTxn &) { return utils::Status::OK(); }, max_attempts);
     EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
   }
 }
 
-TEST(RedisMetaStoreTest, RetriesUntilLimitIsExceeded) {
+TEST(RedisMetaClientTest, RetriesUntilLimitIsExceeded) {
   RedisMetaConfig config;
   config.host = "127.0.0.1";
-  RedisMetaStore store(config);
+  RedisMetaClient store(config);
   int attempts = 0;
   const auto status = store.Transact(
       [&](RedisMetaTxn &) {
@@ -165,13 +165,13 @@ TEST(RedisMetaStoreTest, RetriesUntilLimitIsExceeded) {
   EXPECT_EQ(attempts, 3);
 }
 
-TEST(RedisMetaStoreTest, ReadOnlyTransactionCommitsAsNoOp) {
+TEST(RedisMetaClientTest, ReadOnlyTransactionCommitsAsNoOp) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  RedisMetaStore store(config);
+  RedisMetaClient store(config);
   const auto status = store.Transact([](RedisMetaTxn &transaction) {
     std::optional<std::string> value;
     return transaction.Get("swordfs:phase0:read-only", &value);
@@ -179,13 +179,13 @@ TEST(RedisMetaStoreTest, ReadOnlyTransactionCommitsAsNoOp) {
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
-TEST(RedisMetaStoreTest, PreservesCallbackErrorWithoutQueuedWrite) {
+TEST(RedisMetaClientTest, PreservesCallbackErrorWithoutQueuedWrite) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  RedisMetaStore store(config);
+  RedisMetaClient store(config);
   const auto status = store.Transact([](RedisMetaTxn &transaction) {
     std::optional<std::string> value;
     const auto get_status = transaction.Get("swordfs:phase0:missing", &value);

@@ -14,14 +14,14 @@
 
 namespace swordfs::metadata {
 
-class RedisMetaStore {
+class RedisMetaClient {
 public:
   static constexpr int kDefaultMaxAttempts = 8;
 
-  explicit RedisMetaStore(const RedisMetaConfig &config);
+  explicit RedisMetaClient(const RedisMetaConfig &config);
 
-  RedisMetaStore(const RedisMetaStore &) = delete;
-  RedisMetaStore &operator=(const RedisMetaStore &) = delete;
+  RedisMetaClient(const RedisMetaClient &) = delete;
+  RedisMetaClient &operator=(const RedisMetaClient &) = delete;
 
   utils::Status Ping();
 
