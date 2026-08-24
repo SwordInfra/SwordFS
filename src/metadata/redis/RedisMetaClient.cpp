@@ -4,9 +4,6 @@
 #include "metadata/redis/RedisMetaClient.hpp"
 
 #include <folly/Random.h>
-#include <folly/fibers/Baton.h>
-#include <folly/fibers/FiberManagerInternal.h>
-#include <folly/logging/xlog.h>
 
 #include <algorithm>
 #include <chrono>
@@ -14,7 +11,9 @@
 #include <stdexcept>
 #include <thread>
 
+#include "config/ConfigCenter.hpp"
 #include "metadata/redis/RedisMetaTxn.hpp"
+#include "utils/FiberThreadPool.hpp"
 #include "utils/Logging.hpp"
 
 namespace swordfs::metadata {
@@ -41,12 +40,7 @@ void Backoff(int attempt, std::chrono::milliseconds base_delay) {
   const int exponent = std::min(attempt, 10);
   const auto max_delay = std::min(base_delay * (1 << exponent), std::chrono::milliseconds(kMaxDelayMs));
   const auto delay = std::chrono::milliseconds(folly::Random::rand64(max_delay.count() + 1));
-  if (folly::fibers::FiberManager::getFiberManagerUnsafe() != nullptr) {
-    folly::fibers::Baton baton;
-    baton.try_wait_for(delay);
-  } else {
-    std::this_thread::sleep_for(delay);
-  }
+  std::this_thread::sleep_for(delay);
 }
 
 utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
@@ -56,60 +50,66 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
 }  // namespace
 
 RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config)
-    : retry_attempts_(config.retry_attempts), retry_backoff_(config.retry_backoff) {
+    : pool_(std::make_unique<utils::FiberThreadPool>(
+          static_cast<size_t>(swordfs::config::ConfigCenter::Instance().meta_thread_count()))),
+      retry_attempts_(config.retry_attempts),
+      retry_backoff_(config.retry_backoff) {
   if (retry_attempts_ <= 0) {
     throw std::invalid_argument("retry_attempts must be positive");
   }
-
   sw::redis::ConnectionPoolOptions pool_options;
   pool_options.size = config.pool_size;
   pool_options.wait_timeout = config.pool_wait_timeout;
   redis_ = std::make_unique<sw::redis::Redis>(MakeConnectionOptions(config), pool_options);
 }
 
+RedisMetaClient::~RedisMetaClient() = default;
+
 utils::Status RedisMetaClient::Ping() {
-  try {
-    redis_->ping();
-    return utils::Status::OK();
-  } catch (const sw::redis::Error &error) {
-    return RedisError("PING", error);
-  }
+  return pool_->Run([this] {
+    try {
+      redis_->ping();
+      return utils::Status::OK();
+    } catch (const sw::redis::Error &error) {
+      return RedisError("PING", error);
+    }
+  });
 }
 
 utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
-  const int attempts = retry_attempts_;
+  return pool_->Run([this, &callback] {
+    const int attempts = retry_attempts_;
 
-  for (int attempt = 0; attempt < attempts; ++attempt) {
-    try {
-      RedisMetaTxn transaction(*redis_);
-      auto status = callback(transaction);
-      if (!status.ok()) {
-        transaction.Discard();
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+      try {
+        RedisMetaTxn transaction(*redis_);
+        auto status = callback(transaction);
+        if (!status.ok()) {
+          transaction.Discard();
+          if (status.IsBusy()) {
+            Backoff(attempt, retry_backoff_);
+            continue;
+          }
+          return status;
+        }
+
+        status = transaction.Commit();
         if (status.IsBusy()) {
           Backoff(attempt, retry_backoff_);
           continue;
         }
         return status;
-      }
-
-      status = transaction.Commit();
-      if (status.IsBusy()) {
+      } catch (const sw::redis::TimeoutError &) {
         Backoff(attempt, retry_backoff_);
-        continue;
+      } catch (const sw::redis::ClosedError &) {
+        Backoff(attempt, retry_backoff_);
+      } catch (const sw::redis::Error &error) {
+        return RedisError("transaction", error);
       }
-      return status;
-    } catch (const sw::redis::TimeoutError &error) {
-      SWORDFS_LOG_WARN << "Redis transaction attempt timed out before commit; retrying: " << error.what();
-      Backoff(attempt, retry_backoff_);
-    } catch (const sw::redis::ClosedError &error) {
-      SWORDFS_LOG_WARN << "Redis transaction connection closed before commit; retrying: " << error.what();
-      Backoff(attempt, retry_backoff_);
-    } catch (const sw::redis::Error &error) {
-      return RedisError("transaction", error);
     }
-  }
 
-  return utils::Status::Busy("Redis transaction retry limit exceeded");
+    return utils::Status::Busy("Redis transaction retry limit exceeded");
+  });
 }
 
 }  // namespace swordfs::metadata

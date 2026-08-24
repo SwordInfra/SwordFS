@@ -56,7 +56,14 @@ jobs:
             echo "No C++ source changes detected."
           fi
 
+      - name: Start Redis for coverage
+        run: |
+          docker run -d --name swordfs-coverage-redis -p 6379:6379 redis:7-alpine
+          until docker exec swordfs-coverage-redis redis-cli ping | grep -q PONG; do sleep 1; done
+
       - name: Test (unit)
+        env:
+          SWORDFS_REDIS_TEST_URL: redis://127.0.0.1:6379
         run: build/swordfs_test --gtest_color=no
 
       - name: Test (E2E)

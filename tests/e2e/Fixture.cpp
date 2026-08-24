@@ -138,7 +138,7 @@ bool Fixture::StartMount() {
   cmd << FindSwordfsBin() << " --log-file " << LogPath() << " mount "
       << " --volume " << volume_name_ << " --meta memory://local"
       << " --volume-config-path " << vol_config_dir_ << " --fuse-threads 2"
-      << " --storage-async-threads 2"
+      << " --storage-thread-count 2"
       << " --pidfile " << work_dir_ << "/swordfs.pid"
       << " " << mountpoint_ << " 2>&1";
 

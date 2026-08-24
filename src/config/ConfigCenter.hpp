@@ -57,7 +57,8 @@ class ConfigCenter {
   /// Returns the foreground mode.
   bool foreground() const { return foreground_; }
   int fuse_threads() const { return fuse_threads_; }
-  int storage_async_threads() const { return storage_async_threads_; }
+  int storage_thread_count() const { return storage_thread_count_; }
+  int meta_thread_count() const { return meta_thread_count_; }
   /// Returns the pidfile path (mount subcommand, daemon mode).
   const std::string &pidfile() const { return pidfile_; }
   /// Returns the mount point directory.
@@ -112,7 +113,8 @@ class ConfigCenter {
   // -f / --foreground: run in foreground
   bool foreground_ = false;
   int fuse_threads_ = 1;
-  int storage_async_threads_ = static_cast<int>(std::thread::hardware_concurrency());
+  int storage_thread_count_ = static_cast<int>(std::thread::hardware_concurrency());
+  int meta_thread_count_ = static_cast<int>(std::thread::hardware_concurrency());
   // mount point directory (positional argument)
   std::string mountpoint_;
 
