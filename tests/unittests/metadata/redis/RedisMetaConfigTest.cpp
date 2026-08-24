@@ -72,9 +72,9 @@ TEST(RedisMetaConfigTest, ParsesClientOptions) {
 
 TEST(RedisMetaConfigTest, RejectsInvalidClientOptions) {
   for (const auto url :
-      {"redis://localhost?connect_timeout=0s", "redis://localhost?socket_timeout=-1s", "redis://localhost?pool_size=0",
-          "redis://localhost?pool_wait_timeout=0s", "redis://localhost?retry_attempts=0",
-          "redis://localhost?retry_backoff=abc", "redis://localhost?unknown=1", "redis://localhost?pool_size=abc"}) {
+       {"redis://localhost?connect_timeout=0s", "redis://localhost?socket_timeout=-1s", "redis://localhost?pool_size=0",
+        "redis://localhost?pool_wait_timeout=0s", "redis://localhost?retry_attempts=0",
+        "redis://localhost?retry_backoff=abc", "redis://localhost?unknown=1", "redis://localhost?pool_size=abc"}) {
     RedisMetaConfig config;
     auto status = ParseRedisMetaUrl(url, &config);
     EXPECT_FALSE(status.ok()) << url;
@@ -91,8 +91,9 @@ TEST(RedisMetaConfigTest, ParsesPasswordOnlyAuthentication) {
 }
 
 TEST(RedisMetaConfigTest, RejectsInvalidUrls) {
-  for (const auto url : {"memory://local", "redis://", "redis://:6379", "redis://host:0", "redis://host:00",
-           "redis://host:000", "redis://host:", "redis://host:70000", "redis://host/not-a-db", "redis://host?x=1"}) {
+  for (const auto url :
+       {"memory://local", "redis://", "redis://:6379", "redis://host:0", "redis://host:00", "redis://host:000",
+        "redis://host:", "redis://host:70000", "redis://host/not-a-db", "redis://host?x=1"}) {
     RedisMetaConfig config;
     auto status = ParseRedisMetaUrl(url, &config);
     EXPECT_FALSE(status.ok()) << url;

@@ -58,8 +58,8 @@ Fixture::~Fixture() {
 bool Fixture::SetUp() {
   if (base_bucket_url_.empty()) {
     std::fprintf(stderr,
-        "E2E: SWORDFS_E2E_S3_BUCKET is not set or empty. "
-        "E2E tests require a valid S3 bucket URL.\n");
+                 "E2E: SWORDFS_E2E_S3_BUCKET is not set or empty. "
+                 "E2E tests require a valid S3 bucket URL.\n");
     return false;
   }
 
@@ -410,8 +410,8 @@ std::string Fixture::MountPath(const std::string &relpath) const {
   return ::testing::AssertionSuccess();
 }
 
-::testing::AssertionResult Fixture::FileEquals(
-    const std::string &relpath, size_t expected_size, uint64_t expected_hash) {
+::testing::AssertionResult Fixture::FileEquals(const std::string &relpath, size_t expected_size,
+                                               uint64_t expected_hash) {
   std::string actual;
   if (ReadFile(relpath, &actual) != 0) {
     return ::testing::AssertionFailure() << "Failed to read \"" << relpath << "\": " << std::strerror(errno)

@@ -34,7 +34,7 @@ public:
   Status Unlink(InodeID parent_ino, std::string_view name, nlink_t *post_nlink) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
   Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
-      RenameFlag flags, RenameResult *result) override;
+                RenameFlag flags, RenameResult *result) override;
   Status SetAttr(InodeID ino, const struct stat *attr, SetAttrField fields, SwordFsInode *out) override;
   Status StatFs(struct statvfs *stbuf) override;
   Status Access(InodeID ino, int mask) override;

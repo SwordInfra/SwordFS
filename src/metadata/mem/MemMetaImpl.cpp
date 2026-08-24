@@ -191,7 +191,7 @@ Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, nlink_t *p
 }
 
 Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
-    std::string_view new_name, RenameFlag flags, RenameResult *result) {
+                           std::string_view new_name, RenameFlag flags, RenameResult *result) {
   if (result) {
     *result = {};
   }
@@ -276,8 +276,8 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, In
     // Cycle prevention, the self-rename no-op, victim type checks and
     // victim removal are all enforced by MoveEntry; kNoReplace simply
     // withholds overwrite permission.
-    return txn.MoveEntry(
-        old_parent_ino, old_name, new_parent_ino, new_name, !HasRenameFlag(flags, RenameFlag::kNoReplace), result);
+    return txn.MoveEntry(old_parent_ino, old_name, new_parent_ino, new_name,
+                         !HasRenameFlag(flags, RenameFlag::kNoReplace), result);
   });
 
   if (!status.ok()) {
