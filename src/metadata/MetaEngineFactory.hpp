@@ -16,7 +16,6 @@ class IMetaEngine;
 
 /// Create a metadata engine from a URL string.
 /// On success, |out| is populated and Status::OK() is returned.
-utils::Status CreateMetaEngine(std::string_view meta_url,
-                               std::unique_ptr<IMetaEngine>* out);
+utils::Status CreateMetaEngine(std::string_view scheme, std::string_view meta_url, std::unique_ptr<IMetaEngine> *out);
 
 }  // namespace swordfs::metadata

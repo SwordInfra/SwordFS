@@ -23,6 +23,12 @@ jobs:
       - name: Install dependencies
         run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
 
+      - name: Restore Redis dependency source cache
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: swordfs-redis-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('CMakeLists.txt') }}
+
       - name: Install CI tools
         run: sudo apt-get install -y -qq lcov clang-tidy
 
@@ -108,3 +114,48 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.info
           fail_ci_if_error: false
+
+  redis-integration:
+    name: Redis integration
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Restore native dependency cache
+        uses: actions/cache@v4
+        with:
+          path: .deps/install
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native-deps-cache.env') }}
+
+      - name: Install dependencies
+        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
+
+      - name: Restore Redis dependency source cache
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: swordfs-redis-deps-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: |
+          cmake --preset default -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install"
+
+      - name: Build Redis tests
+        run: cmake --build build --target swordfs_test
+
+      - name: Test Redis Standalone integration
+        env:
+          SWORDFS_REDIS_TEST_URL: redis://127.0.0.1:6379/15
+        run: build/swordfs_test --gtest_filter='RedisMeta*' --gtest_color=no

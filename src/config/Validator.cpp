@@ -3,11 +3,12 @@
 
 #include "config/Validator.hpp"
 
-#include <algorithm>
-#include <cctype>
 #include <string>
 
 #include "metadata/IMetaEngine.hpp"
+#include "metadata/MetaEngineRegistry.hpp"
+#include "metadata/Utils.hpp"
+#include "metadata/redis/RedisMetaConfig.hpp"
 #include "storage/StorageRegistry.hpp"
 #include "storage/StorageUrl.hpp"
 
@@ -15,11 +16,23 @@ namespace swordfs::config {
 
 const CLI::Validator ValidateMetaUrl = CLI::Validator(
     [](const std::string &input) -> std::string {
-      if (input == swordfs::metadata::kMemoryMetaUrl) {
-        return {};
+      std::string scheme;
+      auto status = swordfs::metadata::ParseUrlScheme(input, &scheme);
+      if (!status.ok()) {
+        return "Unsupported metadata engine '" + input + "'";
       }
-      return "Unsupported metadata engine '" + input +
-             "'. Supported: memory://local";
+      if (!swordfs::metadata::MetaEngineRegistry::Instance().Available(scheme)) {
+        return "Unsupported metadata engine '" + scheme + "'";
+      }
+      if (scheme == "memory") {
+        return input == swordfs::metadata::kMemoryMetaUrl ? "" : "Invalid memory metadata URL: " + input;
+      }
+      if (scheme == "redis") {
+        swordfs::metadata::RedisMetaConfig config;
+        status = swordfs::metadata::ParseRedisMetaUrl(input, &config);
+        return status.ok() ? "" : status.message();
+      }
+      return {};
     },
     "META_URL");
 
@@ -30,8 +43,7 @@ const CLI::Validator ValidateBucketUrl = CLI::Validator(
         return "Bucket URL must have a scheme:// prefix, got: " + input;
       }
       std::string scheme = input.substr(0, pos);
-      std::transform(scheme.begin(), scheme.end(), scheme.begin(),
-                     [](unsigned char c) { return std::tolower(c); });
+      std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char c) { return std::tolower(c); });
       if (!swordfs::storage::StorageRegistry::Instance().Available(scheme)) {
         return "Unsupported bucket scheme '" + scheme + "', got: " + input;
       }

@@ -8,6 +8,7 @@
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineFactory.hpp"
+#include "metadata/Utils.hpp"
 #include "storage/DataEngineFactory.hpp"
 #include "storage/IDataEngine.hpp"
 #include "storage/s3/S3DataEngine.hpp"
@@ -27,23 +28,16 @@ VolumeImpl &VolumeImpl::Instance() {
   return *instance_;
 }
 
-void VolumeImpl::set_meta_engine(
-    std::unique_ptr<swordfs::metadata::IMetaEngine> meta) {
+void VolumeImpl::set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine> meta) {
   meta_engine_ = std::move(meta);
 }
 
-void VolumeImpl::set_data_engine(
-    std::unique_ptr<swordfs::storage::IDataEngine> data) {
+void VolumeImpl::set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine> data) {
   data_engine_ = std::move(data);
 }
 
 Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
   config_.meta_url = cfg.meta_url();
-  if (!swordfs::metadata::IsMemoryMode(config_.meta_url)) {
-    return Status::InvalidArgument(
-        "unsupported metadata engine: " + config_.meta_url);
-  }
-
   config_.name = cfg.volume();
   config_.storage = cfg.storage_backend();
   config_.bucket = cfg.bucket_url();
@@ -74,7 +68,12 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
   }
 
   // Create engines.
-  status = swordfs::metadata::CreateMetaEngine(config_.meta_url, &meta_engine_);
+  std::string scheme;
+  status = swordfs::metadata::ParseUrlScheme(config_.meta_url, &scheme);
+  if (!status.ok()) {
+    return status;
+  }
+  status = swordfs::metadata::CreateMetaEngine(scheme, config_.meta_url, &meta_engine_);
   if (!status.ok()) {
     return status;
   }

@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(SwordFS VERSION 0.1.0 LANGUAGES CXX)
 
+include(FetchContent)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -28,6 +30,46 @@ find_package(folly REQUIRED)
 # fuse3 (system package, install via: apt install libfuse3-dev)
 find_library(FUSE3_LIBRARY fuse3 REQUIRED)
 find_path(FUSE3_INCLUDE_DIR fuse.h PATH_SUFFIXES fuse3)
+
+# Redis metadata backend.  Prefer a system redis-plus-plus installation, but
+# fetch a pinned release for reproducible developer and CI builds.
+find_package(redis++ CONFIG QUIET)
+if(TARGET redis++::redis++)
+  set(REDIS_PLUS_PLUS_TARGET redis++::redis++)
+elseif(TARGET redis++::redis++_static)
+  set(REDIS_PLUS_PLUS_TARGET redis++::redis++_static)
+else()
+  # hiredis 1.2 still declares compatibility with very old CMake releases.
+  # CMake 4 requires an explicit policy compatibility floor.
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+  FetchContent_Declare(
+    hiredis
+    GIT_REPOSITORY https://github.com/redis/hiredis.git
+    GIT_TAG 60e5075d4ac77424809f855ba3e398df7aacefe8
+  )
+  FetchContent_MakeAvailable(hiredis)
+  # Feed the FetchContent-provided hiredis target to redis-plus-plus's
+  # FindHiredis.cmake fallback path. Hiredis 1.2 keeps headers at its source
+  # root while redis-plus-plus expects an include root containing hiredis/.
+  file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/redis-hiredis-include)
+  file(CREATE_LINK ${hiredis_SOURCE_DIR}
+       ${CMAKE_BINARY_DIR}/redis-hiredis-include/hiredis SYMBOLIC)
+  set(HIREDIS_HEADER ${CMAKE_BINARY_DIR}/redis-hiredis-include CACHE PATH "" FORCE)
+  set(HIREDIS_LIB hiredis::hiredis CACHE STRING "" FORCE)
+  FetchContent_Declare(
+    redis_plus_plus
+    GIT_REPOSITORY https://github.com/sewenew/redis-plus-plus.git
+    GIT_TAG a63ac43bf192772910b52e27cd2b42a6098a0071
+  )
+  set(REDIS_PLUS_PLUS_BUILD_TEST OFF CACHE BOOL "" FORCE)
+  set(REDIS_PLUS_PLUS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(redis_plus_plus)
+  set(REDIS_PLUS_PLUS_TARGET redis++_static)
+endif()
+
+if(TARGET hiredis::hiredis)
+  set(REDIS_PLUS_PLUS_HIREDIS_TARGET hiredis::hiredis)
+endif()
 
 # ============================================================
 # Version header
@@ -75,7 +117,11 @@ target_link_libraries(swordfs_lib PUBLIC
   ${AWSSDK_LINK_LIBRARIES}
   Folly::folly
   ${FUSE3_LIBRARY}
+  ${REDIS_PLUS_PLUS_TARGET}
 )
+if(REDIS_PLUS_PLUS_HIREDIS_TARGET)
+  target_link_libraries(swordfs_lib PUBLIC ${REDIS_PLUS_PLUS_HIREDIS_TARGET})
+endif()
 if(JITTERENTROPY_LIB)
   target_link_libraries(swordfs_lib PUBLIC ${JITTERENTROPY_LIB})
 endif()
@@ -101,7 +147,6 @@ target_link_libraries(swordfs PRIVATE swordfs_lib)
 # Tests
 # ============================================================
 
-include(FetchContent)
 FetchContent_Declare(
   googletest
   GIT_REPOSITORY https://github.com/google/googletest.git

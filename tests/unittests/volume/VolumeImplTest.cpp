@@ -14,7 +14,7 @@ using swordfs::utils::Status;
 using swordfs::volume::VolumeImpl;
 
 class VolumeImplTest : public ::testing::Test {
- protected:
+protected:
   void SetUp() override {
     tmpdir_ = "/tmp/swordfs_volimpl_test_" + std::to_string(::getpid());
     std::system(("mkdir -p " + tmpdir_).c_str());
@@ -23,9 +23,8 @@ class VolumeImplTest : public ::testing::Test {
     std::system(("rm -rf " + tmpdir_).c_str());
   }
 
-  ConfigCenter makeConfig(const std::string& meta_url,
-                          const std::string& vol_path,
-                          const std::string& vol_name = "testvol") {
+  ConfigCenter makeConfig(const std::string &meta_url, const std::string &vol_path,
+                          const std::string &vol_name = "testvol") {
     ConfigCenter cfg;
     cfg.set_meta_url(meta_url);
     cfg.set_volume_config_path(vol_path);
@@ -44,11 +43,11 @@ TEST_F(VolumeImplTest, CreateFromSucceeds) {
   EXPECT_TRUE(vol.CreateFrom(cfg).ok());
 }
 
-TEST_F(VolumeImplTest, CreateFromUnsupportedEngine) {
+TEST_F(VolumeImplTest, CreateFromRedisEngine) {
   auto cfg = makeConfig("redis://localhost:6379/0", tmpdir_);
   VolumeImpl vol;
   Status st = vol.CreateFrom(cfg);
-  EXPECT_FALSE(st.ok());
+  EXPECT_TRUE(st.ok()) << st.message();
 }
 
 TEST_F(VolumeImplTest, CreateFromNoConfigPathSkipsWrite) {
