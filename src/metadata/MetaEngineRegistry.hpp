@@ -7,7 +7,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <vector>
 
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
@@ -35,9 +34,6 @@ public:
 
   /// Create a metadata engine using its registered factory.
   utils::Status Create(std::string_view name, std::string_view meta_url, std::unique_ptr<IMetaEngine> *out) const;
-
-  /// Return the names of all registered metadata engines.
-  std::vector<std::string> Names() const;
 
 private:
   MetaEngineRegistry() = default;
