@@ -14,7 +14,7 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
 
 }  // namespace
 
-RedisMetaTxn::RedisMetaTxn(sw::redis::Redis &redis) : transaction_(redis.transaction()) {
+RedisMetaTxn::RedisMetaTxn(sw::redis::Redis &redis) : transaction_(redis.transaction(false, false)) {
 }
 
 utils::Status RedisMetaTxn::Watch(std::string_view key) {

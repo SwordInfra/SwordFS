@@ -15,6 +15,9 @@
 namespace swordfs::metadata {
 namespace {
 
+// Phase 0 default; make this configurable with RedisMetaConfig::pool_size later.
+constexpr std::size_t kConnectionPoolSize = 8;
+
 sw::redis::ConnectionOptions MakeConnectionOptions(const RedisMetaConfig &config) {
   sw::redis::ConnectionOptions options;
   options.host = config.host;
@@ -46,7 +49,10 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
 
 }  // namespace
 
-RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config) : redis_(std::make_unique<sw::redis::Redis>(MakeConnectionOptions(config))) {
+RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config) {
+  sw::redis::ConnectionPoolOptions pool_options;
+  pool_options.size = kConnectionPoolSize;
+  redis_ = std::make_unique<sw::redis::Redis>(MakeConnectionOptions(config), pool_options);
 }
 
 utils::Status RedisMetaClient::Ping() {
