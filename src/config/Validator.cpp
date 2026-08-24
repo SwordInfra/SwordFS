@@ -22,14 +22,7 @@ const CLI::Validator ValidateMetaUrl = CLI::Validator(
         return "Unsupported metadata engine '" + input + "'";
       }
       if (!swordfs::metadata::MetaEngineRegistry::Instance().Available(scheme)) {
-        std::string supported;
-        for (const auto &name : swordfs::metadata::MetaEngineRegistry::Instance().Names()) {
-          if (!supported.empty()) {
-            supported += ", ";
-          }
-          supported += name;
-        }
-        return "Unsupported metadata engine '" + scheme + "'. Supported: " + supported;
+        return "Unsupported metadata engine '" + scheme + "'";
       }
       if (scheme == "memory") {
         return input == swordfs::metadata::kMemoryMetaUrl ? "" : "Invalid memory metadata URL: " + input;
