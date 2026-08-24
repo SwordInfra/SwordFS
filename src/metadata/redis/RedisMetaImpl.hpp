@@ -23,7 +23,7 @@ public:
   RedisMetaImpl(const RedisMetaImpl &) = delete;
   RedisMetaImpl &operator=(const RedisMetaImpl &) = delete;
 
-  static utils::Status Create(const RedisMetaConfig &config, std::unique_ptr<RedisMetaImpl> *out);
+  utils::Status Initialize();
   static Limits GetLimits();
 
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;

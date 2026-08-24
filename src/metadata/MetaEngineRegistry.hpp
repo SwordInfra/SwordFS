@@ -3,8 +3,9 @@
 
 #pragma once
 
+#include <string>
 #include <string_view>
-#include <vector>
+#include <unordered_set>
 
 namespace swordfs::metadata {
 
@@ -21,7 +22,7 @@ public:
 
 private:
   MetaEngineRegistry() = default;
-  std::vector<std::string_view> engines_;
+  std::unordered_set<std::string> engines_;
 };
 
 /// RAII helper for registering a metadata engine at static initialization.

@@ -3,8 +3,6 @@
 
 #include "metadata/MetaEngineRegistry.hpp"
 
-#include <algorithm>
-
 namespace swordfs::metadata {
 
 MetaEngineRegistry &MetaEngineRegistry::Instance() {
@@ -13,11 +11,11 @@ MetaEngineRegistry &MetaEngineRegistry::Instance() {
 }
 
 void MetaEngineRegistry::Register(std::string_view name) {
-  engines_.push_back(name);
+  engines_.emplace(name);
 }
 
 bool MetaEngineRegistry::Available(std::string_view name) const {
-  return std::any_of(engines_.begin(), engines_.end(), [name](std::string_view engine) { return engine == name; });
+  return engines_.contains(std::string(name));
 }
 
 }  // namespace swordfs::metadata

@@ -3,8 +3,6 @@
 
 #include "config/Validator.hpp"
 
-#include <algorithm>
-#include <cctype>
 #include <string>
 
 #include "metadata/IMetaEngine.hpp"
@@ -12,17 +10,17 @@
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "storage/StorageRegistry.hpp"
 #include "storage/StorageUrl.hpp"
+#include "metadata/Utils.hpp"
 
 namespace swordfs::config {
 
 const CLI::Validator ValidateMetaUrl = CLI::Validator(
     [](const std::string &input) -> std::string {
-      const auto pos = input.find("://");
-      if (pos == std::string::npos) {
+      std::string scheme;
+      auto status = swordfs::metadata::ParseUrlScheme(input, &scheme);
+      if (!status.ok()) {
         return "Unsupported metadata engine '" + input + "'";
       }
-      std::string scheme = input.substr(0, pos);
-      std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char c) { return std::tolower(c); });
       if (!swordfs::metadata::MetaEngineRegistry::Instance().Available(scheme)) {
         return "Unsupported metadata engine '" + scheme + "'";
       }
@@ -31,7 +29,7 @@ const CLI::Validator ValidateMetaUrl = CLI::Validator(
       }
       if (scheme == "redis") {
         swordfs::metadata::RedisMetaConfig config;
-        auto status = swordfs::metadata::ParseRedisMetaUrl(input, &config);
+        status = swordfs::metadata::ParseRedisMetaUrl(input, &config);
         return status.ok() ? "" : status.message();
       }
       return {};

@@ -5,6 +5,7 @@
 
 #include <sw/redis++/redis++.h>
 
+#include <chrono>
 #include <functional>
 #include <memory>
 
@@ -16,8 +17,6 @@ namespace swordfs::metadata {
 
 class RedisMetaClient {
 public:
-  static constexpr int kDefaultMaxAttempts = 8;
-
   explicit RedisMetaClient(const RedisMetaConfig &config);
 
   RedisMetaClient(const RedisMetaClient &) = delete;
@@ -25,14 +24,16 @@ public:
 
   utils::Status Ping();
 
-  // Runs an optimistic transaction. Every attempt owns one dedicated Redis
-  // connection so WATCH, reads, MULTI, queued writes and EXEC share the same
-  // connection. Busy and WATCH conflicts retry with bounded backoff.
-  //
-  utils::Status Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback, int max_attempts = kDefaultMaxAttempts);
+  // Runs an optimistic transaction. Every attempt exclusively uses one
+  // connection checked out from the Redis client's connection pool, so WATCH,
+  // reads, MULTI, queued writes and EXEC share the same connection. Busy and
+  // WATCH conflicts retry with bounded backoff.
+  utils::Status Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback);
 
 private:
   std::unique_ptr<sw::redis::Redis> redis_;
+  int retry_attempts_;
+  std::chrono::milliseconds retry_backoff_;
 };
 
 }  // namespace swordfs::metadata

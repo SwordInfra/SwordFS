@@ -8,15 +8,12 @@
 #include <exception>
 #include <utility>
 
+#include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
 
 namespace swordfs::metadata {
 namespace {
-
-Status NotImplemented() {
-  return Status::NotSupported("Redis metadata operations are not implemented yet");
-}
-
+RegisterMetaEngine kRedisMetaEngine{"redis"};
 }  // namespace
 
 RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config) : client_(std::make_unique<RedisMetaClient>(config)) {
@@ -24,18 +21,9 @@ RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config) : client_(std::make_
 
 RedisMetaImpl::~RedisMetaImpl() = default;
 
-utils::Status RedisMetaImpl::Create(const RedisMetaConfig &config, std::unique_ptr<RedisMetaImpl> *out) {
-  if (out == nullptr) {
-    return utils::Status::InvalidArgument("Redis metadata engine output is null");
-  }
+utils::Status RedisMetaImpl::Initialize() {
   try {
-    auto impl = std::make_unique<RedisMetaImpl>(config);
-    auto status = impl->client_->Ping();
-    if (!status.ok()) {
-      return status;
-    }
-    *out = std::move(impl);
-    return utils::Status::OK();
+    return client_->Ping();
   } catch (const std::exception &error) {
     return utils::Status::IOError("Redis metadata initialization failed: " + std::string(error.what()));
   }
@@ -46,67 +34,67 @@ Limits RedisMetaImpl::GetLimits() {
 }
 
 Status RedisMetaImpl::Lookup(InodeID, std::string_view, SwordFsInode *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::GetInode(InodeID, SwordFsInode *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::ReadDir(InodeID, std::vector<SwordFsEntry> *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::Create(InodeID, std::string_view, mode_t, SwordFsInode *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::MkDir(InodeID, std::string_view, mode_t, SwordFsInode *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::Unlink(InodeID, std::string_view, nlink_t *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::RmDir(InodeID, std::string_view) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::Rename(InodeID, std::string_view, InodeID, std::string_view, RenameFlag, RenameResult *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::SetAttr(InodeID, const struct stat *, SetAttrField, SwordFsInode *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::StatFs(struct statvfs *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::Access(InodeID, int) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::Symlink(InodeID, std::string_view, const char *, SwordFsInode *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::Link(InodeID, InodeID, std::string_view, SwordFsInode *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::Readlink(InodeID, std::string *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::Open(InodeID) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::ReclaimInode(InodeID) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::ListChunks(InodeID, std::vector<ChunkMeta> *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::OpenDir(InodeID) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::AddChunk(InodeID, const ChunkMeta &) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::FindChunk(InodeID, ChunkIndex, ChunkMeta *) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::Truncate(InodeID, size_t) {
-  return NotImplemented();
+  return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 
 }  // namespace swordfs::metadata

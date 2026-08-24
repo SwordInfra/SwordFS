@@ -8,10 +8,10 @@
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineFactory.hpp"
-#include "metadata/redis/RedisMetaConfig.hpp"
 #include "storage/DataEngineFactory.hpp"
 #include "storage/IDataEngine.hpp"
 #include "storage/s3/S3DataEngine.hpp"
+#include "metadata/Utils.hpp"
 
 namespace swordfs::volume {
 
@@ -38,17 +38,6 @@ void VolumeImpl::set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine> 
 
 Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
   config_.meta_url = cfg.meta_url();
-  if (!swordfs::metadata::IsMemoryMode(config_.meta_url)) {
-    swordfs::metadata::RedisMetaConfig redis_config;
-    if (!config_.meta_url.starts_with("redis://")) {
-      return Status::InvalidArgument("unsupported metadata engine: " + config_.meta_url);
-    }
-    auto status = swordfs::metadata::ParseRedisMetaUrl(config_.meta_url, &redis_config);
-    if (!status.ok()) {
-      return status;
-    }
-  }
-
   config_.name = cfg.volume();
   config_.storage = cfg.storage_backend();
   config_.bucket = cfg.bucket_url();
@@ -79,7 +68,12 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
   }
 
   // Create engines.
-  status = swordfs::metadata::CreateMetaEngine(config_.meta_url, &meta_engine_);
+  std::string scheme;
+  status = swordfs::metadata::ParseUrlScheme(config_.meta_url, &scheme);
+  if (!status.ok()) {
+    return status;
+  }
+  status = swordfs::metadata::CreateMetaEngine(scheme, config_.meta_url, &meta_engine_);
   if (!status.ok()) {
     return status;
   }

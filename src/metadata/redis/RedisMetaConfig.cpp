@@ -6,6 +6,9 @@
 #include <folly/Conv.h>
 #include <folly/Uri.h>
 
+#include <charconv>
+#include <limits>
+
 #include "metadata/MetaEngineRegistry.hpp"
 
 namespace swordfs::metadata {
@@ -50,6 +53,105 @@ utils::Status ParsePort(std::string_view authority, RedisMetaConfig *config) {
     return utils::Status::InvalidArgument("Redis metadata URL has invalid port");
   }
   config->port = parsed_port.value();
+  return utils::Status::OK();
+}
+
+utils::Status ParseDuration(std::string_view value, std::chrono::milliseconds *duration) {
+  if (value.empty() || value.front() == '-') {
+    return utils::Status::InvalidArgument("Redis metadata duration is invalid");
+  }
+
+  std::string_view number = value;
+  auto multiplier = std::chrono::milliseconds(1);
+  if (value.ends_with("ms")) {
+    number = value.substr(0, value.size() - 2);
+  } else if (value.ends_with('s')) {
+    number = value.substr(0, value.size() - 1);
+    multiplier = std::chrono::seconds(1);
+  } else if (value.ends_with('m')) {
+    number = value.substr(0, value.size() - 1);
+    multiplier = std::chrono::minutes(1);
+  } else {
+    return utils::Status::InvalidArgument("Redis metadata duration must use ms, s, or m");
+  }
+
+  int64_t parsed = 0;
+  const auto [end, error] = std::from_chars(number.data(), number.data() + number.size(), parsed);
+  if (number.empty() || error != std::errc{} || end != number.data() + number.size() || parsed <= 0) {
+    return utils::Status::InvalidArgument("Redis metadata duration is invalid");
+  }
+  *duration = multiplier * parsed;
+  return utils::Status::OK();
+}
+
+utils::Status ParsePositiveInteger(std::string_view value, std::string_view name, int64_t *result) {
+  const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), *result);
+  if (value.empty() || error != std::errc{} || end != value.data() + value.size() || *result <= 0) {
+    return utils::Status::InvalidArgument("Redis metadata option " + std::string(name) + " is invalid");
+  }
+  return utils::Status::OK();
+}
+
+utils::Status ParseQuery(std::string_view query, RedisMetaConfig *config) {
+  while (!query.empty()) {
+    const auto separator = query.find('&');
+    const auto item = query.substr(0, separator);
+    query = separator == std::string_view::npos ? std::string_view{} : query.substr(separator + 1);
+
+    const auto equals = item.find('=');
+    if (equals == std::string_view::npos) {
+      return utils::Status::InvalidArgument("Redis metadata query option is missing a value");
+    }
+    const auto key = item.substr(0, equals);
+    const auto value = item.substr(equals + 1);
+    if (key.empty() || value.empty()) {
+      return utils::Status::InvalidArgument("Redis metadata query option is invalid");
+    }
+
+    if (key == "connect_timeout") {
+      auto status = ParseDuration(value, &config->connect_timeout);
+      if (!status.ok()) {
+        return status;
+      }
+    } else if (key == "socket_timeout") {
+      auto status = ParseDuration(value, &config->socket_timeout);
+      if (!status.ok()) {
+        return status;
+      }
+    } else if (key == "pool_wait_timeout") {
+      auto status = ParseDuration(value, &config->pool_wait_timeout);
+      if (!status.ok()) {
+        return status;
+      }
+    } else if (key == "retry_backoff") {
+      auto status = ParseDuration(value, &config->retry_backoff);
+      if (!status.ok()) {
+        return status;
+      }
+    } else if (key == "pool_size") {
+      int64_t parsed = 0;
+      auto status = ParsePositiveInteger(value, key, &parsed);
+      if (!status.ok()) {
+        return status;
+      }
+      if (static_cast<uint64_t>(parsed) > std::numeric_limits<std::size_t>::max()) {
+        return utils::Status::InvalidArgument("Redis metadata option pool_size is invalid");
+      }
+      config->pool_size = static_cast<std::size_t>(parsed);
+    } else if (key == "retry_attempts") {
+      int64_t parsed = 0;
+      auto status = ParsePositiveInteger(value, key, &parsed);
+      if (!status.ok()) {
+        return status;
+      }
+      if (parsed > std::numeric_limits<int>::max()) {
+        return utils::Status::InvalidArgument("Redis metadata option retry_attempts is invalid");
+      }
+      config->retry_attempts = static_cast<int>(parsed);
+    } else {
+      return utils::Status::InvalidArgument("Unknown Redis metadata option: " + std::string(key));
+    }
+  }
   return utils::Status::OK();
 }
 
@@ -113,11 +215,8 @@ utils::Status ParseRedisMetaUrl(std::string_view meta_url, RedisMetaConfig *conf
   if (uri.host().empty()) {
     return utils::Status::InvalidArgument("Redis metadata URL has no host");
   }
-  // TODO(#111): accept the volume query parameter once the Redis key schema
-  // and volume namespace are implemented. Phase 0 intentionally rejects query
-  // components rather than silently ignoring them.
-  if (!uri.query().empty() || !uri.fragment().empty()) {
-    return utils::Status::InvalidArgument("Redis metadata URL does not support query or fragment components");
+  if (!uri.fragment().empty()) {
+    return utils::Status::InvalidArgument("Redis metadata URL does not support fragment components");
   }
 
   RedisMetaConfig parsed;
@@ -128,6 +227,10 @@ utils::Status ParseRedisMetaUrl(std::string_view meta_url, RedisMetaConfig *conf
     return status;
   }
   status = ParseDatabase(uri.path(), &parsed);
+  if (!status.ok()) {
+    return status;
+  }
+  status = ParseQuery(uri.query(), &parsed);
   if (!status.ok()) {
     return status;
   }

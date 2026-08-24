@@ -16,6 +16,12 @@ TEST(RedisMetaConfigTest, ParsesHostWithDefaults) {
   EXPECT_EQ(config.db, 0);
   EXPECT_FALSE(config.username.has_value());
   EXPECT_FALSE(config.password.has_value());
+  EXPECT_EQ(config.connect_timeout, std::chrono::seconds(2));
+  EXPECT_EQ(config.socket_timeout, std::chrono::seconds(5));
+  EXPECT_EQ(config.pool_size, 8);
+  EXPECT_EQ(config.pool_wait_timeout, std::chrono::seconds(1));
+  EXPECT_EQ(config.retry_attempts, 3);
+  EXPECT_EQ(config.retry_backoff, std::chrono::milliseconds(20));
 
   status = ParseRedisMetaUrl("redis://localhost/", &config);
   ASSERT_TRUE(status.ok()) << status.message();
@@ -47,6 +53,29 @@ TEST(RedisMetaConfigTest, ParsesIpv6Host) {
   EXPECT_EQ(config.host, "2001:db8::1");
   EXPECT_EQ(config.port, 6380);
   EXPECT_EQ(config.db, 2);
+}
+
+TEST(RedisMetaConfigTest, ParsesClientOptions) {
+  RedisMetaConfig config;
+  const auto status = ParseRedisMetaUrl(
+      "redis://localhost/0?connect_timeout=250ms&socket_timeout=3s&pool_size=16&pool_wait_timeout=2s&retry_attempts=5&retry_backoff=40ms", &config);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(config.connect_timeout, std::chrono::milliseconds(250));
+  EXPECT_EQ(config.socket_timeout, std::chrono::seconds(3));
+  EXPECT_EQ(config.pool_size, 16);
+  EXPECT_EQ(config.pool_wait_timeout, std::chrono::seconds(2));
+  EXPECT_EQ(config.retry_attempts, 5);
+  EXPECT_EQ(config.retry_backoff, std::chrono::milliseconds(40));
+}
+
+TEST(RedisMetaConfigTest, RejectsInvalidClientOptions) {
+  for (const auto url : {"redis://localhost?connect_timeout=0s", "redis://localhost?socket_timeout=-1s", "redis://localhost?pool_size=0",
+           "redis://localhost?pool_wait_timeout=0s", "redis://localhost?retry_attempts=0", "redis://localhost?retry_backoff=abc", "redis://localhost?unknown=1",
+           "redis://localhost?pool_size=abc"}) {
+    RedisMetaConfig config;
+    auto status = ParseRedisMetaUrl(url, &config);
+    EXPECT_FALSE(status.ok()) << url;
+  }
 }
 
 TEST(RedisMetaConfigTest, ParsesPasswordOnlyAuthentication) {

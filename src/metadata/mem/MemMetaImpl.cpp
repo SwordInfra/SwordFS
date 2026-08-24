@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cstring>
 
+#include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/Types.hpp"
 #include "metadata/Utils.hpp"
 #include "utils/Logging.hpp"
@@ -20,6 +21,7 @@
 namespace swordfs::metadata {
 
 namespace {
+RegisterMetaEngine kMemoryMetaEngine{"memory"};
 
 // MemMeta-specific filesystem limits.
 constexpr size_t kMaxNameLength = 255;  // POSIX NAME_MAX

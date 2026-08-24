@@ -1,9 +1,13 @@
+// Copyright 2026 SwordFS Contributors.
+// Licensed under the Apache License, Version 2.0.
+
 #include "metadata/Utils.hpp"
 
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <cstring>
 
 #include "dirent.h"
@@ -45,6 +49,24 @@ void KillSUID(struct stat *st) {
   if (st->st_mode & S_ISGID) {
     st->st_mode &= ~S_ISGID;
   }
+}
+
+utils::Status ParseUrlScheme(std::string_view url, std::string *scheme) {
+  if (scheme == nullptr) {
+    return utils::Status::InvalidArgument("URL scheme output is null");
+  }
+
+  const auto pos = url.find("://");
+  if (pos == std::string_view::npos || pos == 0) {
+    return utils::Status::InvalidArgument(
+        "URL must have a scheme:// prefix: " + std::string(url));
+  }
+
+  scheme->assign(url.substr(0, pos));
+  for (char &c : *scheme) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  return utils::Status::OK();
 }
 
 }  // namespace swordfs::metadata

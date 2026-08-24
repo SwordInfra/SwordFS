@@ -4,7 +4,11 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 #include <sys/stat.h>
+
+#include "utils/Status.hpp"
 
 namespace swordfs::metadata {
 
@@ -18,5 +22,8 @@ uint32_t ModeToDt(mode_t mode);
 // semantics): required when file ownership changes or the file is
 // truncated/written.
 void KillSUID(struct stat *st);
+
+/// Extracts and normalizes the scheme from a URL such as "redis://host".
+utils::Status ParseUrlScheme(std::string_view url, std::string *scheme);
 
 }  // namespace swordfs::metadata

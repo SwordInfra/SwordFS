@@ -15,16 +15,13 @@
 namespace swordfs::metadata {
 namespace {
 
-// Phase 0 default; make this configurable with RedisMetaConfig::pool_size later.
-constexpr std::size_t kConnectionPoolSize = 8;
-
 sw::redis::ConnectionOptions MakeConnectionOptions(const RedisMetaConfig &config) {
   sw::redis::ConnectionOptions options;
   options.host = config.host;
   options.port = config.port;
   options.db = config.db;
-  options.connect_timeout = std::chrono::seconds(2);
-  options.socket_timeout = std::chrono::seconds(5);
+  options.connect_timeout = config.connect_timeout;
+  options.socket_timeout = config.socket_timeout;
   if (config.username.has_value()) {
     options.user = *config.username;
   }
@@ -34,12 +31,11 @@ sw::redis::ConnectionOptions MakeConnectionOptions(const RedisMetaConfig &config
   return options;
 }
 
-void Backoff(int attempt) {
-  constexpr int kBaseDelayMs = 1;
-  constexpr int kMaxDelayMs = 32;
-  const int exponent = std::min(attempt, 5);
-  const int max_delay = std::min(kBaseDelayMs << exponent, kMaxDelayMs);
-  const auto delay = folly::Random::rand32(max_delay + 1);
+void Backoff(int attempt, std::chrono::milliseconds base_delay) {
+  constexpr int kMaxDelayMs = 1000;
+  const int exponent = std::min(attempt, 10);
+  const auto max_delay = std::min(base_delay * (1 << exponent), std::chrono::milliseconds(kMaxDelayMs));
+  const auto delay = folly::Random::rand64(max_delay.count() + 1);
   std::this_thread::sleep_for(std::chrono::milliseconds(delay));
 }
 
@@ -49,9 +45,10 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
 
 }  // namespace
 
-RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config) {
+RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config) : retry_attempts_(config.retry_attempts), retry_backoff_(config.retry_backoff) {
   sw::redis::ConnectionPoolOptions pool_options;
-  pool_options.size = kConnectionPoolSize;
+  pool_options.size = config.pool_size;
+  pool_options.wait_timeout = config.pool_wait_timeout;
   redis_ = std::make_unique<sw::redis::Redis>(MakeConnectionOptions(config), pool_options);
 }
 
@@ -64,19 +61,21 @@ utils::Status RedisMetaClient::Ping() {
   }
 }
 
-utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback, int max_attempts) {
-  if (max_attempts <= 0) {
-    return utils::Status::InvalidArgument("max_attempts must be positive");
+utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
+  if (retry_attempts_ <= 0) {
+    return utils::Status::InvalidArgument("retry_attempts must be positive");
   }
 
-  for (int attempt = 0; attempt < max_attempts; ++attempt) {
+  const int attempts = retry_attempts_;
+
+  for (int attempt = 0; attempt < attempts; ++attempt) {
     try {
       RedisMetaTxn transaction(*redis_);
       auto status = callback(transaction);
       if (!status.ok()) {
         transaction.Discard();
         if (status.IsBusy()) {
-          Backoff(attempt);
+          Backoff(attempt, retry_backoff_);
           continue;
         }
         return status;
@@ -84,14 +83,14 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisM
 
       status = transaction.Commit();
       if (status.IsBusy()) {
-        Backoff(attempt);
+        Backoff(attempt, retry_backoff_);
         continue;
       }
       return status;
     } catch (const sw::redis::TimeoutError &) {
-      Backoff(attempt);
+      Backoff(attempt, retry_backoff_);
     } catch (const sw::redis::ClosedError &) {
-      Backoff(attempt);
+      Backoff(attempt, retry_backoff_);
     } catch (const sw::redis::Error &error) {
       return RedisError("transaction", error);
     }

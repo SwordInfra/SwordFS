@@ -140,12 +140,13 @@ TEST(RedisMetaClientTest, RetriesExplicitPreCommitFailure) {
   EXPECT_EQ(attempts, 2);
 }
 
-TEST(RedisMetaClientTest, RejectsNonPositiveMaxAttemptsWithoutRedis) {
+TEST(RedisMetaClientTest, RejectsNonPositiveRetryAttemptsWithoutRedis) {
   RedisMetaConfig config;
   config.host = "127.0.0.1";
-  RedisMetaClient store(config);
-  for (const int max_attempts : {0, -1}) {
-    const auto status = store.Transact([](RedisMetaTxn &) { return utils::Status::OK(); }, max_attempts);
+  for (const int retry_attempts : {0, -1}) {
+    config.retry_attempts = retry_attempts;
+    RedisMetaClient store(config);
+    const auto status = store.Transact([](RedisMetaTxn &) { return utils::Status::OK(); });
     EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
   }
 }
@@ -153,14 +154,13 @@ TEST(RedisMetaClientTest, RejectsNonPositiveMaxAttemptsWithoutRedis) {
 TEST(RedisMetaClientTest, RetriesUntilLimitIsExceeded) {
   RedisMetaConfig config;
   config.host = "127.0.0.1";
+  config.retry_attempts = 3;
   RedisMetaClient store(config);
   int attempts = 0;
-  const auto status = store.Transact(
-      [&](RedisMetaTxn &) {
-        ++attempts;
-        return utils::Status::Busy("retry");
-      },
-      3);
+  const auto status = store.Transact([&](RedisMetaTxn &) {
+    ++attempts;
+    return utils::Status::Busy("retry");
+  });
   EXPECT_TRUE(status.IsBusy());
   EXPECT_EQ(attempts, 3);
 }
