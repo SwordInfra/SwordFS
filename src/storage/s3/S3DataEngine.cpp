@@ -76,7 +76,7 @@ Status S3DataEngine::Initialize() {
     return status;
   }
 
-  int n = swordfs::config::ConfigCenter::Instance().storage_async_threads();
+  int n = swordfs::config::ConfigCenter::Instance().storage_thread_count();
   pool_ = std::make_shared<utils::FiberThreadPool>(
       n > 0 ? static_cast<size_t>(n)
             : std::thread::hardware_concurrency());

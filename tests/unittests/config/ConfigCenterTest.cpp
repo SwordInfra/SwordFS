@@ -101,6 +101,28 @@ TEST(MountParamsTest, MinimalMemoryMount) {
   EXPECT_TRUE(ParseOptions(args).empty());
 }
 
+TEST(MountParamsTest, MountWithIndependentThreadCounts) {
+  auto err = ParseOptions({
+      "swordfs",
+      "mount",
+      "--volume",
+      "myvol",
+      "--meta",
+      "memory://local",
+      "--volume-config-path",
+      "/tmp/cfg",
+      "--storage-thread-count",
+      "4",
+      "--meta-thread-count",
+      "7",
+      "/mnt/point",
+  });
+  EXPECT_TRUE(err.empty()) << err;
+  auto &cfg = swordfs::config::ConfigCenter::Instance();
+  EXPECT_EQ(cfg.storage_thread_count(), 4);
+  EXPECT_EQ(cfg.meta_thread_count(), 7);
+}
+
 TEST(MountParamsTest, MountWithFuseOpts) {
   std::vector<std::string> args = {
       "swordfs",

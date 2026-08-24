@@ -19,8 +19,11 @@
 
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/fibers/Baton.h>
+#include <folly/fibers/FiberManagerInternal.h>
 #include <folly/futures/Future.h>
+#include <folly/logging/xlog.h>
 
+#include <exception>
 #include <memory>
 #include <type_traits>
 #include <utility>
@@ -35,39 +38,44 @@ class FiberThreadPool {
   FiberThreadPool(const FiberThreadPool &) = delete;
   FiberThreadPool &operator=(const FiberThreadPool &) = delete;
 
-  /// Run |fn| on a pool thread and block the calling fiber until done.
+  /// Run |fn| on a pool thread and suspend the calling fiber until done.
+  /// Must be called from a running fiber.
   template <typename Fn>
   auto Run(Fn &&fn) -> decltype(fn()) {
+    CHECK(folly::fibers::FiberManager::getFiberManagerUnsafe() != nullptr)
+        << "FiberThreadPool::Run() must be called from a fiber";
+
     using Result = decltype(fn());
     folly::fibers::Baton baton;
     std::exception_ptr ex;
     if constexpr (std::is_void_v<Result>) {
-      auto fut = folly::via(pool_.get(),
-                            [&baton, &ex, fn = std::forward<Fn>(fn)]() mutable {
-                              try {
-                                fn();
-                              } catch (...) {
-                                ex = std::current_exception();
-                              }
-                              baton.post();
-                            });
+      folly::via(pool_.get(), [&baton, &ex, fn = std::forward<Fn>(fn)]() mutable {
+        try {
+          fn();
+        } catch (...) {
+          ex = std::current_exception();
+        }
+        baton.post();
+      });
       baton.wait();
-      std::move(fut).get();
-      if (ex) std::rethrow_exception(ex);
+      if (ex) {
+        std::rethrow_exception(ex);
+      }
+      return;
     } else {
       Result result;
-      auto fut = folly::via(pool_.get(),
-                            [&baton, &ex, &result, fn = std::forward<Fn>(fn)]() mutable {
-                              try {
-                                result = fn();
-                              } catch (...) {
-                                ex = std::current_exception();
-                              }
-                              baton.post();
-                            });
-      baton.wait();
-      std::move(fut).get();
-      if (ex) std::rethrow_exception(ex);
+    folly::via(pool_.get(), [&baton, &ex, &result, fn = std::forward<Fn>(fn)]() mutable {
+      try {
+        result = fn();
+      } catch (...) {
+        ex = std::current_exception();
+      }
+      baton.post();
+    });
+    baton.wait();
+    if (ex) {
+      std::rethrow_exception(ex);
+    }
       return result;
     }
   }

@@ -13,11 +13,16 @@
 #include "metadata/redis/RedisMetaTxn.hpp"
 #include "utils/Status.hpp"
 
+namespace swordfs::utils {
+class FiberThreadPool;
+}  // namespace swordfs::utils
+
 namespace swordfs::metadata {
 
 class RedisMetaClient {
-public:
+ public:
   explicit RedisMetaClient(const RedisMetaConfig &config);
+  ~RedisMetaClient();
 
   RedisMetaClient(const RedisMetaClient &) = delete;
   RedisMetaClient &operator=(const RedisMetaClient &) = delete;
@@ -30,8 +35,9 @@ public:
   // WATCH conflicts retry with bounded backoff.
   utils::Status Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback);
 
-private:
+ private:
   std::unique_ptr<sw::redis::Redis> redis_;
+  std::unique_ptr<utils::FiberThreadPool> pool_;
   int retry_attempts_;
   std::chrono::milliseconds retry_backoff_;
 };
