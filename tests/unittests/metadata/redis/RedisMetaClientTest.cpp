@@ -5,6 +5,7 @@
 
 #include <cstdlib>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 #include "metadata/redis/RedisMetaClient.hpp"
@@ -121,6 +122,42 @@ TEST(RedisMetaClientTest, RetriesWatchConflict) {
   other.del(key);
 }
 
+TEST(RedisMetaClientTest, RetriesReadOnlyWatchConflict) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  const std::string key = "swordfs:phase0:read-only-watch-conflict";
+  sw::redis::Redis other(ConnectionOptions(config));
+  other.set(key, "before");
+
+  RedisMetaClient store(config);
+  int attempts = 0;
+  const auto status = store.Transact([&](RedisMetaTxn &transaction) {
+    ++attempts;
+    auto txn_status = transaction.Watch(key);
+    if (!txn_status.ok()) {
+      return txn_status;
+    }
+
+    std::optional<std::string> value;
+    txn_status = transaction.Get(key, &value);
+    if (!txn_status.ok()) {
+      return txn_status;
+    }
+
+    if (attempts == 1) {
+      other.set(key, "raced");
+    }
+    return utils::Status::OK();
+  });
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(attempts, 2);
+  other.del(key);
+}
+
 TEST(RedisMetaClientTest, RetriesExplicitPreCommitFailure) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
@@ -140,14 +177,12 @@ TEST(RedisMetaClientTest, RetriesExplicitPreCommitFailure) {
   EXPECT_EQ(attempts, 2);
 }
 
-TEST(RedisMetaClientTest, RejectsNonPositiveRetryAttemptsDuringInitialization) {
+TEST(RedisMetaClientTest, RejectsNonPositiveRetryAttemptsDuringConstruction) {
   RedisMetaConfig config;
   config.host = "127.0.0.1";
   for (const int retry_attempts : {0, -1}) {
     config.retry_attempts = retry_attempts;
-    RedisMetaClient store(config);
-    const auto status = store.Ping();
-    EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
+    EXPECT_THROW({ RedisMetaClient store(config); }, std::invalid_argument);
   }
 }
 

@@ -67,11 +67,30 @@ utils::Status RedisMetaTxn::Set(std::string_view key, std::string_view value) {
   }
 }
 
-void RedisMetaTxn::Discard() noexcept {
-  if (!has_writes_) {
-    return;
-  }
+utils::Status RedisMetaTxn::ReleaseConnection() {
   try {
+    transaction_->ping();
+    transaction_->exec();
+    return utils::Status::OK();
+  } catch (const sw::redis::WatchError &) {
+    return utils::Status::Busy("Redis watched key changed");
+  } catch (const sw::redis::TimeoutError &error) {
+    return utils::Status::IOError("Redis read-only transaction timed out: " + std::string(error.what()));
+  } catch (const sw::redis::ClosedError &error) {
+    return utils::Status::IOError("Redis read-only transaction connection closed: " + std::string(error.what()));
+  } catch (const sw::redis::Error &error) {
+    return RedisError("read-only transaction", error);
+  }
+}
+
+void RedisMetaTxn::Discard() noexcept {
+  try {
+    if (!has_writes_) {
+      // QueuedRedis only returns a pooled connection after EXEC/DISCARD has
+      // reset its internal transaction state. Open a harmless transaction so
+      // read-only and pre-commit error paths do not invalidate the pool slot.
+      transaction_->ping();
+    }
     transaction_->discard();
   } catch (const sw::redis::Error &) {
   }
@@ -79,12 +98,13 @@ void RedisMetaTxn::Discard() noexcept {
 
 utils::Status RedisMetaTxn::Commit() {
   if (!has_writes_) {
-    return utils::Status::OK();
+    return ReleaseConnection();
   }
   try {
     transaction_->exec();
     return utils::Status::OK();
   } catch (const sw::redis::WatchError &) {
+    (void)ReleaseConnection();
     return utils::Status::Busy("Redis watched key changed");
   } catch (const sw::redis::TimeoutError &error) {
     SWORDFS_LOG_WARN << "Redis transaction EXEC timed out; commit result is ambiguous: " << error.what();

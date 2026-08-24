@@ -24,14 +24,6 @@ using SwordFsContext = swordfs::utils::SwordFsContext;
 
 namespace swordfs::metadata {
 
-/// Filesystem limits provided by each metadata engine.
-struct Limits {
-  /// Maximum length of a single path component (POSIX NAME_MAX).
-  size_t max_name_length;
-  /// Maximum free inodes, reported as f_ffree in statvfs.
-  size_t max_free_inodes;
-};
-
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
 
@@ -50,8 +42,8 @@ class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
 
-  /// Return limits for the given metadata engine type.
-  static Limits GetLimits(std::string_view meta_url);
+  /// Return filesystem limits provided by this metadata engine.
+  virtual Limits GetLimits() const = 0;
 
   /// Look up a child entry by name.
   virtual Status Lookup(InodeID parent_ino, std::string_view name,

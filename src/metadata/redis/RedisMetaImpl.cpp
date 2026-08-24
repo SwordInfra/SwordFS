@@ -6,6 +6,7 @@
 #include <sw/redis++/redis++.h>
 
 #include <exception>
+#include <stdexcept>
 #include <utility>
 
 #include "metadata/MetaEngineRegistry.hpp"
@@ -13,7 +14,33 @@
 
 namespace swordfs::metadata {
 namespace {
-RegisterMetaEngine kRedisMetaEngine{"redis"};
+utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::unique_ptr<IMetaEngine> *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("metadata engine output is null");
+  }
+
+  RedisMetaConfig config;
+  auto status = ParseRedisMetaUrl(meta_url, &config);
+  if (!status.ok()) {
+    return status;
+  }
+
+  try {
+    auto redis = std::make_unique<RedisMetaImpl>(config);
+    status = redis->Initialize();
+    if (!status.ok()) {
+      return status;
+    }
+    *out = std::move(redis);
+    return utils::Status::OK();
+  } catch (const std::invalid_argument &error) {
+    return utils::Status::InvalidArgument(error.what());
+  } catch (const std::exception &error) {
+    return utils::Status::IOError("Redis metadata initialization failed: " + std::string(error.what()));
+  }
+}
+
+RegisterMetaEngine kRedisMetaEngine{"redis", CreateRedisMetaEngine};
 }  // namespace
 
 RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config) : client_(std::make_unique<RedisMetaClient>(config)) {
@@ -29,7 +56,7 @@ utils::Status RedisMetaImpl::Initialize() {
   }
 }
 
-Limits RedisMetaImpl::GetLimits() {
+Limits RedisMetaImpl::GetLimits() const {
   return {.max_name_length = 255, .max_free_inodes = SIZE_MAX};
 }
 
