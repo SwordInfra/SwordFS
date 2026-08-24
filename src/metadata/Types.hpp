@@ -47,6 +47,14 @@ struct SwordFsEntry {
   InodeID ino;
 };
 
+/// Filesystem limits provided by each metadata engine.
+struct Limits {
+  /// Maximum length of a single path component (POSIX NAME_MAX).
+  size_t max_name_length;
+  /// Maximum free inodes, reported as f_ffree in statvfs.
+  size_t max_free_inodes;
+};
+
 /// Metadata for one flushed chunk.
 struct ChunkMeta {
   ChunkIndex index;       // 0-based chunk number

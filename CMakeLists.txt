@@ -39,9 +39,14 @@ if(TARGET redis++::redis++)
 elseif(TARGET redis++::redis++_static)
   set(REDIS_PLUS_PLUS_TARGET redis++::redis++_static)
 else()
-  # hiredis 1.2 still declares compatibility with very old CMake releases.
-  # CMake 4 requires an explicit policy compatibility floor.
-  set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+  # hiredis and redis-plus-plus still declare compatibility with very old
+  # CMake releases. CMake 4 requires an explicit policy compatibility floor.
+  set(_swordfs_saved_policy_version_minimum "${CMAKE_POLICY_VERSION_MINIMUM}")
+  set(_swordfs_had_policy_version_minimum FALSE)
+  if(DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+    set(_swordfs_had_policy_version_minimum TRUE)
+  endif()
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
   FetchContent_Declare(
     hiredis
     GIT_REPOSITORY https://github.com/redis/hiredis.git
@@ -65,6 +70,13 @@ else()
   set(REDIS_PLUS_PLUS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
   FetchContent_MakeAvailable(redis_plus_plus)
   set(REDIS_PLUS_PLUS_TARGET redis++_static)
+  if(_swordfs_had_policy_version_minimum)
+    set(CMAKE_POLICY_VERSION_MINIMUM "${_swordfs_saved_policy_version_minimum}")
+  else()
+    unset(CMAKE_POLICY_VERSION_MINIMUM)
+  endif()
+  unset(_swordfs_saved_policy_version_minimum)
+  unset(_swordfs_had_policy_version_minimum)
 endif()
 
 if(TARGET hiredis::hiredis)

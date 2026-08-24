@@ -9,12 +9,9 @@
 #include <charconv>
 #include <limits>
 
-#include "metadata/MetaEngineRegistry.hpp"
-
 namespace swordfs::metadata {
 namespace {
 
-RegisterMetaEngine kRedisMetaEngine{"redis"};
 constexpr std::string_view kRedisScheme = "redis";
 
 utils::Status ParsePort(std::string_view authority, RedisMetaConfig *config) {
@@ -79,6 +76,10 @@ utils::Status ParseDuration(std::string_view value, std::chrono::milliseconds *d
   const auto [end, error] = std::from_chars(number.data(), number.data() + number.size(), parsed);
   if (number.empty() || error != std::errc{} || end != number.data() + number.size() || parsed <= 0) {
     return utils::Status::InvalidArgument("Redis metadata duration is invalid");
+  }
+  const auto multiplier_count = multiplier.count();
+  if (parsed > std::chrono::milliseconds::max().count() / multiplier_count) {
+    return utils::Status::InvalidArgument("Redis metadata duration is too large");
   }
   *duration = multiplier * parsed;
   return utils::Status::OK();

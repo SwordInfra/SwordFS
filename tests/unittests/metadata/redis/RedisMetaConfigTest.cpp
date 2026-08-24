@@ -70,6 +70,12 @@ TEST(RedisMetaConfigTest, ParsesClientOptions) {
   EXPECT_EQ(config.retry_backoff, std::chrono::milliseconds(40));
 }
 
+TEST(RedisMetaConfigTest, RejectsDurationOverflow) {
+  RedisMetaConfig config;
+  const auto status = ParseRedisMetaUrl("redis://localhost?connect_timeout=999999999999999m", &config);
+  EXPECT_FALSE(status.ok());
+}
+
 TEST(RedisMetaConfigTest, RejectsInvalidClientOptions) {
   for (const auto url :
        {"redis://localhost?connect_timeout=0s", "redis://localhost?socket_timeout=-1s", "redis://localhost?pool_size=0",

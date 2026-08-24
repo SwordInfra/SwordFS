@@ -8,6 +8,7 @@
 #include <memory>
 #include <string_view>
 
+#include "metadata/Types.hpp"
 #include "utils/Status.hpp"
 
 namespace swordfs::metadata {
@@ -16,6 +17,9 @@ class IMetaEngine;
 
 /// Create a metadata engine from a URL string.
 /// On success, |out| is populated and Status::OK() is returned.
-utils::Status CreateMetaEngine(std::string_view scheme, std::string_view meta_url, std::unique_ptr<IMetaEngine> *out);
+utils::Status CreateMetaEngine(std::string_view meta_url, std::unique_ptr<IMetaEngine> *out);
+
+/// Return filesystem limits for a metadata engine URL.
+Limits GetMetaEngineLimits(std::string_view meta_url);
 
 }  // namespace swordfs::metadata

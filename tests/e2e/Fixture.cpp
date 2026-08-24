@@ -24,6 +24,7 @@
 #include <thread>
 
 #include "metadata/IMetaEngine.hpp"
+#include "metadata/MetaEngineFactory.hpp"
 
 namespace swordfs {
 namespace e2e {
@@ -449,7 +450,7 @@ std::string Fixture::GenerateRandomData(size_t len, RandomMode mode) {
 
 metadata::Limits Fixture::GetLimits() const {
   const char *metadata_url = std::getenv("SWORDFS_METADATA_URL");
-  return metadata::IMetaEngine::GetLimits(metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local");
+  return metadata::GetMetaEngineLimits(metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local");
 }
 
 // ────────────────────────────────────────────────────────────────

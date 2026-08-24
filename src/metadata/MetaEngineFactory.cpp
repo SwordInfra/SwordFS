@@ -3,40 +3,30 @@
 
 #include "metadata/MetaEngineFactory.hpp"
 
-#include <exception>
-#include <string>
-
-#include "metadata/IMetaEngine.hpp"
-#include "metadata/mem/MemMetaImpl.hpp"
-#include "metadata/redis/RedisMetaConfig.hpp"
-#include "metadata/redis/RedisMetaImpl.hpp"
+#include "metadata/MetaEngineRegistry.hpp"
+#include "metadata/Utils.hpp"
 
 namespace swordfs::metadata {
 
-utils::Status CreateMetaEngine(std::string_view scheme, std::string_view meta_url, std::unique_ptr<IMetaEngine> *out) {
-  if (scheme == "memory") {
-    *out = std::make_unique<MemMetaImpl>();
-    return utils::Status::OK();
+utils::Status CreateMetaEngine(std::string_view meta_url, std::unique_ptr<IMetaEngine> *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("metadata engine output is null");
   }
-  if (scheme == "redis") {
-    RedisMetaConfig config;
-    auto status = ParseRedisMetaUrl(meta_url, &config);
-    if (!status.ok()) {
-      return status;
-    }
-    try {
-      auto redis = std::make_unique<RedisMetaImpl>(config);
-      status = redis->Initialize();
-      if (!status.ok()) {
-        return status;
-      }
-      *out = std::move(redis);
-    } catch (const std::exception &error) {
-      return utils::Status::IOError("Redis metadata initialization failed: " + std::string(error.what()));
-    }
-    return utils::Status::OK();
+
+  std::string scheme;
+  auto status = ParseUrlScheme(meta_url, &scheme);
+  if (!status.ok()) {
+    return status;
   }
-  return utils::Status::NotSupported("unsupported metadata engine: " + std::string(meta_url));
+  return MetaEngineRegistry::Instance().Create(scheme, meta_url, out);
+}
+
+Limits GetMetaEngineLimits(std::string_view meta_url) {
+  std::string scheme;
+  if (!ParseUrlScheme(meta_url, &scheme).ok()) {
+    return Limits{};
+  }
+  return MetaEngineRegistry::Instance().GetLimits(scheme);
 }
 
 }  // namespace swordfs::metadata

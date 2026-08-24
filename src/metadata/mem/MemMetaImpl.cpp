@@ -21,11 +21,19 @@
 namespace swordfs::metadata {
 
 namespace {
-RegisterMetaEngine kMemoryMetaEngine{"memory"};
+utils::Status CreateMemoryMetaEngine(std::string_view, std::unique_ptr<IMetaEngine> *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("metadata engine output is null");
+  }
+  *out = std::make_unique<MemMetaImpl>();
+  return utils::Status::OK();
+}
 
 // MemMeta-specific filesystem limits.
 constexpr size_t kMaxNameLength = 255;  // POSIX NAME_MAX
 constexpr size_t kMaxFreeInodes = UINT64_MAX;
+
+RegisterMetaEngine kMemoryMetaEngine{"memory", CreateMemoryMetaEngine, MemMetaImpl::GetLimits};
 
 }  // namespace
 

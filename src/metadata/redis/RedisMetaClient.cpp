@@ -6,10 +6,12 @@
 #include <folly/Random.h>
 #include <folly/fibers/Baton.h>
 #include <folly/fibers/FiberManagerInternal.h>
+#include <folly/logging/xlog.h>
 
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <stdexcept>
 #include <thread>
 
 #include "metadata/redis/RedisMetaTxn.hpp"
@@ -55,6 +57,10 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
 
 RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config)
     : retry_attempts_(config.retry_attempts), retry_backoff_(config.retry_backoff) {
+  if (retry_attempts_ <= 0) {
+    throw std::invalid_argument("retry_attempts must be positive");
+  }
+
   sw::redis::ConnectionPoolOptions pool_options;
   pool_options.size = config.pool_size;
   pool_options.wait_timeout = config.pool_wait_timeout;
@@ -62,10 +68,6 @@ RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config)
 }
 
 utils::Status RedisMetaClient::Ping() {
-  if (retry_attempts_ <= 0) {
-    return utils::Status::InvalidArgument("retry_attempts must be positive");
-  }
-
   try {
     redis_->ping();
     return utils::Status::OK();
@@ -96,9 +98,11 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisM
         continue;
       }
       return status;
-    } catch (const sw::redis::TimeoutError &) {
+    } catch (const sw::redis::TimeoutError &error) {
+      SWORDFS_LOG_WARN << "Redis transaction attempt timed out before commit; retrying: " << error.what();
       Backoff(attempt, retry_backoff_);
-    } catch (const sw::redis::ClosedError &) {
+    } catch (const sw::redis::ClosedError &error) {
+      SWORDFS_LOG_WARN << "Redis transaction connection closed before commit; retrying: " << error.what();
       Backoff(attempt, retry_backoff_);
     } catch (const sw::redis::Error &error) {
       return RedisError("transaction", error);
