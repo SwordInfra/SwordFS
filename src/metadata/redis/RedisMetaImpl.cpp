@@ -16,11 +16,12 @@
 #include "metadata/redis/RedisCodec.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
+#include "volume/VolumeImpl.hpp"
 
 namespace swordfs::metadata {
 namespace {
-utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view volume_name,
-                                    std::unique_ptr<IMetaEngine> *out) {
+using namespace redis;
+utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::unique_ptr<IMetaEngine> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("metadata engine output is null");
   }
@@ -32,14 +33,7 @@ utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view 
   }
 
   try {
-    if (volume_name.empty()) {
-      return utils::Status::InvalidArgument("Redis metadata volume name is empty");
-    }
-    auto redis = std::make_unique<RedisMetaImpl>(config, volume_name);
-    status = redis->Initialize();
-    if (!status.ok()) {
-      return status;
-    }
+    auto redis = std::make_unique<RedisMetaImpl>(config);
     *out = std::move(redis);
     return utils::Status::OK();
   } catch (const std::invalid_argument &error) {
@@ -52,8 +46,9 @@ utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view 
 RegisterMetaEngine kRedisMetaEngine{"redis", CreateRedisMetaEngine};
 }  // namespace
 
-RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name)
-    : client_(std::make_unique<RedisMetaClient>(config)), key_(config.db, volume_name) {
+RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config)
+    : client_(std::make_unique<RedisMetaClient>(config)),
+      key_(config.db, swordfs::volume::VolumeImpl::Instance().config().name) {
 }
 
 RedisMetaImpl::~RedisMetaImpl() = default;

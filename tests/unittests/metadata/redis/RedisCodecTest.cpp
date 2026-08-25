@@ -8,7 +8,7 @@
 
 #include "metadata/redis/RedisCodec.hpp"
 
-namespace swordfs::metadata {
+namespace swordfs::metadata::redis {
 namespace {
 
 SwordFsInode MakeInode() {
@@ -130,4 +130,4 @@ TEST(RedisCodecTest, RejectsTrailingBytes) {
   EXPECT_FALSE(RedisCodec::DecodeInode(encoded, &output).ok());
 }
 
-}  // namespace swordfs::metadata
+}  // namespace swordfs::metadata::redis

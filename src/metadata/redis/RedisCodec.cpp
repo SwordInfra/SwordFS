@@ -3,101 +3,82 @@
 
 #include "metadata/redis/RedisCodec.hpp"
 
+#include <folly/io/Cursor.h>
+#include <folly/io/IOBuf.h>
 #include <sys/stat.h>
 
 #include <limits>
+#include <memory>
 
-namespace swordfs::metadata {
+namespace swordfs::metadata::redis {
 namespace RedisCodec {
 namespace {
 
 constexpr std::string_view kMagic = "SWFSRED1";
+constexpr size_t kInitialBufferSize = 1024;
 constexpr size_t kMaxStringLength = 16 * 1024 * 1024;
 
 class Writer {
-public:
+ public:
+  Writer() : buffer_(folly::IOBuf::create(kInitialBufferSize)), appender_(buffer_.get(), kInitialBufferSize) {
+  }
+
   void U32(uint32_t value) {
-    for (int i = 0; i < 4; ++i) {
-      data_.push_back(static_cast<char>(value >> (i * 8)));
-    }
+    appender_.writeLE<uint32_t>(value);
   }
 
   void U64(uint64_t value) {
-    for (int i = 0; i < 8; ++i) {
-      data_.push_back(static_cast<char>(value >> (i * 8)));
-    }
+    appender_.writeLE<uint64_t>(value);
   }
 
   void String(std::string_view value) {
     U64(value.size());
-    data_.append(value);
+    appender_.push(reinterpret_cast<const uint8_t *>(value.data()), value.size());
   }
 
-  std::string Finish() && {
-    return std::move(data_);
+  void Finish(std::string *out) {
+    buffer_->appendTo(*out);
   }
 
-private:
-  std::string data_;
+ private:
+  std::unique_ptr<folly::IOBuf> buffer_;
+  folly::io::Appender appender_;
 };
 
 class Reader {
-public:
-  explicit Reader(std::string_view data) : data_(data) {
+ public:
+  explicit Reader(std::string_view data)
+      : buffer_(folly::IOBuf::wrapBuffer(data.data(), data.size())), cursor_(buffer_.get()) {
   }
 
   bool U32(uint32_t *value) {
-    if (!CanRead(4)) {
-      return false;
-    }
-    uint32_t result = 0;
-    for (int i = 0; i < 4; ++i) {
-      result |= static_cast<uint32_t>(static_cast<unsigned char>(data_[offset_++])) << (i * 8);
-    }
-    *value = result;
-    return true;
+    return cursor_.tryReadLE(*value);
   }
 
   bool U64(uint64_t *value) {
-    if (!CanRead(8)) {
-      return false;
-    }
-    uint64_t result = 0;
-    for (int i = 0; i < 8; ++i) {
-      result |= static_cast<uint64_t>(static_cast<unsigned char>(data_[offset_++])) << (i * 8);
-    }
-    *value = result;
-    return true;
+    return cursor_.tryReadLE(*value);
   }
 
   bool String(std::string *value) {
     uint64_t length = 0;
-    if (!U64(&length) || length > kMaxStringLength || length > Remaining()) {
+    if (!U64(&length) || length > kMaxStringLength || !cursor_.canAdvance(length)) {
       return false;
     }
-    value->assign(data_.substr(offset_, static_cast<size_t>(length)));
-    offset_ += static_cast<size_t>(length);
+    *value = cursor_.readFixedString(length);
     return true;
   }
 
   bool Done() const {
-    return offset_ == data_.size();
+    return cursor_.isAtEnd();
   }
 
-private:
-  size_t Remaining() const {
-    return data_.size() - offset_;
-  }
-  bool CanRead(size_t size) const {
-    return size <= Remaining();
-  }
-
-  std::string_view data_;
-  size_t offset_ = 0;
+ private:
+  std::unique_ptr<folly::IOBuf> buffer_;
+  folly::io::Cursor cursor_;
 };
 
 utils::Status Malformed(std::string_view type) {
-  return utils::Status::InvalidArgument("Malformed Redis " + std::string(type) + " record");
+  return utils::Status::Malformed("Malformed Redis " + std::string(type) + " record");
 }
 
 void WriteTimespec(Writer &writer, const struct timespec &ts) {
@@ -135,7 +116,7 @@ utils::Status EncodeFormat(const RedisFormat &format, std::string *out) {
   }
   Writer writer;
   WriteHeader(writer);
-  *out = std::move(writer).Finish();
+  writer.Finish(out);
   return utils::Status::OK();
 }
 
@@ -175,7 +156,7 @@ utils::Status EncodeInode(const SwordFsInode &inode, std::string *out) {
   WriteTimespec(writer, inode.attr.st_ctim);
   writer.U64(inode.parent_ino);
   writer.String(inode.symlink_target);
-  *out = std::move(writer).Finish();
+  writer.Finish(out);
   return utils::Status::OK();
 }
 
@@ -250,7 +231,7 @@ utils::Status EncodeEntry(const SwordFsEntry &entry, std::string *out) {
   writer.String(entry.name);
   writer.U32(entry.type);
   writer.U64(entry.ino);
-  *out = std::move(writer).Finish();
+  writer.Finish(out);
   return utils::Status::OK();
 }
 
@@ -278,7 +259,7 @@ utils::Status EncodeChunk(const ChunkMeta &chunk, std::string *out) {
   writer.U64(chunk.start_offset);
   writer.String(chunk.key);
   writer.U64(chunk.size);
-  *out = std::move(writer).Finish();
+  writer.Finish(out);
   return utils::Status::OK();
 }
 
@@ -299,4 +280,4 @@ utils::Status DecodeChunk(std::string_view value, ChunkMeta *out) {
 }
 
 }  // namespace RedisCodec
-}  // namespace swordfs::metadata
+}  // namespace swordfs::metadata::redis

@@ -21,7 +21,7 @@
 namespace swordfs::metadata {
 
 namespace {
-utils::Status CreateMemoryMetaEngine(std::string_view, std::string_view, std::unique_ptr<IMetaEngine> *out) {
+utils::Status CreateMemoryMetaEngine(std::string_view, std::unique_ptr<IMetaEngine> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("metadata engine output is null");
   }

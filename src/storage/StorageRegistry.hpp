@@ -9,10 +9,8 @@
 // Available() to reject unsupported schemes before any backend is
 // instantiated.
 //
-// Instantiation itself still goes through DataEngineFactory, which
-// dispatches on the scheme directly — StorageRegistry intentionally
-// doesn't carry a Factory, so backends stay free to construct
-// themselves however they like.
+// StorageRegistry only tracks availability; engine instantiation is owned
+// by VolumeImpl as part of the volume lifecycle.
 
 #pragma once
 

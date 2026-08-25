@@ -9,7 +9,7 @@
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
 
-namespace swordfs::metadata {
+namespace swordfs::metadata::redis {
 
 struct RedisFormat {
   uint32_t schema_version = 1;
@@ -32,4 +32,4 @@ utils::Status EncodeChunk(const ChunkMeta &chunk, std::string *out);
 utils::Status DecodeChunk(std::string_view value, ChunkMeta *out);
 
 }  // namespace RedisCodec
-}  // namespace swordfs::metadata
+}  // namespace swordfs::metadata::redis

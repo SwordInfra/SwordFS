@@ -18,7 +18,7 @@ class RedisMetaClient;
 // subsequent issues.
 class RedisMetaImpl : public IMetaEngine {
 public:
-  RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name);
+  explicit RedisMetaImpl(const RedisMetaConfig &config);
   ~RedisMetaImpl() override;
 
   RedisMetaImpl(const RedisMetaImpl &) = delete;
