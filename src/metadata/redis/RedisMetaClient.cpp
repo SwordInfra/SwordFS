@@ -76,40 +76,40 @@ utils::Status RedisMetaClient::Ping() {
   });
 }
 
-utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
-  return pool_->Run([this, &callback] {
-    const int attempts = retry_attempts_;
-
-    for (int attempt = 0; attempt < attempts; ++attempt) {
-      try {
-        RedisMetaTxn transaction(*redis_);
-        auto status = callback(transaction);
-        if (!status.ok()) {
-          transaction.Discard();
-          if (status.IsBusy()) {
-            Backoff(attempt, retry_backoff_);
-            continue;
-          }
-          return status;
-        }
-
-        status = transaction.Commit();
+utils::Status RedisMetaClient::TransactImpl(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
+  for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
+    try {
+      RedisMetaTxn transaction(*redis_);
+      auto status = callback(transaction);
+      if (!status.ok()) {
+        transaction.Discard();
         if (status.IsBusy()) {
           Backoff(attempt, retry_backoff_);
           continue;
         }
         return status;
-      } catch (const sw::redis::TimeoutError &) {
-        Backoff(attempt, retry_backoff_);
-      } catch (const sw::redis::ClosedError &) {
-        Backoff(attempt, retry_backoff_);
-      } catch (const sw::redis::Error &error) {
-        return RedisError("transaction", error);
       }
-    }
 
-    return utils::Status::Busy("Redis transaction retry limit exceeded");
-  });
+      status = transaction.Commit();
+      if (status.IsBusy()) {
+        Backoff(attempt, retry_backoff_);
+        continue;
+      }
+      return status;
+    } catch (const sw::redis::TimeoutError &) {
+      Backoff(attempt, retry_backoff_);
+    } catch (const sw::redis::ClosedError &) {
+      Backoff(attempt, retry_backoff_);
+    } catch (const sw::redis::Error &error) {
+      return RedisError("transaction", error);
+    }
+  }
+
+  return utils::Status::Busy("Redis transaction retry limit exceeded");
+}
+
+utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
+  return pool_->Run([this, &callback] { return TransactImpl(callback); });
 }
 
 }  // namespace swordfs::metadata

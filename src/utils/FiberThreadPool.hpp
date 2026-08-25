@@ -37,13 +37,9 @@ class FiberThreadPool {
   FiberThreadPool(const FiberThreadPool &) = delete;
   FiberThreadPool &operator=(const FiberThreadPool &) = delete;
 
-  /// Run |fn| on a pool thread and suspend the calling fiber until done.
-  /// Must be called from a running fiber.
+ private:
   template <typename Fn>
-  auto Run(Fn &&fn) -> decltype(fn()) {
-    CHECK(folly::fibers::FiberManager::getFiberManagerUnsafe() != nullptr)
-        << "FiberThreadPool::Run() must be called from a fiber";
-
+  auto RunInFiber(Fn &&fn) -> decltype(fn()) {
     using Result = decltype(fn());
     folly::Try<Result> result;
     folly::fibers::Baton baton;
@@ -61,6 +57,28 @@ class FiberThreadPool {
     } else {
       return std::move(result).value();
     }
+  }
+
+  template <typename Fn>
+  auto RunInThread(Fn &&fn) -> decltype(fn()) {
+    auto future = folly::via(pool_.get(), [fn = std::forward<Fn>(fn)]() mutable { return fn(); });
+    if constexpr (std::is_void_v<decltype(fn())>) {
+      std::move(future).get();
+      return;
+    } else {
+      return std::move(future).get();
+    }
+  }
+
+ public:
+  /// Run |fn| on a pool thread. Suspend the calling fiber until done when
+  /// called from a fiber, otherwise block the calling thread until done.
+  template <typename Fn>
+  auto Run(Fn &&fn) -> decltype(fn()) {
+    if (folly::fibers::FiberManager::getFiberManagerUnsafe() != nullptr) {
+      return RunInFiber(std::forward<Fn>(fn));
+    }
+    return RunInThread(std::forward<Fn>(fn));
   }
 
  private:
