@@ -8,9 +8,9 @@
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
+#include "storage/DataEngineRegistry.hpp"
 #include "storage/IDataEngine.hpp"
 #include "storage/StorageUrl.hpp"
-#include "storage/s3/S3DataEngine.hpp"
 
 namespace swordfs::volume {
 namespace {
@@ -32,25 +32,17 @@ Status CreateMetaEngine(std::string_view meta_url, std::unique_ptr<swordfs::meta
   }
 }
 
-Status CreateDataEngine(const VolumeConfig &config,
+Status CreateDataEngine(std::string_view bucket,
                         std::unique_ptr<swordfs::storage::IDataEngine> *out) {
-  if (out == nullptr) {
-    return Status::InvalidArgument("data engine output is null");
-  }
-  if (config.bucket.empty()) {
+  if (bucket.empty()) {
     return Status::InvalidArgument("bucket URL is empty");
   }
 
   utils::StorageUrl url;
-  if (!utils::StorageUrl::Parse(config.bucket, &url)) {
-    return Status::InvalidArgument("invalid bucket URL: " + config.bucket);
+  if (!utils::StorageUrl::Parse(bucket, &url)) {
+    return Status::InvalidArgument("invalid bucket URL: " + std::string(bucket));
   }
-  if (url.scheme != "s3") {
-    return Status::NotSupported("unknown data storage scheme: " + std::string(url.scheme));
-  }
-
-  *out = std::make_unique<swordfs::storage::S3DataEngine>();
-  return Status::OK();
+  return swordfs::storage::DataEngineRegistry::Instance().Create(url.scheme, out);
 }
 
 }  // namespace
@@ -138,7 +130,7 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
   }
 
   if (!config_.bucket.empty()) {
-    status = CreateDataEngine(config_, &data_engine_);
+    status = CreateDataEngine(config_.bucket, &data_engine_);
     if (!status.ok()) {
       return status;
     }

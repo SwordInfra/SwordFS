@@ -9,7 +9,7 @@
 #include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
-#include "storage/StorageRegistry.hpp"
+#include "storage/DataEngineRegistry.hpp"
 #include "storage/StorageUrl.hpp"
 
 namespace swordfs::config {
@@ -44,7 +44,7 @@ const CLI::Validator ValidateBucketUrl = CLI::Validator(
       }
       std::string scheme = input.substr(0, pos);
       std::transform(scheme.begin(), scheme.end(), scheme.begin(), [](unsigned char c) { return std::tolower(c); });
-      if (!swordfs::storage::StorageRegistry::Instance().Available(scheme)) {
+      if (!swordfs::storage::DataEngineRegistry::Instance().Available(scheme)) {
         return "Unsupported bucket scheme '" + scheme + "', got: " + input;
       }
 

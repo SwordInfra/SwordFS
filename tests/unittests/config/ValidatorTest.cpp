@@ -8,7 +8,6 @@
 #include <string>
 
 #include "config/Validator.hpp"
-#include "storage/StorageRegistry.hpp"
 
 using swordfs::config::ValidateBucketUrl;
 using swordfs::config::ValidateMetaUrl;
