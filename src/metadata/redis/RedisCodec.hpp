@@ -16,8 +16,13 @@ struct RedisFormatHeader {
   uint32_t schema_version;
 };
 
-utils::Status EncodeFormat(const RedisFormatHeader &format, std::string *out);
-utils::Status DecodeFormat(std::string_view value, RedisFormatHeader *out);
+struct RedisFormat {
+  RedisFormatHeader header;
+  std::string volume_config;
+};
+
+utils::Status EncodeFormat(const RedisFormat &format, std::string *out);
+utils::Status DecodeFormat(std::string_view value, RedisFormat *out);
 
 utils::Status EncodeInode(const SwordFsInode &inode, std::string *out);
 utils::Status DecodeInode(std::string_view value, SwordFsInode *out);

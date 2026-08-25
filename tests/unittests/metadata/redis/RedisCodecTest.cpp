@@ -36,14 +36,18 @@ SwordFsInode MakeInode() {
 }  // namespace
 
 TEST(RedisCodecTest, FormatRoundTrip) {
-  RedisFormatHeader input{.magic = "SWFSRED1", .schema_version = 1};
+  RedisFormat input{
+      .header = {.magic = "SWFSRED1", .schema_version = 1},
+      .volume_config = "{\"name\":\"test\",\"meta\":\"redis://local\"}",
+  };
   std::string encoded;
   ASSERT_TRUE(EncodeFormat(input, &encoded).ok());
 
-  RedisFormatHeader output;
+  RedisFormat output;
   ASSERT_TRUE(DecodeFormat(encoded, &output).ok());
-  EXPECT_EQ(output.magic, input.magic);
-  EXPECT_EQ(output.schema_version, input.schema_version);
+  EXPECT_EQ(output.header.magic, input.header.magic);
+  EXPECT_EQ(output.header.schema_version, input.header.schema_version);
+  EXPECT_EQ(output.volume_config, input.volume_config);
 }
 
 TEST(RedisCodecTest, InodeRoundTrip) {

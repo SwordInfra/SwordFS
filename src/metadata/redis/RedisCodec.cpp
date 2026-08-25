@@ -110,33 +110,35 @@ bool ReadHeader(Reader &reader) {
 
 }  // namespace
 
-utils::Status EncodeFormat(const RedisFormatHeader &format, std::string *out) {
-  if (out == nullptr || format.magic != kMagic || format.schema_version != kSchemaVersion) {
+utils::Status EncodeFormat(const RedisFormat &format, std::string *out) {
+  if (out == nullptr || format.header.magic != kMagic || format.header.schema_version != kSchemaVersion) {
     return utils::Status::InvalidArgument("Invalid Redis format header");
   }
   Writer writer;
-  writer.String(format.magic);
-  writer.U32(format.schema_version);
+  writer.String(format.header.magic);
+  writer.U32(format.header.schema_version);
+  writer.String(format.volume_config);
   writer.Finish(out);
   return utils::Status::OK();
 }
 
-utils::Status DecodeFormat(std::string_view value, RedisFormatHeader *out) {
+utils::Status DecodeFormat(std::string_view value, RedisFormat *out) {
   if (out == nullptr) {
-    return utils::Status::InvalidArgument("Redis format header output is null");
+    return utils::Status::InvalidArgument("Redis format output is null");
   }
   Reader reader(value);
-  RedisFormatHeader header;
-  if (!reader.String(&header.magic) || !reader.U32(&header.schema_version) || !reader.Done()) {
+  RedisFormat format;
+  if (!reader.String(&format.header.magic) || !reader.U32(&format.header.schema_version) ||
+      !reader.String(&format.volume_config) || !reader.Done()) {
     return Malformed("format");
   }
-  if (header.magic != kMagic) {
+  if (format.header.magic != kMagic) {
     return Malformed("format");
   }
-  if (header.schema_version != kSchemaVersion) {
+  if (format.header.schema_version != kSchemaVersion) {
     return utils::Status::NotSupported("unsupported Redis metadata schema version");
   }
-  *out = std::move(header);
+  *out = std::move(format);
   return utils::Status::OK();
 }
 

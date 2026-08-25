@@ -60,11 +60,11 @@ utils::Status RedisMetaImpl::Initialize() {
   }
 }
 
-utils::Status RedisMetaImpl::FormatVolume() {
-  RedisFormatHeader format{
-      .magic = "SWFSRED1",
-      .schema_version = 1,
-  };
+utils::Status RedisMetaImpl::FormatVolume(std::string_view volume_config) {
+  RedisFormat format;
+  format.header.magic = "SWFSRED1";
+  format.header.schema_version = 1;
+  format.volume_config = volume_config;
   std::string format_value;
   auto status = EncodeFormat(format, &format_value);
   if (!status.ok()) {
@@ -107,7 +107,11 @@ utils::Status RedisMetaImpl::FormatVolume() {
   });
 }
 
-utils::Status RedisMetaImpl::LoadVolume() {
+utils::Status RedisMetaImpl::LoadVolume(std::string *volume_config) {
+  if (volume_config == nullptr) {
+    return utils::Status::InvalidArgument("Redis volume config output is null");
+  }
+
   std::optional<std::string> value;
   auto status = client_->Get(key_.Format(), &value);
   if (!status.ok()) {
@@ -117,7 +121,7 @@ utils::Status RedisMetaImpl::LoadVolume() {
     return utils::Status::NotFound("Redis metadata volume is not formatted");
   }
 
-  RedisFormatHeader format;
+  RedisFormat format;
   status = DecodeFormat(*value, &format);
   if (!status.ok()) {
     return status;
@@ -139,6 +143,7 @@ utils::Status RedisMetaImpl::LoadVolume() {
   if (root.ino != kRootInodeId || !root.IsDir()) {
     return utils::Status::InvalidArgument("Redis metadata root inode is invalid");
   }
+  *volume_config = std::move(format.volume_config);
   return utils::Status::OK();
 }
 

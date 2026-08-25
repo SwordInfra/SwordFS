@@ -46,12 +46,15 @@ class IMetaEngine {
   /// runtime prerequisites. Persistent backends should not create a volume here.
   virtual Status Initialize() { return Status::OK(); }
 
-  /// Create a new metadata volume. Backends without persistent metadata may
-  /// treat this as a no-op.
-  virtual Status FormatVolume() { return Status::OK(); }
+  /// Create a new metadata volume. |volume_config| contains the persistent
+  /// volume configuration serialized by VolumeImpl. Backends without
+  /// persistent metadata may treat this as a no-op.
+  virtual Status FormatVolume(std::string_view volume_config) { return Status::OK(); }
 
-  /// Load an existing metadata volume.
-  virtual Status LoadVolume() { return Status::OK(); }
+  /// Load an existing metadata volume and return its persistent volume
+  /// configuration in |volume_config|. Backends without persistent metadata
+  /// may treat this as a no-op.
+  virtual Status LoadVolume(std::string *volume_config) { return Status::OK(); }
 
   /// Return filesystem limits provided by this metadata engine.
   virtual Limits GetLimits() const = 0;

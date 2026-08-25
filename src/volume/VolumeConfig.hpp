@@ -1,10 +1,10 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// VolumeConfig — persistent volume metadata stored in volume.json.
+// VolumeConfig — persistent volume metadata shared by metadata backends.
 //
-// Created by `swordfs format` and read by `swordfs mount` to recover
-// the storage backend configuration without re-specifying CLI flags.
+// Memory metadata persists this configuration in volume.json; persistent
+// metadata backends store it in their own metadata store.
 
 #pragma once
 
@@ -20,7 +20,7 @@ namespace swordfs::volume {
 
 using Status = utils::Status;
 
-/// Volume-level metadata written by `swordfs format`.
+/// Volume-level metadata persisted by `swordfs format`.
 struct VolumeConfig {
   std::string name;      // volume name, set via --volume
   std::string meta_url;  // e.g. "memory://local", "redis://..."

@@ -55,10 +55,11 @@ class VolumeImpl {
   // Lifecycle
   // ────────────────────────────────────────────────────────────────
 
-  /// Build config from CLI flags and persist to disk (format).
+  /// Build and persist volume configuration, then format the metadata engine.
   Status CreateFrom(const swordfs::config::ConfigCenter &cfg);
 
-  /// Load config from persistent store and initialise both engines (mount).
+  /// Load volume configuration from the metadata backend or volume.json for
+  /// memory mode, then initialise both engines.
   Status LoadFrom(const swordfs::config::ConfigCenter &cfg);
 
   /// Explicitly tear down engines before static destruction.  Must be

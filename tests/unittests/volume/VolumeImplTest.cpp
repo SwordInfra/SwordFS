@@ -13,6 +13,7 @@
 
 using swordfs::config::ConfigCenter;
 using swordfs::utils::Status;
+using swordfs::volume::VolumeConfig;
 using swordfs::volume::VolumeImpl;
 
 class VolumeImplTest : public ::testing::Test {
@@ -51,15 +52,20 @@ TEST_F(VolumeImplTest, CreateFromRedisEngine) {
   if (redis_url == nullptr) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
-  auto cfg = makeConfig(redis_url, tmpdir_, "redis-" + tmpdir_);
+  auto cfg = makeConfig(redis_url, tmpdir_, "redis-" + tmpdir_, "s3://endpoint.example.com/bucket");
+  cfg.set_storage_backend("s3");
+  cfg.set_storage_region("us-east-1");
 
   VolumeImpl::Initialize();
   Status status = VolumeImpl::Instance().CreateFrom(cfg);
   ASSERT_TRUE(status.ok()) << status.message();
 
+  auto mount_cfg = makeConfig(redis_url, "", "redis-" + tmpdir_);
   VolumeImpl::Initialize();
-  status = VolumeImpl::Instance().LoadFrom(cfg);
+  status = VolumeImpl::Instance().LoadFrom(mount_cfg);
   EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_NE(VolumeImpl::Instance().data_engine(), nullptr);
+  EXPECT_FALSE(VolumeConfig::ConfigFileExists(tmpdir_));
 
   VolumeImpl::Initialize();
   status = VolumeImpl::Instance().CreateFrom(cfg);
