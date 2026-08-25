@@ -18,7 +18,8 @@ class IMetaEngine;
 /// Registry of metadata engines available in this build.
 class MetaEngineRegistry {
 public:
-  using Factory = utils::Status (*)(std::string_view meta_url, std::unique_ptr<IMetaEngine> *out);
+  using Factory = utils::Status (*)(std::string_view meta_url, std::string_view volume_name,
+                                    std::unique_ptr<IMetaEngine> *out);
 
   struct Entry {
     Factory factory;
@@ -33,7 +34,8 @@ public:
   bool Available(std::string_view name) const;
 
   /// Create a metadata engine using its registered factory.
-  utils::Status Create(std::string_view name, std::string_view meta_url, std::unique_ptr<IMetaEngine> *out) const;
+  utils::Status Create(std::string_view name, std::string_view meta_url, std::string_view volume_name,
+                       std::unique_ptr<IMetaEngine> *out) const;
 
 private:
   MetaEngineRegistry() = default;

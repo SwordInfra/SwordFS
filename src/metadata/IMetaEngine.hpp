@@ -42,6 +42,17 @@ class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
 
+  /// Initialize a metadata backend connection and validate backend-specific
+  /// runtime prerequisites. Persistent backends should not create a volume here.
+  virtual Status Initialize() { return Status::OK(); }
+
+  /// Format a new metadata volume. Backends without persistent metadata may
+  /// treat this as a no-op.
+  virtual Status Format() { return Status::OK(); }
+
+  /// Validate that a previously formatted volume exists and is compatible.
+  virtual Status Validate() { return Status::OK(); }
+
   /// Return filesystem limits provided by this metadata engine.
   virtual Limits GetLimits() const = 0;
 

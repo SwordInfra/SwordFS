@@ -8,7 +8,8 @@
 
 namespace swordfs::metadata {
 
-utils::Status CreateMetaEngine(std::string_view meta_url, std::unique_ptr<IMetaEngine> *out) {
+utils::Status CreateMetaEngine(std::string_view meta_url, std::string_view volume_name,
+                               std::unique_ptr<IMetaEngine> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("metadata engine output is null");
   }
@@ -18,7 +19,7 @@ utils::Status CreateMetaEngine(std::string_view meta_url, std::unique_ptr<IMetaE
   if (!status.ok()) {
     return status;
   }
-  return MetaEngineRegistry::Instance().Create(scheme, meta_url, out);
+  return MetaEngineRegistry::Instance().Create(scheme, meta_url, volume_name, out);
 }
 
 }  // namespace swordfs::metadata

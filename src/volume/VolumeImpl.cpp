@@ -56,6 +56,18 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
     }
   }
 
+  if (!metadata::IsMemoryMode(config_.meta_url)) {
+    auto status = metadata::CreateMetaEngine(config_.meta_url, config_.name, &meta_engine_);
+    if (!status.ok()) {
+      return status;
+    }
+    status = meta_engine_->Format();
+    if (!status.ok()) {
+      meta_engine_.reset();
+      return status;
+    }
+  }
+
   return Status::OK();
 }
 
@@ -66,7 +78,11 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
   }
 
   // Create engines.
-  status = swordfs::metadata::CreateMetaEngine(config_.meta_url, &meta_engine_);
+  status = swordfs::metadata::CreateMetaEngine(config_.meta_url, config_.name, &meta_engine_);
+  if (!status.ok()) {
+    return status;
+  }
+  status = meta_engine_->Validate();
   if (!status.ok()) {
     return status;
   }

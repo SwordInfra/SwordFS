@@ -44,10 +44,18 @@ TEST_F(VolumeImplTest, CreateFromSucceeds) {
 }
 
 TEST_F(VolumeImplTest, CreateFromRedisEngine) {
-  auto cfg = makeConfig("redis://localhost:6379/0", tmpdir_);
+  auto cfg = makeConfig("redis://localhost:6379/0", tmpdir_, "redis-" + tmpdir_);
   VolumeImpl vol;
   Status st = vol.CreateFrom(cfg);
+  ASSERT_TRUE(st.ok()) << st.message();
+
+  VolumeImpl mounted;
+  st = mounted.LoadFrom(cfg);
   EXPECT_TRUE(st.ok()) << st.message();
+
+  VolumeImpl duplicate;
+  st = duplicate.CreateFrom(cfg);
+  EXPECT_TRUE(st.IsAlreadyExists()) << st.message();
 }
 
 TEST_F(VolumeImplTest, CreateFromNoConfigPathSkipsWrite) {

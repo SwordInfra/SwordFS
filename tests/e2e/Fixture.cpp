@@ -19,11 +19,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <thread>
-
-#include <memory>
 
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineFactory.hpp"
@@ -455,7 +454,7 @@ metadata::Limits Fixture::GetLimits() const {
   const auto url = metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local";
 
   std::unique_ptr<metadata::IMetaEngine> engine;
-  auto status = metadata::CreateMetaEngine(url, &engine);
+  auto status = metadata::CreateMetaEngine(url, "e2e", &engine);
   if (!status.ok()) {
     ADD_FAILURE() << "Failed to create metadata engine: " << status.message();
     return {};

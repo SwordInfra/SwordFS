@@ -5,16 +5,22 @@
 
 #include <sw/redis++/redis++.h>
 
+#include <ctime>
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
 #include "metadata/MetaEngineRegistry.hpp"
+#include "metadata/Utils.hpp"
+#include "metadata/redis/RedisCodec.hpp"
+#include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
 
 namespace swordfs::metadata {
 namespace {
-utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::unique_ptr<IMetaEngine> *out) {
+utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view volume_name,
+                                    std::unique_ptr<IMetaEngine> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("metadata engine output is null");
   }
@@ -26,7 +32,10 @@ utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::unique_ptr<I
   }
 
   try {
-    auto redis = std::make_unique<RedisMetaImpl>(config);
+    if (volume_name.empty()) {
+      return utils::Status::InvalidArgument("Redis metadata volume name is empty");
+    }
+    auto redis = std::make_unique<RedisMetaImpl>(config, volume_name);
     status = redis->Initialize();
     if (!status.ok()) {
       return status;
@@ -43,7 +52,8 @@ utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::unique_ptr<I
 RegisterMetaEngine kRedisMetaEngine{"redis", CreateRedisMetaEngine};
 }  // namespace
 
-RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config) : client_(std::make_unique<RedisMetaClient>(config)) {
+RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name)
+    : client_(std::make_unique<RedisMetaClient>(config)), key_(config.db, volume_name) {
 }
 
 RedisMetaImpl::~RedisMetaImpl() = default;
@@ -54,6 +64,94 @@ utils::Status RedisMetaImpl::Initialize() {
   } catch (const std::exception &error) {
     return utils::Status::IOError("Redis metadata initialization failed: " + std::string(error.what()));
   }
+}
+
+utils::Status RedisMetaImpl::Format() {
+  RedisFormat format;
+  std::string format_value;
+  auto status = RedisCodec::EncodeFormat(format, &format_value);
+  if (!status.ok()) {
+    return status;
+  }
+
+  SwordFsInode root;
+  root.ino = kRootInodeId;
+  root.parent_ino = kRootInodeId;
+  root.attr = MakeStat(S_IFDIR | 0777, ::time(nullptr));
+  root.attr.st_ino = kRootInodeId;
+  std::string root_value;
+  status = RedisCodec::EncodeInode(root, &root_value);
+  if (!status.ok()) {
+    return status;
+  }
+
+  return client_->Transact([&](RedisMetaTxn &txn) {
+    auto status = txn.Watch(key_.Format());
+    if (!status.ok()) {
+      return status;
+    }
+    std::optional<std::string> existing;
+    status = txn.Get(key_.Format(), &existing);
+    if (!status.ok()) {
+      return status;
+    }
+    if (existing.has_value()) {
+      RedisFormat existing_format;
+      status = RedisCodec::DecodeFormat(*existing, &existing_format);
+      if (!status.ok()) {
+        return status;
+      }
+      return utils::Status::AlreadyExists("Redis metadata volume is already formatted");
+    }
+    status = txn.Set(key_.Format(), format_value);
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.Set(key_.NextIno(), "2");
+    if (!status.ok()) {
+      return status;
+    }
+    return txn.Set(key_.Inode(kRootInodeId), root_value);
+  });
+}
+
+utils::Status RedisMetaImpl::Validate() {
+  return client_->Transact([&](RedisMetaTxn &txn) {
+    auto status = txn.Watch(key_.Format());
+    if (!status.ok()) {
+      return status;
+    }
+    std::optional<std::string> value;
+    status = txn.Get(key_.Format(), &value);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!value.has_value()) {
+      return utils::Status::NotFound("Redis metadata volume is not formatted");
+    }
+    RedisFormat format;
+    status = RedisCodec::DecodeFormat(*value, &format);
+    if (!status.ok()) {
+      return status;
+    }
+    std::optional<std::string> root_value;
+    status = txn.Get(key_.Inode(kRootInodeId), &root_value);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!root_value.has_value()) {
+      return utils::Status::InvalidArgument("Redis metadata root inode is missing");
+    }
+    SwordFsInode root;
+    status = RedisCodec::DecodeInode(*root_value, &root);
+    if (!status.ok()) {
+      return status;
+    }
+    if (root.ino != kRootInodeId || !root.IsDir()) {
+      return utils::Status::InvalidArgument("Redis metadata root inode is invalid");
+    }
+    return utils::Status::OK();
+  });
 }
 
 Limits RedisMetaImpl::GetLimits() const {
