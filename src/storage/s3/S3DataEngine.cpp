@@ -18,7 +18,7 @@
 #include <thread>
 
 #include "config/ConfigCenter.hpp"
-#include "storage/StorageRegistry.hpp"
+#include "storage/DataEngineRegistry.hpp"
 #include "storage/StorageUrl.hpp"
 #include "storage/s3/S3StreamBuf.hpp"
 #include "utils/FiberThreadPool.hpp"
@@ -64,9 +64,12 @@ void EnsureAwsSdkInit() {
 
 }  // namespace
 
-// Register the "s3" scheme so config validators know this backend is
-// available (StorageRegistry only tracks existence, not factories).
-RegisterBackend kS3Backend{"s3"};
+Status CreateS3DataEngine(std::unique_ptr<IDataEngine> *out) {
+  *out = std::make_unique<S3DataEngine>();
+  return Status::OK();
+}
+
+RegisterDataEngine kS3DataEngine{"s3", CreateS3DataEngine};
 
 S3DataEngine::S3DataEngine() = default;
 
