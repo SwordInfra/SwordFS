@@ -5,26 +5,24 @@
 
 #include "metadata/redis/RedisKey.hpp"
 
-namespace swordfs::metadata {
+namespace swordfs::metadata::redis {
 
 TEST(RedisKeyTest, UsesDatabaseScopedPrefix) {
   RedisKey key(3, "volume");
 
-  EXPECT_EQ(key.Prefix(), "swordfs:{3:766f6c756d65}:");
-  EXPECT_EQ(key.Format(), "swordfs:{3:766f6c756d65}:format");
-  EXPECT_EQ(key.NextIno(), "swordfs:{3:766f6c756d65}:next_ino");
-  EXPECT_EQ(key.Inode(42), "swordfs:{3:766f6c756d65}:inode:42");
-  EXPECT_EQ(key.Dentry(7, "hello"), "swordfs:{3:766f6c756d65}:dentry:7:68656c6c6f");
-  EXPECT_EQ(key.DentryPrefix(7), "swordfs:{3:766f6c756d65}:dentry:7:");
-  EXPECT_EQ(key.Chunk(42, 3), "swordfs:{3:766f6c756d65}:chunk:42:3");
-  EXPECT_EQ(key.ChunkPrefix(42), "swordfs:{3:766f6c756d65}:chunk:42:");
+  EXPECT_EQ(key.Format(), "{3:volume}:format");
+  EXPECT_EQ(key.NextIno(), "{3:volume}:next_ino");
+  EXPECT_EQ(key.Inode(42), "{3:volume}:inode:42");
+  EXPECT_EQ(key.Dentry(7, "hello"), "{3:volume}:dentry:7:hello");
+  EXPECT_EQ(key.Chunk(42, 3), "{3:volume}:chunk:42:3");
 }
 
-TEST(RedisKeyTest, EncodesArbitraryDirectoryNames) {
+TEST(RedisKeyTest, PreservesDirectoryNames) {
   RedisKey key(0, "volume");
 
-  EXPECT_EQ(key.Dentry(1, "a:b"), "swordfs:{0:766f6c756d65}:dentry:1:613a62");
-  EXPECT_EQ(key.Dentry(1, std::string("\0\xff", 2)), "swordfs:{0:766f6c756d65}:dentry:1:00ff");
+  EXPECT_EQ(key.Dentry(1, "a:b"), "{0:volume}:dentry:1:a:b");
+  EXPECT_EQ(key.Dentry(1, std::string("\0\xff", 2)),
+            "{0:volume}:dentry:1:" + std::string("\0\xff", 2));
 }
 
-}  // namespace swordfs::metadata
+}  // namespace swordfs::metadata::redis

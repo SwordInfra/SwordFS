@@ -5,10 +5,10 @@
 
 #include <folly/Format.h>
 
-namespace swordfs::metadata {
+namespace swordfs::metadata::redis {
 
 RedisKey::RedisKey(int db, std::string_view volume_name) {
-  prefix_ = folly::sformat("swordfs:{{{}:{}}}:", db, EncodeName(volume_name));
+  prefix_ = folly::sformat("{{{}:{}}}:", db, volume_name);
 }
 
 std::string RedisKey::Format() const {
@@ -24,30 +24,11 @@ std::string RedisKey::Inode(uint64_t ino) const {
 }
 
 std::string RedisKey::Dentry(uint64_t parent_ino, std::string_view name) const {
-  return folly::sformat("{}dentry:{}:{}", prefix_, parent_ino, EncodeName(name));
-}
-
-std::string RedisKey::DentryPrefix(uint64_t parent_ino) const {
-  return folly::sformat("{}dentry:{}:", prefix_, parent_ino);
+  return folly::sformat("{}dentry:{}:{}", prefix_, parent_ino, name);
 }
 
 std::string RedisKey::Chunk(uint64_t ino, uint32_t index) const {
   return folly::sformat("{}chunk:{}:{}", prefix_, ino, index);
 }
 
-std::string RedisKey::ChunkPrefix(uint64_t ino) const {
-  return folly::sformat("{}chunk:{}:", prefix_, ino);
-}
-
-std::string RedisKey::EncodeName(std::string_view name) {
-  static constexpr char kHex[] = "0123456789abcdef";
-  std::string encoded;
-  encoded.reserve(name.size() * 2);
-  for (const unsigned char c : name) {
-    encoded.push_back(kHex[c >> 4]);
-    encoded.push_back(kHex[c & 0x0f]);
-  }
-  return encoded;
-}
-
-}  // namespace swordfs::metadata
+}  // namespace swordfs::metadata::redis

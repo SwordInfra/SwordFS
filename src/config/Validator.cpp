@@ -14,6 +14,26 @@
 
 namespace swordfs::config {
 
+const CLI::Validator ValidateVolumeName = CLI::Validator(
+    [](const std::string &input) -> std::string {
+      if (input.empty()) {
+        return "Volume name must not be empty";
+      }
+      const auto is_ascii_letter = [](unsigned char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+      };
+      if (!is_ascii_letter(input.front())) {
+        return "Volume name must start with an ASCII letter: " + input;
+      }
+      if (!std::all_of(input.begin(), input.end(), [](unsigned char c) {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+          })) {
+        return "Volume name must contain only ASCII letters and digits: " + input;
+      }
+      return {};
+    },
+    "VOLUME_NAME");
+
 const CLI::Validator ValidateMetaUrl = CLI::Validator(
     [](const std::string &input) -> std::string {
       std::string scheme;

@@ -11,16 +11,13 @@
 
 namespace swordfs::metadata::redis {
 
-struct RedisFormat {
-  uint32_t schema_version = 1;
+struct RedisFormatHeader {
+  std::string magic;
+  uint32_t schema_version;
 };
 
-namespace RedisCodec {
-
-constexpr uint32_t kSchemaVersion = 1;
-
-utils::Status EncodeFormat(const RedisFormat &format, std::string *out);
-utils::Status DecodeFormat(std::string_view value, RedisFormat *out);
+utils::Status EncodeFormat(const RedisFormatHeader &format, std::string *out);
+utils::Status DecodeFormat(std::string_view value, RedisFormatHeader *out);
 
 utils::Status EncodeInode(const SwordFsInode &inode, std::string *out);
 utils::Status DecodeInode(std::string_view value, SwordFsInode *out);
@@ -31,5 +28,4 @@ utils::Status DecodeEntry(std::string_view value, SwordFsEntry *out);
 utils::Status EncodeChunk(const ChunkMeta &chunk, std::string *out);
 utils::Status DecodeChunk(std::string_view value, ChunkMeta *out);
 
-}  // namespace RedisCodec
 }  // namespace swordfs::metadata::redis

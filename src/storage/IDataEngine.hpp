@@ -54,7 +54,7 @@ class IDataEngine {
   virtual ~IDataEngine() = default;
 
   /// Initialize the data backend and its runtime resources.
-  virtual Status Initialize() { return Status::OK(); }
+  virtual Status Initialize() = 0;
 
   /// Return the engine's capability limits.
   virtual DataEngineLimits Limits() const = 0;

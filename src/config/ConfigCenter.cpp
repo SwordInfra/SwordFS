@@ -77,7 +77,8 @@ void ConfigCenter::RegisterFormatOptions(CLI::App& app) {
   auto cmd = app.add_subcommand("format", "Initialise a new SwordFS volume");
 
   cmd->add_option("--volume", volume_, "Volume name")
-      ->required();
+      ->required()
+      ->check(swordfs::config::ValidateVolumeName);
   cmd->add_option("--meta", meta_url_,
                   "Metadata engine URL (e.g. memory://local)")
       ->required()

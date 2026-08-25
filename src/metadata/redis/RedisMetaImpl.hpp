@@ -18,15 +18,15 @@ class RedisMetaClient;
 // subsequent issues.
 class RedisMetaImpl : public IMetaEngine {
 public:
-  explicit RedisMetaImpl(const RedisMetaConfig &config);
+  RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name);
   ~RedisMetaImpl() override;
 
   RedisMetaImpl(const RedisMetaImpl &) = delete;
   RedisMetaImpl &operator=(const RedisMetaImpl &) = delete;
 
   utils::Status Initialize() override;
-  utils::Status Format() override;
-  utils::Status Validate() override;
+  utils::Status FormatVolume() override;
+  utils::Status LoadVolume();
   Limits GetLimits() const override;
 
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
@@ -54,7 +54,7 @@ public:
 
 private:
   std::unique_ptr<RedisMetaClient> client_;
-  RedisKey key_;
+  redis::RedisKey key_;
 };
 
 }  // namespace swordfs::metadata

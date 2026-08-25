@@ -22,7 +22,7 @@ int Status::ToErrno() const {
     case kInvalidArgument:
       return EINVAL;
     case kMalformed:
-      return EINVAL;
+      return EIO;
     case kNotSupported:
       return ENOSYS;
     case kIOError:

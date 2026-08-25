@@ -45,6 +45,7 @@ using swordfs::utils::Status;
 // Delete calls) lives below alongside the ReclaimData tests.
 class NoopDataEngine : public swordfs::storage::IDataEngine {
  public:
+  Status Initialize() override { return Status::OK(); }
   swordfs::storage::DataEngineLimits Limits() const override { return {}; }
   bool Head(std::string_view, size_t *) override { return false; }
   Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
@@ -486,6 +487,7 @@ namespace {
 // per-key failure responses.
 class FakeDataEngine : public swordfs::storage::IDataEngine {
  public:
+  Status Initialize() override { return Status::OK(); }
   swordfs::storage::DataEngineLimits Limits() const override {
     return {};
   }

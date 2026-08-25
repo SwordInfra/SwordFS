@@ -76,6 +76,20 @@ utils::Status RedisMetaClient::Ping() {
   });
 }
 
+utils::Status RedisMetaClient::Get(std::string_view key, std::optional<std::string> *value) {
+  if (value == nullptr) {
+    return utils::Status::InvalidArgument("Redis GET output is null");
+  }
+  return pool_->Run([this, key, value] {
+    try {
+      *value = redis_->get(std::string(key));
+      return utils::Status::OK();
+    } catch (const sw::redis::Error &error) {
+      return RedisError("GET", error);
+    }
+  });
+}
+
 utils::Status RedisMetaClient::TransactImpl(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
   for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
     try {

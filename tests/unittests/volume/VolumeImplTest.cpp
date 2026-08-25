@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "config/ConfigCenter.hpp"
@@ -46,19 +47,23 @@ TEST_F(VolumeImplTest, CreateFromSucceeds) {
 }
 
 TEST_F(VolumeImplTest, CreateFromRedisEngine) {
-  auto cfg = makeConfig("redis://localhost:6379/0", tmpdir_, "redis-" + tmpdir_);
+  const char *redis_url = std::getenv("SWORDFS_REDIS_TEST_URL");
+  if (redis_url == nullptr) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  auto cfg = makeConfig(redis_url, tmpdir_, "redis-" + tmpdir_);
 
   VolumeImpl::Initialize();
-  Status st = VolumeImpl::Instance().CreateFrom(cfg);
-  ASSERT_TRUE(st.ok()) << st.message();
+  Status status = VolumeImpl::Instance().CreateFrom(cfg);
+  ASSERT_TRUE(status.ok()) << status.message();
 
   VolumeImpl::Initialize();
-  st = VolumeImpl::Instance().LoadFrom(cfg);
-  EXPECT_TRUE(st.ok()) << st.message();
+  status = VolumeImpl::Instance().LoadFrom(cfg);
+  EXPECT_TRUE(status.ok()) << status.message();
 
   VolumeImpl::Initialize();
-  st = VolumeImpl::Instance().CreateFrom(cfg);
-  EXPECT_TRUE(st.IsAlreadyExists()) << st.message();
+  status = VolumeImpl::Instance().CreateFrom(cfg);
+  EXPECT_TRUE(status.IsAlreadyExists()) << status.message();
 }
 
 TEST_F(VolumeImplTest, LoadFromS3Engine) {

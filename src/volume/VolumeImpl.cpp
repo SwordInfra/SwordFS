@@ -15,7 +15,8 @@
 namespace swordfs::volume {
 namespace {
 
-Status CreateMetaEngine(std::string_view meta_url, std::unique_ptr<swordfs::metadata::IMetaEngine> *out) {
+Status CreateMetaEngine(std::string_view meta_url, std::string_view volume_name,
+                         std::unique_ptr<swordfs::metadata::IMetaEngine> *out) {
   if (out == nullptr) {
     return Status::InvalidArgument("metadata engine output is null");
   }
@@ -26,7 +27,7 @@ Status CreateMetaEngine(std::string_view meta_url, std::unique_ptr<swordfs::meta
   }
 
   try {
-    return swordfs::metadata::MetaEngineRegistry::Instance().Create(url.scheme, meta_url, out);
+    return swordfs::metadata::MetaEngineRegistry::Instance().Create(url.scheme, meta_url, volume_name, out);
   } catch (const std::exception &error) {
     return Status::IOError("metadata engine initialization failed: " + std::string(error.what()));
   }
@@ -90,18 +91,16 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
     }
   }
 
-  auto status = CreateMetaEngine(config_.meta_url, &meta_engine_);
+  auto status = CreateMetaEngine(config_.meta_url, config_.name, &meta_engine_);
   if (!status.ok()) {
     return status;
   }
   status = meta_engine_->Initialize();
   if (!status.ok()) {
-    meta_engine_.reset();
     return status;
   }
-  status = meta_engine_->Format();
+  status = meta_engine_->FormatVolume();
   if (!status.ok()) {
-    meta_engine_.reset();
     return status;
   }
 
@@ -114,17 +113,15 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
     return status;
   }
 
-  // Create and initialize both engines as part of the volume lifecycle.
-  status = CreateMetaEngine(config_.meta_url, &meta_engine_);
+  status = CreateMetaEngine(config_.meta_url, config_.name, &meta_engine_);
   if (!status.ok()) {
     return status;
   }
   status = meta_engine_->Initialize();
   if (!status.ok()) {
-    meta_engine_.reset();
     return status;
   }
-  status = meta_engine_->Validate();
+  status = meta_engine_->LoadVolume();
   if (!status.ok()) {
     return status;
   }
@@ -136,7 +133,6 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
     }
     status = data_engine_->Initialize();
     if (!status.ok()) {
-      data_engine_.reset();
       return status;
     }
   }

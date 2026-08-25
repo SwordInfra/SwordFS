@@ -32,6 +32,7 @@ using swordfs::vfs::VfsImpl;
 // provide their own.
 class NoopDataEngine : public swordfs::storage::IDataEngine {
  public:
+  swordfs::utils::Status Initialize() override { return swordfs::utils::Status::OK(); }
   swordfs::storage::DataEngineLimits Limits() const override { return {}; }
   bool Head(std::string_view, size_t *) override { return false; }
   swordfs::utils::Status Put(std::string_view,

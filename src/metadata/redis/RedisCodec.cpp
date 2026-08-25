@@ -11,12 +11,12 @@
 #include <memory>
 
 namespace swordfs::metadata::redis {
-namespace RedisCodec {
 namespace {
 
-constexpr std::string_view kMagic = "SWFSRED1";
 constexpr size_t kInitialBufferSize = 1024;
 constexpr size_t kMaxStringLength = 16 * 1024 * 1024;
+constexpr std::string_view kMagic = "SWFSRED1";
+constexpr uint32_t kSchemaVersion = 1;
 
 class Writer {
  public:
@@ -110,27 +110,33 @@ bool ReadHeader(Reader &reader) {
 
 }  // namespace
 
-utils::Status EncodeFormat(const RedisFormat &format, std::string *out) {
-  if (out == nullptr || format.schema_version != kSchemaVersion) {
-    return utils::Status::InvalidArgument("Invalid Redis format record");
+utils::Status EncodeFormat(const RedisFormatHeader &format, std::string *out) {
+  if (out == nullptr || format.magic != kMagic || format.schema_version != kSchemaVersion) {
+    return utils::Status::InvalidArgument("Invalid Redis format header");
   }
   Writer writer;
-  WriteHeader(writer);
+  writer.String(format.magic);
+  writer.U32(format.schema_version);
   writer.Finish(out);
   return utils::Status::OK();
 }
 
-utils::Status DecodeFormat(std::string_view value, RedisFormat *out) {
+utils::Status DecodeFormat(std::string_view value, RedisFormatHeader *out) {
   if (out == nullptr) {
-    return utils::Status::InvalidArgument("Redis format output is null");
+    return utils::Status::InvalidArgument("Redis format header output is null");
   }
   Reader reader(value);
-  RedisFormat format;
-  if (!ReadHeader(reader) || !reader.Done()) {
+  RedisFormatHeader header;
+  if (!reader.String(&header.magic) || !reader.U32(&header.schema_version) || !reader.Done()) {
     return Malformed("format");
   }
-  format.schema_version = kSchemaVersion;
-  *out = std::move(format);
+  if (header.magic != kMagic) {
+    return Malformed("format");
+  }
+  if (header.schema_version != kSchemaVersion) {
+    return utils::Status::NotSupported("unsupported Redis metadata schema version");
+  }
+  *out = std::move(header);
   return utils::Status::OK();
 }
 
@@ -279,5 +285,4 @@ utils::Status DecodeChunk(std::string_view value, ChunkMeta *out) {
   return utils::Status::OK();
 }
 
-}  // namespace RedisCodec
 }  // namespace swordfs::metadata::redis
