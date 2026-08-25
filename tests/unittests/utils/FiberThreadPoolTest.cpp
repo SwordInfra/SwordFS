@@ -37,12 +37,12 @@ void RunInFiber(Fn &&fn) {
 // Basic Run
 // ────────────────────────────────────────────────────────────────
 
-TEST(FiberThreadPoolTest, RejectsNonFiberCaller) {
+TEST(FiberThreadPoolTest, RunFromThreadReturnsValue) {
   FiberThreadPool pool(1);
-  EXPECT_DEATH(pool.Run([] { return 42; }), "must be called from a fiber");
+  EXPECT_EQ(pool.Run([] { return 42; }), 42);
 }
 
-TEST(FiberThreadPoolTest, RunReturnsValue) {
+TEST(FiberThreadPoolTest, RunFromFiberReturnsValue) {
   FiberThreadPool pool(2);
   RunInFiber([&] {
     int result = pool.Run([] { return 42; });
