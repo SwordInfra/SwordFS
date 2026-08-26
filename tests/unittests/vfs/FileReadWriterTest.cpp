@@ -26,7 +26,7 @@
 #include "volume/VolumeImpl.hpp"
 
 using swordfs::metadata::ChunkIndex;
-using swordfs::metadata::ChunkMeta;
+using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
@@ -201,18 +201,18 @@ class MockMetaEngine : public IMetaEngine {
   }
   Status Open(InodeID) override { return Status::OK(); }
   Status ReclaimInode(InodeID) override { return Status::OK(); }
-  Status ListChunks(InodeID, std::vector<ChunkMeta> *) override {
+  Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return Status::OK(); }
 
-  Status AddChunk(InodeID ino, const ChunkMeta &cm) override {
-    chunks_[ino][cm.index] = cm;
+  Status AddChunk(InodeID ino, const SwordFsChunk &chunk) override {
+    chunks_[ino][chunk.index] = chunk;
     return Status::OK();
   }
 
   Status FindChunk(InodeID ino, ChunkIndex idx,
-                   ChunkMeta *cm) override {
+                   SwordFsChunk *chunk) override {
     auto it = chunks_.find(ino);
     if (it == chunks_.end()) {
       return Status::NotFound("");
@@ -221,8 +221,8 @@ class MockMetaEngine : public IMetaEngine {
     if (cit == it->second.end()) {
       return Status::NotFound("");
     }
-    if (cm) {
-      *cm = cit->second;
+    if (chunk) {
+      *chunk = cit->second;
     }
     return Status::OK();
   }
@@ -247,7 +247,7 @@ class MockMetaEngine : public IMetaEngine {
   off_t file_size_ = 0;
   Status truncate_status_ = Status::OK();
   std::unordered_map<InodeID,
-                     std::unordered_map<ChunkIndex, ChunkMeta>>
+                     std::unordered_map<ChunkIndex, SwordFsChunk>>
       chunks_;
 };
 
@@ -599,14 +599,14 @@ TEST_F(FileReadWriterTest, TruncateDeletesDroppedChunkObjects) {
     // them in the data engine so the truncate-side Delete has
     // something to act on.
     for (ChunkIndex i = 0; i < 3; ++i) {
-      ChunkMeta cm{};
-      cm.index = i;
-      cm.start_offset = i * kChunkSize;
-      cm.key = std::to_string(kIno) + "/" + std::to_string(i);
-      cm.size = kChunkSize;
-      ASSERT_TRUE(mock_meta_->AddChunk(kIno, cm).ok());
+      SwordFsChunk chunk{};
+      chunk.index = i;
+      chunk.start_offset = i * kChunkSize;
+      chunk.key = std::to_string(kIno) + "/" + std::to_string(i);
+      chunk.size = kChunkSize;
+      ASSERT_TRUE(mock_meta_->AddChunk(kIno, chunk).ok());
       auto buf = std::make_unique<folly::IOBuf>(Buf(Repeat('A', kChunkSize)));
-      ASSERT_TRUE(mock_data_->Put(cm.key, std::move(buf)).ok());
+      ASSERT_TRUE(mock_data_->Put(chunk.key, std::move(buf)).ok());
     }
     // Materialise each chunk in FileChunkManager by reading it; the
     // reader path uses chunks_.Get(idx, false) which still triggers

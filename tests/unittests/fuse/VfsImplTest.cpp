@@ -16,7 +16,7 @@
 #include "volume/VolumeImpl.hpp"
 
 using swordfs::metadata::ChunkIndex;
-using swordfs::metadata::ChunkMeta;
+using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
@@ -224,14 +224,14 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   }
   Status Open(InodeID) override { return call_status_; }
   Status ReclaimInode(InodeID) override { return call_status_; }
-  Status ListChunks(InodeID, std::vector<swordfs::metadata::ChunkMeta> *) override {
+  Status ListChunks(InodeID, std::vector<swordfs::metadata::SwordFsChunk> *) override {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return call_status_; }
-  Status AddChunk(InodeID, const swordfs::metadata::ChunkMeta &) override {
+  Status AddChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
     return Status::OK();
   }
-  Status FindChunk(InodeID, ChunkIndex, ChunkMeta *) override {
+  Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
     return Status::NotFound("");
   }
   Status Truncate(InodeID, size_t) override { return Status::OK(); }

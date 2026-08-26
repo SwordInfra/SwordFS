@@ -14,10 +14,10 @@ namespace swordfs::metadata::mem {
 /// Memory metadata's on-disk volume.json representation.
 class VolumeJson {
  public:
-  static std::string Serialize(const VolumeFormat &volume);
-  static utils::Status Parse(std::string_view json, VolumeFormat *volume);
-  static utils::Status Write(const VolumeFormat &volume, const std::string &path);
-  static utils::Status Read(const std::string &path, VolumeFormat *volume);
+  static std::string Serialize(const SwordFsVolume &volume);
+  static utils::Status Parse(std::string_view json, SwordFsVolume *volume);
+  static utils::Status Write(const SwordFsVolume &volume, const std::string &path);
+  static utils::Status Read(const std::string &path, SwordFsVolume *volume);
   static bool Exists(const std::string &path);
 };
 

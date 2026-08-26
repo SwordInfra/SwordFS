@@ -5,7 +5,7 @@
 
 #include <ctime>
 
-#include "metadata/types/Serialization.hpp"
+#include "metadata/types/BufCodec.hpp"
 
 namespace swordfs::metadata {
 
@@ -59,11 +59,10 @@ bool SwordFsInode::CheckStickyDelete(uid_t uid, const SwordFsInode &target) cons
 }
 
 utils::Status SwordFsInode::SerializeTo(std::string *out) const {
-  using namespace types::serialization;
   if (out == nullptr || ino == 0) {
     return utils::Status::InvalidArgument("Invalid inode record");
   }
-  Writer writer;
+  BufEncoder writer;
   writer.Header(RecordType::kInode);
   writer.U64(ino);
   writer.U64(static_cast<uint64_t>(attr.st_dev));
@@ -76,9 +75,9 @@ utils::Status SwordFsInode::SerializeTo(std::string *out) const {
   writer.U64(static_cast<uint64_t>(attr.st_size));
   writer.U64(static_cast<uint64_t>(attr.st_blksize));
   writer.U64(static_cast<uint64_t>(attr.st_blocks));
-  WriteTimespec(writer, attr.st_atim);
-  WriteTimespec(writer, attr.st_mtim);
-  WriteTimespec(writer, attr.st_ctim);
+  writer.Timespec(attr.st_atim);
+  writer.Timespec(attr.st_mtim);
+  writer.Timespec(attr.st_ctim);
   writer.U64(parent_ino);
   writer.String(symlink_target);
   writer.Finish(out);
@@ -86,63 +85,62 @@ utils::Status SwordFsInode::SerializeTo(std::string *out) const {
 }
 
 utils::Status SwordFsInode::ParseFrom(std::string_view data, SwordFsInode *out) {
-  using namespace types::serialization;
   if (out == nullptr) {
     return utils::Status::InvalidArgument("Inode output is null");
   }
-  Reader reader(data);
+  BufDecoder reader(data);
   SwordFsInode inode;
   uint64_t ino = 0;
   uint64_t field = 0;
   if (!reader.Header(RecordType::kInode) || !reader.U64(&ino) || ino == 0 || !reader.U64(&field)) {
-    return Malformed("inode");
+    return utils::Status::Malformed("Malformed inode record");
   }
   inode.ino = ino;
   inode.attr.st_dev = static_cast<dev_t>(field);
   if (!reader.U64(&field)) {
-    return Malformed("inode");
+    return utils::Status::Malformed("Malformed inode record");
   }
   inode.attr.st_ino = static_cast<ino_t>(field);
   uint32_t mode = 0;
   if (!reader.U32(&mode)) {
-    return Malformed("inode");
+    return utils::Status::Malformed("Malformed inode record");
   }
   inode.attr.st_mode = static_cast<mode_t>(mode);
   if (!reader.U64(&field)) {
-    return Malformed("inode");
+    return utils::Status::Malformed("Malformed inode record");
   }
   inode.attr.st_nlink = static_cast<nlink_t>(field);
   if (!reader.U64(&field)) {
-    return Malformed("inode");
+    return utils::Status::Malformed("Malformed inode record");
   }
   inode.attr.st_uid = static_cast<uid_t>(field);
   if (!reader.U64(&field)) {
-    return Malformed("inode");
+    return utils::Status::Malformed("Malformed inode record");
   }
   inode.attr.st_gid = static_cast<gid_t>(field);
   if (!reader.U64(&field)) {
-    return Malformed("inode");
+    return utils::Status::Malformed("Malformed inode record");
   }
   inode.attr.st_rdev = static_cast<dev_t>(field);
   if (!reader.U64(&field)) {
-    return Malformed("inode");
+    return utils::Status::Malformed("Malformed inode record");
   }
   inode.attr.st_size = static_cast<off_t>(field);
   if (!reader.U64(&field)) {
-    return Malformed("inode");
+    return utils::Status::Malformed("Malformed inode record");
   }
   inode.attr.st_blksize = static_cast<blksize_t>(field);
   if (!reader.U64(&field)) {
-    return Malformed("inode");
+    return utils::Status::Malformed("Malformed inode record");
   }
   inode.attr.st_blocks = static_cast<blkcnt_t>(field);
-  if (!ReadTimespec(reader, &inode.attr.st_atim) || !ReadTimespec(reader, &inode.attr.st_mtim) ||
-      !ReadTimespec(reader, &inode.attr.st_ctim) || !reader.U64(&inode.parent_ino) ||
+  if (!reader.Timespec(&inode.attr.st_atim) || !reader.Timespec(&inode.attr.st_mtim) ||
+      !reader.Timespec(&inode.attr.st_ctim) || !reader.U64(&inode.parent_ino) ||
       !reader.String(&inode.symlink_target) || !reader.Done()) {
-    return Malformed("inode");
+    return utils::Status::Malformed("Malformed inode record");
   }
   if (inode.attr.st_ino != inode.ino || inode.attr.st_nlink == 0) {
-    return Malformed("inode");
+    return utils::Status::Malformed("Malformed inode record");
   }
   *out = std::move(inode);
   return utils::Status::OK();

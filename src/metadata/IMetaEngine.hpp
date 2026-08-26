@@ -50,12 +50,12 @@ class IMetaEngine {
   /// Create a new metadata volume. |volume_config| contains the persistent
   /// volume configuration serialized by VolumeImpl. Backends without
   /// persistent metadata may treat this as a no-op.
-  virtual Status FormatVolume(const VolumeFormat &config) { return Status::OK(); }
+  virtual Status FormatVolume(const SwordFsVolume &config) { return Status::OK(); }
 
   /// Load an existing metadata volume and return its persistent volume
   /// configuration in |volume_config|. Backends without persistent metadata
   /// may treat this as a no-op.
-  virtual Status LoadVolume(VolumeFormat *config) { return Status::OK(); }
+  virtual Status LoadVolume(SwordFsVolume *config) { return Status::OK(); }
 
   /// Return filesystem limits provided by this metadata engine.
   virtual Limits GetLimits() const = 0;
@@ -149,11 +149,11 @@ class IMetaEngine {
   virtual Status ReclaimInode(InodeID ino) = 0;
 
   /// Enumerate the chunk indices currently registered for |ino|. Fills
-  /// |*out| with `ChunkMeta` entries (by value) ordered by ascending
+  /// |*out| with `SwordFsChunk` entries (by value) ordered by ascending
   /// chunk index. Used by the VFS layer when reclaiming an inode to
   /// compute the per-chunk object keys it must delete via the data
   /// engine. Returns OK with `*out` empty if the inode has no chunks.
-  virtual Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out) = 0;
+  virtual Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) = 0;
 
   /// Open a directory for reading. Performs permission check and updates
   /// atime. Handle allocation is now managed by FileHandleManager.
@@ -166,11 +166,11 @@ class IMetaEngine {
   /// Register a flushed chunk.  The metadata engine stores the chunk
   /// key, size, and start offset so that subsequent reads can locate
   /// the data via the data engine.
-  virtual Status AddChunk(InodeID ino, const ChunkMeta &cm) = 0;
+  virtual Status AddChunk(InodeID ino, const SwordFsChunk &chunk) = 0;
 
-  /// Find the chunk at |idx|.  Returns OK and fills |*cm| if a
+  /// Find the chunk at |idx|.  Returns OK and fills |*chunk| if a
   /// matching chunk is registered for the given inode.
-  virtual Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) = 0;
+  virtual Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) = 0;
 
   /// Truncate |ino| to |size| bytes.  Updates the inode size and drops
   /// chunk metadata for data beyond the new size.

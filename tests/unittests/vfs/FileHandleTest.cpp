@@ -29,7 +29,7 @@ namespace swordfs::vfs {
 namespace {
 
 using swordfs::metadata::ChunkIndex;
-using swordfs::metadata::ChunkMeta;
+using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
@@ -107,12 +107,12 @@ class MockMetaEngine : public IMetaEngine {
     ++reclaim_calls;
     return reclaim_status;
   }
-  Status ListChunks(InodeID, std::vector<ChunkMeta> *) override {
+  Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return Status::OK(); }
-  Status AddChunk(InodeID, const ChunkMeta &) override { return Status::OK(); }
-  Status FindChunk(InodeID, ChunkIndex, ChunkMeta *) override {
+  Status AddChunk(InodeID, const SwordFsChunk &) override { return Status::OK(); }
+  Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
     return Status::NotFound("no chunk");
   }
   Status Truncate(InodeID, size_t size) override {
@@ -563,7 +563,7 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status ListChunks(InodeID ino,
-                    std::vector<swordfs::metadata::ChunkMeta> *out) override {
+                    std::vector<swordfs::metadata::SwordFsChunk> *out) override {
     ++list_chunks_calls;
     last_list_ino = ino;
     if (!list_chunks_status.ok()) {
@@ -573,11 +573,11 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return Status::OK(); }
-  Status AddChunk(InodeID, const swordfs::metadata::ChunkMeta &) override {
+  Status AddChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
     return Status::OK();
   }
   Status FindChunk(InodeID, swordfs::metadata::ChunkIndex,
-                   swordfs::metadata::ChunkMeta *) override {
+                   swordfs::metadata::SwordFsChunk *) override {
     return Status::NotFound("no chunk");
   }
   Status Truncate(InodeID, size_t) override { return Status::OK(); }
@@ -587,7 +587,7 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
   InodeID last_list_ino = 0;
   InodeID last_reclaim_ino = 0;
   Status list_chunks_status = Status::OK();
-  std::vector<swordfs::metadata::ChunkMeta> chunks;
+  std::vector<swordfs::metadata::SwordFsChunk> chunks;
   std::unordered_map<InodeID, struct stat> attrs;
 };
 
@@ -618,12 +618,12 @@ TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
   auto *data = data_up.get();
 
   // Seed two chunk records.
-  swordfs::metadata::ChunkMeta c0{};
+  swordfs::metadata::SwordFsChunk c0{};
   c0.index = 0;
   c0.start_offset = 0;
   c0.key = "4242/0";
   c0.size = 1024;
-  swordfs::metadata::ChunkMeta c1{};
+  swordfs::metadata::SwordFsChunk c1{};
   c1.index = 1;
   c1.start_offset = 65536;
   c1.key = "4242/1";
@@ -669,7 +669,7 @@ TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
   auto *meta = meta_up.get();
   auto *data = data_up.get();
 
-  swordfs::metadata::ChunkMeta c{};
+  swordfs::metadata::SwordFsChunk c{};
   c.index = 0;
   c.key = "99/0";
   meta->chunks = {c};
@@ -727,10 +727,10 @@ TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
   auto *meta = meta_up.get();
   auto *data = data_up.get();
 
-  swordfs::metadata::ChunkMeta c0{};
+  swordfs::metadata::SwordFsChunk c0{};
   c0.index = 0;
   c0.key = "1/0";
-  swordfs::metadata::ChunkMeta c1{};
+  swordfs::metadata::SwordFsChunk c1{};
   c1.index = 1;
   c1.key = "1/1";
   meta->chunks = {c0, c1};
@@ -821,10 +821,10 @@ TEST_F(FileHandleTest, ReclaimDataRefusesWhenNlinkStillPositive) {
   auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/2);
   // Add a chunk so we'd have something to delete if the guard fell
   // through; the absence of any delete is what we actually verify.
-  swordfs::metadata::ChunkMeta cm{};
-  cm.index = 0;
-  cm.key = "7/0";
-  meta->chunks = {cm};
+  swordfs::metadata::SwordFsChunk chunk{};
+  chunk.index = 0;
+  chunk.key = "7/0";
+  meta->chunks = {chunk};
 
   ASSERT_TRUE(ReclaimInode(7).ok());
   EXPECT_TRUE(data->delete_calls.empty())

@@ -25,8 +25,8 @@ public:
   RedisMetaImpl &operator=(const RedisMetaImpl &) = delete;
 
   utils::Status Initialize() override;
-  utils::Status FormatVolume(const VolumeFormat &config) override;
-  utils::Status LoadVolume(VolumeFormat *config) override;
+  utils::Status FormatVolume(const SwordFsVolume &config) override;
+  utils::Status LoadVolume(SwordFsVolume *config) override;
   Limits GetLimits() const override;
 
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
@@ -46,10 +46,10 @@ public:
   Status Readlink(InodeID ino, std::string *target) override;
   Status Open(InodeID ino) override;
   Status ReclaimInode(InodeID ino) override;
-  Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out) override;
+  Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) override;
   Status OpenDir(InodeID ino) override;
-  Status AddChunk(InodeID ino, const ChunkMeta &cm) override;
-  Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) override;
+  Status AddChunk(InodeID ino, const SwordFsChunk &chunk) override;
+  Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
   Status Truncate(InodeID ino, size_t size) override;
 
 private:

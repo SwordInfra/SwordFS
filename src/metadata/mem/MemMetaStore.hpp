@@ -72,8 +72,8 @@ class MemMetaStore {
   folly::F14FastMap<InodeID, std::unique_ptr<SwordFsInode>> inodes_;
   folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode *>> dirs_;
 
-  // Chunk metadata: inode → (index → ChunkMeta).
-  folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, ChunkMeta>> chunks_;
+  // Chunk metadata: inode → (index → SwordFsChunk).
+  folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, SwordFsChunk>> chunks_;
 };
 
 }  // namespace swordfs::metadata

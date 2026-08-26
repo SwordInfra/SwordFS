@@ -1,7 +1,7 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// Unit tests for VolumeFormat and the memory volume.json representation.
+// Unit tests for SwordFsVolume and the memory volume.json representation.
 
 #include <gtest/gtest.h>
 
@@ -13,7 +13,7 @@
 #include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
 
-using swordfs::metadata::VolumeFormat;
+using swordfs::metadata::SwordFsVolume;
 using swordfs::metadata::mem::VolumeJson;
 using swordfs::utils::Status;
 
@@ -32,8 +32,8 @@ void RemoveDir(const std::string &path) {
   }
 }
 
-VolumeFormat MakeVolume() {
-  VolumeFormat volume;
+SwordFsVolume MakeVolume() {
+  SwordFsVolume volume;
   volume.name = "test-vol";
   volume.meta_url = "memory://local";
   volume.storage = "s3";
@@ -44,12 +44,12 @@ VolumeFormat MakeVolume() {
 }  // namespace
 
 TEST(VolumeJsonTest, ToJsonAndFromJsonRoundTrip) {
-  VolumeFormat original = MakeVolume();
+  SwordFsVolume original = MakeVolume();
   std::string json = VolumeJson::Serialize(original);
   EXPECT_NE(json.find("test-vol"), std::string::npos);
   EXPECT_NE(json.find("us-east-1"), std::string::npos);
 
-  VolumeFormat parsed;
+  SwordFsVolume parsed;
   Status st = VolumeJson::Parse(json, &parsed);
   ASSERT_TRUE(st.ok()) << st.message();
   EXPECT_EQ(parsed.name, original.name);
@@ -60,23 +60,23 @@ TEST(VolumeJsonTest, ToJsonAndFromJsonRoundTrip) {
 }
 
 TEST(VolumeJsonTest, ToJsonAndFromJsonRoundTripRegionAuto) {
-  VolumeFormat original = MakeVolume();
+  SwordFsVolume original = MakeVolume();
   original.name = "v2";
   original.region = "auto";
-  VolumeFormat parsed;
+  SwordFsVolume parsed;
   Status st = VolumeJson::Parse(VolumeJson::Serialize(original), &parsed);
   ASSERT_TRUE(st.ok());
   EXPECT_EQ(parsed.region, "auto");
 }
 
-TEST(VolumeFormatTest, SerializeToAndParseFromRoundTrip) {
-  VolumeFormat original = MakeVolume();
+TEST(SwordFsVolumeTest, SerializeToAndParseFromRoundTrip) {
+  SwordFsVolume original = MakeVolume();
   original.meta_url = "redis://localhost:6379/3";
   original.chunk_size = 128ULL * 1024 * 1024;
 
   std::string encoded = original.SerializeTo();
   ASSERT_FALSE(encoded.empty());
-  VolumeFormat parsed;
+  SwordFsVolume parsed;
   Status st = parsed.ParseFrom(encoded);
   ASSERT_TRUE(st.ok()) << st.message();
   EXPECT_EQ(parsed.name, original.name);
@@ -87,15 +87,15 @@ TEST(VolumeFormatTest, SerializeToAndParseFromRoundTrip) {
   EXPECT_EQ(parsed.chunk_size, original.chunk_size);
 }
 
-TEST(VolumeFormatTest, ParseFromRejectsMalformedData) {
-  VolumeFormat v;
+TEST(SwordFsVolumeTest, ParseFromRejectsMalformedData) {
+  SwordFsVolume v;
   Status st = v.ParseFrom("not volume metadata");
   EXPECT_FALSE(st.ok());
   EXPECT_EQ(st.code(), Status::kMalformed);
 }
 
 TEST(VolumeJsonTest, FromJsonInvalidJson) {
-  VolumeFormat v;
+  SwordFsVolume v;
   Status st = VolumeJson::Parse("not json", &v);
   EXPECT_FALSE(st.ok());
   EXPECT_EQ(st.code(), Status::kInvalidArgument);
@@ -103,7 +103,7 @@ TEST(VolumeJsonTest, FromJsonInvalidJson) {
 }
 
 TEST(VolumeJsonTest, FromJsonRootNotObject) {
-  VolumeFormat v;
+  SwordFsVolume v;
   Status st = VolumeJson::Parse("[1, 2, 3]", &v);
   EXPECT_FALSE(st.ok());
   EXPECT_EQ(st.code(), Status::kInvalidArgument);
@@ -111,14 +111,14 @@ TEST(VolumeJsonTest, FromJsonRootNotObject) {
 }
 
 TEST(VolumeJsonTest, FromJsonMissingFields) {
-  VolumeFormat v;
+  SwordFsVolume v;
   Status st = VolumeJson::Parse(R"({"meta":"m","storage":"s","bucket":"b","region":"r"})", &v);
   EXPECT_FALSE(st.ok());
   EXPECT_NE(st.message().find("name"), std::string::npos);
 }
 
 TEST(VolumeJsonTest, FromJsonWrongType) {
-  VolumeFormat v;
+  SwordFsVolume v;
   Status st = VolumeJson::Parse(R"({"name":123,"meta":"m","storage":"s","bucket":"b","region":"r"})", &v);
   EXPECT_FALSE(st.ok());
   EXPECT_NE(st.message().find("name"), std::string::npos);
@@ -126,14 +126,14 @@ TEST(VolumeJsonTest, FromJsonWrongType) {
 
 TEST(VolumeJsonTest, WriteAndReadRoundTrip) {
   std::string dir = MakeTempDir();
-  VolumeFormat original = MakeVolume();
+  SwordFsVolume original = MakeVolume();
   Status st = VolumeJson::Write(original, dir);
   ASSERT_TRUE(st.ok()) << st.message();
 
   std::ifstream ifs(dir + "/volume.json");
   ASSERT_TRUE(ifs.good());
 
-  VolumeFormat restored;
+  SwordFsVolume restored;
   st = VolumeJson::Read(dir, &restored);
   ASSERT_TRUE(st.ok()) << st.message();
   EXPECT_EQ(restored.name, original.name);
@@ -147,7 +147,7 @@ TEST(VolumeJsonTest, WriteAndReadRoundTrip) {
 TEST(VolumeJsonTest, WriteCreatesParentDir) {
   std::string dir = MakeTempDir();
   std::string subdir = dir + "/nested/path";
-  VolumeFormat v = MakeVolume();
+  SwordFsVolume v = MakeVolume();
   Status st = VolumeJson::Write(v, subdir);
   ASSERT_TRUE(st.ok()) << st.message();
   std::ifstream ifs(subdir + "/volume.json");
@@ -156,7 +156,7 @@ TEST(VolumeJsonTest, WriteCreatesParentDir) {
 }
 
 TEST(VolumeJsonTest, ReadNotFound) {
-  VolumeFormat v;
+  SwordFsVolume v;
   Status st = VolumeJson::Read("/tmp/nonexistent_dir_xyz123", &v);
   EXPECT_FALSE(st.ok());
   EXPECT_EQ(st.code(), Status::kNotFound);
@@ -165,8 +165,11 @@ TEST(VolumeJsonTest, ReadNotFound) {
 TEST(VolumeJsonTest, WriteNotADirectory) {
   std::string dir = MakeTempDir();
   std::string file_path = dir + "/regular_file";
-  { std::ofstream ofs(file_path); ofs << "hello"; }
-  VolumeFormat v = MakeVolume();
+  {
+    std::ofstream ofs(file_path);
+    ofs << "hello";
+  }
+  SwordFsVolume v = MakeVolume();
   Status st = VolumeJson::Write(v, file_path);
   EXPECT_FALSE(st.ok());
   EXPECT_EQ(st.code(), Status::kInvalidArgument);

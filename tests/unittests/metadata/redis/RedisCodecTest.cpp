@@ -83,12 +83,12 @@ TEST(MetadataTypesTest, EntryRoundTrip) {
 }
 
 TEST(MetadataTypesTest, ChunkRoundTrip) {
-  ChunkMeta input{.index = 3, .start_offset = 4096, .key = "42/3", .size = 1024};
+  SwordFsChunk input{.index = 3, .start_offset = 4096, .key = "42/3", .size = 1024};
   std::string encoded;
   ASSERT_TRUE(input.SerializeTo(&encoded).ok());
 
-  ChunkMeta output;
-  ASSERT_TRUE(ChunkMeta::ParseFrom(encoded, &output).ok());
+  SwordFsChunk output;
+  ASSERT_TRUE(SwordFsChunk::ParseFrom(encoded, &output).ok());
   EXPECT_EQ(output.index, input.index);
   EXPECT_EQ(output.start_offset, input.start_offset);
   EXPECT_EQ(output.key, input.key);

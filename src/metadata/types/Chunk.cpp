@@ -5,16 +5,15 @@
 
 #include <limits>
 
-#include "metadata/types/Serialization.hpp"
+#include "metadata/types/BufCodec.hpp"
 
 namespace swordfs::metadata {
 
-utils::Status ChunkMeta::SerializeTo(std::string *out) const {
-  using namespace types::serialization;
-  if (out == nullptr || key.size() > kMaxStringLength) {
+utils::Status SwordFsChunk::SerializeTo(std::string *out) const {
+  if (out == nullptr) {
     return utils::Status::InvalidArgument("Invalid chunk record");
   }
-  Writer writer;
+  BufEncoder writer;
   writer.Header(RecordType::kChunk);
   writer.U32(index);
   writer.U64(start_offset);
@@ -24,17 +23,16 @@ utils::Status ChunkMeta::SerializeTo(std::string *out) const {
   return utils::Status::OK();
 }
 
-utils::Status ChunkMeta::ParseFrom(std::string_view data, ChunkMeta *out) {
-  using namespace types::serialization;
+utils::Status SwordFsChunk::ParseFrom(std::string_view data, SwordFsChunk *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("Chunk output is null");
   }
-  Reader reader(data);
-  ChunkMeta chunk;
+  BufDecoder reader(data);
+  SwordFsChunk chunk;
   uint64_t size = 0;
   if (!reader.Header(RecordType::kChunk) || !reader.U32(&chunk.index) || !reader.U64(&chunk.start_offset) ||
       !reader.String(&chunk.key) || !reader.U64(&size) || size > std::numeric_limits<size_t>::max() || !reader.Done()) {
-    return Malformed("chunk");
+    return utils::Status::Malformed("Malformed chunk record");
   }
   chunk.size = static_cast<size_t>(size);
   *out = std::move(chunk);

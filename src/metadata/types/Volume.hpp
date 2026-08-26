@@ -12,7 +12,7 @@
 namespace swordfs::metadata {
 
 /// Volume-level metadata persisted by `swordfs format`.
-struct VolumeFormat {
+struct SwordFsVolume {
   std::string name;
   std::string meta_url;
   std::string storage;

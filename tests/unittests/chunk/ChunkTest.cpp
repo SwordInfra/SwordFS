@@ -25,7 +25,7 @@
 
 using swordfs::chunk::Chunk;
 using swordfs::metadata::ChunkIndex;
-using swordfs::metadata::ChunkMeta;
+using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
@@ -44,7 +44,7 @@ namespace {
 class MissingMetaEngine final : public IMetaEngine {
  public:
   Limits GetLimits() const override { return {}; }
-  Status FindChunk(InodeID, ChunkIndex, ChunkMeta *) override {
+  Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
     return Status::NotFound("no chunk");
   }
   // Everything else is irrelevant for these tests.
@@ -78,11 +78,11 @@ class MissingMetaEngine final : public IMetaEngine {
   Status Readlink(InodeID, std::string *) override { return Status::OK(); }
   Status Open(InodeID) override { return Status::OK(); }
   Status ReclaimInode(InodeID) override { return Status::OK(); }
-  Status ListChunks(InodeID, std::vector<ChunkMeta> *) override {
+  Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return Status::OK(); }
-  Status AddChunk(InodeID, const ChunkMeta &) override { return Status::OK(); }
+  Status AddChunk(InodeID, const SwordFsChunk &) override { return Status::OK(); }
   Status Truncate(InodeID, size_t) override { return Status::OK(); }
 };
 

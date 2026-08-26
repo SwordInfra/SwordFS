@@ -59,7 +59,7 @@ utils::Status RedisMetaImpl::Initialize() {
   }
 }
 
-utils::Status RedisMetaImpl::FormatVolume(const VolumeFormat &config) {
+utils::Status RedisMetaImpl::FormatVolume(const SwordFsVolume &config) {
   SwordFsInode root;
   root.ino = kRootInodeId;
   root.parent_ino = kRootInodeId;
@@ -92,7 +92,7 @@ utils::Status RedisMetaImpl::FormatVolume(const VolumeFormat &config) {
   });
 }
 
-utils::Status RedisMetaImpl::LoadVolume(VolumeFormat *config) {
+utils::Status RedisMetaImpl::LoadVolume(SwordFsVolume *config) {
   if (config == nullptr) {
     return utils::Status::InvalidArgument("Redis volume config output is null");
   }
@@ -176,16 +176,16 @@ Status RedisMetaImpl::Open(InodeID) {
 Status RedisMetaImpl::ReclaimInode(InodeID) {
   return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
-Status RedisMetaImpl::ListChunks(InodeID, std::vector<ChunkMeta> *) {
+Status RedisMetaImpl::ListChunks(InodeID, std::vector<SwordFsChunk> *) {
   return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::OpenDir(InodeID) {
   return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
-Status RedisMetaImpl::AddChunk(InodeID, const ChunkMeta &) {
+Status RedisMetaImpl::AddChunk(InodeID, const SwordFsChunk &) {
   return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
-Status RedisMetaImpl::FindChunk(InodeID, ChunkIndex, ChunkMeta *) {
+Status RedisMetaImpl::FindChunk(InodeID, ChunkIndex, SwordFsChunk *) {
   return Status::NotSupported("Redis metadata operations are not implemented yet");
 }
 Status RedisMetaImpl::Truncate(InodeID, size_t) {

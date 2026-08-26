@@ -54,9 +54,9 @@ class MemMetaImpl : public IMetaEngine {
   Status Readlink(InodeID ino, std::string *target) override;
 
   // Chunk metadata
-  Status AddChunk(InodeID ino, const ChunkMeta &cm) override;
-  Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) override;
-  Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out) override;
+  Status AddChunk(InodeID ino, const SwordFsChunk &chunk) override;
+  Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
+  Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) override;
   Status Truncate(InodeID ino, size_t size) override;
 
   // Volume operations

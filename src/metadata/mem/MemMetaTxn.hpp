@@ -151,8 +151,8 @@ class MemMetaTxn {
   // Chunk metadata
   // ────────────────────────────────────────────────────────────────
 
-  Status AddChunk(InodeID ino, const ChunkMeta &cm);
-  Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm);
+  Status AddChunk(InodeID ino, const SwordFsChunk &chunk);
+  Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
   Status TruncateChunks(InodeID ino, size_t new_size);
 
   // ────────────────────────────────────────────────────────────────
@@ -164,7 +164,7 @@ class MemMetaTxn {
   Status ReclaimInode(InodeID ino);
 
   // Snapshot every chunk registered for |ino|, ascending chunk index.
-  Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out);
+  Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out);
 
  private:
   friend class MemMetaStore;

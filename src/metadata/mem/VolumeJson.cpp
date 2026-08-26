@@ -19,7 +19,7 @@ namespace {
 constexpr const char *kConfigFileName = "/volume.json";
 }
 
-std::string VolumeJson::Serialize(const VolumeFormat &volume) {
+std::string VolumeJson::Serialize(const SwordFsVolume &volume) {
   folly::dynamic root = folly::dynamic::object;
   root["name"] = volume.name;
   root["meta"] = volume.meta_url;
@@ -30,7 +30,7 @@ std::string VolumeJson::Serialize(const VolumeFormat &volume) {
   return folly::toPrettyJson(root);
 }
 
-utils::Status VolumeJson::Parse(std::string_view json, VolumeFormat *volume) {
+utils::Status VolumeJson::Parse(std::string_view json, SwordFsVolume *volume) {
   if (volume == nullptr) {
     return utils::Status::InvalidArgument("volume output is null");
   }
@@ -45,7 +45,7 @@ utils::Status VolumeJson::Parse(std::string_view json, VolumeFormat *volume) {
     return utils::Status::InvalidArgument("volume.json root is not an object");
   }
 
-  VolumeFormat parsed;
+  SwordFsVolume parsed;
   if (!root.count("name") || !root["name"].isString()) {
     return utils::Status::InvalidArgument("missing or invalid 'name' in volume.json");
   }
@@ -77,7 +77,7 @@ utils::Status VolumeJson::Parse(std::string_view json, VolumeFormat *volume) {
   return utils::Status::OK();
 }
 
-utils::Status VolumeJson::Write(const VolumeFormat &volume, const std::string &path) {
+utils::Status VolumeJson::Write(const SwordFsVolume &volume, const std::string &path) {
   std::error_code ec;
   if (!folly::fs::exists(path, ec)) {
     if (ec) {
@@ -99,7 +99,7 @@ utils::Status VolumeJson::Write(const VolumeFormat &volume, const std::string &p
   return utils::Status::OK();
 }
 
-utils::Status VolumeJson::Read(const std::string &path, VolumeFormat *volume) {
+utils::Status VolumeJson::Read(const std::string &path, SwordFsVolume *volume) {
   const std::string file_path = path + kConfigFileName;
   std::string content;
   if (!folly::readFile(file_path.c_str(), content)) {

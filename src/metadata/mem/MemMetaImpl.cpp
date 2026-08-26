@@ -631,15 +631,15 @@ Status MemMetaImpl::Readlink(InodeID ino, std::string *target) {
 // Chunk metadata
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaImpl::AddChunk(InodeID ino, const ChunkMeta &cm) {
-  return store_.Transact([&](MemMetaTxn &txn) { return txn.AddChunk(ino, cm); });
+Status MemMetaImpl::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.AddChunk(ino, chunk); });
 }
 
-Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) {
-  return store_.Transact([&](MemMetaTxn &txn) { return txn.FindChunk(ino, idx, cm); });
+Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.FindChunk(ino, idx, chunk); });
 }
 
-Status MemMetaImpl::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
+Status MemMetaImpl::ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) {
   return store_.Transact([&](MemMetaTxn &txn) { return txn.ListChunks(ino, out); });
 }
 

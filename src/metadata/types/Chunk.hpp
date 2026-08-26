@@ -13,14 +13,14 @@
 namespace swordfs::metadata {
 
 /// Metadata for one flushed chunk.
-struct ChunkMeta {
+struct SwordFsChunk {
   ChunkIndex index;
   uint64_t start_offset;
   std::string key;
   size_t size;
 
   utils::Status SerializeTo(std::string *out) const;
-  static utils::Status ParseFrom(std::string_view data, ChunkMeta *out);
+  static utils::Status ParseFrom(std::string_view data, SwordFsChunk *out);
 };
 
 }  // namespace swordfs::metadata

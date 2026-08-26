@@ -521,17 +521,17 @@ Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a,
   return Status::OK();
 }
 
-Status MemMetaTxn::AddChunk(InodeID ino, const ChunkMeta &cm) {
+Status MemMetaTxn::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
   auto &chunk_map = store_->chunks_[ino];
-  if (chunk_map.count(cm.index) > 0) {
+  if (chunk_map.count(chunk.index) > 0) {
     return Status::AlreadyExists(
-        "chunk already exists at index " + std::to_string(cm.index));
+        "chunk already exists at index " + std::to_string(chunk.index));
   }
-  chunk_map[cm.index] = cm;
+  chunk_map[chunk.index] = chunk;
   return Status::OK();
 }
 
-Status MemMetaTxn::FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) {
+Status MemMetaTxn::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
   auto ino_it = store_->chunks_.find(ino);
   if (ino_it == store_->chunks_.end()) {
     return Status::NotFound("no chunks for inode " + std::to_string(ino));
@@ -544,8 +544,8 @@ Status MemMetaTxn::FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) {
   if (c.index != idx) {
     return Status::NotFound("chunk index mismatch");
   }
-  if (cm) {
-    *cm = c;
+  if (chunk) {
+    *chunk = c;
   }
   return Status::OK();
 }
@@ -562,16 +562,16 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, size_t new_size) {
 
   auto &cmap = ino_it->second;
   for (auto cit = cmap.begin(); cit != cmap.end();) {
-    const auto &cm = cit->second;
-    if (cm.start_offset >= new_size) {
+    auto &chunk = cit->second;
+    if (chunk.start_offset >= new_size) {
       // Chunk lies entirely beyond the new size — drop it.
       cit = cmap.erase(cit);
       continue;
     }
     // Chunk straddles the new size — clamp its size.
-    uint64_t new_chunk_size = new_size - cm.start_offset;
-    if (cm.size > new_chunk_size) {
-      cit->second.size = static_cast<size_t>(new_chunk_size);
+    uint64_t new_chunk_size = new_size - chunk.start_offset;
+    if (chunk.size > new_chunk_size) {
+      chunk.size = static_cast<size_t>(new_chunk_size);
     }
     ++cit;
   }
@@ -589,7 +589,7 @@ Status MemMetaTxn::ReclaimInode(InodeID ino) {
   return Status::OK();
 }
 
-Status MemMetaTxn::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
+Status MemMetaTxn::ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) {
   if (!out) {
     return Status::InvalidArgument("null out");
   }
@@ -599,14 +599,14 @@ Status MemMetaTxn::ListChunks(InodeID ino, std::vector<ChunkMeta> *out) {
     return Status::OK();
   }
   out->reserve(it->second.size());
-  for (const auto &[idx, cm] : it->second) {
-    out->push_back(cm);
+  for (const auto &[idx, chunk] : it->second) {
+    out->push_back(chunk);
   }
   // F14FastMap iteration order is unspecified; the contract for
   // ListChunks is ascending ChunkIndex so a single audit log of
   // deletes reads top-to-bottom. Sort by index to honour it.
   std::sort(out->begin(), out->end(),
-            [](const ChunkMeta &a, const ChunkMeta &b) {
+            [](const SwordFsChunk &a, const SwordFsChunk &b) {
               return a.index < b.index;
             });
   return Status::OK();
