@@ -59,7 +59,7 @@ utils::Status RedisMetaImpl::Initialize() {
   }
 }
 
-utils::Status RedisMetaImpl::FormatVolume(const volume::VolumeConfig &config) {
+utils::Status RedisMetaImpl::FormatVolume(const VolumeFormat &config) {
   SwordFsInode root;
   root.ino = kRootInodeId;
   root.parent_ino = kRootInodeId;
@@ -92,7 +92,7 @@ utils::Status RedisMetaImpl::FormatVolume(const volume::VolumeConfig &config) {
   });
 }
 
-utils::Status RedisMetaImpl::LoadVolume(volume::VolumeConfig *config) {
+utils::Status RedisMetaImpl::LoadVolume(VolumeFormat *config) {
   if (config == nullptr) {
     return utils::Status::InvalidArgument("Redis volume config output is null");
   }

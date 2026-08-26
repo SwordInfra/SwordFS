@@ -26,7 +26,7 @@ int RunFormat() {
     return 1;
   }
 
-  SWORDFS_LOG_INFO << "Mount with: " << vol.config().MountHint();
+  SWORDFS_LOG_INFO << "Mount with: " << vol.MountHint();
   return 0;
 }
 

@@ -3,7 +3,7 @@
 
 // VolumeImpl — volume lifecycle logic (format, mount).
 //
-// Owns a VolumeConfig, the metadata engine, and the data engine.
+// Owns a VolumeFormat, the metadata engine, and the data engine.
 // VfsImpl binds to a VolumeImpl to access all volume-level resources.
 
 #pragma once
@@ -12,8 +12,8 @@
 #include <optional>
 #include <string_view>
 
+#include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
-#include "volume/VolumeConfig.hpp"
 
 namespace swordfs {
 
@@ -67,7 +67,10 @@ class VolumeImpl {
   /// Aws::ShutdownAPI() when AWS SDK resources are still alive.
   void Shutdown();
 
-  const VolumeConfig &config() const { return config_; }
+  const swordfs::metadata::VolumeFormat &config() const { return config_; }
+
+  /// Returns a `swordfs mount` command-line hint for this volume.
+  std::string MountHint() const;
 
   /// Chunk size in bytes — normally immutable after format, but see
   /// `set_chunk_size_for_test` for the unit-test escape hatch.
@@ -98,7 +101,7 @@ class VolumeImpl {
   void set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine> data);
 
  private:
-  VolumeConfig config_;
+  swordfs::metadata::VolumeFormat config_;
   // Test-only override of config_.chunk_size; std::nullopt means
   // "use config_.chunk_size". Production code never sets this.
   std::optional<size_t> chunk_size_override_;
