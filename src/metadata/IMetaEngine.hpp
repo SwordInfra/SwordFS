@@ -18,6 +18,7 @@
 #include "metadata/Types.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
+#include "volume/VolumeConfig.hpp"
 
 using Status = swordfs::utils::Status;
 using SwordFsContext = swordfs::utils::SwordFsContext;
@@ -49,12 +50,12 @@ class IMetaEngine {
   /// Create a new metadata volume. |volume_config| contains the persistent
   /// volume configuration serialized by VolumeImpl. Backends without
   /// persistent metadata may treat this as a no-op.
-  virtual Status FormatVolume(std::string_view volume_config) { return Status::OK(); }
+  virtual Status FormatVolume(const volume::VolumeConfig &config) { return Status::OK(); }
 
   /// Load an existing metadata volume and return its persistent volume
   /// configuration in |volume_config|. Backends without persistent metadata
   /// may treat this as a no-op.
-  virtual Status LoadVolume(std::string *volume_config) { return Status::OK(); }
+  virtual Status LoadVolume(volume::VolumeConfig *config) { return Status::OK(); }
 
   /// Return filesystem limits provided by this metadata engine.
   virtual Limits GetLimits() const = 0;

@@ -25,8 +25,8 @@ public:
   RedisMetaImpl &operator=(const RedisMetaImpl &) = delete;
 
   utils::Status Initialize() override;
-  utils::Status FormatVolume(std::string_view volume_config) override;
-  utils::Status LoadVolume(std::string *volume_config) override;
+  utils::Status FormatVolume(const volume::VolumeConfig &config) override;
+  utils::Status LoadVolume(volume::VolumeConfig *config) override;
   Limits GetLimits() const override;
 
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;

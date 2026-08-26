@@ -99,7 +99,7 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
   if (!status.ok()) {
     return status;
   }
-  status = meta_engine_->FormatVolume(config_.SerializeTo());
+  status = meta_engine_->FormatVolume(config_);
   if (!status.ok()) {
     return status;
   }
@@ -125,12 +125,7 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
       return status;
     }
   } else {
-    std::string volume_config;
-    status = meta_engine_->LoadVolume(&volume_config);
-    if (!status.ok()) {
-      return status;
-    }
-    status = config_.ParseFrom(volume_config);
+    status = meta_engine_->LoadVolume(&config_);
     if (!status.ok()) {
       return status;
     }

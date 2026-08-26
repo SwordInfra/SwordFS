@@ -5,10 +5,10 @@
 
 #include <sw/redis++/redis++.h>
 
-#include <optional>
 #include <string>
 #include <string_view>
-#include "metadata/MetadataTxn.hpp"
+
+#include "utils/Status.hpp"
 
 namespace swordfs::metadata {
 
@@ -19,15 +19,15 @@ class RedisMetaClient;
 // the Redis client's connection pool. Redis WATCH/MULTI/EXEC details are kept
 // inside this implementation; callers only see key/value operations.
 // The object is only valid for the lifetime of RedisMetaClient::Transact().
-class RedisMetaTxn final : public MetadataTxn {
-public:
+class RedisMetaTxn {
+ public:
   // WATCH is issued before each read so Redis can detect changes between the
   // read and EXEC. Redis WATCH/MULTI details remain private to this class.
-  utils::Status Get(std::string_view key, std::optional<std::string> *value) override;
-  utils::Status Put(std::string_view key, std::string_view value) override;
-  utils::Status Delete(std::string_view key) override;
+  utils::Status Get(std::string_view key, std::string *value);
+  utils::Status Set(std::string_view key, std::string_view value);
+  utils::Status Del(std::string_view key);
 
-private:
+ private:
   friend class RedisMetaClient;
   explicit RedisMetaTxn(sw::redis::Redis &redis);
 

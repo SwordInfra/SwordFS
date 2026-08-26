@@ -59,7 +59,7 @@ utils::Status RedisMetaImpl::Initialize() {
   }
 }
 
-utils::Status RedisMetaImpl::FormatVolume(std::string_view volume_config) {
+utils::Status RedisMetaImpl::FormatVolume(const volume::VolumeConfig &config) {
   SwordFsInode root;
   root.ino = kRootInodeId;
   root.parent_ino = kRootInodeId;
@@ -71,59 +71,56 @@ utils::Status RedisMetaImpl::FormatVolume(std::string_view volume_config) {
     return status;
   }
 
-  return client_->Transact([&](MetadataTxn &txn) {
-    std::optional<std::string> existing;
+  return client_->Transact([&](RedisMetaTxn &txn) {
+    std::string existing;
     auto status = txn.Get(key_.Format(), &existing);
-    if (!status.ok()) {
-      return status;
-    }
-    if (existing.has_value()) {
+    if (status.ok()) {
       return utils::Status::AlreadyExists("Redis metadata volume is already formatted");
     }
-    status = txn.Put(key_.Format(), volume_config);
+    if (!status.IsNotFound()) {
+      return status;
+    }
+    status = txn.Set(key_.Format(), config.SerializeTo());
     if (!status.ok()) {
       return status;
     }
-    status = txn.Put(key_.NextIno(), std::to_string(kRootInodeId + 1));
+    status = txn.Set(key_.NextIno(), std::to_string(kRootInodeId + 1));
     if (!status.ok()) {
       return status;
     }
-    return txn.Put(key_.Inode(kRootInodeId), root_value);
+    return txn.Set(key_.Inode(kRootInodeId), root_value);
   });
 }
 
-utils::Status RedisMetaImpl::LoadVolume(std::string *volume_config) {
-  if (volume_config == nullptr) {
+utils::Status RedisMetaImpl::LoadVolume(volume::VolumeConfig *config) {
+  if (config == nullptr) {
     return utils::Status::InvalidArgument("Redis volume config output is null");
   }
 
-  std::optional<std::string> value;
+  std::string value;
   auto status = client_->Get(key_.Format(), &value);
   if (!status.ok()) {
     return status;
   }
-  if (!value.has_value()) {
-    return utils::Status::NotFound("Redis metadata volume is not formatted");
-  }
 
-  std::optional<std::string> root_value;
+  std::string root_value;
   status = client_->Get(key_.Inode(kRootInodeId), &root_value);
   if (!status.ok()) {
     return status;
   }
-  if (!root_value.has_value()) {
-    return utils::Status::InvalidArgument("Redis metadata root inode is missing");
-  }
 
   SwordFsInode root;
-  status = SwordFsInode::ParseFrom(*root_value, &root);
+  status = SwordFsInode::ParseFrom(root_value, &root);
   if (!status.ok()) {
     return status;
   }
   if (root.ino != kRootInodeId || !root.IsDir()) {
     return utils::Status::InvalidArgument("Redis metadata root inode is invalid");
   }
-  *volume_config = std::move(*value);
+  status = config->ParseFrom(value);
+  if (!status.ok()) {
+    return status;
+  }
   return utils::Status::OK();
 }
 

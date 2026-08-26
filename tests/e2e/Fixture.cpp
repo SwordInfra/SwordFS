@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <climits>
 #include <csignal>
@@ -491,10 +492,15 @@ void Fixture::InitPaths() {
   // Use the fully-qualified gtest name (suite_test) as the unique
   // namespace so that parallel / repeated runs never collide.
   auto *test_info = ::testing::UnitTest::GetInstance()->current_test_info();
-  std::string test_name = std::string(test_info->test_suite_name()) + "_" + test_info->name();
+  const std::string test_name = std::string(test_info->test_suite_name()) + "_" + test_info->name();
 
+  // Volume names are intentionally restricted to ASCII letters and digits.
+  // Keep the human-readable test name for paths, but derive a valid unique
+  // volume name from it by removing separators and appending a stable hash.
   volume_name_ = test_name;
-  work_dir_ = "/tmp/swordfs_e2e_" + volume_name_;
+  volume_name_.erase(std::remove(volume_name_.begin(), volume_name_.end(), '_'), volume_name_.end());
+  volume_name_ += std::to_string(folly::hash::SpookyHashV2::Hash64(test_name.data(), test_name.size(), 0));
+  work_dir_ = "/tmp/swordfs_e2e_" + test_name;
   mountpoint_ = work_dir_ + "/mnt";
   vol_config_dir_ = work_dir_ + "/config";
 
