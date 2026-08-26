@@ -31,8 +31,8 @@ find_package(folly REQUIRED)
 find_library(FUSE3_LIBRARY fuse3 REQUIRED)
 find_path(FUSE3_INCLUDE_DIR fuse.h PATH_SUFFIXES fuse3)
 
-# Redis metadata backend.  Prefer a system redis-plus-plus installation, but
-# fetch a pinned release for reproducible developer and CI builds.
+# Redis metadata backend. Prefer an installed redis-plus-plus package, but
+# fetch a pinned release for developer environments without it.
 find_package(redis++ CONFIG QUIET)
 if(TARGET redis++::redis++)
   set(REDIS_PLUS_PLUS_TARGET redis++::redis++)

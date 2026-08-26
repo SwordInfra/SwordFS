@@ -5,16 +5,22 @@
 
 #include <sw/redis++/redis++.h>
 
+#include <ctime>
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
 #include "metadata/MetaEngineRegistry.hpp"
+#include "metadata/Utils.hpp"
+#include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
 
 namespace swordfs::metadata {
 namespace {
-utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::unique_ptr<IMetaEngine> *out) {
+using namespace redis;
+utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view volume_name,
+                                    std::unique_ptr<IMetaEngine> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("metadata engine output is null");
   }
@@ -26,11 +32,7 @@ utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::unique_ptr<I
   }
 
   try {
-    auto redis = std::make_unique<RedisMetaImpl>(config);
-    status = redis->Initialize();
-    if (!status.ok()) {
-      return status;
-    }
+    auto redis = std::make_unique<RedisMetaImpl>(config, volume_name);
     *out = std::move(redis);
     return utils::Status::OK();
   } catch (const std::invalid_argument &error) {
@@ -43,7 +45,8 @@ utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::unique_ptr<I
 RegisterMetaEngine kRedisMetaEngine{"redis", CreateRedisMetaEngine};
 }  // namespace
 
-RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config) : client_(std::make_unique<RedisMetaClient>(config)) {
+RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name)
+    : client_(std::make_unique<RedisMetaClient>(config)), key_(config.db, volume_name) {
 }
 
 RedisMetaImpl::~RedisMetaImpl() = default;
@@ -54,6 +57,74 @@ utils::Status RedisMetaImpl::Initialize() {
   } catch (const std::exception &error) {
     return utils::Status::IOError("Redis metadata initialization failed: " + std::string(error.what()));
   }
+}
+
+utils::Status RedisMetaImpl::FormatVolume(std::string_view volume_config) {
+  SwordFsInode root;
+  root.ino = kRootInodeId;
+  root.parent_ino = kRootInodeId;
+  root.attr = MakeStat(S_IFDIR | 0777, ::time(nullptr));
+  root.attr.st_ino = kRootInodeId;
+  std::string root_value;
+  auto status = root.SerializeTo(&root_value);
+  if (!status.ok()) {
+    return status;
+  }
+
+  return client_->Transact([&](MetadataTxn &txn) {
+    std::optional<std::string> existing;
+    auto status = txn.Get(key_.Format(), &existing);
+    if (!status.ok()) {
+      return status;
+    }
+    if (existing.has_value()) {
+      return utils::Status::AlreadyExists("Redis metadata volume is already formatted");
+    }
+    status = txn.Put(key_.Format(), volume_config);
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.Put(key_.NextIno(), std::to_string(kRootInodeId + 1));
+    if (!status.ok()) {
+      return status;
+    }
+    return txn.Put(key_.Inode(kRootInodeId), root_value);
+  });
+}
+
+utils::Status RedisMetaImpl::LoadVolume(std::string *volume_config) {
+  if (volume_config == nullptr) {
+    return utils::Status::InvalidArgument("Redis volume config output is null");
+  }
+
+  std::optional<std::string> value;
+  auto status = client_->Get(key_.Format(), &value);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!value.has_value()) {
+    return utils::Status::NotFound("Redis metadata volume is not formatted");
+  }
+
+  std::optional<std::string> root_value;
+  status = client_->Get(key_.Inode(kRootInodeId), &root_value);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!root_value.has_value()) {
+    return utils::Status::InvalidArgument("Redis metadata root inode is missing");
+  }
+
+  SwordFsInode root;
+  status = SwordFsInode::ParseFrom(*root_value, &root);
+  if (!status.ok()) {
+    return status;
+  }
+  if (root.ino != kRootInodeId || !root.IsDir()) {
+    return utils::Status::InvalidArgument("Redis metadata root inode is invalid");
+  }
+  *volume_config = std::move(*value);
+  return utils::Status::OK();
 }
 
 Limits RedisMetaImpl::GetLimits() const {

@@ -8,25 +8,24 @@
 #include <optional>
 #include <string>
 #include <string_view>
-
-#include "utils/Status.hpp"
+#include "metadata/MetadataTxn.hpp"
 
 namespace swordfs::metadata {
 
 class RedisMetaClient;
 
-// One optimistic Redis transaction attempt. All WATCH, reads, MULTI, queued
-// writes and EXEC operations use the same connection checked out from the
-// Redis client's connection pool.
-// Call Watch() and all reads before the first Set(): the first queued write
-// opens MULTI, after which Redis no longer returns ordinary read replies and
-// rejects WATCH. The object is only valid for the lifetime of
-// RedisMetaClient::Transact().
-class RedisMetaTxn {
+// One optimistic metadata transaction attempt backed by Redis. All reads,
+// queued writes and EXEC operations use the same connection checked out from
+// the Redis client's connection pool. Redis WATCH/MULTI/EXEC details are kept
+// inside this implementation; callers only see key/value operations.
+// The object is only valid for the lifetime of RedisMetaClient::Transact().
+class RedisMetaTxn final : public MetadataTxn {
 public:
-  utils::Status Watch(std::string_view key);
-  utils::Status Get(std::string_view key, std::optional<std::string> *value);
-  utils::Status Set(std::string_view key, std::string_view value);
+  // WATCH is issued before each read so Redis can detect changes between the
+  // read and EXEC. Redis WATCH/MULTI details remain private to this class.
+  utils::Status Get(std::string_view key, std::optional<std::string> *value) override;
+  utils::Status Put(std::string_view key, std::string_view value) override;
+  utils::Status Delete(std::string_view key) override;
 
 private:
   friend class RedisMetaClient;

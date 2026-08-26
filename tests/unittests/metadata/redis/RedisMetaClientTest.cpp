@@ -86,25 +86,20 @@ TEST(RedisMetaClientTest, StandalonePingAndWatchReadMultiExec) {
   cleanup.del(key);
 
   status = RunInFiber([&] {
-    return store.Transact([&](RedisMetaTxn &transaction) {
-    auto txn_status = transaction.Watch(key);
-    if (!txn_status.ok()) {
-      return txn_status;
-    }
-
+    return store.Transact([&](MetadataTxn &transaction) {
     std::optional<std::string> value;
-    txn_status = transaction.Get(key, &value);
+    auto txn_status = transaction.Get(key, &value);
     if (!txn_status.ok()) {
       return txn_status;
     }
     EXPECT_FALSE(value.has_value());
-    return transaction.Set(key, "ok");
+    return transaction.Put(key, "ok");
     });
   });
   ASSERT_TRUE(status.ok()) << status.message();
 
   status = RunInFiber([&] {
-    return store.Transact([&](RedisMetaTxn &transaction) {
+    return store.Transact([&](MetadataTxn &transaction) {
     std::optional<std::string> value;
     auto txn_status = transaction.Get(key, &value);
     if (!txn_status.ok()) {
@@ -132,15 +127,10 @@ TEST(RedisMetaClientTest, RetriesWatchConflict) {
 
   RedisMetaClient store(config);
   int attempts = 0;
-  const auto status = RunInFiber([&] { return store.Transact([&](RedisMetaTxn &transaction) {
+  const auto status = RunInFiber([&] { return store.Transact([&](MetadataTxn &transaction) {
     ++attempts;
-    auto txn_status = transaction.Watch(key);
-    if (!txn_status.ok()) {
-      return txn_status;
-    }
-
     std::optional<std::string> value;
-    txn_status = transaction.Get(key, &value);
+    auto txn_status = transaction.Get(key, &value);
     if (!txn_status.ok()) {
       return txn_status;
     }
@@ -148,7 +138,7 @@ TEST(RedisMetaClientTest, RetriesWatchConflict) {
     if (attempts == 1) {
       other.set(key, "raced");
     }
-    return transaction.Set(key, "committed");
+    return transaction.Put(key, "committed");
   }); });
 
   ASSERT_TRUE(status.ok()) << status.message();
@@ -171,15 +161,10 @@ TEST(RedisMetaClientTest, RetriesReadOnlyWatchConflict) {
 
   RedisMetaClient store(config);
   int attempts = 0;
-  const auto status = RunInFiber([&] { return store.Transact([&](RedisMetaTxn &transaction) {
+  const auto status = RunInFiber([&] { return store.Transact([&](MetadataTxn &transaction) {
     ++attempts;
-    auto txn_status = transaction.Watch(key);
-    if (!txn_status.ok()) {
-      return txn_status;
-    }
-
     std::optional<std::string> value;
-    txn_status = transaction.Get(key, &value);
+    auto txn_status = transaction.Get(key, &value);
     if (!txn_status.ok()) {
       return txn_status;
     }
@@ -204,12 +189,12 @@ TEST(RedisMetaClientTest, RetriesExplicitPreCommitFailure) {
   RedisMetaClient store(config);
   int attempts = 0;
   const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisMetaTxn &transaction) {
+    return store.Transact([&](MetadataTxn &transaction) {
       ++attempts;
       if (attempts == 1) {
         return utils::Status::Busy("retry");
       }
-      return transaction.Set("swordfs:phase0:retry", "ok");
+      return transaction.Put("swordfs:phase0:retry", "ok");
     });
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -232,7 +217,7 @@ TEST(RedisMetaClientTest, RetriesUntilLimitIsExceeded) {
   RedisMetaClient store(config);
   int attempts = 0;
   RunInFiber([&] {
-    const auto status = store.Transact([&](RedisMetaTxn &) {
+    const auto status = store.Transact([&](MetadataTxn &) {
       ++attempts;
       return utils::Status::Busy("retry");
     });
@@ -249,7 +234,7 @@ TEST(RedisMetaClientTest, ReadOnlyTransactionCommitsAsNoOp) {
 
   RedisMetaClient store(config);
   const auto status = RunInFiber([&] {
-    return store.Transact([](RedisMetaTxn &transaction) {
+    return store.Transact([](MetadataTxn &transaction) {
       std::optional<std::string> value;
       return transaction.Get("swordfs:phase0:read-only", &value);
     });
@@ -265,7 +250,7 @@ TEST(RedisMetaClientTest, PreservesCallbackErrorWithoutQueuedWrite) {
 
   RedisMetaClient store(config);
   const auto status = RunInFiber([&] {
-    return store.Transact([](RedisMetaTxn &transaction) {
+    return store.Transact([](MetadataTxn &transaction) {
       std::optional<std::string> value;
       const auto get_status = transaction.Get("swordfs:phase0:missing", &value);
       if (!get_status.ok()) {

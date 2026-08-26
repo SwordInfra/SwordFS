@@ -19,14 +19,14 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <thread>
 
-#include <memory>
-
 #include "metadata/IMetaEngine.hpp"
-#include "metadata/MetaEngineFactory.hpp"
+#include "metadata/MetaEngineRegistry.hpp"
+#include "metadata/Utils.hpp"
 
 namespace swordfs {
 namespace e2e {
@@ -455,7 +455,11 @@ metadata::Limits Fixture::GetLimits() const {
   const auto url = metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local";
 
   std::unique_ptr<metadata::IMetaEngine> engine;
-  auto status = metadata::CreateMetaEngine(url, &engine);
+  std::string scheme;
+  auto status = metadata::ParseUrlScheme(url, &scheme);
+  if (status.ok()) {
+    status = metadata::MetaEngineRegistry::Instance().Create(scheme, url, volume_name_, &engine);
+  }
   if (!status.ok()) {
     ADD_FAILURE() << "Failed to create metadata engine: " << status.message();
     return {};

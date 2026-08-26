@@ -71,6 +71,7 @@ static void RunInTestFiber(Fn &&fn) {
 
 class MockDataEngine : public IDataEngine {
  public:
+  Status Initialize() override { return Status::OK(); }
   DataEngineLimits Limits() const override {
     DataEngineLimits lim;
     lim.supports_multipart = false;

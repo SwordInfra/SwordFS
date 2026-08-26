@@ -5,13 +5,14 @@
 #   ./scripts/install-deps.sh [--force] [--skip-heavy] [--only-heavy]
 #
 #   --force        Rebuild and reinstall even if already present.
-#   --skip-heavy   Only install system packages; skip folly + AWS SDK.
-#   --only-heavy   Only build folly + AWS SDK; skip system packages.
+#   --skip-heavy   Only install system packages; skip heavy dependencies.
+#   --only-heavy   Only build heavy dependencies; skip system packages.
 #
 # This script:
 #   1. Installs system packages (libfuse3, folly build deps)
 #   2. Builds and installs folly from GitHub release tarball
 #   3. Installs AWS SDK for S3 object storage
+#   4. Builds and installs hiredis and redis-plus-plus
 #
 # Each step is skipped if the dependency is already present and
 # passes verification (cmake configs AND library binaries exist).
@@ -123,6 +124,26 @@ cmake_minimum_required(VERSION 3.16)
 project(VerifyFolly CXX)
 find_package(folly REQUIRED)
 message(STATUS "folly OK")
+CMEOF
+  cd "$TMPDIR"
+  if cmake -DCMAKE_PREFIX_PATH="$DEPS_PREFIX" . > /dev/null 2>&1; then
+    rm -rf "$TMPDIR"
+    return 0
+  fi
+  rm -rf "$TMPDIR"
+  return 1
+}
+
+verify_redis_plus_plus() {
+  TMPDIR=$(mktemp -d)
+  cat > "$TMPDIR/CMakeLists.txt" << 'CMEOF'
+cmake_minimum_required(VERSION 3.16)
+project(VerifyRedisPlusPlus CXX)
+find_package(redis++ CONFIG REQUIRED)
+if(NOT TARGET redis++::redis++_static)
+  message(FATAL_ERROR "redis++::redis++_static target not found")
+endif()
+message(STATUS "redis-plus-plus OK")
 CMEOF
   cd "$TMPDIR"
   if cmake -DCMAKE_PREFIX_PATH="$DEPS_PREFIX" . > /dev/null 2>&1; then
@@ -301,6 +322,85 @@ if [ "$AWS_SDK_INSTALLED" = false ]; then
 fi
 
 fi  # --skip-heavy
+
+# ────────────────────────────────────────────────────────────────
+# hiredis + redis-plus-plus
+# ────────────────────────────────────────────────────────────────
+
+echo "==> Checking redis-plus-plus..."
+
+REDIS_PLUS_PLUS_INSTALLED=false
+if [ "$FORCE" = false ]; then
+  if [ -f "$DEPS_PREFIX/share/cmake/redis++/redis++-config.cmake" ] && \
+     { [ -f "$DEPS_PREFIX/lib/libredis++_static.a" ] || [ -f "$DEPS_PREFIX/lib/libredis++.a" ]; }; then
+    echo "==> redis-plus-plus cmake config and library found, verifying..."
+    if verify_redis_plus_plus; then
+      echo "==> redis-plus-plus verified OK, skipping."
+      REDIS_PLUS_PLUS_INSTALLED=true
+    else
+      echo "==> redis-plus-plus verification FAILED, will reinstall."
+    fi
+  fi
+fi
+
+if [ "$REDIS_PLUS_PLUS_INSTALLED" = false ]; then
+  HIREDIS_SRC="$PROJECT_DIR/build/hiredis-src"
+  REDIS_PLUS_PLUS_SRC="$PROJECT_DIR/build/redis-plus-plus-src"
+
+  if [ -f "$DEPS_PREFIX/lib/cmake/hiredis/hiredis-config.cmake" ]; then
+    echo "==> hiredis already installed, skipping."
+  else
+    if [ -f "$HIREDIS_SRC/CMakeLists.txt" ]; then
+      echo "==> hiredis already cloned, skipping."
+    else
+      echo "==> Cloning hiredis ${HIREDIS_VER}..."
+      git clone --depth 1 --branch "v${HIREDIS_VER}" \
+        https://github.com/redis/hiredis.git "$HIREDIS_SRC"
+    fi
+    if [ -f "$HIREDIS_SRC/build/CMakeCache.txt" ]; then
+      echo "==> hiredis already configured, skipping."
+    else
+      echo "==> Configuring hiredis..."
+      mkdir -p "$HIREDIS_SRC/build"
+      cd "$HIREDIS_SRC/build"
+      cmake .. \
+        -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
+        -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
+        -DBUILD_SHARED_LIBS="$REDIS_PLUS_PLUS_BUILD_SHARED_LIBS" \
+        -DDISABLE_TESTS=ON
+    fi
+    echo "==> Building and installing hiredis..."
+    cd "$HIREDIS_SRC/build"
+    cmake --build . -j"$(nproc)"
+    cmake --install .
+  fi
+
+  if [ -f "$REDIS_PLUS_PLUS_SRC/CMakeLists.txt" ]; then
+    echo "==> redis-plus-plus already cloned, skipping."
+  else
+    echo "==> Cloning redis-plus-plus ${REDIS_PLUS_PLUS_VER}..."
+    git clone --depth 1 --branch "${REDIS_PLUS_PLUS_VER}" \
+      https://github.com/sewenew/redis-plus-plus.git "$REDIS_PLUS_PLUS_SRC"
+  fi
+  if [ -f "$REDIS_PLUS_PLUS_SRC/build/CMakeCache.txt" ]; then
+    echo "==> redis-plus-plus already configured, skipping."
+  else
+    echo "==> Configuring redis-plus-plus..."
+    mkdir -p "$REDIS_PLUS_PLUS_SRC/build"
+    cd "$REDIS_PLUS_PLUS_SRC/build"
+    cmake .. \
+      -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
+      -DCMAKE_INSTALL_PREFIX="$DEPS_PREFIX" \
+      -DCMAKE_PREFIX_PATH="$DEPS_PREFIX" \
+      -DREDIS_PLUS_PLUS_BUILD_STATIC=ON \
+      -DREDIS_PLUS_PLUS_BUILD_SHARED=OFF \
+      -DREDIS_PLUS_PLUS_BUILD_TEST=OFF
+  fi
+  echo "==> Building and installing redis-plus-plus..."
+  cd "$REDIS_PLUS_PLUS_SRC/build"
+  cmake --build . -j"$(nproc)"
+  cmake --install .
+fi
 
 echo "==> Done. Dependencies installed under: $DEPS_PREFIX"
 echo "==> You can now build SwordFS with: cmake --preset default"

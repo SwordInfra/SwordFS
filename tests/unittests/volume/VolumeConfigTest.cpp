@@ -77,6 +77,40 @@ TEST(VolumeConfigTest, ToJsonAndFromJsonRoundTripRegionAuto) {
 }
 
 // ────────────────────────────────────────────────────────────────
+// SerializeTo / ParseFrom round-trip
+// ────────────────────────────────────────────────────────────────
+
+TEST(VolumeConfigTest, SerializeToAndParseFromRoundTrip) {
+  VolumeConfig original;
+  original.name = "binary-vol";
+  original.meta_url = "redis://localhost:6379/3";
+  original.storage = "s3";
+  original.bucket = "s3://host/bucket/prefix";
+  original.region = "us-east-1";
+  original.chunk_size = 128ULL * 1024 * 1024;
+
+  std::string encoded = original.SerializeTo();
+  ASSERT_FALSE(encoded.empty());
+
+  VolumeConfig parsed;
+  Status st = parsed.ParseFrom(encoded);
+  ASSERT_TRUE(st.ok()) << st.message();
+  EXPECT_EQ(parsed.name, original.name);
+  EXPECT_EQ(parsed.meta_url, original.meta_url);
+  EXPECT_EQ(parsed.storage, original.storage);
+  EXPECT_EQ(parsed.bucket, original.bucket);
+  EXPECT_EQ(parsed.region, original.region);
+  EXPECT_EQ(parsed.chunk_size, original.chunk_size);
+}
+
+TEST(VolumeConfigTest, ParseFromRejectsMalformedData) {
+  VolumeConfig v;
+  Status st = v.ParseFrom("not volume metadata");
+  EXPECT_FALSE(st.ok());
+  EXPECT_EQ(st.code(), Status::kMalformed);
+}
+
+// ────────────────────────────────────────────────────────────────
 // FromJson — error cases
 // ────────────────────────────────────────────────────────────────
 

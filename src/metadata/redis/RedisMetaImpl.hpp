@@ -6,24 +6,27 @@
 #include <memory>
 
 #include "metadata/IMetaEngine.hpp"
+#include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 
 namespace swordfs::metadata {
 
 class RedisMetaClient;
 
-// Phase 0 Redis metadata engine. It establishes the Redis connection and
-// transaction infrastructure; metadata schema and IMetaEngine operations are
-// added by subsequent issues.
+// Redis metadata engine. Connection and transaction infrastructure is shared
+// with the persistent schema/format layer; metadata operations are added by
+// subsequent issues.
 class RedisMetaImpl : public IMetaEngine {
 public:
-  explicit RedisMetaImpl(const RedisMetaConfig &config);
+  RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name);
   ~RedisMetaImpl() override;
 
   RedisMetaImpl(const RedisMetaImpl &) = delete;
   RedisMetaImpl &operator=(const RedisMetaImpl &) = delete;
 
-  utils::Status Initialize();
+  utils::Status Initialize() override;
+  utils::Status FormatVolume(std::string_view volume_config) override;
+  utils::Status LoadVolume(std::string *volume_config) override;
   Limits GetLimits() const override;
 
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
@@ -51,6 +54,7 @@ public:
 
 private:
   std::unique_ptr<RedisMetaClient> client_;
+  redis::RedisKey key_;
 };
 
 }  // namespace swordfs::metadata

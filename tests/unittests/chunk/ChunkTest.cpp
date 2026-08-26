@@ -90,6 +90,7 @@ class MissingMetaEngine final : public IMetaEngine {
 // calls Put on Flush, and these tests don't reach that point.
 class NullDataEngine final : public IDataEngine {
  public:
+  Status Initialize() override { return Status::OK(); }
   DataEngineLimits Limits() const override { return {}; }
   bool Head(std::string_view, size_t *) override { return false; }
   Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
