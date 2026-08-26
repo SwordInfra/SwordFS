@@ -90,7 +90,7 @@ utils::Status RedisMetaClient::Get(std::string_view key, std::optional<std::stri
   });
 }
 
-utils::Status RedisMetaClient::TransactImpl(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
+utils::Status RedisMetaClient::TransactImpl(const std::function<utils::Status(MetadataTxn &)> &callback) {
   for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
     try {
       RedisMetaTxn transaction(*redis_);
@@ -122,7 +122,7 @@ utils::Status RedisMetaClient::TransactImpl(const std::function<utils::Status(Re
   return utils::Status::Busy("Redis transaction retry limit exceeded");
 }
 
-utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
+utils::Status RedisMetaClient::Transact(const std::function<utils::Status(MetadataTxn &)> &callback) {
   return pool_->Run([this, &callback] { return TransactImpl(callback); });
 }
 

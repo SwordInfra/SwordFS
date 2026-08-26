@@ -9,6 +9,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
 #include "utils/Status.hpp"
 
@@ -29,10 +30,16 @@ struct VolumeConfig {
   std::string region;    // storage region, default "auto"
   size_t chunk_size = 64ULL * 1024 * 1024;  // immutable after format
 
-  /// Serialize to a JSON string.
+  /// Serialize the volume metadata into its canonical representation.
+  std::string SerializeTo() const;
+
+  /// Parse the canonical volume metadata representation.
+  Status ParseFrom(std::string_view data);
+
+  /// Serialize to a JSON string for the memory volume.json file.
   std::string ToJson() const;
 
-  /// Parse from a JSON string into this object.
+  /// Parse from a JSON string used by the memory volume.json file.
   Status FromJson(std::string_view json);
 
   /// Write this config to path/volume.json.  Creates parent directories.

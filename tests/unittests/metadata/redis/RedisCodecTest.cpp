@@ -4,11 +4,9 @@
 #include <dirent.h>
 #include <gtest/gtest.h>
 
-#include <cstring>
+#include "metadata/Types.hpp"
 
-#include "metadata/redis/RedisCodec.hpp"
-
-namespace swordfs::metadata::redis {
+namespace swordfs::metadata {
 namespace {
 
 SwordFsInode MakeInode() {
@@ -29,34 +27,18 @@ SwordFsInode MakeInode() {
   inode.attr.st_ctim.tv_sec = 30;
   inode.attr.st_ctim.tv_nsec = 31;
   inode.parent_ino = 7;
-  inode.symlink_target.clear();
   return inode;
 }
 
 }  // namespace
 
-TEST(RedisCodecTest, FormatRoundTrip) {
-  RedisFormat input{
-      .header = {.magic = "SWFSRED1", .schema_version = 1},
-      .volume_config = "{\"name\":\"test\",\"meta\":\"redis://local\"}",
-  };
-  std::string encoded;
-  ASSERT_TRUE(EncodeFormat(input, &encoded).ok());
-
-  RedisFormat output;
-  ASSERT_TRUE(DecodeFormat(encoded, &output).ok());
-  EXPECT_EQ(output.header.magic, input.header.magic);
-  EXPECT_EQ(output.header.schema_version, input.header.schema_version);
-  EXPECT_EQ(output.volume_config, input.volume_config);
-}
-
-TEST(RedisCodecTest, InodeRoundTrip) {
+TEST(MetadataTypesTest, InodeRoundTrip) {
   const auto input = MakeInode();
   std::string encoded;
-  ASSERT_TRUE(EncodeInode(input, &encoded).ok());
+  ASSERT_TRUE(input.SerializeTo(&encoded).ok());
 
   SwordFsInode output;
-  ASSERT_TRUE(DecodeInode(encoded, &output).ok());
+  ASSERT_TRUE(SwordFsInode::ParseFrom(encoded, &output).ok());
   EXPECT_EQ(output.ino, input.ino);
   EXPECT_EQ(output.attr.st_ino, input.attr.st_ino);
   EXPECT_EQ(output.attr.st_mode, input.attr.st_mode);
@@ -75,64 +57,57 @@ TEST(RedisCodecTest, InodeRoundTrip) {
   EXPECT_EQ(output.parent_ino, input.parent_ino);
 }
 
-TEST(RedisCodecTest, SymlinkRoundTrip) {
+TEST(MetadataTypesTest, SymlinkRoundTrip) {
   auto input = MakeInode();
   input.attr.st_mode = S_IFLNK | 0777;
   input.symlink_target = "/some/target";
 
   std::string encoded;
-  ASSERT_TRUE(EncodeInode(input, &encoded).ok());
+  ASSERT_TRUE(input.SerializeTo(&encoded).ok());
 
   SwordFsInode output;
-  ASSERT_TRUE(DecodeInode(encoded, &output).ok());
+  ASSERT_TRUE(SwordFsInode::ParseFrom(encoded, &output).ok());
   EXPECT_EQ(output.symlink_target, input.symlink_target);
 }
 
-TEST(RedisCodecTest, EntryRoundTrip) {
+TEST(MetadataTypesTest, EntryRoundTrip) {
   SwordFsEntry input{.name = "a:b", .type = DT_DIR, .ino = 42};
   std::string encoded;
-  ASSERT_TRUE(EncodeEntry(input, &encoded).ok());
+  ASSERT_TRUE(input.SerializeTo(&encoded).ok());
 
   SwordFsEntry output;
-  ASSERT_TRUE(DecodeEntry(encoded, &output).ok());
+  ASSERT_TRUE(SwordFsEntry::ParseFrom(encoded, &output).ok());
   EXPECT_EQ(output.name, input.name);
   EXPECT_EQ(output.type, input.type);
   EXPECT_EQ(output.ino, input.ino);
 }
 
-TEST(RedisCodecTest, ChunkRoundTrip) {
+TEST(MetadataTypesTest, ChunkRoundTrip) {
   ChunkMeta input{.index = 3, .start_offset = 4096, .key = "42/3", .size = 1024};
   std::string encoded;
-  ASSERT_TRUE(EncodeChunk(input, &encoded).ok());
+  ASSERT_TRUE(input.SerializeTo(&encoded).ok());
 
   ChunkMeta output;
-  ASSERT_TRUE(DecodeChunk(encoded, &output).ok());
+  ASSERT_TRUE(ChunkMeta::ParseFrom(encoded, &output).ok());
   EXPECT_EQ(output.index, input.index);
   EXPECT_EQ(output.start_offset, input.start_offset);
   EXPECT_EQ(output.key, input.key);
   EXPECT_EQ(output.size, input.size);
 }
 
-TEST(RedisCodecTest, RejectsTruncatedAndUnknownVersionRecords) {
+TEST(MetadataTypesTest, RejectsWrongTypeAndMalformedRecords) {
   const auto input = MakeInode();
   std::string encoded;
-  ASSERT_TRUE(EncodeInode(input, &encoded).ok());
+  ASSERT_TRUE(input.SerializeTo(&encoded).ok());
+
+  SwordFsEntry entry;
+  EXPECT_FALSE(SwordFsEntry::ParseFrom(encoded, &entry).ok());
 
   SwordFsInode output;
-  EXPECT_FALSE(DecodeInode(encoded.substr(0, encoded.size() - 1), &output).ok());
+  EXPECT_FALSE(SwordFsInode::ParseFrom(encoded.substr(0, encoded.size() - 1), &output).ok());
 
-  encoded[16] = static_cast<char>(2);
-  EXPECT_FALSE(DecodeInode(encoded, &output).ok());
-}
-
-TEST(RedisCodecTest, RejectsTrailingBytes) {
-  const auto input = MakeInode();
-  std::string encoded;
-  ASSERT_TRUE(EncodeInode(input, &encoded).ok());
   encoded.push_back('\0');
-
-  SwordFsInode output;
-  EXPECT_FALSE(DecodeInode(encoded, &output).ok());
+  EXPECT_FALSE(SwordFsInode::ParseFrom(encoded, &output).ok());
 }
 
-}  // namespace swordfs::metadata::redis
+}  // namespace swordfs::metadata

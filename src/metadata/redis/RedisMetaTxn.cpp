@@ -24,25 +24,21 @@ RedisMetaTxn::RedisMetaTxn(sw::redis::Redis &redis)
     : transaction_(redis.transaction(false, false)) {
 }
 
-utils::Status RedisMetaTxn::Watch(std::string_view key) {
-  try {
-    transaction_->redis().watch(std::string(key));
-    return utils::Status::OK();
-  } catch (const sw::redis::TimeoutError &) {
-    throw;
-  } catch (const sw::redis::ClosedError &) {
-    throw;
-  } catch (const sw::redis::Error &error) {
-    return RedisError("WATCH", error);
-  }
-}
-
 utils::Status RedisMetaTxn::Get(std::string_view key, std::optional<std::string> *value) {
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis GET output is null");
   }
   try {
-    *value = transaction_->redis().get(std::string(key));
+    if (has_writes_) {
+      return utils::Status::InvalidArgument(
+          "Redis transaction cannot read after a write");
+    }
+    const std::string key_string(key);
+    // WATCH must happen before the read so changes between GET and EXEC are
+    // detected. Deferring WATCH until the first write would miss exactly the
+    // race this optimistic transaction is meant to protect against.
+    transaction_->redis().watch(key_string);
+    *value = transaction_->redis().get(key_string);
     return utils::Status::OK();
   } catch (const sw::redis::TimeoutError &) {
     throw;
@@ -53,7 +49,7 @@ utils::Status RedisMetaTxn::Get(std::string_view key, std::optional<std::string>
   }
 }
 
-utils::Status RedisMetaTxn::Set(std::string_view key, std::string_view value) {
+utils::Status RedisMetaTxn::Put(std::string_view key, std::string_view value) {
   try {
     transaction_->set(std::string(key), std::string(value));
     has_writes_ = true;
@@ -64,6 +60,20 @@ utils::Status RedisMetaTxn::Set(std::string_view key, std::string_view value) {
     throw;
   } catch (const sw::redis::Error &error) {
     return RedisError("SET", error);
+  }
+}
+
+utils::Status RedisMetaTxn::Delete(std::string_view key) {
+  try {
+    transaction_->del(std::string(key));
+    has_writes_ = true;
+    return utils::Status::OK();
+  } catch (const sw::redis::TimeoutError &) {
+    throw;
+  } catch (const sw::redis::ClosedError &) {
+    throw;
+  } catch (const sw::redis::Error &error) {
+    return RedisError("DEL", error);
   }
 }
 

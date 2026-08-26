@@ -14,6 +14,9 @@
 #include <cstdint>
 #include <ctime>
 #include <string>
+#include <string_view>
+
+#include "utils/Status.hpp"
 
 namespace swordfs::metadata {
 
@@ -45,6 +48,9 @@ struct SwordFsEntry {
   std::string name;
   uint32_t type;  // DT_DIR, DT_REG, DT_LNK, etc.
   InodeID ino;
+
+  utils::Status SerializeTo(std::string *out) const;
+  static utils::Status ParseFrom(std::string_view data, SwordFsEntry *out);
 };
 
 /// Filesystem limits provided by each metadata engine.
@@ -61,6 +67,9 @@ struct ChunkMeta {
   uint64_t start_offset;  // file offset of the chunk's first byte
   std::string key;        // storage key (e.g. "42/0")
   size_t size;            // data size in bytes
+
+  utils::Status SerializeTo(std::string *out) const;
+  static utils::Status ParseFrom(std::string_view data, ChunkMeta *out);
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -163,6 +172,9 @@ struct SwordFsInode {
   // it — i.e. the bit is clear, or uid is root, the directory owner, or
   // the entry's owner.
   bool CheckStickyDelete(uid_t uid, const SwordFsInode &target) const;
+
+  utils::Status SerializeTo(std::string *out) const;
+  static utils::Status ParseFrom(std::string_view data, SwordFsInode *out);
 };
 
 }  // namespace swordfs::metadata

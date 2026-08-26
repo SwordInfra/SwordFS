@@ -13,7 +13,6 @@
 
 #include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/Utils.hpp"
-#include "metadata/redis/RedisCodec.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
 
@@ -61,49 +60,35 @@ utils::Status RedisMetaImpl::Initialize() {
 }
 
 utils::Status RedisMetaImpl::FormatVolume(std::string_view volume_config) {
-  RedisFormat format;
-  format.header.magic = "SWFSRED1";
-  format.header.schema_version = 1;
-  format.volume_config = volume_config;
-  std::string format_value;
-  auto status = EncodeFormat(format, &format_value);
-  if (!status.ok()) {
-    return status;
-  }
-
   SwordFsInode root;
   root.ino = kRootInodeId;
   root.parent_ino = kRootInodeId;
   root.attr = MakeStat(S_IFDIR | 0777, ::time(nullptr));
   root.attr.st_ino = kRootInodeId;
   std::string root_value;
-  status = EncodeInode(root, &root_value);
+  auto status = root.SerializeTo(&root_value);
   if (!status.ok()) {
     return status;
   }
 
-  return client_->Transact([&](RedisMetaTxn &txn) {
-    auto status = txn.Watch(key_.Format());
-    if (!status.ok()) {
-      return status;
-    }
+  return client_->Transact([&](MetadataTxn &txn) {
     std::optional<std::string> existing;
-    status = txn.Get(key_.Format(), &existing);
+    auto status = txn.Get(key_.Format(), &existing);
     if (!status.ok()) {
       return status;
     }
     if (existing.has_value()) {
       return utils::Status::AlreadyExists("Redis metadata volume is already formatted");
     }
-    status = txn.Set(key_.Format(), format_value);
+    status = txn.Put(key_.Format(), volume_config);
     if (!status.ok()) {
       return status;
     }
-    status = txn.Set(key_.NextIno(), std::to_string(kRootInodeId + 1));
+    status = txn.Put(key_.NextIno(), std::to_string(kRootInodeId + 1));
     if (!status.ok()) {
       return status;
     }
-    return txn.Set(key_.Inode(kRootInodeId), root_value);
+    return txn.Put(key_.Inode(kRootInodeId), root_value);
   });
 }
 
@@ -121,11 +106,6 @@ utils::Status RedisMetaImpl::LoadVolume(std::string *volume_config) {
     return utils::Status::NotFound("Redis metadata volume is not formatted");
   }
 
-  RedisFormat format;
-  status = DecodeFormat(*value, &format);
-  if (!status.ok()) {
-    return status;
-  }
   std::optional<std::string> root_value;
   status = client_->Get(key_.Inode(kRootInodeId), &root_value);
   if (!status.ok()) {
@@ -136,14 +116,14 @@ utils::Status RedisMetaImpl::LoadVolume(std::string *volume_config) {
   }
 
   SwordFsInode root;
-  status = DecodeInode(*root_value, &root);
+  status = SwordFsInode::ParseFrom(*root_value, &root);
   if (!status.ok()) {
     return status;
   }
   if (root.ino != kRootInodeId || !root.IsDir()) {
     return utils::Status::InvalidArgument("Redis metadata root inode is invalid");
   }
-  *volume_config = std::move(format.volume_config);
+  *volume_config = std::move(*value);
   return utils::Status::OK();
 }
 
