@@ -28,11 +28,6 @@ namespace swordfs::metadata {
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
 
-/// Returns true if |meta_url| refers to the in-memory metadata engine.
-inline bool IsMemoryMode(std::string_view meta_url) {
-  return meta_url == kMemoryMetaUrl;
-}
-
 /// Concurrency contract: every method on this interface must be atomic
 /// and thread-safe.  Concurrent observers must never see an intermediate
 /// state of a composite operation (e.g. a Rename whose target has been
@@ -47,15 +42,16 @@ class IMetaEngine {
   /// runtime prerequisites. Persistent backends should not create a volume here.
   virtual Status Initialize() { return Status::OK(); }
 
-  /// Create a new metadata volume. |volume_config| contains the persistent
-  /// volume configuration serialized by VolumeImpl. Backends without
-  /// persistent metadata may treat this as a no-op.
-  virtual Status FormatVolume(const SwordFsVolume &config) { return Status::OK(); }
+  /// Create a new metadata volume.
+  virtual Status FormatVolume(const SwordFsVolume &config) {
+    return Status::OK();
+  }
 
   /// Load an existing metadata volume and return its persistent volume
-  /// configuration in |volume_config|. Backends without persistent metadata
-  /// may treat this as a no-op.
-  virtual Status LoadVolume(SwordFsVolume *config) { return Status::OK(); }
+  /// configuration in |config|.
+  virtual Status LoadVolume(SwordFsVolume *config) {
+    return Status::OK();
+  }
 
   /// Return filesystem limits provided by this metadata engine.
   virtual Limits GetLimits() const = 0;

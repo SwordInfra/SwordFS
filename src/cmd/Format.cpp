@@ -3,7 +3,7 @@
 
 // SwordFS format subcommand — initialise a new volume.
 //
-// Creates volume metadata (volume.json) at the given path when
+// Creates volume metadata (volume.fmt) at the given path when
 // --meta memory://local is used.  For persistent metadata engines
 // (e.g. Redis), volume config is stored in the engine itself.
 

@@ -81,9 +81,6 @@ class ConfigCenter {
   /// Returns the volume name (format and mount subcommands).
   const std::string &volume() const { return volume_; }
   void set_volume(const std::string &v) { volume_ = v; }
-  /// Returns the volume config path (format subcommand positional arg).
-  const std::string &volume_config_path() const { return volume_config_path_; }
-  void set_volume_config_path(const std::string &p) { volume_config_path_ = p; }
   /// Returns the FUSE mount options string (e.g. "allow_other,ro").
   const std::string &fuse_opts() const { return fuse_opts_; }
 
@@ -126,7 +123,6 @@ class ConfigCenter {
 
   // Volume configuration (format subcommand)
   std::string volume_;                       // --volume (required for format)
-  std::string volume_config_path_;           // --volume-config-path (required for memory)
   std::string fuse_opts_;                    // -o FUSE mount options (e.g. allow_other,ro)
   std::string pidfile_;                      // --pidfile (mount daemon PID file)
   size_t chunk_size_ = 64ULL * 1024 * 1024;  // --chunk-size

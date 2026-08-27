@@ -21,11 +21,11 @@ constexpr uint32_t kSchemaVersion = 1;
 
 class BufEncoder::Impl {
  public:
-  Impl() : buffer(folly::IOBuf::create(kInitialBufferSize)), appender(buffer.get(), kInitialBufferSize) {
+  Impl() : buffer_(folly::IOBuf::create(kInitialBufferSize)), appender_(buffer_.get(), kInitialBufferSize) {
   }
 
-  std::unique_ptr<folly::IOBuf> buffer;
-  folly::io::Appender appender;
+  std::unique_ptr<folly::IOBuf> buffer_;
+  folly::io::Appender appender_;
 };
 
 BufEncoder::BufEncoder() : impl_(std::make_unique<Impl>()) {
@@ -38,16 +38,16 @@ BufEncoder::BufEncoder(BufEncoder &&) noexcept = default;
 BufEncoder &BufEncoder::operator=(BufEncoder &&) noexcept = default;
 
 void BufEncoder::U32(uint32_t value) {
-  impl_->appender.writeLE<uint32_t>(value);
+  impl_->appender_.writeLE<uint32_t>(value);
 }
 
 void BufEncoder::U64(uint64_t value) {
-  impl_->appender.writeLE<uint64_t>(value);
+  impl_->appender_.writeLE<uint64_t>(value);
 }
 
 void BufEncoder::String(std::string_view value) {
   U64(value.size());
-  impl_->appender.push(reinterpret_cast<const uint8_t *>(value.data()), value.size());
+  impl_->appender_.push(reinterpret_cast<const uint8_t *>(value.data()), value.size());
 }
 
 void BufEncoder::Timespec(const struct timespec &ts) {
@@ -66,17 +66,18 @@ void BufEncoder::Header(RecordType type) {
 }
 
 void BufEncoder::Finish(std::string *out) {
-  impl_->buffer->appendTo(*out);
+  impl_->buffer_->appendTo(*out);
 }
 
 class BufDecoder::Impl {
  public:
   explicit Impl(std::string_view data)
-      : buffer(folly::IOBuf::wrapBuffer(data.data(), data.size())), cursor(buffer.get()) {
+      : buffer_(folly::IOBuf::wrapBuffer(data.data(), data.size())), cursor_(buffer_.get()) {
   }
 
-  std::unique_ptr<folly::IOBuf> buffer;
-  folly::io::Cursor cursor;
+  std::unique_ptr<folly::IOBuf> buffer_;
+  folly::io::Cursor cursor_;
+  bool failed_{false};
 };
 
 BufDecoder::BufDecoder(std::string_view data) : impl_(std::make_unique<Impl>(data)) {
@@ -89,19 +90,24 @@ BufDecoder::BufDecoder(BufDecoder &&) noexcept = default;
 BufDecoder &BufDecoder::operator=(BufDecoder &&) noexcept = default;
 
 bool BufDecoder::U32(uint32_t *value) {
-  return impl_->cursor.tryReadLE(*value);
+  const bool ok = impl_->cursor_.tryReadLE(*value);
+  impl_->failed_ |= !ok;
+  return ok;
 }
 
 bool BufDecoder::U64(uint64_t *value) {
-  return impl_->cursor.tryReadLE(*value);
+  const bool ok = impl_->cursor_.tryReadLE(*value);
+  impl_->failed_ |= !ok;
+  return ok;
 }
 
 bool BufDecoder::String(std::string *value) {
   uint64_t length = 0;
-  if (!U64(&length) || !impl_->cursor.canAdvance(length)) {
+  if (!U64(&length) || value == nullptr || !impl_->cursor_.canAdvance(length)) {
+    impl_->failed_ = true;
     return false;
   }
-  *value = impl_->cursor.readFixedString(length);
+  *value = impl_->cursor_.readFixedString(length);
   return true;
 }
 
@@ -113,22 +119,38 @@ bool BufDecoder::Timespec(struct timespec *ts) {
   }
   ts->tv_sec = static_cast<time_t>(static_cast<int64_t>(sec));
   ts->tv_nsec = static_cast<long>(static_cast<int64_t>(nsec));
-  return ts->tv_nsec >= 0 && ts->tv_nsec < 1000000000L;
+  if (ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000L) {
+    impl_->failed_ = true;
+    return false;
+  }
+  return true;
 }
 
 bool BufDecoder::Header(std::string_view expected_magic, uint32_t expected_schema_version) {
   std::string magic;
   uint32_t version = 0;
-  return String(&magic) && magic == expected_magic && U32(&version) && version == expected_schema_version;
+  if (!String(&magic) || magic != expected_magic || !U32(&version) || version != expected_schema_version) {
+    impl_->failed_ = true;
+    return false;
+  }
+  return true;
 }
 
 bool BufDecoder::Header(RecordType expected_type) {
   uint32_t type = 0;
-  return Header(kMagic, kSchemaVersion) && U32(&type) && type == static_cast<uint32_t>(expected_type);
+  if (!Header(kMagic, kSchemaVersion) || !U32(&type) || type != static_cast<uint32_t>(expected_type)) {
+    impl_->failed_ = true;
+    return false;
+  }
+  return true;
 }
 
 bool BufDecoder::Done() const {
-  return impl_->cursor.isAtEnd();
+  return !impl_->failed_ && impl_->cursor_.isAtEnd();
+}
+
+BufDecoder::operator bool() const noexcept {
+  return !impl_->failed_;
 }
 
 }  // namespace swordfs::metadata

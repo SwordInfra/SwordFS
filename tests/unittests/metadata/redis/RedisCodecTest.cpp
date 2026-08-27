@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include "metadata/Types.hpp"
+#include "metadata/types/BufCodec.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -93,6 +94,13 @@ TEST(MetadataTypesTest, ChunkRoundTrip) {
   EXPECT_EQ(output.start_offset, input.start_offset);
   EXPECT_EQ(output.key, input.key);
   EXPECT_EQ(output.size, input.size);
+}
+
+TEST(MetadataTypesTest, DecoderReportsMalformedInput) {
+  BufDecoder decoder("\x01\x02\x03");
+  uint64_t value = 0;
+  EXPECT_FALSE(decoder.U64(&value));
+  EXPECT_FALSE(decoder);
 }
 
 TEST(MetadataTypesTest, RejectsWrongTypeAndMalformedRecords) {

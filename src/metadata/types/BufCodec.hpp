@@ -56,6 +56,7 @@ class BufDecoder {
   bool Header(std::string_view expected_magic, uint32_t expected_schema_version);
   bool Header(RecordType expected_type);
   bool Done() const;
+  explicit operator bool() const noexcept;
 
  private:
   class Impl;

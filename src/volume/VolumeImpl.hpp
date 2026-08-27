@@ -58,7 +58,7 @@ class VolumeImpl {
   /// Build and persist volume configuration, then format the metadata engine.
   Status CreateFrom(const swordfs::config::ConfigCenter &cfg);
 
-  /// Load volume configuration from the metadata backend or volume.json for
+  /// Load volume configuration from the metadata backend or volume.fmt for
   /// memory mode, then initialise both engines.
   Status LoadFrom(const swordfs::config::ConfigCenter &cfg);
 

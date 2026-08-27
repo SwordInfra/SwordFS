@@ -33,9 +33,14 @@ utils::Status SwordFsVolume::ParseFrom(std::string_view data) {
   BufDecoder reader(data);
   SwordFsVolume volume;
   uint64_t chunk_size_value = 0;
-  if (!reader.Header(kVolumeMagic, kVolumeSchemaVersion) || !reader.String(&volume.name) ||
-      !reader.String(&volume.meta_url) || !reader.String(&volume.storage) || !reader.String(&volume.bucket) ||
-      !reader.String(&volume.region) || !reader.U64(&chunk_size_value) || chunk_size_value == 0 ||
+  reader.Header(kVolumeMagic, kVolumeSchemaVersion);
+  reader.String(&volume.name);
+  reader.String(&volume.meta_url);
+  reader.String(&volume.storage);
+  reader.String(&volume.bucket);
+  reader.String(&volume.region);
+  reader.U64(&chunk_size_value);
+  if (!reader || volume.name.empty() || chunk_size_value == 0 ||
       chunk_size_value > std::numeric_limits<size_t>::max() || !reader.Done()) {
     return utils::Status::Malformed("Malformed volume metadata record");
   }

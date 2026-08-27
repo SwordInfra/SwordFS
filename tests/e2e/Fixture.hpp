@@ -157,7 +157,6 @@ class Fixture {
  private:
   std::string work_dir_;
   std::string mountpoint_;
-  std::string vol_config_dir_;
   std::string volume_name_;
   std::string bucket_url_;
   std::string base_bucket_url_;  // original URL (without test-name suffix)

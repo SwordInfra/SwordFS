@@ -1,40 +1,28 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// Unit tests for SwordFsVolume and the memory volume.json representation.
+// Unit tests for SwordFsVolume and memory volume file persistence.
 
 #include <gtest/gtest.h>
 
-#include <cstdio>
-#include <fstream>
 #include <string>
+#include <unistd.h>
 
-#include "metadata/mem/VolumeJson.hpp"
+#include "metadata/mem/VolumeFile.hpp"
 #include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
 
 using swordfs::metadata::SwordFsVolume;
-using swordfs::metadata::mem::VolumeJson;
 using swordfs::utils::Status;
 
 namespace {
-std::string MakeTempDir() {
-  char tmpl[] = "/tmp/swordfs_test_XXXXXX";
-  const char *path = mkdtemp(tmpl);
-  EXPECT_NE(path, nullptr);
-  return std::string(path);
-}
-
-void RemoveDir(const std::string &path) {
-  if (!path.empty() && path.rfind("/tmp/", 0) == 0) {
-    std::string cmd = "rm -rf " + path;
-    std::system(cmd.c_str());
-  }
+bool ConfigRootWritable() {
+  return access("/etc/swordfs", W_OK) == 0 || access("/etc", W_OK) == 0;
 }
 
 SwordFsVolume MakeVolume() {
   SwordFsVolume volume;
-  volume.name = "test-vol";
+  volume.name = "test-vol-" + std::to_string(::getpid());
   volume.meta_url = "memory://local";
   volume.storage = "s3";
   volume.bucket = "s3://endpoint/mybucket/prefix";
@@ -42,32 +30,6 @@ SwordFsVolume MakeVolume() {
   return volume;
 }
 }  // namespace
-
-TEST(VolumeJsonTest, ToJsonAndFromJsonRoundTrip) {
-  SwordFsVolume original = MakeVolume();
-  std::string json = VolumeJson::Serialize(original);
-  EXPECT_NE(json.find("test-vol"), std::string::npos);
-  EXPECT_NE(json.find("us-east-1"), std::string::npos);
-
-  SwordFsVolume parsed;
-  Status st = VolumeJson::Parse(json, &parsed);
-  ASSERT_TRUE(st.ok()) << st.message();
-  EXPECT_EQ(parsed.name, original.name);
-  EXPECT_EQ(parsed.meta_url, original.meta_url);
-  EXPECT_EQ(parsed.storage, original.storage);
-  EXPECT_EQ(parsed.bucket, original.bucket);
-  EXPECT_EQ(parsed.region, original.region);
-}
-
-TEST(VolumeJsonTest, ToJsonAndFromJsonRoundTripRegionAuto) {
-  SwordFsVolume original = MakeVolume();
-  original.name = "v2";
-  original.region = "auto";
-  SwordFsVolume parsed;
-  Status st = VolumeJson::Parse(VolumeJson::Serialize(original), &parsed);
-  ASSERT_TRUE(st.ok());
-  EXPECT_EQ(parsed.region, "auto");
-}
 
 TEST(SwordFsVolumeTest, SerializeToAndParseFromRoundTrip) {
   SwordFsVolume original = MakeVolume();
@@ -94,92 +56,48 @@ TEST(SwordFsVolumeTest, ParseFromRejectsMalformedData) {
   EXPECT_EQ(st.code(), Status::kMalformed);
 }
 
-TEST(VolumeJsonTest, FromJsonInvalidJson) {
-  SwordFsVolume v;
-  Status st = VolumeJson::Parse("not json", &v);
-  EXPECT_FALSE(st.ok());
-  EXPECT_EQ(st.code(), Status::kInvalidArgument);
-  EXPECT_NE(st.message().find("invalid JSON"), std::string::npos);
-}
-
-TEST(VolumeJsonTest, FromJsonRootNotObject) {
-  SwordFsVolume v;
-  Status st = VolumeJson::Parse("[1, 2, 3]", &v);
-  EXPECT_FALSE(st.ok());
-  EXPECT_EQ(st.code(), Status::kInvalidArgument);
-  EXPECT_NE(st.message().find("not an object"), std::string::npos);
-}
-
-TEST(VolumeJsonTest, FromJsonMissingFields) {
-  SwordFsVolume v;
-  Status st = VolumeJson::Parse(R"({"meta":"m","storage":"s","bucket":"b","region":"r"})", &v);
-  EXPECT_FALSE(st.ok());
-  EXPECT_NE(st.message().find("name"), std::string::npos);
-}
-
-TEST(VolumeJsonTest, FromJsonWrongType) {
-  SwordFsVolume v;
-  Status st = VolumeJson::Parse(R"({"name":123,"meta":"m","storage":"s","bucket":"b","region":"r"})", &v);
-  EXPECT_FALSE(st.ok());
-  EXPECT_NE(st.message().find("name"), std::string::npos);
-}
-
-TEST(VolumeJsonTest, WriteAndReadRoundTrip) {
-  std::string dir = MakeTempDir();
+TEST(VolumeFileTest, WriteAndReadRoundTrip) {
+  if (!ConfigRootWritable()) GTEST_SKIP() << "/etc/swordfs is not writable";
   SwordFsVolume original = MakeVolume();
-  Status st = VolumeJson::Write(original, dir);
+  original.name = "volume-file-round-trip";
+  swordfs::metadata::mem::VolumeFile file{original.name};
+  Status st = file.Write(original);
   ASSERT_TRUE(st.ok()) << st.message();
 
-  std::ifstream ifs(dir + "/volume.json");
-  ASSERT_TRUE(ifs.good());
-
   SwordFsVolume restored;
-  st = VolumeJson::Read(dir, &restored);
+  st = file.Read(&restored);
   ASSERT_TRUE(st.ok()) << st.message();
   EXPECT_EQ(restored.name, original.name);
   EXPECT_EQ(restored.meta_url, original.meta_url);
   EXPECT_EQ(restored.storage, original.storage);
   EXPECT_EQ(restored.bucket, original.bucket);
   EXPECT_EQ(restored.region, original.region);
-  RemoveDir(dir);
 }
 
-TEST(VolumeJsonTest, WriteCreatesParentDir) {
-  std::string dir = MakeTempDir();
-  std::string subdir = dir + "/nested/path";
+TEST(VolumeFileTest, WriteCreatesParentDir) {
+  if (!ConfigRootWritable()) GTEST_SKIP() << "/etc/swordfs is not writable";
   SwordFsVolume v = MakeVolume();
-  Status st = VolumeJson::Write(v, subdir);
+  v.name = "volume-file-parent-dir";
+  swordfs::metadata::mem::VolumeFile file{v.name};
+  Status st = file.Write(v);
   ASSERT_TRUE(st.ok()) << st.message();
-  std::ifstream ifs(subdir + "/volume.json");
-  ASSERT_TRUE(ifs.good());
-  RemoveDir(dir);
+  EXPECT_TRUE(file.Exists());
 }
 
-TEST(VolumeJsonTest, ReadNotFound) {
+TEST(VolumeFileTest, ReadNotFound) {
   SwordFsVolume v;
-  Status st = VolumeJson::Read("/tmp/nonexistent_dir_xyz123", &v);
+  swordfs::metadata::mem::VolumeFile file{"nonexistent-volume-file"};
+  Status st = file.Read(&v);
   EXPECT_FALSE(st.ok());
   EXPECT_EQ(st.code(), Status::kNotFound);
 }
 
-TEST(VolumeJsonTest, WriteNotADirectory) {
-  std::string dir = MakeTempDir();
-  std::string file_path = dir + "/regular_file";
-  {
-    std::ofstream ofs(file_path);
-    ofs << "hello";
-  }
+TEST(VolumeFileTest, Exists) {
+  if (!ConfigRootWritable()) GTEST_SKIP() << "/etc/swordfs is not writable";
   SwordFsVolume v = MakeVolume();
-  Status st = VolumeJson::Write(v, file_path);
-  EXPECT_FALSE(st.ok());
-  EXPECT_EQ(st.code(), Status::kInvalidArgument);
-  RemoveDir(dir);
-}
-
-TEST(VolumeJsonTest, Exists) {
-  std::string dir = MakeTempDir();
-  EXPECT_FALSE(VolumeJson::Exists(dir));
-  ASSERT_TRUE(VolumeJson::Write(MakeVolume(), dir).ok());
-  EXPECT_TRUE(VolumeJson::Exists(dir));
-  RemoveDir(dir);
+  v.name = "volume-file-exists";
+  swordfs::metadata::mem::VolumeFile file{v.name};
+  EXPECT_FALSE(file.Exists());
+  ASSERT_TRUE(file.Write(v).ok());
+  EXPECT_TRUE(file.Exists());
 }

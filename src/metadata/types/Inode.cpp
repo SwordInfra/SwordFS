@@ -92,51 +92,36 @@ utils::Status SwordFsInode::ParseFrom(std::string_view data, SwordFsInode *out) 
   SwordFsInode inode;
   uint64_t ino = 0;
   uint64_t field = 0;
-  if (!reader.Header(RecordType::kInode) || !reader.U64(&ino) || ino == 0 || !reader.U64(&field)) {
-    return utils::Status::Malformed("Malformed inode record");
-  }
+  reader.Header(RecordType::kInode);
+  reader.U64(&ino);
+  reader.U64(&field);
   inode.ino = ino;
   inode.attr.st_dev = static_cast<dev_t>(field);
-  if (!reader.U64(&field)) {
-    return utils::Status::Malformed("Malformed inode record");
-  }
+  reader.U64(&field);
   inode.attr.st_ino = static_cast<ino_t>(field);
   uint32_t mode = 0;
-  if (!reader.U32(&mode)) {
-    return utils::Status::Malformed("Malformed inode record");
-  }
+  reader.U32(&mode);
   inode.attr.st_mode = static_cast<mode_t>(mode);
-  if (!reader.U64(&field)) {
-    return utils::Status::Malformed("Malformed inode record");
-  }
+  reader.U64(&field);
   inode.attr.st_nlink = static_cast<nlink_t>(field);
-  if (!reader.U64(&field)) {
-    return utils::Status::Malformed("Malformed inode record");
-  }
+  reader.U64(&field);
   inode.attr.st_uid = static_cast<uid_t>(field);
-  if (!reader.U64(&field)) {
-    return utils::Status::Malformed("Malformed inode record");
-  }
+  reader.U64(&field);
   inode.attr.st_gid = static_cast<gid_t>(field);
-  if (!reader.U64(&field)) {
-    return utils::Status::Malformed("Malformed inode record");
-  }
+  reader.U64(&field);
   inode.attr.st_rdev = static_cast<dev_t>(field);
-  if (!reader.U64(&field)) {
-    return utils::Status::Malformed("Malformed inode record");
-  }
+  reader.U64(&field);
   inode.attr.st_size = static_cast<off_t>(field);
-  if (!reader.U64(&field)) {
-    return utils::Status::Malformed("Malformed inode record");
-  }
+  reader.U64(&field);
   inode.attr.st_blksize = static_cast<blksize_t>(field);
-  if (!reader.U64(&field)) {
-    return utils::Status::Malformed("Malformed inode record");
-  }
+  reader.U64(&field);
   inode.attr.st_blocks = static_cast<blkcnt_t>(field);
-  if (!reader.Timespec(&inode.attr.st_atim) || !reader.Timespec(&inode.attr.st_mtim) ||
-      !reader.Timespec(&inode.attr.st_ctim) || !reader.U64(&inode.parent_ino) ||
-      !reader.String(&inode.symlink_target) || !reader.Done()) {
+  reader.Timespec(&inode.attr.st_atim);
+  reader.Timespec(&inode.attr.st_mtim);
+  reader.Timespec(&inode.attr.st_ctim);
+  reader.U64(&inode.parent_ino);
+  reader.String(&inode.symlink_target);
+  if (!reader || ino == 0 || !reader.Done()) {
     return utils::Status::Malformed("Malformed inode record");
   }
   if (inode.attr.st_ino != inode.ino || inode.attr.st_nlink == 0) {

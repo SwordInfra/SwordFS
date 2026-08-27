@@ -26,8 +26,11 @@ utils::Status SwordFsEntry::ParseFrom(std::string_view data, SwordFsEntry *out) 
   }
   BufDecoder reader(data);
   SwordFsEntry entry;
-  if (!reader.Header(RecordType::kEntry) || !reader.String(&entry.name) || entry.name.empty() ||
-      !reader.U32(&entry.type) || !reader.U64(&entry.ino) || entry.ino == 0 || !reader.Done()) {
+  reader.Header(RecordType::kEntry);
+  reader.String(&entry.name);
+  reader.U32(&entry.type);
+  reader.U64(&entry.ino);
+  if (!reader || entry.name.empty() || entry.ino == 0 || !reader.Done()) {
     return utils::Status::Malformed("Malformed directory entry record");
   }
   *out = std::move(entry);

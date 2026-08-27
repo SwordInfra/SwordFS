@@ -30,8 +30,12 @@ utils::Status SwordFsChunk::ParseFrom(std::string_view data, SwordFsChunk *out) 
   BufDecoder reader(data);
   SwordFsChunk chunk;
   uint64_t size = 0;
-  if (!reader.Header(RecordType::kChunk) || !reader.U32(&chunk.index) || !reader.U64(&chunk.start_offset) ||
-      !reader.String(&chunk.key) || !reader.U64(&size) || size > std::numeric_limits<size_t>::max() || !reader.Done()) {
+  reader.Header(RecordType::kChunk);
+  reader.U32(&chunk.index);
+  reader.U64(&chunk.start_offset);
+  reader.String(&chunk.key);
+  reader.U64(&size);
+  if (!reader || size > std::numeric_limits<size_t>::max() || !reader.Done()) {
     return utils::Status::Malformed("Malformed chunk record");
   }
   chunk.size = static_cast<size_t>(size);

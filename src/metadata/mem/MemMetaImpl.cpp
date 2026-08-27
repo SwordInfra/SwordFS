@@ -15,6 +15,7 @@
 
 #include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/Types.hpp"
+#include "metadata/mem/VolumeFile.hpp"
 #include "metadata/Utils.hpp"
 #include "utils/Logging.hpp"
 
@@ -64,6 +65,25 @@ RegisterMetaEngine kMemoryMetaEngine{"memory", CreateMemoryMetaEngine};
 //   if (!parent.IsDir()) {
 //     return Status::NotDirectory("parent is not a directory");
 //   }
+
+// ────────────────────────────────────────────────────────────────
+// Volume operations
+// ────────────────────────────────────────────────────────────────
+
+Status MemMetaImpl::FormatVolume(const SwordFsVolume &config) {
+  mem::VolumeFile file{config.name};
+  if (file.Exists()) {
+    return Status::AlreadyExists("volume already exists: " + config.name);
+  }
+  return file.Write(config);
+}
+
+Status MemMetaImpl::LoadVolume(SwordFsVolume *config) {
+  if (config == nullptr) {
+    return Status::InvalidArgument("memory volume config output is null");
+  }
+  return mem::VolumeFile(config->name).Read(config);
+}
 
 // ────────────────────────────────────────────────────────────────
 // Entry operations

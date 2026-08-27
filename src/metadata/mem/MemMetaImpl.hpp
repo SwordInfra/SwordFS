@@ -60,6 +60,8 @@ class MemMetaImpl : public IMetaEngine {
   Status Truncate(InodeID ino, size_t size) override;
 
   // Volume operations
+  Status FormatVolume(const SwordFsVolume &config) override;
+  Status LoadVolume(SwordFsVolume *config) override;
   Status StatFs(struct statvfs *stbuf) override;
 
   Limits GetLimits() const override;
