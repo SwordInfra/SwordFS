@@ -3,131 +3,110 @@
 
 #include "metadata/types/Inode.hpp"
 
+#include <sys/stat.h>
 #include <ctime>
+#include <cstring>
+#include <utility>
 
 #include "metadata/types/BufCodec.hpp"
 
 namespace swordfs::metadata {
 
-SwordFsInode::SwordFsInode(InodeID ino, struct stat attr, InodeID parent_ino, std::string symlink_target)
+SwordFsAttr::SwordFsAttr(uint64_t ino, uint32_t mode) : ino(ino), mode(mode) {
+  nlink = S_ISDIR(mode) ? 2 : 1;
+  size = S_ISDIR(mode) ? 4096 : 0;
+  uid = static_cast<uint64_t>(::getuid());
+  gid = static_cast<uint64_t>(::getgid());
+  blksize = 4096;
+  atime = mtime = ctime = static_cast<int64_t>(::time(nullptr));
+}
+
+void SwordFsAttr::KillSUID() {
+  mode &= ~(S_ISUID | S_ISGID);
+}
+
+SwordFsInode::SwordFsInode(InodeID ino, SwordFsAttr attr, InodeID parent_ino,
+                           std::string symlink_target)
     : ino(ino), attr(attr), parent_ino(parent_ino), symlink_target(std::move(symlink_target)) {
 }
 
 void SwordFsInode::Touch(SetAttrField fields) {
-  time_t now = ::time(nullptr);
+  const int64_t now = static_cast<int64_t>(::time(nullptr));
   if (HasSetAttrField(fields, SetAttrField::kAtime)) {
-    attr.st_atime = now;
+    attr.atime = now;
+    attr.atime_nsec = 0;
   }
   if (HasSetAttrField(fields, SetAttrField::kMtime)) {
-    attr.st_mtime = now;
+    attr.mtime = now;
+    attr.mtime_nsec = 0;
   }
   if (HasSetAttrField(fields, SetAttrField::kCtime)) {
-    attr.st_ctime = now;
+    attr.ctime = now;
+    attr.ctime_nsec = 0;
   }
 }
 
 bool SwordFsInode::IsDir() const {
-  return S_ISDIR(attr.st_mode);
-}
-bool SwordFsInode::IsRegular() const {
-  return S_ISREG(attr.st_mode);
-}
-bool SwordFsInode::IsSymlink() const {
-  return S_ISLNK(attr.st_mode);
+  return S_ISDIR(attr.mode);
 }
 
-bool SwordFsInode::CheckAccess(uid_t uid, gid_t gid, int mask) const {
+bool SwordFsInode::IsRegular() const {
+  return S_ISREG(attr.mode);
+}
+
+bool SwordFsInode::IsSymlink() const {
+  return S_ISLNK(attr.mode);
+}
+
+bool SwordFsInode::CheckAccess(uint64_t uid, uint64_t gid, uint32_t mask) const {
   if (uid == 0) {
     return true;
   }
-  unsigned int access_bits;
-  if (uid == attr.st_uid) {
-    access_bits = (attr.st_mode & S_IRWXU) >> 6;
-  } else if (gid == attr.st_gid) {
-    access_bits = (attr.st_mode & S_IRWXG) >> 3;
+  uint32_t access_bits;
+  if (static_cast<uint64_t>(uid) == attr.uid) {
+    access_bits = (attr.mode & S_IRWXU) >> 6;
+  } else if (static_cast<uint64_t>(gid) == attr.gid) {
+    access_bits = (attr.mode & S_IRWXG) >> 3;
   } else {
-    access_bits = attr.st_mode & S_IRWXO;
+    access_bits = attr.mode & S_IRWXO;
   }
-  return (access_bits & static_cast<unsigned int>(mask)) == static_cast<unsigned int>(mask);
+  return (access_bits & mask) == mask;
 }
 
-bool SwordFsInode::CheckStickyDelete(uid_t uid, const SwordFsInode &target) const {
-  if (!(attr.st_mode & S_ISVTX)) {
+bool SwordFsInode::CheckStickyDelete(uint64_t uid, const SwordFsInode &target) const {
+  if (!(attr.mode & S_ISVTX)) {
     return true;
   }
-  return uid == 0 || uid == attr.st_uid || uid == target.attr.st_uid;
+  return uid == 0 || uid == attr.uid || uid == target.attr.uid;
 }
 
 utils::Status SwordFsInode::SerializeTo(std::string *out) const {
   if (out == nullptr || ino == 0) {
     return utils::Status::InvalidArgument("Invalid inode record");
   }
-  BufEncoder writer;
-  writer.Header(RecordType::kInode);
-  writer.U64(ino);
-  writer.U64(static_cast<uint64_t>(attr.st_dev));
-  writer.U64(static_cast<uint64_t>(attr.st_ino));
-  writer.U32(static_cast<uint32_t>(attr.st_mode));
-  writer.U64(static_cast<uint64_t>(attr.st_nlink));
-  writer.U64(static_cast<uint64_t>(attr.st_uid));
-  writer.U64(static_cast<uint64_t>(attr.st_gid));
-  writer.U64(static_cast<uint64_t>(attr.st_rdev));
-  writer.U64(static_cast<uint64_t>(attr.st_size));
-  writer.U64(static_cast<uint64_t>(attr.st_blksize));
-  writer.U64(static_cast<uint64_t>(attr.st_blocks));
-  writer.Timespec(attr.st_atim);
-  writer.Timespec(attr.st_mtim);
-  writer.Timespec(attr.st_ctim);
-  writer.U64(parent_ino);
-  writer.String(symlink_target);
-  writer.Finish(out);
+  BufEncoder enc;
+  enc.Header(RecordType::kInode);
+  enc.U64(ino);
+  enc.Attr(attr);
+  enc.U64(parent_ino);
+  enc.String(symlink_target);
+  enc.Finish(out);
   return utils::Status::OK();
 }
 
-utils::Status SwordFsInode::ParseFrom(std::string_view data, SwordFsInode *out) {
-  if (out == nullptr) {
-    return utils::Status::InvalidArgument("Inode output is null");
-  }
-  BufDecoder reader(data);
-  SwordFsInode inode;
-  uint64_t ino = 0;
-  uint64_t field = 0;
-  reader.Header(RecordType::kInode);
-  reader.U64(&ino);
-  reader.U64(&field);
-  inode.ino = ino;
-  inode.attr.st_dev = static_cast<dev_t>(field);
-  reader.U64(&field);
-  inode.attr.st_ino = static_cast<ino_t>(field);
-  uint32_t mode = 0;
-  reader.U32(&mode);
-  inode.attr.st_mode = static_cast<mode_t>(mode);
-  reader.U64(&field);
-  inode.attr.st_nlink = static_cast<nlink_t>(field);
-  reader.U64(&field);
-  inode.attr.st_uid = static_cast<uid_t>(field);
-  reader.U64(&field);
-  inode.attr.st_gid = static_cast<gid_t>(field);
-  reader.U64(&field);
-  inode.attr.st_rdev = static_cast<dev_t>(field);
-  reader.U64(&field);
-  inode.attr.st_size = static_cast<off_t>(field);
-  reader.U64(&field);
-  inode.attr.st_blksize = static_cast<blksize_t>(field);
-  reader.U64(&field);
-  inode.attr.st_blocks = static_cast<blkcnt_t>(field);
-  reader.Timespec(&inode.attr.st_atim);
-  reader.Timespec(&inode.attr.st_mtim);
-  reader.Timespec(&inode.attr.st_ctim);
-  reader.U64(&inode.parent_ino);
-  reader.String(&inode.symlink_target);
-  if (!reader || ino == 0 || !reader.Done()) {
+utils::Status SwordFsInode::ParseFrom(std::string_view data) {
+  BufDecoder dec(data);
+  dec.Header(RecordType::kInode);
+  dec.U64(&ino);
+  dec.Attr(&attr);
+  dec.U64(&parent_ino);
+  dec.String(&symlink_target);
+  if (!dec || ino == 0 || !dec.Done()) {
     return utils::Status::Malformed("Malformed inode record");
   }
-  if (inode.attr.st_ino != inode.ino || inode.attr.st_nlink == 0) {
+  if (attr.ino != ino || attr.nlink == 0) {
     return utils::Status::Malformed("Malformed inode record");
   }
-  *out = std::move(inode);
   return utils::Status::OK();
 }
 

@@ -3,10 +3,11 @@
 
 #include "metadata/types/BufCodec.hpp"
 
+#include "metadata/types/Inode.hpp"
+
 #include <folly/io/Cursor.h>
 #include <folly/io/IOBuf.h>
 
-#include <ctime>
 #include <utility>
 
 namespace swordfs::metadata {
@@ -45,14 +46,32 @@ void BufEncoder::U64(uint64_t value) {
   impl_->appender_.writeLE<uint64_t>(value);
 }
 
+void BufEncoder::I64(int64_t value) {
+  impl_->appender_.writeLE<int64_t>(value);
+}
+
 void BufEncoder::String(std::string_view value) {
   U64(value.size());
   impl_->appender_.push(reinterpret_cast<const uint8_t *>(value.data()), value.size());
 }
 
-void BufEncoder::Timespec(const struct timespec &ts) {
-  U64(static_cast<uint64_t>(static_cast<int64_t>(ts.tv_sec)));
-  U64(static_cast<uint64_t>(static_cast<int64_t>(ts.tv_nsec)));
+void BufEncoder::Attr(const SwordFsAttr &attr) {
+  U64(attr.dev);
+  U64(attr.ino);
+  U32(attr.mode);
+  U64(attr.nlink);
+  U64(attr.uid);
+  U64(attr.gid);
+  U64(attr.rdev);
+  U64(attr.size);
+  U64(attr.blksize);
+  U64(attr.blocks);
+  I64(attr.atime);
+  I64(attr.atime_nsec);
+  I64(attr.mtime);
+  I64(attr.mtime_nsec);
+  I64(attr.ctime);
+  I64(attr.ctime_nsec);
 }
 
 void BufEncoder::Header(std::string_view magic, uint32_t schema_version) {
@@ -101,6 +120,12 @@ bool BufDecoder::U64(uint64_t *value) {
   return ok;
 }
 
+bool BufDecoder::I64(int64_t *value) {
+  const bool ok = impl_->cursor_.tryReadLE(*value);
+  impl_->failed_ |= !ok;
+  return ok;
+}
+
 bool BufDecoder::String(std::string *value) {
   uint64_t length = 0;
   if (!U64(&length) || value == nullptr || !impl_->cursor_.canAdvance(length)) {
@@ -111,15 +136,21 @@ bool BufDecoder::String(std::string *value) {
   return true;
 }
 
-bool BufDecoder::Timespec(struct timespec *ts) {
-  uint64_t sec = 0;
-  uint64_t nsec = 0;
-  if (!U64(&sec) || !U64(&nsec)) {
+bool BufDecoder::Attr(SwordFsAttr *attr) {
+  if (attr == nullptr) {
+    impl_->failed_ = true;
     return false;
   }
-  ts->tv_sec = static_cast<time_t>(static_cast<int64_t>(sec));
-  ts->tv_nsec = static_cast<long>(static_cast<int64_t>(nsec));
-  if (ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000L) {
+  if (!U64(&attr->dev) || !U64(&attr->ino) || !U32(&attr->mode) || !U64(&attr->nlink) ||
+      !U64(&attr->uid) || !U64(&attr->gid) || !U64(&attr->rdev) || !U64(&attr->size) ||
+      !U64(&attr->blksize) || !U64(&attr->blocks) || !I64(&attr->atime) ||
+      !I64(&attr->atime_nsec) || !I64(&attr->mtime) || !I64(&attr->mtime_nsec) ||
+      !I64(&attr->ctime) || !I64(&attr->ctime_nsec)) {
+    return false;
+  }
+  if (attr->atime_nsec < 0 || attr->atime_nsec >= 1000000000 ||
+      attr->mtime_nsec < 0 || attr->mtime_nsec >= 1000000000 ||
+      attr->ctime_nsec < 0 || attr->ctime_nsec >= 1000000000) {
     impl_->failed_ = true;
     return false;
   }

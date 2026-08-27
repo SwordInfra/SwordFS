@@ -14,7 +14,10 @@
 #include <cstring>
 
 #include "metadata/MetaEngineRegistry.hpp"
-#include "metadata/Types.hpp"
+#include "metadata/types/Common.hpp"
+#include "metadata/types/Entry.hpp"
+#include "metadata/types/Inode.hpp"
+#include "metadata/types/Volume.hpp"
 #include "metadata/mem/VolumeFile.hpp"
 #include "metadata/Utils.hpp"
 #include "utils/Logging.hpp"
@@ -31,8 +34,8 @@ utils::Status CreateMemoryMetaEngine(std::string_view, std::string_view, std::un
 }
 
 // MemMeta-specific filesystem limits.
-constexpr size_t kMaxNameLength = 255;  // POSIX NAME_MAX
-constexpr size_t kMaxFreeInodes = UINT64_MAX;
+constexpr uint64_t kMaxNameLength = 255;  // POSIX NAME_MAX
+constexpr uint64_t kMaxFreeInodes = UINT64_MAX;
 
 RegisterMetaEngine kMemoryMetaEngine{"memory", CreateMemoryMetaEngine};
 
@@ -69,6 +72,10 @@ RegisterMetaEngine kMemoryMetaEngine{"memory", CreateMemoryMetaEngine};
 // ────────────────────────────────────────────────────────────────
 // Volume operations
 // ────────────────────────────────────────────────────────────────
+
+Status MemMetaImpl::Initialize() {
+  return Status::OK();
+}
 
 Status MemMetaImpl::FormatVolume(const SwordFsVolume &config) {
   mem::VolumeFile file{config.name};
@@ -125,7 +132,7 @@ Status MemMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
   return Status::OK();
 }
 
-Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, mode_t mode, SwordFsInode *out) {
+Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("file name exceeds maximum length");
   }
@@ -146,7 +153,7 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, mode_t mod
       return Status::Permission("access denied on parent");
     }
 
-    mode_t file_mode = (S_IFREG | (mode & 0777));
+    uint32_t file_mode = static_cast<uint32_t>(S_IFREG) | (mode & 0777u);
     return txn.AddEntry(parent_ino, name, file_mode, &child);
   });
 
@@ -162,7 +169,7 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, mode_t mod
   return Status::OK();
 }
 
-Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, nlink_t *post_nlink) {
+Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) {
   // Refuse to unlink "." or ".."
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot unlink . or ..");
@@ -318,7 +325,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, In
   return Status::OK();
 }
 
-Status MemMetaImpl::SetAttr(InodeID ino, const struct stat *attr, SetAttrField fields, SwordFsInode *out) {
+Status MemMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) {
   SwordFsInode result;
   Status status = store_.Transact(
       [&](MemMetaTxn &txn) -> Status { return txn.SetAttr(ino, attr, fields, out ? &result : nullptr); });
@@ -333,7 +340,7 @@ Status MemMetaImpl::SetAttr(InodeID ino, const struct stat *attr, SetAttrField f
   return Status::OK();
 }
 
-Status MemMetaImpl::Access(InodeID ino, int mask) {
+Status MemMetaImpl::Access(InodeID ino, uint32_t mask) {
   const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
   return store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode inode;
@@ -416,7 +423,7 @@ Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
   return status;
 }
 
-Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, mode_t mode, SwordFsInode *out) {
+Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("directory name exceeds maximum length");
   }
@@ -437,7 +444,7 @@ Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, mode_t mode
       return Status::Permission("access denied on parent");
     }
 
-    mode_t dir_mode = (S_IFDIR | (mode & 0777));
+    uint32_t dir_mode = static_cast<uint32_t>(S_IFDIR) | (mode & 0777u);
     return txn.AddEntry(parent_ino, name, dir_mode, &child);
   });
 
@@ -532,7 +539,7 @@ Status MemMetaImpl::OpenDir(InodeID ino) {
 // Link / symlink operations
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, const char *link, SwordFsInode *out) {
+Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("symlink name exceeds maximum length");
   }
@@ -553,7 +560,7 @@ Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, const cha
       return Status::Permission("access denied on parent");
     }
 
-    mode_t link_mode = (S_IFLNK | 0777);
+    uint32_t link_mode = static_cast<uint32_t>(S_IFLNK) | 0777u;
     status = txn.AddEntry(parent_ino, name, link_mode, &child);
     if (!status.ok()) {
       return status;
@@ -565,7 +572,7 @@ Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, const cha
     }
     // Mirror the target/size into the local snapshot for the out params.
     child.symlink_target = link;
-    child.attr.st_size = child.symlink_target.size();
+    child.attr.size = child.symlink_target.size();
     return Status::OK();
   });
 
@@ -663,7 +670,7 @@ Status MemMetaImpl::ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) {
   return store_.Transact([&](MemMetaTxn &txn) { return txn.ListChunks(ino, out); });
 }
 
-Status MemMetaImpl::Truncate(InodeID ino, size_t size) {
+Status MemMetaImpl::Truncate(InodeID ino, uint64_t size) {
   Status status = store_.Transact([&](MemMetaTxn &txn) { return txn.Truncate(ino, size); });
   if (!status.ok()) {
     SWORDFS_LOG_DEBUG << "Truncate: ino " << ino << " to " << size << " failed: " << status.message();
@@ -675,20 +682,20 @@ Status MemMetaImpl::Truncate(InodeID ino, size_t size) {
 // Volume operations
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaImpl::StatFs(struct statvfs *stbuf) {
-  std::memset(stbuf, 0, sizeof(*stbuf));
-
+Status MemMetaImpl::StatFs(SwordFsStatFs *stbuf) {
+  if (stbuf == nullptr) {
+    return Status::InvalidArgument("statfs output is null");
+  }
+  *stbuf = {};
   Limits limits = GetLimits();
-  stbuf->f_namemax = limits.max_name_length;
-  stbuf->f_frsize = 4096;
-  stbuf->f_bsize = 4096;
-  // Report a large virtual capacity so df shows this mount.
-  // 1 TiB = 1 * 1024 * 1024 * 1024 * 1024 / 4096 blocks
-  stbuf->f_blocks = 268435456;  // ~1 TiB
-  stbuf->f_bfree = 268435456;
-  stbuf->f_bavail = 268435456;
-  store_.Transact([&](MemMetaTxn &txn) { stbuf->f_files = txn.InodeCount(); });
-  stbuf->f_ffree = limits.max_free_inodes;
+  stbuf->name_max = limits.max_name_length;
+  stbuf->fragment_size = 4096;
+  stbuf->block_size = 4096;
+  stbuf->blocks = 268435456;  // ~1 TiB
+  stbuf->blocks_free = 268435456;
+  stbuf->blocks_available = 268435456;
+  store_.Transact([&](MemMetaTxn &txn) { stbuf->files = txn.InodeCount(); });
+  stbuf->files_free = limits.max_free_inodes;
   return Status::OK();
 }
 

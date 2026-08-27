@@ -11,29 +11,24 @@ utils::Status SwordFsEntry::SerializeTo(std::string *out) const {
   if (out == nullptr || name.empty() || ino == 0) {
     return utils::Status::InvalidArgument("Invalid directory entry record");
   }
-  BufEncoder writer;
-  writer.Header(RecordType::kEntry);
-  writer.String(name);
-  writer.U32(type);
-  writer.U64(ino);
-  writer.Finish(out);
+  BufEncoder enc;
+  enc.Header(RecordType::kEntry);
+  enc.String(name);
+  enc.U32(type);
+  enc.U64(ino);
+  enc.Finish(out);
   return utils::Status::OK();
 }
 
-utils::Status SwordFsEntry::ParseFrom(std::string_view data, SwordFsEntry *out) {
-  if (out == nullptr) {
-    return utils::Status::InvalidArgument("Directory entry output is null");
-  }
-  BufDecoder reader(data);
-  SwordFsEntry entry;
-  reader.Header(RecordType::kEntry);
-  reader.String(&entry.name);
-  reader.U32(&entry.type);
-  reader.U64(&entry.ino);
-  if (!reader || entry.name.empty() || entry.ino == 0 || !reader.Done()) {
+utils::Status SwordFsEntry::ParseFrom(std::string_view data) {
+  BufDecoder dec(data);
+  dec.Header(RecordType::kEntry);
+  dec.String(&name);
+  dec.U32(&type);
+  dec.U64(&ino);
+  if (!dec || name.empty() || ino == 0 || !dec.Done()) {
     return utils::Status::Malformed("Malformed directory entry record");
   }
-  *out = std::move(entry);
   return utils::Status::OK();
 }
 

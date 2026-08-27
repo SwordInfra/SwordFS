@@ -19,7 +19,7 @@ struct SwordFsEntry {
   InodeID ino;
 
   utils::Status SerializeTo(std::string *out) const;
-  static utils::Status ParseFrom(std::string_view data, SwordFsEntry *out);
+  utils::Status ParseFrom(std::string_view data);
 };
 
 }  // namespace swordfs::metadata

@@ -10,8 +10,8 @@
 #include <algorithm>
 
 #include "metadata/Types.hpp"
-#include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
+#include "metadata/Utils.hpp"
 #include "utils/Context.hpp"
 #include "utils/Logging.hpp"
 
@@ -45,75 +45,72 @@ Status MemMetaTxn::LookupInode(InodeID ino, SwordFsInode *out) {
   return Status::OK();
 }
 
-size_t MemMetaTxn::InodeCount() {
+uint64_t MemMetaTxn::InodeCount() {
   return store_->inodes_.size();
 }
 
-Status MemMetaTxn::SetAttr(InodeID ino, const struct stat *attr,
+Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr,
                            SetAttrField fields, SwordFsInode *out) {
-  if (!attr) {
-    return Status::InvalidArgument("null attr");
-  }
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
     return Status::NotFound("inode not found");
   }
 
-  struct stat st = inode->attr;
+  SwordFsAttr st = inode->attr;
+  const SwordFsAttr &requested = attr;
   bool owner_changed = false;
   bool size_changed = false;
 
   if (HasSetAttrField(fields, SetAttrField::kMode)) {
-    st.st_mode = (st.st_mode & S_IFMT) | (attr->st_mode & 07777);
+    st.mode = (st.mode & S_IFMT) | (requested.mode & 07777);
   }
   if (HasSetAttrField(fields, SetAttrField::kUid)) {
-    owner_changed = owner_changed || st.st_uid != attr->st_uid;
-    st.st_uid = attr->st_uid;
+    owner_changed = owner_changed || st.uid != requested.uid;
+    st.uid = requested.uid;
   }
   if (HasSetAttrField(fields, SetAttrField::kGid)) {
-    owner_changed = owner_changed || st.st_gid != attr->st_gid;
-    st.st_gid = attr->st_gid;
+    owner_changed = owner_changed || st.gid != requested.gid;
+    st.gid = requested.gid;
   }
   if (HasSetAttrField(fields, SetAttrField::kSize)) {
-    if (attr->st_size < 0) {
-      return Status::InvalidArgument("negative file size");
-    }
-    size_changed = st.st_size != attr->st_size;
-    st.st_size = attr->st_size;
+    size_changed = st.size != requested.size;
+    st.size = requested.size;
   }
   if (HasSetAttrField(fields, SetAttrField::kAtime)) {
-    st.st_atime = attr->st_atime;
-    st.st_atim.tv_nsec = attr->st_atim.tv_nsec;
+    st.atime = requested.atime;
+    st.atime_nsec = requested.atime_nsec;
   }
   if (HasSetAttrField(fields, SetAttrField::kMtime)) {
-    st.st_mtime = attr->st_mtime;
-    st.st_mtim.tv_nsec = attr->st_mtim.tv_nsec;
+    st.mtime = requested.mtime;
+    st.mtime_nsec = requested.mtime_nsec;
   }
   if (HasSetAttrField(fields, SetAttrField::kAtimeNow)) {
-    st.st_atime = ::time(nullptr);
-    st.st_atim.tv_nsec = 0;
+    st.atime = static_cast<int64_t>(::time(nullptr));
+    st.atime_nsec = 0;
   }
   if (HasSetAttrField(fields, SetAttrField::kMtimeNow)) {
-    st.st_mtime = ::time(nullptr);
-    st.st_mtim.tv_nsec = 0;
+    st.mtime = static_cast<int64_t>(::time(nullptr));
+    st.mtime_nsec = 0;
   }
   if (HasSetAttrField(fields, SetAttrField::kCtime)) {
-    st.st_ctime = attr->st_ctime;
+    st.ctime = requested.ctime;
+    st.ctime_nsec = requested.ctime_nsec;
   }
 
   if (size_changed || owner_changed) {
-    KillSUID(&st);
+    st.KillSUID();
   }
   if (!HasSetAttrField(fields, SetAttrField::kCtime)) {
-    st.st_ctime = ::time(nullptr);
+    st.ctime = static_cast<int64_t>(::time(nullptr));
+    st.ctime_nsec = 0;
   }
 
-  Status status = WriteAttr(ino, &st);
+  Status status = WriteAttr(ino, st);
   if (!status.ok()) {
     return status;
   }
   if (size_changed) {
-    status = TruncateChunks(ino, static_cast<size_t>(st.st_size));
+    status = TruncateChunks(ino, st.size);
     if (!status.ok()) {
       return status;
     }
@@ -124,36 +121,34 @@ Status MemMetaTxn::SetAttr(InodeID ino, const struct stat *attr,
   return Status::OK();
 }
 
-Status MemMetaTxn::Truncate(InodeID ino, size_t size) {
+Status MemMetaTxn::Truncate(InodeID ino, uint64_t size) {
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
     return Status::NotFound("inode not found");
   }
-  if (inode->attr.st_size == static_cast<off_t>(size)) {
+  if (inode->attr.size == static_cast<int64_t>(size)) {
     return Status::OK();
   }
 
-  struct stat st = inode->attr;
-  st.st_size = static_cast<off_t>(size);
-  KillSUID(&st);
-  st.st_ctime = ::time(nullptr);
+  SwordFsAttr st = inode->attr;
+  st.size = size;
+  st.KillSUID();
+  st.ctime = static_cast<int64_t>(::time(nullptr));
+  st.ctime_nsec = 0;
 
-  Status status = WriteAttr(ino, &st);
+  Status status = WriteAttr(ino, st);
   if (!status.ok()) {
     return status;
   }
   return TruncateChunks(ino, size);
 }
 
-Status MemMetaTxn::WriteAttr(InodeID ino, const struct stat *attr) {
-  if (!attr) {
-    return Status::InvalidArgument("null attr");
-  }
+Status MemMetaTxn::WriteAttr(InodeID ino, const SwordFsAttr &attr) {
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
     return Status::NotFound("inode not found");
   }
-  inode->attr = *attr;
+  inode->attr = attr;
   return Status::OK();
 }
 
@@ -171,7 +166,7 @@ Status MemMetaTxn::AdjustNlink(InodeID ino, int delta) {
   if (!inode) {
     return Status::NotFound("inode not found");
   }
-  inode->attr.st_nlink += delta;
+  inode->attr.nlink += delta;
   return Status::OK();
 }
 
@@ -181,7 +176,7 @@ Status MemMetaTxn::SetSymlinkTarget(InodeID ino, std::string_view target) {
     return Status::NotFound("inode not found");
   }
   inode->symlink_target = target;
-  inode->attr.st_size = inode->symlink_target.size();
+  inode->attr.size = inode->symlink_target.size();
   return Status::OK();
 }
 
@@ -205,7 +200,7 @@ Status MemMetaTxn::LookupEntry(InodeID parent_ino, std::string_view name,
 }
 
 Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
-                            mode_t mode, SwordFsInode *out) {
+                            uint32_t mode, SwordFsInode *out) {
   SwordFsInode *parent = FindInode(parent_ino);
   if (!parent) {
     return Status::NotFound("parent directory not found");
@@ -218,12 +213,12 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
   }
 
   auto &ctx = folly::fibers::local<swordfs::utils::SwordFsContext>();
-  struct stat st = MakeStat(mode, ::time(nullptr));
-  st.st_uid = ctx.uid;
-  st.st_gid = parent->attr.st_gid;
-  st.st_ino = store_->next_ino_.fetch_add(1, std::memory_order_relaxed);
+  SwordFsAttr attr(store_->next_ino_.fetch_add(1, std::memory_order_relaxed),
+                   static_cast<uint32_t>(mode));
+  attr.uid = ctx.uid;
+  attr.gid = parent->attr.gid;
 
-  auto child = std::make_unique<SwordFsInode>(st.st_ino, st, parent_ino);
+  auto child = std::make_unique<SwordFsInode>(attr.ino, attr, parent_ino);
   SwordFsInode *child_ptr = child.get();
   InsertInode(std::move(child));
   LinkEntry(parent_ino, name, child_ptr);
@@ -231,7 +226,7 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
   // A new subdirectory's ".." is an additional hard link to the parent,
   // and the entry-list change bumps the parent's mtime/ctime.
   if (child_ptr->IsDir()) {
-    parent->attr.st_nlink++;
+    parent->attr.nlink++;
   }
   parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
@@ -305,7 +300,7 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino,
     }
     if (result && !victim->IsDir()) {
       result->overwritten_ino = victim_ino;
-      result->overwritten_post_nlink = victim->attr.st_nlink;
+      result->overwritten_post_nlink = victim->attr.nlink;
     }
   }
 
@@ -317,8 +312,8 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino,
   // link and the new parent gains one.  (Same-parent moves change no
   // nlink.)
   if (child->IsDir() && old_parent_ino != new_parent_ino) {
-    old_parent->attr.st_nlink--;
-    new_parent->attr.st_nlink++;
+    old_parent->attr.nlink--;
+    new_parent->attr.nlink++;
   }
   // Both entry lists changed; the re-linked inode's ctime bumps.
   old_parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
@@ -328,7 +323,7 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino,
 }
 
 Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name,
-                          nlink_t *post_nlink) {
+                          uint64_t *post_nlink) {
   SwordFsInode *child = FindEntry(parent_ino, name);
   if (!child) {
     return Status::NotFound("entry not found");
@@ -351,7 +346,7 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name,
     // The removed subdirectory's ".." no longer points back at the
     // parent, so the parent loses a hard link.  Directories cannot be
     // hard-linked; always reclaim immediately.
-    parent->attr.st_nlink--;
+    parent->attr.nlink--;
     DeleteInode(child->ino);
     if (post_nlink) {
       // Inode is gone — surface 0 so the caller doesn't try to read
@@ -364,12 +359,12 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name,
   // File: decrement nlink only. If no names remain, the inode stays
   // alive until the caller (VfsImpl::Unlink or InodeHandle::Close)
   // confirms no fd is open and calls ReclaimData.
-  child->attr.st_nlink--;
+  child->attr.nlink--;
   if (post_nlink) {
     // Read it back inside the same transaction so the caller sees the
     // exact post-decrement value with no chance of a concurrent Link
     // racing in between.
-    *post_nlink = child->attr.st_nlink;
+    *post_nlink = child->attr.nlink;
   }
   return Status::OK();
 }
@@ -392,7 +387,7 @@ Status MemMetaTxn::LinkExistingEntry(InodeID parent_ino,
     return Status::NotFound("inode not found");
   }
 
-  inode->attr.st_nlink++;
+  inode->attr.nlink++;
   LinkEntry(parent_ino, name, inode);
   inode->Touch(SetAttrField::kCtime);
   parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
@@ -418,7 +413,7 @@ Status MemMetaTxn::ListEntries(InodeID ino,
   auto dir_it = store_->dirs_.find(ino);
   if (dir_it != store_->dirs_.end()) {
     for (const auto &[name, child] : dir_it->second) {
-      entries->push_back({name, ModeToDt(child->attr.st_mode), child->ino});
+      entries->push_back({name, ModeToDt(child->attr.mode), child->ino});
     }
   }
   return Status::OK();
@@ -550,7 +545,7 @@ Status MemMetaTxn::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
   return Status::OK();
 }
 
-Status MemMetaTxn::TruncateChunks(InodeID ino, size_t new_size) {
+Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
   auto ino_it = store_->chunks_.find(ino);
   if (ino_it == store_->chunks_.end()) {
     return Status::OK();
@@ -571,7 +566,7 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, size_t new_size) {
     // Chunk straddles the new size — clamp its size.
     uint64_t new_chunk_size = new_size - chunk.start_offset;
     if (chunk.size > new_chunk_size) {
-      chunk.size = static_cast<size_t>(new_chunk_size);
+      chunk.size = new_chunk_size;
     }
     ++cit;
   }
@@ -583,7 +578,7 @@ Status MemMetaTxn::ReclaimInode(InodeID ino) {
   if (!inode) {
     return Status::OK();  // already reclaimed
   }
-  if (inode->attr.st_nlink == 0) {
+  if (inode->attr.nlink == 0) {
     DeleteInode(ino);
   }
   return Status::OK();
@@ -625,7 +620,7 @@ SwordFsInode *MemMetaTxn::FindInode(InodeID ino) {
 
 void MemMetaTxn::InsertInode(std::unique_ptr<SwordFsInode> inode) {
   InodeID ino = inode->ino;
-  bool is_dir = S_ISDIR(inode->attr.st_mode);
+  bool is_dir = S_ISDIR(inode->attr.mode);
   store_->inodes_[ino] = std::move(inode);
   if (is_dir) {
     store_->dirs_.try_emplace(ino);

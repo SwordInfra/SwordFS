@@ -3,9 +3,7 @@
 
 #pragma once
 
-#include <sys/stat.h>
-#include <sys/types.h>
-
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -14,26 +12,52 @@
 
 namespace swordfs::metadata {
 
+/// Platform-independent inode attributes with fixed-width scalar fields.
+struct SwordFsAttr {
+  uint64_t dev = 0;
+  uint64_t ino = 0;
+  uint32_t mode = 0;
+  uint64_t nlink = 0;
+  uint64_t uid = 0;
+  uint64_t gid = 0;
+  uint64_t rdev = 0;
+  uint64_t size = 0;
+  uint64_t blksize = 0;
+  uint64_t blocks = 0;
+
+  int64_t atime = 0;
+  int64_t atime_nsec = 0;
+  int64_t mtime = 0;
+  int64_t mtime_nsec = 0;
+  int64_t ctime = 0;
+  int64_t ctime_nsec = 0;
+
+  SwordFsAttr() = default;
+  SwordFsAttr(uint64_t ino, uint32_t mode);
+
+  void KillSUID();
+};
+
 /// Core per-inode metadata record.
 struct SwordFsInode {
   InodeID ino = 0;
-  struct stat attr{};
+  SwordFsAttr attr{};
   InodeID parent_ino = 0;
   std::string symlink_target;
 
   SwordFsInode() = default;
-  SwordFsInode(InodeID ino, struct stat attr, InodeID parent_ino, std::string symlink_target = std::string{});
+  SwordFsInode(InodeID ino, SwordFsAttr attr, InodeID parent_ino, std::string symlink_target = std::string{});
 
   void Touch(SetAttrField fields);
 
   bool IsDir() const;
   bool IsRegular() const;
   bool IsSymlink() const;
-  bool CheckAccess(uid_t uid, gid_t gid, int mask) const;
-  bool CheckStickyDelete(uid_t uid, const SwordFsInode &target) const;
+  bool CheckAccess(uint64_t uid, uint64_t gid, uint32_t mask) const;
+  bool CheckStickyDelete(uint64_t uid, const SwordFsInode &target) const;
 
   utils::Status SerializeTo(std::string *out) const;
-  static utils::Status ParseFrom(std::string_view data, SwordFsInode *out);
+  utils::Status ParseFrom(std::string_view data);
 };
 
 }  // namespace swordfs::metadata

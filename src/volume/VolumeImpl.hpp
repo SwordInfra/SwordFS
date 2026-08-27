@@ -74,14 +74,14 @@ class VolumeImpl {
 
   /// Chunk size in bytes — normally immutable after format, but see
   /// `set_chunk_size_for_test` for the unit-test escape hatch.
-  size_t chunk_size() const {
+  uint64_t chunk_size() const {
     return chunk_size_override_.value_or(config_.chunk_size);
   }
 
   // Test-only override: lets unit tests shrink the chunk size so a
   // single Write across multiple chunks doesn't need to push tens of
   // MiB through the I/O stack. Production code paths never call this.
-  void set_chunk_size_for_test(size_t cs) { chunk_size_override_ = cs; }
+  void set_chunk_size_for_test(uint64_t cs) { chunk_size_override_ = cs; }
 
   // Test-only: clear the override so chunk_size() falls back to
   // config_.chunk_size again.
@@ -104,7 +104,7 @@ class VolumeImpl {
   swordfs::metadata::SwordFsVolume config_;
   // Test-only override of config_.chunk_size; std::nullopt means
   // "use config_.chunk_size". Production code never sets this.
-  std::optional<size_t> chunk_size_override_;
+  std::optional<uint64_t> chunk_size_override_;
   std::unique_ptr<swordfs::metadata::IMetaEngine> meta_engine_;
   std::unique_ptr<swordfs::storage::IDataEngine> data_engine_;
 

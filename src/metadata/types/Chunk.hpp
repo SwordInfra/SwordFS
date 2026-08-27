@@ -17,10 +17,10 @@ struct SwordFsChunk {
   ChunkIndex index;
   uint64_t start_offset;
   std::string key;
-  size_t size;
+  uint64_t size;
 
   utils::Status SerializeTo(std::string *out) const;
-  static utils::Status ParseFrom(std::string_view data, SwordFsChunk *out);
+  utils::Status ParseFrom(std::string_view data);
 };
 
 }  // namespace swordfs::metadata

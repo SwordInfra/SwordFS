@@ -18,6 +18,8 @@
 
 #pragma once
 
+#include <sys/stat.h>
+
 #include <folly/container/F14Map.h>
 
 #include <atomic>
@@ -27,8 +29,10 @@
 #include <string>
 #include <utility>
 
-#include "metadata/Types.hpp"
-#include "metadata/Utils.hpp"
+#include "metadata/types/Chunk.hpp"
+#include "metadata/types/Common.hpp"
+#include "metadata/types/Entry.hpp"
+#include "metadata/types/Inode.hpp"
 #include "metadata/mem/MemMetaTxn.hpp"
 
 namespace swordfs::metadata {
@@ -36,11 +40,9 @@ namespace swordfs::metadata {
 class MemMetaStore {
  public:
   MemMetaStore() : next_ino_(kRootInodeId + 1) {
-    time_t now = ::time(nullptr);
-    struct stat root_st = MakeStat(S_IFDIR | 0755, now);
-    root_st.st_ino = kRootInodeId;
+    SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
     inodes_[kRootInodeId] =
-        std::make_unique<SwordFsInode>(kRootInodeId, root_st, kRootInodeId);
+        std::make_unique<SwordFsInode>(kRootInodeId, root_attr, kRootInodeId);
     dirs_[kRootInodeId] = {};
   }
   ~MemMetaStore() = default;

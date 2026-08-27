@@ -3,8 +3,6 @@
 
 #include "metadata/types/Chunk.hpp"
 
-#include <limits>
-
 #include "metadata/types/BufCodec.hpp"
 
 namespace swordfs::metadata {
@@ -13,33 +11,26 @@ utils::Status SwordFsChunk::SerializeTo(std::string *out) const {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("Invalid chunk record");
   }
-  BufEncoder writer;
-  writer.Header(RecordType::kChunk);
-  writer.U32(index);
-  writer.U64(start_offset);
-  writer.String(key);
-  writer.U64(size);
-  writer.Finish(out);
+  BufEncoder enc;
+  enc.Header(RecordType::kChunk);
+  enc.U32(index);
+  enc.U64(start_offset);
+  enc.String(key);
+  enc.U64(size);
+  enc.Finish(out);
   return utils::Status::OK();
 }
 
-utils::Status SwordFsChunk::ParseFrom(std::string_view data, SwordFsChunk *out) {
-  if (out == nullptr) {
-    return utils::Status::InvalidArgument("Chunk output is null");
-  }
-  BufDecoder reader(data);
-  SwordFsChunk chunk;
-  uint64_t size = 0;
-  reader.Header(RecordType::kChunk);
-  reader.U32(&chunk.index);
-  reader.U64(&chunk.start_offset);
-  reader.String(&chunk.key);
-  reader.U64(&size);
-  if (!reader || size > std::numeric_limits<size_t>::max() || !reader.Done()) {
+utils::Status SwordFsChunk::ParseFrom(std::string_view data) {
+  BufDecoder dec(data);
+  dec.Header(RecordType::kChunk);
+  dec.U32(&index);
+  dec.U64(&start_offset);
+  dec.String(&key);
+  dec.U64(&size);
+  if (!dec || !dec.Done()) {
     return utils::Status::Malformed("Malformed chunk record");
   }
-  chunk.size = static_cast<size_t>(size);
-  *out = std::move(chunk);
   return utils::Status::OK();
 }
 

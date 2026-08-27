@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -18,7 +18,7 @@ struct SwordFsVolume {
   std::string storage;
   std::string bucket;
   std::string region;
-  size_t chunk_size = 64ULL * 1024 * 1024;
+  uint64_t chunk_size = 64ULL * 1024 * 1024;
 
   /// Serialize the volume metadata into its canonical binary representation.
   std::string SerializeTo() const;

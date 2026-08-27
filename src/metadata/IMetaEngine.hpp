@@ -7,15 +7,15 @@
 
 #pragma once
 
-#include <sys/stat.h>
-#include <sys/statvfs.h>
-
 #include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "metadata/Types.hpp"
+#include "metadata/types/Chunk.hpp"
+#include "metadata/types/Common.hpp"
+#include "metadata/types/Entry.hpp"
+#include "metadata/types/Inode.hpp"
 #include "metadata/types/Volume.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
@@ -40,18 +40,14 @@ class IMetaEngine {
 
   /// Initialize a metadata backend connection and validate backend-specific
   /// runtime prerequisites. Persistent backends should not create a volume here.
-  virtual Status Initialize() { return Status::OK(); }
+  virtual Status Initialize() = 0;
 
   /// Create a new metadata volume.
-  virtual Status FormatVolume(const SwordFsVolume &config) {
-    return Status::OK();
-  }
+  virtual Status FormatVolume(const SwordFsVolume &config) = 0;
 
   /// Load an existing metadata volume and return its persistent volume
   /// configuration in |config|.
-  virtual Status LoadVolume(SwordFsVolume *config) {
-    return Status::OK();
-  }
+  virtual Status LoadVolume(SwordFsVolume *config) = 0;
 
   /// Return filesystem limits provided by this metadata engine.
   virtual Limits GetLimits() const = 0;
@@ -68,11 +64,11 @@ class IMetaEngine {
 
   /// Create a regular file.
   virtual Status Create(InodeID parent_ino, std::string_view name,
-                        mode_t mode, SwordFsInode *out) = 0;
+                        uint32_t mode, SwordFsInode *out) = 0;
 
   /// Create a directory. Increments parent nlink to account for "..".
   virtual Status MkDir(InodeID parent_ino, std::string_view name,
-                       mode_t mode, SwordFsInode *out) = 0;
+                       uint32_t mode, SwordFsInode *out) = 0;
 
   /// POSIX unlink(2): detach the directory entry and decrement nlink.
   /// On success, *post_nlink receives the authoritative nlink value the
@@ -87,7 +83,7 @@ class IMetaEngine {
   /// deciding afterwards: the store is the only thing that mutates
   /// nlink on this thread, and we read it back under the same lock.
   virtual Status Unlink(InodeID parent_ino, std::string_view name,
-                        nlink_t *post_nlink = nullptr) = 0;
+                        uint64_t *post_nlink = nullptr) = 0;
 
   /// Remove an empty directory. Decrements parent nlink.
   virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;
@@ -107,18 +103,18 @@ class IMetaEngine {
   /// Set attributes for an inode.  |fields| is a bitwise OR of
   /// SetAttrField values; only the bits set in |fields| are read from
   /// |attr| and applied to the inode.
-  virtual Status SetAttr(InodeID ino, const struct stat *attr,
+  virtual Status SetAttr(InodeID ino, const SwordFsAttr &attr,
                          SetAttrField fields, SwordFsInode *out) = 0;
 
   /// Get file system statistics.
-  virtual Status StatFs(struct statvfs *stbuf) = 0;
+  virtual Status StatFs(SwordFsStatFs *stbuf) = 0;
 
   /// Check access permissions.
-  virtual Status Access(InodeID ino, int mask) = 0;
+  virtual Status Access(InodeID ino, uint32_t mask) = 0;
 
   /// Create a symbolic link.
   virtual Status Symlink(InodeID parent_ino, std::string_view name,
-                         const char *link, SwordFsInode *out) = 0;
+                         std::string_view link, SwordFsInode *out) = 0;
 
   /// Create a hard link to an existing inode.
   virtual Status Link(InodeID ino, InodeID newparent_ino,
@@ -170,7 +166,7 @@ class IMetaEngine {
 
   /// Truncate |ino| to |size| bytes.  Updates the inode size and drops
   /// chunk metadata for data beyond the new size.
-  virtual Status Truncate(InodeID ino, size_t size) = 0;
+  virtual Status Truncate(InodeID ino, uint64_t size) = 0;
 };
 
 }  // namespace swordfs::metadata

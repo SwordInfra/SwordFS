@@ -3,8 +3,6 @@
 
 #pragma once
 
-#include <sys/types.h>
-
 #include <cstdint>
 
 namespace swordfs::metadata {
@@ -15,8 +13,20 @@ using ChunkIndex = uint32_t;
 constexpr InodeID kRootInodeId = 1;
 
 struct Limits {
-  size_t max_name_length;
-  size_t max_free_inodes;
+  uint64_t max_name_length;
+  uint64_t max_free_inodes;
+};
+
+/// Platform-independent filesystem statistics returned by metadata engines.
+struct SwordFsStatFs {
+  uint64_t name_max = 0;
+  uint64_t fragment_size = 0;
+  uint64_t block_size = 0;
+  uint64_t blocks = 0;
+  uint64_t blocks_free = 0;
+  uint64_t blocks_available = 0;
+  uint64_t files = 0;
+  uint64_t files_free = 0;
 };
 
 enum class SetAttrField : uint32_t {
@@ -39,7 +49,7 @@ enum class RenameFlag : uint32_t {
 
 struct RenameResult {
   InodeID overwritten_ino = 0;
-  nlink_t overwritten_post_nlink = 0;
+  uint64_t overwritten_post_nlink = 0;
 };
 
 inline bool HasSetAttrField(SetAttrField fields, SetAttrField field) {

@@ -34,6 +34,9 @@ using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsInode;
+using swordfs::metadata::SwordFsAttr;
+using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::SwordFsStatFs;
 using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
 using swordfs::utils::Status;
@@ -145,6 +148,9 @@ class MockDataEngine : public IDataEngine {
 
 class MockMetaEngine : public IMetaEngine {
  public:
+  Status Initialize() override { return Status::OK(); }
+  Status FormatVolume(const SwordFsVolume &) override { return Status::OK(); }
+  Status LoadVolume(SwordFsVolume *) override { return Status::OK(); }
   Limits GetLimits() const override { return {}; }
   Status Lookup(InodeID, std::string_view, SwordFsInode *out) override {
     if (out) {
@@ -155,7 +161,7 @@ class MockMetaEngine : public IMetaEngine {
   Status GetInode(InodeID, SwordFsInode *out) override {
     if (out) {
       *out = {};
-      out->attr.st_size = file_size_;
+      out->attr.size = file_size_;
     }
     return Status::OK();
   }
@@ -163,32 +169,32 @@ class MockMetaEngine : public IMetaEngine {
                  std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, mode_t, SwordFsInode *) override {
+  Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status MkDir(InodeID, std::string_view, mode_t, SwordFsInode *) override {
+  Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
+  Status Unlink(InodeID, std::string_view, uint64_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID,
                 std::string_view, RenameFlag, RenameResult *) override {
     return Status::OK();
   }
-  Status SetAttr(InodeID, const struct stat *attr, SetAttrField fields,
+  Status SetAttr(InodeID, const SwordFsAttr &attr, SetAttrField fields,
                  SwordFsInode *out) override {
     if (HasSetAttrField(fields, SetAttrField::kSize)) {
-      file_size_ = attr->st_size;
+      file_size_ = static_cast<off_t>(attr.size);
     }
     if (out) {
       *out = {};
-      out->attr.st_size = file_size_;
+      out->attr.size = file_size_;
     }
     return Status::OK();
   }
-  Status StatFs(struct statvfs *) override { return Status::OK(); }
-  Status Access(InodeID, int) override { return Status::OK(); }
-  Status Symlink(InodeID, std::string_view, const char *,
+  Status StatFs(SwordFsStatFs *) override { return Status::OK(); }
+  Status Access(InodeID, uint32_t) override { return Status::OK(); }
+  Status Symlink(InodeID, std::string_view, std::string_view,
                  SwordFsInode *) override {
     return Status::OK();
   }
@@ -227,7 +233,7 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
 
-  Status Truncate(InodeID ino, size_t size) override {
+  Status Truncate(InodeID ino, uint64_t size) override {
     ++truncate_calls;
     if (!truncate_status_.ok()) {
       return truncate_status_;

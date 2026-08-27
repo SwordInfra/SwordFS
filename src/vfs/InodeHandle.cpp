@@ -159,12 +159,12 @@ utils::Status InodeHandle::ReclaimData() {
     return status;
   }
 
-  if (inode.attr.st_nlink > 0) {
+  if (inode.attr.nlink > 0) {
     // Another directory entry still references this inode (a
     // concurrent Link raced our Unlink). Refusing to reclaim keeps
     // the chunk objects alive for the surviving name.
     SWORDFS_LOG_WARN << "ReclaimData(" << ino_
-                     << ") refused: nlink=" << inode.attr.st_nlink
+                     << ") refused: nlink=" << inode.attr.nlink
                      << " (>0). A concurrent Link won the race.";
     return utils::Status::OK();
   } else if (open_count_ > 0) {

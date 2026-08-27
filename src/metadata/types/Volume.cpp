@@ -4,7 +4,6 @@
 #include "metadata/types/Volume.hpp"
 
 #include <cstdint>
-#include <limits>
 #include <utility>
 
 #include "metadata/types/BufCodec.hpp"
@@ -17,34 +16,31 @@ constexpr uint32_t kVolumeSchemaVersion = 1;
 
 std::string SwordFsVolume::SerializeTo() const {
   std::string out;
-  BufEncoder writer;
-  writer.Header(kVolumeMagic, kVolumeSchemaVersion);
-  writer.String(name);
-  writer.String(meta_url);
-  writer.String(storage);
-  writer.String(bucket);
-  writer.String(region);
-  writer.U64(chunk_size);
-  writer.Finish(&out);
+  BufEncoder enc;
+  enc.Header(kVolumeMagic, kVolumeSchemaVersion);
+  enc.String(name);
+  enc.String(meta_url);
+  enc.String(storage);
+  enc.String(bucket);
+  enc.String(region);
+  enc.U64(chunk_size);
+  enc.Finish(&out);
   return out;
 }
 
 utils::Status SwordFsVolume::ParseFrom(std::string_view data) {
-  BufDecoder reader(data);
+  BufDecoder dec(data);
   SwordFsVolume volume;
-  uint64_t chunk_size_value = 0;
-  reader.Header(kVolumeMagic, kVolumeSchemaVersion);
-  reader.String(&volume.name);
-  reader.String(&volume.meta_url);
-  reader.String(&volume.storage);
-  reader.String(&volume.bucket);
-  reader.String(&volume.region);
-  reader.U64(&chunk_size_value);
-  if (!reader || volume.name.empty() || chunk_size_value == 0 ||
-      chunk_size_value > std::numeric_limits<size_t>::max() || !reader.Done()) {
+  dec.Header(kVolumeMagic, kVolumeSchemaVersion);
+  dec.String(&volume.name);
+  dec.String(&volume.meta_url);
+  dec.String(&volume.storage);
+  dec.String(&volume.bucket);
+  dec.String(&volume.region);
+  dec.U64(&volume.chunk_size);
+  if (!dec || volume.name.empty() || volume.chunk_size == 0 || !dec.Done()) {
     return utils::Status::Malformed("Malformed volume metadata record");
   }
-  volume.chunk_size = static_cast<size_t>(chunk_size_value);
   *this = std::move(volume);
   return utils::Status::OK();
 }
