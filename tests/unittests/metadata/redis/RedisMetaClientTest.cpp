@@ -1,10 +1,9 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include <gtest/gtest.h>
-
 #include <folly/fibers/Baton.h>
 #include <folly/fibers/FiberManagerMap.h>
+#include <gtest/gtest.h>
 
 #include <cstdlib>
 #include <optional>
@@ -83,37 +82,32 @@ TEST(RedisMetaClientTest, StandalonePingAndWatchReadMultiExec) {
 
   const std::string key = "swordfs:phase0:watch-read-write";
   sw::redis::Redis cleanup(ConnectionOptions(config));
-  cleanup.del(key);
+  cleanup.set(key, "before");
 
   status = RunInFiber([&] {
     return store.Transact([&](RedisMetaTxn &transaction) {
-    auto txn_status = transaction.Watch(key);
-    if (!txn_status.ok()) {
-      return txn_status;
-    }
-
-    std::optional<std::string> value;
-    txn_status = transaction.Get(key, &value);
-    if (!txn_status.ok()) {
-      return txn_status;
-    }
-    EXPECT_FALSE(value.has_value());
-    return transaction.Set(key, "ok");
+      std::string value;
+      auto txn_status = transaction.Get(key, &value);
+      if (!txn_status.ok()) {
+        return txn_status;
+      }
+      EXPECT_EQ(value, "before");
+      return transaction.Set(key, "ok");
     });
   });
   ASSERT_TRUE(status.ok()) << status.message();
 
   status = RunInFiber([&] {
     return store.Transact([&](RedisMetaTxn &transaction) {
-    std::optional<std::string> value;
-    auto txn_status = transaction.Get(key, &value);
-    if (!txn_status.ok()) {
-      return txn_status;
-    }
-    if (!value.has_value() || *value != "ok") {
-      return utils::Status::IOError("unexpected Redis value");
-    }
-    return utils::Status::OK();
+      std::string value;
+      auto txn_status = transaction.Get(key, &value);
+      if (!txn_status.ok()) {
+        return txn_status;
+      }
+      if (value != "ok") {
+        return utils::Status::IOError("unexpected Redis value");
+      }
+      return utils::Status::OK();
     });
   });
   EXPECT_TRUE(status.ok()) << status.message();
@@ -132,24 +126,21 @@ TEST(RedisMetaClientTest, RetriesWatchConflict) {
 
   RedisMetaClient store(config);
   int attempts = 0;
-  const auto status = RunInFiber([&] { return store.Transact([&](RedisMetaTxn &transaction) {
-    ++attempts;
-    auto txn_status = transaction.Watch(key);
-    if (!txn_status.ok()) {
-      return txn_status;
-    }
+  const auto status = RunInFiber([&] {
+    return store.Transact([&](RedisMetaTxn &transaction) {
+      ++attempts;
+      std::string value;
+      auto txn_status = transaction.Get(key, &value);
+      if (!txn_status.ok()) {
+        return txn_status;
+      }
 
-    std::optional<std::string> value;
-    txn_status = transaction.Get(key, &value);
-    if (!txn_status.ok()) {
-      return txn_status;
-    }
-
-    if (attempts == 1) {
-      other.set(key, "raced");
-    }
-    return transaction.Set(key, "committed");
-  }); });
+      if (attempts == 1) {
+        other.set(key, "raced");
+      }
+      return transaction.Set(key, "committed");
+    });
+  });
 
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(attempts, 2);
@@ -171,24 +162,21 @@ TEST(RedisMetaClientTest, RetriesReadOnlyWatchConflict) {
 
   RedisMetaClient store(config);
   int attempts = 0;
-  const auto status = RunInFiber([&] { return store.Transact([&](RedisMetaTxn &transaction) {
-    ++attempts;
-    auto txn_status = transaction.Watch(key);
-    if (!txn_status.ok()) {
-      return txn_status;
-    }
+  const auto status = RunInFiber([&] {
+    return store.Transact([&](RedisMetaTxn &transaction) {
+      ++attempts;
+      std::string value;
+      auto txn_status = transaction.Get(key, &value);
+      if (!txn_status.ok()) {
+        return txn_status;
+      }
 
-    std::optional<std::string> value;
-    txn_status = transaction.Get(key, &value);
-    if (!txn_status.ok()) {
-      return txn_status;
-    }
-
-    if (attempts == 1) {
-      other.set(key, "raced");
-    }
-    return utils::Status::OK();
-  }); });
+      if (attempts == 1) {
+        other.set(key, "raced");
+      }
+      return utils::Status::OK();
+    });
+  });
 
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(attempts, 2);
@@ -248,13 +236,18 @@ TEST(RedisMetaClientTest, ReadOnlyTransactionCommitsAsNoOp) {
   }
 
   RedisMetaClient store(config);
+  const std::string key = "swordfs:phase0:read-only";
+  sw::redis::Redis cleanup(ConnectionOptions(config));
+  cleanup.set(key, "value");
+
   const auto status = RunInFiber([&] {
-    return store.Transact([](RedisMetaTxn &transaction) {
-      std::optional<std::string> value;
-      return transaction.Get("swordfs:phase0:read-only", &value);
+    return store.Transact([&](RedisMetaTxn &transaction) {
+      std::string value;
+      return transaction.Get(key, &value);
     });
   });
   EXPECT_TRUE(status.ok()) << status.message();
+  cleanup.del(key);
 }
 
 TEST(RedisMetaClientTest, PreservesCallbackErrorWithoutQueuedWrite) {
@@ -266,7 +259,7 @@ TEST(RedisMetaClientTest, PreservesCallbackErrorWithoutQueuedWrite) {
   RedisMetaClient store(config);
   const auto status = RunInFiber([&] {
     return store.Transact([](RedisMetaTxn &transaction) {
-      std::optional<std::string> value;
+      std::string value;
       const auto get_status = transaction.Get("swordfs:phase0:missing", &value);
       if (!get_status.ok()) {
         return get_status;

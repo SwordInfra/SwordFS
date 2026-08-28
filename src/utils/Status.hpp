@@ -22,6 +22,7 @@ class Status {
     kIsDirectory,      // EISDIR
     kNotEmpty,         // ENOTEMPTY
     kInvalidArgument,  // EINVAL
+    kMalformed,        // malformed persistent data
     kNotSupported,     // ENOSYS
     kIOError,          // EIO
     kBusy,             // EBUSY
@@ -45,6 +46,7 @@ class Status {
   bool IsNotEmpty() const { return code_ == kNotEmpty; }
   bool IsNotDirectory() const { return code_ == kNotDirectory; }
   bool IsDirectory() const { return code_ == kIsDirectory; }
+  bool IsMalformed() const { return code_ == kMalformed; }
   bool IsNotSupported() const { return code_ == kNotSupported; }
   bool IsNameTooLong() const { return code_ == kNameTooLong; }
   bool IsNotPermitted() const { return code_ == kNotPermitted; }
@@ -74,6 +76,9 @@ class Status {
   }
   static Status InvalidArgument(std::string msg) {
     return Status(kInvalidArgument, std::move(msg));
+  }
+  static Status Malformed(std::string msg) {
+    return Status(kMalformed, std::move(msg));
   }
   static Status NotSupported(std::string msg) {
     return Status(kNotSupported, std::move(msg));

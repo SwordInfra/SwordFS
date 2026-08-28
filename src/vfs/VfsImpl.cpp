@@ -35,20 +35,13 @@ using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsEntry;
+using swordfs::metadata::SwordFsAttr;
+using swordfs::metadata::FromFuseRenameFlags;
+using swordfs::metadata::FromFuseSetAttrFields;
 using swordfs::volume::VolumeImpl;
 
 namespace swordfs::vfs {
 
-// Translate a FUSE_SET_ATTR_* bitmask to the metadata-layer
-// SetAttrField bitmask.  Bit values match exactly, so the conversion
-// is a 1:1 copy through a uint32_t view.
-inline SetAttrField FuseAttrToSetAttrField(int fuse_to_set) {
-  return static_cast<SetAttrField>(static_cast<uint32_t>(fuse_to_set));
-}
-
-inline RenameFlag FuseFlagsToRenameFlag(unsigned int fuse_flags) {
-  return static_cast<RenameFlag>(fuse_flags);
-}
 
 volume::VolumeImpl *VfsImpl::Volume() {
   return &volume::VolumeImpl::Instance();
@@ -63,7 +56,7 @@ utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name,
   }
   *entry = {};
   entry->ino = child.ino;
-  entry->attr = child.attr;
+  child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -73,19 +66,20 @@ utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
   SwordFsInode inode;
   Status status = VolumeImpl::Instance().meta_engine()->GetInode(ino, &inode);
   if (status.ok()) {
-    *attr = inode.attr;
+    inode.attr.ToPosixStat(attr);
   }
   return status;
 }
 
 utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr,
                                int to_set, struct stat *out_attr) {
-  SetAttrField fields = FuseAttrToSetAttrField(to_set);
+  SetAttrField fields = FromFuseSetAttrFields(to_set);
+  SwordFsAttr metadata_attr = SwordFsAttr::FromPosixStat(*attr);
   SwordFsInode inode;
   Status status = VolumeImpl::Instance().meta_engine()->SetAttr(
-      ino, attr, fields, out_attr ? &inode : nullptr);
+      ino, metadata_attr, fields, out_attr ? &inode : nullptr);
   if (status.ok() && out_attr) {
-    *out_attr = inode.attr;
+    inode.attr.ToPosixStat(out_attr);
   }
   return status;
 }
@@ -106,14 +100,14 @@ utils::Status VfsImpl::Mknod(fuse_ino_t parent, const char *name,
 utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name,
                              mode_t mode, fuse_entry_param *entry) {
   SwordFsInode child;
-  Status status = VolumeImpl::Instance().meta_engine()->MkDir(parent, name, mode,
-                                                              &child);
+  Status status = VolumeImpl::Instance().meta_engine()->MkDir(
+      parent, name, static_cast<uint32_t>(mode), &child);
   if (!status.ok()) {
     return status;
   }
   *entry = {};
   entry->ino = child.ino;
-  entry->attr = child.attr;
+  child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -142,7 +136,7 @@ utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
   }
 
   // meta->Unlink hands back the authoritative post-decrement nlink.
-  nlink_t post_nlink = 0;
+  uint64_t post_nlink = 0;
   auto st = meta->Unlink(parent, name, &post_nlink);
   if (!st.ok()) {
     return st;
@@ -176,13 +170,13 @@ utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent,
                                fuse_entry_param *entry) {
   SwordFsInode child;
   Status status = VolumeImpl::Instance().meta_engine()->Symlink(
-      parent, name, link, &child);
+      parent, name, std::string_view(link), &child);
   if (!status.ok()) {
     return status;
   }
   *entry = {};
   entry->ino = child.ino;
-  entry->attr = child.attr;
+  child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -191,7 +185,7 @@ utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent,
 utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
                               fuse_ino_t newparent, const char *newname,
                               unsigned int flags) {
-  RenameFlag rename_flags = FuseFlagsToRenameFlag(flags);
+  RenameFlag rename_flags = FromFuseRenameFlags(flags);
   auto meta = VolumeImpl::Instance().meta_engine();
   metadata::RenameResult result;
   auto status = meta->Rename(parent, name, newparent, newname, rename_flags,
@@ -239,7 +233,7 @@ utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent,
   }
   *entry = {};
   entry->ino = inode.ino;
-  entry->attr = inode.attr;
+  inode.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -410,7 +404,25 @@ utils::Status VfsImpl::Fsyncdir(fuse_ino_t ino, int datasync) {
 
 utils::Status VfsImpl::Statfs(fuse_ino_t ino, struct statvfs *stbuf) {
   (void)ino;
-  return VolumeImpl::Instance().meta_engine()->StatFs(stbuf);
+  if (stbuf == nullptr) {
+    return Status::InvalidArgument("statfs output is null");
+  }
+  metadata::SwordFsStatFs stats;
+  auto status = VolumeImpl::Instance().meta_engine()->StatFs(&stats);
+  if (!status.ok()) {
+    return status;
+  }
+  std::memset(stbuf, 0, sizeof(*stbuf));
+  stbuf->f_namemax = stats.name_max;
+  stbuf->f_frsize = stats.fragment_size;
+  stbuf->f_bsize = stats.block_size;
+  stbuf->f_blocks = stats.blocks;
+  stbuf->f_bfree = stats.blocks_free;
+  stbuf->f_bavail = stats.blocks_available;
+  stbuf->f_files = stats.files;
+  stbuf->f_ffree = stats.files_free;
+  stbuf->f_favail = stats.files_free;
+  return Status::OK();
 }
 
 utils::Status VfsImpl::Setxattr(fuse_ino_t ino, const char *name,
@@ -444,15 +456,15 @@ utils::Status VfsImpl::Removexattr(fuse_ino_t ino, const char *name) {
 }
 
 utils::Status VfsImpl::Access(fuse_ino_t ino, int mask) {
-  return VolumeImpl::Instance().meta_engine()->Access(ino, mask);
+  return VolumeImpl::Instance().meta_engine()->Access(ino, static_cast<uint32_t>(mask));
 }
 
 utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name,
                               mode_t mode, fuse_entry_param *entry,
                               struct fuse_file_info *fi) {
   SwordFsInode child;
-  Status status = VolumeImpl::Instance().meta_engine()->Create(parent, name, mode,
-                                                                &child);
+  Status status = VolumeImpl::Instance().meta_engine()->Create(
+      parent, name, static_cast<uint32_t>(mode), &child);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Create FAILED: parent=" << parent << " name='" << name
                       << "' — " << status.message();
@@ -468,7 +480,7 @@ utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name,
   fi->fh = handle.fh();
   *entry = {};
   entry->ino = child.ino;
-  entry->attr = child.attr;
+  child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   SWORDFS_LOG_DEBUG << "Create: ino=" << child.ino << " fh=" << handle.fh()

@@ -47,36 +47,17 @@ std::string ParseOptions(std::vector<std::string> args) {
 // ================================================================
 
 TEST(FormatParamsTest, MinimalMemoryFormat) {
-  // Bare minimum for format with in-memory metadata engine.
   std::vector<std::string> args = {
-      "swordfs",
-      "format",
-      "--volume",
-      "myvol",
-      "--meta",
-      "memory://local",
-      "--bucket",
-      "s3://mybucket.s3.amazonaws.com/chunks",
-      "--volume-config-path",
-      "/tmp/cfg",
+      "swordfs", "format", "--volume", "myvol", "--meta", "memory://local",
+      "--bucket", "s3://mybucket.s3.amazonaws.com/chunks",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
 }
 
 TEST(FormatParamsTest, MemoryFormatWithRegion) {
   std::vector<std::string> args = {
-      "swordfs",
-      "format",
-      "--volume",
-      "myvol",
-      "--meta",
-      "memory://local",
-      "--bucket",
-      "s3://mybucket.s3.amazonaws.com/chunks",
-      "--volume-config-path",
-      "/tmp/cfg",
-      "--storage-region",
-      "us-east-1",
+      "swordfs", "format", "--volume", "myvol", "--meta", "memory://local",
+      "--bucket", "s3://mybucket.s3.amazonaws.com/chunks", "--storage-region", "us-east-1",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
 }
@@ -86,36 +67,16 @@ TEST(FormatParamsTest, MemoryFormatWithRegion) {
 // ================================================================
 
 TEST(MountParamsTest, MinimalMemoryMount) {
-  // Bare minimum for mount with in-memory metadata engine.
   std::vector<std::string> args = {
-      "swordfs",
-      "mount",
-      "--volume",
-      "myvol",
-      "--meta",
-      "memory://local",
-      "--volume-config-path",
-      "/tmp/cfg",
-      "/mnt/point",
+      "swordfs", "mount", "--volume", "myvol", "--meta", "memory://local", "/mnt/point",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
 }
 
 TEST(MountParamsTest, MountWithIndependentThreadCounts) {
   auto err = ParseOptions({
-      "swordfs",
-      "mount",
-      "--volume",
-      "myvol",
-      "--meta",
-      "memory://local",
-      "--volume-config-path",
-      "/tmp/cfg",
-      "--storage-thread-count",
-      "4",
-      "--meta-thread-count",
-      "7",
-      "/mnt/point",
+      "swordfs", "mount", "--volume", "myvol", "--meta", "memory://local",
+      "--storage-thread-count", "4", "--meta-thread-count", "7", "/mnt/point",
   });
   EXPECT_TRUE(err.empty()) << err;
   auto &cfg = swordfs::config::ConfigCenter::Instance();
@@ -125,17 +86,8 @@ TEST(MountParamsTest, MountWithIndependentThreadCounts) {
 
 TEST(MountParamsTest, MountWithFuseOpts) {
   std::vector<std::string> args = {
-      "swordfs",
-      "mount",
-      "--volume",
-      "myvol",
-      "--meta",
-      "memory://local",
-      "--volume-config-path",
-      "/tmp/cfg",
-      "-o",
-      "allow_other,ro",
-      "/mnt/point",
+      "swordfs", "mount", "--volume", "myvol", "--meta", "memory://local",
+      "-o", "allow_other,ro", "/mnt/point",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
 }
@@ -143,37 +95,6 @@ TEST(MountParamsTest, MountWithFuseOpts) {
 // ================================================================
 // format — invalid parameter combinations
 // ================================================================
-
-TEST(FormatParamsTest, MissingVolumeConfigPathWithMemoryMeta) {
-  auto err = ParseOptions({
-      "swordfs",
-      "format",
-      "--volume",
-      "myvol",
-      "--meta",
-      "memory://local",
-      "--bucket",
-      "s3://mybucket.s3.amazonaws.com/chunks",
-  });
-  EXPECT_FALSE(err.empty());
-  EXPECT_NE(err.find("volume-config-path"), std::string::npos) << err;
-}
-
-TEST(FormatParamsTest, VolumeConfigPathWithoutMemoryMeta) {
-  // --volume-config-path without --meta.
-  auto err = ParseOptions({
-      "swordfs",
-      "format",
-      "--volume",
-      "myvol",
-      "--bucket",
-      "s3://mybucket.s3.amazonaws.com/chunks",
-      "--volume-config-path",
-      "/tmp/cfg",
-  });
-  EXPECT_FALSE(err.empty());
-  EXPECT_NE(err.find("--meta"), std::string::npos) << err;
-}
 
 TEST(FormatParamsTest, MissingBucket) {
   auto err = ParseOptions({
@@ -183,8 +104,6 @@ TEST(FormatParamsTest, MissingBucket) {
       "myvol",
       "--meta",
       "memory://local",
-      "--volume-config-path",
-      "/tmp/cfg",
   });
   EXPECT_FALSE(err.empty());
   EXPECT_NE(err.find("--bucket"), std::string::npos) << err;
@@ -198,8 +117,6 @@ TEST(FormatParamsTest, MissingVolume) {
       "memory://local",
       "--bucket",
       "s3://mybucket.s3.amazonaws.com/chunks",
-      "--volume-config-path",
-      "/tmp/cfg",
   });
   EXPECT_FALSE(err.empty());
   EXPECT_NE(err.find("--volume"), std::string::npos) << err;
@@ -215,8 +132,6 @@ TEST(FormatParamsTest, InvalidBucketScheme) {
       "memory://local",
       "--bucket",
       "https://example.com/bucket",
-      "--volume-config-path",
-      "/tmp/cfg",
   });
   EXPECT_FALSE(err.empty());
   EXPECT_NE(err.find("scheme"), std::string::npos) << err;
@@ -232,8 +147,6 @@ TEST(FormatParamsTest, BucketWithoutScheme) {
       "memory://local",
       "--bucket",
       "no-scheme-bucket",
-      "--volume-config-path",
-      "/tmp/cfg",
   });
   EXPECT_FALSE(err.empty());
   EXPECT_NE(err.find("scheme"), std::string::npos) << err;
@@ -249,8 +162,6 @@ TEST(FormatParamsTest, UnknownFlag) {
       "memory://local",
       "--bucket",
       "s3://mybucket.s3.amazonaws.com/chunks",
-      "--volume-config-path",
-      "/tmp/cfg",
       "--storage",
       "s3",
   });
@@ -263,34 +174,6 @@ TEST(FormatParamsTest, UnknownFlag) {
 // mount — invalid parameter combinations
 // ================================================================
 
-TEST(MountParamsTest, MissingVolumeConfigPathWithMemoryMeta) {
-  auto err = ParseOptions({
-      "swordfs",
-      "mount",
-      "--volume",
-      "myvol",
-      "--meta",
-      "memory://local",
-      "/mnt/point",
-  });
-  EXPECT_FALSE(err.empty());
-  EXPECT_NE(err.find("volume-config-path"), std::string::npos) << err;
-}
-
-TEST(MountParamsTest, VolumeConfigPathWithoutMemoryMeta) {
-  auto err = ParseOptions({
-      "swordfs",
-      "mount",
-      "--volume",
-      "myvol",
-      "--volume-config-path",
-      "/tmp/cfg",
-      "/mnt/point",
-  });
-  EXPECT_FALSE(err.empty());
-  EXPECT_NE(err.find("--meta"), std::string::npos) << err;
-}
-
 TEST(MountParamsTest, MissingMountpoint) {
   auto err = ParseOptions({
       "swordfs",
@@ -299,8 +182,6 @@ TEST(MountParamsTest, MissingMountpoint) {
       "myvol",
       "--meta",
       "memory://local",
-      "--volume-config-path",
-      "/tmp/cfg",
   });
   EXPECT_FALSE(err.empty());
   EXPECT_NE(err.find("mountpoint"), std::string::npos) << err;
@@ -312,8 +193,6 @@ TEST(MountParamsTest, MissingVolume) {
       "mount",
       "--meta",
       "memory://local",
-      "--volume-config-path",
-      "/tmp/cfg",
       "/mnt/point",
   });
   EXPECT_FALSE(err.empty());

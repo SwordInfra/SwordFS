@@ -159,12 +159,12 @@ utils::Status InodeHandle::ReclaimData() {
     return status;
   }
 
-  if (inode.attr.st_nlink > 0) {
+  if (inode.attr.nlink > 0) {
     // Another directory entry still references this inode (a
     // concurrent Link raced our Unlink). Refusing to reclaim keeps
     // the chunk objects alive for the surviving name.
     SWORDFS_LOG_WARN << "ReclaimData(" << ino_
-                     << ") refused: nlink=" << inode.attr.st_nlink
+                     << ") refused: nlink=" << inode.attr.nlink
                      << " (>0). A concurrent Link won the race.";
     return utils::Status::OK();
   } else if (open_count_ > 0) {
@@ -178,17 +178,17 @@ utils::Status InodeHandle::ReclaimData() {
 
   // 1. Enumerate every chunk the metadata engine still tracks for this
   //    inode and issue a data-engine delete for each.
-  std::vector<metadata::ChunkMeta> chunks;
+  std::vector<metadata::SwordFsChunk> chunks;
   status = meta_->ListChunks(ino_, &chunks);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "ReclaimData: ListChunks(" << ino_
                       << ") failed: " << status.message();
     return status;
   }
-  for (const auto &cm : chunks) {
-    status = data_->Delete(cm.key);
+  for (const auto &chunk : chunks) {
+    status = data_->Delete(chunk.key);
     if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << cm.key
+      SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << chunk.key
                         << ") failed: " << status.message();
     }
   }

@@ -24,25 +24,29 @@ RedisMetaTxn::RedisMetaTxn(sw::redis::Redis &redis)
     : transaction_(redis.transaction(false, false)) {
 }
 
-utils::Status RedisMetaTxn::Watch(std::string_view key) {
-  try {
-    transaction_->redis().watch(std::string(key));
-    return utils::Status::OK();
-  } catch (const sw::redis::TimeoutError &) {
-    throw;
-  } catch (const sw::redis::ClosedError &) {
-    throw;
-  } catch (const sw::redis::Error &error) {
-    return RedisError("WATCH", error);
-  }
-}
-
-utils::Status RedisMetaTxn::Get(std::string_view key, std::optional<std::string> *value) {
+utils::Status RedisMetaTxn::Get(std::string_view key, std::string *value) {
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis GET output is null");
   }
   try {
-    *value = transaction_->redis().get(std::string(key));
+    // GET is executed immediately because callers need its value to compute
+    // subsequent metadata mutations. Once a write is queued, redis-plus-plus
+    // has entered MULTI, so a subsequent GET through the transaction would be
+    // queued instead of returning its value. Keep this transaction model's
+    // read-before-write restriction rather than mixing immediate reads with
+    // queued commands.
+    if (has_writes_) {
+      return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
+    }
+    // WATCH must happen before the read so changes between GET and EXEC are
+    // detected. This is Redis's optimistic transaction pattern: the read is
+    // performed immediately, while queued writes are committed by EXEC.
+    transaction_->redis().watch(key);
+    auto result = transaction_->redis().get(key);
+    if (!result.has_value()) {
+      return utils::Status::NotFound("Redis key not found");
+    }
+    *value = std::move(*result);
     return utils::Status::OK();
   } catch (const sw::redis::TimeoutError &) {
     throw;
@@ -64,6 +68,20 @@ utils::Status RedisMetaTxn::Set(std::string_view key, std::string_view value) {
     throw;
   } catch (const sw::redis::Error &error) {
     return RedisError("SET", error);
+  }
+}
+
+utils::Status RedisMetaTxn::Del(std::string_view key) {
+  try {
+    transaction_->del(std::string(key));
+    has_writes_ = true;
+    return utils::Status::OK();
+  } catch (const sw::redis::TimeoutError &) {
+    throw;
+  } catch (const sw::redis::ClosedError &) {
+    throw;
+  } catch (const sw::redis::Error &error) {
+    return RedisError("DEL", error);
   }
 }
 

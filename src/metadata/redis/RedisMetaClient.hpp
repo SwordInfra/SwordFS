@@ -8,6 +8,8 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <string_view>
 
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/redis/RedisMetaTxn.hpp"
@@ -28,6 +30,7 @@ class RedisMetaClient {
   RedisMetaClient &operator=(const RedisMetaClient &) = delete;
 
   utils::Status Ping();
+  utils::Status Get(std::string_view key, std::string *value);
 
   // Runs an optimistic transaction. Every attempt exclusively uses one
   // connection checked out from the Redis client's connection pool, so WATCH,

@@ -10,6 +10,9 @@
 
 namespace swordfs::config {
 
+/// Validates a volume name: non-empty, ASCII alphanumeric, and starts with a letter.
+extern const CLI::Validator ValidateVolumeName;
+
 /// Validates --meta URL format and scheme (e.g. memory://local).
 extern const CLI::Validator ValidateMetaUrl;
 

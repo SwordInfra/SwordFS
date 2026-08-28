@@ -8,10 +8,36 @@
 #include <string>
 
 #include "config/Validator.hpp"
-#include "storage/StorageRegistry.hpp"
 
 using swordfs::config::ValidateBucketUrl;
 using swordfs::config::ValidateMetaUrl;
+using swordfs::config::ValidateVolumeName;
+
+// ================================================================
+// ValidateVolumeName
+// ================================================================
+
+TEST(ValidateVolumeNameTest, ValidNames) {
+  EXPECT_TRUE(ValidateVolumeName("myvol").empty());
+  EXPECT_TRUE(ValidateVolumeName("Volume123").empty());
+  EXPECT_TRUE(ValidateVolumeName("v1").empty());
+}
+
+TEST(ValidateVolumeNameTest, EmptyName) {
+  EXPECT_FALSE(ValidateVolumeName("").empty());
+}
+
+TEST(ValidateVolumeNameTest, MustStartWithLetter) {
+  EXPECT_FALSE(ValidateVolumeName("1volume").empty());
+}
+
+TEST(ValidateVolumeNameTest, OnlyAsciiLettersAndDigits) {
+  EXPECT_FALSE(ValidateVolumeName("my-volume").empty());
+  EXPECT_FALSE(ValidateVolumeName("my_volume").empty());
+  EXPECT_FALSE(ValidateVolumeName("my.volume").empty());
+  EXPECT_FALSE(ValidateVolumeName("vol/").empty());
+  EXPECT_FALSE(ValidateVolumeName("卷volume").empty());
+}
 
 // ================================================================
 // ValidateMetaUrl

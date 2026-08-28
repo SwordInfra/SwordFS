@@ -18,6 +18,8 @@
 
 #pragma once
 
+#include <sys/stat.h>
+
 #include <folly/container/F14Map.h>
 
 #include <atomic>
@@ -27,8 +29,10 @@
 #include <string>
 #include <utility>
 
-#include "metadata/Types.hpp"
-#include "metadata/Utils.hpp"
+#include "metadata/types/Chunk.hpp"
+#include "metadata/types/Common.hpp"
+#include "metadata/types/Entry.hpp"
+#include "metadata/types/Inode.hpp"
 #include "metadata/mem/MemMetaTxn.hpp"
 
 namespace swordfs::metadata {
@@ -36,11 +40,9 @@ namespace swordfs::metadata {
 class MemMetaStore {
  public:
   MemMetaStore() : next_ino_(kRootInodeId + 1) {
-    time_t now = ::time(nullptr);
-    struct stat root_st = MakeStat(S_IFDIR | 0755, now);
-    root_st.st_ino = kRootInodeId;
+    SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
     inodes_[kRootInodeId] =
-        std::make_unique<SwordFsInode>(kRootInodeId, root_st, kRootInodeId);
+        std::make_unique<SwordFsInode>(kRootInodeId, root_attr, kRootInodeId);
     dirs_[kRootInodeId] = {};
   }
   ~MemMetaStore() = default;
@@ -72,8 +74,8 @@ class MemMetaStore {
   folly::F14FastMap<InodeID, std::unique_ptr<SwordFsInode>> inodes_;
   folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode *>> dirs_;
 
-  // Chunk metadata: inode → (index → ChunkMeta).
-  folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, ChunkMeta>> chunks_;
+  // Chunk metadata: inode → (index → SwordFsChunk).
+  folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, SwordFsChunk>> chunks_;
 };
 
 }  // namespace swordfs::metadata

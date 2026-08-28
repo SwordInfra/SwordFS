@@ -29,7 +29,7 @@ namespace swordfs::vfs {
 namespace {
 
 using swordfs::metadata::ChunkIndex;
-using swordfs::metadata::ChunkMeta;
+using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
@@ -37,6 +37,9 @@ using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsInode;
+using swordfs::metadata::SwordFsAttr;
+using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::SwordFsStatFs;
 using swordfs::utils::Status;
 
 // Minimal no-op data engine. The fixture needs to install one so the
@@ -45,6 +48,7 @@ using swordfs::utils::Status;
 // Delete calls) lives below alongside the ReclaimData tests.
 class NoopDataEngine : public swordfs::storage::IDataEngine {
  public:
+  Status Initialize() override { return Status::OK(); }
   swordfs::storage::DataEngineLimits Limits() const override { return {}; }
   bool Head(std::string_view, size_t *) override { return false; }
   Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
@@ -59,6 +63,9 @@ class NoopDataEngine : public swordfs::storage::IDataEngine {
 // Minimal IMetaEngine — every op succeeds; Create fabricates an inode.
 class MockMetaEngine : public IMetaEngine {
  public:
+  Status Initialize() override { return Status::OK(); }
+  Status FormatVolume(const SwordFsVolume &) override { return Status::OK(); }
+  Status LoadVolume(SwordFsVolume *) override { return Status::OK(); }
   Limits GetLimits() const override { return {}; }
   Status Lookup(InodeID, std::string_view, SwordFsInode *) override {
     return Status::OK();
@@ -75,27 +82,27 @@ class MockMetaEngine : public IMetaEngine {
                  std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, mode_t, SwordFsInode *out) override {
+  Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
     if (out) {
       *out = {};
       out->ino = next_ino_++;
-      out->attr.st_ino = out->ino;
-      out->attr.st_mode = S_IFREG | 0644;
+      out->attr.ino = out->ino;
+      out->attr.mode = S_IFREG | 0644;
     }
     return Status::OK();
   }
-  Status MkDir(InodeID, std::string_view, mode_t, SwordFsInode *) override {
+  Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
+  Status Unlink(InodeID, std::string_view, uint64_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID, std::string_view,
                 RenameFlag, RenameResult *) override { return Status::OK(); }
-  Status SetAttr(InodeID, const struct stat *, SetAttrField,
+  Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField,
                  SwordFsInode *) override { return Status::OK(); }
-  Status StatFs(struct statvfs *) override { return Status::OK(); }
-  Status Access(InodeID, int) override { return Status::OK(); }
-  Status Symlink(InodeID, std::string_view, const char *, SwordFsInode *) override {
+  Status StatFs(SwordFsStatFs *) override { return Status::OK(); }
+  Status Access(InodeID, uint32_t) override { return Status::OK(); }
+  Status Symlink(InodeID, std::string_view, std::string_view, SwordFsInode *) override {
     return Status::OK();
   }
   Status Link(InodeID, InodeID, std::string_view,
@@ -106,15 +113,15 @@ class MockMetaEngine : public IMetaEngine {
     ++reclaim_calls;
     return reclaim_status;
   }
-  Status ListChunks(InodeID, std::vector<ChunkMeta> *) override {
+  Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return Status::OK(); }
-  Status AddChunk(InodeID, const ChunkMeta &) override { return Status::OK(); }
-  Status FindChunk(InodeID, ChunkIndex, ChunkMeta *) override {
+  Status AddChunk(InodeID, const SwordFsChunk &) override { return Status::OK(); }
+  Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
     return Status::NotFound("no chunk");
   }
-  Status Truncate(InodeID, size_t size) override {
+  Status Truncate(InodeID, uint64_t size) override {
     ++truncate_calls;
     last_truncate_size = size;
     return truncate_status;
@@ -486,6 +493,7 @@ namespace {
 // per-key failure responses.
 class FakeDataEngine : public swordfs::storage::IDataEngine {
  public:
+  Status Initialize() override { return Status::OK(); }
   swordfs::storage::DataEngineLimits Limits() const override {
     return {};
   }
@@ -513,6 +521,9 @@ class FakeDataEngine : public swordfs::storage::IDataEngine {
 // guard sees the nlink value the test wants).
 class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
  public:
+  Status Initialize() override { return Status::OK(); }
+  Status FormatVolume(const SwordFsVolume &) override { return Status::OK(); }
+  Status LoadVolume(SwordFsVolume *) override { return Status::OK(); }
   Limits GetLimits() const override { return {}; }
   Status Lookup(InodeID, std::string_view, SwordFsInode *) override {
     return Status::OK();
@@ -525,7 +536,20 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     if (out) {
       *out = {};
       out->ino = ino;
-      out->attr = it->second;
+      out->attr.ino = it->second.st_ino;
+      out->attr.mode = it->second.st_mode;
+      out->attr.nlink = it->second.st_nlink;
+      out->attr.uid = it->second.st_uid;
+      out->attr.gid = it->second.st_gid;
+      out->attr.size = it->second.st_size;
+      out->attr.blksize = it->second.st_blksize;
+      out->attr.blocks = it->second.st_blocks;
+      out->attr.atime = it->second.st_atime;
+      out->attr.atime_nsec = it->second.st_atim.tv_nsec;
+      out->attr.mtime = it->second.st_mtime;
+      out->attr.mtime_nsec = it->second.st_mtim.tv_nsec;
+      out->attr.ctime = it->second.st_ctime;
+      out->attr.ctime_nsec = it->second.st_ctim.tv_nsec;
     }
     return Status::OK();
   }
@@ -534,21 +558,21 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
                  std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, mode_t, SwordFsInode *) override {
+  Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status MkDir(InodeID, std::string_view, mode_t, SwordFsInode *) override {
+  Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
+  Status Unlink(InodeID, std::string_view, uint64_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID, std::string_view,
                 RenameFlag, RenameResult *) override { return Status::OK(); }
-  Status SetAttr(InodeID, const struct stat *, SetAttrField,
+  Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField,
                  SwordFsInode *) override { return Status::OK(); }
-  Status StatFs(struct statvfs *) override { return Status::OK(); }
-  Status Access(InodeID, int) override { return Status::OK(); }
-  Status Symlink(InodeID, std::string_view, const char *, SwordFsInode *) override {
+  Status StatFs(SwordFsStatFs *) override { return Status::OK(); }
+  Status Access(InodeID, uint32_t) override { return Status::OK(); }
+  Status Symlink(InodeID, std::string_view, std::string_view, SwordFsInode *) override {
     return Status::OK();
   }
   Status Link(InodeID, InodeID, std::string_view,
@@ -561,7 +585,7 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status ListChunks(InodeID ino,
-                    std::vector<swordfs::metadata::ChunkMeta> *out) override {
+                    std::vector<swordfs::metadata::SwordFsChunk> *out) override {
     ++list_chunks_calls;
     last_list_ino = ino;
     if (!list_chunks_status.ok()) {
@@ -571,21 +595,21 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return Status::OK(); }
-  Status AddChunk(InodeID, const swordfs::metadata::ChunkMeta &) override {
+  Status AddChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
     return Status::OK();
   }
   Status FindChunk(InodeID, swordfs::metadata::ChunkIndex,
-                   swordfs::metadata::ChunkMeta *) override {
+                   swordfs::metadata::SwordFsChunk *) override {
     return Status::NotFound("no chunk");
   }
-  Status Truncate(InodeID, size_t) override { return Status::OK(); }
+  Status Truncate(InodeID, uint64_t) override { return Status::OK(); }
 
   int list_chunks_calls = 0;
   int reclaim_inode_calls = 0;
   InodeID last_list_ino = 0;
   InodeID last_reclaim_ino = 0;
   Status list_chunks_status = Status::OK();
-  std::vector<swordfs::metadata::ChunkMeta> chunks;
+  std::vector<swordfs::metadata::SwordFsChunk> chunks;
   std::unordered_map<InodeID, struct stat> attrs;
 };
 
@@ -616,12 +640,12 @@ TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
   auto *data = data_up.get();
 
   // Seed two chunk records.
-  swordfs::metadata::ChunkMeta c0{};
+  swordfs::metadata::SwordFsChunk c0{};
   c0.index = 0;
   c0.start_offset = 0;
   c0.key = "4242/0";
   c0.size = 1024;
-  swordfs::metadata::ChunkMeta c1{};
+  swordfs::metadata::SwordFsChunk c1{};
   c1.index = 1;
   c1.start_offset = 65536;
   c1.key = "4242/1";
@@ -667,7 +691,7 @@ TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
   auto *meta = meta_up.get();
   auto *data = data_up.get();
 
-  swordfs::metadata::ChunkMeta c{};
+  swordfs::metadata::SwordFsChunk c{};
   c.index = 0;
   c.key = "99/0";
   meta->chunks = {c};
@@ -725,10 +749,10 @@ TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
   auto *meta = meta_up.get();
   auto *data = data_up.get();
 
-  swordfs::metadata::ChunkMeta c0{};
+  swordfs::metadata::SwordFsChunk c0{};
   c0.index = 0;
   c0.key = "1/0";
-  swordfs::metadata::ChunkMeta c1{};
+  swordfs::metadata::SwordFsChunk c1{};
   c1.index = 1;
   c1.key = "1/1";
   meta->chunks = {c0, c1};
@@ -819,10 +843,10 @@ TEST_F(FileHandleTest, ReclaimDataRefusesWhenNlinkStillPositive) {
   auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/2);
   // Add a chunk so we'd have something to delete if the guard fell
   // through; the absence of any delete is what we actually verify.
-  swordfs::metadata::ChunkMeta cm{};
-  cm.index = 0;
-  cm.key = "7/0";
-  meta->chunks = {cm};
+  swordfs::metadata::SwordFsChunk chunk{};
+  chunk.index = 0;
+  chunk.key = "7/0";
+  meta->chunks = {chunk};
 
   ASSERT_TRUE(ReclaimInode(7).ok());
   EXPECT_TRUE(data->delete_calls.empty())

@@ -7,11 +7,46 @@
 
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
-#include "metadata/MetaEngineFactory.hpp"
-#include "storage/DataEngineFactory.hpp"
+#include "metadata/MetaEngineRegistry.hpp"
+#include "storage/DataEngineRegistry.hpp"
 #include "storage/IDataEngine.hpp"
+#include "storage/StorageUrl.hpp"
 
 namespace swordfs::volume {
+namespace {
+
+Status CreateMetaEngine(std::string_view meta_url, std::string_view volume_name,
+                         std::unique_ptr<swordfs::metadata::IMetaEngine> *out) {
+  if (out == nullptr) {
+    return Status::InvalidArgument("metadata engine output is null");
+  }
+
+  utils::StorageUrl url;
+  if (!utils::StorageUrl::Parse(meta_url, &url)) {
+    return Status::InvalidArgument("invalid metadata URL: " + std::string(meta_url));
+  }
+
+  try {
+    return swordfs::metadata::MetaEngineRegistry::Instance().Create(url.scheme, meta_url, volume_name, out);
+  } catch (const std::exception &error) {
+    return Status::IOError("metadata engine initialization failed: " + std::string(error.what()));
+  }
+}
+
+Status CreateDataEngine(std::string_view bucket,
+                        std::unique_ptr<swordfs::storage::IDataEngine> *out) {
+  if (bucket.empty()) {
+    return Status::InvalidArgument("bucket URL is empty");
+  }
+
+  utils::StorageUrl url;
+  if (!utils::StorageUrl::Parse(bucket, &url)) {
+    return Status::InvalidArgument("invalid bucket URL: " + std::string(bucket));
+  }
+  return swordfs::storage::DataEngineRegistry::Instance().Create(url.scheme, out);
+}
+
+}  // namespace
 
 VolumeImpl::VolumeImpl() = default;
 VolumeImpl::~VolumeImpl() = default;
@@ -45,33 +80,45 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
   }
   config_.chunk_size = cfg.chunk_size();
 
-  const std::string &config_path = cfg.volume_config_path();
-  if (!config_path.empty()) {
-    if (VolumeConfig::ConfigFileExists(config_path)) {
-      return Status::AlreadyExists("volume already exists at " + config_path);
-    }
-    auto status = config_.WriteToFile(config_path);
-    if (!status.ok()) {
-      return status;
-    }
+  auto status = CreateMetaEngine(config_.meta_url, config_.name, &meta_engine_);
+  if (!status.ok()) {
+    return status;
+  }
+  status = meta_engine_->Initialize();
+  if (!status.ok()) {
+    return status;
+  }
+  status = meta_engine_->FormatVolume(config_);
+  if (!status.ok()) {
+    return status;
   }
 
   return Status::OK();
 }
 
 Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
-  auto status = config_.ReadFromFile(cfg.volume_config_path());
+  config_.meta_url = cfg.meta_url();
+  config_.name = cfg.volume();
+
+  auto status = CreateMetaEngine(config_.meta_url, config_.name, &meta_engine_);
+  if (!status.ok()) {
+    return status;
+  }
+  status = meta_engine_->Initialize();
+  if (!status.ok()) {
+    return status;
+  }
+  status = meta_engine_->LoadVolume(&config_);
   if (!status.ok()) {
     return status;
   }
 
-  // Create engines.
-  status = swordfs::metadata::CreateMetaEngine(config_.meta_url, &meta_engine_);
-  if (!status.ok()) {
-    return status;
-  }
   if (!config_.bucket.empty()) {
-    status = storage::CreateDataEngine(config_, &data_engine_);
+    status = CreateDataEngine(config_.bucket, &data_engine_);
+    if (!status.ok()) {
+      return status;
+    }
+    status = data_engine_->Initialize();
     if (!status.ok()) {
       return status;
     }

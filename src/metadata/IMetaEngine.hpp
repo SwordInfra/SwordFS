@@ -7,15 +7,16 @@
 
 #pragma once
 
-#include <sys/stat.h>
-#include <sys/statvfs.h>
-
 #include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "metadata/Types.hpp"
+#include "metadata/types/Chunk.hpp"
+#include "metadata/types/Common.hpp"
+#include "metadata/types/Entry.hpp"
+#include "metadata/types/Inode.hpp"
+#include "metadata/types/Volume.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
 
@@ -27,11 +28,6 @@ namespace swordfs::metadata {
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
 
-/// Returns true if |meta_url| refers to the in-memory metadata engine.
-inline bool IsMemoryMode(std::string_view meta_url) {
-  return meta_url == kMemoryMetaUrl;
-}
-
 /// Concurrency contract: every method on this interface must be atomic
 /// and thread-safe.  Concurrent observers must never see an intermediate
 /// state of a composite operation (e.g. a Rename whose target has been
@@ -41,6 +37,17 @@ inline bool IsMemoryMode(std::string_view meta_url) {
 class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
+
+  /// Initialize a metadata backend connection and validate backend-specific
+  /// runtime prerequisites. Persistent backends should not create a volume here.
+  virtual Status Initialize() = 0;
+
+  /// Create a new metadata volume.
+  virtual Status FormatVolume(const SwordFsVolume &config) = 0;
+
+  /// Load an existing metadata volume and return its persistent volume
+  /// configuration in |config|.
+  virtual Status LoadVolume(SwordFsVolume *config) = 0;
 
   /// Return filesystem limits provided by this metadata engine.
   virtual Limits GetLimits() const = 0;
@@ -57,11 +64,11 @@ class IMetaEngine {
 
   /// Create a regular file.
   virtual Status Create(InodeID parent_ino, std::string_view name,
-                        mode_t mode, SwordFsInode *out) = 0;
+                        uint32_t mode, SwordFsInode *out) = 0;
 
   /// Create a directory. Increments parent nlink to account for "..".
   virtual Status MkDir(InodeID parent_ino, std::string_view name,
-                       mode_t mode, SwordFsInode *out) = 0;
+                       uint32_t mode, SwordFsInode *out) = 0;
 
   /// POSIX unlink(2): detach the directory entry and decrement nlink.
   /// On success, *post_nlink receives the authoritative nlink value the
@@ -76,7 +83,7 @@ class IMetaEngine {
   /// deciding afterwards: the store is the only thing that mutates
   /// nlink on this thread, and we read it back under the same lock.
   virtual Status Unlink(InodeID parent_ino, std::string_view name,
-                        nlink_t *post_nlink = nullptr) = 0;
+                        uint64_t *post_nlink = nullptr) = 0;
 
   /// Remove an empty directory. Decrements parent nlink.
   virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;
@@ -96,18 +103,18 @@ class IMetaEngine {
   /// Set attributes for an inode.  |fields| is a bitwise OR of
   /// SetAttrField values; only the bits set in |fields| are read from
   /// |attr| and applied to the inode.
-  virtual Status SetAttr(InodeID ino, const struct stat *attr,
+  virtual Status SetAttr(InodeID ino, const SwordFsAttr &attr,
                          SetAttrField fields, SwordFsInode *out) = 0;
 
   /// Get file system statistics.
-  virtual Status StatFs(struct statvfs *stbuf) = 0;
+  virtual Status StatFs(SwordFsStatFs *stbuf) = 0;
 
   /// Check access permissions.
-  virtual Status Access(InodeID ino, int mask) = 0;
+  virtual Status Access(InodeID ino, uint32_t mask) = 0;
 
   /// Create a symbolic link.
   virtual Status Symlink(InodeID parent_ino, std::string_view name,
-                         const char *link, SwordFsInode *out) = 0;
+                         std::string_view link, SwordFsInode *out) = 0;
 
   /// Create a hard link to an existing inode.
   virtual Status Link(InodeID ino, InodeID newparent_ino,
@@ -134,11 +141,11 @@ class IMetaEngine {
   virtual Status ReclaimInode(InodeID ino) = 0;
 
   /// Enumerate the chunk indices currently registered for |ino|. Fills
-  /// |*out| with `ChunkMeta` entries (by value) ordered by ascending
+  /// |*out| with `SwordFsChunk` entries (by value) ordered by ascending
   /// chunk index. Used by the VFS layer when reclaiming an inode to
   /// compute the per-chunk object keys it must delete via the data
   /// engine. Returns OK with `*out` empty if the inode has no chunks.
-  virtual Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out) = 0;
+  virtual Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) = 0;
 
   /// Open a directory for reading. Performs permission check and updates
   /// atime. Handle allocation is now managed by FileHandleManager.
@@ -151,15 +158,15 @@ class IMetaEngine {
   /// Register a flushed chunk.  The metadata engine stores the chunk
   /// key, size, and start offset so that subsequent reads can locate
   /// the data via the data engine.
-  virtual Status AddChunk(InodeID ino, const ChunkMeta &cm) = 0;
+  virtual Status AddChunk(InodeID ino, const SwordFsChunk &chunk) = 0;
 
-  /// Find the chunk at |idx|.  Returns OK and fills |*cm| if a
+  /// Find the chunk at |idx|.  Returns OK and fills |*chunk| if a
   /// matching chunk is registered for the given inode.
-  virtual Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) = 0;
+  virtual Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) = 0;
 
   /// Truncate |ino| to |size| bytes.  Updates the inode size and drops
   /// chunk metadata for data beyond the new size.
-  virtual Status Truncate(InodeID ino, size_t size) = 0;
+  virtual Status Truncate(InodeID ino, uint64_t size) = 0;
 };
 
 }  // namespace swordfs::metadata

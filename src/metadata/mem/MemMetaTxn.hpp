@@ -31,7 +31,10 @@
 #include <string_view>
 #include <vector>
 
-#include "metadata/Types.hpp"
+#include "metadata/types/Chunk.hpp"
+#include "metadata/types/Common.hpp"
+#include "metadata/types/Entry.hpp"
+#include "metadata/types/Inode.hpp"
 #include "utils/Status.hpp"
 
 using Status = swordfs::utils::Status;
@@ -51,7 +54,7 @@ class MemMetaTxn {
   Status LookupInode(InodeID ino, SwordFsInode *out);
 
   // Return the total number of inodes currently stored.
-  size_t InodeCount();
+  uint64_t InodeCount();
 
   // ────────────────────────────────────────────────────────────────
   // Inode writes (by ino)
@@ -59,12 +62,12 @@ class MemMetaTxn {
 
   // Apply the requested SetAttr fields atomically. Size changes also
   // update chunk metadata and apply the killpriv/ctime rules.
-  Status SetAttr(InodeID ino, const struct stat *attr, SetAttrField fields,
+  Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields,
                  SwordFsInode *out = nullptr);
 
   // Truncate an inode atomically: update st_size, apply killpriv/ctime,
   // and drop or clamp chunk metadata beyond the new size.
-  Status Truncate(InodeID ino, size_t size);
+  Status Truncate(InodeID ino, uint64_t size);
 
   // Bump the inode's atime/mtime/ctime to now, selected by |fields|
   // (only kAtime/kMtime/kCtime are honoured).
@@ -91,7 +94,7 @@ class MemMetaTxn {
   // Linking a subdirectory also increments the parent's nlink (the new
   // ".." backlink); any successful link bumps the parent's mtime/ctime.
   Status AddEntry(InodeID parent_ino, std::string_view name,
-                  mode_t mode, SwordFsInode *out);
+                  uint32_t mode, SwordFsInode *out);
 
 
   // Move an existing entry from old_parent/old_name to
@@ -122,7 +125,7 @@ class MemMetaTxn {
   // a non-empty directory returns NotEmpty.  Missing entries return
   // NotFound. Any successful removal bumps the parent's mtime/ctime.
   Status Unlink(InodeID parent_ino, std::string_view name,
-                nlink_t *post_nlink = nullptr);
+                uint64_t *post_nlink = nullptr);
 
   // Link an existing inode (by ino) into a directory (hard link).
   // Increments the inode's nlink; bumps the inode's ctime and the
@@ -151,9 +154,9 @@ class MemMetaTxn {
   // Chunk metadata
   // ────────────────────────────────────────────────────────────────
 
-  Status AddChunk(InodeID ino, const ChunkMeta &cm);
-  Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm);
-  Status TruncateChunks(InodeID ino, size_t new_size);
+  Status AddChunk(InodeID ino, const SwordFsChunk &chunk);
+  Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
+  Status TruncateChunks(InodeID ino, uint64_t new_size);
 
   // ────────────────────────────────────────────────────────────────
   // Open-unlink reclaim
@@ -164,7 +167,7 @@ class MemMetaTxn {
   Status ReclaimInode(InodeID ino);
 
   // Snapshot every chunk registered for |ino|, ascending chunk index.
-  Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out);
+  Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out);
 
  private:
   friend class MemMetaStore;
@@ -177,7 +180,7 @@ class MemMetaTxn {
   // "Locked" suffix: every MemMetaTxn method runs inside the store's
   // critical section by construction.
   // ────────────────────────────────────────────────────────────────
-  Status WriteAttr(InodeID ino, const struct stat *attr);
+  Status WriteAttr(InodeID ino, const SwordFsAttr &attr);
 
   SwordFsInode *FindInode(InodeID ino);
   void InsertInode(std::unique_ptr<SwordFsInode> inode);

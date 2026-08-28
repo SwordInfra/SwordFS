@@ -105,7 +105,22 @@ class MemMetaImplTest : public ::testing::Test {
   Status GetInodeAttr(InodeID ino, struct stat *attr) {
     SwordFsInode inode;
     Status status = impl_->GetInode(ino, &inode);
-    if (status.ok() && attr) *attr = inode.attr;
+    if (status.ok() && attr) {
+      attr->st_ino = static_cast<ino_t>(inode.attr.ino);
+      attr->st_mode = static_cast<mode_t>(inode.attr.mode);
+      attr->st_nlink = static_cast<nlink_t>(inode.attr.nlink);
+      attr->st_uid = static_cast<uid_t>(inode.attr.uid);
+      attr->st_gid = static_cast<gid_t>(inode.attr.gid);
+      attr->st_size = static_cast<off_t>(inode.attr.size);
+      attr->st_blksize = static_cast<blksize_t>(inode.attr.blksize);
+      attr->st_blocks = static_cast<blkcnt_t>(inode.attr.blocks);
+      attr->st_atime = static_cast<time_t>(inode.attr.atime);
+      attr->st_atim.tv_nsec = static_cast<long>(inode.attr.atime_nsec);
+      attr->st_mtime = static_cast<time_t>(inode.attr.mtime);
+      attr->st_mtim.tv_nsec = static_cast<long>(inode.attr.mtime_nsec);
+      attr->st_ctime = static_cast<time_t>(inode.attr.ctime);
+      attr->st_ctim.tv_nsec = static_cast<long>(inode.attr.ctime_nsec);
+    }
     return status;
   }
 
@@ -684,9 +699,9 @@ TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
   attr.st_size = 2048;
   swordfs::metadata::SwordFsInode out{};
   ASSERT_TRUE(impl_->SetAttr(f_ino, &attr, SetAttrField::kSize, &out).ok());
-  EXPECT_EQ(out.attr.st_size, 2048);
-  EXPECT_EQ(out.attr.st_mode & S_ISUID, 0u);
-  EXPECT_EQ(out.attr.st_mode & S_ISGID, 0u);
+  EXPECT_EQ(out.attr.size, 2048);
+  EXPECT_EQ(out.attr.mode & S_ISUID, 0u);
+  EXPECT_EQ(out.attr.mode & S_ISGID, 0u);
 }
 
 TEST_F(MemMetaImplTest, ReclaimInodeMissingInodeIsNoOp) {
