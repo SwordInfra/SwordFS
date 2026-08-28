@@ -75,6 +75,28 @@ TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesSameParentNlin
   EXPECT_EQ(root.attr.nlink, 3U);
 }
 
+TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesCrossParentNlink) {
+  SwordFsInode dir_a;
+  SwordFsInode dir_b;
+  SwordFsInode src;
+  SwordFsInode dst;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "a", 0777, &dir_a).ok());
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "b", 0777, &dir_b).ok());
+  ASSERT_TRUE(impl_->MkDir(dir_a.ino, "src", 0777, &src).ok());
+  ASSERT_TRUE(impl_->MkDir(dir_b.ino, "dst", 0777, &dst).ok());
+
+  ASSERT_TRUE(impl_->Rename(dir_a.ino, "src", dir_b.ino, "dst", swordfs::metadata::RenameFlag::kNone, nullptr).ok());
+
+  SwordFsInode old_parent;
+  SwordFsInode new_parent;
+  ASSERT_TRUE(impl_->GetInode(dir_a.ino, &old_parent).ok());
+  ASSERT_TRUE(impl_->GetInode(dir_b.ino, &new_parent).ok());
+  // The old parent loses the moved directory's ".." backlink; the new parent
+  // loses the victim's backlink and gains the moved directory's, net zero.
+  EXPECT_EQ(old_parent.attr.nlink, 2U);
+  EXPECT_EQ(new_parent.attr.nlink, 3U);
+}
+
 TEST_F(RedisMetaImplTest, SetAttrShrinkRemovesAndClampsChunks) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());

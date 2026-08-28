@@ -456,6 +456,25 @@ TEST_F(DirectoryOpsTest, RenameDirOverEmptyDirSameParentUpdatesNlink) {
   EXPECT_EQ(root_after.st_nlink, static_cast<nlink_t>(3));
 }
 
+TEST_F(DirectoryOpsTest, RenameDirOverEmptyDirCrossParentUpdatesNlink) {
+  ASSERT_EQ(fixture_.MkDir("a", kDefaultDirMode), 0);
+  ASSERT_EQ(fixture_.MkDir("b", kDefaultDirMode), 0);
+  ASSERT_EQ(fixture_.MkDir("a/src", kDefaultDirMode), 0);
+  ASSERT_EQ(fixture_.MkDir("b/dst", kDefaultDirMode), 0);
+
+  ASSERT_EQ(fixture_.Rename("a/src", "b/dst"), 0);
+
+  struct stat old_parent_after;
+  ASSERT_EQ(fixture_.Stat("a", &old_parent_after), 0);
+  EXPECT_EQ(old_parent_after.st_nlink, static_cast<nlink_t>(2));
+
+  // The new parent loses the victim's ".." backlink and gains the moved
+  // directory's, so its nlink is unchanged.
+  struct stat new_parent_after;
+  ASSERT_EQ(fixture_.Stat("b", &new_parent_after), 0);
+  EXPECT_EQ(new_parent_after.st_nlink, static_cast<nlink_t>(3));
+}
+
 // ────────────────────────────────────────────────────────────────
 // Directory rename — over non-empty dir (error)
 // ────────────────────────────────────────────────────────────────

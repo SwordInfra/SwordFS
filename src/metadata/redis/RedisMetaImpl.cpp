@@ -747,10 +747,12 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     }
     status = txn.HDel(key_.Directory(old_parent_ino), old_name); if (!status.ok()) return status;
     status = txn.HSet(key_.Directory(new_parent_ino), new_name, SerializeDirValue(source_type, source_ino)); if (!status.ok()) return status;
-    if (source.IsDir()) {
-      source.parent_ino = new_parent_ino;
-      if (old_parent_ino != new_parent_ino && !target_exists) { old_parent.attr.nlink--; new_parent.attr.nlink++; }
-    } else { source.parent_ino = new_parent_ino; }
+    source.parent_ino = new_parent_ino;
+    // Moving a directory re-parents its "..": the old parent loses a hard
+    // link and the new parent gains one. This applies whether or not the
+    // move replaced a victim; the victim's own ".." backlink was already
+    // accounted for above.
+    if (source.IsDir() && old_parent_ino != new_parent_ino) { old_parent.attr.nlink--; new_parent.attr.nlink++; }
     Touch(&source, false, false, true);
     Touch(&old_parent, false, true, true);
     Touch(&new_parent, false, true, true);
