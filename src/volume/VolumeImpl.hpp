@@ -69,9 +69,6 @@ class VolumeImpl {
 
   const swordfs::metadata::SwordFsVolume &config() const { return config_; }
 
-  /// Returns a `swordfs mount` command-line hint for this volume.
-  std::string MountHint() const;
-
   /// Chunk size in bytes — normally immutable after format, but see
   /// `set_chunk_size_for_test` for the unit-test escape hatch.
   uint64_t chunk_size() const {

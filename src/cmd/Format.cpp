@@ -26,7 +26,10 @@ int RunFormat() {
     return 1;
   }
 
-  SWORDFS_LOG_INFO << "Mount with: " << vol.MountHint();
+  SWORDFS_LOG_INFO << "Volume '" << vol.config().name
+                   << "' formatted successfully. Mount with: swordfs mount --volume "
+                   << vol.config().name << " --meta " << vol.config().meta_url
+                   << " /mnt/swordfs";
   return 0;
 }
 

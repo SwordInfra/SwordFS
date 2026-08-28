@@ -51,13 +51,6 @@ Status CreateDataEngine(std::string_view bucket,
 VolumeImpl::VolumeImpl() = default;
 VolumeImpl::~VolumeImpl() = default;
 
-std::string VolumeImpl::MountHint() const {
-  std::string hint = "swordfs mount --volume " + config_.name;
-  hint += " --meta " + config_.meta_url;
-  hint += " /mnt/swordfs";
-  return hint;
-}
-
 std::unique_ptr<VolumeImpl> VolumeImpl::instance_;
 
 void VolumeImpl::Initialize() {

@@ -51,16 +51,6 @@ TEST_F(VolumeImplTest, CreateFromSucceeds) {
   EXPECT_TRUE(vol.CreateFrom(cfg).ok());
 }
 
-TEST_F(VolumeImplTest, MountHintContainsKeyFields) {
-  auto cfg = makeConfig("memory://local", "myvol");
-  VolumeImpl vol;
-  ASSERT_TRUE(vol.CreateFrom(cfg).ok());
-  std::string hint = vol.MountHint();
-  EXPECT_NE(hint.find("myvol"), std::string::npos);
-  EXPECT_NE(hint.find("memory://local"), std::string::npos);
-  EXPECT_NE(hint.find("mount"), std::string::npos);
-}
-
 TEST_F(VolumeImplTest, CreateFromRedisEngine) {
   const char *redis_url = std::getenv("SWORDFS_REDIS_TEST_URL");
   if (redis_url == nullptr) {
