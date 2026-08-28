@@ -23,11 +23,11 @@ Chunk::Chunk(metadata::InodeID ino, metadata::ChunkIndex index)
       meta_(volume::VolumeImpl::Instance().meta_engine()) {}
 
 utils::Status Chunk::Initialize() {
-  metadata::ChunkMeta cm;
-  auto status = meta_->FindChunk(ino_, index_, &cm);
+  metadata::SwordFsChunk chunk;
+  auto status = meta_->FindChunk(ino_, index_, &chunk);
   if (status.ok()) {
     state_ = State::kFlushed;
-    flushed_size_ = cm.size;
+    flushed_size_ = chunk.size;
     return Status::OK();
   } else if (status.IsNotFound()) {
     // create a chunk but not commit to metadata so only the local mount knows it.
@@ -103,13 +103,13 @@ utils::Status Chunk::Flush() {
   return utils::Status::OK();
 }
 
-metadata::ChunkMeta Chunk::BuildMeta() const {
-  metadata::ChunkMeta cm;
-  cm.index = index_;
-  cm.start_offset = static_cast<uint64_t>(StartOffset());
-  cm.key = ChunkKey();
-  cm.size = IsFlushed() ? flushed_size_ : (wb_ ? wb_->size() : 0);
-  return cm;
+metadata::SwordFsChunk Chunk::BuildMeta() const {
+  metadata::SwordFsChunk chunk;
+  chunk.index = index_;
+  chunk.start_offset = static_cast<uint64_t>(StartOffset());
+  chunk.key = ChunkKey();
+  chunk.size = IsFlushed() ? flushed_size_ : (wb_ ? wb_->size() : 0);
+  return chunk;
 }
 
 }  // namespace swordfs::chunk

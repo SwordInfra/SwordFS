@@ -44,8 +44,6 @@ void ConfigCenter::RegisterMountOptions(CLI::App& app) {
                   "Metadata engine URL (e.g. memory://local, redis://...)")
       ->required()
       ->check(swordfs::config::ValidateMetaUrl);
-  cmd->add_option("--volume-config-path", volume_config_path_,
-                  "Volume config directory (required for --meta memory://local)");
   cmd->add_option("-o", fuse_opts_, "FUSE mount options (e.g. -o allow_other,ro)")
       ->allow_extra_args(false);
   cmd->add_option("--storage-thread-count", storage_thread_count_,
@@ -59,13 +57,7 @@ void ConfigCenter::RegisterMountOptions(CLI::App& app) {
       ->check(CLI::Range(1, static_cast<int>(std::thread::hardware_concurrency())));
   cmd->add_option("--pidfile", pidfile_, "Write daemon PID to this file");
 
-  cmd->parse_complete_callback([this]() {
-    if (volume_config_path_.empty() ==
-        swordfs::metadata::IsMemoryMode(meta_url_)) {
-      throw CLI::ValidationError(
-          "--volume-config-path and --meta memory://local must be used together");
-    }
-  });
+
 
   SubCommand sc;
   sc.cmd = cmd;
@@ -93,15 +85,8 @@ void ConfigCenter::RegisterFormatOptions(CLI::App& app) {
                   "Chunk size in bytes (default: 64 MiB)")
       ->check(CLI::PositiveNumber)
       ->check(CLI::Range(4096ULL, 1024ULL * 1024 * 1024));
-  cmd->add_option("--volume-config-path", volume_config_path_,
-                  "Volume config directory (required for --meta memory://local)");
 
   cmd->parse_complete_callback([this]() {
-    if (volume_config_path_.empty() ==
-        swordfs::metadata::IsMemoryMode(meta_url_)) {
-      throw CLI::ValidationError(
-          "--volume-config-path and --meta memory://local must be used together");
-    }
     // Derive storage backend from --bucket scheme.
     if (!bucket_url_.empty()) {
       utils::StorageUrl url;

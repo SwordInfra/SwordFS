@@ -8,30 +8,14 @@
 #include <unistd.h>
 
 #include <cctype>
-#include <cstring>
 
 #include "dirent.h"
-#include "metadata/Types.hpp"
+#include "metadata/types/Common.hpp"
 
 namespace swordfs::metadata {
 
-struct stat MakeStat(mode_t mode, time_t now) {
-  struct stat st;
-  std::memset(&st, 0, sizeof(st));
-  st.st_mode = mode;
-  st.st_nlink = S_ISDIR(mode) ? 2 : 1;
-  st.st_size = S_ISDIR(mode) ? 4096 : 0;
-  st.st_uid = ::getuid();
-  st.st_gid = ::getgid();
-  st.st_blksize = 4096;
-  st.st_atime = now;
-  st.st_mtime = now;
-  st.st_ctime = now;
-  return st;
-}
-
 // Convert st_mode to dirent type (DT_DIR, DT_REG, etc.)
-uint32_t ModeToDt(mode_t mode) {
+uint32_t ModeToDt(uint32_t mode) {
   if (S_ISDIR(mode)) {
     return DT_DIR;
   }
@@ -54,15 +38,6 @@ uint32_t ModeToDt(mode_t mode) {
     return DT_SOCK;
   }
   return DT_UNKNOWN;
-}
-
-void KillSUID(struct stat *st) {
-  if (st->st_mode & S_ISUID) {
-    st->st_mode &= ~S_ISUID;
-  }
-  if (st->st_mode & S_ISGID) {
-    st->st_mode &= ~S_ISGID;
-  }
 }
 
 utils::Status ParseUrlScheme(std::string_view url, std::string *scheme) {

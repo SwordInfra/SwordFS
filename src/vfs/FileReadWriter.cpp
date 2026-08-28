@@ -270,12 +270,11 @@ utils::Status FileReadWriter::Flush() {
   if (file_end > 0) {
     metadata::SwordFsInode inode;
     if (meta_->GetInode(ino_, &inode).ok() &&
-        file_end > inode.attr.st_size) {
-      struct stat new_attr = {
-          .st_size = file_end,
-      };
+        file_end > inode.attr.size) {
+      metadata::SwordFsAttr new_attr;
+      new_attr.size = file_end;
       auto status = meta_->SetAttr(
-          ino_, &new_attr, metadata::SetAttrField::kSize, nullptr);
+          ino_, new_attr, metadata::SetAttrField::kSize, nullptr);
       if (!status.ok()) {
         SWORDFS_LOG_ERROR << "FileReadWriter::Flush size update FAILED: ino="
                           << ino_ << " — " << status.message();

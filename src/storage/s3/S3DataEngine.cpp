@@ -23,7 +23,6 @@
 #include "storage/s3/S3StreamBuf.hpp"
 #include "utils/FiberThreadPool.hpp"
 #include "utils/Logging.hpp"
-#include "volume/VolumeConfig.hpp"
 #include "volume/VolumeImpl.hpp"
 
 namespace swordfs::storage {

@@ -14,7 +14,7 @@
 #include "utils/Status.hpp"
 
 using swordfs::metadata::ChunkIndex;
-using swordfs::metadata::ChunkMeta;
+using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaStore;
 using swordfs::metadata::MemMetaTxn;
@@ -372,13 +372,13 @@ TEST_F(MemMetaStoreTest, IsDescendantOfSelf) {
 // ────────────────────────────────────────────────────────────────
 
 namespace {
-ChunkMeta MakeChunk(ChunkIndex index, uint64_t start_offset, size_t size) {
-  ChunkMeta cm;
-  cm.index = index;
-  cm.start_offset = start_offset;
-  cm.key = "key";
-  cm.size = size;
-  return cm;
+SwordFsChunk MakeChunk(ChunkIndex index, uint64_t start_offset, size_t size) {
+  SwordFsChunk chunk;
+  chunk.index = index;
+  chunk.start_offset = start_offset;
+  chunk.key = "key";
+  chunk.size = size;
+  return chunk;
 }
 }  // namespace
 
@@ -387,7 +387,7 @@ TEST_F(MemMetaStoreTest, AddChunkAndFindChunk) {
       [&](MemMetaTxn &txn) { return txn.AddChunk(42, MakeChunk(0, 0, 100)); });
   ASSERT_TRUE(status.ok());
 
-  ChunkMeta out;
+  SwordFsChunk out;
   status = store_->Transact(
       [&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
   ASSERT_TRUE(status.ok());
@@ -398,17 +398,17 @@ TEST_F(MemMetaStoreTest, AddChunkAndFindChunk) {
 }
 
 TEST_F(MemMetaStoreTest, AddChunkDuplicateFails) {
-  ChunkMeta cm = MakeChunk(0, 0, 100);
+  SwordFsChunk chunk = MakeChunk(0, 0, 100);
   Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.AddChunk(42, cm); });
+      [&](MemMetaTxn &txn) { return txn.AddChunk(42, chunk); });
   ASSERT_TRUE(status.ok());
   status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.AddChunk(42, cm); });
+      [&](MemMetaTxn &txn) { return txn.AddChunk(42, chunk); });
   EXPECT_TRUE(status.IsAlreadyExists());
 }
 
 TEST_F(MemMetaStoreTest, FindChunkNotFound) {
-  ChunkMeta out;
+  SwordFsChunk out;
   Status status = store_->Transact(
       [&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
   EXPECT_TRUE(status.IsNotFound());
@@ -440,7 +440,7 @@ TEST_F(MemMetaStoreTest, TruncateChunksToZeroRemovesAllChunks) {
   status = store_->Transact(
       [&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 0); });
   ASSERT_TRUE(status.ok());
-  ChunkMeta out;
+  SwordFsChunk out;
   status = store_->Transact(
       [&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
   EXPECT_TRUE(status.IsNotFound());
@@ -462,7 +462,7 @@ TEST_F(MemMetaStoreTest, TruncateChunksDropsChunksBeyondNewSize) {
   status = store_->Transact(
       [&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 100); });
   ASSERT_TRUE(status.ok());
-  ChunkMeta out;
+  SwordFsChunk out;
   // Chunk 0 ends exactly at the new size — kept unchanged.
   status = store_->Transact(
       [&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
@@ -487,7 +487,7 @@ TEST_F(MemMetaStoreTest, TruncateChunksClampsStraddlingChunk) {
   status = store_->Transact(
       [&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 150); });
   ASSERT_TRUE(status.ok());
-  ChunkMeta out;
+  SwordFsChunk out;
   status = store_->Transact(
       [&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
   ASSERT_TRUE(status.ok());
@@ -558,7 +558,7 @@ TEST_F(MemMetaStoreTest, ListChunksEmptyInodeIsOk) {
   SwordFsInode f;
   Add(kRoot, "f", kRegFile, &f);
 
-  std::vector<ChunkMeta> out;
+  std::vector<SwordFsChunk> out;
   Status status = store_->Transact(
       [&](MemMetaTxn &txn) { return txn.ListChunks(f.ino, &out); });
   ASSERT_TRUE(status.ok());
@@ -583,17 +583,17 @@ TEST_F(MemMetaStoreTest, ListChunksReturnsRegisteredChunksInIndexOrder) {
   // Add three chunks out of order; the snapshot must be sorted by
   // ChunkIndex so the coordinator's Delete calls follow the same
   // order as a sequential reader would.
-  ChunkMeta c2{};
+  SwordFsChunk c2{};
   c2.index = 2;
   c2.start_offset = 2 * kChunkSize;
   c2.key = std::to_string(ino) + "/2";
   c2.size = 100;
-  ChunkMeta c0{};
+  SwordFsChunk c0{};
   c0.index = 0;
   c0.start_offset = 0;
   c0.key = std::to_string(ino) + "/0";
   c0.size = 100;
-  ChunkMeta c1{};
+  SwordFsChunk c1{};
   c1.index = 1;
   c1.start_offset = kChunkSize;
   c1.key = std::to_string(ino) + "/1";
@@ -611,7 +611,7 @@ TEST_F(MemMetaStoreTest, ListChunksReturnsRegisteredChunksInIndexOrder) {
   });
   ASSERT_TRUE(status.ok());
 
-  std::vector<ChunkMeta> out;
+  std::vector<SwordFsChunk> out;
   status = store_->Transact(
       [&](MemMetaTxn &txn) { return txn.ListChunks(ino, &out); });
   ASSERT_TRUE(status.ok());

@@ -25,32 +25,32 @@ public:
   RedisMetaImpl &operator=(const RedisMetaImpl &) = delete;
 
   utils::Status Initialize() override;
-  utils::Status FormatVolume(const volume::VolumeConfig &config) override;
-  utils::Status LoadVolume(volume::VolumeConfig *config) override;
+  utils::Status FormatVolume(const SwordFsVolume &config) override;
+  utils::Status LoadVolume(SwordFsVolume *config) override;
   Limits GetLimits() const override;
 
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
   Status GetInode(InodeID ino, SwordFsInode *out) override;
   Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) override;
-  Status Create(InodeID parent_ino, std::string_view name, mode_t mode, SwordFsInode *out) override;
-  Status MkDir(InodeID parent_ino, std::string_view name, mode_t mode, SwordFsInode *out) override;
-  Status Unlink(InodeID parent_ino, std::string_view name, nlink_t *post_nlink) override;
+  Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
+  Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
+  Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
   Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
                 RenameFlag flags, RenameResult *result) override;
-  Status SetAttr(InodeID ino, const struct stat *attr, SetAttrField fields, SwordFsInode *out) override;
-  Status StatFs(struct statvfs *stbuf) override;
-  Status Access(InodeID ino, int mask) override;
-  Status Symlink(InodeID parent_ino, std::string_view name, const char *link, SwordFsInode *out) override;
+  Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override;
+  Status StatFs(SwordFsStatFs *stbuf) override;
+  Status Access(InodeID ino, uint32_t mask) override;
+  Status Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) override;
   Status Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) override;
   Status Readlink(InodeID ino, std::string *target) override;
   Status Open(InodeID ino) override;
   Status ReclaimInode(InodeID ino) override;
-  Status ListChunks(InodeID ino, std::vector<ChunkMeta> *out) override;
+  Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) override;
   Status OpenDir(InodeID ino) override;
-  Status AddChunk(InodeID ino, const ChunkMeta &cm) override;
-  Status FindChunk(InodeID ino, ChunkIndex idx, ChunkMeta *cm) override;
-  Status Truncate(InodeID ino, size_t size) override;
+  Status AddChunk(InodeID ino, const SwordFsChunk &chunk) override;
+  Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
+  Status Truncate(InodeID ino, uint64_t size) override;
 
 private:
   std::unique_ptr<RedisMetaClient> client_;

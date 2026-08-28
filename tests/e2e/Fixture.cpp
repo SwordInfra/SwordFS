@@ -69,13 +69,24 @@ bool Fixture::SetUp() {
 
   InitPaths();
 
+  std::error_code ec;
+  std::filesystem::create_directories(work_dir_, ec);
+  if (ec) {
+    std::fprintf(stderr, "E2E: failed to create %s: %s\n", work_dir_.c_str(), ec.message().c_str());
+    return false;
+  }
+
   if (!FormatVolume()) {
+    RemoveVolumeConfig();
     return false;
   }
   if (!StartMount()) {
+    RemoveVolumeConfig();
     return false;
   }
   if (!WaitForMount()) {
+    StopMount();
+    RemoveVolumeConfig();
     return false;
   }
 
@@ -84,6 +95,7 @@ bool Fixture::SetUp() {
 
 void Fixture::TearDown() {
   StopMount();
+  RemoveVolumeConfig();
 
   if (!std::getenv("SWORDFS_E2E_KEEP_WORKDIR")) {
     std::string cmd = "rm -rf " + work_dir_;
@@ -101,19 +113,12 @@ bool Fixture::FormatVolume() {
     metadata_url = "memory://local";
   }
 
-  std::error_code ec;
-  std::filesystem::create_directories(vol_config_dir_, ec);
-  if (ec) {
-    std::fprintf(stderr, "E2E: failed to create %s: %s\n", vol_config_dir_.c_str(), ec.message().c_str());
-    return false;
-  }
-
   // Shell out to the `swordfs format` binary to exercise the real
   // CLI path end-to-end.
   std::ostringstream cmd;
   cmd << FindSwordfsBin() << " --log-file " << LogPath() << " format"
       << " --volume " << volume_name_ << " --meta " << metadata_url << " --bucket " << bucket_url_
-      << " --volume-config-path " << vol_config_dir_ << " 2>&1";
+      << " 2>&1";
 
   int ret = std::system(cmd.str().c_str());
   if (ret != 0) {
@@ -138,7 +143,7 @@ bool Fixture::StartMount() {
   std::ostringstream cmd;
   cmd << FindSwordfsBin() << " --log-file " << LogPath() << " mount "
       << " --volume " << volume_name_ << " --meta memory://local"
-      << " --volume-config-path " << vol_config_dir_ << " --fuse-threads 2"
+      << " --fuse-threads 2"
       << " --storage-thread-count 2"
       << " --pidfile " << work_dir_ << "/swordfs.pid"
       << " " << mountpoint_ << " 2>&1";
@@ -488,6 +493,16 @@ std::string Fixture::LogPath() const {
   return log ? log : work_dir_ + "/swordfs.log";
 }
 
+void Fixture::RemoveVolumeConfig() {
+  constexpr std::string_view kConfigRoot = "/etc/swordfs";
+  const std::filesystem::path volume_dir = std::filesystem::path(kConfigRoot) / volume_name_;
+  std::error_code ec;
+  std::filesystem::remove_all(volume_dir, ec);
+  if (ec) {
+    std::fprintf(stderr, "E2E: failed to remove volume config %s: %s\n", volume_dir.c_str(), ec.message().c_str());
+  }
+}
+
 void Fixture::InitPaths() {
   // Use the fully-qualified gtest name (suite_test) as the unique
   // namespace so that parallel / repeated runs never collide.
@@ -502,8 +517,6 @@ void Fixture::InitPaths() {
   volume_name_ += std::to_string(folly::hash::SpookyHashV2::Hash64(test_name.data(), test_name.size(), 0));
   work_dir_ = "/tmp/swordfs_e2e_" + test_name;
   mountpoint_ = work_dir_ + "/mnt";
-  vol_config_dir_ = work_dir_ + "/config";
-
   // Restore base URL and append test-specific prefix.
   bucket_url_ = base_bucket_url_ + volume_name_;
 }

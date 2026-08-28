@@ -16,13 +16,16 @@
 #include "volume/VolumeImpl.hpp"
 
 using swordfs::metadata::ChunkIndex;
-using swordfs::metadata::ChunkMeta;
+using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsInode;
+using swordfs::metadata::SwordFsAttr;
+using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::SwordFsStatFs;
 using swordfs::vfs::VfsImpl;
 
 // Minimal no-op data engine. The VfsImplIntegrationTest fixture must
@@ -149,6 +152,9 @@ namespace {
 
 class MockMetaEngine : public swordfs::metadata::IMetaEngine {
  public:
+  Status Initialize() override { return Status::OK(); }
+  Status FormatVolume(const SwordFsVolume &) override { return Status::OK(); }
+  Status LoadVolume(SwordFsVolume *) override { return Status::OK(); }
   Limits GetLimits() const override { return {}; }
   Status Lookup(InodeID, std::string_view, SwordFsInode *out) override {
     if (out) {
@@ -168,21 +174,21 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
                  std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, mode_t, SwordFsInode *out) override {
+  Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
     if (out) {
       *out = {};
       out->ino = 100;
     }
     return call_status_;
   }
-  Status MkDir(InodeID, std::string_view, mode_t, SwordFsInode *out) override {
+  Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
     if (out) {
       *out = {};
       out->ino = 101;
     }
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, nlink_t *) override {
+  Status Unlink(InodeID, std::string_view, uint64_t *) override {
     return Status::OK();
   }
   Status RmDir(InodeID, std::string_view) override {
@@ -192,15 +198,18 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
                 std::string_view, RenameFlag, RenameResult *) override {
     return Status::OK();
   }
-  Status SetAttr(InodeID, const struct stat *, SetAttrField,
+  Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField,
                  SwordFsInode *) override {
     return Status::OK();
   }
-  Status StatFs(struct statvfs *stbuf) override {
-    std::memset(stbuf, 0, sizeof(*stbuf));
+  Status StatFs(SwordFsStatFs *stbuf) override {
+    *stbuf = {};
+    stbuf->name_max = 255;
+    stbuf->fragment_size = 4096;
+    stbuf->block_size = 4096;
     return call_status_;
   }
-  Status Symlink(InodeID, std::string_view, const char *,
+  Status Symlink(InodeID, std::string_view, std::string_view,
                  SwordFsInode *out) override {
     if (out) {
       *out = {};
@@ -219,22 +228,22 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Access(InodeID, int) override {
+  Status Access(InodeID, uint32_t) override {
     return call_status_;
   }
   Status Open(InodeID) override { return call_status_; }
   Status ReclaimInode(InodeID) override { return call_status_; }
-  Status ListChunks(InodeID, std::vector<swordfs::metadata::ChunkMeta> *) override {
+  Status ListChunks(InodeID, std::vector<swordfs::metadata::SwordFsChunk> *) override {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return call_status_; }
-  Status AddChunk(InodeID, const swordfs::metadata::ChunkMeta &) override {
+  Status AddChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
     return Status::OK();
   }
-  Status FindChunk(InodeID, ChunkIndex, ChunkMeta *) override {
+  Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
     return Status::NotFound("");
   }
-  Status Truncate(InodeID, size_t) override { return Status::OK(); }
+  Status Truncate(InodeID, uint64_t) override { return Status::OK(); }
 
   void set_status(Status s) { call_status_ = s; }
 

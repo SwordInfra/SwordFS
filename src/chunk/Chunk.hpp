@@ -84,8 +84,8 @@ class Chunk {
  private:
   bool IsWriting() const { return state_ == State::kWriting; }
 
-  /// Build a ChunkMeta snapshot for metadata registration.
-  metadata::ChunkMeta BuildMeta() const;
+  /// Build a SwordFsChunk snapshot for metadata registration.
+  metadata::SwordFsChunk BuildMeta() const;
 
   std::string ChunkKey() const {
     return FormatChunkKey(ino_, index_);

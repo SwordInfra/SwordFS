@@ -80,17 +80,6 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
   }
   config_.chunk_size = cfg.chunk_size();
 
-  const std::string &config_path = cfg.volume_config_path();
-  if (swordfs::metadata::IsMemoryMode(config_.meta_url) && !config_path.empty()) {
-    if (VolumeConfig::ConfigFileExists(config_path)) {
-      return Status::AlreadyExists("volume already exists at " + config_path);
-    }
-    auto status = config_.WriteToFile(config_path);
-    if (!status.ok()) {
-      return status;
-    }
-  }
-
   auto status = CreateMetaEngine(config_.meta_url, config_.name, &meta_engine_);
   if (!status.ok()) {
     return status;
@@ -119,16 +108,9 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
   if (!status.ok()) {
     return status;
   }
-  if (swordfs::metadata::IsMemoryMode(config_.meta_url)) {
-    status = config_.ReadFromFile(cfg.volume_config_path());
-    if (!status.ok()) {
-      return status;
-    }
-  } else {
-    status = meta_engine_->LoadVolume(&config_);
-    if (!status.ok()) {
-      return status;
-    }
+  status = meta_engine_->LoadVolume(&config_);
+  if (!status.ok()) {
+    return status;
   }
 
   if (!config_.bucket.empty()) {

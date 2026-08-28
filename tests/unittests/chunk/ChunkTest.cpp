@@ -25,7 +25,7 @@
 
 using swordfs::chunk::Chunk;
 using swordfs::metadata::ChunkIndex;
-using swordfs::metadata::ChunkMeta;
+using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
@@ -33,6 +33,9 @@ using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsInode;
+using swordfs::metadata::SwordFsAttr;
+using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::SwordFsStatFs;
 using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
 using swordfs::utils::Status;
@@ -43,8 +46,11 @@ namespace {
 // transitions to kWriting and allocates a write buffer.
 class MissingMetaEngine final : public IMetaEngine {
  public:
+  Status Initialize() override { return Status::OK(); }
+  Status FormatVolume(const SwordFsVolume &) override { return Status::OK(); }
+  Status LoadVolume(SwordFsVolume *) override { return Status::OK(); }
   Limits GetLimits() const override { return {}; }
-  Status FindChunk(InodeID, ChunkIndex, ChunkMeta *) override {
+  Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
     return Status::NotFound("no chunk");
   }
   // Everything else is irrelevant for these tests.
@@ -55,21 +61,21 @@ class MissingMetaEngine final : public IMetaEngine {
   Status ReadDir(InodeID, std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, mode_t, SwordFsInode *) override {
+  Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status MkDir(InodeID, std::string_view, mode_t, SwordFsInode *) override {
+  Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, nlink_t *) override { return Status::OK(); }
+  Status Unlink(InodeID, std::string_view, uint64_t *) override { return Status::OK(); }
   Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
   Status Rename(InodeID, std::string_view, InodeID, std::string_view,
                 RenameFlag, RenameResult *) override { return Status::OK(); }
-  Status SetAttr(InodeID, const struct stat *, SetAttrField,
+  Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField,
                  SwordFsInode *) override { return Status::OK(); }
-  Status StatFs(struct statvfs *) override { return Status::OK(); }
-  Status Access(InodeID, int) override { return Status::OK(); }
-  Status Symlink(InodeID, std::string_view, const char *, SwordFsInode *) override {
+  Status StatFs(SwordFsStatFs *) override { return Status::OK(); }
+  Status Access(InodeID, uint32_t) override { return Status::OK(); }
+  Status Symlink(InodeID, std::string_view, std::string_view, SwordFsInode *) override {
     return Status::OK();
   }
   Status Link(InodeID, InodeID, std::string_view, SwordFsInode *) override {
@@ -78,12 +84,12 @@ class MissingMetaEngine final : public IMetaEngine {
   Status Readlink(InodeID, std::string *) override { return Status::OK(); }
   Status Open(InodeID) override { return Status::OK(); }
   Status ReclaimInode(InodeID) override { return Status::OK(); }
-  Status ListChunks(InodeID, std::vector<ChunkMeta> *) override {
+  Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return Status::OK(); }
-  Status AddChunk(InodeID, const ChunkMeta &) override { return Status::OK(); }
-  Status Truncate(InodeID, size_t) override { return Status::OK(); }
+  Status AddChunk(InodeID, const SwordFsChunk &) override { return Status::OK(); }
+  Status Truncate(InodeID, uint64_t) override { return Status::OK(); }
 };
 
 // Minimal data engine: nothing is actually persisted; the chunk only
