@@ -71,6 +71,8 @@ jobs:
           sudo chmod 666 /dev/fuse
           getent group fuse || sudo groupadd fuse
           sudo usermod -aG fuse "$(whoami)"
+          sudo mkdir -p /etc/swordfs
+          sudo chown "$(whoami):$(id -gn)" /etc/swordfs
           sg fuse -c "bash scripts/run-e2e.sh --gtest_color=no"
 
       - name: Generate coverage report

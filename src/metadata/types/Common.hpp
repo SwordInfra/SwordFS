@@ -47,6 +47,14 @@ enum class RenameFlag : uint32_t {
   kExchange = 1u << 1,
 };
 
+inline SetAttrField FromFuseSetAttrFields(unsigned int fields) {
+  return static_cast<SetAttrField>(fields);
+}
+
+inline RenameFlag FromFuseRenameFlags(unsigned int flags) {
+  return static_cast<RenameFlag>(flags);
+}
+
 struct RenameResult {
   InodeID overwritten_ino = 0;
   uint64_t overwritten_post_nlink = 0;

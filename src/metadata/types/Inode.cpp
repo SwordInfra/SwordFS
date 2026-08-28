@@ -25,6 +25,48 @@ void SwordFsAttr::KillSUID() {
   mode &= ~(S_ISUID | S_ISGID);
 }
 
+void SwordFsAttr::ToPosixStat(struct stat *st) const {
+  if (st == nullptr) return;
+  std::memset(st, 0, sizeof(*st));
+  st->st_dev = static_cast<dev_t>(dev);
+  st->st_ino = static_cast<ino_t>(ino);
+  st->st_mode = static_cast<mode_t>(mode);
+  st->st_nlink = static_cast<nlink_t>(nlink);
+  st->st_uid = static_cast<uid_t>(uid);
+  st->st_gid = static_cast<gid_t>(gid);
+  st->st_rdev = static_cast<dev_t>(rdev);
+  st->st_size = static_cast<off_t>(size);
+  st->st_blksize = static_cast<blksize_t>(blksize);
+  st->st_blocks = static_cast<blkcnt_t>(blocks);
+  st->st_atime = static_cast<time_t>(atime);
+  st->st_atim.tv_nsec = static_cast<long>(atime_nsec);
+  st->st_mtime = static_cast<time_t>(mtime);
+  st->st_mtim.tv_nsec = static_cast<long>(mtime_nsec);
+  st->st_ctime = static_cast<time_t>(ctime);
+  st->st_ctim.tv_nsec = static_cast<long>(ctime_nsec);
+}
+
+SwordFsAttr SwordFsAttr::FromPosixStat(const struct stat &st) {
+  SwordFsAttr attr;
+  attr.dev = static_cast<uint64_t>(st.st_dev);
+  attr.ino = static_cast<uint64_t>(st.st_ino);
+  attr.mode = static_cast<uint32_t>(st.st_mode);
+  attr.nlink = static_cast<uint64_t>(st.st_nlink);
+  attr.uid = static_cast<uint64_t>(st.st_uid);
+  attr.gid = static_cast<uint64_t>(st.st_gid);
+  attr.rdev = static_cast<uint64_t>(st.st_rdev);
+  attr.size = static_cast<uint64_t>(st.st_size);
+  attr.blksize = static_cast<uint64_t>(st.st_blksize);
+  attr.blocks = static_cast<uint64_t>(st.st_blocks);
+  attr.atime = static_cast<int64_t>(st.st_atime);
+  attr.atime_nsec = static_cast<int64_t>(st.st_atim.tv_nsec);
+  attr.mtime = static_cast<int64_t>(st.st_mtime);
+  attr.mtime_nsec = static_cast<int64_t>(st.st_mtim.tv_nsec);
+  attr.ctime = static_cast<int64_t>(st.st_ctime);
+  attr.ctime_nsec = static_cast<int64_t>(st.st_ctim.tv_nsec);
+  return attr;
+}
+
 SwordFsInode::SwordFsInode(InodeID ino, SwordFsAttr attr, InodeID parent_ino,
                            std::string symlink_target)
     : ino(ino), attr(attr), parent_ino(parent_ino), symlink_target(std::move(symlink_target)) {

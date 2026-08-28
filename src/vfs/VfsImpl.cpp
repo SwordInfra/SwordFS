@@ -3,8 +3,6 @@
 
 #include "vfs/VfsImpl.hpp"
 
-#include "vfs/VfsConverter.hpp"
-
 #include <dirent.h>
 #include <folly/io/IOBuf.h>
 #include <folly/logging/xlog.h>
@@ -38,6 +36,8 @@ using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsAttr;
+using swordfs::metadata::FromFuseRenameFlags;
+using swordfs::metadata::FromFuseSetAttrFields;
 using swordfs::volume::VolumeImpl;
 
 namespace swordfs::vfs {
@@ -56,7 +56,7 @@ utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name,
   }
   *entry = {};
   entry->ino = child.ino;
-  ToPosixStat(child.attr, &entry->attr);
+  child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -66,7 +66,7 @@ utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
   SwordFsInode inode;
   Status status = VolumeImpl::Instance().meta_engine()->GetInode(ino, &inode);
   if (status.ok()) {
-    ToPosixStat(inode.attr, attr);
+    inode.attr.ToPosixStat(attr);
   }
   return status;
 }
@@ -74,12 +74,12 @@ utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
 utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr,
                                int to_set, struct stat *out_attr) {
   SetAttrField fields = FromFuseSetAttrFields(to_set);
-  SwordFsAttr metadata_attr = FromPosixStat(*attr);
+  SwordFsAttr metadata_attr = SwordFsAttr::FromPosixStat(*attr);
   SwordFsInode inode;
   Status status = VolumeImpl::Instance().meta_engine()->SetAttr(
       ino, metadata_attr, fields, out_attr ? &inode : nullptr);
   if (status.ok() && out_attr) {
-    ToPosixStat(inode.attr, out_attr);
+    inode.attr.ToPosixStat(out_attr);
   }
   return status;
 }
@@ -107,7 +107,7 @@ utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name,
   }
   *entry = {};
   entry->ino = child.ino;
-  ToPosixStat(child.attr, &entry->attr);
+  child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -176,7 +176,7 @@ utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent,
   }
   *entry = {};
   entry->ino = child.ino;
-  ToPosixStat(child.attr, &entry->attr);
+  child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -233,7 +233,7 @@ utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent,
   }
   *entry = {};
   entry->ino = inode.ino;
-  ToPosixStat(inode.attr, &entry->attr);
+  inode.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -480,7 +480,7 @@ utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name,
   fi->fh = handle.fh();
   *entry = {};
   entry->ino = child.ino;
-  ToPosixStat(child.attr, &entry->attr);
+  child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   SWORDFS_LOG_DEBUG << "Create: ino=" << child.ino << " fh=" << handle.fh()

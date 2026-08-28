@@ -10,6 +10,8 @@
 #include "metadata/types/Common.hpp"
 #include "utils/Status.hpp"
 
+struct stat;
+
 namespace swordfs::metadata {
 
 /// Platform-independent inode attributes with fixed-width scalar fields.
@@ -36,6 +38,9 @@ struct SwordFsAttr {
   SwordFsAttr(uint64_t ino, uint32_t mode);
 
   void KillSUID();
+
+  void ToPosixStat(struct stat *st) const;
+  static SwordFsAttr FromPosixStat(const struct stat &st);
 };
 
 /// Core per-inode metadata record.
