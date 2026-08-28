@@ -69,6 +69,13 @@ bool Fixture::SetUp() {
 
   InitPaths();
 
+  std::error_code ec;
+  std::filesystem::create_directories(work_dir_, ec);
+  if (ec) {
+    std::fprintf(stderr, "E2E: failed to create %s: %s\n", work_dir_.c_str(), ec.message().c_str());
+    return false;
+  }
+
   if (!FormatVolume()) {
     return false;
   }
