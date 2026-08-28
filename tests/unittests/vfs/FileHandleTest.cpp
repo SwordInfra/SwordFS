@@ -363,7 +363,6 @@ TEST_F(FileHandleTest, ReleaseDirNonexistentNoCrash) {
 
 TEST_F(FileHandleTest, OpenDirAndReleaseDirLifecycle) {
   auto &mgr = FileHandleManager::Instance();
-  constexpr metadata::InodeID kIno = 77;
 
   uint64_t dh = mgr.OpenDir(NewTestDirIterator());
   EXPECT_NE(dh, 0u);

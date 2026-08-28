@@ -390,9 +390,16 @@ static utils::Status ReaddirCommon(fuse_req_t req, size_t size, off_t off,
     bool consumed_end = false;
     status = iterator->Read(current_off, 1, &consumed, &consumed_off,
                             &consumed_end);
-    if (!status.ok() || consumed.size() != 1 || consumed.front().ino != entry.ino ||
+    if (!status.ok()) {
+      return status;
+    }
+    if (consumed.size() != 1 || consumed.front().ino != entry.ino ||
         consumed.front().name != entry.name) {
-      return status.ok() ? Status::Internal("directory iterator changed between peek and read") : status;
+      // Another client mutated the directory between Peek and Read (the
+      // per-handle mutex only serializes local callers). Iteration is
+      // best-effort: stop this batch here instead of failing with EIO. The
+      // next readdir carrying the current cookie re-syncs the iterator.
+      break;
     }
     out->append(encoded.data(), written);
     current_off = consumed_off;

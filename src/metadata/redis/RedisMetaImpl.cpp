@@ -62,11 +62,6 @@ class RedisDirIterator final : public IDirIterator {
     logical_offset_ = saved_logical_offset;
     exhausted_ = saved_exhausted;
     pending_ = saved_pending;
-    if (status.IsNotFound()) {
-      *next_offset = offset;
-      *end = true;
-      return status;
-    }
     if (!status.ok()) return status;
     if (entries.empty()) {
       *next_offset = peek_next;
@@ -640,29 +635,29 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     if (!status.ok()) return status;
     if (!old_parent.CheckStickyDelete(ctx.uid, source)) return Status::Permission("sticky bit denied on source");
 
-    auto is_descendant = [&](InodeID ancestor, InodeID candidate, bool *result_out) -> Status {
+    auto is_descendant = [&](InodeID ancestor_ino, InodeID candidate_ino, bool *result_out) -> Status {
       if (result_out == nullptr) return Status::InvalidArgument("cycle check output is null");
       *result_out = false;
-      InodeID current = candidate;
+      InodeID current_ino = candidate_ino;
       std::unordered_set<InodeID> visited;
-      while (current != 0) {
-        if (!visited.insert(current).second) {
+      while (current_ino != 0) {
+        if (!visited.insert(current_ino).second) {
           return Status::Malformed("directory parent cycle detected");
         }
-        if (current == ancestor) {
+        if (current_ino == ancestor_ino) {
           *result_out = true;
           return Status::OK();
         }
         std::string inode_value;
-        auto check_status = txn.Get(key_.Inode(current), &inode_value);
-        if (!check_status.ok()) return check_status;
+        auto status = txn.Get(key_.Inode(current_ino), &inode_value);
+        if (!status.ok()) return status;
         SwordFsInode inode;
-        check_status = ParseInode(inode_value, &inode);
-        if (!check_status.ok()) return check_status;
-        if (inode.parent_ino == current) {
+        status = ParseInode(inode_value, &inode);
+        if (!status.ok()) return status;
+        if (inode.parent_ino == current_ino) {
           break;
         }
-        current = inode.parent_ino;
+        current_ino = inode.parent_ino;
       }
       return Status::OK();
     };
