@@ -15,9 +15,10 @@ namespace swordfs::metadata {
 struct SwordFsAttr;
 
 enum class RecordType : uint32_t {
-  kInode = 1,
-  kEntry = 2,
-  kChunk = 3,
+  kVolume = 1,
+  kInode = 2,
+  kEntry = 3,
+  kChunk = 4,
 };
 
 class BufEncoder {
@@ -34,7 +35,6 @@ class BufEncoder {
   void I64(int64_t value);
   void String(std::string_view value);
   void Attr(const SwordFsAttr &attr);
-  void Header(std::string_view magic, uint32_t schema_version);
   void Header(RecordType type);
   void Finish(std::string *out);
 
@@ -57,7 +57,6 @@ class BufDecoder {
   bool I64(int64_t *value);
   bool String(std::string *value);
   bool Attr(SwordFsAttr *attr);
-  bool Header(std::string_view expected_magic, uint32_t expected_schema_version);
   bool Header(RecordType expected_type);
   bool Done() const;
   explicit operator bool() const noexcept;

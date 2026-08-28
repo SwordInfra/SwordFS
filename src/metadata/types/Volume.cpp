@@ -9,15 +9,11 @@
 #include "metadata/types/BufCodec.hpp"
 
 namespace swordfs::metadata {
-namespace {
-constexpr std::string_view kVolumeMagic = "SWORVOL1";
-constexpr uint32_t kVolumeSchemaVersion = 1;
-}  // namespace
 
 std::string SwordFsVolume::SerializeTo() const {
   std::string out;
   BufEncoder enc;
-  enc.Header(kVolumeMagic, kVolumeSchemaVersion);
+  enc.Header(RecordType::kVolume);
   enc.String(name);
   enc.String(meta_url);
   enc.String(storage);
@@ -31,7 +27,7 @@ std::string SwordFsVolume::SerializeTo() const {
 utils::Status SwordFsVolume::ParseFrom(std::string_view data) {
   BufDecoder dec(data);
   SwordFsVolume volume;
-  dec.Header(kVolumeMagic, kVolumeSchemaVersion);
+  dec.Header(RecordType::kVolume);
   dec.String(&volume.name);
   dec.String(&volume.meta_url);
   dec.String(&volume.storage);

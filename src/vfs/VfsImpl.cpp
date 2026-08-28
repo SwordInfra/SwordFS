@@ -3,6 +3,8 @@
 
 #include "vfs/VfsImpl.hpp"
 
+#include "vfs/VfsConverter.hpp"
+
 #include <dirent.h>
 #include <folly/io/IOBuf.h>
 #include <folly/logging/xlog.h>
@@ -40,60 +42,6 @@ using swordfs::volume::VolumeImpl;
 
 namespace swordfs::vfs {
 
-namespace {
-void AttrToStat(const SwordFsAttr &attr, struct stat *st) {
-  if (st == nullptr) return;
-  std::memset(st, 0, sizeof(*st));
-  st->st_dev = static_cast<dev_t>(attr.dev);
-  st->st_ino = static_cast<ino_t>(attr.ino);
-  st->st_mode = static_cast<mode_t>(attr.mode);
-  st->st_nlink = static_cast<nlink_t>(attr.nlink);
-  st->st_uid = static_cast<uid_t>(attr.uid);
-  st->st_gid = static_cast<gid_t>(attr.gid);
-  st->st_rdev = static_cast<dev_t>(attr.rdev);
-  st->st_size = static_cast<off_t>(attr.size);
-  st->st_blksize = static_cast<blksize_t>(attr.blksize);
-  st->st_blocks = static_cast<blkcnt_t>(attr.blocks);
-  st->st_atime = static_cast<time_t>(attr.atime);
-  st->st_atim.tv_nsec = static_cast<long>(attr.atime_nsec);
-  st->st_mtime = static_cast<time_t>(attr.mtime);
-  st->st_mtim.tv_nsec = static_cast<long>(attr.mtime_nsec);
-  st->st_ctime = static_cast<time_t>(attr.ctime);
-  st->st_ctim.tv_nsec = static_cast<long>(attr.ctime_nsec);
-}
-
-SwordFsAttr StatToAttr(const struct stat &st) {
-  SwordFsAttr attr;
-  attr.dev = static_cast<uint64_t>(st.st_dev);
-  attr.ino = static_cast<uint64_t>(st.st_ino);
-  attr.mode = static_cast<uint32_t>(st.st_mode);
-  attr.nlink = static_cast<uint64_t>(st.st_nlink);
-  attr.uid = static_cast<uint64_t>(st.st_uid);
-  attr.gid = static_cast<uint64_t>(st.st_gid);
-  attr.rdev = static_cast<uint64_t>(st.st_rdev);
-  attr.size = static_cast<uint64_t>(st.st_size);
-  attr.blksize = static_cast<uint64_t>(st.st_blksize);
-  attr.blocks = static_cast<uint64_t>(st.st_blocks);
-  attr.atime = static_cast<int64_t>(st.st_atime);
-  attr.atime_nsec = static_cast<int64_t>(st.st_atim.tv_nsec);
-  attr.mtime = static_cast<int64_t>(st.st_mtime);
-  attr.mtime_nsec = static_cast<int64_t>(st.st_mtim.tv_nsec);
-  attr.ctime = static_cast<int64_t>(st.st_ctime);
-  attr.ctime_nsec = static_cast<int64_t>(st.st_ctim.tv_nsec);
-  return attr;
-}
-}  // namespace
-
-// Translate a FUSE_SET_ATTR_* bitmask to the metadata-layer
-// SetAttrField bitmask.  Bit values match exactly, so the conversion
-// is a 1:1 copy through a uint32_t view.
-inline SetAttrField FuseAttrToSetAttrField(int fuse_to_set) {
-  return static_cast<SetAttrField>(static_cast<uint32_t>(fuse_to_set));
-}
-
-inline RenameFlag FuseFlagsToRenameFlag(unsigned int fuse_flags) {
-  return static_cast<RenameFlag>(fuse_flags);
-}
 
 volume::VolumeImpl *VfsImpl::Volume() {
   return &volume::VolumeImpl::Instance();
@@ -108,7 +56,7 @@ utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name,
   }
   *entry = {};
   entry->ino = child.ino;
-  AttrToStat(child.attr, &entry->attr);
+  ToPosixStat(child.attr, &entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -118,20 +66,20 @@ utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
   SwordFsInode inode;
   Status status = VolumeImpl::Instance().meta_engine()->GetInode(ino, &inode);
   if (status.ok()) {
-    AttrToStat(inode.attr, attr);
+    ToPosixStat(inode.attr, attr);
   }
   return status;
 }
 
 utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr,
                                int to_set, struct stat *out_attr) {
-  SetAttrField fields = FuseAttrToSetAttrField(to_set);
-  SwordFsAttr metadata_attr = StatToAttr(*attr);
+  SetAttrField fields = FromFuseSetAttrFields(to_set);
+  SwordFsAttr metadata_attr = FromPosixStat(*attr);
   SwordFsInode inode;
   Status status = VolumeImpl::Instance().meta_engine()->SetAttr(
       ino, metadata_attr, fields, out_attr ? &inode : nullptr);
   if (status.ok() && out_attr) {
-    AttrToStat(inode.attr, out_attr);
+    ToPosixStat(inode.attr, out_attr);
   }
   return status;
 }
@@ -159,7 +107,7 @@ utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name,
   }
   *entry = {};
   entry->ino = child.ino;
-  AttrToStat(child.attr, &entry->attr);
+  ToPosixStat(child.attr, &entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -228,7 +176,7 @@ utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent,
   }
   *entry = {};
   entry->ino = child.ino;
-  AttrToStat(child.attr, &entry->attr);
+  ToPosixStat(child.attr, &entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -237,7 +185,7 @@ utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent,
 utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
                               fuse_ino_t newparent, const char *newname,
                               unsigned int flags) {
-  RenameFlag rename_flags = FuseFlagsToRenameFlag(flags);
+  RenameFlag rename_flags = FromFuseRenameFlags(flags);
   auto meta = VolumeImpl::Instance().meta_engine();
   metadata::RenameResult result;
   auto status = meta->Rename(parent, name, newparent, newname, rename_flags,
@@ -285,7 +233,7 @@ utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent,
   }
   *entry = {};
   entry->ino = inode.ino;
-  AttrToStat(inode.attr, &entry->attr);
+  ToPosixStat(inode.attr, &entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   return Status::OK();
@@ -532,7 +480,7 @@ utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name,
   fi->fh = handle.fh();
   *entry = {};
   entry->ino = child.ino;
-  AttrToStat(child.attr, &entry->attr);
+  ToPosixStat(child.attr, &entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
   SWORDFS_LOG_DEBUG << "Create: ino=" << child.ino << " fh=" << handle.fh()

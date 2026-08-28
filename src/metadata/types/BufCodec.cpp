@@ -74,13 +74,9 @@ void BufEncoder::Attr(const SwordFsAttr &attr) {
   I64(attr.ctime_nsec);
 }
 
-void BufEncoder::Header(std::string_view magic, uint32_t schema_version) {
-  String(magic);
-  U32(schema_version);
-}
-
 void BufEncoder::Header(RecordType type) {
-  Header(kMagic, kSchemaVersion);
+  String(kMagic);
+  U32(kSchemaVersion);
   U32(static_cast<uint32_t>(type));
 }
 
@@ -157,19 +153,13 @@ bool BufDecoder::Attr(SwordFsAttr *attr) {
   return true;
 }
 
-bool BufDecoder::Header(std::string_view expected_magic, uint32_t expected_schema_version) {
+bool BufDecoder::Header(RecordType expected_type) {
   std::string magic;
   uint32_t version = 0;
-  if (!String(&magic) || magic != expected_magic || !U32(&version) || version != expected_schema_version) {
-    impl_->failed_ = true;
-    return false;
-  }
-  return true;
-}
-
-bool BufDecoder::Header(RecordType expected_type) {
   uint32_t type = 0;
-  if (!Header(kMagic, kSchemaVersion) || !U32(&type) || type != static_cast<uint32_t>(expected_type)) {
+  if (!String(&magic) || magic != kMagic || !U32(&version) ||
+      version != kSchemaVersion || !U32(&type) ||
+      type != static_cast<uint32_t>(expected_type)) {
     impl_->failed_ = true;
     return false;
   }

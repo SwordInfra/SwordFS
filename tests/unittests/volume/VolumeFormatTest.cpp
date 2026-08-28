@@ -54,6 +54,13 @@ TEST(SwordFsVolumeTest, ParseFromRejectsMalformedData) {
   Status st = v.ParseFrom("not volume metadata");
   EXPECT_FALSE(st.ok());
   EXPECT_EQ(st.code(), Status::kMalformed);
+
+  SwordFsVolume original = MakeVolume();
+  std::string encoded = original.SerializeTo();
+  encoded.push_back('\0');
+  st = v.ParseFrom(encoded);
+  EXPECT_FALSE(st.ok());
+  EXPECT_EQ(st.code(), Status::kMalformed);
 }
 
 TEST(VolumeFileTest, WriteAndReadRoundTrip) {
