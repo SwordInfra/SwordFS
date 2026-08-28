@@ -3,6 +3,7 @@
 
 #include <folly/fibers/FiberManagerInternal.h>
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cstdlib>
@@ -44,7 +45,11 @@ class RedisMetaImplTest : public ::testing::Test {
       GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
     }
     static std::atomic<uint64_t> sequence{0};
-    volume_name_ = "redis-meta-test-" + std::to_string(++sequence);
+    // FormatVolume refuses an already-formatted volume, and Redis state
+    // outlives this process. Include the pid so rerunning the test binary
+    // against the same Redis instance does not collide with previous runs.
+    volume_name_ = "redis-meta-test-" + std::to_string(::getpid()) + "-" +
+                   std::to_string(++sequence);
     impl_ = std::make_unique<RedisMetaImpl>(config_, volume_name_);
     ASSERT_TRUE(impl_->Initialize().ok());
     SwordFsVolume volume;
