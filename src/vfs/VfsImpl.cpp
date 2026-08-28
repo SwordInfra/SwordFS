@@ -306,62 +306,108 @@ utils::Status VfsImpl::Fsync(fuse_ino_t ino, int datasync, uint64_t fh) {
 }
 
 utils::Status VfsImpl::Opendir(fuse_ino_t ino, uint64_t *fh) {
-  // Permission check and atime update.
-  auto status = VolumeImpl::Instance().meta_engine()->OpenDir(ino);
+  if (fh == nullptr) {
+    return Status::InvalidArgument("directory handle output is null");
+  }
+  auto *meta = VolumeImpl::Instance().meta_engine();
+  auto status = meta->OpenDir(ino);
   if (!status.ok()) {
     return status;
   }
-  *fh = FileHandleManager::Instance().OpenDir(ino);
+  std::unique_ptr<metadata::IDirIterator> iterator;
+  status = meta->OpenDirIterator(ino, &iterator);
+  if (!status.ok()) {
+    return status;
+  }
+  auto shared_iterator = std::shared_ptr<metadata::IDirIterator>(std::move(iterator));
+  *fh = FileHandleManager::Instance().OpenDir(std::move(shared_iterator));
+  if (*fh == 0) {
+    return Status::NoMemory("directory handle");
+  }
   return Status::OK();
 }
 
-// Common implementation for Readdir and Readdirplus.
+// Common implementation for Readdir and Readdirplus. Directory iteration
+// state belongs to the FUSE directory handle; the metadata iterator hides
+// backend-specific continuation state such as a Redis HSCAN cursor.
 template <typename F>
-static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
-                                   off_t off,
-                                   swordfs::metadata::IMetaEngine *meta,
-                                   F &&add_entry, std::string *out) {
-  using swordfs::metadata::SwordFsEntry;
-
-  std::vector<SwordFsEntry> entries;
-  Status status = meta->ReadDir(ino, &entries);
-  if (!status.ok()) {
-    return status;
+static utils::Status ReaddirCommon(fuse_req_t req, size_t size, off_t off,
+                                   uint64_t fh, F &&add_entry, std::string *out) {
+  auto dir_handle = FileHandleManager::Instance().FindDir(fh);
+  if (!dir_handle) {
+    return Status::InvalidArgument("unknown directory fh=" + std::to_string(fh));
+  }
+  if (off < 0) {
+    return Status::InvalidArgument("negative directory offset");
   }
 
-  std::vector<size_t> sizes(entries.size());
-  size_t cap = 0;
-  for (size_t i = 0; i < entries.size(); ++i) {
-    sizes[i] = add_entry(req, nullptr, 0, entries[i], 0);
-    cap += sizes[i];
+  // Serialize readdir calls for a directory handle so the Peek + Read pair
+  // below is atomic with respect to other callers using the same fh.
+  std::lock_guard lock(dir_handle->mutex);
+  auto &iterator = dir_handle->iterator;
+
+  // A zero-sized request is valid and must not advance the iterator.
+  if (size == 0) {
+    out->clear();
+    return Status::OK();
   }
 
-  char *buf = static_cast<char *>(std::malloc(cap));
-  if (!buf) {
-    return Status::NoMemory("readdir buffer");
-  }
-
-  size_t pos = 0;
-  for (size_t i = 0; i < entries.size() && pos < cap; ++i) {
-    size_t n = add_entry(req, buf + pos, cap - pos,
-                         entries[i], pos + sizes[i]);
-    if (n > cap - pos) {
+  // Peek before consuming each entry so a byte-sized FUSE buffer boundary
+  // never drops an entry. The iterator advances only after the entry has
+  // been encoded successfully.
+  out->clear();
+  uint64_t current_off = static_cast<uint64_t>(off);
+  while (out->size() < size) {
+    metadata::SwordFsEntry entry;
+    uint64_t next_off = current_off;
+    bool end = false;
+    Status status = iterator->Peek(current_off, &entry, &next_off, &end);
+    if (status.IsNotFound()) {
       break;
     }
-    pos += n;
-  }
+    if (!status.ok()) {
+      return status;
+    }
 
-  if (static_cast<size_t>(off) < pos) {
-    out->assign(buf + off, std::min(pos - off, size));
+    const size_t required = add_entry(req, nullptr, 0, entry,
+                                      static_cast<off_t>(next_off));
+    const size_t remaining = size - out->size();
+    if (required > remaining) {
+      if (out->empty()) {
+        return Status::NoMemory("readdir entry does not fit in buffer");
+      }
+      break;
+    }
+
+    std::string encoded(required, '\0');
+    const size_t written = add_entry(req, encoded.data(), encoded.size(),
+                                     entry, static_cast<off_t>(next_off));
+    if (written > encoded.size()) {
+      return Status::NoMemory("readdir entry encoding overflow");
+    }
+    std::vector<metadata::SwordFsEntry> consumed;
+    uint64_t consumed_off = current_off;
+    bool consumed_end = false;
+    status = iterator->Read(current_off, 1, &consumed, &consumed_off,
+                            &consumed_end);
+    if (!status.ok() || consumed.size() != 1 || consumed.front().ino != entry.ino ||
+        consumed.front().name != entry.name) {
+      return status.ok() ? Status::Internal("directory iterator changed between peek and read") : status;
+    }
+    out->append(encoded.data(), written);
+    current_off = consumed_off;
+    if (consumed_end) {
+      break;
+    }
   }
-  std::free(buf);
   return Status::OK();
 }
 
 utils::Status VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
-                               off_t off, std::string *buf) {
+                               off_t off, uint64_t fh, std::string *buf) {
+  (void)ino;
   return ReaddirCommon(
-      req, ino, size, off, VolumeImpl::Instance().meta_engine(),
+      req, size, off, fh,
       [](fuse_req_t r, char *p, size_t cap, const metadata::SwordFsEntry &e,
          off_t next_off) {
         struct stat st = {};
@@ -373,9 +419,11 @@ utils::Status VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 }
 
 utils::Status VfsImpl::Readdirplus(fuse_req_t req, fuse_ino_t ino,
-                                   size_t size, off_t off, std::string *buf) {
+                                   size_t size, off_t off, uint64_t fh,
+                                   std::string *buf) {
+  (void)ino;
   return ReaddirCommon(
-      req, ino, size, off, VolumeImpl::Instance().meta_engine(),
+      req, size, off, fh,
       [](fuse_req_t r, char *p, size_t cap, const metadata::SwordFsEntry &e,
          off_t next_off) {
         fuse_entry_param ep = {};

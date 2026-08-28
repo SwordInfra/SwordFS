@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <dirent.h>
 #include <cstring>
 #include <memory>
 
@@ -150,6 +151,37 @@ TEST(VfsImplTest, Forget) {
 
 namespace {
 
+class TestDirIterator final : public swordfs::metadata::IDirIterator {
+ public:
+  Status Peek(uint64_t offset, swordfs::metadata::SwordFsEntry *entry,
+              uint64_t *next_offset, bool *end) override {
+    if (offset == 0) {
+      *entry = {".", DT_DIR, 1};
+      *next_offset = 1;
+      *end = false;
+      return Status::OK();
+    }
+    *next_offset = offset;
+    *end = true;
+    return Status::NotFound("directory end");
+  }
+
+  Status Read(uint64_t offset, size_t max_entries,
+              std::vector<swordfs::metadata::SwordFsEntry> *entries,
+              uint64_t *next_offset, bool *end) override {
+    entries->clear();
+    if (offset == 0 && max_entries > 0) {
+      entries->push_back({".", DT_DIR, 1});
+      *next_offset = 1;
+      *end = false;
+    } else {
+      *next_offset = offset;
+      *end = true;
+    }
+    return Status::OK();
+  }
+};
+
 class MockMetaEngine : public swordfs::metadata::IMetaEngine {
  public:
   Status Initialize() override { return Status::OK(); }
@@ -237,6 +269,12 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status OpenDir(InodeID) override { return call_status_; }
+  Status OpenDirIterator(InodeID, std::unique_ptr<swordfs::metadata::IDirIterator> *out) override {
+    if (call_status_.ok()) {
+      *out = std::make_unique<TestDirIterator>();
+    }
+    return call_status_;
+  }
   Status AddChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
     return Status::OK();
   }
@@ -292,14 +330,18 @@ TEST_F(VfsImplIntegrationTest, OpendirPermissionDenied) {
 }
 
 TEST_F(VfsImplIntegrationTest, Readdir) {
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::Opendir(1, &fh).ok());
   std::string buf;
-  auto status = VfsImpl::Readdir(nullptr, 1, 4096, 0, &buf);
+  auto status = VfsImpl::Readdir(nullptr, 1, 4096, 0, fh, &buf);
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
 TEST_F(VfsImplIntegrationTest, Readdirplus) {
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::Opendir(1, &fh).ok());
   std::string buf;
-  auto status = VfsImpl::Readdirplus(nullptr, 1, 4096, 0, &buf);
+  auto status = VfsImpl::Readdirplus(nullptr, 1, 4096, 0, fh, &buf);
   EXPECT_TRUE(status.ok()) << status.message();
 }
 

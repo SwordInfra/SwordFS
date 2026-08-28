@@ -331,11 +331,11 @@ void VfsHookFactory::SwordFsOpendir(fuse_req_t req, fuse_ino_t ino,
 void VfsHookFactory::SwordFsReaddir(fuse_req_t req, fuse_ino_t ino,
                                     size_t size, off_t off,
                                     struct fuse_file_info *fi) {
-  (void)fi;
-  ::swordfs::utils::RunInFiber([req, ino, size, off] {
+  const uint64_t fh = fi->fh;
+  ::swordfs::utils::RunInFiber([req, ino, size, off, fh] {
     SetRequestContext(req);
     std::string buf;
-    auto status = VfsImpl::Readdir(req, ino, size, off, &buf);
+    auto status = VfsImpl::Readdir(req, ino, size, off, fh, &buf);
     if (!status.ok()) {
       fuse_reply_err(req, status.ToErrno());
       return;
@@ -542,11 +542,11 @@ void VfsHookFactory::SwordFsFallocate(fuse_req_t req, fuse_ino_t ino,
 void VfsHookFactory::SwordFsReaddirplus(fuse_req_t req, fuse_ino_t ino,
                                         size_t size, off_t off,
                                         struct fuse_file_info *fi) {
-  (void)fi;
-  ::swordfs::utils::RunInFiber([req, ino, size, off] {
+  const uint64_t fh = fi->fh;
+  ::swordfs::utils::RunInFiber([req, ino, size, off, fh] {
     SetRequestContext(req);
     std::string buf;
-    auto status = VfsImpl::Readdirplus(req, ino, size, off, &buf);
+    auto status = VfsImpl::Readdirplus(req, ino, size, off, fh, &buf);
     if (!status.ok()) {
       fuse_reply_err(req, status.ToErrno());
       return;

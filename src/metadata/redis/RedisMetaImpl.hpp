@@ -5,6 +5,7 @@
 
 #include <memory>
 
+#include "metadata/DirIterator.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
@@ -32,6 +33,7 @@ public:
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
   Status GetInode(InodeID ino, SwordFsInode *out) override;
   Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) override;
+  Status OpenDirIterator(InodeID ino, std::unique_ptr<IDirIterator> *out) override;
   Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) override;
@@ -53,7 +55,7 @@ public:
   Status Truncate(InodeID ino, uint64_t size) override;
 
 private:
-  std::unique_ptr<RedisMetaClient> client_;
+  std::shared_ptr<RedisMetaClient> client_;
   redis::RedisKey key_;
 };
 

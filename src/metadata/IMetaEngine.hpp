@@ -8,10 +8,12 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "metadata/DirIterator.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
@@ -59,8 +61,19 @@ class IMetaEngine {
   /// Get an inode metadata snapshot.
   virtual Status GetInode(InodeID ino, SwordFsInode *out) = 0;
 
-  /// List all entries in a directory.
+  /// Materialize all entries in a directory. Kept for metadata callers that
+  /// need a complete listing; VFS readdir uses OpenDirIterator for pagination.
   virtual Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) = 0;
+
+  /// Create a backend-neutral directory iterator. The iterator owns any
+  /// backend-specific continuation state (for example a Redis HSCAN cursor).
+  virtual Status OpenDirIterator(InodeID,
+                                 std::unique_ptr<IDirIterator> *out) {
+    if (out != nullptr) {
+      out->reset();
+    }
+    return Status::NotSupported("directory iterator not supported");
+  }
 
   /// Create a regular file.
   virtual Status Create(InodeID parent_ino, std::string_view name,

@@ -76,9 +76,12 @@ bool Fixture::SetUp() {
     return false;
   }
 
-  if (!FormatVolume()) {
-    RemoveVolumeConfig();
-    return false;
+  if (!volume_formatted_) {
+    if (!FormatVolume()) {
+      RemoveVolumeConfig();
+      return false;
+    }
+    volume_formatted_ = true;
   }
   if (!StartMount()) {
     RemoveVolumeConfig();
@@ -110,7 +113,8 @@ void Fixture::TearDown() {
 bool Fixture::FormatVolume() {
   const char *metadata_url = std::getenv("SWORDFS_METADATA_URL");
   if (!metadata_url || metadata_url[0] == '\0') {
-    metadata_url = "memory://local";
+    std::fprintf(stderr, "E2E: SWORDFS_METADATA_URL must be set for Redis metadata E2E\n");
+    return false;
   }
 
   // Shell out to the `swordfs format` binary to exercise the real
@@ -133,6 +137,12 @@ bool Fixture::FormatVolume() {
 // ────────────────────────────────────────────────────────────────
 
 bool Fixture::StartMount() {
+  const char *metadata_url = std::getenv("SWORDFS_METADATA_URL");
+  if (!metadata_url || metadata_url[0] == '\0') {
+    std::fprintf(stderr, "E2E: SWORDFS_METADATA_URL must be set for Redis metadata E2E\n");
+    return false;
+  }
+
   std::error_code ec;
   std::filesystem::create_directories(mountpoint_, ec);
   if (ec) {
@@ -142,7 +152,7 @@ bool Fixture::StartMount() {
 
   std::ostringstream cmd;
   cmd << FindSwordfsBin() << " --log-file " << LogPath() << " mount "
-      << " --volume " << volume_name_ << " --meta memory://local"
+      << " --volume " << volume_name_ << " --meta " << metadata_url
       << " --fuse-threads 2"
       << " --storage-thread-count 2"
       << " --pidfile " << work_dir_ << "/swordfs.pid"

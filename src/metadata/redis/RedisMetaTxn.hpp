@@ -5,8 +5,11 @@
 
 #include <sw/redis++/redis++.h>
 
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "utils/Status.hpp"
 
@@ -24,7 +27,13 @@ class RedisMetaTxn {
   // WATCH is issued before each read so Redis can detect changes between the
   // read and EXEC. Redis WATCH/MULTI details remain private to this class.
   utils::Status Get(std::string_view key, std::string *value);
+  utils::Status HGet(std::string_view key, std::string_view field, std::string *value);
+  utils::Status HGetAll(std::string_view key, std::vector<std::pair<std::string, std::string>> *values);
+  utils::Status HLen(std::string_view key, uint64_t *length);
   utils::Status Set(std::string_view key, std::string_view value);
+  utils::Status HSet(std::string_view key, std::string_view field, std::string_view value);
+  utils::Status HDel(std::string_view key, std::string_view field);
+  utils::Status IncrBy(std::string_view key, int64_t delta);
   utils::Status Del(std::string_view key);
 
  private:
@@ -40,6 +49,10 @@ class RedisMetaTxn {
   utils::Status ReleaseConnection();
 
   std::optional<sw::redis::Transaction> transaction_;
+  // Keep the Redis view returned by Transaction::redis() alive for the
+  // entire transaction. redis-plus-plus requires this for pooled
+  // transaction connections.
+  std::optional<sw::redis::Redis> redis_;
   bool has_writes_ = false;
 };
 

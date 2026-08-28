@@ -172,6 +172,18 @@ TEST_F(DirectoryOpsTest, ReaddirListsEntries) {
   EXPECT_EQ(entries.size(), std::size(items));
 }
 
+TEST_F(DirectoryOpsTest, ReaddirLargeDirectoryStreamsEntries) {
+  constexpr size_t kEntryCount = 300;
+  for (size_t i = 0; i < kEntryCount; ++i) {
+    const std::string name = "entry_" + std::to_string(i);
+    ASSERT_EQ(fixture_.CreateFile(name, kDefaultFileMode, kDefaultCreateFlags), 0);
+  }
+
+  std::vector<std::string> entries;
+  ASSERT_EQ(fixture_.ReadDir(".", &entries), 0);
+  EXPECT_EQ(entries.size(), kEntryCount);
+}
+
 TEST_F(DirectoryOpsTest, ReaddirEmpty) {
   std::vector<std::string> entries;
   ASSERT_EQ(fixture_.ReadDir(".", &entries), 0);
@@ -427,6 +439,21 @@ TEST_F(DirectoryOpsTest, RenameDirOverEmptyDir) {
       EXPECT_TRUE(fixture_.FileEquals(path, c.content.size(), Fixture::Hash64(c.content)));
     }
   }
+}
+
+TEST_F(DirectoryOpsTest, RenameDirOverEmptyDirSameParentUpdatesNlink) {
+  ASSERT_EQ(fixture_.MkDir("src", kDefaultDirMode), 0);
+  ASSERT_EQ(fixture_.MkDir("dst", kDefaultDirMode), 0);
+
+  struct stat root_before;
+  ASSERT_EQ(fixture_.Stat(".", &root_before), 0);
+  ASSERT_EQ(root_before.st_nlink, static_cast<nlink_t>(4));
+
+  ASSERT_EQ(fixture_.Rename("src", "dst"), 0);
+
+  struct stat root_after;
+  ASSERT_EQ(fixture_.Stat(".", &root_after), 0);
+  EXPECT_EQ(root_after.st_nlink, static_cast<nlink_t>(3));
 }
 
 // ────────────────────────────────────────────────────────────────

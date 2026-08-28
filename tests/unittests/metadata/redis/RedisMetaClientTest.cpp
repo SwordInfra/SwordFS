@@ -70,6 +70,60 @@ sw::redis::ConnectionOptions ConnectionOptions(const RedisMetaConfig &config) {
 
 }  // namespace
 
+TEST(RedisMetaClientTest, BinaryValueRoundTrip) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const std::string key = "swordfs:binary-roundtrip";
+  const std::string value(172, '\0');
+  sw::redis::Redis cleanup(ConnectionOptions(config));
+  cleanup.set(key, value);
+
+  std::string actual;
+  auto status = RunInFiber([&] { return store.Get(key, &actual); });
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(actual.size(), value.size());
+  EXPECT_EQ(actual, value);
+  cleanup.del(key);
+}
+
+TEST(RedisMetaClientTest, BinaryValueSurvivesWriteTransaction) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const std::string parent_key = "swordfs:txn:parent";
+  const std::string child_key = "swordfs:txn:child";
+  const std::string child_value(172, '\0');
+
+  auto status = RunInFiber([&] {
+    return store.Transact([&](RedisMetaTxn &txn) {
+      std::string ignored;
+      auto s = txn.Get(parent_key, &ignored);
+      if (!s.IsNotFound()) return s;
+      s = txn.Set(child_key, child_value);
+      if (!s.ok()) return s;
+      return txn.Set(parent_key, "parent");
+    });
+  });
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  std::string actual;
+  status = RunInFiber([&] { return store.Get(child_key, &actual); });
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(actual.size(), child_value.size());
+  EXPECT_EQ(actual, child_value);
+
+  sw::redis::Redis cleanup(ConnectionOptions(config));
+  cleanup.del(parent_key);
+  cleanup.del(child_key);
+}
+
 TEST(RedisMetaClientTest, StandalonePingAndWatchReadMultiExec) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {

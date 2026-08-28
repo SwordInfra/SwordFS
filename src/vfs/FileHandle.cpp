@@ -14,7 +14,7 @@ namespace swordfs::vfs {
 // Concrete F14FastMap types — hidden from the header to avoid pulling
 // the heavy Folly template into every includer.
 struct FileMap : folly::F14FastMap<uint64_t, FileHandle> {};
-struct DirMap : folly::F14FastMap<uint64_t, metadata::InodeID> {};
+struct DirMap : folly::F14FastMap<uint64_t, std::shared_ptr<DirHandle>> {};
 
 // ────────────────────────────────────────────────────────────────
 // FileHandle
@@ -110,11 +110,23 @@ utils::Status FileHandleManager::Release(uint64_t fh) {
   return inode_handle->Close();
 }
 
-uint64_t FileHandleManager::OpenDir(metadata::InodeID ino) {
+uint64_t FileHandleManager::OpenDir(std::shared_ptr<metadata::IDirIterator> iterator) {
+  if (!iterator) {
+    return 0;
+  }
   uint64_t handle = AllocateFh();
   std::unique_lock lock(mutex_);
-  (*dir_handles_)[handle] = ino;
+  (*dir_handles_)[handle] = std::make_shared<DirHandle>(std::move(iterator));
   return handle;
+}
+
+std::shared_ptr<DirHandle> FileHandleManager::FindDir(uint64_t fh) {
+  std::shared_lock lock(mutex_);
+  auto it = dir_handles_->find(fh);
+  if (it == dir_handles_->end()) {
+    return nullptr;
+  }
+  return it->second;
 }
 
 void FileHandleManager::ReleaseDir(uint64_t fh) {

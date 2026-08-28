@@ -64,9 +64,10 @@ class VfsImpl {
   static utils::Status Fsync(fuse_ino_t ino, int datasync, uint64_t fh);
   static utils::Status Opendir(fuse_ino_t ino, uint64_t *fh);
   static utils::Status Readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
-                               off_t off, std::string *buf);
+                               off_t off, uint64_t fh, std::string *buf);
   static utils::Status Readdirplus(fuse_req_t req, fuse_ino_t ino,
-                                   size_t size, off_t off, std::string *buf);
+                                   size_t size, off_t off, uint64_t fh,
+                                   std::string *buf);
   static utils::Status Releasedir(fuse_ino_t ino, uint64_t fh);
   static utils::Status Fsyncdir(fuse_ino_t ino, int datasync);
   static utils::Status Statfs(fuse_ino_t ino, struct statvfs *stbuf);

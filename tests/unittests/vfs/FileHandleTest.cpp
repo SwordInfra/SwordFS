@@ -312,21 +312,44 @@ TEST_F(FileHandleTest, ConcurrentOpenAndFind) {
   }
 }
 
+class TestDirIterator final : public metadata::IDirIterator {
+ public:
+  Status Peek(uint64_t offset, metadata::SwordFsEntry *entry,
+              uint64_t *next_offset, bool *end) override {
+    *next_offset = offset;
+    *end = true;
+    return Status::NotFound("directory end");
+  }
+
+  Status Read(uint64_t offset, size_t max_entries,
+              std::vector<metadata::SwordFsEntry> *entries,
+              uint64_t *next_offset, bool *end) override {
+    entries->clear();
+    *next_offset = offset;
+    *end = true;
+    return Status::OK();
+  }
+};
+
+std::shared_ptr<metadata::IDirIterator> NewTestDirIterator() {
+  return std::make_shared<TestDirIterator>();
+}
+
 // ────────────────────────────────────────────────────────────────
 // OpenDir / ReleaseDir
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(FileHandleTest, OpenDirAllocatesHandle) {
   auto &mgr = FileHandleManager::Instance();
-  uint64_t dh = mgr.OpenDir(42);
+  uint64_t dh = mgr.OpenDir(NewTestDirIterator());
   EXPECT_GT(dh, 0u);
   mgr.ReleaseDir(dh);
 }
 
 TEST_F(FileHandleTest, OpenDirUniqueHandles) {
   auto &mgr = FileHandleManager::Instance();
-  uint64_t dh1 = mgr.OpenDir(10);
-  uint64_t dh2 = mgr.OpenDir(20);
+  uint64_t dh1 = mgr.OpenDir(NewTestDirIterator());
+  uint64_t dh2 = mgr.OpenDir(NewTestDirIterator());
   EXPECT_NE(dh1, dh2);
   mgr.ReleaseDir(dh1);
   mgr.ReleaseDir(dh2);
@@ -342,12 +365,12 @@ TEST_F(FileHandleTest, OpenDirAndReleaseDirLifecycle) {
   auto &mgr = FileHandleManager::Instance();
   constexpr metadata::InodeID kIno = 77;
 
-  uint64_t dh = mgr.OpenDir(kIno);
+  uint64_t dh = mgr.OpenDir(NewTestDirIterator());
   EXPECT_NE(dh, 0u);
 
   // Release and then re-allocate — should get a new handle.
   mgr.ReleaseDir(dh);
-  uint64_t dh2 = mgr.OpenDir(kIno);
+  uint64_t dh2 = mgr.OpenDir(NewTestDirIterator());
   EXPECT_NE(dh, dh2);
   mgr.ReleaseDir(dh2);
 }

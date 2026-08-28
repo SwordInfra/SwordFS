@@ -11,7 +11,9 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <algorithm>
 #include <cstring>
+#include <utility>
 
 #include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/types/Common.hpp"
@@ -25,6 +27,53 @@
 namespace swordfs::metadata {
 
 namespace {
+
+class MemoryDirIterator final : public IDirIterator {
+ public:
+  explicit MemoryDirIterator(std::vector<SwordFsEntry> entries) : entries_(std::move(entries)) {}
+
+  Status Peek(uint64_t offset, SwordFsEntry *entry,
+              uint64_t *next_offset, bool *end) override {
+    if (entry == nullptr || next_offset == nullptr || end == nullptr) {
+      return Status::InvalidArgument("directory iterator output is null");
+    }
+    if (offset >= entries_.size()) {
+      *next_offset = offset;
+      *end = true;
+      return Status::NotFound("directory end");
+    }
+    *entry = entries_[static_cast<size_t>(offset)];
+    *next_offset = offset + 1;
+    *end = *next_offset >= entries_.size();
+    return Status::OK();
+  }
+
+  Status Read(uint64_t offset, size_t max_entries,
+              std::vector<SwordFsEntry> *entries,
+              uint64_t *next_offset, bool *end) override {
+    if (entries == nullptr || next_offset == nullptr || end == nullptr) {
+      return Status::InvalidArgument("directory iterator output is null");
+    }
+    if (offset > entries_.size()) {
+      entries->clear();
+      *next_offset = offset;
+      *end = true;
+      return Status::OK();
+    }
+    entries->clear();
+    const size_t begin = static_cast<size_t>(offset);
+    const size_t count = std::min(max_entries, entries_.size() - begin);
+    entries->insert(entries->end(), entries_.begin() + begin,
+                    entries_.begin() + begin + count);
+    *next_offset = offset + count;
+    *end = *next_offset >= entries_.size();
+    return Status::OK();
+  }
+
+ private:
+  std::vector<SwordFsEntry> entries_;
+};
+
 utils::Status CreateMemoryMetaEngine(std::string_view, std::string_view, std::unique_ptr<IMetaEngine> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("metadata engine output is null");
@@ -421,6 +470,19 @@ Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
     SWORDFS_LOG_ERROR << "ReadDir: ino " << ino << " failed: " << status.message();
   }
   return status;
+}
+
+Status MemMetaImpl::OpenDirIterator(InodeID ino, std::unique_ptr<IDirIterator> *out) {
+  if (out == nullptr) {
+    return Status::InvalidArgument("directory iterator output is null");
+  }
+  std::vector<SwordFsEntry> entries;
+  auto status = ReadDir(ino, &entries);
+  if (!status.ok()) {
+    return status;
+  }
+  *out = std::make_unique<MemoryDirIterator>(std::move(entries));
+  return Status::OK();
 }
 
 Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {

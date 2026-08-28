@@ -66,6 +66,8 @@ jobs:
           SWORDFS_E2E_S3_BUCKET: "s3://127.0.0.1:9000/swordfs-e2e"
           SWORDFS_BIN: "${{ github.workspace }}/build/swordfs"
           E2E_BIN: "${{ github.workspace }}/build/swordfs_e2e_test"
+          METADATA_URL: "redis://127.0.0.1:6380/15"
+          REDIS_PORT: "6380"
         run: |
           sudo modprobe fuse
           sudo chmod 666 /dev/fuse

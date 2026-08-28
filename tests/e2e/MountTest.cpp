@@ -44,7 +44,7 @@ TEST_F(MountTest, DataPersistsAfterRemount) {
   fixture_.TearDown();
   ASSERT_TRUE(fixture_.SetUp());
 
-  // Data stored in memory://local metadata does not survive unmount,
+  // Redis metadata survives unmount, so verify that the namespace is
   // but the mount cycle itself must be clean.
   EXPECT_TRUE(fixture_.IsMounted());
 }

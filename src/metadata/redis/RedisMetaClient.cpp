@@ -94,6 +94,41 @@ utils::Status RedisMetaClient::Get(std::string_view key, std::string *value) {
   });
 }
 
+utils::Status RedisMetaClient::HScan(
+    std::string_view key, uint64_t cursor, size_t count,
+    std::vector<std::pair<std::string, std::string>> *values,
+    uint64_t *next_cursor) {
+  if (values == nullptr || next_cursor == nullptr) {
+    return utils::Status::InvalidArgument("Redis HSCAN output is null");
+  }
+  return pool_->Run([this, key, cursor, count, values, next_cursor] {
+    try {
+      values->clear();
+      *next_cursor = cursor;
+      *next_cursor = redis_->hscan(std::string(key), *next_cursor,
+                                    static_cast<long long>(count),
+                                    std::back_inserter(*values));
+      return utils::Status::OK();
+    } catch (const sw::redis::Error &error) {
+      return RedisError("HSCAN", error);
+    }
+  });
+}
+
+utils::Status RedisMetaClient::Incr(std::string_view key, uint64_t *value) {
+  if (value == nullptr) {
+    return utils::Status::InvalidArgument("Redis INCR output is null");
+  }
+  return pool_->Run([this, key, value] {
+    try {
+      *value = redis_->incr(std::string(key));
+      return utils::Status::OK();
+    } catch (const sw::redis::Error &error) {
+      return RedisError("INCR", error);
+    }
+  });
+}
+
 utils::Status RedisMetaClient::TransactImpl(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
   for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
     try {

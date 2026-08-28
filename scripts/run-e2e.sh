@@ -25,7 +25,7 @@ S3_BUCKET="${S3_BUCKET:-swordfs-e2e}"
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 MINIO_CONTAINER="${MINIO_CONTAINER:-swordfs-e2e-minio}"
-METADATA_URL="${METADATA_URL:-memory://local}"
+METADATA_URL="${METADATA_URL:-redis://127.0.0.1:6379/15}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-swordfs-e2e-redis}"
 REDIS_IMAGE="${REDIS_IMAGE:-redis:7-alpine}"
 
@@ -151,8 +151,10 @@ start_minio
 create_bucket
 
 if [[ "${METADATA_URL}" == redis://* ]]; then
-  if [[ "${METADATA_URL}" != redis://127.0.0.1:6379/* && "${METADATA_URL}" != redis://localhost:6379/* ]]; then
-    echo "ERROR: Redis E2E currently expects METADATA_URL on 127.0.0.1:6379 or localhost:6379."
+  redis_host="${REDIS_HOST:-127.0.0.1}"
+  redis_port="${REDIS_PORT:-6379}"
+  if [[ "${METADATA_URL}" != "redis://${redis_host}:${redis_port}" && "${METADATA_URL}" != "redis://${redis_host}:${redis_port}/"* ]]; then
+    echo "ERROR: Redis E2E METADATA_URL must use ${redis_host}:${redis_port}."
     exit 1
   fi
   start_redis

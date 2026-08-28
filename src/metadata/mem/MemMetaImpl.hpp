@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 
+#include "metadata/DirIterator.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 
@@ -41,6 +42,7 @@ class MemMetaImpl : public IMetaEngine {
 
   // Directory operations
   Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) override;
+  Status OpenDirIterator(InodeID ino, std::unique_ptr<IDirIterator> *out) override;
   Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode,
                SwordFsInode *out) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
