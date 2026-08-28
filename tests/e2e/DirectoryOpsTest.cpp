@@ -492,8 +492,7 @@ TEST_F(DirectoryOpsTest, RenameDirOverNonEmptyDir) {
   const Child dst_children[] = {
       {"child.txt", Fixture::GenerateRandomData(kSmallContentLen, Fixture::RandomMode::kUpTo), false},
   };
-  auto populate = [&](const std::string &parent, const Child *children,
-                      size_t count) {
+  auto populate = [&](const std::string &parent, const Child *children, size_t count) {
     for (size_t i = 0; i < count; ++i) {
       auto path = parent + "/" + children[i].name;
       if (children[i].is_dir) {
@@ -523,8 +522,7 @@ TEST_F(DirectoryOpsTest, RenameDirOverNonEmptyDir) {
   EXPECT_EQ(st.st_ino, dst_before.st_ino);
   EXPECT_TRUE(S_ISDIR(st.st_mode));
 
-  auto verify = [&](const std::string &parent, const Child *children,
-                    size_t count) {
+  auto verify = [&](const std::string &parent, const Child *children, size_t count) {
     for (size_t i = 0; i < count; ++i) {
       auto path = parent + "/" + children[i].name;
       ASSERT_EQ(fixture_.Stat(path, &st), 0);

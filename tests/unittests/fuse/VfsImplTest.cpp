@@ -5,9 +5,9 @@
 // All VfsImpl methods return utils::Status (no FUSE dependency),
 // so they can be tested directly without any FUSE infrastructure.
 
+#include <dirent.h>
 #include <gtest/gtest.h>
 
-#include <dirent.h>
 #include <cstring>
 #include <memory>
 
@@ -17,16 +17,16 @@
 #include "volume/VolumeImpl.hpp"
 
 using swordfs::metadata::ChunkIndex;
-using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
-using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsAttr;
-using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::SwordFsChunk;
+using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
+using swordfs::metadata::SwordFsVolume;
 using swordfs::vfs::VfsImpl;
 
 // Minimal no-op data engine. The VfsImplIntegrationTest fixture must
@@ -36,15 +36,19 @@ using swordfs::vfs::VfsImpl;
 // provide their own.
 class NoopDataEngine : public swordfs::storage::IDataEngine {
  public:
-  swordfs::utils::Status Initialize() override { return swordfs::utils::Status::OK(); }
-  swordfs::storage::DataEngineLimits Limits() const override { return {}; }
-  bool Head(std::string_view, size_t *) override { return false; }
-  swordfs::utils::Status Put(std::string_view,
-                             std::unique_ptr<folly::IOBuf>) override {
+  swordfs::utils::Status Initialize() override {
     return swordfs::utils::Status::OK();
   }
-  swordfs::utils::Status Get(std::string_view, size_t, size_t,
-                             folly::IOBuf *) override {
+  swordfs::storage::DataEngineLimits Limits() const override {
+    return {};
+  }
+  bool Head(std::string_view, size_t *) override {
+    return false;
+  }
+  swordfs::utils::Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
+    return swordfs::utils::Status::OK();
+  }
+  swordfs::utils::Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
     return swordfs::utils::Status::OK();
   }
   swordfs::utils::Status Delete(std::string_view) override {
@@ -70,11 +74,10 @@ TEST(VfsImplTest, VolumeReturnsNonNullAfterInit) {
 // Not-yet-implemented methods — all return NotSupported
 // ────────────────────────────────────────────────────────────────
 
-#define EXPECT_NOT_SUPPORTED(call)              \
-  do {                                          \
-    auto status = (call);                       \
-    EXPECT_TRUE(status.IsNotSupported())        \
-        << #call << " => " << status.message(); \
+#define EXPECT_NOT_SUPPORTED(call)                                               \
+  do {                                                                           \
+    auto status = (call);                                                        \
+    EXPECT_TRUE(status.IsNotSupported()) << #call << " => " << status.message(); \
   } while (0)
 
 TEST(VfsImplTest, Mknod) {
@@ -153,8 +156,7 @@ namespace {
 
 class TestDirIterator final : public swordfs::metadata::IDirIterator {
  public:
-  Status Peek(uint64_t offset, swordfs::metadata::SwordFsEntry *entry,
-              uint64_t *next_offset, bool *end) override {
+  Status Peek(uint64_t offset, swordfs::metadata::SwordFsEntry *entry, uint64_t *next_offset, bool *end) override {
     if (offset == 0) {
       *entry = {".", DT_DIR, 1};
       *next_offset = 1;
@@ -166,8 +168,7 @@ class TestDirIterator final : public swordfs::metadata::IDirIterator {
     return Status::NotFound("directory end");
   }
 
-  Status Read(uint64_t offset, size_t max_entries,
-              std::vector<swordfs::metadata::SwordFsEntry> *entries,
+  Status Read(uint64_t offset, size_t max_entries, std::vector<swordfs::metadata::SwordFsEntry> *entries,
               uint64_t *next_offset, bool *end) override {
     entries->clear();
     if (offset == 0 && max_entries > 0) {
@@ -184,10 +185,18 @@ class TestDirIterator final : public swordfs::metadata::IDirIterator {
 
 class MockMetaEngine : public swordfs::metadata::IMetaEngine {
  public:
-  Status Initialize() override { return Status::OK(); }
-  Status FormatVolume(const SwordFsVolume &) override { return Status::OK(); }
-  Status LoadVolume(SwordFsVolume *) override { return Status::OK(); }
-  Limits GetLimits() const override { return {}; }
+  Status Initialize() override {
+    return Status::OK();
+  }
+  Status FormatVolume(const SwordFsVolume &) override {
+    return Status::OK();
+  }
+  Status LoadVolume(SwordFsVolume *) override {
+    return Status::OK();
+  }
+  Limits GetLimits() const override {
+    return {};
+  }
   Status Lookup(InodeID, std::string_view, SwordFsInode *out) override {
     if (out) {
       *out = {};
@@ -202,8 +211,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return call_status_;
   }
-  Status ReadDir(InodeID,
-                 std::vector<swordfs::metadata::SwordFsEntry> *) override {
+  Status ReadDir(InodeID, std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
@@ -226,12 +234,10 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status RmDir(InodeID, std::string_view) override {
     return Status::OK();
   }
-  Status Rename(InodeID, std::string_view, InodeID,
-                std::string_view, RenameFlag, RenameResult *) override {
+  Status Rename(InodeID, std::string_view, InodeID, std::string_view, RenameFlag, RenameResult *) override {
     return Status::OK();
   }
-  Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField,
-                 SwordFsInode *) override {
+  Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField, SwordFsInode *) override {
     return Status::OK();
   }
   Status StatFs(SwordFsStatFs *stbuf) override {
@@ -241,16 +247,14 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     stbuf->block_size = 4096;
     return call_status_;
   }
-  Status Symlink(InodeID, std::string_view, std::string_view,
-                 SwordFsInode *out) override {
+  Status Symlink(InodeID, std::string_view, std::string_view, SwordFsInode *out) override {
     if (out) {
       *out = {};
       out->ino = 102;
     }
     return Status::OK();
   }
-  Status Link(InodeID, InodeID, std::string_view,
-              SwordFsInode *out) override {
+  Status Link(InodeID, InodeID, std::string_view, SwordFsInode *out) override {
     if (out) {
       *out = {};
       out->ino = 2;
@@ -263,12 +267,18 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status Access(InodeID, uint32_t) override {
     return call_status_;
   }
-  Status Open(InodeID) override { return call_status_; }
-  Status ReclaimInode(InodeID) override { return call_status_; }
+  Status Open(InodeID) override {
+    return call_status_;
+  }
+  Status ReclaimInode(InodeID) override {
+    return call_status_;
+  }
   Status ListChunks(InodeID, std::vector<swordfs::metadata::SwordFsChunk> *) override {
     return Status::OK();
   }
-  Status OpenDir(InodeID) override { return call_status_; }
+  Status OpenDir(InodeID) override {
+    return call_status_;
+  }
   Status OpenDirIterator(InodeID, std::unique_ptr<swordfs::metadata::IDirIterator> *out) override {
     if (call_status_.ok()) {
       *out = std::make_unique<TestDirIterator>();
@@ -281,9 +291,13 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
     return Status::NotFound("");
   }
-  Status Truncate(InodeID, uint64_t) override { return Status::OK(); }
+  Status Truncate(InodeID, uint64_t) override {
+    return Status::OK();
+  }
 
-  void set_status(Status s) { call_status_ = s; }
+  void set_status(Status s) {
+    call_status_ = s;
+  }
 
  private:
   Status call_status_{Status::OK()};

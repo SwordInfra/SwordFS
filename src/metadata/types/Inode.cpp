@@ -4,8 +4,9 @@
 #include "metadata/types/Inode.hpp"
 
 #include <sys/stat.h>
-#include <ctime>
+
 #include <cstring>
+#include <ctime>
 #include <utility>
 
 #include "metadata/types/BufCodec.hpp"
@@ -26,7 +27,9 @@ void SwordFsAttr::KillSUID() {
 }
 
 void SwordFsAttr::ToPosixStat(struct stat *st) const {
-  if (st == nullptr) return;
+  if (st == nullptr) {
+    return;
+  }
   std::memset(st, 0, sizeof(*st));
   st->st_dev = static_cast<dev_t>(dev);
   st->st_ino = static_cast<ino_t>(ino);
@@ -67,8 +70,7 @@ SwordFsAttr SwordFsAttr::FromPosixStat(const struct stat &st) {
   return attr;
 }
 
-SwordFsInode::SwordFsInode(InodeID ino, SwordFsAttr attr, InodeID parent_ino,
-                           std::string symlink_target)
+SwordFsInode::SwordFsInode(InodeID ino, SwordFsAttr attr, InodeID parent_ino, std::string symlink_target)
     : ino(ino), attr(attr), parent_ino(parent_ino), symlink_target(std::move(symlink_target)) {
 }
 
@@ -147,8 +149,7 @@ utils::Status SwordFsInode::ParseFrom(std::string_view data) {
     return utils::Status::Malformed("Malformed inode record: decode failure");
   }
   if (!dec.Done()) {
-    return utils::Status::Malformed("Malformed inode record: trailing data size=" +
-                                   std::to_string(data.size()));
+    return utils::Status::Malformed("Malformed inode record: trailing data size=" + std::to_string(data.size()));
   }
   // nlink == 0 is a valid orphan-inode state. The inode remains in
   // metadata until the runtime/open-reference lifecycle calls ReclaimInode.

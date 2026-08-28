@@ -53,8 +53,7 @@ TEST_F(FileIOTest, MultipleWritesAccumulate) {
   ASSERT_EQ(::write(fd, "world", 5), 5);
   ::close(fd);
 
-  EXPECT_TRUE(
-      fixture_.FileEquals(name, 11, Fixture::Hash64("hello world")));
+  EXPECT_TRUE(fixture_.FileEquals(name, 11, Fixture::Hash64("hello world")));
   struct stat st;
   ASSERT_EQ(fixture_.Stat(name, &st), 0);
   EXPECT_EQ(st.st_size, 11);
@@ -181,8 +180,7 @@ TEST_F(FileIOTest, AppendMultipleWithinSameOpen) {
   ASSERT_EQ(::write(fd, "world", 5), 5);
   ::close(fd);
 
-  EXPECT_TRUE(
-      fixture_.FileEquals(name, 11, Fixture::Hash64("hello world")));
+  EXPECT_TRUE(fixture_.FileEquals(name, 11, Fixture::Hash64("hello world")));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -193,8 +191,7 @@ TEST_F(FileIOTest, CreateWriteRead) {
   const std::string name = "hello.txt";
   ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
   ASSERT_EQ(fixture_.WriteFile(name, "Hello, SwordFS!"), 0);
-  EXPECT_TRUE(
-      fixture_.FileEquals(name, 15, Fixture::Hash64("Hello, SwordFS!")));
+  EXPECT_TRUE(fixture_.FileEquals(name, 15, Fixture::Hash64("Hello, SwordFS!")));
 }
 
 TEST_F(FileIOTest, FileInRootIsFile) {

@@ -19,6 +19,7 @@
 namespace {
 
 using swordfs::metadata::InodeID;
+using swordfs::metadata::kRootInodeId;
 using swordfs::metadata::RedisMetaConfig;
 using swordfs::metadata::RedisMetaImpl;
 using swordfs::metadata::SetAttrField;
@@ -26,13 +27,14 @@ using swordfs::metadata::SwordFsAttr;
 using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsVolume;
-using swordfs::metadata::kRootInodeId;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
 bool LoadConfig(RedisMetaConfig *config) {
   const char *url = std::getenv("SWORDFS_REDIS_TEST_URL");
-  if (url == nullptr) return false;
+  if (url == nullptr) {
+    return false;
+  }
   const auto status = swordfs::metadata::ParseRedisMetaUrl(url, config);
   EXPECT_TRUE(status.ok()) << status.message();
   return status.ok();
@@ -48,8 +50,7 @@ class RedisMetaImplTest : public ::testing::Test {
     // FormatVolume refuses an already-formatted volume, and Redis state
     // outlives this process. Include the pid so rerunning the test binary
     // against the same Redis instance does not collide with previous runs.
-    volume_name_ = "redis-meta-test-" + std::to_string(::getpid()) + "-" +
-                   std::to_string(++sequence);
+    volume_name_ = "redis-meta-test-" + std::to_string(::getpid()) + "-" + std::to_string(++sequence);
     impl_ = std::make_unique<RedisMetaImpl>(config_, volume_name_);
     ASSERT_TRUE(impl_->Initialize().ok());
     SwordFsVolume volume;
@@ -74,7 +75,8 @@ TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesSameParentNlin
   ASSERT_TRUE(impl_->GetInode(kRootInodeId, &root).ok());
   ASSERT_EQ(root.attr.nlink, 4U);
 
-  ASSERT_TRUE(impl_->Rename(kRootInodeId, "src", kRootInodeId, "dst", swordfs::metadata::RenameFlag::kNone, nullptr).ok());
+  ASSERT_TRUE(
+      impl_->Rename(kRootInodeId, "src", kRootInodeId, "dst", swordfs::metadata::RenameFlag::kNone, nullptr).ok());
 
   ASSERT_TRUE(impl_->GetInode(kRootInodeId, &root).ok());
   EXPECT_EQ(root.attr.nlink, 3U);

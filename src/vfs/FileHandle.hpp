@@ -49,10 +49,14 @@ class FileHandle {
   utils::Status Flush();
 
   /// The file-handle id assigned by FileHandleManager.
-  uint64_t fh() const { return fh_; }
+  uint64_t fh() const {
+    return fh_;
+  }
 
   // Exposed for FileHandleManager::Release and unit tests.
-  const std::shared_ptr<InodeHandle> &handle() const { return handle_; }
+  const std::shared_ptr<InodeHandle> &handle() const {
+    return handle_;
+  }
 
  private:
   uint64_t fh_ = 0;
@@ -65,8 +69,8 @@ struct FileMap;
 struct DirMap;
 
 struct DirHandle {
-  explicit DirHandle(std::shared_ptr<metadata::IDirIterator> iterator)
-      : iterator(std::move(iterator)) {}
+  explicit DirHandle(std::shared_ptr<metadata::IDirIterator> iterator) : iterator(std::move(iterator)) {
+  }
 
   std::shared_ptr<metadata::IDirIterator> iterator;
   std::mutex mutex;
