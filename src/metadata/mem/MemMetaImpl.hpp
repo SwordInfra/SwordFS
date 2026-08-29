@@ -23,19 +23,13 @@ class MemMetaImpl : public IMetaEngine {
   ~MemMetaImpl() override = default;
 
   // Entry operations
-  Status Lookup(InodeID parent_ino, std::string_view name,
-                SwordFsInode *out) override;
+  Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
   Status GetInode(InodeID ino, SwordFsInode *out) override;
-  Status Create(InodeID parent_ino, std::string_view name, uint32_t mode,
-                SwordFsInode *out) override;
-  Status Unlink(InodeID parent_ino, std::string_view name,
-                uint64_t *post_nlink = nullptr) override;
-  Status Rename(InodeID old_parent_ino,
-                std::string_view old_name, InodeID new_parent_ino,
-                std::string_view new_name, RenameFlag flags,
-                RenameResult *result = nullptr) override;
-  Status SetAttr(InodeID ino, const SwordFsAttr &attr,
-                 SetAttrField fields, SwordFsInode *out) override;
+  Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
+  Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink = nullptr) override;
+  Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
+                RenameFlag flags, RenameResult *result = nullptr) override;
+  Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override;
   Status Access(InodeID ino, uint32_t mask) override;
   Status Open(InodeID ino) override;
   Status ReclaimInode(InodeID ino) override;
@@ -43,16 +37,13 @@ class MemMetaImpl : public IMetaEngine {
   // Directory operations
   Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) override;
   Status OpenDirIterator(InodeID ino, std::unique_ptr<IDirIterator> *out) override;
-  Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode,
-               SwordFsInode *out) override;
+  Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
   Status OpenDir(InodeID ino) override;
 
   // Link / symlink operations
-  Status Symlink(InodeID parent_ino, std::string_view name,
-                 std::string_view link, SwordFsInode *out) override;
-  Status Link(InodeID ino, InodeID newparent_ino,
-              std::string_view newname, SwordFsInode *out) override;
+  Status Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) override;
+  Status Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) override;
   Status Readlink(InodeID ino, std::string *target) override;
 
   // Chunk metadata

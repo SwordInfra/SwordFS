@@ -69,8 +69,8 @@ struct FileMap;
 struct DirMap;
 
 struct DirHandle {
-  explicit DirHandle(std::shared_ptr<metadata::IDirIterator> iterator)
-      : iterator(std::move(iterator)) {}
+  explicit DirHandle(std::shared_ptr<metadata::IDirIterator> iterator) : iterator(std::move(iterator)) {
+  }
 
   std::shared_ptr<metadata::IDirIterator> iterator;
   std::mutex mutex;

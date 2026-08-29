@@ -3,6 +3,7 @@
 
 #include <folly/fibers/FiberManagerInternal.h>
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cstdlib>
@@ -18,6 +19,7 @@
 namespace {
 
 using swordfs::metadata::InodeID;
+using swordfs::metadata::kRootInodeId;
 using swordfs::metadata::RedisMetaConfig;
 using swordfs::metadata::RedisMetaImpl;
 using swordfs::metadata::SetAttrField;
@@ -25,13 +27,14 @@ using swordfs::metadata::SwordFsAttr;
 using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsVolume;
-using swordfs::metadata::kRootInodeId;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
 bool LoadConfig(RedisMetaConfig *config) {
   const char *url = std::getenv("SWORDFS_REDIS_TEST_URL");
-  if (url == nullptr) return false;
+  if (url == nullptr) {
+    return false;
+  }
   const auto status = swordfs::metadata::ParseRedisMetaUrl(url, config);
   EXPECT_TRUE(status.ok()) << status.message();
   return status.ok();
@@ -44,7 +47,10 @@ class RedisMetaImplTest : public ::testing::Test {
       GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
     }
     static std::atomic<uint64_t> sequence{0};
-    volume_name_ = "redis-meta-test-" + std::to_string(++sequence);
+    // FormatVolume refuses an already-formatted volume, and Redis state
+    // outlives this process. Include the pid so rerunning the test binary
+    // against the same Redis instance does not collide with previous runs.
+    volume_name_ = "redis-meta-test-" + std::to_string(::getpid()) + "-" + std::to_string(++sequence);
     impl_ = std::make_unique<RedisMetaImpl>(config_, volume_name_);
     ASSERT_TRUE(impl_->Initialize().ok());
     SwordFsVolume volume;
@@ -69,10 +75,33 @@ TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesSameParentNlin
   ASSERT_TRUE(impl_->GetInode(kRootInodeId, &root).ok());
   ASSERT_EQ(root.attr.nlink, 4U);
 
-  ASSERT_TRUE(impl_->Rename(kRootInodeId, "src", kRootInodeId, "dst", swordfs::metadata::RenameFlag::kNone, nullptr).ok());
+  ASSERT_TRUE(
+      impl_->Rename(kRootInodeId, "src", kRootInodeId, "dst", swordfs::metadata::RenameFlag::kNone, nullptr).ok());
 
   ASSERT_TRUE(impl_->GetInode(kRootInodeId, &root).ok());
   EXPECT_EQ(root.attr.nlink, 3U);
+}
+
+TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesCrossParentNlink) {
+  SwordFsInode dir_a;
+  SwordFsInode dir_b;
+  SwordFsInode src;
+  SwordFsInode dst;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "a", 0777, &dir_a).ok());
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "b", 0777, &dir_b).ok());
+  ASSERT_TRUE(impl_->MkDir(dir_a.ino, "src", 0777, &src).ok());
+  ASSERT_TRUE(impl_->MkDir(dir_b.ino, "dst", 0777, &dst).ok());
+
+  ASSERT_TRUE(impl_->Rename(dir_a.ino, "src", dir_b.ino, "dst", swordfs::metadata::RenameFlag::kNone, nullptr).ok());
+
+  SwordFsInode old_parent;
+  SwordFsInode new_parent;
+  ASSERT_TRUE(impl_->GetInode(dir_a.ino, &old_parent).ok());
+  ASSERT_TRUE(impl_->GetInode(dir_b.ino, &new_parent).ok());
+  // The old parent loses the moved directory's ".." backlink; the new parent
+  // loses the victim's backlink and gains the moved directory's, net zero.
+  EXPECT_EQ(old_parent.attr.nlink, 2U);
+  EXPECT_EQ(new_parent.attr.nlink, 3U);
 }
 
 TEST_F(RedisMetaImplTest, SetAttrShrinkRemovesAndClampsChunks) {

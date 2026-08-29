@@ -10,8 +10,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <cerrno>
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <utility>
 
@@ -30,10 +30,10 @@ namespace {
 
 class MemoryDirIterator final : public IDirIterator {
  public:
-  explicit MemoryDirIterator(std::vector<SwordFsEntry> entries) : entries_(std::move(entries)) {}
+  explicit MemoryDirIterator(std::vector<SwordFsEntry> entries) : entries_(std::move(entries)) {
+  }
 
-  Status Peek(uint64_t offset, SwordFsEntry *entry,
-              uint64_t *next_offset, bool *end) override {
+  Status Peek(uint64_t offset, SwordFsEntry *entry, uint64_t *next_offset, bool *end) override {
     if (entry == nullptr || next_offset == nullptr || end == nullptr) {
       return Status::InvalidArgument("directory iterator output is null");
     }
@@ -48,9 +48,8 @@ class MemoryDirIterator final : public IDirIterator {
     return Status::OK();
   }
 
-  Status Read(uint64_t offset, size_t max_entries,
-              std::vector<SwordFsEntry> *entries,
-              uint64_t *next_offset, bool *end) override {
+  Status Read(uint64_t offset, size_t max_entries, std::vector<SwordFsEntry> *entries, uint64_t *next_offset,
+              bool *end) override {
     if (entries == nullptr || next_offset == nullptr || end == nullptr) {
       return Status::InvalidArgument("directory iterator output is null");
     }
@@ -63,8 +62,7 @@ class MemoryDirIterator final : public IDirIterator {
     entries->clear();
     const size_t begin = static_cast<size_t>(offset);
     const size_t count = std::min(max_entries, entries_.size() - begin);
-    entries->insert(entries->end(), entries_.begin() + begin,
-                    entries_.begin() + begin + count);
+    entries->insert(entries->end(), entries_.begin() + begin, entries_.begin() + begin + count);
     *next_offset = offset + count;
     *end = *next_offset >= entries_.size();
     return Status::OK();

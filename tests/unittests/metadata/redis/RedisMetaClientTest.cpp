@@ -105,9 +105,13 @@ TEST(RedisMetaClientTest, BinaryValueSurvivesWriteTransaction) {
     return store.Transact([&](RedisMetaTxn &txn) {
       std::string ignored;
       auto s = txn.Get(parent_key, &ignored);
-      if (!s.IsNotFound()) return s;
+      if (!s.IsNotFound()) {
+        return s;
+      }
       s = txn.Set(child_key, child_value);
-      if (!s.ok()) return s;
+      if (!s.ok()) {
+        return s;
+      }
       return txn.Set(parent_key, "parent");
     });
   });

@@ -20,7 +20,6 @@ struct SwordFsEntry {
 
   utils::Status SerializeTo(std::string *out) const;
   utils::Status ParseFrom(std::string_view data);
-
 };
 
 }  // namespace swordfs::metadata

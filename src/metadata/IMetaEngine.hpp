@@ -66,8 +66,7 @@ class IMetaEngine {
 
   /// Create a backend-neutral directory iterator. The iterator owns any
   /// backend-specific continuation state (for example a Redis HSCAN cursor).
-  virtual Status OpenDirIterator(InodeID,
-                                 std::unique_ptr<IDirIterator> *out) {
+  virtual Status OpenDirIterator(InodeID, std::unique_ptr<IDirIterator> *out) {
     if (out != nullptr) {
       out->reset();
     }

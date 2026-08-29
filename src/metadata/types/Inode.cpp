@@ -149,8 +149,7 @@ utils::Status SwordFsInode::ParseFrom(std::string_view data) {
     return utils::Status::Malformed("Malformed inode record: decode failure");
   }
   if (!dec.Done()) {
-    return utils::Status::Malformed("Malformed inode record: trailing data size=" +
-                                   std::to_string(data.size()));
+    return utils::Status::Malformed("Malformed inode record: trailing data size=" + std::to_string(data.size()));
   }
   // nlink == 0 is a valid orphan-inode state. The inode remains in
   // metadata until the runtime/open-reference lifecycle calls ReclaimInode.

@@ -347,16 +347,14 @@ TEST_F(FileHandleTest, ConcurrentOpenAndFind) {
 
 class TestDirIterator final : public metadata::IDirIterator {
  public:
-  Status Peek(uint64_t offset, metadata::SwordFsEntry *entry,
-              uint64_t *next_offset, bool *end) override {
+  Status Peek(uint64_t offset, metadata::SwordFsEntry *entry, uint64_t *next_offset, bool *end) override {
     *next_offset = offset;
     *end = true;
     return Status::NotFound("directory end");
   }
 
-  Status Read(uint64_t offset, size_t max_entries,
-              std::vector<metadata::SwordFsEntry> *entries,
-              uint64_t *next_offset, bool *end) override {
+  Status Read(uint64_t offset, size_t max_entries, std::vector<metadata::SwordFsEntry> *entries, uint64_t *next_offset,
+              bool *end) override {
     entries->clear();
     *next_offset = offset;
     *end = true;
@@ -396,7 +394,6 @@ TEST_F(FileHandleTest, ReleaseDirNonexistentNoCrash) {
 
 TEST_F(FileHandleTest, OpenDirAndReleaseDirLifecycle) {
   auto &mgr = FileHandleManager::Instance();
-  constexpr metadata::InodeID kIno = 77;
 
   uint64_t dh = mgr.OpenDir(NewTestDirIterator());
   EXPECT_NE(dh, 0u);

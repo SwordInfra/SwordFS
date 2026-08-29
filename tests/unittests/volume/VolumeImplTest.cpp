@@ -21,8 +21,8 @@ using swordfs::volume::VolumeImpl;
 class VolumeImplTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    if (access("/etc/swordfs", W_OK) != 0 && access("/etc", W_OK) != 0) {
-      GTEST_SKIP() << "/etc/swordfs is not writable";
+    if (::mkdir("/etc/swordfs", 0755) != 0 && errno != EEXIST) {
+      FAIL() << "failed to create /etc/swordfs: " << strerror(errno);
     }
     tmpdir_ = "/tmp/swordfs_volimpl_test_" + std::to_string(::getpid());
     std::system(("mkdir -p " + tmpdir_).c_str());

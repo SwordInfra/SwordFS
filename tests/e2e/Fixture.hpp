@@ -148,7 +148,6 @@ class Fixture {
   bool WaitForMount();
   bool StopMount();
   void InitPaths();
-  void RemoveVolumeConfig();
   std::string LogPath() const;
   std::string FindSwordfsBin() const;
 
@@ -156,6 +155,7 @@ class Fixture {
   std::string work_dir_;
   std::string mountpoint_;
   std::string volume_name_;
+  // Keep the formatted Redis volume across unmount/remount cycles within a test.
   bool volume_formatted_ = false;
   std::string bucket_url_;
   std::string base_bucket_url_;  // original URL (without test-name suffix)
