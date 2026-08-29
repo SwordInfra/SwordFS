@@ -62,7 +62,7 @@ class MemMetaImplTest : public ::testing::Test {
     impl_->MkDir(parent_ino, name, mode, &inode);
     InodeID ino = inode.ino;
     // Change ownership to kOwner:kGroup
-    struct stat st {};
+    struct stat st{};
     st.st_uid = kOwner;
     st.st_gid = kGroup;
     st.st_mode = S_IFDIR | mode;
@@ -73,7 +73,7 @@ class MemMetaImplTest : public ::testing::Test {
   // Change only the mode of an existing directory.
   void SetDirMode(InodeID ino, mode_t mode) {
     SetContext(0, 0);
-    struct stat st {};
+    struct stat st{};
     st.st_mode = S_IFDIR | mode;
     impl_->SetAttr(ino, &st, SetAttrField::kMode, nullptr);
   }
@@ -130,7 +130,7 @@ class MemMetaImplTest : public ::testing::Test {
   // Change ownership of an existing directory.
   void SetDirOwner(InodeID ino, uid_t uid, gid_t gid) {
     SetContext(0, 0);
-    struct stat st {};
+    struct stat st{};
     st.st_uid = uid;
     st.st_gid = gid;
     impl_->SetAttr(ino, &st, SetAttrField::kUid | SetAttrField::kGid, nullptr);
@@ -614,7 +614,7 @@ TEST_F(MemMetaImplTest, OpenRequiresReadPermission) {
   ASSERT_TRUE(CreateFile(dir_ino, "f", 0644, &f_ino).ok());
 
   // Remove read from the file owner
-  struct stat st {};
+  struct stat st{};
   st.st_uid = kOwner;
   st.st_gid = kOtherGroup;
   st.st_mode = S_IFREG | 0200;  // -w-------
@@ -631,7 +631,7 @@ TEST_F(MemMetaImplTest, OpenRootSucceedsWithoutReadPerm) {
   CreateFile(dir_ino, "f", 0644, &f_ino);
 
   // Remove all perms
-  struct stat st {};
+  struct stat st{};
   st.st_mode = S_IFREG | 0000;
   SetContext(0, 0);
   impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr);
@@ -655,13 +655,13 @@ TEST_F(MemMetaImplTest, TruncateUpdatesSizeAndClearsSuidSgid) {
   ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
 
   // Give the file SUID/SGID without touching its size.
-  struct stat st {};
+  struct stat st{};
   st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
   ASSERT_TRUE(impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr).ok());
 
   ASSERT_TRUE(impl_->Truncate(f_ino, 1024).ok());
 
-  struct stat out {};
+  struct stat out{};
   ASSERT_TRUE(impl_->GetAttr(f_ino, &out).ok());
   EXPECT_EQ(out.st_size, 1024);
   EXPECT_EQ(out.st_mode & S_ISUID, 0u);
@@ -672,12 +672,12 @@ TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
   InodeID f_ino = 0;
   ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
 
-  struct stat st {};
+  struct stat st{};
   st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
   ASSERT_TRUE(impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr).ok());
   ASSERT_TRUE(impl_->Truncate(f_ino, 0).ok());  // size was already 0
 
-  struct stat out {};
+  struct stat out{};
   ASSERT_TRUE(impl_->GetAttr(f_ino, &out).ok());
   EXPECT_EQ(out.st_size, 0);
   EXPECT_NE(out.st_mode & S_ISUID, 0u);
@@ -692,11 +692,11 @@ TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
   InodeID f_ino = 0;
   ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
 
-  struct stat st {};
+  struct stat st{};
   st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
   ASSERT_TRUE(impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr).ok());
 
-  struct stat attr {};
+  struct stat attr{};
   attr.st_size = 2048;
   swordfs::metadata::SwordFsInode out{};
   ASSERT_TRUE(impl_->SetAttr(f_ino, &attr, SetAttrField::kSize, &out).ok());
@@ -720,7 +720,7 @@ TEST_F(MemMetaImplTest, UnlinkOnHardlinkedInodeKeepsInodeAlive) {
   ASSERT_TRUE(impl_->Link(f_ino, kRoot, "link", nullptr).ok());
 
   // Sanity: both names now point to the same inode, nlink=2.
-  struct stat attr {};
+  struct stat attr{};
   ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
   ASSERT_EQ(attr.st_nlink, 2);
 

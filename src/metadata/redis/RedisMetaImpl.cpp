@@ -1057,7 +1057,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     }
     if (source.IsDir()) {
       source.parent_ino = new_parent_ino;
-      if (old_parent_ino != new_parent_ino && !target_exists) {
+      if (old_parent_ino != new_parent_ino) {
         old_parent.attr.nlink--;
         new_parent.attr.nlink++;
       }

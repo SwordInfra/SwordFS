@@ -1,6 +1,6 @@
 # Redis Metadata Schema and Access-Pattern Review
 
-Issue: #109  
+Issue: #109
 Scope: Redis Metadata V1, Phase 1
 
 This document is the working design baseline for Redis Metadata V1. It captures decisions made during review and records items that still need validation. Follow-up implementation PRs should use this document as the starting point and update it when implementation reveals a necessary design change.

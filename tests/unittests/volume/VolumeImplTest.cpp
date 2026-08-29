@@ -35,7 +35,9 @@ class VolumeImplTest : public ::testing::Test {
                           const std::string &bucket_url = "") {
     ConfigCenter cfg;
     cfg.set_meta_url(meta_url);
-    cfg.set_volume(vol_name + "-" + std::to_string(::getpid()));
+    const auto *test_info = ::testing::UnitTest::GetInstance()->current_test_info();
+    const std::string test_name = test_info != nullptr ? test_info->name() : "unknown";
+    cfg.set_volume(vol_name + "-" + test_name + "-" + std::to_string(::getpid()));
     cfg.set_bucket_url(bucket_url);
     return std::move(cfg);
   }

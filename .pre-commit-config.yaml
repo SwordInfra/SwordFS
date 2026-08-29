@@ -1,5 +1,5 @@
 # SwordFS pre-commit hooks
-# Install: pip install pre-commit && pre-commit install
+# Install: pipx install pre-commit && pre-commit install
 
 repos:
   # ── Generic file checks ────────────────────────────────────────
@@ -12,6 +12,13 @@ repos:
       - id: check-merge-conflict
       - id: check-added-large-files
         args: ['--maxkb=500']
+
+  # ── C++ formatting ─────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v21.1.6
+    hooks:
+      - id: clang-format
+        types_or: [c++, c, header]
 
   # ── CMake formatting ───────────────────────────────────────────
   - repo: https://github.com/cheshirekow/cmake-format-precommit

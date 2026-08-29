@@ -148,6 +148,7 @@ class Fixture {
   bool WaitForMount();
   bool StopMount();
   void InitPaths();
+  void RemoveVolumeConfig();
   std::string LogPath() const;
   std::string FindSwordfsBin() const;
 
