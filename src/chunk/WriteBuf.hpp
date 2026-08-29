@@ -29,15 +29,15 @@ class WriteBuf {
   ~WriteBuf();
 
   // Movable (required by std::deque<Chunk>::erase)
-  WriteBuf(WriteBuf&&) = default;
-  WriteBuf& operator=(WriteBuf&&) = default;
+  WriteBuf(WriteBuf &&) = default;
+  WriteBuf &operator=(WriteBuf &&) = default;
 
   // Non-copyable (owns unique_ptr)
-  WriteBuf(const WriteBuf&) = delete;
-  WriteBuf& operator=(const WriteBuf&) = delete;
+  WriteBuf(const WriteBuf &) = delete;
+  WriteBuf &operator=(const WriteBuf &) = delete;
 
   /// Write the contents of |data| at the given buffer-relative |offset|.
-  utils::Status Write(off_t offset, const folly::IOBuf& data);
+  utils::Status Write(off_t offset, const folly::IOBuf &data);
 
   /// Clone the underlying IOBuf.  Shares the buffer (refcount bump),
   /// does NOT copy data.  The original buffer remains valid in the

@@ -32,10 +32,14 @@ FiberRuntime::~FiberRuntime() {
 }
 
 void InitFiberRuntime() {
-  if (t_runtime != nullptr) return;
+  if (t_runtime != nullptr) {
+    return;
+  }
 
   std::lock_guard<std::mutex> lock(g_mutex);
-  if (t_runtime != nullptr || g_shutdown) return;
+  if (t_runtime != nullptr || g_shutdown) {
+    return;
+  }
 
   t_runtime = new FiberRuntime();
   g_runtimes.push_back(t_runtime);
@@ -54,6 +58,8 @@ void ShutdownFiberRuntime() {
   }
 }
 
-FiberRuntime *ThisFiberRuntime() { return t_runtime; }
+FiberRuntime *ThisFiberRuntime() {
+  return t_runtime;
+}
 
 }  // namespace swordfs::utils

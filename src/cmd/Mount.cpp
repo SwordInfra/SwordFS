@@ -49,10 +49,8 @@ static int ValidateMountpoint(const std::string &mountpoint) {
 
   // Detect stale mount
   if (IsStaleMount(mountpoint)) {
-    SWORDFS_PROMPT_INFO << "Warning: stale FUSE mount detected at '"
-                        << mountpoint
-                        << "'. Run 'fusermount3 -u " << mountpoint
-                        << "' first.";
+    SWORDFS_PROMPT_INFO << "Warning: stale FUSE mount detected at '" << mountpoint << "'. Run 'fusermount3 -u "
+                        << mountpoint << "' first.";
     return -1;
   }
 
@@ -61,20 +59,17 @@ static int ValidateMountpoint(const std::string &mountpoint) {
     std::error_code ec;
     folly::fs::create_directories(mountpoint, ec);
     if (ec) {
-      SWORDFS_PROMPT_INFO << "Error: failed to create mountpoint '"
-                          << mountpoint << "': " << ec.message();
+      SWORDFS_PROMPT_INFO << "Error: failed to create mountpoint '" << mountpoint << "': " << ec.message();
       return -1;
     }
   } else if (!folly::fs::is_directory(mountpoint)) {
-    SWORDFS_PROMPT_INFO << "Error: mountpoint '" << mountpoint
-                        << "' is not a directory";
+    SWORDFS_PROMPT_INFO << "Error: mountpoint '" << mountpoint << "' is not a directory";
     return -1;
   }
 
   // Must not already be mounted
   if (IsFuseMounted(mountpoint)) {
-    SWORDFS_PROMPT_INFO << "Error: mountpoint '" << mountpoint
-                        << "' is already mounted";
+    SWORDFS_PROMPT_INFO << "Error: mountpoint '" << mountpoint << "' is already mounted";
     return -1;
   }
 
@@ -164,13 +159,11 @@ static FuseArgsGuard BuildFuseArgs(const std::vector<std::string> &extras) {
 }
 
 // Mount the filesystem via libfuse low-level API. Blocks until unmounted.
-static int Mount(const std::string &mountpoint,
-                 const std::vector<std::string> &extras, int signal_fd) {
+static int Mount(const std::string &mountpoint, const std::vector<std::string> &extras, int signal_fd) {
   FuseArgsGuard args(BuildFuseArgs(extras));
 
-  FuseSessionGuard se(fuse_session_new(
-      args.get(), &::swordfs::fuse::VfsHookFactory::get_ops(),
-      sizeof(struct fuse_lowlevel_ops), nullptr));
+  FuseSessionGuard se(fuse_session_new(args.get(), &::swordfs::fuse::VfsHookFactory::get_ops(),
+                                       sizeof(struct fuse_lowlevel_ops), nullptr));
   if (!se) {
     return 1;
   }

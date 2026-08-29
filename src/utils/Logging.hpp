@@ -26,7 +26,9 @@
 // User-facing terminal output (plain text, no metadata)
 
 struct PromptStream {
-  ~PromptStream() { std::cerr << '\n'; }
+  ~PromptStream() {
+    std::cerr << '\n';
+  }
   template <typename T>
   PromptStream &operator<<(T &&val) {
     std::cerr << std::forward<T>(val);

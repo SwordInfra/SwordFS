@@ -9,15 +9,16 @@
 
 #include "cmd/Format.hpp"
 
-#include "config/ConfigCenter.hpp"
 #include <folly/logging/xlog.h>
+
+#include "config/ConfigCenter.hpp"
 #include "utils/Logging.hpp"
 #include "volume/VolumeImpl.hpp"
 
 namespace swordfs::cmd {
 
 int RunFormat() {
-  auto& cfg = swordfs::config::ConfigCenter::Instance();
+  auto &cfg = swordfs::config::ConfigCenter::Instance();
 
   swordfs::volume::VolumeImpl vol;
   auto status = vol.CreateFrom(cfg);
@@ -26,10 +27,8 @@ int RunFormat() {
     return 1;
   }
 
-  SWORDFS_LOG_INFO << "Volume '" << vol.config().name
-                   << "' formatted successfully. Mount with: swordfs mount --volume "
-                   << vol.config().name << " --meta " << vol.config().meta_url
-                   << " /mnt/swordfs";
+  SWORDFS_LOG_INFO << "Volume '" << vol.config().name << "' formatted successfully. Mount with: swordfs mount --volume "
+                   << vol.config().name << " --meta " << vol.config().meta_url << " /mnt/swordfs";
   return 0;
 }
 

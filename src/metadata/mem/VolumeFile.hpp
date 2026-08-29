@@ -15,7 +15,8 @@ namespace swordfs::metadata::mem {
 /// Persistent storage for the memory metadata volume configuration.
 class VolumeFile {
  public:
-  explicit VolumeFile(std::string volume_name) : volume_name_(std::move(volume_name)) {}
+  explicit VolumeFile(std::string volume_name) : volume_name_(std::move(volume_name)) {
+  }
 
   utils::Status Write(const SwordFsVolume &volume);
   utils::Status Read(SwordFsVolume *volume);

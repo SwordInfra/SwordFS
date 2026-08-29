@@ -38,10 +38,8 @@ class S3DataEngine : public IDataEngine {
 
   DataEngineLimits Limits() const override;
   bool Head(std::string_view key, size_t *size) override;
-  Status Put(std::string_view key,
-             std::unique_ptr<folly::IOBuf> data) override;
-  Status Get(std::string_view key, size_t offset, size_t size,
-             folly::IOBuf *out) override;
+  Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) override;
+  Status Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) override;
   Status Delete(std::string_view key) override;
 
   /// Return the S3 object key for a chunk identifier.

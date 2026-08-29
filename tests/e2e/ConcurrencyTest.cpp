@@ -147,8 +147,7 @@ TEST_F(ConcurrencyTest, ConcurrentStat) {
   auto stater = [&]() {
     for (int i = 0; i < 100; ++i) {
       struct stat st;
-      if (fixture_.Stat(name, &st) != 0 ||
-          !S_ISREG(st.st_mode) || st.st_size != 7) {
+      if (fixture_.Stat(name, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != 7) {
         errors.fetch_add(1);
       }
     }

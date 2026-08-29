@@ -5,12 +5,16 @@
 
 namespace swordfs::utils {
 
-bool StorageUrl::Parse(std::string_view url, StorageUrl* out) {
-  if (!out) return false;
+bool StorageUrl::Parse(std::string_view url, StorageUrl *out) {
+  if (!out) {
+    return false;
+  }
 
   // Find scheme
   auto scheme_end = url.find("://");
-  if (scheme_end == std::string_view::npos) return false;
+  if (scheme_end == std::string_view::npos) {
+    return false;
+  }
 
   out->scheme = url.substr(0, scheme_end);
   auto rest = url.substr(scheme_end + 3);

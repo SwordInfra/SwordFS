@@ -187,12 +187,10 @@ TEST_F(LargeFileTest, TruncateIntoFirstChunkKeepsEarlierData) {
 
   // Fill chunk 0 fully with 'A'.
   std::string chunk0(kFirstChunkBytes, 'A');
-  ASSERT_EQ(::pwrite(fd, chunk0.data(), chunk0.size(), 0),
-            static_cast<ssize_t>(chunk0.size()));
+  ASSERT_EQ(::pwrite(fd, chunk0.data(), chunk0.size(), 0), static_cast<ssize_t>(chunk0.size()));
   // Append a partial chunk 1 — only a few bytes of 'B'.
   std::string chunk1_head(16, 'B');
-  ASSERT_EQ(::pwrite(fd, chunk1_head.data(), chunk1_head.size(),
-                     static_cast<off_t>(kFirstChunkBytes)),
+  ASSERT_EQ(::pwrite(fd, chunk1_head.data(), chunk1_head.size(), static_cast<off_t>(kFirstChunkBytes)),
             static_cast<ssize_t>(chunk1_head.size()));
   ::close(fd);
 
@@ -227,11 +225,9 @@ TEST_F(LargeFileTest, TruncateAtChunkBoundaryKeepsFirstChunk) {
   ASSERT_GE(fd, 0);
 
   std::string chunk0(kFirstChunkBytes, 'X');
-  ASSERT_EQ(::pwrite(fd, chunk0.data(), chunk0.size(), 0),
-            static_cast<ssize_t>(chunk0.size()));
+  ASSERT_EQ(::pwrite(fd, chunk0.data(), chunk0.size(), 0), static_cast<ssize_t>(chunk0.size()));
   std::string chunk1(32, 'Y');
-  ASSERT_EQ(::pwrite(fd, chunk1.data(), chunk1.size(),
-                     static_cast<off_t>(kFirstChunkBytes)),
+  ASSERT_EQ(::pwrite(fd, chunk1.data(), chunk1.size(), static_cast<off_t>(kFirstChunkBytes)),
             static_cast<ssize_t>(chunk1.size()));
   ::close(fd);
 
@@ -262,11 +258,9 @@ TEST_F(LargeFileTest, TruncateExtendPreservesEarlierChunks) {
   ASSERT_GE(fd, 0);
 
   std::string chunk0(kFirstChunkBytes, 'P');
-  ASSERT_EQ(::pwrite(fd, chunk0.data(), chunk0.size(), 0),
-            static_cast<ssize_t>(chunk0.size()));
+  ASSERT_EQ(::pwrite(fd, chunk0.data(), chunk0.size(), 0), static_cast<ssize_t>(chunk0.size()));
   std::string chunk1(32, 'Q');
-  ASSERT_EQ(::pwrite(fd, chunk1.data(), chunk1.size(),
-                     static_cast<off_t>(kFirstChunkBytes)),
+  ASSERT_EQ(::pwrite(fd, chunk1.data(), chunk1.size(), static_cast<off_t>(kFirstChunkBytes)),
             static_cast<ssize_t>(chunk1.size()));
   ::close(fd);
 

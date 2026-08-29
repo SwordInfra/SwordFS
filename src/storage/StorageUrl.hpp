@@ -24,12 +24,14 @@ struct StorageUrl {
   std::string path;    // e.g. "/0", "/chunks"
 
   /// Parse a URL of the form scheme://host/path.  Returns true on success.
-  static bool Parse(std::string_view url, StorageUrl* out);
+  static bool Parse(std::string_view url, StorageUrl *out);
 
   /// Reconstruct the URL string.
   std::string ToString() const;
 
-  bool empty() const { return scheme.empty(); }
+  bool empty() const {
+    return scheme.empty();
+  }
 };
 
 }  // namespace swordfs::utils

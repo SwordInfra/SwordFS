@@ -14,10 +14,10 @@
 #include "utils/Status.hpp"
 
 using swordfs::metadata::ChunkIndex;
-using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaStore;
 using swordfs::metadata::MemMetaTxn;
+using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
 using swordfs::utils::Status;
@@ -28,25 +28,23 @@ static constexpr mode_t kDir = S_IFDIR | 0755;
 
 class MemMetaStoreTest : public ::testing::Test {
  protected:
-  void SetUp() override { store_ = new MemMetaStore(); }
-  void TearDown() override { delete store_; }
+  void SetUp() override {
+    store_ = new MemMetaStore();
+  }
+  void TearDown() override {
+    delete store_;
+  }
 
   // Single-primitive transaction convenience wrappers, so individual
   // assertions read like production call sites.
-  Status Add(InodeID parent_ino, std::string_view name, mode_t mode,
-             SwordFsInode *out = nullptr) {
-    return store_->Transact([&](MemMetaTxn &txn) {
-      return txn.AddEntry(parent_ino, name, mode, out);
-    });
+  Status Add(InodeID parent_ino, std::string_view name, mode_t mode, SwordFsInode *out = nullptr) {
+    return store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(parent_ino, name, mode, out); });
   }
   Status Lookup(InodeID ino, SwordFsInode *out = nullptr) {
-    return store_->Transact(
-        [&](MemMetaTxn &txn) { return txn.LookupInode(ino, out); });
+    return store_->Transact([&](MemMetaTxn &txn) { return txn.LookupInode(ino, out); });
   }
-  Status LookupChild(InodeID parent_ino, std::string_view name,
-                     SwordFsInode *out = nullptr) {
-    return store_->Transact(
-        [&](MemMetaTxn &txn) { return txn.LookupEntry(parent_ino, name, out); });
+  Status LookupChild(InodeID parent_ino, std::string_view name, SwordFsInode *out = nullptr) {
+    return store_->Transact([&](MemMetaTxn &txn) { return txn.LookupEntry(parent_ino, name, out); });
   }
 
   MemMetaStore *store_;
@@ -57,8 +55,7 @@ class MemMetaStoreTest : public ::testing::Test {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreTest, ConstructorCreatesRoot) {
-  size_t count = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.InodeCount(); });
+  size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(count, 1);
 
   SwordFsInode root;
@@ -93,8 +90,7 @@ TEST_F(MemMetaStoreTest, AddEntryCreatesFile) {
   EXPECT_FALSE(child.IsDir());
   EXPECT_GT(child.ino, 0);
 
-  size_t count = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.InodeCount(); });
+  size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(count, 2);
 }
 
@@ -161,9 +157,7 @@ TEST_F(MemMetaStoreTest, MoveEntrySuccess) {
   Add(kRoot, "f1", kRegFile, &f1);
 
   // Move root/f1 → root/sub/f1
-  Status status = store_->Transact([&](MemMetaTxn &txn) {
-    return txn.MoveEntry(kRoot, "f1", sub.ino, "f1", false);
-  });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.MoveEntry(kRoot, "f1", sub.ino, "f1", false); });
   EXPECT_TRUE(status.ok());
 
   // Old location is gone
@@ -181,9 +175,7 @@ TEST_F(MemMetaStoreTest, MoveEntryOldParentNotFound) {
   SwordFsInode sub;
   Add(kRoot, "dst", kDir, &sub);
 
-  Status status = store_->Transact([&](MemMetaTxn &txn) {
-    return txn.MoveEntry(999, "f", sub.ino, "f", false);
-  });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.MoveEntry(999, "f", sub.ino, "f", false); });
   EXPECT_TRUE(status.IsNotFound());
 }
 
@@ -191,9 +183,7 @@ TEST_F(MemMetaStoreTest, MoveEntryNewParentNotFound) {
   SwordFsInode f;
   Add(kRoot, "f", kRegFile, &f);
 
-  Status status = store_->Transact([&](MemMetaTxn &txn) {
-    return txn.MoveEntry(kRoot, "f", 999, "f", false);
-  });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.MoveEntry(kRoot, "f", 999, "f", false); });
   EXPECT_TRUE(status.IsNotFound());
 }
 
@@ -208,9 +198,7 @@ TEST_F(MemMetaStoreTest, MoveEntryTargetExists) {
   Add(d1.ino, "f", kRegFile);
   Add(d2.ino, "f", kRegFile);
 
-  Status status = store_->Transact([&](MemMetaTxn &txn) {
-    return txn.MoveEntry(d1.ino, "f", d2.ino, "f", false);
-  });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.MoveEntry(d1.ino, "f", d2.ino, "f", false); });
   EXPECT_TRUE(status.IsAlreadyExists());
 }
 
@@ -227,13 +215,10 @@ TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   Add(kRoot, "f", kRegFile, &f);
   InodeID ino = f.ino;
 
-  auto count = [&] {
-    return store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
-  };
+  auto count = [&] { return store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); }); };
 
   EXPECT_EQ(count(), 2);  // root + f
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "f"); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "f"); });
   EXPECT_TRUE(status.ok());
 
   // Entry gone from directory
@@ -243,19 +228,16 @@ TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   EXPECT_TRUE(Lookup(ino).ok());
 
   // Caller follows up with ReclaimInode to free the orphaned inode.
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
   EXPECT_TRUE(status.ok());
   EXPECT_EQ(count(), 1);
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 }
 
 TEST_F(MemMetaStoreTest, UnlinkMissingEntryReturnsNotFound) {
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "nonexistent"); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "nonexistent"); });
   EXPECT_TRUE(status.IsNotFound());
-  size_t count = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.InodeCount(); });
+  size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(count, 1);
 }
 
@@ -266,11 +248,9 @@ TEST_F(MemMetaStoreTest, UnlinkNonEmptyDirectory) {
   // Add a file inside sub
   Add(sub.ino, "f", kRegFile);
 
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "sub"); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "sub"); });
   EXPECT_TRUE(status.IsNotEmpty());
-  size_t count = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.InodeCount(); });
+  size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(count, 3);  // root + sub + f
 }
 
@@ -279,13 +259,11 @@ TEST_F(MemMetaStoreTest, UnlinkEmptyDirectory) {
   Add(kRoot, "sub", kDir, &sub);
   InodeID sub_ino = sub.ino;
 
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "sub"); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "sub"); });
   EXPECT_TRUE(status.ok());
   // Both sub and its dir entry table freed
   EXPECT_TRUE(Lookup(sub_ino).IsNotFound());
-  size_t count = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.InodeCount(); });
+  size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(count, 1);
 }
 
@@ -299,24 +277,21 @@ TEST_F(MemMetaStoreTest, ListEntriesSuccess) {
   Add(kRoot, "c", kDir);
 
   std::vector<SwordFsEntry> entries;
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.ListEntries(kRoot, &entries); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListEntries(kRoot, &entries); });
   EXPECT_TRUE(status.ok());
   EXPECT_EQ(entries.size(), 5);  // 3 real + "." + ".."
 }
 
 TEST_F(MemMetaStoreTest, ListEntriesEmptyDir) {
   std::vector<SwordFsEntry> entries;
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.ListEntries(kRoot, &entries); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListEntries(kRoot, &entries); });
   EXPECT_TRUE(status.ok());
   EXPECT_EQ(entries.size(), 2);  // just "." and ".."
 }
 
 TEST_F(MemMetaStoreTest, ListEntriesNotFound) {
   std::vector<SwordFsEntry> entries;
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.ListEntries(42, &entries); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListEntries(42, &entries); });
   EXPECT_TRUE(status.IsNotFound());
 }
 
@@ -328,8 +303,7 @@ TEST_F(MemMetaStoreTest, IsDescendantOfDirectChild) {
   SwordFsInode sub;
   Add(kRoot, "sub", kDir, &sub);
 
-  bool result = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.IsDescendantOf(kRoot, sub.ino); });
+  bool result = store_->Transact([&](MemMetaTxn &txn) { return txn.IsDescendantOf(kRoot, sub.ino); });
   EXPECT_TRUE(result);
 }
 
@@ -339,10 +313,8 @@ TEST_F(MemMetaStoreTest, IsDescendantOfGrandchild) {
   SwordFsInode leaf;
   Add(sub.ino, "nested", kRegFile, &leaf);
 
-  bool from_root = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.IsDescendantOf(kRoot, leaf.ino); });
-  bool from_sub = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.IsDescendantOf(sub.ino, leaf.ino); });
+  bool from_root = store_->Transact([&](MemMetaTxn &txn) { return txn.IsDescendantOf(kRoot, leaf.ino); });
+  bool from_sub = store_->Transact([&](MemMetaTxn &txn) { return txn.IsDescendantOf(sub.ino, leaf.ino); });
   EXPECT_TRUE(from_root);
   EXPECT_TRUE(from_sub);
 }
@@ -356,14 +328,12 @@ TEST_F(MemMetaStoreTest, IsDescendantOfNotDescendant) {
   Add(b.ino, "leaf", kRegFile, &leaf);
 
   // leaf is under b, not under a
-  bool result = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.IsDescendantOf(a.ino, leaf.ino); });
+  bool result = store_->Transact([&](MemMetaTxn &txn) { return txn.IsDescendantOf(a.ino, leaf.ino); });
   EXPECT_FALSE(result);
 }
 
 TEST_F(MemMetaStoreTest, IsDescendantOfSelf) {
-  bool result = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.IsDescendantOf(kRoot, kRoot); });
+  bool result = store_->Transact([&](MemMetaTxn &txn) { return txn.IsDescendantOf(kRoot, kRoot); });
   EXPECT_FALSE(result);
 }
 
@@ -383,13 +353,11 @@ SwordFsChunk MakeChunk(ChunkIndex index, uint64_t start_offset, size_t size) {
 }  // namespace
 
 TEST_F(MemMetaStoreTest, AddChunkAndFindChunk) {
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.AddChunk(42, MakeChunk(0, 0, 100)); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.AddChunk(42, MakeChunk(0, 0, 100)); });
   ASSERT_TRUE(status.ok());
 
   SwordFsChunk out;
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(out.index, 0);
   EXPECT_EQ(out.start_offset, 0);
@@ -399,18 +367,15 @@ TEST_F(MemMetaStoreTest, AddChunkAndFindChunk) {
 
 TEST_F(MemMetaStoreTest, AddChunkDuplicateFails) {
   SwordFsChunk chunk = MakeChunk(0, 0, 100);
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.AddChunk(42, chunk); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.AddChunk(42, chunk); });
   ASSERT_TRUE(status.ok());
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.AddChunk(42, chunk); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.AddChunk(42, chunk); });
   EXPECT_TRUE(status.IsAlreadyExists());
 }
 
 TEST_F(MemMetaStoreTest, FindChunkNotFound) {
   SwordFsChunk out;
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
   EXPECT_TRUE(status.IsNotFound());
 }
 
@@ -419,11 +384,9 @@ TEST_F(MemMetaStoreTest, FindChunkNotFound) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreTest, TruncateChunksNoChunksIsNoOp) {
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 0); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 0); });
   EXPECT_TRUE(status.ok());
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 100); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 100); });
   EXPECT_TRUE(status.ok());
 }
 
@@ -437,15 +400,12 @@ TEST_F(MemMetaStoreTest, TruncateChunksToZeroRemovesAllChunks) {
   });
   ASSERT_TRUE(status.ok());
 
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 0); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 0); });
   ASSERT_TRUE(status.ok());
   SwordFsChunk out;
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
   EXPECT_TRUE(status.IsNotFound());
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.FindChunk(42, 1, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 1, &out); });
   EXPECT_TRUE(status.IsNotFound());
 }
 
@@ -459,18 +419,15 @@ TEST_F(MemMetaStoreTest, TruncateChunksDropsChunksBeyondNewSize) {
   });
   ASSERT_TRUE(status.ok());
 
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 100); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 100); });
   ASSERT_TRUE(status.ok());
   SwordFsChunk out;
   // Chunk 0 ends exactly at the new size — kept unchanged.
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(out.size, 100);
   // Chunk 1 starts at the new size — dropped.
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.FindChunk(42, 1, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 1, &out); });
   EXPECT_TRUE(status.IsNotFound());
 }
 
@@ -484,17 +441,14 @@ TEST_F(MemMetaStoreTest, TruncateChunksClampsStraddlingChunk) {
   });
   ASSERT_TRUE(status.ok());
 
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 150); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 150); });
   ASSERT_TRUE(status.ok());
   SwordFsChunk out;
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(out.size, 100);
   // Chunk 1 straddles the new size (covers 100..200) — clamped to 50.
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.FindChunk(42, 1, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 1, &out); });
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(out.size, 50);
 }
@@ -504,8 +458,7 @@ TEST_F(MemMetaStoreTest, TruncateChunksClampsStraddlingChunk) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(MemMetaStoreTest, ReclaimInodeMissingInodeIsNoOp) {
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.ReclaimInode(999); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(999); });
   EXPECT_TRUE(status.ok());
 }
 
@@ -514,18 +467,14 @@ TEST_F(MemMetaStoreTest, ReclaimInodeDeletesOrphanedInode) {
   Add(kRoot, "f", kRegFile, &f);
   InodeID ino = f.ino;
 
-  auto count = [&] {
-    return store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
-  };
+  auto count = [&] { return store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); }); };
 
   // Unlink detaches the entry and drops nlink to 0; the inode survives.
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "f"); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "f"); });
   ASSERT_TRUE(status.ok());
 
   EXPECT_EQ(count(), 2);
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(count(), 1);
   EXPECT_TRUE(Lookup(ino).IsNotFound());
@@ -536,11 +485,9 @@ TEST_F(MemMetaStoreTest, ReclaimInodeKeepsLinkedInode) {
   Add(kRoot, "f", kRegFile, &f);
   InodeID ino = f.ino;  // nlink == 1 — not orphaned
 
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
   ASSERT_TRUE(status.ok());
-  size_t count = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.InodeCount(); });
+  size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(count, 2);
   SwordFsInode out;
   ASSERT_TRUE(Lookup(ino, &out).ok());
@@ -559,8 +506,7 @@ TEST_F(MemMetaStoreTest, ListChunksEmptyInodeIsOk) {
   Add(kRoot, "f", kRegFile, &f);
 
   std::vector<SwordFsChunk> out;
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.ListChunks(f.ino, &out); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListChunks(f.ino, &out); });
   ASSERT_TRUE(status.ok());
   EXPECT_TRUE(out.empty());
 }
@@ -569,8 +515,7 @@ TEST_F(MemMetaStoreTest, ListChunksNullOutIsError) {
   // Defensive: callers must hand in a valid pointer. A null out
   // would silently lose the chunks the coordinator needs to drive
   // data-engine Deletes — better to fail loudly.
-  Status status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.ListChunks(1, nullptr); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListChunks(1, nullptr); });
   EXPECT_TRUE(status.code() == Status::kInvalidArgument);
 }
 
@@ -612,8 +557,7 @@ TEST_F(MemMetaStoreTest, ListChunksReturnsRegisteredChunksInIndexOrder) {
   ASSERT_TRUE(status.ok());
 
   std::vector<SwordFsChunk> out;
-  status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.ListChunks(ino, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListChunks(ino, &out); });
   ASSERT_TRUE(status.ok());
   ASSERT_EQ(out.size(), 3);
   EXPECT_EQ(out[0].index, 0);

@@ -18,8 +18,7 @@ constexpr std::string_view kConfigRoot = "/etc/swordfs";
 constexpr std::string_view kConfigFileName = "/volume.fmt";
 
 std::string FilePath(std::string_view volume_name) {
-  return std::string(kConfigRoot) + "/" + std::string(volume_name) +
-         std::string(kConfigFileName);
+  return std::string(kConfigRoot) + "/" + std::string(volume_name) + std::string(kConfigFileName);
 }
 }  // namespace
 

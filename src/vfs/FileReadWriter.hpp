@@ -45,7 +45,8 @@ class FileChunkManager {
  public:
   using Map = folly::F14FastMap<metadata::ChunkIndex, chunk::Chunk>;
 
-  explicit FileChunkManager(metadata::InodeID ino) : ino_(ino) {}
+  explicit FileChunkManager(metadata::InodeID ino) : ino_(ino) {
+  }
 
   /// Get the chunk at |idx|.  If not in the map, creates and
   /// initializes it.  Returns nullptr on error or when
@@ -64,8 +65,7 @@ class FileChunkManager {
   /// to |*dropped| if non-null) so the caller can issue data-engine
   /// Deletes. Chunks below remain so reads can still hit them directly.
   /// No-op when |new_last_idx| is the smallest representable value.
-  void Truncate(metadata::ChunkIndex new_last_idx,
-                std::vector<metadata::ChunkIndex> *dropped);
+  void Truncate(metadata::ChunkIndex new_last_idx, std::vector<metadata::ChunkIndex> *dropped);
 
  private:
   metadata::InodeID ino_;
@@ -81,7 +81,9 @@ class FileReadWriter {
   FileReadWriter(InodeID ino);
 
   /// Return the inode this writer is bound to.
-  InodeID ino() const { return ino_; }
+  InodeID ino() const {
+    return ino_;
+  }
 
   /// Write the contents of |buf| at |off|, splitting across chunk boundaries.
   utils::Status Write(const folly::IOBuf &buf, off_t off);

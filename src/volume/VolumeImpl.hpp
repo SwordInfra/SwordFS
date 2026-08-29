@@ -67,7 +67,9 @@ class VolumeImpl {
   /// Aws::ShutdownAPI() when AWS SDK resources are still alive.
   void Shutdown();
 
-  const swordfs::metadata::SwordFsVolume &config() const { return config_; }
+  const swordfs::metadata::SwordFsVolume &config() const {
+    return config_;
+  }
 
   /// Chunk size in bytes — normally immutable after format, but see
   /// `set_chunk_size_for_test` for the unit-test escape hatch.
@@ -78,11 +80,15 @@ class VolumeImpl {
   // Test-only override: lets unit tests shrink the chunk size so a
   // single Write across multiple chunks doesn't need to push tens of
   // MiB through the I/O stack. Production code paths never call this.
-  void set_chunk_size_for_test(uint64_t cs) { chunk_size_override_ = cs; }
+  void set_chunk_size_for_test(uint64_t cs) {
+    chunk_size_override_ = cs;
+  }
 
   // Test-only: clear the override so chunk_size() falls back to
   // config_.chunk_size again.
-  void clear_chunk_size_for_test() { chunk_size_override_.reset(); }
+  void clear_chunk_size_for_test() {
+    chunk_size_override_.reset();
+  }
 
   swordfs::metadata::IMetaEngine *meta_engine() const {
     return meta_engine_.get();
