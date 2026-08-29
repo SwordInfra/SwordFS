@@ -14,7 +14,9 @@
 using swordfs::chunk::WriteBuf;
 using swordfs::utils::Status;
 
-static std::string Repeat(char c, size_t n) { return std::string(n, c); }
+static std::string Repeat(char c, size_t n) {
+  return std::string(n, c);
+}
 
 static auto Buf(const std::string &s) {
   return *folly::IOBuf::copyBuffer(s.data(), s.size());
@@ -101,9 +103,7 @@ TEST(WriteBufTest, CloneBufReturnsAllBelowThreshold) {
   auto data = wb.CloneBuf();
   ASSERT_NE(data, nullptr);
   EXPECT_EQ(data->length(), payload.size());
-  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(data->data()),
-                             data->length()),
-            payload);
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(data->data()), data->length()), payload);
 }
 
 TEST(WriteBufTest, CloneBufReturnsFullChunk) {
@@ -113,9 +113,7 @@ TEST(WriteBufTest, CloneBufReturnsFullChunk) {
   auto data = wb.CloneBuf();
   ASSERT_NE(data, nullptr);
   EXPECT_EQ(data->length(), kChunkSize);
-  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(data->data()),
-                             data->length()),
-            Repeat('Z', kChunkSize));
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(data->data()), data->length()), Repeat('Z', kChunkSize));
 }
 
 TEST(WriteBufTest, CloneBufEmpty) {
@@ -136,9 +134,7 @@ TEST(WriteBufTest, CopyOutFullBuffer) {
   auto out = folly::IOBuf::create(256);
   ASSERT_TRUE(wb.CopyOut(0, 200, out.get()).ok());
   EXPECT_EQ(out->length(), 200);
-  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                             out->length()),
-            Repeat('A', 200));
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('A', 200));
 }
 
 TEST(WriteBufTest, CopyOutWithOffset) {
@@ -148,9 +144,7 @@ TEST(WriteBufTest, CopyOutWithOffset) {
   auto out = folly::IOBuf::create(256);
   ASSERT_TRUE(wb.CopyOut(100, 50, out.get()).ok());
   EXPECT_EQ(out->length(), 50);
-  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                             out->length()),
-            Repeat('A', 50));
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('A', 50));
 }
 
 TEST(WriteBufTest, CopyOutTruncatesAtEnd) {
@@ -160,9 +154,7 @@ TEST(WriteBufTest, CopyOutTruncatesAtEnd) {
   auto out = folly::IOBuf::create(256);
   ASSERT_TRUE(wb.CopyOut(50, 200, out.get()).ok());
   EXPECT_EQ(out->length(), 50);
-  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                             out->length()),
-            Repeat('A', 50));
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('A', 50));
 }
 
 TEST(WriteBufTest, WriteOverwriteWithinBounds) {
@@ -173,8 +165,7 @@ TEST(WriteBufTest, WriteOverwriteWithinBounds) {
   EXPECT_EQ(wb.size(), 200);
   auto out = folly::IOBuf::create(256);
   ASSERT_TRUE(wb.CopyOut(0, 200, out.get()).ok());
-  std::string_view sv(reinterpret_cast<const char *>(out->data()),
-                      out->length());
+  std::string_view sv(reinterpret_cast<const char *>(out->data()), out->length());
   EXPECT_EQ(sv.substr(0, 50), Repeat('A', 50));
   EXPECT_EQ(sv.substr(50, 50), Repeat('B', 50));
   EXPECT_EQ(sv.substr(100, 100), Repeat('A', 100));
@@ -219,19 +210,16 @@ TEST(WriteBufTest, CopyOutPositionalWrite) {
 
   // chunk1 at file offset 200 → window into out + 200.
   auto w1 = folly::IOBuf::takeOwnership(
-      const_cast<uint8_t *>(out->writableData()) + 200, 200, (std::size_t)0,
-      +[](void *, void *) {}, nullptr, true);
+      const_cast<uint8_t *>(out->writableData()) + 200, 200, (std::size_t)0, +[](void *, void *) {}, nullptr, true);
   ASSERT_TRUE(chunk1.CopyOut(0, 200, w1.get()).ok());
 
   // chunk0 at file offset 0 → window into out + 0.
-  auto w0 = folly::IOBuf::takeOwnership(
-      out->writableData(), 200, (std::size_t)0,
-      +[](void *, void *) {}, nullptr, true);
+  auto w0 =
+      folly::IOBuf::takeOwnership(out->writableData(), 200, (std::size_t)0, +[](void *, void *) {}, nullptr, true);
   ASSERT_TRUE(chunk0.CopyOut(0, 200, w0.get()).ok());
 
   out->append(400);
-  std::string_view sv(reinterpret_cast<const char *>(out->data()),
-                      out->length());
+  std::string_view sv(reinterpret_cast<const char *>(out->data()), out->length());
   EXPECT_EQ(sv.substr(0, 200), Repeat('A', 200));
   EXPECT_EQ(sv.substr(200, 200), Repeat('B', 200));
 }
@@ -249,19 +237,16 @@ TEST(WriteBufTest, CopyOutPositionalWithGap) {
 
   // chunk2 at file offset kHalf.
   auto w2 = folly::IOBuf::takeOwnership(
-      const_cast<uint8_t *>(out->writableData()) + kHalf, kHalf, (std::size_t)0,
-      +[](void *, void *) {}, nullptr, true);
+      const_cast<uint8_t *>(out->writableData()) + kHalf, kHalf, (std::size_t)0, +[](void *, void *) {}, nullptr, true);
   ASSERT_TRUE(chunk2.CopyOut(0, kHalf, w2.get()).ok());
 
   // chunk0 at file offset 0.
-  auto w0 = folly::IOBuf::takeOwnership(
-      out->writableData(), kHalf, (std::size_t)0,
-      +[](void *, void *) {}, nullptr, true);
+  auto w0 =
+      folly::IOBuf::takeOwnership(out->writableData(), kHalf, (std::size_t)0, +[](void *, void *) {}, nullptr, true);
   ASSERT_TRUE(chunk0.CopyOut(0, kHalf, w0.get()).ok());
 
   out->append(kChunkSize);
-  std::string_view sv(reinterpret_cast<const char *>(out->data()),
-                      out->length());
+  std::string_view sv(reinterpret_cast<const char *>(out->data()), out->length());
   EXPECT_EQ(sv.substr(0, kHalf), a);
   EXPECT_EQ(sv.substr(kHalf, kHalf), c);
 }

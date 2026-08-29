@@ -28,7 +28,9 @@ class FileOpsTest : public ::testing::Test {
   void SetUp() override {
     ASSERT_TRUE(fixture_.SetUp()) << "Failed to set up E2E fixture";
   }
-  void TearDown() override { fixture_.TearDown(); }
+  void TearDown() override {
+    fixture_.TearDown();
+  }
   Fixture fixture_;
 };
 

@@ -119,14 +119,11 @@ class Fixture {
   std::string MountPath(const std::string &relpath) const;
 
   /// Check that the file permissions match |requested_mode| minus umask.
-  ::testing::AssertionResult UmaskEquals(const std::string &relpath,
-                                         mode_t expected_mask) const;
+  ::testing::AssertionResult UmaskEquals(const std::string &relpath, mode_t expected_mask) const;
 
   /// Compare file content with expected via 64-bit hash.
   /// On mismatch, prints sizes and hashes — never dumps raw content.
-  ::testing::AssertionResult FileEquals(const std::string &relpath,
-                                        size_t expected_size,
-                                        uint64_t expected_hash);
+  ::testing::AssertionResult FileEquals(const std::string &relpath, size_t expected_size, uint64_t expected_hash);
 
   /// Compute a 64-bit SpookyHashV2 for use with FileEquals.
   static uint64_t Hash64(std::string_view data);

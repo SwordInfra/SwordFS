@@ -2,11 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#include <unistd.h>
 
 #include "config/ConfigCenter.hpp"
 #include "metadata/mem/VolumeFile.hpp"
@@ -31,8 +31,8 @@ class VolumeImplTest : public ::testing::Test {
     std::system(("rm -rf " + tmpdir_).c_str());
   }
 
-  ConfigCenter makeConfig(const std::string &meta_url,
-                          const std::string &vol_name = "testvol", const std::string &bucket_url = "") {
+  ConfigCenter makeConfig(const std::string &meta_url, const std::string &vol_name = "testvol",
+                          const std::string &bucket_url = "") {
     ConfigCenter cfg;
     cfg.set_meta_url(meta_url);
     cfg.set_volume(vol_name + "-" + std::to_string(::getpid()));

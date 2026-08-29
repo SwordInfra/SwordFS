@@ -26,17 +26,17 @@
 #include "volume/VolumeImpl.hpp"
 
 using swordfs::metadata::ChunkIndex;
-using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
-using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsAttr;
-using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::SwordFsChunk;
+using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
+using swordfs::metadata::SwordFsVolume;
 using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
 using swordfs::utils::Status;
@@ -74,7 +74,9 @@ static void RunInTestFiber(Fn &&fn) {
 
 class MockDataEngine : public IDataEngine {
  public:
-  Status Initialize() override { return Status::OK(); }
+  Status Initialize() override {
+    return Status::OK();
+  }
   DataEngineLimits Limits() const override {
     DataEngineLimits lim;
     lim.supports_multipart = false;
@@ -92,15 +94,12 @@ class MockDataEngine : public IDataEngine {
     return true;
   }
 
-  Status Put(std::string_view key,
-             std::unique_ptr<folly::IOBuf> data) override {
-    store_[std::string(key)] = std::string(
-        reinterpret_cast<const char *>(data->data()), data->length());
+  Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) override {
+    store_[std::string(key)] = std::string(reinterpret_cast<const char *>(data->data()), data->length());
     return Status::OK();
   }
 
-  Status Get(std::string_view key, size_t offset, size_t size,
-             folly::IOBuf *out) override {
+  Status Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) override {
     auto it = store_.find(std::string(key));
     if (it == store_.end()) {
       return Status::NotFound("chunk not found");
@@ -109,8 +108,7 @@ class MockDataEngine : public IDataEngine {
     if (offset >= chunk.size()) {
       return Status::OK();
     }
-    size_t len = (size == 0) ? chunk.size() - offset
-                             : std::min(size, chunk.size() - offset);
+    size_t len = (size == 0) ? chunk.size() - offset : std::min(size, chunk.size() - offset);
     std::memcpy(out->writableTail(), chunk.data() + offset, len);
     out->append(len);
     return Status::OK();
@@ -148,10 +146,18 @@ class MockDataEngine : public IDataEngine {
 
 class MockMetaEngine : public IMetaEngine {
  public:
-  Status Initialize() override { return Status::OK(); }
-  Status FormatVolume(const SwordFsVolume &) override { return Status::OK(); }
-  Status LoadVolume(SwordFsVolume *) override { return Status::OK(); }
-  Limits GetLimits() const override { return {}; }
+  Status Initialize() override {
+    return Status::OK();
+  }
+  Status FormatVolume(const SwordFsVolume &) override {
+    return Status::OK();
+  }
+  Status LoadVolume(SwordFsVolume *) override {
+    return Status::OK();
+  }
+  Limits GetLimits() const override {
+    return {};
+  }
   Status Lookup(InodeID, std::string_view, SwordFsInode *out) override {
     if (out) {
       *out = {};
@@ -165,8 +171,7 @@ class MockMetaEngine : public IMetaEngine {
     }
     return Status::OK();
   }
-  Status ReadDir(InodeID,
-                 std::vector<swordfs::metadata::SwordFsEntry> *) override {
+  Status ReadDir(InodeID, std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
@@ -175,14 +180,16 @@ class MockMetaEngine : public IMetaEngine {
   Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, uint64_t *) override { return Status::OK(); }
-  Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
-  Status Rename(InodeID, std::string_view, InodeID,
-                std::string_view, RenameFlag, RenameResult *) override {
+  Status Unlink(InodeID, std::string_view, uint64_t *) override {
     return Status::OK();
   }
-  Status SetAttr(InodeID, const SwordFsAttr &attr, SetAttrField fields,
-                 SwordFsInode *out) override {
+  Status RmDir(InodeID, std::string_view) override {
+    return Status::OK();
+  }
+  Status Rename(InodeID, std::string_view, InodeID, std::string_view, RenameFlag, RenameResult *) override {
+    return Status::OK();
+  }
+  Status SetAttr(InodeID, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override {
     if (HasSetAttrField(fields, SetAttrField::kSize)) {
       file_size_ = static_cast<off_t>(attr.size);
     }
@@ -192,33 +199,40 @@ class MockMetaEngine : public IMetaEngine {
     }
     return Status::OK();
   }
-  Status StatFs(SwordFsStatFs *) override { return Status::OK(); }
-  Status Access(InodeID, uint32_t) override { return Status::OK(); }
-  Status Symlink(InodeID, std::string_view, std::string_view,
-                 SwordFsInode *) override {
+  Status StatFs(SwordFsStatFs *) override {
     return Status::OK();
   }
-  Status Link(InodeID, InodeID, std::string_view,
-              SwordFsInode *) override {
+  Status Access(InodeID, uint32_t) override {
+    return Status::OK();
+  }
+  Status Symlink(InodeID, std::string_view, std::string_view, SwordFsInode *) override {
+    return Status::OK();
+  }
+  Status Link(InodeID, InodeID, std::string_view, SwordFsInode *) override {
     return Status::OK();
   }
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Open(InodeID) override { return Status::OK(); }
-  Status ReclaimInode(InodeID) override { return Status::OK(); }
+  Status Open(InodeID) override {
+    return Status::OK();
+  }
+  Status ReclaimInode(InodeID) override {
+    return Status::OK();
+  }
   Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
     return Status::OK();
   }
-  Status OpenDir(InodeID) override { return Status::OK(); }
+  Status OpenDir(InodeID) override {
+    return Status::OK();
+  }
 
   Status AddChunk(InodeID ino, const SwordFsChunk &chunk) override {
     chunks_[ino][chunk.index] = chunk;
     return Status::OK();
   }
 
-  Status FindChunk(InodeID ino, ChunkIndex idx,
-                   SwordFsChunk *chunk) override {
+  Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override {
     auto it = chunks_.find(ino);
     if (it == chunks_.end()) {
       return Status::NotFound("");
@@ -243,18 +257,22 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
 
-  void set_file_size(off_t size) { file_size_ = size; }
-  void set_truncate_status(Status s) { truncate_status_ = s; }
-  off_t file_size() const { return file_size_; }
+  void set_file_size(off_t size) {
+    file_size_ = size;
+  }
+  void set_truncate_status(Status s) {
+    truncate_status_ = s;
+  }
+  off_t file_size() const {
+    return file_size_;
+  }
 
   int truncate_calls = 0;
 
  private:
   off_t file_size_ = 0;
   Status truncate_status_ = Status::OK();
-  std::unordered_map<InodeID,
-                     std::unordered_map<ChunkIndex, SwordFsChunk>>
-      chunks_;
+  std::unordered_map<InodeID, std::unordered_map<ChunkIndex, SwordFsChunk>> chunks_;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -295,9 +313,7 @@ TEST_F(FileReadWriterTest, FullChunk) {
     ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(kChunkSize, 0, out.get()).ok());
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              Repeat('A', kChunkSize));
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('A', kChunkSize));
   });
 }
 
@@ -307,9 +323,7 @@ TEST_F(FileReadWriterTest, WithinChunkWithOffset) {
     ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(100, 200, out.get()).ok());
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              Repeat('A', 100));
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('A', 100));
   });
 }
 
@@ -319,12 +333,9 @@ TEST_F(FileReadWriterTest, PartialChunkAtEOF) {
     ASSERT_TRUE(rw.Write(Buf(Repeat('A', 500)), 0).ok());
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(kChunkSize, 0, out.get()).ok());
-    std::string expected = Repeat('A', 500) +
-                           std::string(kChunkSize - 500, '\0');
+    std::string expected = Repeat('A', 500) + std::string(kChunkSize - 500, '\0');
     EXPECT_EQ(out->length(), kChunkSize);
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              expected);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
   });
 }
 
@@ -335,9 +346,7 @@ TEST_F(FileReadWriterTest, PastEOF) {
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(100, kChunkSize + 100, out.get()).ok());
     EXPECT_EQ(out->length(), 100);
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              std::string(100, '\0'));
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), std::string(100, '\0'));
   });
 }
 
@@ -349,17 +358,13 @@ TEST_F(FileReadWriterTest, CrossChunkBoundary) {
   RunInTestFiber([&] {
     auto rw = Make();
     ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
-    ASSERT_TRUE(rw.Write(Buf(Repeat('B', 500)),
-                         static_cast<off_t>(kChunkSize))
-                    .ok());
+    ASSERT_TRUE(rw.Write(Buf(Repeat('B', 500)), static_cast<off_t>(kChunkSize)).ok());
 
     off_t off = static_cast<off_t>(kChunkSize) - 100;
     std::string expected = Repeat('A', 100) + Repeat('B', 500);
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(600, off, out.get()).ok());
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              expected);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
   });
 }
 
@@ -367,14 +372,10 @@ TEST_F(FileReadWriterTest, CrossChunkExactBoundary) {
   RunInTestFiber([&] {
     auto rw = Make();
     ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
-    ASSERT_TRUE(rw.Write(Buf(Repeat('B', 500)),
-                         static_cast<off_t>(kChunkSize))
-                    .ok());
+    ASSERT_TRUE(rw.Write(Buf(Repeat('B', 500)), static_cast<off_t>(kChunkSize)).ok());
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(500, static_cast<off_t>(kChunkSize), out.get()).ok());
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              Repeat('B', 500));
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('B', 500));
   });
 }
 
@@ -382,17 +383,13 @@ TEST_F(FileReadWriterTest, CrossChunkReadsIntoSecondChunk) {
   RunInTestFiber([&] {
     auto rw = Make();
     ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
-    ASSERT_TRUE(rw.Write(Buf(Repeat('B', 800)),
-                         static_cast<off_t>(kChunkSize))
-                    .ok());
+    ASSERT_TRUE(rw.Write(Buf(Repeat('B', 800)), static_cast<off_t>(kChunkSize)).ok());
 
     off_t off = static_cast<off_t>(kChunkSize) - 1;
     std::string expected = "A" + Repeat('B', 500);
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(501, off, out.get()).ok());
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              expected);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
   });
 }
 
@@ -400,19 +397,14 @@ TEST_F(FileReadWriterTest, CrossChunkExhaustsSecondChunk) {
   RunInTestFiber([&] {
     auto rw = Make();
     ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
-    ASSERT_TRUE(rw.Write(Buf(Repeat('B', 200)),
-                         static_cast<off_t>(kChunkSize))
-                    .ok());
+    ASSERT_TRUE(rw.Write(Buf(Repeat('B', 200)), static_cast<off_t>(kChunkSize)).ok());
 
     off_t off = static_cast<off_t>(kChunkSize) - 50;
     auto out = folly::IOBuf::create(kChunkSize * 2);
     ASSERT_TRUE(rw.Read(kChunkSize, off, out.get()).ok());
-    std::string expected = Repeat('A', 50) + Repeat('B', 200) +
-                           std::string(kChunkSize - 250, '\0');
+    std::string expected = Repeat('A', 50) + Repeat('B', 200) + std::string(kChunkSize - 250, '\0');
     EXPECT_EQ(out->length(), kChunkSize);
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              expected);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
   });
 }
 
@@ -425,9 +417,7 @@ TEST_F(FileReadWriterTest, CrossChunkSecondChunkMissing) {
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(200, off, out.get()).ok());
     std::string expected = Repeat('A', 50) + std::string(150, '\0');
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              expected);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
   });
 }
 
@@ -451,9 +441,7 @@ TEST_F(FileReadWriterTest, EmptyOutputOnNoData) {
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(64, 0, out.get()).ok());
     EXPECT_EQ(out->length(), 64);
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              std::string(64, '\0'));
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), std::string(64, '\0'));
   });
 }
 
@@ -461,19 +449,12 @@ TEST_F(FileReadWriterTest, SparseReadWithMultipleHoles) {
   RunInTestFiber([&] {
     auto rw = Make();
     ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
-    ASSERT_TRUE(rw.Write(Buf(Repeat('B', kChunkSize)),
-                         static_cast<off_t>(kChunkSize * 3))
-                    .ok());
+    ASSERT_TRUE(rw.Write(Buf(Repeat('B', kChunkSize)), static_cast<off_t>(kChunkSize * 3)).ok());
 
     auto out = folly::IOBuf::create(kChunkSize * 4);
     ASSERT_TRUE(rw.Read(kChunkSize * 4, 0, out.get()).ok());
-    std::string expected =
-        Repeat('A', kChunkSize) +
-        std::string(kChunkSize * 2, '\0') +
-        Repeat('B', kChunkSize);
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              expected);
+    std::string expected = Repeat('A', kChunkSize) + std::string(kChunkSize * 2, '\0') + Repeat('B', kChunkSize);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
   });
 }
 
@@ -505,9 +486,7 @@ TEST_F(FileReadWriterTest, UnflushedWriteVisibleAcrossHandles) {
     ASSERT_TRUE(h1->Write(Buf(Repeat('Z', 300)), 100).ok());
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(h2->Read(300, 100, out.get()).ok());
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              Repeat('Z', 300));
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('Z', 300));
 
     mgr.Release(fh1);
     mgr.Release(fh2);
@@ -538,9 +517,7 @@ TEST_F(FileReadWriterTest, FlushedDataVisibleAcrossHandles) {
     // Read through handle 2 — same instance, flushed chunk in map.
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(h2->Read(500, 0, out.get()).ok());
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              Repeat('X', 500));
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('X', 500));
 
     mgr.Release(fh1);
     mgr.Release(fh2);
@@ -580,9 +557,7 @@ TEST_F(FileReadWriterTest, TruncateDropsDirtyChunks) {
     ASSERT_TRUE(rw.Truncate(0).ok());
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(16, 0, out.get()).ok());
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()),
-                               out->length()),
-              std::string(16, '\0'));
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), std::string(16, '\0'));
   });
 }
 
@@ -627,16 +602,12 @@ TEST_F(FileReadWriterTest, TruncateDeletesDroppedChunkObjects) {
     // no longer fits the new size), chunk 0 is kept alive.
     ASSERT_TRUE(rw.Truncate(1).ok());
 
-    std::sort(mock_data_->delete_calls.begin(),
-              mock_data_->delete_calls.end());
+    std::sort(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end());
     EXPECT_EQ(mock_data_->delete_calls.size(), 2);
-    EXPECT_EQ(mock_data_->delete_calls[0],
-              std::to_string(kIno) + "/1");
-    EXPECT_EQ(mock_data_->delete_calls[1],
-              std::to_string(kIno) + "/2");
+    EXPECT_EQ(mock_data_->delete_calls[0], std::to_string(kIno) + "/1");
+    EXPECT_EQ(mock_data_->delete_calls[1], std::to_string(kIno) + "/2");
     EXPECT_EQ(mock_data_->StoredKeys().size(), 1);
-    EXPECT_EQ(mock_data_->StoredKeys()[0],
-              std::to_string(kIno) + "/0");
+    EXPECT_EQ(mock_data_->StoredKeys()[0], std::to_string(kIno) + "/0");
 
     // Restore the production chunk size so a later test in this
     // fixture doesn't observe the override.

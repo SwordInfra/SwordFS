@@ -46,8 +46,7 @@ void EnsureAwsSdkInit() {
       // When neither environment variable is set, the SDK falls
       // through to EC2 metadata, which adds ~10 s of TCP connect
       // timeout on non-EC2 machines.  Disable that path explicitly.
-      if (!std::getenv("AWS_ACCESS_KEY_ID") ||
-          !std::getenv("AWS_SECRET_ACCESS_KEY")) {
+      if (!std::getenv("AWS_ACCESS_KEY_ID") || !std::getenv("AWS_SECRET_ACCESS_KEY")) {
         setenv("AWS_EC2_METADATA_DISABLED", "true", /*overwrite=*/0);
       }
       Aws::SDKOptions opts;
@@ -79,9 +78,8 @@ Status S3DataEngine::Initialize() {
   }
 
   int n = swordfs::config::ConfigCenter::Instance().storage_thread_count();
-  pool_ = std::make_shared<utils::FiberThreadPool>(
-      n > 0 ? static_cast<size_t>(n)
-            : std::thread::hardware_concurrency());
+  pool_ =
+      std::make_shared<utils::FiberThreadPool>(n > 0 ? static_cast<size_t>(n) : std::thread::hardware_concurrency());
 
   EnsureAwsSdkInit();
   Aws::S3::S3ClientConfiguration aws_cfg;
@@ -136,8 +134,7 @@ Status S3DataEngine::ParseBucketUrl() {
         "got: " +
         vol.bucket);
   }
-  SWORDFS_LOG_INFO << "S3DataEngine: endpoint=" << endpoint_
-                   << " bucket=" << bucket_;
+  SWORDFS_LOG_INFO << "S3DataEngine: endpoint=" << endpoint_ << " bucket=" << bucket_;
   return Status::OK();
 }
 
@@ -175,16 +172,13 @@ Status S3DataEngine::Put(std::string_view key, std::unique_ptr<folly::IOBuf> dat
       // temporary std::string.  The IOBuf is moved into the lambda so
       // the buffer outlives the stream.
       auto stream_buf = Aws::New<Aws::Utils::Stream::PreallocatedStreamBuf>(
-          "PutObject",
-          const_cast<unsigned char *>(d->data()),
-          d->length());
+          "PutObject", const_cast<unsigned char *>(d->data()), d->length());
       auto body = std::make_shared<std::iostream>(stream_buf);
       req.SetBody(body);
 
       auto outcome = client_->PutObject(req);
       if (!outcome.IsSuccess()) {
-        SWORDFS_LOG_ERROR << "S3 PutObject failed: "
-                          << outcome.GetError().GetMessage();
+        SWORDFS_LOG_ERROR << "S3 PutObject failed: " << outcome.GetError().GetMessage();
         return Status::Internal("S3 PutObject failed");
       }
       return Status::OK();
@@ -198,8 +192,7 @@ Status S3DataEngine::Put(std::string_view key, std::unique_ptr<folly::IOBuf> dat
   }
 }
 
-Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size,
-                         folly::IOBuf *out) {
+Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) {
   try {
     return pool_->Run([this, key, out, offset, size] {
       Aws::S3::Model::GetObjectRequest req;
@@ -221,32 +214,25 @@ Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size,
       // and writes the body into our buffer with no intermediate
       // std::string or memcpy.
       req.SetResponseStreamFactory([out]() -> Aws::IOStream * {
-        return Aws::New<PreallocatedResponseStream>(
-            "GetObject",
-            reinterpret_cast<char *>(out->writableData()),
-            out->tailroom());
+        return Aws::New<PreallocatedResponseStream>("GetObject", reinterpret_cast<char *>(out->writableData()),
+                                                    out->tailroom());
       });
 
       auto outcome = client_->GetObject(req);
       if (!outcome.IsSuccess()) {
-        if (outcome.GetError().GetResponseCode() ==
-            Aws::Http::HttpResponseCode::NOT_FOUND) {
-          SWORDFS_LOG_WARN << "S3 GetObject: chunk not found: "
-                           << ObjectKey(key);
+        if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+          SWORDFS_LOG_WARN << "S3 GetObject: chunk not found: " << ObjectKey(key);
           return Status::NotFound("chunk not found");
         }
-        SWORDFS_LOG_ERROR << "S3 GetObject failed: "
-                          << outcome.GetError().GetMessage();
+        SWORDFS_LOG_ERROR << "S3 GetObject failed: " << outcome.GetError().GetMessage();
         return Status::Internal("S3 GetObject failed");
       }
 
       // The SDK has already written the body into our buffer.
-      auto content_length = static_cast<size_t>(
-          outcome.GetResult().GetContentLength());
+      auto content_length = static_cast<size_t>(outcome.GetResult().GetContentLength());
       if (out->tailroom() < content_length) {
         SWORDFS_LOG_ERROR << "S3 GetObject: output buffer too small"
-                          << " (need=" << content_length
-                          << " tailroom=" << out->tailroom() << ")";
+                          << " (need=" << content_length << " tailroom=" << out->tailroom() << ")";
         return Status::InvalidArgument("Get: output buffer too small");
       }
       out->append(content_length);
@@ -269,8 +255,7 @@ Status S3DataEngine::Delete(std::string_view key) {
 
     auto outcome = client_->DeleteObject(req);
     if (!outcome.IsSuccess()) {
-      SWORDFS_LOG_ERROR << "S3 DeleteObject failed: "
-                        << outcome.GetError().GetMessage();
+      SWORDFS_LOG_ERROR << "S3 DeleteObject failed: " << outcome.GetError().GetMessage();
       return Status::Internal("S3 DeleteObject failed");
     }
     return Status::OK();

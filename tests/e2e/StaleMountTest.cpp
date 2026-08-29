@@ -47,8 +47,7 @@ int CountSwordfsDaemons() {
     if (!cmdline.is_open()) {
       continue;
     }
-    std::string buf((std::istreambuf_iterator<char>(cmdline)),
-                    std::istreambuf_iterator<char>());
+    std::string buf((std::istreambuf_iterator<char>(cmdline)), std::istreambuf_iterator<char>());
     // cmdline uses '\0' as separator; check if "swordfs" appears.
     if (buf.find("swordfs") != std::string::npos) {
       ++count;

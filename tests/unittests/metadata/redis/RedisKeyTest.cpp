@@ -21,8 +21,7 @@ TEST(RedisKeyTest, PreservesDirectoryNames) {
   RedisKey key(0, "volume");
 
   EXPECT_EQ(key.Dentry(1, "a:b"), "{0:volume}:dentry:1:a:b");
-  EXPECT_EQ(key.Dentry(1, std::string("\0\xff", 2)),
-            "{0:volume}:dentry:1:" + std::string("\0\xff", 2));
+  EXPECT_EQ(key.Dentry(1, std::string("\0\xff", 2)), "{0:volume}:dentry:1:" + std::string("\0\xff", 2));
 }
 
 }  // namespace swordfs::metadata::redis

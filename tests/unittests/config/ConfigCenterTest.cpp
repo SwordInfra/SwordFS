@@ -48,16 +48,17 @@ std::string ParseOptions(std::vector<std::string> args) {
 
 TEST(FormatParamsTest, MinimalMemoryFormat) {
   std::vector<std::string> args = {
-      "swordfs", "format", "--volume", "myvol", "--meta", "memory://local",
-      "--bucket", "s3://mybucket.s3.amazonaws.com/chunks",
+      "swordfs", "format",         "--volume", "myvol",
+      "--meta",  "memory://local", "--bucket", "s3://mybucket.s3.amazonaws.com/chunks",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
 }
 
 TEST(FormatParamsTest, MemoryFormatWithRegion) {
   std::vector<std::string> args = {
-      "swordfs", "format", "--volume", "myvol", "--meta", "memory://local",
-      "--bucket", "s3://mybucket.s3.amazonaws.com/chunks", "--storage-region", "us-east-1",
+      "swordfs",          "format",         "--volume", "myvol",
+      "--meta",           "memory://local", "--bucket", "s3://mybucket.s3.amazonaws.com/chunks",
+      "--storage-region", "us-east-1",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
 }
@@ -75,8 +76,17 @@ TEST(MountParamsTest, MinimalMemoryMount) {
 
 TEST(MountParamsTest, MountWithIndependentThreadCounts) {
   auto err = ParseOptions({
-      "swordfs", "mount", "--volume", "myvol", "--meta", "memory://local",
-      "--storage-thread-count", "4", "--meta-thread-count", "7", "/mnt/point",
+      "swordfs",
+      "mount",
+      "--volume",
+      "myvol",
+      "--meta",
+      "memory://local",
+      "--storage-thread-count",
+      "4",
+      "--meta-thread-count",
+      "7",
+      "/mnt/point",
   });
   EXPECT_TRUE(err.empty()) << err;
   auto &cfg = swordfs::config::ConfigCenter::Instance();
@@ -86,8 +96,7 @@ TEST(MountParamsTest, MountWithIndependentThreadCounts) {
 
 TEST(MountParamsTest, MountWithFuseOpts) {
   std::vector<std::string> args = {
-      "swordfs", "mount", "--volume", "myvol", "--meta", "memory://local",
-      "-o", "allow_other,ro", "/mnt/point",
+      "swordfs", "mount", "--volume", "myvol", "--meta", "memory://local", "-o", "allow_other,ro", "/mnt/point",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
 }

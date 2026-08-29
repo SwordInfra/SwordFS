@@ -10,7 +10,6 @@
 
 #define FUSE_USE_VERSION 312
 #include <fuse_lowlevel.h>
-
 #include <sys/types.h>
 
 namespace swordfs {
@@ -23,8 +22,8 @@ namespace swordfs::utils {
 
 struct SwordFsContext {
   SwordFsContext() = default;
-  SwordFsContext(const struct fuse_ctx* ctx)
-      : uid(ctx->uid), gid(ctx->gid), pid(ctx->pid), umask(ctx->umask) {}
+  SwordFsContext(const struct fuse_ctx *ctx) : uid(ctx->uid), gid(ctx->gid), pid(ctx->pid), umask(ctx->umask) {
+  }
 
   uid_t uid = 0;
   gid_t gid = 0;

@@ -117,8 +117,7 @@ bool Fixture::FormatVolume() {
   // CLI path end-to-end.
   std::ostringstream cmd;
   cmd << FindSwordfsBin() << " --log-file " << LogPath() << " format"
-      << " --volume " << volume_name_ << " --meta " << metadata_url << " --bucket " << bucket_url_
-      << " 2>&1";
+      << " --volume " << volume_name_ << " --meta " << metadata_url << " --bucket " << bucket_url_ << " 2>&1";
 
   int ret = std::system(cmd.str().c_str());
   if (ret != 0) {

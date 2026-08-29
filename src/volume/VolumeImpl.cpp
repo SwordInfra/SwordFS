@@ -16,7 +16,7 @@ namespace swordfs::volume {
 namespace {
 
 Status CreateMetaEngine(std::string_view meta_url, std::string_view volume_name,
-                         std::unique_ptr<swordfs::metadata::IMetaEngine> *out) {
+                        std::unique_ptr<swordfs::metadata::IMetaEngine> *out) {
   if (out == nullptr) {
     return Status::InvalidArgument("metadata engine output is null");
   }
@@ -33,8 +33,7 @@ Status CreateMetaEngine(std::string_view meta_url, std::string_view volume_name,
   }
 }
 
-Status CreateDataEngine(std::string_view bucket,
-                        std::unique_ptr<swordfs::storage::IDataEngine> *out) {
+Status CreateDataEngine(std::string_view bucket, std::unique_ptr<swordfs::storage::IDataEngine> *out) {
   if (bucket.empty()) {
     return Status::InvalidArgument("bucket URL is empty");
   }
