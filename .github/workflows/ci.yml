@@ -55,25 +55,26 @@ jobs:
           docker run -d --name swordfs-coverage-redis -p 6379:6379 redis:7-alpine
           until docker exec swordfs-coverage-redis redis-cli ping | grep -q PONG; do sleep 1; done
 
+      - name: Prepare unit test volume config directory
+        run: |
+          sudo mkdir -p /etc/swordfs
+          sudo chown "$(whoami):$(id -gn)" /etc/swordfs
+
       - name: Test (unit)
         env:
           SWORDFS_REDIS_TEST_URL: redis://127.0.0.1:6379
         run: build/swordfs_test --gtest_color=no
 
+      - name: Stop Redis for coverage tests
+        run: docker rm -f swordfs-coverage-redis
+
       - name: Test (E2E)
         env:
-          SWORDFS_S3_NO_SSL: "1"
-          SWORDFS_E2E_S3_BUCKET: "s3://127.0.0.1:9000/swordfs-e2e"
           SWORDFS_BIN: "${{ github.workspace }}/build/swordfs"
           E2E_BIN: "${{ github.workspace }}/build/swordfs_e2e_test"
-          REDIS_PORT: "6380"
         run: |
-          sudo modprobe fuse
-          sudo chmod 666 /dev/fuse
           getent group fuse || sudo groupadd fuse
           sudo usermod -aG fuse "$(whoami)"
-          sudo mkdir -p /etc/swordfs
-          sudo chown "$(whoami):$(id -gn)" /etc/swordfs
           sg fuse -c "bash scripts/run-e2e.sh --gtest_color=no"
 
       - name: Generate coverage report
