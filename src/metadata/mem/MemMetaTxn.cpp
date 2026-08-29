@@ -10,8 +10,8 @@
 #include <algorithm>
 
 #include "metadata/Types.hpp"
-#include "metadata/mem/MemMetaStore.hpp"
 #include "metadata/Utils.hpp"
+#include "metadata/mem/MemMetaStore.hpp"
 #include "utils/Context.hpp"
 #include "utils/Logging.hpp"
 
@@ -49,8 +49,7 @@ uint64_t MemMetaTxn::InodeCount() {
   return store_->inodes_.size();
 }
 
-Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr,
-                           SetAttrField fields, SwordFsInode *out) {
+Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) {
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
     return Status::NotFound("inode not found");
@@ -187,8 +186,7 @@ Status MemMetaTxn::SetSymlinkTarget(InodeID ino, std::string_view target) {
   return Status::OK();
 }
 
-Status MemMetaTxn::LookupEntry(InodeID parent_ino, std::string_view name,
-                               SwordFsInode *out) {
+Status MemMetaTxn::LookupEntry(InodeID parent_ino, std::string_view name, SwordFsInode *out) {
   SwordFsInode *parent = FindInode(parent_ino);
   if (!parent) {
     return Status::NotFound("parent directory not found");
@@ -206,8 +204,7 @@ Status MemMetaTxn::LookupEntry(InodeID parent_ino, std::string_view name,
   return Status::OK();
 }
 
-Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
-                            uint32_t mode, SwordFsInode *out) {
+Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
   SwordFsInode *parent = FindInode(parent_ino);
   if (!parent) {
     return Status::NotFound("parent directory not found");
@@ -220,8 +217,7 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
   }
 
   auto &ctx = folly::fibers::local<swordfs::utils::SwordFsContext>();
-  SwordFsAttr attr(store_->next_ino_.fetch_add(1, std::memory_order_relaxed),
-                   static_cast<uint32_t>(mode));
+  SwordFsAttr attr(store_->next_ino_.fetch_add(1, std::memory_order_relaxed), static_cast<uint32_t>(mode));
   attr.uid = ctx.uid;
   attr.gid = parent->attr.gid;
 
@@ -243,11 +239,8 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name,
   return Status::OK();
 }
 
-Status MemMetaTxn::MoveEntry(InodeID old_parent_ino,
-                             std::string_view old_name,
-                             InodeID new_parent_ino,
-                             std::string_view new_name, bool overwrite,
-                             RenameResult *result) {
+Status MemMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
+                             std::string_view new_name, bool overwrite, RenameResult *result) {
   if (result) {
     *result = {};
   }
@@ -274,9 +267,7 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino,
   // A directory can never be moved into itself or its own subtree —
   // that would create a cycle.  (The descendant check alone misses the
   // direct self-move new_parent_ino == child->ino.)
-  if (child->IsDir() &&
-      (new_parent_ino == child->ino ||
-       IsDescendantOf(child->ino, new_parent_ino))) {
+  if (child->IsDir() && (new_parent_ino == child->ino || IsDescendantOf(child->ino, new_parent_ino))) {
     return Status::InvalidArgument("cannot move directory into itself");
   }
 
@@ -329,8 +320,7 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino,
   return Status::OK();
 }
 
-Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name,
-                          uint64_t *post_nlink) {
+Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) {
   SwordFsInode *child = FindEntry(parent_ino, name);
   if (!child) {
     return Status::NotFound("entry not found");
@@ -376,9 +366,7 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name,
   return Status::OK();
 }
 
-Status MemMetaTxn::LinkExistingEntry(InodeID parent_ino,
-                                     std::string_view name, InodeID ino,
-                                     SwordFsInode *out) {
+Status MemMetaTxn::LinkExistingEntry(InodeID parent_ino, std::string_view name, InodeID ino, SwordFsInode *out) {
   SwordFsInode *parent = FindInode(parent_ino);
   if (!parent) {
     return Status::NotFound("parent directory not found");
@@ -404,8 +392,7 @@ Status MemMetaTxn::LinkExistingEntry(InodeID parent_ino,
   return Status::OK();
 }
 
-Status MemMetaTxn::ListEntries(InodeID ino,
-                               std::vector<SwordFsEntry> *entries) {
+Status MemMetaTxn::ListEntries(InodeID ino, std::vector<SwordFsEntry> *entries) {
   SwordFsInode *dir = FindInode(ino);
   if (dir == nullptr) {
     return Status::NotFound("directory not found");
@@ -426,8 +413,7 @@ Status MemMetaTxn::ListEntries(InodeID ino,
   return Status::OK();
 }
 
-bool MemMetaTxn::IsDescendantOf(InodeID ancestor_ino,
-                                InodeID child_ino) const {
+bool MemMetaTxn::IsDescendantOf(InodeID ancestor_ino, InodeID child_ino) const {
   // Defence in depth: a corrupted tree (e.g. a directory cycle) must not
   // send this DFS into an infinite loop, so track visited inodes.
   folly::F14FastSet<InodeID> visited;
@@ -457,8 +443,7 @@ bool MemMetaTxn::IsDescendantOf(InodeID ancestor_ino,
   return false;
 }
 
-Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a,
-                               InodeID parent_b_ino,
+Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a, InodeID parent_b_ino,
                                std::string_view name_b) {
   auto dir_a_it = store_->dirs_.find(parent_a_ino);
   if (dir_a_it == store_->dirs_.end()) {
@@ -485,14 +470,10 @@ Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a,
   // places a directory beneath itself would create a cycle.  Both
   // directions must be checked: a swap moves A under parent_b AND B
   // under parent_a.
-  if (inode_a->IsDir() &&
-      (parent_b_ino == inode_a->ino ||
-       IsDescendantOf(inode_a->ino, parent_b_ino))) {
+  if (inode_a->IsDir() && (parent_b_ino == inode_a->ino || IsDescendantOf(inode_a->ino, parent_b_ino))) {
     return Status::InvalidArgument("cannot move directory into itself");
   }
-  if (inode_b->IsDir() &&
-      (parent_a_ino == inode_b->ino ||
-       IsDescendantOf(inode_b->ino, parent_a_ino))) {
+  if (inode_b->IsDir() && (parent_a_ino == inode_b->ino || IsDescendantOf(inode_b->ino, parent_a_ino))) {
     return Status::InvalidArgument("cannot move directory into itself");
   }
 
@@ -526,8 +507,7 @@ Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a,
 Status MemMetaTxn::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
   auto &chunk_map = store_->chunks_[ino];
   if (chunk_map.count(chunk.index) > 0) {
-    return Status::AlreadyExists(
-        "chunk already exists at index " + std::to_string(chunk.index));
+    return Status::AlreadyExists("chunk already exists at index " + std::to_string(chunk.index));
   }
   chunk_map[chunk.index] = chunk;
   return Status::OK();
@@ -607,10 +587,7 @@ Status MemMetaTxn::ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) {
   // F14FastMap iteration order is unspecified; the contract for
   // ListChunks is ascending ChunkIndex so a single audit log of
   // deletes reads top-to-bottom. Sort by index to honour it.
-  std::sort(out->begin(), out->end(),
-            [](const SwordFsChunk &a, const SwordFsChunk &b) {
-              return a.index < b.index;
-            });
+  std::sort(out->begin(), out->end(), [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
   return Status::OK();
 }
 
@@ -643,8 +620,7 @@ void MemMetaTxn::DeleteInode(InodeID ino) {
   }
 }
 
-SwordFsInode *MemMetaTxn::FindEntry(InodeID parent_ino,
-                                    std::string_view name) {
+SwordFsInode *MemMetaTxn::FindEntry(InodeID parent_ino, std::string_view name) {
   auto dir_it = store_->dirs_.find(parent_ino);
   if (dir_it == store_->dirs_.end()) {
     return nullptr;
@@ -653,13 +629,11 @@ SwordFsInode *MemMetaTxn::FindEntry(InodeID parent_ino,
   return it != dir_it->second.end() ? it->second : nullptr;
 }
 
-void MemMetaTxn::LinkEntry(InodeID parent_ino, std::string_view name,
-                           SwordFsInode *inode) {
+void MemMetaTxn::LinkEntry(InodeID parent_ino, std::string_view name, SwordFsInode *inode) {
   store_->dirs_[parent_ino][std::string(name)] = inode;
 }
 
-SwordFsInode *MemMetaTxn::UnlinkEntry(InodeID parent_ino,
-                                      std::string_view name) {
+SwordFsInode *MemMetaTxn::UnlinkEntry(InodeID parent_ino, std::string_view name) {
   auto dir_it = store_->dirs_.find(parent_ino);
   if (dir_it == store_->dirs_.end()) {
     return nullptr;
@@ -675,8 +649,7 @@ SwordFsInode *MemMetaTxn::UnlinkEntry(InodeID parent_ino,
 
 bool MemMetaTxn::IsDirEmpty(InodeID ino) {
   auto it = store_->dirs_.find(ino);
-  CHECK(it != store_->dirs_.end())
-      << "IsDirEmpty called for non-directory ino=" << ino;
+  CHECK(it != store_->dirs_.end()) << "IsDirEmpty called for non-directory ino=" << ino;
   return it->second.empty();
 }
 

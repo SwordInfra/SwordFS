@@ -61,14 +61,20 @@ class Chunk {
   /// Returns OK if there is nothing to flush.
   utils::Status Flush();
 
-  bool IsFlushed() const { return state_ == State::kFlushed; }
-  bool Flushable() const { return state_ == State::kWriting && wb_ && wb_->size() > 0; }
+  bool IsFlushed() const {
+    return state_ == State::kFlushed;
+  }
+  bool Flushable() const {
+    return state_ == State::kWriting && wb_ && wb_->size() > 0;
+  }
 
   // ──────────────────────────────────────────────────────────────
   // Accessors
   // ──────────────────────────────────────────────────────────────
 
-  metadata::ChunkIndex index() const { return index_; }
+  metadata::ChunkIndex index() const {
+    return index_;
+  }
 
   /// File-offset range: [StartOffset(), EndOffset()).
   off_t StartOffset() const {
@@ -82,7 +88,9 @@ class Chunk {
   }
 
  private:
-  bool IsWriting() const { return state_ == State::kWriting; }
+  bool IsWriting() const {
+    return state_ == State::kWriting;
+  }
 
   /// Build a SwordFsChunk snapshot for metadata registration.
   metadata::SwordFsChunk BuildMeta() const;

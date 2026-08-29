@@ -28,7 +28,9 @@ class FileOpsTest : public ::testing::Test {
   void SetUp() override {
     ASSERT_TRUE(fixture_.SetUp()) << "Failed to set up E2E fixture";
   }
-  void TearDown() override { fixture_.TearDown(); }
+  void TearDown() override {
+    fixture_.TearDown();
+  }
   Fixture fixture_;
 };
 
@@ -250,7 +252,7 @@ TEST_F(FileOpsTest, StatNonexistent) {
 
 TEST_F(FileOpsTest, StatfsReturnsValidData) {
   auto limits = fixture_.GetLimits();
-  struct statvfs sv{};
+  struct statvfs sv {};
   ASSERT_EQ(fixture_.Statfs(&sv), 0);
   EXPECT_GT(sv.f_bsize, static_cast<unsigned long>(0));
   EXPECT_GT(sv.f_frsize, static_cast<unsigned long>(0));

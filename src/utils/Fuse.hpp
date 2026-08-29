@@ -17,18 +17,24 @@ namespace swordfs::utils {
 // RAII wrapper that frees fuse_args on scope exit.
 class FuseArgsGuard {
  public:
-  FuseArgsGuard(int argc, char** argv) {
+  FuseArgsGuard(int argc, char **argv) {
     args_ = FUSE_ARGS_INIT(0, nullptr);
     for (int i = 0; i < argc; i++) {
       fuse_opt_add_arg(&args_, argv[i]);
     }
   }
-  ~FuseArgsGuard() { fuse_opt_free_args(&args_); }
-  FuseArgsGuard(const FuseArgsGuard&) = delete;
-  FuseArgsGuard& operator=(const FuseArgsGuard&) = delete;
+  ~FuseArgsGuard() {
+    fuse_opt_free_args(&args_);
+  }
+  FuseArgsGuard(const FuseArgsGuard &) = delete;
+  FuseArgsGuard &operator=(const FuseArgsGuard &) = delete;
 
-  fuse_args* operator->() { return &args_; }
-  fuse_args* get() { return &args_; }
+  fuse_args *operator->() {
+    return &args_;
+  }
+  fuse_args *get() {
+    return &args_;
+  }
 
  private:
   fuse_args args_;
@@ -39,29 +45,38 @@ class FuseArgsGuard {
 class FuseSessionGuard {
  public:
   FuseSessionGuard() = default;
-  explicit FuseSessionGuard(fuse_session* se) : se_(se) {}
+  explicit FuseSessionGuard(fuse_session *se) : se_(se) {
+  }
   ~FuseSessionGuard() {
     if (se_) {
       fuse_session_unmount(se_);
       fuse_session_destroy(se_);
     }
   }
-  FuseSessionGuard(const FuseSessionGuard&) = delete;
-  FuseSessionGuard& operator=(const FuseSessionGuard&) = delete;
+  FuseSessionGuard(const FuseSessionGuard &) = delete;
+  FuseSessionGuard &operator=(const FuseSessionGuard &) = delete;
 
-  fuse_session* get() { return se_; }
-  fuse_session** ptr() { return &se_; }
-  explicit operator bool() const { return se_ != nullptr; }
+  fuse_session *get() {
+    return se_;
+  }
+  fuse_session **ptr() {
+    return &se_;
+  }
+  explicit operator bool() const {
+    return se_ != nullptr;
+  }
 
  private:
-  fuse_session* se_ = nullptr;
+  fuse_session *se_ = nullptr;
 };
 
 // Mountpoint validation
-bool IsFuseMounted(const std::string& mp) {
+bool IsFuseMounted(const std::string &mp) {
   // Check /proc/mounts for an existing FUSE mount
-  FILE* f = std::fopen("/proc/mounts", "r");
-  if (!f) return false;
+  FILE *f = std::fopen("/proc/mounts", "r");
+  if (!f) {
+    return false;
+  }
   char line[4096];
   while (std::fgets(line, sizeof(line), f)) {
     // Each line: device mountpoint fstype ...
@@ -77,7 +92,7 @@ bool IsFuseMounted(const std::string& mp) {
   return false;
 }
 
-bool IsStaleMount(const std::string& mp) {
+bool IsStaleMount(const std::string &mp) {
   // A stale FUSE mount can be detected in two ways:
   // 1. stat returns ENOTCONN — kernel holds the mount but daemon is gone
   // 2. stat succeeds but st_ino == 0 — dead FUSE mount returns zero inode

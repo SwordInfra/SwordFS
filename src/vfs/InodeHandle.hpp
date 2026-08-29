@@ -61,14 +61,18 @@ class InodeHandle {
   /// is no longer reachable from any directory entry.
   utils::Status ReclaimData();
 
-  metadata::InodeID ino() const { return ino_; }
+  metadata::InodeID ino() const {
+    return ino_;
+  }
 
   /// Number of open file descriptors referencing this handle.
   // Exposed for unit-test access only.
   uint64_t open_count() const;
 
   // Exposed for unit-test access only.
-  const std::shared_ptr<FileReadWriter> &rw() const { return rw_; }
+  const std::shared_ptr<FileReadWriter> &rw() const {
+    return rw_;
+  }
 
  private:
   // Result of ReleaseRef: whether this release dropped the open-fd count

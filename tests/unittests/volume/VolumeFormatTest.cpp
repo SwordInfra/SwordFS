@@ -4,9 +4,9 @@
 // Unit tests for SwordFsVolume and memory volume file persistence.
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <string>
-#include <unistd.h>
 
 #include "metadata/mem/VolumeFile.hpp"
 #include "metadata/types/Volume.hpp"
@@ -64,7 +64,9 @@ TEST(SwordFsVolumeTest, ParseFromRejectsMalformedData) {
 }
 
 TEST(VolumeFileTest, WriteAndReadRoundTrip) {
-  if (!ConfigRootWritable()) GTEST_SKIP() << "/etc/swordfs is not writable";
+  if (!ConfigRootWritable()) {
+    GTEST_SKIP() << "/etc/swordfs is not writable";
+  }
   SwordFsVolume original = MakeVolume();
   original.name = "volume-file-round-trip";
   swordfs::metadata::mem::VolumeFile file{original.name};
@@ -82,7 +84,9 @@ TEST(VolumeFileTest, WriteAndReadRoundTrip) {
 }
 
 TEST(VolumeFileTest, WriteCreatesParentDir) {
-  if (!ConfigRootWritable()) GTEST_SKIP() << "/etc/swordfs is not writable";
+  if (!ConfigRootWritable()) {
+    GTEST_SKIP() << "/etc/swordfs is not writable";
+  }
   SwordFsVolume v = MakeVolume();
   v.name = "volume-file-parent-dir";
   swordfs::metadata::mem::VolumeFile file{v.name};
@@ -100,7 +104,9 @@ TEST(VolumeFileTest, ReadNotFound) {
 }
 
 TEST(VolumeFileTest, Exists) {
-  if (!ConfigRootWritable()) GTEST_SKIP() << "/etc/swordfs is not writable";
+  if (!ConfigRootWritable()) {
+    GTEST_SKIP() << "/etc/swordfs is not writable";
+  }
   SwordFsVolume v = MakeVolume();
   v.name = "volume-file-exists";
   swordfs::metadata::mem::VolumeFile file{v.name};

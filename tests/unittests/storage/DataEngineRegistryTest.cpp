@@ -1,9 +1,8 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include <gtest/gtest.h>
-
 #include <folly/io/IOBuf.h>
+#include <gtest/gtest.h>
 
 #include <memory>
 
@@ -14,18 +13,22 @@ namespace {
 
 class TestDataEngine : public swordfs::storage::IDataEngine {
  public:
-  swordfs::utils::Status Initialize() override { return swordfs::utils::Status::OK(); }
-  swordfs::storage::DataEngineLimits Limits() const override { return {}; }
+  swordfs::utils::Status Initialize() override {
+    return swordfs::utils::Status::OK();
+  }
+  swordfs::storage::DataEngineLimits Limits() const override {
+    return {};
+  }
 
-  bool Head(std::string_view, size_t *) override { return false; }
+  bool Head(std::string_view, size_t *) override {
+    return false;
+  }
 
-  swordfs::utils::Status Put(std::string_view,
-                             std::unique_ptr<folly::IOBuf>) override {
+  swordfs::utils::Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
     return swordfs::utils::Status::OK();
   }
 
-  swordfs::utils::Status Get(std::string_view, size_t, size_t,
-                             folly::IOBuf *) override {
+  swordfs::utils::Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
     return swordfs::utils::Status::OK();
   }
 

@@ -12,17 +12,17 @@
 #include <barrier>
 #include <thread>
 
-#include "metadata/mem/MemMetaImpl.hpp"
 #include "TestMemMetaImpl.hpp"
+#include "metadata/mem/MemMetaImpl.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
-using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsInode;
+using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -39,7 +39,9 @@ class MemMetaImplTest : public ::testing::Test {
     // Default context is root (uid=0, gid=0).
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
-  void TearDown() override { delete impl_; }
+  void TearDown() override {
+    delete impl_;
+  }
 
   // Set the fiber-local context for the current thread.
   void SetContext(uid_t uid, gid_t gid) {
@@ -60,45 +62,46 @@ class MemMetaImplTest : public ::testing::Test {
     impl_->MkDir(parent_ino, name, mode, &inode);
     InodeID ino = inode.ino;
     // Change ownership to kOwner:kGroup
-    struct stat st{};
+    struct stat st {};
     st.st_uid = kOwner;
     st.st_gid = kGroup;
     st.st_mode = S_IFDIR | mode;
-    impl_->SetAttr(ino, &st,
-                   SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kMode,
-                   nullptr);
+    impl_->SetAttr(ino, &st, SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kMode, nullptr);
     return ino;
   }
 
   // Change only the mode of an existing directory.
   void SetDirMode(InodeID ino, mode_t mode) {
     SetContext(0, 0);
-    struct stat st{};
+    struct stat st {};
     st.st_mode = S_IFDIR | mode;
     impl_->SetAttr(ino, &st, SetAttrField::kMode, nullptr);
   }
 
-  Status CreateFile(InodeID parent_ino, std::string_view name, mode_t mode,
-                    InodeID *ino = nullptr) {
+  Status CreateFile(InodeID parent_ino, std::string_view name, mode_t mode, InodeID *ino = nullptr) {
     SwordFsInode inode;
     Status status = impl_->Create(parent_ino, name, mode, ino ? &inode : nullptr);
-    if (status.ok() && ino) *ino = inode.ino;
+    if (status.ok() && ino) {
+      *ino = inode.ino;
+    }
     return status;
   }
 
-  Status MakeDir(InodeID parent_ino, std::string_view name, mode_t mode,
-                 InodeID *ino = nullptr) {
+  Status MakeDir(InodeID parent_ino, std::string_view name, mode_t mode, InodeID *ino = nullptr) {
     SwordFsInode inode;
     Status status = impl_->MkDir(parent_ino, name, mode, ino ? &inode : nullptr);
-    if (status.ok() && ino) *ino = inode.ino;
+    if (status.ok() && ino) {
+      *ino = inode.ino;
+    }
     return status;
   }
 
-  Status LookupInode(InodeID parent_ino, std::string_view name,
-                     InodeID *ino) {
+  Status LookupInode(InodeID parent_ino, std::string_view name, InodeID *ino) {
     SwordFsInode inode;
     Status status = impl_->Lookup(parent_ino, name, &inode);
-    if (status.ok() && ino) *ino = inode.ino;
+    if (status.ok() && ino) {
+      *ino = inode.ino;
+    }
     return status;
   }
 
@@ -127,7 +130,7 @@ class MemMetaImplTest : public ::testing::Test {
   // Change ownership of an existing directory.
   void SetDirOwner(InodeID ino, uid_t uid, gid_t gid) {
     SetContext(0, 0);
-    struct stat st{};
+    struct stat st {};
     st.st_uid = uid;
     st.st_gid = gid;
     impl_->SetAttr(ino, &st, SetAttrField::kUid | SetAttrField::kGid, nullptr);
@@ -611,13 +614,11 @@ TEST_F(MemMetaImplTest, OpenRequiresReadPermission) {
   ASSERT_TRUE(CreateFile(dir_ino, "f", 0644, &f_ino).ok());
 
   // Remove read from the file owner
-  struct stat st{};
+  struct stat st {};
   st.st_uid = kOwner;
   st.st_gid = kOtherGroup;
   st.st_mode = S_IFREG | 0200;  // -w-------
-  impl_->SetAttr(f_ino, &st,
-                 SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kMode,
-                 nullptr);
+  impl_->SetAttr(f_ino, &st, SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kMode, nullptr);
 
   Status s = impl_->Open(f_ino);
   EXPECT_TRUE(s.IsPermission()) << s.message();
@@ -630,7 +631,7 @@ TEST_F(MemMetaImplTest, OpenRootSucceedsWithoutReadPerm) {
   CreateFile(dir_ino, "f", 0644, &f_ino);
 
   // Remove all perms
-  struct stat st{};
+  struct stat st {};
   st.st_mode = S_IFREG | 0000;
   SetContext(0, 0);
   impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr);
@@ -654,13 +655,13 @@ TEST_F(MemMetaImplTest, TruncateUpdatesSizeAndClearsSuidSgid) {
   ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
 
   // Give the file SUID/SGID without touching its size.
-  struct stat st{};
+  struct stat st {};
   st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
   ASSERT_TRUE(impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr).ok());
 
   ASSERT_TRUE(impl_->Truncate(f_ino, 1024).ok());
 
-  struct stat out{};
+  struct stat out {};
   ASSERT_TRUE(impl_->GetAttr(f_ino, &out).ok());
   EXPECT_EQ(out.st_size, 1024);
   EXPECT_EQ(out.st_mode & S_ISUID, 0u);
@@ -671,12 +672,12 @@ TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
   InodeID f_ino = 0;
   ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
 
-  struct stat st{};
+  struct stat st {};
   st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
   ASSERT_TRUE(impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr).ok());
   ASSERT_TRUE(impl_->Truncate(f_ino, 0).ok());  // size was already 0
 
-  struct stat out{};
+  struct stat out {};
   ASSERT_TRUE(impl_->GetAttr(f_ino, &out).ok());
   EXPECT_EQ(out.st_size, 0);
   EXPECT_NE(out.st_mode & S_ISUID, 0u);
@@ -691,11 +692,11 @@ TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
   InodeID f_ino = 0;
   ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
 
-  struct stat st{};
+  struct stat st {};
   st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
   ASSERT_TRUE(impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr).ok());
 
-  struct stat attr{};
+  struct stat attr {};
   attr.st_size = 2048;
   swordfs::metadata::SwordFsInode out{};
   ASSERT_TRUE(impl_->SetAttr(f_ino, &attr, SetAttrField::kSize, &out).ok());
@@ -719,7 +720,7 @@ TEST_F(MemMetaImplTest, UnlinkOnHardlinkedInodeKeepsInodeAlive) {
   ASSERT_TRUE(impl_->Link(f_ino, kRoot, "link", nullptr).ok());
 
   // Sanity: both names now point to the same inode, nlink=2.
-  struct stat attr{};
+  struct stat attr {};
   ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
   ASSERT_EQ(attr.st_nlink, 2);
 
@@ -826,8 +827,7 @@ TEST_F(MemMetaImplTest, ConcurrentRenameOverwriteHasNoObservableGap) {
   stop.store(true, std::memory_order_relaxed);
   creator.join();
 
-  EXPECT_EQ(create_succeeded.load(), 0)
-      << "rename-overwrite was observable mid-flight (META-03)";
+  EXPECT_EQ(create_succeeded.load(), 0) << "rename-overwrite was observable mid-flight (META-03)";
   EXPECT_EQ(rename_failed.load(), 0);
 
   // "dst" must still resolve to a live inode.
@@ -856,8 +856,7 @@ TEST_F(MemMetaImplTest, ConcurrentExchangeKeepsBothInodes) {
   auto worker = [&](const char *from, const char *to) {
     gate.arrive_and_wait();
     for (int i = 0; i < kRounds; ++i) {
-      Status status =
-          impl_->Rename(kRoot, from, kRoot, to, RenameFlag::kExchange);
+      Status status = impl_->Rename(kRoot, from, kRoot, to, RenameFlag::kExchange);
       if (!status.ok()) {
         failures.fetch_add(1, std::memory_order_relaxed);
       }
@@ -876,8 +875,7 @@ TEST_F(MemMetaImplTest, ConcurrentExchangeKeepsBothInodes) {
   ASSERT_TRUE(impl_->Lookup(kRoot, "a", &found_a, nullptr).ok());
   ASSERT_TRUE(impl_->Lookup(kRoot, "b", &found_b, nullptr).ok());
   EXPECT_NE(found_a, found_b);
-  EXPECT_TRUE((found_a == a_ino && found_b == b_ino) ||
-              (found_a == b_ino && found_b == a_ino));
+  EXPECT_TRUE((found_a == a_ino && found_b == b_ino) || (found_a == b_ino && found_b == a_ino));
 
   // Both inodes must still have readable attributes (no dangling state).
   struct stat attr;

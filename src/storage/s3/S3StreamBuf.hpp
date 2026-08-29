@@ -35,8 +35,7 @@ class PreallocatedOutputStreamBuf : public std::streambuf {
  protected:
   std::streamsize xsputn(const char *s, std::streamsize n) override;
   int_type overflow(int_type ch) override;
-  pos_type seekoff(off_type off, std::ios_base::seekdir dir,
-                   std::ios_base::openmode which) override;
+  pos_type seekoff(off_type off, std::ios_base::seekdir dir, std::ios_base::openmode which) override;
   int sync() override;
 };
 

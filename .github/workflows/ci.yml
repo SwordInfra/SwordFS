@@ -7,11 +7,40 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-test:
+  clang-format:
+    name: clang-format
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 2
+
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+
+      - name: Format C++ sources
+        run: |
+          find src tests -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cc' -o -name '*.cxx' \) -print0 \
+            | xargs -0 clang-format -i
+
+      - name: Check clang-format
+        run: |
+          git diff --exit-code -- src tests
+
+  build-and-test:
+    needs: clang-format
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
           submodules: false
 
       - name: Restore native dependency cache
@@ -122,6 +151,8 @@ jobs:
 
   redis-integration:
     name: Redis integration
+    needs: clang-format
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     services:
       redis:

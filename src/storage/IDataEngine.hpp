@@ -66,14 +66,11 @@ class IDataEngine {
   virtual bool Head(std::string_view key, size_t *size) = 0;
 
   /// Write a chunk to the storage backend.  Takes ownership of |data|.
-  virtual Status Put(std::string_view key,
-                     std::unique_ptr<folly::IOBuf> data) = 0;
+  virtual Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) = 0;
 
   /// Read all or part of a chunk.  Data is written directly into
   /// |out|, which must have tailroom() >= expected size.
-  virtual Status Get(std::string_view key,
-                     size_t offset, size_t size,
-                     folly::IOBuf* out) = 0;
+  virtual Status Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) = 0;
 
   /// Delete a chunk (called by the garbage collector).
   virtual Status Delete(std::string_view key) = 0;

@@ -48,7 +48,9 @@ utils::Status InodeHandle::Write(const folly::IOBuf &buf, off_t off) {
   return rw_->Write(buf, off);
 }
 
-utils::Status InodeHandle::Flush() { return rw_->Flush(); }
+utils::Status InodeHandle::Flush() {
+  return rw_->Flush();
+}
 
 utils::Status InodeHandle::Close() {
   auto state = ReleaseRef();
@@ -69,8 +71,7 @@ utils::Status InodeHandle::Close() {
   if (state.orphaned) {
     auto status = ReclaimData();
     if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "InodeHandle::Close: ReclaimData(" << ino_
-                        << ") failed: " << status.message();
+      SWORDFS_LOG_ERROR << "InodeHandle::Close: ReclaimData(" << ino_ << ") failed: " << status.message();
     }
   }
   return utils::Status::OK();
@@ -107,11 +108,10 @@ InodeHandle::ReleaseState InodeHandle::ReleaseRef() {
 
 // Concrete F14FastMap type — hidden from the header to avoid pulling the
 // heavy Folly template into every includer.
-struct InodeHandleMap
-    : folly::F14FastMap<metadata::InodeID, std::weak_ptr<InodeHandle>> {};
+struct InodeHandleMap : folly::F14FastMap<metadata::InodeID, std::weak_ptr<InodeHandle>> {};
 
-InodeHandleManager::InodeHandleManager()
-    : inode_handles_(std::make_unique<InodeHandleMap>()) {}
+InodeHandleManager::InodeHandleManager() : inode_handles_(std::make_unique<InodeHandleMap>()) {
+}
 
 InodeHandleManager &InodeHandleManager::Instance() {
   static InodeHandleManager instance;
@@ -163,16 +163,14 @@ utils::Status InodeHandle::ReclaimData() {
     // Another directory entry still references this inode (a
     // concurrent Link raced our Unlink). Refusing to reclaim keeps
     // the chunk objects alive for the surviving name.
-    SWORDFS_LOG_WARN << "ReclaimData(" << ino_
-                     << ") refused: nlink=" << inode.attr.nlink
+    SWORDFS_LOG_WARN << "ReclaimData(" << ino_ << ") refused: nlink=" << inode.attr.nlink
                      << " (>0). A concurrent Link won the race.";
     return utils::Status::OK();
   } else if (open_count_ > 0) {
     // An fd is still open on this inode. The caller should have
     // routed through MarkOrphaned instead — refuse to drop the
     // underlying chunks/inode out from under it.
-    SWORDFS_LOG_WARN << "ReclaimData(" << ino_
-                     << ") refused: open handle still references it.";
+    SWORDFS_LOG_WARN << "ReclaimData(" << ino_ << ") refused: open handle still references it.";
     return utils::Status::OK();
   }
 
@@ -181,15 +179,13 @@ utils::Status InodeHandle::ReclaimData() {
   std::vector<metadata::SwordFsChunk> chunks;
   status = meta_->ListChunks(ino_, &chunks);
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "ReclaimData: ListChunks(" << ino_
-                      << ") failed: " << status.message();
+    SWORDFS_LOG_ERROR << "ReclaimData: ListChunks(" << ino_ << ") failed: " << status.message();
     return status;
   }
   for (const auto &chunk : chunks) {
     status = data_->Delete(chunk.key);
     if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << chunk.key
-                        << ") failed: " << status.message();
+      SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << chunk.key << ") failed: " << status.message();
     }
   }
 

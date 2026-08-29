@@ -10,17 +10,17 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
-#include "metadata/mem/MemMetaImpl.hpp"
 #include "TestMemMetaImpl.hpp"
+#include "metadata/mem/MemMetaImpl.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
-using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
 using swordfs::metadata::SwordFsInode;
+using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -32,7 +32,9 @@ class MemMetaImplRenameTest : public ::testing::Test {
     impl_ = new TestMemMetaImpl();
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
-  void TearDown() override { delete impl_; }
+  void TearDown() override {
+    delete impl_;
+  }
 
   TestMemMetaImpl *impl_;
 };
@@ -84,8 +86,7 @@ TEST_F(MemMetaImplRenameTest, RenameOverwriteFileReportsVictim) {
   impl_->Create(kRoot, "dst", 0644, &f2_ino, nullptr);
 
   RenameResult result;
-  Status st = impl_->Rename(kRoot, "src", kRoot, "dst", RenameFlag::kNone,
-                            &result);
+  Status st = impl_->Rename(kRoot, "src", kRoot, "dst", RenameFlag::kNone, &result);
   EXPECT_TRUE(st.ok()) << st.message();
   EXPECT_EQ(result.overwritten_ino, f2_ino);
   EXPECT_EQ(result.overwritten_post_nlink, 0);
@@ -302,8 +303,7 @@ TEST_F(MemMetaImplRenameTest, RenameExchangeDirectoryIntoItselfFails) {
 
   // Exchange root/a with a/b: the moved directory's new parent would be
   // itself.  The EXCHANGE path runs the same cycle check.
-  Status status =
-      impl_->Rename(kRoot, "a", a_ino, "b", RenameFlag::kExchange);
+  Status status = impl_->Rename(kRoot, "a", a_ino, "b", RenameFlag::kExchange);
   EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
 
   // Both entries must be untouched.
@@ -324,8 +324,7 @@ TEST_F(MemMetaImplRenameTest, RenameExchangeWithAncestorDirectoryFails) {
   // Exchange x/a with root/b: dir b would land inside its own subtree.
   // The source-side check (a into b) passes here — only the symmetric
   // check catches this direction.
-  Status status =
-      impl_->Rename(x_ino, "a", kRoot, "b", RenameFlag::kExchange);
+  Status status = impl_->Rename(x_ino, "a", kRoot, "b", RenameFlag::kExchange);
   EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
 
   // The whole subtree must be untouched.

@@ -18,9 +18,8 @@
 
 #pragma once
 
-#include <sys/stat.h>
-
 #include <folly/container/F14Map.h>
+#include <sys/stat.h>
 
 #include <atomic>
 #include <ctime>
@@ -29,11 +28,11 @@
 #include <string>
 #include <utility>
 
+#include "metadata/mem/MemMetaTxn.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
 #include "metadata/types/Inode.hpp"
-#include "metadata/mem/MemMetaTxn.hpp"
 
 namespace swordfs::metadata {
 
@@ -41,8 +40,7 @@ class MemMetaStore {
  public:
   MemMetaStore() : next_ino_(kRootInodeId + 1) {
     SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
-    inodes_[kRootInodeId] =
-        std::make_unique<SwordFsInode>(kRootInodeId, root_attr, kRootInodeId);
+    inodes_[kRootInodeId] = std::make_unique<SwordFsInode>(kRootInodeId, root_attr, kRootInodeId);
     dirs_[kRootInodeId] = {};
   }
   ~MemMetaStore() = default;
@@ -57,7 +55,7 @@ class MemMetaStore {
   // where a future KV/Redis backend maps the same callback shape onto
   // a real transaction.
   template <typename F>
-  decltype(auto) Transact(F&& f) {
+  decltype(auto) Transact(F &&f) {
     std::lock_guard<std::mutex> lock(mutex_);
     MemMetaTxn txn(this);
     return std::forward<F>(f)(txn);

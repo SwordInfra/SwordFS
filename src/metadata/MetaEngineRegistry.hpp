@@ -17,7 +17,7 @@ class IMetaEngine;
 
 /// Registry of metadata engines available in this build.
 class MetaEngineRegistry {
-public:
+ public:
   using Factory = utils::Status (*)(std::string_view meta_url, std::string_view volume_name,
                                     std::unique_ptr<IMetaEngine> *out);
   struct Entry {
@@ -36,7 +36,7 @@ public:
   utils::Status Create(std::string_view name, std::string_view meta_url, std::string_view volume_name,
                        std::unique_ptr<IMetaEngine> *out) const;
 
-private:
+ private:
   MetaEngineRegistry() = default;
   std::unordered_map<std::string, Entry> engines_;
 };
