@@ -6,8 +6,46 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
+  clang-format:
+    name: clang-format
+    if: github.event_name == 'push' || (github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 2
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+
+      - name: Format C++ sources
+        run: |
+          find src tests -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cc' -o -name '*.cxx' \) -print0 \
+            | xargs -0 clang-format -i
+
+      - name: Amend and push formatting changes
+        run: |
+          if git diff --quiet; then
+            echo "No clang-format changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src tests
+          git commit --amend --no-edit
+          git push --force-with-lease origin HEAD:${{ github.head_ref || github.ref_name }}
+
   build-and-test:
+    needs: clang-format
+    if: always() && needs.clang-format.result == 'success'
+
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

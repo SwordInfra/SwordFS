@@ -23,8 +23,7 @@ namespace swordfs::config {
 
 static void PrintVersion() {
   std::cout << "SwordFS version " << SWORDFS_VERSION_MAJOR << "." << SWORDFS_VERSION_MINOR << "."
-            << SWORDFS_VERSION_PATCH << " (libfuse " << FUSE_MAJOR_VERSION << "." << FUSE_MINOR_VERSION << ")"
-            << "\n";
+            << SWORDFS_VERSION_PATCH << " (libfuse " << FUSE_MAJOR_VERSION << "." << FUSE_MINOR_VERSION << ")" << "\n";
 }
 
 /// Describes one registered subcommand: its CLI::App handle and the closure

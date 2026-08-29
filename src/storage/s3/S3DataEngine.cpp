@@ -231,8 +231,8 @@ Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size, folly
       // The SDK has already written the body into our buffer.
       auto content_length = static_cast<size_t>(outcome.GetResult().GetContentLength());
       if (out->tailroom() < content_length) {
-        SWORDFS_LOG_ERROR << "S3 GetObject: output buffer too small"
-                          << " (need=" << content_length << " tailroom=" << out->tailroom() << ")";
+        SWORDFS_LOG_ERROR << "S3 GetObject: output buffer too small" << " (need=" << content_length
+                          << " tailroom=" << out->tailroom() << ")";
         return Status::InvalidArgument("Get: output buffer too small");
       }
       out->append(content_length);
