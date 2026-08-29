@@ -12,17 +12,17 @@
 
 #include <set>
 
-#include "metadata/mem/MemMetaImpl.hpp"
 #include "TestMemMetaImpl.hpp"
+#include "metadata/mem/MemMetaImpl.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
-using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
+using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -34,7 +34,9 @@ class MemMetaImplReadDirTest : public ::testing::Test {
     impl_ = new TestMemMetaImpl();
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
-  void TearDown() override { delete impl_; }
+  void TearDown() override {
+    delete impl_;
+  }
 
   TestMemMetaImpl *impl_;
 };

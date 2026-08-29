@@ -34,15 +34,13 @@ void checkLogFilePath(const std::string &path) {
   // Verify the log file is accessible (create if missing).
   int fd = folly::openNoInt(path.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
   if (fd < 0) {
-    SWORDFS_PROMPT_EXIT << "Error: cannot open log file '" << path
-                        << "': " << std::strerror(errno);
+    SWORDFS_PROMPT_EXIT << "Error: cannot open log file '" << path << "': " << std::strerror(errno);
   }
   ::close(fd);
 }
 
 void InitLogging(const LogConfig &log, bool foreground) {
-  folly::LoggerDB::get().registerHandlerFactory(
-      std::make_unique<folly::FileHandlerFactory>());
+  folly::LoggerDB::get().registerHandlerFactory(std::make_unique<folly::FileHandlerFactory>());
 
   checkLogLevel(log.level);
 
@@ -50,8 +48,7 @@ void InitLogging(const LogConfig &log, bool foreground) {
     folly::initLogging(".=INFO:default; default=stream:stream=stderr");
   } else {
     checkLogFilePath(log.path);
-    std::string config = ".=" + log.level +
-                         ":default; default=file:path=" + log.path;
+    std::string config = ".=" + log.level + ":default; default=file:path=" + log.path;
     folly::initLogging(config.c_str());
     SWORDFS_LOG_INFO << "Logging to " << log.path << " at level " << log.level;
   }

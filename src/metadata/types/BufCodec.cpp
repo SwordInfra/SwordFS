@@ -3,12 +3,12 @@
 
 #include "metadata/types/BufCodec.hpp"
 
-#include "metadata/types/Inode.hpp"
-
 #include <folly/io/Cursor.h>
 #include <folly/io/IOBuf.h>
 
 #include <utility>
+
+#include "metadata/types/Inode.hpp"
 
 namespace swordfs::metadata {
 
@@ -137,16 +137,14 @@ bool BufDecoder::Attr(SwordFsAttr *attr) {
     impl_->failed_ = true;
     return false;
   }
-  if (!U64(&attr->dev) || !U64(&attr->ino) || !U32(&attr->mode) || !U64(&attr->nlink) ||
-      !U64(&attr->uid) || !U64(&attr->gid) || !U64(&attr->rdev) || !U64(&attr->size) ||
-      !U64(&attr->blksize) || !U64(&attr->blocks) || !I64(&attr->atime) ||
-      !I64(&attr->atime_nsec) || !I64(&attr->mtime) || !I64(&attr->mtime_nsec) ||
+  if (!U64(&attr->dev) || !U64(&attr->ino) || !U32(&attr->mode) || !U64(&attr->nlink) || !U64(&attr->uid) ||
+      !U64(&attr->gid) || !U64(&attr->rdev) || !U64(&attr->size) || !U64(&attr->blksize) || !U64(&attr->blocks) ||
+      !I64(&attr->atime) || !I64(&attr->atime_nsec) || !I64(&attr->mtime) || !I64(&attr->mtime_nsec) ||
       !I64(&attr->ctime) || !I64(&attr->ctime_nsec)) {
     return false;
   }
-  if (attr->atime_nsec < 0 || attr->atime_nsec >= 1000000000 ||
-      attr->mtime_nsec < 0 || attr->mtime_nsec >= 1000000000 ||
-      attr->ctime_nsec < 0 || attr->ctime_nsec >= 1000000000) {
+  if (attr->atime_nsec < 0 || attr->atime_nsec >= 1000000000 || attr->mtime_nsec < 0 ||
+      attr->mtime_nsec >= 1000000000 || attr->ctime_nsec < 0 || attr->ctime_nsec >= 1000000000) {
     impl_->failed_ = true;
     return false;
   }
@@ -157,8 +155,7 @@ bool BufDecoder::Header(RecordType expected_type) {
   std::string magic;
   uint32_t version = 0;
   uint32_t type = 0;
-  if (!String(&magic) || magic != kMagic || !U32(&version) ||
-      version != kSchemaVersion || !U32(&type) ||
+  if (!String(&magic) || magic != kMagic || !U32(&version) || version != kSchemaVersion || !U32(&type) ||
       type != static_cast<uint32_t>(expected_type)) {
     impl_->failed_ = true;
     return false;

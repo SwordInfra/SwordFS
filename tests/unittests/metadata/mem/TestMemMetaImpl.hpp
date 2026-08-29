@@ -15,42 +15,48 @@ class TestMemMetaImpl : public MemMetaImpl {
   using MemMetaImpl::Lookup;
   using MemMetaImpl::MkDir;
 
-  Status SetAttr(InodeID ino, const struct stat *attr, SetAttrField fields,
-                 SwordFsInode *out = nullptr) {
+  Status SetAttr(InodeID ino, const struct stat *attr, SetAttrField fields, SwordFsInode *out = nullptr) {
     return MemMetaImpl::SetAttr(ino, SwordFsAttr::FromPosixStat(*attr), fields, out);
   }
 
-  Status Create(InodeID parent_ino, std::string_view name, mode_t mode,
-                InodeID *ino, struct stat *attr) {
+  Status Create(InodeID parent_ino, std::string_view name, mode_t mode, InodeID *ino, struct stat *attr) {
     SwordFsInode out;
-    Status status = MemMetaImpl::Create(parent_ino, name, mode,
-                                        (ino || attr) ? &out : nullptr);
+    Status status = MemMetaImpl::Create(parent_ino, name, mode, (ino || attr) ? &out : nullptr);
     if (status.ok()) {
-      if (ino) *ino = out.ino;
-      if (attr) out.attr.ToPosixStat(attr);
+      if (ino) {
+        *ino = out.ino;
+      }
+      if (attr) {
+        out.attr.ToPosixStat(attr);
+      }
     }
     return status;
   }
 
-  Status MkDir(InodeID parent_ino, std::string_view name, mode_t mode,
-               InodeID *ino, struct stat *attr) {
+  Status MkDir(InodeID parent_ino, std::string_view name, mode_t mode, InodeID *ino, struct stat *attr) {
     SwordFsInode out;
-    Status status = MemMetaImpl::MkDir(parent_ino, name, mode,
-                                       (ino || attr) ? &out : nullptr);
+    Status status = MemMetaImpl::MkDir(parent_ino, name, mode, (ino || attr) ? &out : nullptr);
     if (status.ok()) {
-      if (ino) *ino = out.ino;
-      if (attr) out.attr.ToPosixStat(attr);
+      if (ino) {
+        *ino = out.ino;
+      }
+      if (attr) {
+        out.attr.ToPosixStat(attr);
+      }
     }
     return status;
   }
 
-  Status Lookup(InodeID parent_ino, std::string_view name,
-                InodeID *ino, struct stat *attr) {
+  Status Lookup(InodeID parent_ino, std::string_view name, InodeID *ino, struct stat *attr) {
     SwordFsInode out;
     Status status = MemMetaImpl::Lookup(parent_ino, name, &out);
     if (status.ok()) {
-      if (ino) *ino = out.ino;
-      if (attr) out.attr.ToPosixStat(attr);
+      if (ino) {
+        *ino = out.ino;
+      }
+      if (attr) {
+        out.attr.ToPosixStat(attr);
+      }
     }
     return status;
   }
@@ -58,7 +64,9 @@ class TestMemMetaImpl : public MemMetaImpl {
   Status GetAttr(InodeID ino, struct stat *attr) {
     SwordFsInode out;
     Status status = MemMetaImpl::GetInode(ino, attr ? &out : nullptr);
-    if (status.ok() && attr) out.attr.ToPosixStat(attr);
+    if (status.ok() && attr) {
+      out.attr.ToPosixStat(attr);
+    }
     return status;
   }
 };

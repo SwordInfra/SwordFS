@@ -12,8 +12,7 @@ namespace swordfs::storage {
 
 // ─── PreallocatedOutputStreamBuf ────────────────────────────────
 
-PreallocatedOutputStreamBuf::PreallocatedOutputStreamBuf(char *buffer,
-                                                         size_t capacity) {
+PreallocatedOutputStreamBuf::PreallocatedOutputStreamBuf(char *buffer, size_t capacity) {
   setp(buffer, buffer + capacity);
 }
 
@@ -21,8 +20,7 @@ size_t PreallocatedOutputStreamBuf::Written() const {
   return static_cast<size_t>(pptr() - pbase());
 }
 
-std::streamsize PreallocatedOutputStreamBuf::xsputn(const char *s,
-                                                    std::streamsize n) {
+std::streamsize PreallocatedOutputStreamBuf::xsputn(const char *s, std::streamsize n) {
   auto avail = static_cast<std::streamsize>(epptr() - pptr());
   auto actual = std::min(n, avail);
   std::memcpy(pptr(), s, static_cast<size_t>(actual));
@@ -34,24 +32,26 @@ std::streambuf::int_type PreallocatedOutputStreamBuf::overflow(int_type ch) {
   return traits_type::eof();
 }
 
-std::streambuf::pos_type PreallocatedOutputStreamBuf::seekoff(
-    off_type off, std::ios_base::seekdir dir,
-    std::ios_base::openmode which) {
-  if (which == std::ios_base::out && off == 0 &&
-      dir == std::ios_base::cur) {
+std::streambuf::pos_type PreallocatedOutputStreamBuf::seekoff(off_type off, std::ios_base::seekdir dir,
+                                                              std::ios_base::openmode which) {
+  if (which == std::ios_base::out && off == 0 && dir == std::ios_base::cur) {
     return pptr() - pbase();
   }
   return pos_type(off_type(-1));
 }
 
-int PreallocatedOutputStreamBuf::sync() { return std::streambuf::sync(); }
+int PreallocatedOutputStreamBuf::sync() {
+  return std::streambuf::sync();
+}
 
 // ─── PreallocatedResponseStream ────────────────────────────────
 
-PreallocatedResponseStream::PreallocatedResponseStream(char *buffer,
-                                                       size_t capacity)
-    : Aws::IOStream(&buf_), buf_(buffer, capacity) {}
+PreallocatedResponseStream::PreallocatedResponseStream(char *buffer, size_t capacity)
+    : Aws::IOStream(&buf_), buf_(buffer, capacity) {
+}
 
-size_t PreallocatedResponseStream::Written() const { return buf_.Written(); }
+size_t PreallocatedResponseStream::Written() const {
+  return buf_.Written();
+}
 
 }  // namespace swordfs::storage

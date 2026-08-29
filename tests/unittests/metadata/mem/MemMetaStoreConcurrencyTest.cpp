@@ -37,8 +37,12 @@ static constexpr mode_t kDir = S_IFDIR | 0755;
 
 class MemMetaStoreConcurrencyTest : public ::testing::Test {
  protected:
-  void SetUp() override { store_ = new MemMetaStore(); }
-  void TearDown() override { delete store_; }
+  void SetUp() override {
+    store_ = new MemMetaStore();
+  }
+  void TearDown() override {
+    delete store_;
+  }
 
   MemMetaStore *store_;
 };
@@ -58,9 +62,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntryNoDuplicate) {
     for (int i = 0; i < kPerThread; ++i) {
       // Each thread uses a unique name: "file_<tid>_<i>"
       std::string name = "file_" + std::to_string(tid) + "_" + std::to_string(i);
-      Status status = store_->Transact([&](MemMetaTxn &txn) {
-        return txn.AddEntry(kRoot, name, kRegFile, nullptr);
-      });
+      Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, name, kRegFile, nullptr); });
       if (status.ok()) {
         success_count.fetch_add(1, std::memory_order_relaxed);
       } else {
@@ -80,8 +82,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntryNoDuplicate) {
   EXPECT_EQ(success_count.load(), kThreads * kPerThread);
   EXPECT_EQ(error_count.load(), 0);
   // root + all created files
-  size_t inode_count = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.InodeCount(); });
+  size_t inode_count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(inode_count, 1 + kThreads * kPerThread);
 }
 
@@ -103,9 +104,8 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntrySameName) {
   auto worker = [&]() {
     gate.arrive_and_wait();
     SwordFsInode child;
-    Status status = store_->Transact([&](MemMetaTxn &txn) {
-      return txn.AddEntry(kRoot, "race_target", kRegFile, &child);
-    });
+    Status status =
+        store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "race_target", kRegFile, &child); });
     if (status.ok()) {
       success_count.fetch_add(1, std::memory_order_relaxed);
       winner_ino.store(child.ino, std::memory_order_relaxed);
@@ -123,8 +123,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntrySameName) {
   }
 
   // Exactly ONE thread must succeed.
-  EXPECT_EQ(success_count.load(), 1)
-      << "TOCTOU: more than one thread created 'race_target'";
+  EXPECT_EQ(success_count.load(), 1) << "TOCTOU: more than one thread created 'race_target'";
   EXPECT_EQ(exists_count.load(), kThreads - 1);
   EXPECT_GT(winner_ino.load(), kRoot);
 }
@@ -136,17 +135,11 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntrySameName) {
 TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveEntryAtomicity) {
   // Set up: root/src/file + root/dst/
   SwordFsInode src_dir;
-  store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "src", kDir, &src_dir);
-  });
+  store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "src", kDir, &src_dir); });
   SwordFsInode dst_dir;
-  store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "dst", kDir, &dst_dir);
-  });
+  store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "dst", kDir, &dst_dir); });
   SwordFsInode f;
-  store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(src_dir.ino, "target", kRegFile, &f);
-  });
+  store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(src_dir.ino, "target", kRegFile, &f); });
   InodeID file_ino = f.ino;
 
   constexpr int kThreads = 8;
@@ -160,9 +153,8 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveEntryAtomicity) {
     gate.arrive_and_wait();
     // Each thread tries to move the same file to a unique destination name
     std::string new_name = "moved_" + std::to_string(tid);
-    Status status = store_->Transact([&](MemMetaTxn &txn) {
-      return txn.MoveEntry(src_dir.ino, "target", dst_dir.ino, new_name, false);
-    });
+    Status status = store_->Transact(
+        [&](MemMetaTxn &txn) { return txn.MoveEntry(src_dir.ino, "target", dst_dir.ino, new_name, false); });
     if (status.ok()) {
       moved_count.fetch_add(1, std::memory_order_relaxed);
     } else if (status.IsNotFound()) {
@@ -181,17 +173,14 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveEntryAtomicity) {
   }
 
   // Exactly ONE move should succeed (source is unlinked atomically).
-  EXPECT_EQ(moved_count.load(), 1)
-      << "TOCTOU: multiple threads moved the same source entry";
+  EXPECT_EQ(moved_count.load(), 1) << "TOCTOU: multiple threads moved the same source entry";
   EXPECT_EQ(notfound_count.load(), kThreads - 1);
 
   // Verify the file still exists with its original ino
   SwordFsInode found;
   for (int t = 0; t < kThreads; ++t) {
     std::string name = "moved_" + std::to_string(t);
-    Status status = store_->Transact([&](MemMetaTxn &txn) {
-      return txn.LookupEntry(dst_dir.ino, name, &found);
-    });
+    Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.LookupEntry(dst_dir.ino, name, &found); });
     if (status.ok()) {
       EXPECT_EQ(found.ino, file_ino);
       break;
@@ -209,9 +198,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentRemoveAndAdd) {
   std::vector<InodeID> inodes;
   for (int i = 0; i < kFiles; ++i) {
     SwordFsInode f;
-    store_->Transact([&](MemMetaTxn &txn) {
-      return txn.AddEntry(kRoot, "file_" + std::to_string(i), kRegFile, &f);
-    });
+    store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "file_" + std::to_string(i), kRegFile, &f); });
     inodes.push_back(f.ino);
   }
 
@@ -243,9 +230,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentRemoveAndAdd) {
   auto adder = [&](int tid) {
     for (int i = 0; i < 25; ++i) {
       std::string name = "new_" + std::to_string(tid) + "_" + std::to_string(i);
-      Status status = store_->Transact([&](MemMetaTxn &txn) {
-        return txn.AddEntry(kRoot, name, kRegFile, nullptr);
-      });
+      Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, name, kRegFile, nullptr); });
       if (status.ok()) {
         ops_ok.fetch_add(1, std::memory_order_relaxed);
       } else {
@@ -266,8 +251,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentRemoveAndAdd) {
 
   EXPECT_EQ(ops_fail.load(), 0);
   // After: root + 100 - 100 + 100 = 101 inodes
-  size_t inode_count = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.InodeCount(); });
+  size_t inode_count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(inode_count, 1 + kFiles) << "Inode count mismatch";
 }
 
@@ -289,9 +273,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddAndList) {
     }
     for (int i = 0; i < kFiles; ++i) {
       std::string name = "item_" + std::to_string(tid) + "_" + std::to_string(i);
-      store_->Transact([&](MemMetaTxn &txn) {
-        return txn.AddEntry(kRoot, name, kRegFile, nullptr);
-      });
+      store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, name, kRegFile, nullptr); });
     }
   };
 
@@ -300,9 +282,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddAndList) {
     }
     for (int round = 0; round < 20; ++round) {
       std::vector<SwordFsEntry> entries;
-      Status status = store_->Transact([&](MemMetaTxn &txn) {
-        return txn.ListEntries(kRoot, &entries);
-      });
+      Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListEntries(kRoot, &entries); });
       if (status.ok()) {
         // Verify no duplicate names in the listing.
         std::set<std::string> names;
@@ -336,8 +316,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddAndList) {
     t.join();
   }
 
-  EXPECT_EQ(lists_corrupt.load(), 0)
-      << "TOCTOU: ListEntries returned duplicate entries under concurrency";
+  EXPECT_EQ(lists_corrupt.load(), 0) << "TOCTOU: ListEntries returned duplicate entries under concurrency";
   EXPECT_GT(lists_ok.load(), 0);
 }
 
@@ -348,23 +327,13 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddAndList) {
 TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveToSameTarget) {
   // Set up: root/a/file1, root/b/file2, root/dst/
   SwordFsInode dir_a, dir_b, dir_dst;
-  store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "a", kDir, &dir_a);
-  });
-  store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "b", kDir, &dir_b);
-  });
-  store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(kRoot, "dst", kDir, &dir_dst);
-  });
+  store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "a", kDir, &dir_a); });
+  store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "b", kDir, &dir_b); });
+  store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "dst", kDir, &dir_dst); });
 
   SwordFsInode f1, f2;
-  store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(dir_a.ino, "file", kRegFile, &f1);
-  });
-  store_->Transact([&](MemMetaTxn &txn) {
-    return txn.AddEntry(dir_b.ino, "file", kRegFile, &f2);
-  });
+  store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(dir_a.ino, "file", kRegFile, &f1); });
+  store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(dir_b.ino, "file", kRegFile, &f2); });
 
   std::atomic<int> moved{0};
   std::atomic<int> failed{0};
@@ -372,9 +341,8 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveToSameTarget) {
 
   auto mover_a = [&]() {
     gate.arrive_and_wait();
-    Status status = store_->Transact([&](MemMetaTxn &txn) {
-      return txn.MoveEntry(dir_a.ino, "file", dir_dst.ino, "winner", false);
-    });
+    Status status = store_->Transact(
+        [&](MemMetaTxn &txn) { return txn.MoveEntry(dir_a.ino, "file", dir_dst.ino, "winner", false); });
     if (status.ok()) {
       moved.fetch_add(1, std::memory_order_relaxed);
     } else {
@@ -384,9 +352,8 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveToSameTarget) {
 
   auto mover_b = [&]() {
     gate.arrive_and_wait();
-    Status status = store_->Transact([&](MemMetaTxn &txn) {
-      return txn.MoveEntry(dir_b.ino, "file", dir_dst.ino, "winner", false);
-    });
+    Status status = store_->Transact(
+        [&](MemMetaTxn &txn) { return txn.MoveEntry(dir_b.ino, "file", dir_dst.ino, "winner", false); });
     if (status.ok()) {
       moved.fetch_add(1, std::memory_order_relaxed);
     } else {
@@ -399,15 +366,12 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveToSameTarget) {
   t1.join();
   t2.join();
 
-  EXPECT_EQ(moved.load(), 1)
-      << "TOCTOU: two moves to the same target both succeeded";
+  EXPECT_EQ(moved.load(), 1) << "TOCTOU: two moves to the same target both succeeded";
   EXPECT_EQ(failed.load(), 1);
 
   // Verify exactly one file ended up at the target
   SwordFsInode winner;
-  Status status = store_->Transact([&](MemMetaTxn &txn) {
-    return txn.LookupEntry(dir_dst.ino, "winner", &winner);
-  });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.LookupEntry(dir_dst.ino, "winner", &winner); });
   EXPECT_TRUE(status.ok());
   bool winner_is_f1 = (winner.ino == f1.ino);
   bool winner_is_f2 = (winner.ino == f2.ino);

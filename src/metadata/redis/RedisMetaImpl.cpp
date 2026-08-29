@@ -4,22 +4,22 @@
 #include "metadata/redis/RedisMetaImpl.hpp"
 
 #include <sw/redis++/redis++.h>
+#include <unistd.h>
 
 #include <ctime>
-#include <unistd.h>
 #include <exception>
 #include <optional>
 #include <stdexcept>
 #include <utility>
 
 #include "metadata/MetaEngineRegistry.hpp"
+#include "metadata/redis/RedisKey.hpp"
+#include "metadata/redis/RedisMetaClient.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
 #include "metadata/types/Inode.hpp"
 #include "metadata/types/Volume.hpp"
-#include "metadata/redis/RedisKey.hpp"
-#include "metadata/redis/RedisMetaClient.hpp"
 
 namespace swordfs::metadata {
 namespace {

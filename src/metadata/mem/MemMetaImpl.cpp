@@ -14,12 +14,12 @@
 #include <cstring>
 
 #include "metadata/MetaEngineRegistry.hpp"
+#include "metadata/Utils.hpp"
+#include "metadata/mem/VolumeFile.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
 #include "metadata/types/Inode.hpp"
 #include "metadata/types/Volume.hpp"
-#include "metadata/mem/VolumeFile.hpp"
-#include "metadata/Utils.hpp"
 #include "utils/Logging.hpp"
 
 namespace swordfs::metadata {

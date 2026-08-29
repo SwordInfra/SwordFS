@@ -33,8 +33,7 @@ utils::Status WriteBuf::Write(off_t write_offset, const folly::IOBuf &data) {
   // fuse_reply_write() returns, the kernel may reuse or free that
   // memory immediately.  We must own a private copy so the data
   // survives until the chunk is sealed and uploaded.
-  std::memcpy(const_cast<uint8_t *>(buf_->data()) + write_offset,
-              data.data(), data.length());
+  std::memcpy(const_cast<uint8_t *>(buf_->data()) + write_offset, data.data(), data.length());
 
   if (end > static_cast<off_t>(buf_->length())) {
     buf_->append(end - buf_->length());

@@ -30,25 +30,23 @@
 using namespace swordfs::utils;
 using namespace swordfs::config;
 
+using swordfs::metadata::FromFuseRenameFlags;
+using swordfs::metadata::FromFuseSetAttrFields;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
-using swordfs::metadata::SwordFsInode;
-using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsAttr;
-using swordfs::metadata::FromFuseRenameFlags;
-using swordfs::metadata::FromFuseSetAttrFields;
+using swordfs::metadata::SwordFsEntry;
+using swordfs::metadata::SwordFsInode;
 using swordfs::volume::VolumeImpl;
 
 namespace swordfs::vfs {
-
 
 volume::VolumeImpl *VfsImpl::Volume() {
   return &volume::VolumeImpl::Instance();
 }
 
-utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name,
-                              fuse_entry_param *entry) {
+utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name, fuse_entry_param *entry) {
   SwordFsInode child;
   Status status = VolumeImpl::Instance().meta_engine()->Lookup(parent, name, &child);
   if (!status.ok()) {
@@ -71,13 +69,12 @@ utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
   return status;
 }
 
-utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr,
-                               int to_set, struct stat *out_attr) {
+utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr, int to_set, struct stat *out_attr) {
   SetAttrField fields = FromFuseSetAttrFields(to_set);
   SwordFsAttr metadata_attr = SwordFsAttr::FromPosixStat(*attr);
   SwordFsInode inode;
-  Status status = VolumeImpl::Instance().meta_engine()->SetAttr(
-      ino, metadata_attr, fields, out_attr ? &inode : nullptr);
+  Status status =
+      VolumeImpl::Instance().meta_engine()->SetAttr(ino, metadata_attr, fields, out_attr ? &inode : nullptr);
   if (status.ok() && out_attr) {
     inode.attr.ToPosixStat(out_attr);
   }
@@ -88,8 +85,7 @@ utils::Status VfsImpl::Readlink(fuse_ino_t ino, std::string *target) {
   return VolumeImpl::Instance().meta_engine()->Readlink(ino, target);
 }
 
-utils::Status VfsImpl::Mknod(fuse_ino_t parent, const char *name,
-                             mode_t mode, dev_t rdev) {
+utils::Status VfsImpl::Mknod(fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev) {
   (void)parent;
   (void)name;
   (void)mode;
@@ -97,11 +93,9 @@ utils::Status VfsImpl::Mknod(fuse_ino_t parent, const char *name,
   return Status::NotSupported("mknod");
 }
 
-utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name,
-                             mode_t mode, fuse_entry_param *entry) {
+utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry) {
   SwordFsInode child;
-  Status status = VolumeImpl::Instance().meta_engine()->MkDir(
-      parent, name, static_cast<uint32_t>(mode), &child);
+  Status status = VolumeImpl::Instance().meta_engine()->MkDir(parent, name, static_cast<uint32_t>(mode), &child);
   if (!status.ok()) {
     return status;
   }
@@ -165,12 +159,9 @@ utils::Status VfsImpl::Rmdir(fuse_ino_t parent, const char *name) {
   return VolumeImpl::Instance().meta_engine()->RmDir(parent, name);
 }
 
-utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent,
-                               const char *name,
-                               fuse_entry_param *entry) {
+utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent, const char *name, fuse_entry_param *entry) {
   SwordFsInode child;
-  Status status = VolumeImpl::Instance().meta_engine()->Symlink(
-      parent, name, std::string_view(link), &child);
+  Status status = VolumeImpl::Instance().meta_engine()->Symlink(parent, name, std::string_view(link), &child);
   if (!status.ok()) {
     return status;
   }
@@ -182,14 +173,12 @@ utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent,
   return Status::OK();
 }
 
-utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
-                              fuse_ino_t newparent, const char *newname,
+utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name, fuse_ino_t newparent, const char *newname,
                               unsigned int flags) {
   RenameFlag rename_flags = FromFuseRenameFlags(flags);
   auto meta = VolumeImpl::Instance().meta_engine();
   metadata::RenameResult result;
-  auto status = meta->Rename(parent, name, newparent, newname, rename_flags,
-                             &result);
+  auto status = meta->Rename(parent, name, newparent, newname, rename_flags, &result);
   if (!status.ok()) {
     return status;
   }
@@ -199,8 +188,7 @@ utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
   // cannot know whether an open file descriptor still references it. Let
   // InodeHandle perform the same data/inode cleanup used by unlink.
   if (result.overwritten_ino != 0 && result.overwritten_post_nlink == 0) {
-    auto handle = vfs::InodeHandleManager::Instance().Get(
-        result.overwritten_ino, /*create_if_missing=*/true);
+    auto handle = vfs::InodeHandleManager::Instance().Get(result.overwritten_ino, /*create_if_missing=*/true);
     if (!handle) {
       // The metadata rename has already committed, so returning an error
       // here would report a failed rename for a state that is already
@@ -208,26 +196,21 @@ utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name,
       // log the failure. A future orphan-data reconciliation mechanism
       // should provide retry/repair for cleanup failures.
       SWORDFS_LOG_ERROR << "Rename: failed to get InodeHandle for overwritten "
-                        << "inode " << result.overwritten_ino
-                        << "; rename has already committed";
+                        << "inode " << result.overwritten_ino << "; rename has already committed";
     } else if (!handle->MarkOrphanedIfOpen()) {
       auto cleanup_status = handle->ReclaimData();
       if (!cleanup_status.ok()) {
-        SWORDFS_LOG_ERROR << "Rename: cleanup of overwritten inode "
-                          << result.overwritten_ino << " failed: "
-                          << cleanup_status.message();
+        SWORDFS_LOG_ERROR << "Rename: cleanup of overwritten inode " << result.overwritten_ino
+                          << " failed: " << cleanup_status.message();
       }
     }
   }
   return utils::Status::OK();
 }
 
-utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent,
-                            const char *newname,
-                            fuse_entry_param *entry) {
+utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent, const char *newname, fuse_entry_param *entry) {
   SwordFsInode inode;
-  Status status = VolumeImpl::Instance().meta_engine()->Link(
-      ino, newparent, newname, &inode);
+  Status status = VolumeImpl::Instance().meta_engine()->Link(ino, newparent, newname, &inode);
   if (!status.ok()) {
     return status;
   }
@@ -251,8 +234,7 @@ utils::Status VfsImpl::Open(fuse_ino_t ino, struct fuse_file_info *fi) {
   return Status::OK();
 }
 
-utils::Status VfsImpl::Read(fuse_ino_t ino, size_t size, off_t off,
-                            uint64_t fh, std::unique_ptr<folly::IOBuf> *data) {
+utils::Status VfsImpl::Read(fuse_ino_t ino, size_t size, off_t off, uint64_t fh, std::unique_ptr<folly::IOBuf> *data) {
   SWORDFS_LOG_DEBUG << "Read: ino=" << ino << " offset=" << off << " size=" << size;
   auto handle = FileHandleManager::Instance().Find(fh);
   if (!handle) {
@@ -267,16 +249,14 @@ utils::Status VfsImpl::Read(fuse_ino_t ino, size_t size, off_t off,
   return Status::OK();
 }
 
-utils::Status VfsImpl::Write(fuse_ino_t ino, const folly::IOBuf &buf,
-                             off_t off, uint64_t fh) {
+utils::Status VfsImpl::Write(fuse_ino_t ino, const folly::IOBuf &buf, off_t off, uint64_t fh) {
   auto handle = FileHandleManager::Instance().Find(fh);
   if (!handle) {
     return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
   }
   auto status = handle->Write(buf, off);
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "VfsImpl::Write FAILED: ino=" << ino
-                      << " fh=" << fh << " — " << status.message();
+    SWORDFS_LOG_ERROR << "VfsImpl::Write FAILED: ino=" << ino << " fh=" << fh << " — " << status.message();
   }
   return status;
 }
@@ -296,8 +276,7 @@ utils::Status VfsImpl::Release(fuse_ino_t ino, uint64_t fh) {
 }
 
 utils::Status VfsImpl::Fsync(fuse_ino_t ino, int datasync, uint64_t fh) {
-  SWORDFS_LOG_DEBUG << "Fsync: ino=" << ino << " datasync=" << datasync
-                    << " fh=" << fh;
+  SWORDFS_LOG_DEBUG << "Fsync: ino=" << ino << " datasync=" << datasync << " fh=" << fh;
   auto handle = FileHandleManager::Instance().Find(fh);
   if (!handle) {
     return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
@@ -317,10 +296,8 @@ utils::Status VfsImpl::Opendir(fuse_ino_t ino, uint64_t *fh) {
 
 // Common implementation for Readdir and Readdirplus.
 template <typename F>
-static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
-                                   off_t off,
-                                   swordfs::metadata::IMetaEngine *meta,
-                                   F &&add_entry, std::string *out) {
+static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
+                                   swordfs::metadata::IMetaEngine *meta, F &&add_entry, std::string *out) {
   using swordfs::metadata::SwordFsEntry;
 
   std::vector<SwordFsEntry> entries;
@@ -343,8 +320,7 @@ static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
 
   size_t pos = 0;
   for (size_t i = 0; i < entries.size() && pos < cap; ++i) {
-    size_t n = add_entry(req, buf + pos, cap - pos,
-                         entries[i], pos + sizes[i]);
+    size_t n = add_entry(req, buf + pos, cap - pos, entries[i], pos + sizes[i]);
     if (n > cap - pos) {
       break;
     }
@@ -358,12 +334,10 @@ static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size,
   return Status::OK();
 }
 
-utils::Status VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
-                               off_t off, std::string *buf) {
+utils::Status VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, std::string *buf) {
   return ReaddirCommon(
       req, ino, size, off, VolumeImpl::Instance().meta_engine(),
-      [](fuse_req_t r, char *p, size_t cap, const metadata::SwordFsEntry &e,
-         off_t next_off) {
+      [](fuse_req_t r, char *p, size_t cap, const metadata::SwordFsEntry &e, off_t next_off) {
         struct stat st = {};
         st.st_ino = e.ino;
         st.st_mode = e.type << 12;
@@ -372,20 +346,17 @@ utils::Status VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
       buf);
 }
 
-utils::Status VfsImpl::Readdirplus(fuse_req_t req, fuse_ino_t ino,
-                                   size_t size, off_t off, std::string *buf) {
+utils::Status VfsImpl::Readdirplus(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, std::string *buf) {
   return ReaddirCommon(
       req, ino, size, off, VolumeImpl::Instance().meta_engine(),
-      [](fuse_req_t r, char *p, size_t cap, const metadata::SwordFsEntry &e,
-         off_t next_off) {
+      [](fuse_req_t r, char *p, size_t cap, const metadata::SwordFsEntry &e, off_t next_off) {
         fuse_entry_param ep = {};
         ep.ino = e.ino;
         ep.attr.st_ino = e.ino;
         ep.attr.st_mode = e.type << 12;
         ep.attr_timeout = 1.0;
         ep.entry_timeout = 1.0;
-        return fuse_add_direntry_plus(r, p, cap, e.name.c_str(), &ep,
-                                      next_off);
+        return fuse_add_direntry_plus(r, p, cap, e.name.c_str(), &ep, next_off);
       },
       buf);
 }
@@ -425,8 +396,7 @@ utils::Status VfsImpl::Statfs(fuse_ino_t ino, struct statvfs *stbuf) {
   return Status::OK();
 }
 
-utils::Status VfsImpl::Setxattr(fuse_ino_t ino, const char *name,
-                                const char *value, size_t size, int flags) {
+utils::Status VfsImpl::Setxattr(fuse_ino_t ino, const char *name, const char *value, size_t size, int flags) {
   (void)ino;
   (void)name;
   (void)value;
@@ -435,8 +405,7 @@ utils::Status VfsImpl::Setxattr(fuse_ino_t ino, const char *name,
   return Status::NotSupported("setxattr");
 }
 
-utils::Status VfsImpl::Getxattr(fuse_ino_t ino, const char *name,
-                                size_t size) {
+utils::Status VfsImpl::Getxattr(fuse_ino_t ino, const char *name, size_t size) {
   (void)ino;
   (void)name;
   (void)size;
@@ -459,22 +428,18 @@ utils::Status VfsImpl::Access(fuse_ino_t ino, int mask) {
   return VolumeImpl::Instance().meta_engine()->Access(ino, static_cast<uint32_t>(mask));
 }
 
-utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name,
-                              mode_t mode, fuse_entry_param *entry,
+utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry,
                               struct fuse_file_info *fi) {
   SwordFsInode child;
-  Status status = VolumeImpl::Instance().meta_engine()->Create(
-      parent, name, static_cast<uint32_t>(mode), &child);
+  Status status = VolumeImpl::Instance().meta_engine()->Create(parent, name, static_cast<uint32_t>(mode), &child);
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Create FAILED: parent=" << parent << " name='" << name
-                      << "' — " << status.message();
+    SWORDFS_LOG_ERROR << "Create FAILED: parent=" << parent << " name='" << name << "' — " << status.message();
     return status;
   }
   FileHandle handle;
   status = FileHandle::Open(child.ino, fi->flags, &handle);
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Create: Open FAILED: ino=" << child.ino
-                      << " — " << status.message();
+    SWORDFS_LOG_ERROR << "Create: Open FAILED: ino=" << child.ino << " — " << status.message();
     return status;
   }
   fi->fh = handle.fh();
@@ -483,15 +448,12 @@ utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name,
   child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
-  SWORDFS_LOG_DEBUG << "Create: ino=" << child.ino << " fh=" << handle.fh()
-                    << " name='" << name << "'";
+  SWORDFS_LOG_DEBUG << "Create: ino=" << child.ino << " fh=" << handle.fh() << " name='" << name << "'";
   return Status::OK();
 }
 
-utils::Status VfsImpl::Ioctl(fuse_ino_t ino, int cmd, void *arg,
-                             struct fuse_file_info *fi, unsigned flags,
-                             const void *in_buf, size_t in_bufsz,
-                             size_t out_bufsz) {
+utils::Status VfsImpl::Ioctl(fuse_ino_t ino, int cmd, void *arg, struct fuse_file_info *fi, unsigned flags,
+                             const void *in_buf, size_t in_bufsz, size_t out_bufsz) {
   (void)ino;
   (void)cmd;
   (void)arg;
@@ -503,8 +465,7 @@ utils::Status VfsImpl::Ioctl(fuse_ino_t ino, int cmd, void *arg,
   return Status::NotSupported("ioctl");
 }
 
-utils::Status VfsImpl::RetrieveReply(fuse_req_t /*req*/, void *cookie,
-                                     fuse_ino_t ino, off_t offset,
+utils::Status VfsImpl::RetrieveReply(fuse_req_t /*req*/, void *cookie, fuse_ino_t ino, off_t offset,
                                      struct fuse_bufvec *bufv) {
   (void)cookie;
   (void)ino;
@@ -513,17 +474,14 @@ utils::Status VfsImpl::RetrieveReply(fuse_req_t /*req*/, void *cookie,
   return Status::NotSupported("retrieve_reply");
 }
 
-utils::Status VfsImpl::Flock(fuse_ino_t ino,
-                             struct fuse_file_info *fi, int op) {
+utils::Status VfsImpl::Flock(fuse_ino_t ino, struct fuse_file_info *fi, int op) {
   (void)ino;
   (void)fi;
   (void)op;
   return Status::NotSupported("flock");
 }
 
-utils::Status VfsImpl::Fallocate(fuse_ino_t ino, int mode,
-                                 off_t offset, off_t length,
-                                 struct fuse_file_info *fi) {
+utils::Status VfsImpl::Fallocate(fuse_ino_t ino, int mode, off_t offset, off_t length, struct fuse_file_info *fi) {
   (void)ino;
   (void)mode;
   (void)offset;
@@ -532,8 +490,7 @@ utils::Status VfsImpl::Fallocate(fuse_ino_t ino, int mode,
   return Status::NotSupported("fallocate");
 }
 
-utils::Status VfsImpl::Lseek(fuse_ino_t ino, off_t off, int whence,
-                             struct fuse_file_info *fi) {
+utils::Status VfsImpl::Lseek(fuse_ino_t ino, off_t off, int whence, struct fuse_file_info *fi) {
   (void)ino;
   (void)off;
   (void)whence;
@@ -541,16 +498,14 @@ utils::Status VfsImpl::Lseek(fuse_ino_t ino, off_t off, int whence,
   return Status::NotSupported("lseek");
 }
 
-utils::Status VfsImpl::Tmpfile(fuse_ino_t parent, mode_t mode,
-                               struct fuse_file_info *fi) {
+utils::Status VfsImpl::Tmpfile(fuse_ino_t parent, mode_t mode, struct fuse_file_info *fi) {
   (void)parent;
   (void)mode;
   (void)fi;
   return Status::NotSupported("tmpfile");
 }
 
-utils::Status VfsImpl::Statx(fuse_ino_t ino, int flags, int mask,
-                             struct fuse_file_info *fi) {
+utils::Status VfsImpl::Statx(fuse_ino_t ino, int flags, int mask, struct fuse_file_info *fi) {
   (void)ino;
   (void)flags;
   (void)mask;

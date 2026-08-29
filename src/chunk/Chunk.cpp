@@ -20,7 +20,8 @@ Chunk::Chunk(metadata::InodeID ino, metadata::ChunkIndex index)
       max_chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
       index_(index),
       data_(volume::VolumeImpl::Instance().data_engine()),
-      meta_(volume::VolumeImpl::Instance().meta_engine()) {}
+      meta_(volume::VolumeImpl::Instance().meta_engine()) {
+}
 
 utils::Status Chunk::Initialize() {
   metadata::SwordFsChunk chunk;
@@ -44,8 +45,7 @@ utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf &data) {
   }
   auto status = wb_->Write(write_offset - StartOffset(), data);
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Chunk::Write FAILED: ino=" << ino_
-                      << " index=" << index_ << " write_offset=" << write_offset
+    SWORDFS_LOG_ERROR << "Chunk::Write FAILED: ino=" << ino_ << " index=" << index_ << " write_offset=" << write_offset
                       << " data_size=" << data.length() << " — " << status.message();
   }
   return status;
@@ -78,28 +78,22 @@ utils::Status Chunk::Flush() {
   auto data = wb_->CloneBuf();
   auto status = data_->Put(ChunkKey(), std::move(data));
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: ino=" << ino_
-                      << " chunk=" << index_
-                      << " size=" << flushed_size_
+    SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: ino=" << ino_ << " chunk=" << index_ << " size=" << flushed_size_
                       << " — " << status.message();
     return status;
   }
 
   status = meta_->AddChunk(ino_, BuildMeta());
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: AddChunk ino=" << ino_
-                      << " chunk=" << index_
-                      << " size=" << flushed_size_
-                      << " — " << status.message();
+    SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: AddChunk ino=" << ino_ << " chunk=" << index_
+                      << " size=" << flushed_size_ << " — " << status.message();
     return status;
   }
 
   state_ = State::kFlushed;
   wb_.reset();
 
-  SWORDFS_LOG_DEBUG << "Flush uploaded: ino=" << ino_
-                    << " chunk=" << index_
-                    << " size=" << flushed_size_;
+  SWORDFS_LOG_DEBUG << "Flush uploaded: ino=" << ino_ << " chunk=" << index_ << " size=" << flushed_size_;
   return utils::Status::OK();
 }
 

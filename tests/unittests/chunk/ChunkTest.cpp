@@ -25,17 +25,17 @@
 
 using swordfs::chunk::Chunk;
 using swordfs::metadata::ChunkIndex;
-using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
-using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsAttr;
-using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::SwordFsChunk;
+using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
+using swordfs::metadata::SwordFsVolume;
 using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
 using swordfs::utils::Status;
@@ -46,10 +46,18 @@ namespace {
 // transitions to kWriting and allocates a write buffer.
 class MissingMetaEngine final : public IMetaEngine {
  public:
-  Status Initialize() override { return Status::OK(); }
-  Status FormatVolume(const SwordFsVolume &) override { return Status::OK(); }
-  Status LoadVolume(SwordFsVolume *) override { return Status::OK(); }
-  Limits GetLimits() const override { return {}; }
+  Status Initialize() override {
+    return Status::OK();
+  }
+  Status FormatVolume(const SwordFsVolume &) override {
+    return Status::OK();
+  }
+  Status LoadVolume(SwordFsVolume *) override {
+    return Status::OK();
+  }
+  Limits GetLimits() const override {
+    return {};
+  }
   Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
     return Status::NotFound("no chunk");
   }
@@ -57,7 +65,9 @@ class MissingMetaEngine final : public IMetaEngine {
   Status Lookup(InodeID, std::string_view, SwordFsInode *) override {
     return Status::OK();
   }
-  Status GetInode(InodeID, SwordFsInode *) override { return Status::OK(); }
+  Status GetInode(InodeID, SwordFsInode *) override {
+    return Status::OK();
+  }
   Status ReadDir(InodeID, std::vector<swordfs::metadata::SwordFsEntry> *) override {
     return Status::OK();
   }
@@ -67,45 +77,75 @@ class MissingMetaEngine final : public IMetaEngine {
   Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, uint64_t *) override { return Status::OK(); }
-  Status RmDir(InodeID, std::string_view) override { return Status::OK(); }
-  Status Rename(InodeID, std::string_view, InodeID, std::string_view,
-                RenameFlag, RenameResult *) override { return Status::OK(); }
-  Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField,
-                 SwordFsInode *) override { return Status::OK(); }
-  Status StatFs(SwordFsStatFs *) override { return Status::OK(); }
-  Status Access(InodeID, uint32_t) override { return Status::OK(); }
+  Status Unlink(InodeID, std::string_view, uint64_t *) override {
+    return Status::OK();
+  }
+  Status RmDir(InodeID, std::string_view) override {
+    return Status::OK();
+  }
+  Status Rename(InodeID, std::string_view, InodeID, std::string_view, RenameFlag, RenameResult *) override {
+    return Status::OK();
+  }
+  Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField, SwordFsInode *) override {
+    return Status::OK();
+  }
+  Status StatFs(SwordFsStatFs *) override {
+    return Status::OK();
+  }
+  Status Access(InodeID, uint32_t) override {
+    return Status::OK();
+  }
   Status Symlink(InodeID, std::string_view, std::string_view, SwordFsInode *) override {
     return Status::OK();
   }
   Status Link(InodeID, InodeID, std::string_view, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Readlink(InodeID, std::string *) override { return Status::OK(); }
-  Status Open(InodeID) override { return Status::OK(); }
-  Status ReclaimInode(InodeID) override { return Status::OK(); }
+  Status Readlink(InodeID, std::string *) override {
+    return Status::OK();
+  }
+  Status Open(InodeID) override {
+    return Status::OK();
+  }
+  Status ReclaimInode(InodeID) override {
+    return Status::OK();
+  }
   Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
     return Status::OK();
   }
-  Status OpenDir(InodeID) override { return Status::OK(); }
-  Status AddChunk(InodeID, const SwordFsChunk &) override { return Status::OK(); }
-  Status Truncate(InodeID, uint64_t) override { return Status::OK(); }
+  Status OpenDir(InodeID) override {
+    return Status::OK();
+  }
+  Status AddChunk(InodeID, const SwordFsChunk &) override {
+    return Status::OK();
+  }
+  Status Truncate(InodeID, uint64_t) override {
+    return Status::OK();
+  }
 };
 
 // Minimal data engine: nothing is actually persisted; the chunk only
 // calls Put on Flush, and these tests don't reach that point.
 class NullDataEngine final : public IDataEngine {
  public:
-  Status Initialize() override { return Status::OK(); }
-  DataEngineLimits Limits() const override { return {}; }
-  bool Head(std::string_view, size_t *) override { return false; }
+  Status Initialize() override {
+    return Status::OK();
+  }
+  DataEngineLimits Limits() const override {
+    return {};
+  }
+  bool Head(std::string_view, size_t *) override {
+    return false;
+  }
   Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
     return Status::OK();
   }
   Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
     return Status::NotFound("nope");
   }
-  Status Delete(std::string_view) override { return Status::OK(); }
+  Status Delete(std::string_view) override {
+    return Status::OK();
+  }
 };
 
 void InstallEngines() {
@@ -140,9 +180,8 @@ TEST_F(ChunkTest, WriteAtChunkIndexOneStaysWithinCapacity) {
   // succeed at chunk-relative offset 0, which corresponds to
   // file offset = 1 * 1024 = 1024.
   auto buf = *folly::IOBuf::copyBuffer("hello", 5);
-  EXPECT_TRUE(c.Write(1024, buf).ok())
-      << "Chunk::Write at file offset 1024 (chunk-relative 0) "
-         "must succeed when chunk_size=1024";
+  EXPECT_TRUE(c.Write(1024, buf).ok()) << "Chunk::Write at file offset 1024 (chunk-relative 0) "
+                                          "must succeed when chunk_size=1024";
 }
 
 TEST_F(ChunkTest, WriteBeyondChunkCapacityIsRejected) {

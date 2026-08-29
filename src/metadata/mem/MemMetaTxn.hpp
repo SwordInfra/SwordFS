@@ -62,8 +62,7 @@ class MemMetaTxn {
 
   // Apply the requested SetAttr fields atomically. Size changes also
   // update chunk metadata and apply the killpriv/ctime rules.
-  Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields,
-                 SwordFsInode *out = nullptr);
+  Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out = nullptr);
 
   // Truncate an inode atomically: update st_size, apply killpriv/ctime,
   // and drop or clamp chunk metadata beyond the new size.
@@ -85,17 +84,14 @@ class MemMetaTxn {
 
   // Look up a child entry by name.  On success, *out receives a
   // snapshot copy of the child's inode record.
-  Status LookupEntry(InodeID parent_ino, std::string_view name,
-                     SwordFsInode *out);
+  Status LookupEntry(InodeID parent_ino, std::string_view name, SwordFsInode *out);
 
   // Allocate a new inode and link it as a child of parent.  Returns
   // AlreadyExists if the name already exists under that parent.  On
   // success, *out receives a snapshot copy of the new inode.
   // Linking a subdirectory also increments the parent's nlink (the new
   // ".." backlink); any successful link bumps the parent's mtime/ctime.
-  Status AddEntry(InodeID parent_ino, std::string_view name,
-                  uint32_t mode, SwordFsInode *out);
-
+  Status AddEntry(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out);
 
   // Move an existing entry from old_parent/old_name to
   // new_parent/new_name.  The inode is re-linked, not re-created.
@@ -114,8 +110,7 @@ class MemMetaTxn {
   //
   // Moving a directory across parents adjusts both parents' nlink;
   // bumps both parents' mtime/ctime and the moved inode's ctime.
-  Status MoveEntry(InodeID old_parent_ino, std::string_view old_name,
-                   InodeID new_parent_ino, std::string_view new_name,
+  Status MoveEntry(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
                    bool overwrite, RenameResult *result = nullptr);
 
   // POSIX unlink(2): remove the child entry from its parent and
@@ -124,14 +119,12 @@ class MemMetaTxn {
   // reclaimed immediately (and the parent loses the ".." backlink);
   // a non-empty directory returns NotEmpty.  Missing entries return
   // NotFound. Any successful removal bumps the parent's mtime/ctime.
-  Status Unlink(InodeID parent_ino, std::string_view name,
-                uint64_t *post_nlink = nullptr);
+  Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink = nullptr);
 
   // Link an existing inode (by ino) into a directory (hard link).
   // Increments the inode's nlink; bumps the inode's ctime and the
   // parent's mtime/ctime.
-  Status LinkExistingEntry(InodeID parent_ino, std::string_view name,
-                           InodeID ino, SwordFsInode *out = nullptr);
+  Status LinkExistingEntry(InodeID parent_ino, std::string_view name, InodeID ino, SwordFsInode *out = nullptr);
 
   // List all entries in a directory, including the synthetic "."
   // and "..".
@@ -147,8 +140,7 @@ class MemMetaTxn {
   //
   // Structural integrity is enforced here: neither directory may end
   // up inside its own subtree (InvalidArgument).
-  Status SwapEntries(InodeID parent_a_ino, std::string_view name_a,
-                     InodeID parent_b_ino, std::string_view name_b);
+  Status SwapEntries(InodeID parent_a_ino, std::string_view name_a, InodeID parent_b_ino, std::string_view name_b);
 
   // ────────────────────────────────────────────────────────────────
   // Chunk metadata
@@ -173,7 +165,8 @@ class MemMetaTxn {
   friend class MemMetaStore;
 
   // Only MemMetaStore::Transact() may begin a transaction.
-  explicit MemMetaTxn(MemMetaStore *store) : store_(store) {}
+  explicit MemMetaTxn(MemMetaStore *store) : store_(store) {
+  }
 
   // ────────────────────────────────────────────────────────────────
   // Private helpers — direct accessors over the store's tables.  No
@@ -186,8 +179,7 @@ class MemMetaTxn {
   void InsertInode(std::unique_ptr<SwordFsInode> inode);
   void DeleteInode(InodeID ino);
   SwordFsInode *FindEntry(InodeID parent_ino, std::string_view name);
-  void LinkEntry(InodeID parent_ino, std::string_view name,
-                 SwordFsInode *inode);
+  void LinkEntry(InodeID parent_ino, std::string_view name, SwordFsInode *inode);
   SwordFsInode *UnlinkEntry(InodeID parent_ino, std::string_view name);
   bool IsDirEmpty(InodeID ino);
 

@@ -34,26 +34,56 @@ class Status {
     kInternal,         // internal / unexpected error
   };
 
-  Status() : code_(kOk) {}
-  Status(Code code, std::string msg) : code_(code), msg_(std::move(msg)) {}
+  Status() : code_(kOk) {
+  }
+  Status(Code code, std::string msg) : code_(code), msg_(std::move(msg)) {
+  }
 
   // queries
 
-  bool ok() const { return code_ == kOk; }
-  bool IsNotFound() const { return code_ == kNotFound; }
-  bool IsAlreadyExists() const { return code_ == kAlreadyExists; }
-  bool IsBusy() const { return code_ == kBusy; }
-  bool IsNotEmpty() const { return code_ == kNotEmpty; }
-  bool IsNotDirectory() const { return code_ == kNotDirectory; }
-  bool IsDirectory() const { return code_ == kIsDirectory; }
-  bool IsMalformed() const { return code_ == kMalformed; }
-  bool IsNotSupported() const { return code_ == kNotSupported; }
-  bool IsNameTooLong() const { return code_ == kNameTooLong; }
-  bool IsNotPermitted() const { return code_ == kNotPermitted; }
-  bool IsPermission() const { return code_ == kPermission; }
+  bool ok() const {
+    return code_ == kOk;
+  }
+  bool IsNotFound() const {
+    return code_ == kNotFound;
+  }
+  bool IsAlreadyExists() const {
+    return code_ == kAlreadyExists;
+  }
+  bool IsBusy() const {
+    return code_ == kBusy;
+  }
+  bool IsNotEmpty() const {
+    return code_ == kNotEmpty;
+  }
+  bool IsNotDirectory() const {
+    return code_ == kNotDirectory;
+  }
+  bool IsDirectory() const {
+    return code_ == kIsDirectory;
+  }
+  bool IsMalformed() const {
+    return code_ == kMalformed;
+  }
+  bool IsNotSupported() const {
+    return code_ == kNotSupported;
+  }
+  bool IsNameTooLong() const {
+    return code_ == kNameTooLong;
+  }
+  bool IsNotPermitted() const {
+    return code_ == kNotPermitted;
+  }
+  bool IsPermission() const {
+    return code_ == kPermission;
+  }
 
-  Code code() const { return code_; }
-  const std::string& message() const { return msg_; }
+  Code code() const {
+    return code_;
+  }
+  const std::string &message() const {
+    return msg_;
+  }
 
   /// Maps the internal code to the matching negative errno value, suitable
   /// for fuse_reply_err(req, st.ToErrno()).
@@ -61,7 +91,9 @@ class Status {
 
   // factories
 
-  static Status OK() { return Status(); }
+  static Status OK() {
+    return Status();
+  }
   static Status NotFound(std::string msg) {
     return Status(kNotFound, std::move(msg));
   }
@@ -86,7 +118,9 @@ class Status {
   static Status IOError(std::string msg) {
     return Status(kIOError, std::move(msg));
   }
-  static Status Busy(std::string msg) { return Status(kBusy, std::move(msg)); }
+  static Status Busy(std::string msg) {
+    return Status(kBusy, std::move(msg));
+  }
   static Status NotEmpty(std::string msg) {
     return Status(kNotEmpty, std::move(msg));
   }

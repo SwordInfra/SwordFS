@@ -20,8 +20,7 @@ bool DataEngineRegistry::Available(std::string_view name) const {
   return factories_.find(std::string(name)) != factories_.end();
 }
 
-utils::Status DataEngineRegistry::Create(std::string_view name,
-                                         std::unique_ptr<IDataEngine> *out) const {
+utils::Status DataEngineRegistry::Create(std::string_view name, std::unique_ptr<IDataEngine> *out) const {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("data engine output is null");
   }
