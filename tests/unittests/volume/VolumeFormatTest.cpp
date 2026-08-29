@@ -6,6 +6,9 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <cerrno>
+#include <filesystem>
+#include <cstring>
 #include <string>
 
 #include "metadata/mem/VolumeFile.hpp"
@@ -16,9 +19,25 @@ using swordfs::metadata::SwordFsVolume;
 using swordfs::utils::Status;
 
 namespace {
-bool ConfigRootWritable() {
-  return access("/etc/swordfs", W_OK) == 0 || access("/etc", W_OK) == 0;
-}
+class VolumeFileTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    if (::mkdir("/etc/swordfs", 0755) != 0 && errno != EEXIST) {
+      FAIL() << "failed to create /etc/swordfs: " << strerror(errno);
+    }
+    std::error_code ec;
+    std::filesystem::remove_all("/etc/swordfs/volume-file-round-trip", ec);
+    std::filesystem::remove_all("/etc/swordfs/volume-file-parent-dir", ec);
+    std::filesystem::remove_all("/etc/swordfs/volume-file-exists", ec);
+  }
+
+  void TearDown() override {
+    std::error_code ec;
+    std::filesystem::remove_all("/etc/swordfs/volume-file-round-trip", ec);
+    std::filesystem::remove_all("/etc/swordfs/volume-file-parent-dir", ec);
+    std::filesystem::remove_all("/etc/swordfs/volume-file-exists", ec);
+  }
+};
 
 SwordFsVolume MakeVolume() {
   SwordFsVolume volume;
@@ -63,10 +82,7 @@ TEST(SwordFsVolumeTest, ParseFromRejectsMalformedData) {
   EXPECT_EQ(st.code(), Status::kMalformed);
 }
 
-TEST(VolumeFileTest, WriteAndReadRoundTrip) {
-  if (!ConfigRootWritable()) {
-    GTEST_SKIP() << "/etc/swordfs is not writable";
-  }
+TEST_F(VolumeFileTest, WriteAndReadRoundTrip) {
   SwordFsVolume original = MakeVolume();
   original.name = "volume-file-round-trip";
   swordfs::metadata::mem::VolumeFile file{original.name};
@@ -83,10 +99,7 @@ TEST(VolumeFileTest, WriteAndReadRoundTrip) {
   EXPECT_EQ(restored.region, original.region);
 }
 
-TEST(VolumeFileTest, WriteCreatesParentDir) {
-  if (!ConfigRootWritable()) {
-    GTEST_SKIP() << "/etc/swordfs is not writable";
-  }
+TEST_F(VolumeFileTest, WriteCreatesParentDir) {
   SwordFsVolume v = MakeVolume();
   v.name = "volume-file-parent-dir";
   swordfs::metadata::mem::VolumeFile file{v.name};
@@ -95,7 +108,7 @@ TEST(VolumeFileTest, WriteCreatesParentDir) {
   EXPECT_TRUE(file.Exists());
 }
 
-TEST(VolumeFileTest, ReadNotFound) {
+TEST_F(VolumeFileTest, ReadNotFound) {
   SwordFsVolume v;
   swordfs::metadata::mem::VolumeFile file{"nonexistent-volume-file"};
   Status st = file.Read(&v);
@@ -103,10 +116,7 @@ TEST(VolumeFileTest, ReadNotFound) {
   EXPECT_EQ(st.code(), Status::kNotFound);
 }
 
-TEST(VolumeFileTest, Exists) {
-  if (!ConfigRootWritable()) {
-    GTEST_SKIP() << "/etc/swordfs is not writable";
-  }
+TEST_F(VolumeFileTest, Exists) {
   SwordFsVolume v = MakeVolume();
   v.name = "volume-file-exists";
   swordfs::metadata::mem::VolumeFile file{v.name};

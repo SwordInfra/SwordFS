@@ -195,8 +195,8 @@ utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name, fuse_ino_t ne
       // visible. Cleanup is best-effort after the metadata transaction;
       // log the failure. A future orphan-data reconciliation mechanism
       // should provide retry/repair for cleanup failures.
-      SWORDFS_LOG_ERROR << "Rename: failed to get InodeHandle for overwritten "
-                        << "inode " << result.overwritten_ino << "; rename has already committed";
+      SWORDFS_LOG_ERROR << "Rename: failed to get InodeHandle for overwritten " << "inode " << result.overwritten_ino
+                        << "; rename has already committed";
     } else if (!handle->MarkOrphanedIfOpen()) {
       auto cleanup_status = handle->ReclaimData();
       if (!cleanup_status.ok()) {
