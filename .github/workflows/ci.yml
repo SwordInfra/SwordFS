@@ -4,20 +4,23 @@ on:
   push:
     branches: [main]
   pull_request:
+  pull_request_target:
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   clang-format:
     name: clang-format
-    if: github.event_name == 'push' || (github.event.pull_request.head.repo.full_name == github.repository)
+    # Internal PRs use pull_request_target so the trusted workflow can amend
+    # the contributor branch. Fork PRs stay on pull_request and are checked only.
+    if: github.event_name == 'pull_request_target' || github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref || github.ref_name }}
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.ref || github.ref }}
+          repository: ${{ github.repository }}
           fetch-depth: 2
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -30,6 +33,7 @@ jobs:
             | xargs -0 clang-format -i
 
       - name: Amend and push formatting changes
+        if: github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository
         run: |
           if git diff --quiet; then
             echo "No clang-format changes."
@@ -40,16 +44,23 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src tests
           git commit --amend --no-edit
-          git push --force-with-lease origin HEAD:${{ github.head_ref || github.ref_name }}
+          git push --force-with-lease origin HEAD:${{ github.event.pull_request.head.ref }}
+
+      - name: Check clang-format
+        if: github.event_name != 'pull_request_target'
+        run: |
+          git diff --exit-code -- src tests
 
   build-and-test:
     needs: clang-format
-    if: always() && needs.clang-format.result == 'success'
-
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request_target' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.ref || github.ref }}
           submodules: false
 
       - name: Restore native dependency cache
@@ -158,6 +169,8 @@ jobs:
 
   redis-integration:
     name: Redis integration
+    needs: clang-format
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request_target' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)
     runs-on: ubuntu-latest
     services:
       redis:
