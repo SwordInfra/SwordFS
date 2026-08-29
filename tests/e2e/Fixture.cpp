@@ -116,8 +116,8 @@ bool Fixture::FormatVolume() {
   // Shell out to the `swordfs format` binary to exercise the real
   // CLI path end-to-end.
   std::ostringstream cmd;
-  cmd << FindSwordfsBin() << " --log-file " << LogPath() << " format"
-      << " --volume " << volume_name_ << " --meta " << metadata_url << " --bucket " << bucket_url_ << " 2>&1";
+  cmd << FindSwordfsBin() << " --log-file " << LogPath() << " format" << " --volume " << volume_name_ << " --meta "
+      << metadata_url << " --bucket " << bucket_url_ << " 2>&1";
 
   int ret = std::system(cmd.str().c_str());
   if (ret != 0) {
@@ -146,11 +146,9 @@ bool Fixture::StartMount() {
   }
 
   std::ostringstream cmd;
-  cmd << FindSwordfsBin() << " --log-file " << LogPath() << " mount "
-      << " --volume " << volume_name_ << " --meta " << metadata_url << " --fuse-threads 2"
-      << " --storage-thread-count 2"
-      << " --pidfile " << work_dir_ << "/swordfs.pid"
-      << " " << mountpoint_ << " 2>&1";
+  cmd << FindSwordfsBin() << " --log-file " << LogPath() << " mount " << " --volume " << volume_name_ << " --meta "
+      << metadata_url << " --fuse-threads 2" << " --storage-thread-count 2" << " --pidfile " << work_dir_
+      << "/swordfs.pid" << " " << mountpoint_ << " 2>&1";
 
   int ret = std::system(cmd.str().c_str());
   if (ret != 0) {
@@ -394,7 +392,7 @@ int Fixture::Truncate(const std::string &relpath, off_t length) {
 bool Fixture::IsMounted() {
   // Verify the mountpoint is actually a FUSE filesystem, not just
   // a regular directory on the host.
-  struct statvfs sv{};
+  struct statvfs sv {};
   if (Statfs(&sv) != 0) {
     return false;
   }

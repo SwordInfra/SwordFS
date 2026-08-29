@@ -734,7 +734,7 @@ TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
   meta->chunks = {c0, c1};
   // Register the inode so ReclaimData's nlink guard sees nlink==0 and
   // proceeds with the chunk enumeration.
-  struct stat attr{};
+  struct stat attr {};
   attr.st_nlink = 0;
   meta->SetAttr(4242, attr);
 
@@ -774,7 +774,7 @@ TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
   c.index = 0;
   c.key = "99/0";
   meta->chunks = {c};
-  struct stat attr{};
+  struct stat attr {};
   attr.st_nlink = 0;
   meta->SetAttr(99, attr);
 
@@ -800,7 +800,7 @@ TEST_F(FileHandleTest, ReclaimDataCallsReclaimInodeEvenWhenChunkEmpty) {
   auto *meta = meta_up.get();
   auto *data = data_up.get();
 
-  struct stat attr{};
+  struct stat attr {};
   attr.st_nlink = 0;
   meta->SetAttr(123, attr);
 
@@ -832,7 +832,7 @@ TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
   c1.key = "1/1";
   meta->chunks = {c0, c1};
   data->fail_keys["1/0"] = Status::Internal("forced");
-  struct stat attr{};
+  struct stat attr {};
   attr.st_nlink = 0;
   meta->SetAttr(1, attr);
 
@@ -856,7 +856,7 @@ TEST_F(FileHandleTest, ReclaimDataPropagatesListChunksFailure) {
   auto *meta = meta_up.get();
   auto *data = data_up.get();
   meta->list_chunks_status = Status::Internal("nope");
-  struct stat attr{};
+  struct stat attr {};
   attr.st_nlink = 0;
   meta->SetAttr(42, attr);
 

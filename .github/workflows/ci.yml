@@ -7,11 +7,37 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-test:
+  clang-format:
+    name: clang-format
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 2
+
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+
+      - name: Format C++ sources
+        run: |
+          find src tests -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cc' -o -name '*.cxx' \) -print0 \
+            | xargs -0 clang-format -i
+          git diff --exit-code -- src tests
+
+  build-and-test:
+    needs: clang-format
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
           submodules: false
 
       - name: Restore native dependency cache
@@ -79,21 +105,13 @@ jobs:
 
       - name: Generate coverage report
         run: |
-          # Run the entire coverage pipeline with relaxed error handling.
-          # lcov 2.x (Ubuntu 24.04) is stricter than 1.x and may exit non-zero
-          # for gcov version mismatches, empty .gcda files, or missing source
-          # references — all of which are harmless for our report.
           set +e
-
-          # Step 1: capture raw coverage data
           lcov --capture --directory build --output-file coverage.info \
                --ignore-errors inconsistent,gcov,source,mismatch,negative,empty,unused,corrupt
           LCOV_EXIT=$?
           if [ $LCOV_EXIT -ne 0 ]; then
             echo "::warning::lcov --capture exited with $LCOV_EXIT (ignored)"
           fi
-
-          # Step 2: remove system / third-party paths
           if [ -f coverage.info ] && [ -s coverage.info ]; then
             lcov --remove coverage.info \
                  '/usr/*' '*/_deps/*' '*/googletest-src/*' '*/build/*' \
@@ -107,8 +125,6 @@ jobs:
           else
             echo "::warning::coverage.info is empty or missing after capture"
           fi
-
-          # Step 3: print summary
           if [ -f coverage.info ] && [ -s coverage.info ]; then
             lcov --list coverage.info --ignore-errors unused,empty,source || true
           fi
@@ -122,6 +138,8 @@ jobs:
 
   redis-integration:
     name: Redis integration
+    needs: clang-format
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     services:
       redis:
