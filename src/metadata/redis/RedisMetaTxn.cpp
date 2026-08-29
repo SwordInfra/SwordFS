@@ -80,8 +80,7 @@ utils::Status RedisMetaTxn::HGet(std::string_view key, std::string_view field, s
   }
 }
 
-utils::Status RedisMetaTxn::HGetAll(std::string_view key,
-                                    std::vector<std::pair<std::string, std::string>> *values) {
+utils::Status RedisMetaTxn::HGetAll(std::string_view key, std::vector<std::pair<std::string, std::string>> *values) {
   if (values == nullptr) {
     return utils::Status::InvalidArgument("Redis HGETALL output is null");
   }

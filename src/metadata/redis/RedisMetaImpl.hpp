@@ -18,7 +18,7 @@ class RedisMetaClient;
 // with the persistent schema/format layer; metadata operations are added by
 // subsequent issues.
 class RedisMetaImpl : public IMetaEngine {
-public:
+ public:
   RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name);
   ~RedisMetaImpl() override;
 
@@ -54,7 +54,7 @@ public:
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
   Status Truncate(InodeID ino, uint64_t size) override;
 
-private:
+ private:
   std::shared_ptr<RedisMetaClient> client_;
   redis::RedisKey key_;
 };
