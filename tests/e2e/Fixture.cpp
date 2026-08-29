@@ -386,7 +386,7 @@ int Fixture::Truncate(const std::string &relpath, off_t length) {
 bool Fixture::IsMounted() {
   // Verify the mountpoint is actually a FUSE filesystem, not just
   // a regular directory on the host.
-  struct statvfs sv {};
+  struct statvfs sv{};
   if (Statfs(&sv) != 0) {
     return false;
   }

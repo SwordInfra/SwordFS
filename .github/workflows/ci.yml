@@ -19,17 +19,11 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
           fetch-depth: 2
 
-      - name: Install clang-format
-        run: sudo apt-get update && sudo apt-get install -y clang-format
+      - name: Install pre-commit
+        run: pipx install pre-commit
 
-      - name: Format C++ sources
-        run: |
-          find src tests -type f \( -name '*.cpp' -o -name '*.hpp' -o -name '*.h' -o -name '*.cc' -o -name '*.cxx' \) -print0 \
-            | xargs -0 clang-format -i
-
-      - name: Check clang-format
-        run: |
-          git diff --exit-code -- src tests
+      - name: Check formatting
+        run: pre-commit run --all-files
 
   build-and-test:
     needs: clang-format

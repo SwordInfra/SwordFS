@@ -124,6 +124,24 @@ cmake --preset default && ninja -C build
 cmake --preset release && ninja -C build
 ```
 
+### Pre-commit
+
+SwordFS uses `pre-commit` for local formatting and repository hygiene checks. The C++ formatter
+is pinned to clang-format 21.1.6, so local checks and CI use the same formatter version.
+
+Install pre-commit with your platform's package manager or `pipx`, then enable the hooks:
+
+```bash
+pipx install pre-commit
+pre-commit install
+```
+
+Run all hooks manually when needed:
+
+```bash
+pre-commit run --all-files
+```
+
 ### Run Tests
 
 Test dependencies (gtest) are fetched automatically via CMake's `FetchContent` — no manual
