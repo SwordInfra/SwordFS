@@ -2,8 +2,8 @@
 # ────────────────────────────────────────────────────────────────
 # run-e2e.sh — Run SwordFS end-to-end tests.
 #
-# Builds SwordFS, starts the Redis and MinIO dependencies with
-# Docker Compose, creates the test bucket, and runs the E2E suite.
+# Starts the Redis and MinIO dependencies with Docker Compose,
+# creates the test bucket, and runs the pre-built E2E suite.
 # All extra arguments are forwarded to the test binary.
 # ────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -19,9 +19,8 @@ MINIO_ENDPOINT="127.0.0.1:${MINIO_PORT}"
 S3_BUCKET="${S3_BUCKET:-swordfs-e2e}"
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
-REDIS_PORT="${REDIS_PORT:-6379}"
-SWORDFS_METADATA_URL="redis://127.0.0.1:${REDIS_PORT}/15"
-export MINIO_PORT S3_BUCKET MINIO_ROOT_USER MINIO_ROOT_PASSWORD REDIS_PORT
+SWORDFS_METADATA_URL="redis://127.0.0.1:6379/15"
+export MINIO_PORT S3_BUCKET MINIO_ROOT_USER MINIO_ROOT_PASSWORD
 
 if docker compose version >/dev/null 2>&1; then
   DOCKER_COMPOSE=(docker compose)
@@ -44,13 +43,6 @@ setup_fuse() {
   if [ -e /dev/fuse ]; then
     sudo chmod 666 /dev/fuse
   fi
-}
-
-build() {
-  echo "=== Building SwordFS ==="
-  cd "${PROJECT_DIR}"
-  cmake --preset default
-  cmake --build build --target swordfs swordfs_e2e_test -j2
 }
 
 start_dependencies() {
@@ -77,7 +69,6 @@ if [ -z "${SKIP_FUSE_SETUP:-}" ]; then
   setup_fuse
 fi
 
-build
 start_dependencies
 create_bucket
 
