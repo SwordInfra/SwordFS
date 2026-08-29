@@ -32,9 +32,9 @@ SWORDFS_METADATA_URL="redis://${REDIS_HOST}:${REDIS_PORT}/15"
 
 # Auto-detect docker command (fall back to sudo if needed).
 if docker ps >/dev/null 2>&1; then
-  DOCKER="docker"
+  DOCKER=(docker)
 else
-  DOCKER="sudo docker"
+  DOCKER=(sudo docker)
 fi
 
 # ── FUSE setup ───────────────────────────────────────────────────
@@ -58,14 +58,43 @@ build() {
   cmake --build build --target swordfs swordfs_e2e_test -j2
 }
 
+# ── Container helpers ────────────────────────────────────────────
+
+remove_container() {
+  local container="$1"
+  local volumes="${2:-false}"
+  echo "=== Stopping ${container} ==="
+  if [[ "${volumes}" == true ]]; then
+    "${DOCKER[@]}" rm -f -v "${container}" 2>/dev/null || true
+  else
+    "${DOCKER[@]}" rm -f "${container}" 2>/dev/null || true
+  fi
+}
+
+wait_for_container() {
+  local container="$1"
+  local retries="$2"
+  local delay="$3"
+  shift 3
+
+  for i in $(seq 1 "${retries}"); do
+    if "$@"; then
+      echo "${container} is ready."
+      return 0
+    fi
+    echo "  ... waiting (${i}/${retries})"
+    sleep "${delay}"
+  done
+  echo "ERROR: ${container} did not become healthy."
+  return 1
+}
+
 # ── MinIO ────────────────────────────────────────────────────────
 
 start_minio() {
   echo "=== Starting MinIO container (${MINIO_CONTAINER}) ==="
-  # Use -v so the anonymous volume created for the image's VOLUME /data
-  # is removed along with the container (docker rm without -v leaks it).
-  ${DOCKER} rm -f -v "${MINIO_CONTAINER}" 2>/dev/null || true
-  ${DOCKER} run -d --name "${MINIO_CONTAINER}" \
+  remove_container "${MINIO_CONTAINER}" true
+  "${DOCKER[@]}" run -d --name "${MINIO_CONTAINER}" \
     -p "${MINIO_ENDPOINT##*:}:${MINIO_ENDPOINT##*:}" \
     -e MINIO_ROOT_USER="${MINIO_ROOT_USER}" \
     -e MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD}" \
@@ -73,66 +102,36 @@ start_minio() {
     server /data --address ":${MINIO_ENDPOINT##*:}"
 
   echo "=== Waiting for MinIO ==="
-  for i in $(seq 1 30); do
-    if curl -sf "http://${MINIO_ENDPOINT}/minio/health/live" >/dev/null 2>&1; then
-      echo "MinIO is ready."
-      return 0
-    fi
-    echo "  ... waiting (${i}/30)"
-    sleep 2
-  done
-  echo "ERROR: MinIO did not become healthy."
-  return 1
+  wait_for_container "MinIO" 30 2 \
+    curl -sf "http://${MINIO_ENDPOINT}/minio/health/live"
 }
-
-stop_minio() {
-  echo "=== Stopping MinIO container ==="
-  # Use -v so the anonymous volume created for the image's VOLUME /data
-  # is removed along with the container (docker rm without -v leaks it).
-  ${DOCKER} rm -f -v "${MINIO_CONTAINER}" 2>/dev/null || true
-}
-
-# ── Redis ────────────────────────────────────────────────────────
 
 start_redis() {
   echo "=== Starting Redis container (${REDIS_CONTAINER}) ==="
-  ${DOCKER} rm -f "${REDIS_CONTAINER}" 2>/dev/null || true
-  ${DOCKER} run -d --name "${REDIS_CONTAINER}" \
+  remove_container "${REDIS_CONTAINER}"
+  "${DOCKER[@]}" run -d --name "${REDIS_CONTAINER}" \
     -p "${REDIS_HOST}:${REDIS_PORT}:6379" \
     "${REDIS_IMAGE}"
 
   echo "=== Waiting for Redis ==="
-  for i in $(seq 1 30); do
-    if ${DOCKER} exec "${REDIS_CONTAINER}" redis-cli ping 2>/dev/null | grep -q '^PONG$'; then
-      echo "Redis is ready."
-      return 0
-    fi
-    echo "  ... waiting (${i}/30)"
-    sleep 1
-  done
-  echo "ERROR: Redis did not become healthy."
-  return 1
-}
-
-stop_redis() {
-  echo "=== Stopping Redis container ==="
-  ${DOCKER} rm -f "${REDIS_CONTAINER}" 2>/dev/null || true
+  wait_for_container "Redis" 30 1 \
+    "${DOCKER[@]}" exec "${REDIS_CONTAINER}" redis-cli ping
 }
 
 create_bucket() {
   echo "=== Creating bucket ${S3_BUCKET} ==="
-  ${DOCKER} exec "${MINIO_CONTAINER}" \
+  "${DOCKER[@]}" exec "${MINIO_CONTAINER}" \
     mc alias set local http://localhost:9000 \
       "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}"
-  ${DOCKER} exec "${MINIO_CONTAINER}" \
+  "${DOCKER[@]}" exec "${MINIO_CONTAINER}" \
     mc mb "local/${S3_BUCKET}" --ignore-existing
 }
 
 # ── Cleanup ──────────────────────────────────────────────────────
 
 cleanup() {
-  stop_redis
-  stop_minio
+  remove_container "${REDIS_CONTAINER}"
+  remove_container "${MINIO_CONTAINER}" true
 }
 trap cleanup EXIT
 
