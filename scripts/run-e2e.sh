@@ -8,7 +8,6 @@
 #
 # Usage:
 #   ./scripts/run-e2e.sh
-#   METADATA_URL=redis://127.0.0.1:6379/15 ./scripts/run-e2e.sh
 #   ./scripts/run-e2e.sh --gtest_filter='BasicOpsTest.*'
 # ────────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -25,9 +24,11 @@ S3_BUCKET="${S3_BUCKET:-swordfs-e2e}"
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 MINIO_CONTAINER="${MINIO_CONTAINER:-swordfs-e2e-minio}"
-METADATA_URL="${METADATA_URL:-redis://127.0.0.1:6379/15}"
+REDIS_HOST="${REDIS_HOST:-127.0.0.1}"
+REDIS_PORT="${REDIS_PORT:-6379}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-swordfs-e2e-redis}"
 REDIS_IMAGE="${REDIS_IMAGE:-redis:7-alpine}"
+SWORDFS_METADATA_URL="redis://${REDIS_HOST}:${REDIS_PORT}/15"
 
 # Auto-detect docker command (fall back to sudo if needed).
 if docker ps >/dev/null 2>&1; then
@@ -94,14 +95,10 @@ stop_minio() {
 # ── Redis ────────────────────────────────────────────────────────
 
 start_redis() {
-  local redis_host redis_port
-  redis_host="${REDIS_HOST:-127.0.0.1}"
-  redis_port="${REDIS_PORT:-6379}"
-
   echo "=== Starting Redis container (${REDIS_CONTAINER}) ==="
   ${DOCKER} rm -f "${REDIS_CONTAINER}" 2>/dev/null || true
   ${DOCKER} run -d --name "${REDIS_CONTAINER}" \
-    -p "${redis_host}:${redis_port}:6379" \
+    -p "${REDIS_HOST}:${REDIS_PORT}:6379" \
     "${REDIS_IMAGE}"
 
   echo "=== Waiting for Redis ==="
@@ -150,22 +147,14 @@ build
 start_minio
 create_bucket
 
-if [[ "${METADATA_URL}" == redis://* ]]; then
-  redis_host="${REDIS_HOST:-127.0.0.1}"
-  redis_port="${REDIS_PORT:-6379}"
-  if [[ "${METADATA_URL}" != "redis://${redis_host}:${redis_port}" && "${METADATA_URL}" != "redis://${redis_host}:${redis_port}/"* ]]; then
-    echo "ERROR: Redis E2E METADATA_URL must use ${redis_host}:${redis_port}."
-    exit 1
-  fi
-  start_redis
-fi
+start_redis
 
 echo "=== Running E2E tests ==="
 cd "$PROJECT_DIR"
 
 SWORDFS_S3_NO_SSL=1 \
 SWORDFS_E2E_S3_BUCKET="s3://${MINIO_ENDPOINT}/${S3_BUCKET}" \
-SWORDFS_METADATA_URL="${METADATA_URL}" \
+SWORDFS_METADATA_URL="${SWORDFS_METADATA_URL}" \
 SWORDFS_BIN="${SWORDFS_BIN}" \
 AWS_DEFAULT_REGION=auto \
 AWS_ACCESS_KEY_ID="${MINIO_ROOT_USER}" \

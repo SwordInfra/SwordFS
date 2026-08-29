@@ -78,18 +78,15 @@ bool Fixture::SetUp() {
 
   if (!volume_formatted_) {
     if (!FormatVolume()) {
-      RemoveVolumeConfig();
       return false;
     }
     volume_formatted_ = true;
   }
   if (!StartMount()) {
-    RemoveVolumeConfig();
     return false;
   }
   if (!WaitForMount()) {
     StopMount();
-    RemoveVolumeConfig();
     return false;
   }
 
@@ -98,7 +95,6 @@ bool Fixture::SetUp() {
 
 void Fixture::TearDown() {
   StopMount();
-  RemoveVolumeConfig();
 
   if (!std::getenv("SWORDFS_E2E_KEEP_WORKDIR")) {
     std::string cmd = "rm -rf " + work_dir_;
@@ -465,8 +461,11 @@ std::string Fixture::GenerateRandomData(size_t len, RandomMode mode) {
 }
 
 metadata::Limits Fixture::GetLimits() const {
-  const char *metadata_url = std::getenv("SWORDFS_METADATA_URL");
-  const auto url = metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local";
+  const char *url = std::getenv("SWORDFS_METADATA_URL");
+  if (!url || url[0] == '\0') {
+    ADD_FAILURE() << "SWORDFS_METADATA_URL is not set";
+    return {};
+  }
 
   std::unique_ptr<metadata::IMetaEngine> engine;
   std::string scheme;
@@ -499,16 +498,6 @@ std::string Fixture::FindSwordfsBin() const {
 std::string Fixture::LogPath() const {
   const char *log = std::getenv("SWORDFS_E2E_LOG");
   return log ? log : work_dir_ + "/swordfs.log";
-}
-
-void Fixture::RemoveVolumeConfig() {
-  constexpr std::string_view kConfigRoot = "/etc/swordfs";
-  const std::filesystem::path volume_dir = std::filesystem::path(kConfigRoot) / volume_name_;
-  std::error_code ec;
-  std::filesystem::remove_all(volume_dir, ec);
-  if (ec) {
-    std::fprintf(stderr, "E2E: failed to remove volume config %s: %s\n", volume_dir.c_str(), ec.message().c_str());
-  }
 }
 
 void Fixture::InitPaths() {
