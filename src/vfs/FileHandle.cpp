@@ -107,10 +107,7 @@ utils::Status FileHandleManager::Release(uint64_t fh) {
   return inode_handle->Close();
 }
 
-uint64_t FileHandleManager::OpenDir(std::shared_ptr<metadata::IDirIterator> iterator) {
-  if (!iterator) {
-    return 0;
-  }
+uint64_t FileHandleManager::OpenDir(metadata::DirIteratorPtr iterator) {
   uint64_t handle = AllocateFh();
   std::unique_lock lock(mutex_);
   (*dir_handles_)[handle] = std::make_shared<DirHandle>(std::move(iterator));

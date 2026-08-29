@@ -21,12 +21,8 @@ int Status::ToErrno() const {
       return EISDIR;
     case kInvalidArgument:
       return EINVAL;
-    case kMalformed:
-      return EIO;
     case kNotSupported:
       return ENOSYS;
-    case kIOError:
-      return EIO;
     case kBusy:
       return EBUSY;
     case kNotEmpty:

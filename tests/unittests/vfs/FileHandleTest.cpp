@@ -94,9 +94,6 @@ class MockMetaEngine : public IMetaEngine {
     }
     return Status::OK();
   }
-  Status ReadDir(InodeID, std::vector<swordfs::metadata::SwordFsEntry> *) override {
-    return Status::OK();
-  }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
     if (out) {
       *out = {};
@@ -146,7 +143,7 @@ class MockMetaEngine : public IMetaEngine {
   Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
     return Status::OK();
   }
-  Status OpenDir(InodeID) override {
+  Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
     return Status::OK();
   }
   Status AddChunk(InodeID, const SwordFsChunk &) override {
@@ -345,24 +342,18 @@ TEST_F(FileHandleTest, ConcurrentOpenAndFind) {
   }
 }
 
-class TestDirIterator final : public metadata::IDirIterator {
+class TestDirIterator final : public metadata::DirIterator {
  public:
-  Status Peek(uint64_t offset, metadata::SwordFsEntry *entry, uint64_t *next_offset, bool *end) override {
-    *next_offset = offset;
-    *end = true;
-    return Status::NotFound("directory end");
+  Status Peek(uint64_t, metadata::SwordFsEntry *) override {
+    return Status::EndOfDirectory("directory end");
   }
 
-  Status Read(uint64_t offset, size_t max_entries, std::vector<metadata::SwordFsEntry> *entries, uint64_t *next_offset,
-              bool *end) override {
-    entries->clear();
-    *next_offset = offset;
-    *end = true;
-    return Status::OK();
+  Status Next(uint64_t, metadata::SwordFsEntry *, uint64_t *) override {
+    return Status::EndOfDirectory("directory end");
   }
 };
 
-std::shared_ptr<metadata::IDirIterator> NewTestDirIterator() {
+metadata::DirIteratorPtr NewTestDirIterator() {
   return std::make_shared<TestDirIterator>();
 }
 
@@ -619,9 +610,6 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
   void SetAttr(InodeID ino, struct stat attr) {
     attrs[ino] = attr;
   }
-  Status ReadDir(InodeID, std::vector<swordfs::metadata::SwordFsEntry> *) override {
-    return Status::OK();
-  }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
@@ -672,7 +660,7 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     *out = chunks;
     return Status::OK();
   }
-  Status OpenDir(InodeID) override {
+  Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
     return Status::OK();
   }
   Status AddChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {

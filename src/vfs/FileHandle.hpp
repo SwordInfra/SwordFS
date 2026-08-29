@@ -13,7 +13,7 @@
 #include <optional>
 #include <shared_mutex>
 
-#include "metadata/DirIterator.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
 #include "vfs/InodeHandle.hpp"
@@ -69,10 +69,10 @@ struct FileMap;
 struct DirMap;
 
 struct DirHandle {
-  explicit DirHandle(std::shared_ptr<metadata::IDirIterator> iterator) : iterator(std::move(iterator)) {
+  explicit DirHandle(metadata::DirIteratorPtr iterator = nullptr) : iterator(std::move(iterator)) {
   }
 
-  std::shared_ptr<metadata::IDirIterator> iterator;
+  metadata::DirIteratorPtr iterator;
   std::mutex mutex;
 };
 
@@ -95,7 +95,7 @@ class FileHandleManager {
   utils::Status Release(uint64_t fh);
 
   /// Allocate a directory handle owning backend-specific iteration state.
-  uint64_t OpenDir(std::shared_ptr<metadata::IDirIterator> iterator);
+  uint64_t OpenDir(metadata::DirIteratorPtr iterator = nullptr);
 
   /// Find a directory handle. The returned shared pointer keeps the iterator
   /// and its per-handle serialization lock alive while a readdir operation is

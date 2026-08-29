@@ -94,6 +94,39 @@ utils::Status RedisMetaClient::Get(std::string_view key, std::string *value) {
   });
 }
 
+utils::Status RedisMetaClient::HGet(std::string_view key, std::string_view field, std::string *value) {
+  if (value == nullptr) {
+    return utils::Status::InvalidArgument("Redis HGET output is null");
+  }
+  return pool_->Run([this, key, field, value] {
+    try {
+      auto result = redis_->hget(std::string(key), std::string(field));
+      if (!result.has_value()) {
+        return utils::Status::NotFound("Redis hash field not found");
+      }
+      *value = std::move(*result);
+      return utils::Status::OK();
+    } catch (const sw::redis::Error &error) {
+      return RedisError("HGET", error);
+    }
+  });
+}
+
+utils::Status RedisMetaClient::HGetAll(std::string_view key, std::vector<std::pair<std::string, std::string>> *values) {
+  if (values == nullptr) {
+    return utils::Status::InvalidArgument("Redis HGETALL output is null");
+  }
+  return pool_->Run([this, key, values] {
+    try {
+      values->clear();
+      redis_->hgetall(std::string(key), std::back_inserter(*values));
+      return utils::Status::OK();
+    } catch (const sw::redis::Error &error) {
+      return RedisError("HGETALL", error);
+    }
+  });
+}
+
 utils::Status RedisMetaClient::HScan(std::string_view key, uint64_t cursor, size_t count,
                                      std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor) {
   if (values == nullptr || next_cursor == nullptr) {

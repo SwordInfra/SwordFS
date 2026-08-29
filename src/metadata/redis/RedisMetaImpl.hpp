@@ -4,8 +4,9 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 
-#include "metadata/DirIterator.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
@@ -13,6 +14,8 @@
 namespace swordfs::metadata {
 
 class RedisMetaClient;
+class RedisDirEntryCache;
+class RedisDirCacheRegistry;
 
 // Redis metadata engine. Connection and transaction infrastructure is shared
 // with the persistent schema/format layer; metadata operations are added by
@@ -32,8 +35,6 @@ class RedisMetaImpl : public IMetaEngine {
 
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
   Status GetInode(InodeID ino, SwordFsInode *out) override;
-  Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) override;
-  Status OpenDirIterator(InodeID ino, std::unique_ptr<IDirIterator> *out) override;
   Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) override;
@@ -49,14 +50,17 @@ class RedisMetaImpl : public IMetaEngine {
   Status Open(InodeID ino) override;
   Status ReclaimInode(InodeID ino) override;
   Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) override;
-  Status OpenDir(InodeID ino) override;
+  Status OpenDir(InodeID ino, DirIteratorPtr *iterator) override;
   Status AddChunk(InodeID ino, const SwordFsChunk &chunk) override;
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
   Status Truncate(InodeID ino, uint64_t size) override;
 
  private:
+  Status UpdateAtimeBestEffort(InodeID ino);
+
   std::shared_ptr<RedisMetaClient> client_;
   redis::RedisKey key_;
+  std::shared_ptr<RedisDirCacheRegistry> dir_cache_registry_;
 };
 
 }  // namespace swordfs::metadata

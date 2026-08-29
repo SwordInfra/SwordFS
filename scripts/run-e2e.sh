@@ -65,10 +65,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ -z "${SKIP_FUSE_SETUP:-}" ]; then
-  setup_fuse
-fi
-
+setup_fuse
 start_dependencies
 create_bucket
 

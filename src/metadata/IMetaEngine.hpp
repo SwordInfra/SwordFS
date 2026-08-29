@@ -13,7 +13,6 @@
 #include <string_view>
 #include <vector>
 
-#include "metadata/DirIterator.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
@@ -26,6 +25,20 @@ using Status = swordfs::utils::Status;
 using SwordFsContext = swordfs::utils::SwordFsContext;
 
 namespace swordfs::metadata {
+
+// Backend-neutral directory iteration state. The iterator is an independent
+// view of a directory enumeration; backend implementations may share the
+// underlying prefetched directory entries between iterators. |offset| is an
+// opaque FUSE directory cookie, interpreted by the iterator implementation.
+class DirIterator {
+ public:
+  virtual ~DirIterator() = default;
+
+  virtual utils::Status Peek(uint64_t cookie, SwordFsEntry *entry) = 0;
+  virtual utils::Status Next(uint64_t cookie, SwordFsEntry *entry, uint64_t *next_cookie) = 0;
+};
+
+using DirIteratorPtr = std::shared_ptr<DirIterator>;
 
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
@@ -59,19 +72,6 @@ class IMetaEngine {
 
   /// Get an inode metadata snapshot.
   virtual Status GetInode(InodeID ino, SwordFsInode *out) = 0;
-
-  /// Materialize all entries in a directory. Kept for metadata callers that
-  /// need a complete listing; VFS readdir uses OpenDirIterator for pagination.
-  virtual Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) = 0;
-
-  /// Create a backend-neutral directory iterator. The iterator owns any
-  /// backend-specific continuation state (for example a Redis HSCAN cursor).
-  virtual Status OpenDirIterator(InodeID, std::unique_ptr<IDirIterator> *out) {
-    if (out != nullptr) {
-      out->reset();
-    }
-    return Status::NotSupported("directory iterator not supported");
-  }
 
   /// Create a regular file.
   virtual Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) = 0;
@@ -150,9 +150,9 @@ class IMetaEngine {
   /// engine. Returns OK with `*out` empty if the inode has no chunks.
   virtual Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) = 0;
 
-  /// Open a directory for reading. Performs permission check and updates
-  /// atime. Handle allocation is now managed by FileHandleManager.
-  virtual Status OpenDir(InodeID ino) = 0;
+  /// Open a directory and create its per-open iterator. Implementations may
+  /// share backend directory-entry prefetch/cache state between iterators.
+  virtual Status OpenDir(InodeID ino, DirIteratorPtr *iterator) = 0;
 
   // ────────────────────────────────────────────────────────────────
   // Chunk metadata

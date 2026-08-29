@@ -154,32 +154,22 @@ TEST(VfsImplTest, Forget) {
 
 namespace {
 
-class TestDirIterator final : public swordfs::metadata::IDirIterator {
+class TestDirIterator final : public swordfs::metadata::DirIterator {
  public:
-  Status Peek(uint64_t offset, swordfs::metadata::SwordFsEntry *entry, uint64_t *next_offset, bool *end) override {
+  Status Peek(uint64_t offset, swordfs::metadata::SwordFsEntry *entry) override {
     if (offset == 0) {
       *entry = {".", DT_DIR, 1};
-      *next_offset = 1;
-      *end = false;
       return Status::OK();
     }
-    *next_offset = offset;
-    *end = true;
-    return Status::NotFound("directory end");
+    return Status::EndOfDirectory("directory end");
   }
 
-  Status Read(uint64_t offset, size_t max_entries, std::vector<swordfs::metadata::SwordFsEntry> *entries,
-              uint64_t *next_offset, bool *end) override {
-    entries->clear();
-    if (offset == 0 && max_entries > 0) {
-      entries->push_back({".", DT_DIR, 1});
-      *next_offset = 1;
-      *end = false;
-    } else {
-      *next_offset = offset;
-      *end = true;
+  Status Next(uint64_t offset, swordfs::metadata::SwordFsEntry *entry, uint64_t *next_offset) override {
+    auto status = Peek(offset, entry);
+    if (status.ok()) {
+      *next_offset = offset + 1;
     }
-    return Status::OK();
+    return status;
   }
 };
 
@@ -210,9 +200,6 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
       out->ino = ino;
     }
     return call_status_;
-  }
-  Status ReadDir(InodeID, std::vector<swordfs::metadata::SwordFsEntry> *) override {
-    return Status::OK();
   }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
     if (out) {
@@ -276,12 +263,9 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status ListChunks(InodeID, std::vector<swordfs::metadata::SwordFsChunk> *) override {
     return Status::OK();
   }
-  Status OpenDir(InodeID) override {
-    return call_status_;
-  }
-  Status OpenDirIterator(InodeID, std::unique_ptr<swordfs::metadata::IDirIterator> *out) override {
-    if (call_status_.ok()) {
-      *out = std::make_unique<TestDirIterator>();
+  Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *iterator) override {
+    if (call_status_.ok() && iterator != nullptr) {
+      *iterator = std::make_shared<TestDirIterator>();
     }
     return call_status_;
   }

@@ -5,6 +5,7 @@
 
 #include <dirent.h>
 #include <folly/fibers/FiberManagerInternal.h>
+#include <folly/logging/xlog.h>
 #include <sw/redis++/redis++.h>
 #include <sys/stat.h>
 
@@ -30,160 +31,161 @@
 #include "metadata/types/Inode.hpp"
 #include "metadata/types/Volume.hpp"
 #include "utils/Context.hpp"
+#include "utils/Logging.hpp"
 
 namespace swordfs::metadata {
-namespace {
-using namespace redis;
 
-utils::Status ParseDirValue(std::string_view value, uint32_t *type, InodeID *ino);
+utils::Status ParseDirValue(std::string_view value, uint32_t *type, InodeID *ino) {
+  if (type == nullptr || ino == nullptr) {
+    return utils::Status::InvalidArgument("directory entry output is null");
+  }
+  BufDecoder decoder(value);
+  if (!decoder.U32(type) || !decoder.U64(ino) || *ino == 0 || !decoder.Done()) {
+    return utils::Status::Malformed("malformed Redis directory entry");
+  }
+  return utils::Status::OK();
+}
 
-class RedisDirIterator final : public IDirIterator {
+class RedisDirCacheRegistry;
+
+// Shared by all DirIterators opened while this directory enumeration is alive.
+// The vector index is the opaque FUSE cookie; Redis HSCAN only supplies the
+// backend cursor used to extend the vector on demand.
+class RedisDirEntryCache final {
  public:
-  RedisDirIterator(std::shared_ptr<RedisMetaClient> client, std::string key, InodeID ino, InodeID parent_ino)
-      : client_(std::move(client)), key_(std::move(key)), ino_(ino), parent_ino_(parent_ino) {
+  RedisDirEntryCache(std::shared_ptr<RedisMetaClient> client, std::string key, InodeID ino, InodeID parent_ino,
+                     std::weak_ptr<RedisDirCacheRegistry> registry)
+      : client_(std::move(client)), key_(std::move(key)), ino_(ino), registry_(std::move(registry)) {
+    entries_.push_back({".", DT_DIR, ino});
+    entries_.push_back({"..", DT_DIR, parent_ino});
   }
 
-  Status Peek(uint64_t offset, SwordFsEntry *entry, uint64_t *next_offset, bool *end) override {
-    if (entry == nullptr || next_offset == nullptr || end == nullptr) {
-      return Status::InvalidArgument("directory iterator output is null");
+  Status Get(size_t index, SwordFsEntry *entry) {
+    if (entry == nullptr) {
+      return Status::InvalidArgument("directory entry output is null");
     }
     std::lock_guard lock(mutex_);
-    const auto saved_cursor = cursor_;
-    const auto saved_logical_offset = logical_offset_;
-    const auto saved_exhausted = exhausted_;
-    const auto saved_pending = pending_;
-    std::vector<SwordFsEntry> entries;
-    uint64_t peek_next = offset;
-    bool peek_end = false;
-    auto status = ReadLocked(offset, 1, &entries, &peek_next, &peek_end);
-    cursor_ = saved_cursor;
-    logical_offset_ = saved_logical_offset;
-    exhausted_ = saved_exhausted;
-    pending_ = saved_pending;
-    if (status.IsNotFound()) {
-      *next_offset = offset;
-      *end = true;
-      return status;
-    }
+    auto status = EnsureLoadedLocked(index);
     if (!status.ok()) {
       return status;
     }
-    if (entries.empty()) {
-      *next_offset = peek_next;
-      *end = peek_end;
-      return Status::NotFound("directory end");
+    if (index >= entries_.size()) {
+      return Status::EndOfDirectory("directory end");
     }
-    *entry = entries.front();
-    *next_offset = peek_next;
-    *end = peek_end;
+    *entry = entries_[index];
     return Status::OK();
   }
 
-  Status Read(uint64_t offset, size_t max_entries, std::vector<SwordFsEntry> *entries, uint64_t *next_offset,
-              bool *end) override {
-    std::lock_guard lock(mutex_);
-    return ReadLocked(offset, max_entries, entries, next_offset, end);
-  }
-
  private:
-  Status ReadLocked(uint64_t offset, size_t max_entries, std::vector<SwordFsEntry> *entries, uint64_t *next_offset,
-                    bool *end) {
-    if (entries == nullptr || next_offset == nullptr || end == nullptr) {
-      return Status::InvalidArgument("directory iterator output is null");
-    }
-    if (max_entries == 0) {
-      entries->clear();
-      *next_offset = offset;
-      *end = false;
-      return Status::OK();
-    }
-
-    if (offset != logical_offset_) {
-      cursor_ = 0;
-      logical_offset_ = 2;
-      exhausted_ = false;
-      pending_.clear();
-    }
-
-    entries->clear();
-
-    // The synthetic entries are stable logical positions 0 and 1. Seeking
-    // into them always restarts the backend cursor because HSCAN only has an
-    // opaque backend cursor, not a FUSE-compatible directory cookie.
-    if (offset < 2) {
-      if (offset == 0 && entries->size() < max_entries) {
-        entries->push_back({".", DT_DIR, ino_});
+  Status EnsureLoadedLocked(size_t index) {
+    while (index >= entries_.size() && !exhausted_) {
+      std::vector<std::pair<std::string, std::string>> values;
+      uint64_t next_cursor = cursor_;
+      auto status = client_->HScan(key_, cursor_, 128, &values, &next_cursor);
+      if (!status.ok()) {
+        return status;
       }
-      if (offset <= 1 && entries->size() < max_entries) {
-        entries->push_back({"..", DT_DIR, parent_ino_});
-      }
-      logical_offset_ = offset + entries->size();
-      if (logical_offset_ < 2) {
-        logical_offset_ = 2;
-      }
-    }
-
-    while (entries->size() < max_entries) {
-      if (pending_.empty()) {
-        if (exhausted_) {
-          break;
-        }
-        std::vector<std::pair<std::string, std::string>> values;
-        uint64_t next_cursor = cursor_;
-        auto status = Scan(&values, &next_cursor);
+      cursor_ = next_cursor;
+      exhausted_ = cursor_ == 0;
+      for (const auto &[name, value] : values) {
+        uint32_t type;
+        InodeID child_ino;
+        status = ParseDirValue(value, &type, &child_ino);
         if (!status.ok()) {
           return status;
         }
-        cursor_ = next_cursor;
-        exhausted_ = cursor_ == 0;
-        for (const auto &[name, value] : values) {
-          uint32_t type;
-          InodeID child_ino;
-          status = ParseDirValue(value, &type, &child_ino);
-          if (!status.ok()) {
-            return status;
-          }
-          pending_.push_back({name, type, child_ino});
-        }
-        if (values.empty() && exhausted_) {
-          break;
-        }
+        entries_.push_back({name, type, child_ino});
       }
+      if (values.empty() && exhausted_) {
+        break;
+      }
+    }
+    return Status::OK();
+  }
 
-      const SwordFsEntry entry = std::move(pending_.front());
-      pending_.erase(pending_.begin());
-      if (logical_offset_ < offset) {
-        ++logical_offset_;
-        continue;
+ public:
+  ~RedisDirEntryCache();
+
+ private:
+  std::mutex mutex_;
+  std::shared_ptr<RedisMetaClient> client_;
+  std::string key_;
+  InodeID ino_;
+  std::weak_ptr<RedisDirCacheRegistry> registry_;
+  std::vector<SwordFsEntry> entries_;
+  uint64_t cursor_ = 0;
+  bool exhausted_ = false;
+};
+
+class RedisDirCacheRegistry final : public std::enable_shared_from_this<RedisDirCacheRegistry> {
+ public:
+  std::shared_ptr<RedisDirEntryCache> GetOrCreate(InodeID ino, std::shared_ptr<RedisMetaClient> client, std::string key,
+                                                  InodeID parent_ino) {
+    std::lock_guard lock(mutex_);
+    auto it = caches_.find(ino);
+    if (it != caches_.end()) {
+      if (auto cache = it->second.lock()) {
+        return cache;
       }
-      entries->push_back(entry);
-      ++logical_offset_;
+      caches_.erase(it);
     }
 
-    if (logical_offset_ < offset) {
-      *next_offset = offset;
-      *end = true;
-      return Status::OK();
+    auto cache =
+        std::make_shared<RedisDirEntryCache>(std::move(client), std::move(key), ino, parent_ino, weak_from_this());
+    caches_.emplace(ino, cache);
+    return cache;
+  }
+
+  void Remove(InodeID ino, const RedisDirEntryCache *cache) {
+    std::lock_guard lock(mutex_);
+    auto it = caches_.find(ino);
+    if (it == caches_.end()) {
+      return;
     }
-    *next_offset = logical_offset_;
-    *end = exhausted_;
+    auto current = it->second.lock();
+    if (!current || current.get() == cache) {
+      caches_.erase(it);
+    }
+  }
+
+ private:
+  std::mutex mutex_;
+  std::unordered_map<InodeID, std::weak_ptr<RedisDirEntryCache>> caches_;
+};
+
+RedisDirEntryCache::~RedisDirEntryCache() {
+  if (auto registry = registry_.lock()) {
+    registry->Remove(ino_, this);
+  }
+}
+
+namespace {
+
+class RedisDirIterator final : public DirIterator {
+ public:
+  explicit RedisDirIterator(std::shared_ptr<RedisDirEntryCache> cache) : cache_(std::move(cache)) {
+  }
+
+  Status Peek(uint64_t offset, SwordFsEntry *entry) override {
+    return cache_->Get(static_cast<size_t>(offset), entry);
+  }
+
+  Status Next(uint64_t offset, SwordFsEntry *entry, uint64_t *next_offset) override {
+    if (entry == nullptr || next_offset == nullptr) {
+      return Status::InvalidArgument("directory iterator output is null");
+    }
+    std::lock_guard lock(mutex_);
+    auto status = cache_->Get(static_cast<size_t>(offset), entry);
+    if (!status.ok()) {
+      return status;
+    }
+    *next_offset = offset + 1;
     return Status::OK();
   }
 
  private:
-  Status Scan(std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor) {
-    return client_->HScan(key_, cursor_, 128, values, next_cursor);
-  }
-
-  mutable std::mutex mutex_;
-  std::shared_ptr<RedisMetaClient> client_;
-  std::string key_;
-  InodeID ino_;
-  InodeID parent_ino_;
-  uint64_t cursor_ = 0;
-  uint64_t logical_offset_ = 2;
-  bool exhausted_ = false;
-  std::vector<SwordFsEntry> pending_;
+  std::mutex mutex_;
+  std::shared_ptr<RedisDirEntryCache> cache_;
 };
 utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view volume_name,
                                     std::unique_ptr<IMetaEngine> *out) {
@@ -217,17 +219,6 @@ std::string SerializeDirValue(uint32_t type, InodeID ino) {
   std::string value;
   encoder.Finish(&value);
   return value;
-}
-
-utils::Status ParseDirValue(std::string_view value, uint32_t *type, InodeID *ino) {
-  if (type == nullptr || ino == nullptr) {
-    return utils::Status::InvalidArgument("directory entry output is null");
-  }
-  BufDecoder decoder(value);
-  if (!decoder.U32(type) || !decoder.U64(ino) || *ino == 0 || !decoder.Done()) {
-    return utils::Status::Malformed("malformed Redis directory entry");
-  }
-  return utils::Status::OK();
 }
 
 int64_t NowSeconds() {
@@ -271,7 +262,9 @@ utils::Status SerializeInode(const SwordFsInode &inode, std::string *value) {
 }  // namespace
 
 RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name)
-    : client_(std::make_shared<RedisMetaClient>(config)), key_(config.db, volume_name) {
+    : client_(std::make_shared<RedisMetaClient>(config)),
+      key_(config.db, volume_name),
+      dir_cache_registry_(std::make_shared<RedisDirCacheRegistry>()) {
 }
 
 RedisMetaImpl::~RedisMetaImpl() = default;
@@ -360,56 +353,77 @@ Status RedisMetaImpl::Lookup(InodeID parent_ino, std::string_view name, SwordFsI
   if (out == nullptr) {
     return Status::InvalidArgument("Lookup output is null");
   }
-  return client_->Transact([&](RedisMetaTxn &txn) {
-    SwordFsInode parent;
-    std::string value;
-    auto status = txn.Get(key_.Inode(parent_ino), &value);
-    if (!status.ok()) {
-      return status;
-    }
-    status = ParseInode(value, &parent);
-    if (!status.ok()) {
-      return status;
-    }
-    if (!parent.IsDir()) {
-      return Status::NotDirectory("parent is not a directory");
-    }
-    std::string entry_value;
-    status = txn.HGet(key_.Directory(parent_ino), name, &entry_value);
-    if (!status.ok()) {
-      return status;
-    }
-    uint32_t type;
-    InodeID child_ino;
-    status = ParseDirValue(entry_value, &type, &child_ino);
-    if (!status.ok()) {
-      return status;
-    }
-    (void)type;
-    status = txn.Get(key_.Inode(child_ino), &entry_value);
-    if (!status.ok()) {
-      return status;
-    }
-    return ParseInode(entry_value, out);
-  });
+  std::string value;
+  auto status = client_->Get(key_.Inode(parent_ino), &value);
+  if (!status.ok()) {
+    return status;
+  }
+  SwordFsInode parent;
+  status = ParseInode(value, &parent);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!parent.IsDir()) {
+    return Status::NotDirectory("parent is not a directory");
+  }
+  std::string entry_value;
+  status = client_->HGet(key_.Directory(parent_ino), name, &entry_value);
+  if (!status.ok()) {
+    return status;
+  }
+  uint32_t type;
+  InodeID child_ino;
+  status = ParseDirValue(entry_value, &type, &child_ino);
+  if (!status.ok()) {
+    return status;
+  }
+  (void)type;
+  status = client_->Get(key_.Inode(child_ino), &entry_value);
+  if (!status.ok()) {
+    return status;
+  }
+  return ParseInode(entry_value, out);
 }
 
 Status RedisMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
   if (out == nullptr) {
     return Status::InvalidArgument("GetInode output is null");
   }
-  return client_->Transact([&](RedisMetaTxn &txn) {
+  std::string value;
+  auto status = client_->Get(key_.Inode(ino), &value);
+  if (!status.ok()) {
+    return status;
+  }
+  return ParseInode(value, out);
+}
+
+Status RedisMetaImpl::UpdateAtimeBestEffort(InodeID ino) {
+  auto status = client_->Transact([&](RedisMetaTxn &txn) {
     std::string value;
     auto status = txn.Get(key_.Inode(ino), &value);
     if (!status.ok()) {
       return status;
     }
-    return ParseInode(value, out);
+    SwordFsInode inode;
+    status = ParseInode(value, &inode);
+    if (!status.ok()) {
+      return status;
+    }
+    Touch(&inode, true, false, false);
+    status = SerializeInode(inode, &value);
+    if (!status.ok()) {
+      return status;
+    }
+    return txn.Set(key_.Inode(ino), value);
   });
+  if (!status.ok()) {
+    SWORDFS_LOG_WARN << "failed to update atime for inode " << ino << ": " << status.message();
+  }
+  return Status::OK();
 }
 
-Status RedisMetaImpl::OpenDirIterator(InodeID ino, std::unique_ptr<IDirIterator> *out) {
-  if (out == nullptr) {
+Status RedisMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
+  if (iterator == nullptr) {
     return Status::InvalidArgument("directory iterator output is null");
   }
   SwordFsInode dir;
@@ -420,52 +434,15 @@ Status RedisMetaImpl::OpenDirIterator(InodeID ino, std::unique_ptr<IDirIterator>
   if (!dir.IsDir()) {
     return Status::NotDirectory("not a directory");
   }
-  *out = std::make_unique<RedisDirIterator>(client_, key_.Directory(ino), ino, dir.parent_ino);
-  return Status::OK();
-}
 
-Status RedisMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
-  if (entries == nullptr) {
-    return Status::InvalidArgument("ReadDir output is null");
+  auto cache = dir_cache_registry_->GetOrCreate(ino, client_, key_.Directory(ino), dir.parent_ino);
+  *iterator = std::make_shared<RedisDirIterator>(std::move(cache));
+
+  status = UpdateAtimeBestEffort(ino);
+  if (!status.ok()) {
+    SWORDFS_LOG_WARN << "OpenDir: failed to update atime for ino " << ino << ": " << status.message();
   }
-  return client_->Transact([&](RedisMetaTxn &txn) {
-    SwordFsInode dir;
-    std::string value;
-    auto status = txn.Get(key_.Inode(ino), &value);
-    if (!status.ok()) {
-      return status;
-    }
-    status = ParseInode(value, &dir);
-    if (!status.ok()) {
-      return status;
-    }
-    if (!dir.IsDir()) {
-      return Status::NotDirectory("not a directory");
-    }
-    std::vector<std::pair<std::string, std::string>> values;
-    status = txn.HGetAll(key_.Directory(ino), &values);
-    if (!status.ok()) {
-      return status;
-    }
-    entries->clear();
-    entries->push_back({".", DT_DIR, ino});
-    entries->push_back({"..", DT_DIR, dir.parent_ino});
-    for (const auto &[name, entry_value] : values) {
-      uint32_t type;
-      InodeID child_ino;
-      status = ParseDirValue(entry_value, &type, &child_ino);
-      if (!status.ok()) {
-        return status;
-      }
-      entries->push_back({name, type, child_ino});
-    }
-    Touch(&dir, true, false, false);
-    status = SerializeInode(dir, &value);
-    if (!status.ok()) {
-      return status;
-    }
-    return txn.Set(key_.Inode(ino), value);
-  });
+  return Status::OK();
 }
 
 Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
@@ -1217,19 +1194,17 @@ Status RedisMetaImpl::StatFs(SwordFsStatFs *stbuf) {
 
 Status RedisMetaImpl::Access(InodeID ino, uint32_t mask) {
   const auto ctx = folly::fibers::local<SwordFsContext>();
-  return client_->Transact([&](RedisMetaTxn &txn) {
-    std::string value;
-    auto status = txn.Get(key_.Inode(ino), &value);
-    if (!status.ok()) {
-      return status;
-    }
-    SwordFsInode inode;
-    status = ParseInode(value, &inode);
-    if (!status.ok()) {
-      return status;
-    }
-    return inode.CheckAccess(ctx.uid, ctx.gid, mask) ? Status::OK() : Status::Permission("access denied");
-  });
+  std::string value;
+  auto status = client_->Get(key_.Inode(ino), &value);
+  if (!status.ok()) {
+    return status;
+  }
+  SwordFsInode inode;
+  status = ParseInode(value, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  return inode.CheckAccess(ctx.uid, ctx.gid, mask) ? Status::OK() : Status::Permission("access denied");
 }
 
 Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) {
@@ -1373,51 +1348,37 @@ Status RedisMetaImpl::Readlink(InodeID ino, std::string *target) {
   if (!target) {
     return Status::InvalidArgument("Readlink output is null");
   }
-  return client_->Transact([&](RedisMetaTxn &txn) {
-    std::string value;
-    auto status = txn.Get(key_.Inode(ino), &value);
-    if (!status.ok()) {
-      return status;
-    }
-    SwordFsInode inode;
-    status = ParseInode(value, &inode);
-    if (!status.ok()) {
-      return status;
-    }
-    if (!inode.IsSymlink()) {
-      return Status::InvalidArgument("not a symbolic link");
-    }
-    *target = inode.symlink_target;
-    return Status::OK();
-  });
+  std::string value;
+  auto status = client_->Get(key_.Inode(ino), &value);
+  if (!status.ok()) {
+    return status;
+  }
+  SwordFsInode inode;
+  status = ParseInode(value, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!inode.IsSymlink()) {
+    return Status::InvalidArgument("not a symbolic link");
+  }
+  *target = inode.symlink_target;
+  return Status::OK();
 }
 
 Status RedisMetaImpl::Open(InodeID ino) {
-  return client_->Transact([&](RedisMetaTxn &txn) {
-    std::string value;
-    auto status = txn.Get(key_.Inode(ino), &value);
-    if (!status.ok()) {
-      return status;
-    }
-    SwordFsInode inode;
-    status = ParseInode(value, &inode);
-    if (!status.ok()) {
-      return status;
-    }
-    if (!inode.IsRegular()) {
-      return Status::NotDirectory("not a regular file");
-    }
-    const auto ctx = folly::fibers::local<SwordFsContext>();
-    if (!inode.CheckAccess(ctx.uid, ctx.gid, R_OK)) {
-      return Status::Permission("access denied");
-    }
-    Touch(&inode, true, false, false);
-    status = SerializeInode(inode, &value);
-    if (!status.ok()) {
-      return status;
-    }
-    return txn.Set(key_.Inode(ino), value);
-  });
+  SwordFsInode inode;
+  auto status = GetInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!inode.IsRegular()) {
+    return Status::NotDirectory("not a regular file");
+  }
+  const auto ctx = folly::fibers::local<SwordFsContext>();
+  if (!inode.CheckAccess(ctx.uid, ctx.gid, R_OK)) {
+    return Status::Permission("access denied");
+  }
+  return UpdateAtimeBestEffort(ino);
 }
 
 Status RedisMetaImpl::ReclaimInode(InodeID ino) {
@@ -1454,53 +1415,35 @@ Status RedisMetaImpl::ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) {
   if (!out) {
     return Status::InvalidArgument("ListChunks output is null");
   }
-  return client_->Transact([&](RedisMetaTxn &txn) {
-    std::string value;
-    auto status = txn.Get(key_.Inode(ino), &value);
+  std::string inode_value;
+  auto status = client_->Get(key_.Inode(ino), &inode_value);
+  if (!status.ok()) {
+    return status;
+  }
+  SwordFsInode inode;
+  status = ParseInode(inode_value, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!inode.IsRegular()) {
+    return Status::InvalidArgument("not a regular file");
+  }
+  std::vector<std::pair<std::string, std::string>> values;
+  status = client_->HGetAll(key_.Chunk(ino), &values);
+  if (!status.ok()) {
+    return status;
+  }
+  out->clear();
+  for (const auto &[field, chunk_value] : values) {
+    SwordFsChunk chunk;
+    status = chunk.ParseFrom(chunk_value);
     if (!status.ok()) {
       return status;
     }
-    std::vector<std::pair<std::string, std::string>> values;
-    status = txn.HGetAll(key_.Chunk(ino), &values);
-    if (!status.ok()) {
-      return status;
-    }
-    out->clear();
-    for (const auto &[field, chunk_value] : values) {
-      SwordFsChunk chunk;
-      status = chunk.ParseFrom(chunk_value);
-      if (!status.ok()) {
-        return status;
-      }
-      out->push_back(std::move(chunk));
-    }
-    std::sort(out->begin(), out->end(), [](const auto &a, const auto &b) { return a.index < b.index; });
-    return Status::OK();
-  });
-}
-
-Status RedisMetaImpl::OpenDir(InodeID ino) {
-  return client_->Transact([&](RedisMetaTxn &txn) {
-    std::string value;
-    auto status = txn.Get(key_.Inode(ino), &value);
-    if (!status.ok()) {
-      return status;
-    }
-    SwordFsInode dir;
-    status = ParseInode(value, &dir);
-    if (!status.ok()) {
-      return status;
-    }
-    if (!dir.IsDir()) {
-      return Status::NotDirectory("not a directory");
-    }
-    Touch(&dir, true, false, false);
-    status = SerializeInode(dir, &value);
-    if (!status.ok()) {
-      return status;
-    }
-    return txn.Set(key_.Inode(ino), value);
-  });
+    out->push_back(std::move(chunk));
+  }
+  std::sort(out->begin(), out->end(), [](const auto &a, const auto &b) { return a.index < b.index; });
+  return Status::OK();
 }
 
 Status RedisMetaImpl::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
@@ -1531,14 +1474,12 @@ Status RedisMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk
   if (!chunk) {
     return Status::InvalidArgument("FindChunk output is null");
   }
-  return client_->Transact([&](RedisMetaTxn &txn) {
-    std::string value;
-    auto status = txn.HGet(key_.Chunk(ino), std::to_string(idx), &value);
-    if (!status.ok()) {
-      return status;
-    }
-    return chunk->ParseFrom(value);
-  });
+  std::string value;
+  auto status = client_->HGet(key_.Chunk(ino), std::to_string(idx), &value);
+  if (!status.ok()) {
+    return status;
+  }
+  return chunk->ParseFrom(value);
 }
 
 Status RedisMetaImpl::Truncate(InodeID ino, uint64_t size) {

@@ -289,17 +289,12 @@ utils::Status VfsImpl::Opendir(fuse_ino_t ino, uint64_t *fh) {
     return Status::InvalidArgument("directory handle output is null");
   }
   auto *meta = VolumeImpl::Instance().meta_engine();
-  auto status = meta->OpenDir(ino);
+  metadata::DirIteratorPtr iterator;
+  auto status = meta->OpenDir(ino, &iterator);
   if (!status.ok()) {
     return status;
   }
-  std::unique_ptr<metadata::IDirIterator> iterator;
-  status = meta->OpenDirIterator(ino, &iterator);
-  if (!status.ok()) {
-    return status;
-  }
-  auto shared_iterator = std::shared_ptr<metadata::IDirIterator>(std::move(iterator));
-  *fh = FileHandleManager::Instance().OpenDir(std::move(shared_iterator));
+  *fh = FileHandleManager::Instance().OpenDir(std::move(iterator));
   if (*fh == 0) {
     return Status::NoMemory("directory handle");
   }
@@ -308,9 +303,9 @@ utils::Status VfsImpl::Opendir(fuse_ino_t ino, uint64_t *fh) {
 
 // Common implementation for Readdir and Readdirplus. Directory iteration
 // state belongs to the FUSE directory handle; the metadata iterator hides
-// backend-specific continuation state such as a Redis HSCAN cursor.
+// backend-specific directory-entry caching and continuation state.
 template <typename F>
-static utils::Status ReaddirCommon(fuse_req_t req, size_t size, off_t off, uint64_t fh, F &&add_entry,
+static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh, F &&add_entry,
                                    std::string *out) {
   auto dir_handle = FileHandleManager::Instance().FindDir(fh);
   if (!dir_handle) {
@@ -320,7 +315,7 @@ static utils::Status ReaddirCommon(fuse_req_t req, size_t size, off_t off, uint6
     return Status::InvalidArgument("negative directory offset");
   }
 
-  // Serialize readdir calls for a directory handle so the Peek + Read pair
+  // Serialize readdir calls for a directory handle so the Peek + Next pair
   // below is atomic with respect to other callers using the same fh.
   std::lock_guard lock(dir_handle->mutex);
   auto &iterator = dir_handle->iterator;
@@ -338,17 +333,18 @@ static utils::Status ReaddirCommon(fuse_req_t req, size_t size, off_t off, uint6
   uint64_t current_off = static_cast<uint64_t>(off);
   while (out->size() < size) {
     metadata::SwordFsEntry entry;
-    uint64_t next_off = current_off;
-    bool end = false;
-    Status status = iterator->Peek(current_off, &entry, &next_off, &end);
-    if (status.IsNotFound()) {
+    Status status = iterator->Peek(current_off, &entry);
+    if (status.IsEndOfDirectory()) {
       break;
     }
     if (!status.ok()) {
       return status;
     }
 
-    const size_t required = add_entry(req, nullptr, 0, entry, static_cast<off_t>(next_off));
+    // The cookie is only known after Next() consumes the entry. The encoded
+    // size is independent of the cookie value, so probe with a dummy offset
+    // before consuming anything.
+    const size_t required = add_entry(req, nullptr, 0, entry, 0);
     const size_t remaining = size - out->size();
     if (required > remaining) {
       if (out->empty()) {
@@ -357,24 +353,23 @@ static utils::Status ReaddirCommon(fuse_req_t req, size_t size, off_t off, uint6
       break;
     }
 
+    metadata::SwordFsEntry consumed;
+    uint64_t consumed_off = current_off;
+    status = iterator->Next(current_off, &consumed, &consumed_off);
+    if (!status.ok()) {
+      return status;
+    }
+    if (consumed.ino != entry.ino || consumed.name != entry.name) {
+      return Status::Internal("directory iterator changed between peek and next");
+    }
+
     std::string encoded(required, '\0');
-    const size_t written = add_entry(req, encoded.data(), encoded.size(), entry, static_cast<off_t>(next_off));
+    const size_t written = add_entry(req, encoded.data(), encoded.size(), entry, static_cast<off_t>(consumed_off));
     if (written > encoded.size()) {
       return Status::NoMemory("readdir entry encoding overflow");
     }
-    std::vector<metadata::SwordFsEntry> consumed;
-    uint64_t consumed_off = current_off;
-    bool consumed_end = false;
-    status = iterator->Read(current_off, 1, &consumed, &consumed_off, &consumed_end);
-    if (!status.ok() || consumed.size() != 1 || consumed.front().ino != entry.ino ||
-        consumed.front().name != entry.name) {
-      return status.ok() ? Status::Internal("directory iterator changed between peek and read") : status;
-    }
     out->append(encoded.data(), written);
     current_off = consumed_off;
-    if (consumed_end) {
-      break;
-    }
   }
   return Status::OK();
 }
@@ -382,7 +377,7 @@ static utils::Status ReaddirCommon(fuse_req_t req, size_t size, off_t off, uint6
 utils::Status VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh, std::string *buf) {
   (void)ino;
   return ReaddirCommon(
-      req, size, off, fh,
+      req, ino, size, off, fh,
       [](fuse_req_t r, char *p, size_t cap, const metadata::SwordFsEntry &e, off_t next_off) {
         struct stat st = {};
         st.st_ino = e.ino;
@@ -396,7 +391,7 @@ utils::Status VfsImpl::Readdirplus(fuse_req_t req, fuse_ino_t ino, size_t size, 
                                    std::string *buf) {
   (void)ino;
   return ReaddirCommon(
-      req, size, off, fh,
+      req, ino, size, off, fh,
       [](fuse_req_t r, char *p, size_t cap, const metadata::SwordFsEntry &e, off_t next_off) {
         fuse_entry_param ep = {};
         ep.ino = e.ino;

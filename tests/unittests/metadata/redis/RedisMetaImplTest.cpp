@@ -8,6 +8,8 @@
 #include <atomic>
 #include <cstdlib>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/redis/RedisMetaImpl.hpp"
@@ -25,6 +27,7 @@ using swordfs::metadata::RedisMetaImpl;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsAttr;
 using swordfs::metadata::SwordFsChunk;
+using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsVolume;
 using swordfs::utils::Status;
@@ -65,6 +68,39 @@ class RedisMetaImplTest : public ::testing::Test {
   std::string volume_name_;
 };
 
+TEST_F(RedisMetaImplTest, OpenDirIteratorsShareCacheAndSupportSeek) {
+  SwordFsInode first;
+  SwordFsInode second;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "first", 0644, &first).ok());
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "second", 0644, &second).ok());
+
+  swordfs::metadata::DirIteratorPtr first_iterator;
+  swordfs::metadata::DirIteratorPtr second_iterator;
+  ASSERT_TRUE(impl_->OpenDir(kRootInodeId, &first_iterator).ok());
+  ASSERT_TRUE(impl_->OpenDir(kRootInodeId, &second_iterator).ok());
+  ASSERT_NE(first_iterator, nullptr);
+  ASSERT_NE(second_iterator, nullptr);
+
+  SwordFsEntry entry;
+  uint64_t next_offset = 0;
+  ASSERT_TRUE(first_iterator->Next(0, &entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, ".");
+  EXPECT_EQ(next_offset, 1);
+  ASSERT_TRUE(first_iterator->Next(1, &entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, "..");
+  EXPECT_EQ(next_offset, 2);
+  ASSERT_TRUE(first_iterator->Next(2, &entry, &next_offset).ok());
+  EXPECT_EQ(next_offset, 3);
+
+  // The second iterator has an independent position but can seek directly
+  // into entries already prefetched by the shared cache.
+  ASSERT_TRUE(second_iterator->Peek(2, &entry).ok());
+  EXPECT_EQ(entry.name, "first");
+  ASSERT_TRUE(second_iterator->Next(2, &entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, "first");
+  EXPECT_EQ(next_offset, 3);
+}
+
 TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesSameParentNlink) {
   SwordFsInode src;
   SwordFsInode dst;
@@ -102,6 +138,29 @@ TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesCrossParentNli
   // loses the victim's backlink and gains the moved directory's, net zero.
   EXPECT_EQ(old_parent.attr.nlink, 2U);
   EXPECT_EQ(new_parent.attr.nlink, 3U);
+}
+
+TEST_F(RedisMetaImplTest, ConcurrentOpenDoesNotFailOnAtimeContention) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+
+  constexpr size_t kThreadCount = 8;
+  const InodeID file_ino = file.ino;
+  std::vector<std::thread> threads;
+  std::vector<Status> statuses(kThreadCount);
+  threads.reserve(kThreadCount);
+  for (size_t i = 0; i < kThreadCount; ++i) {
+    threads.emplace_back([this, &statuses, file_ino, i] {
+      folly::fibers::local<SwordFsContext>() = SwordFsContext{};
+      statuses[i] = impl_->Open(file_ino);
+    });
+  }
+  for (auto &thread : threads) {
+    thread.join();
+  }
+  for (const auto &status : statuses) {
+    EXPECT_TRUE(status.ok()) << status.message();
+  }
 }
 
 TEST_F(RedisMetaImplTest, SetAttrShrinkRemovesAndClampsChunks) {

@@ -12,7 +12,7 @@
 
 namespace swordfs::metadata {
 
-/// One directory entry returned by IMetaEngine::ReadDir.
+/// One directory entry returned by a directory iterator.
 struct SwordFsEntry {
   std::string name;
   uint32_t type;  // DT_DIR, DT_REG, DT_LNK, etc.

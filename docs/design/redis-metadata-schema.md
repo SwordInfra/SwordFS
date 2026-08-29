@@ -36,8 +36,7 @@ All keys are scoped by the volume hash tag.
 |---|---|---|---|---|
 | `Lookup(parent,name)` | `dir:parent`, `inode:child` | — | no | Confirmed pattern |
 | `GetInode(ino)` | `inode:ino` | — | no | Confirmed pattern |
-| `ReadDir(ino)` | `dir:ino`, possibly directory inode | — / atime if required | iterator state is per open directory handle | Confirmed |
-| `OpenDirIterator(ino)` | `inode:ino`, `dir:ino` as required | — / atime handled by `OpenDir` | no long-lived metadata transaction | Confirmed |
+| `ReadDir(ino, offset, max_entries, iterator)` | `dir:ino`, directory inode on first call | — / best-effort atime on first call | iterator state is owned by the caller and reused across calls | Confirmed |
 | `Readlink(ino)` | `inode:ino` | — | no | Confirmed pattern |
 | `FindChunk(ino,idx)` | `chunk:ino` | — | no | Confirmed pattern |
 | `ListChunks(ino)` | `chunk:ino` | — | no | Current proposal: incremental hash enumeration |
@@ -58,6 +57,8 @@ All keys are scoped by the volume hash tag.
 
 
 This matrix is a working baseline, not a claim that all transaction details are finalized.
+
+Access-time updates are best-effort metadata side effects. An access operation must not fail because its atime update conflicts with another metadata mutation or otherwise cannot be persisted. Redis may use a separate optimistic transaction for the atime update, but failure of that transaction is logged and does not change the result of the enclosing filesystem operation. Read-only metadata access itself must not be placed inside a WATCH/MULTI/EXEC transaction merely because atime is updated as a side effect.
 
 ## 4. Confirmed design choices
 
@@ -186,6 +187,13 @@ For replacement of an existing directory, the destination must be empty. The sou
 The Redis implementation covers the defined Rename variants while keeping all namespace and link-count changes atomic. Directory cycle prevention and sticky-bit checks are performed before mutation; backend-specific iterator state is not exposed through the metadata API.
 
 ### Directory pagination / ReadDir
+
+`ReadDir` is the single directory enumeration API. The caller owns a nullable
+`DirIterator`: on the first call it is null and the metadata engine creates the
+backend-specific iterator; subsequent calls pass the same iterator to continue
+the enumeration. The iterator may encapsulate a Redis `HSCAN` cursor or an
+in-memory snapshot. The `offset` is the logical FUSE directory position and
+`max_entries` limits the returned batch.
 
 Large directories are streamed instead of materialized in one operation. The implemented model is:
 

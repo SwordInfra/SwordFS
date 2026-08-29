@@ -84,11 +84,14 @@ jobs:
 
       - name: Test (unit)
         run: |
-          bash scripts/run-ut.sh --gtest_color=no
+          bash scripts/run-ut.sh --gtest_color=no --gtest_output=xml:unit-test-results.xml
+          if grep -q '<skipped' unit-test-results.xml; then
+            echo "ERROR: unit test suite contains skipped tests."
+            grep '<skipped' unit-test-results.xml
+            exit 1
+          fi
 
       - name: Test (E2E)
-        env:
-          SKIP_FUSE_SETUP: "1"
         run: |
           sg fuse -c "bash scripts/run-e2e.sh --gtest_color=no"
 
