@@ -68,7 +68,7 @@ class RedisMetaImplTest : public ::testing::Test {
   std::string volume_name_;
 };
 
-TEST_F(RedisMetaImplTest, OpenDirIteratorsShareCacheAndSupportSeek) {
+TEST_F(RedisMetaImplTest, OpenDirReturnsIndependentIteratorsAndSupportsSeek) {
   SwordFsInode first;
   SwordFsInode second;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "first", 0644, &first).ok());
@@ -83,22 +83,42 @@ TEST_F(RedisMetaImplTest, OpenDirIteratorsShareCacheAndSupportSeek) {
 
   SwordFsEntry entry;
   uint64_t next_offset = 0;
-  ASSERT_TRUE(first_iterator->Next(0, &entry, &next_offset).ok());
+  ASSERT_TRUE(first_iterator->Peek(&entry, &next_offset).ok());
   EXPECT_EQ(entry.name, ".");
   EXPECT_EQ(next_offset, 1);
-  ASSERT_TRUE(first_iterator->Next(1, &entry, &next_offset).ok());
+  first_iterator->Advance();
+  ASSERT_TRUE(first_iterator->Peek(&entry, &next_offset).ok());
   EXPECT_EQ(entry.name, "..");
   EXPECT_EQ(next_offset, 2);
-  ASSERT_TRUE(first_iterator->Next(2, &entry, &next_offset).ok());
+  first_iterator->Advance();
+  ASSERT_TRUE(first_iterator->Peek(&entry, &next_offset).ok());
   EXPECT_EQ(next_offset, 3);
+  first_iterator->Advance();
 
-  // The second iterator has an independent position but can seek directly
-  // into entries already prefetched by the shared cache.
-  ASSERT_TRUE(second_iterator->Peek(2, &entry).ok());
-  EXPECT_EQ(entry.name, "first");
-  ASSERT_TRUE(second_iterator->Next(2, &entry, &next_offset).ok());
+  // Seeking behind the iterator's evicted window rebuilds from HSCAN cursor 0.
+  ASSERT_TRUE(first_iterator->Seek(0).ok());
+  ASSERT_TRUE(first_iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, ".");
+  EXPECT_EQ(next_offset, 1);
+
+  // Each OpenDir owns independent HSCAN state, so the second iterator still
+  // starts from its own position regardless of the first iterator's progress.
+  ASSERT_TRUE(second_iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, ".");
+  EXPECT_EQ(next_offset, 1);
+  second_iterator->Advance();
+
+  ASSERT_TRUE(second_iterator->Seek(1).ok());
+  ASSERT_TRUE(second_iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, "..");
+  EXPECT_EQ(next_offset, 2);
+  second_iterator->Advance();
+
+  ASSERT_TRUE(second_iterator->Seek(2).ok());
+  ASSERT_TRUE(second_iterator->Peek(&entry, &next_offset).ok());
   EXPECT_EQ(entry.name, "first");
   EXPECT_EQ(next_offset, 3);
+  second_iterator->Advance();
 }
 
 TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesSameParentNlink) {

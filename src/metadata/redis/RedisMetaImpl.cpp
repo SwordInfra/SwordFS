@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <deque>
 #include <exception>
 #include <mutex>
 #include <optional>
@@ -22,9 +23,9 @@
 
 #include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/Utils.hpp"
+#include "metadata/redis/RedisDirIterator.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
-#include "metadata/types/BufCodec.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
@@ -35,158 +36,7 @@
 
 namespace swordfs::metadata {
 
-utils::Status ParseDirValue(std::string_view value, uint32_t *type, InodeID *ino) {
-  if (type == nullptr || ino == nullptr) {
-    return utils::Status::InvalidArgument("directory entry output is null");
-  }
-  BufDecoder decoder(value);
-  if (!decoder.U32(type) || !decoder.U64(ino) || *ino == 0 || !decoder.Done()) {
-    return utils::Status::Malformed("malformed Redis directory entry");
-  }
-  return utils::Status::OK();
-}
-
-class RedisDirCacheRegistry;
-
-// Shared by all DirIterators opened while this directory enumeration is alive.
-// The vector index is the opaque FUSE cookie; Redis HSCAN only supplies the
-// backend cursor used to extend the vector on demand.
-class RedisDirEntryCache final {
- public:
-  RedisDirEntryCache(std::shared_ptr<RedisMetaClient> client, std::string key, InodeID ino, InodeID parent_ino,
-                     std::weak_ptr<RedisDirCacheRegistry> registry)
-      : client_(std::move(client)), key_(std::move(key)), ino_(ino), registry_(std::move(registry)) {
-    entries_.push_back({".", DT_DIR, ino});
-    entries_.push_back({"..", DT_DIR, parent_ino});
-  }
-
-  Status Get(size_t index, SwordFsEntry *entry) {
-    if (entry == nullptr) {
-      return Status::InvalidArgument("directory entry output is null");
-    }
-    std::lock_guard lock(mutex_);
-    auto status = EnsureLoadedLocked(index);
-    if (!status.ok()) {
-      return status;
-    }
-    if (index >= entries_.size()) {
-      return Status::EndOfDirectory("directory end");
-    }
-    *entry = entries_[index];
-    return Status::OK();
-  }
-
- private:
-  Status EnsureLoadedLocked(size_t index) {
-    while (index >= entries_.size() && !exhausted_) {
-      std::vector<std::pair<std::string, std::string>> values;
-      uint64_t next_cursor = cursor_;
-      auto status = client_->HScan(key_, cursor_, 128, &values, &next_cursor);
-      if (!status.ok()) {
-        return status;
-      }
-      cursor_ = next_cursor;
-      exhausted_ = cursor_ == 0;
-      for (const auto &[name, value] : values) {
-        uint32_t type;
-        InodeID child_ino;
-        status = ParseDirValue(value, &type, &child_ino);
-        if (!status.ok()) {
-          return status;
-        }
-        entries_.push_back({name, type, child_ino});
-      }
-      if (values.empty() && exhausted_) {
-        break;
-      }
-    }
-    return Status::OK();
-  }
-
- public:
-  ~RedisDirEntryCache();
-
- private:
-  std::mutex mutex_;
-  std::shared_ptr<RedisMetaClient> client_;
-  std::string key_;
-  InodeID ino_;
-  std::weak_ptr<RedisDirCacheRegistry> registry_;
-  std::vector<SwordFsEntry> entries_;
-  uint64_t cursor_ = 0;
-  bool exhausted_ = false;
-};
-
-class RedisDirCacheRegistry final : public std::enable_shared_from_this<RedisDirCacheRegistry> {
- public:
-  std::shared_ptr<RedisDirEntryCache> GetOrCreate(InodeID ino, std::shared_ptr<RedisMetaClient> client, std::string key,
-                                                  InodeID parent_ino) {
-    std::lock_guard lock(mutex_);
-    auto it = caches_.find(ino);
-    if (it != caches_.end()) {
-      if (auto cache = it->second.lock()) {
-        return cache;
-      }
-      caches_.erase(it);
-    }
-
-    auto cache =
-        std::make_shared<RedisDirEntryCache>(std::move(client), std::move(key), ino, parent_ino, weak_from_this());
-    caches_.emplace(ino, cache);
-    return cache;
-  }
-
-  void Remove(InodeID ino, const RedisDirEntryCache *cache) {
-    std::lock_guard lock(mutex_);
-    auto it = caches_.find(ino);
-    if (it == caches_.end()) {
-      return;
-    }
-    auto current = it->second.lock();
-    if (!current || current.get() == cache) {
-      caches_.erase(it);
-    }
-  }
-
- private:
-  std::mutex mutex_;
-  std::unordered_map<InodeID, std::weak_ptr<RedisDirEntryCache>> caches_;
-};
-
-RedisDirEntryCache::~RedisDirEntryCache() {
-  if (auto registry = registry_.lock()) {
-    registry->Remove(ino_, this);
-  }
-}
-
 namespace {
-
-class RedisDirIterator final : public DirIterator {
- public:
-  explicit RedisDirIterator(std::shared_ptr<RedisDirEntryCache> cache) : cache_(std::move(cache)) {
-  }
-
-  Status Peek(uint64_t offset, SwordFsEntry *entry) override {
-    return cache_->Get(static_cast<size_t>(offset), entry);
-  }
-
-  Status Next(uint64_t offset, SwordFsEntry *entry, uint64_t *next_offset) override {
-    if (entry == nullptr || next_offset == nullptr) {
-      return Status::InvalidArgument("directory iterator output is null");
-    }
-    std::lock_guard lock(mutex_);
-    auto status = cache_->Get(static_cast<size_t>(offset), entry);
-    if (!status.ok()) {
-      return status;
-    }
-    *next_offset = offset + 1;
-    return Status::OK();
-  }
-
- private:
-  std::mutex mutex_;
-  std::shared_ptr<RedisDirEntryCache> cache_;
-};
 utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view volume_name,
                                     std::unique_ptr<IMetaEngine> *out) {
   if (out == nullptr) {
@@ -211,15 +61,6 @@ utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view 
 }
 
 RegisterMetaEngine kRedisMetaEngine{"redis", CreateRedisMetaEngine};
-
-std::string SerializeDirValue(uint32_t type, InodeID ino) {
-  BufEncoder encoder;
-  encoder.U32(type);
-  encoder.U64(ino);
-  std::string value;
-  encoder.Finish(&value);
-  return value;
-}
 
 int64_t NowSeconds() {
   return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -262,9 +103,7 @@ utils::Status SerializeInode(const SwordFsInode &inode, std::string *value) {
 }  // namespace
 
 RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name)
-    : client_(std::make_shared<RedisMetaClient>(config)),
-      key_(config.db, volume_name),
-      dir_cache_registry_(std::make_shared<RedisDirCacheRegistry>()) {
+    : client_(std::make_shared<RedisMetaClient>(config)), key_(config.db, volume_name) {
 }
 
 RedisMetaImpl::~RedisMetaImpl() = default;
@@ -371,14 +210,12 @@ Status RedisMetaImpl::Lookup(InodeID parent_ino, std::string_view name, SwordFsI
   if (!status.ok()) {
     return status;
   }
-  uint32_t type;
-  InodeID child_ino;
-  status = ParseDirValue(entry_value, &type, &child_ino);
+  SwordFsEntry entry;
+  status = entry.ParseFrom(entry_value);
   if (!status.ok()) {
     return status;
   }
-  (void)type;
-  status = client_->Get(key_.Inode(child_ino), &entry_value);
+  status = client_->Get(key_.Inode(entry.ino), &entry_value);
   if (!status.ok()) {
     return status;
   }
@@ -435,8 +272,11 @@ Status RedisMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
     return Status::NotDirectory("not a directory");
   }
 
-  auto cache = dir_cache_registry_->GetOrCreate(ino, client_, key_.Directory(ino), dir.parent_ino);
-  *iterator = std::make_shared<RedisDirIterator>(std::move(cache));
+  std::vector<SwordFsEntry> prefix_entries{
+      {".", DT_DIR, ino},
+      {"..", DT_DIR, dir.parent_ino},
+  };
+  *iterator = std::make_shared<RedisDirIterator>(client_, key_.Directory(ino), std::move(prefix_entries));
 
   status = UpdateAtimeBestEffort(ino);
   if (!status.ok()) {
@@ -495,7 +335,12 @@ Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t
     if (!status.ok()) {
       return status;
     }
-    status = txn.HSet(key_.Directory(parent_ino), name, SerializeDirValue(DT_REG, child_ino));
+    std::string dir_entry_value;
+    status = SwordFsEntry{std::string(name), DT_REG, child_ino}.SerializeTo(&dir_entry_value);
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.HSet(key_.Directory(parent_ino), name, dir_entry_value);
     if (!status.ok()) {
       return status;
     }
@@ -566,7 +411,12 @@ Status RedisMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t 
     if (!status.ok()) {
       return status;
     }
-    status = txn.HSet(key_.Directory(parent_ino), name, SerializeDirValue(DT_DIR, child_ino));
+    std::string dir_entry_value;
+    status = SwordFsEntry{std::string(name), DT_DIR, child_ino}.SerializeTo(&dir_entry_value);
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.HSet(key_.Directory(parent_ino), name, dir_entry_value);
     if (!status.ok()) {
       return status;
     }
@@ -613,12 +463,12 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t
     if (!status.ok()) {
       return status;
     }
-    uint32_t type;
-    InodeID child_ino;
-    status = ParseDirValue(entry_value, &type, &child_ino);
+    SwordFsEntry entry;
+    status = entry.ParseFrom(entry_value);
     if (!status.ok()) {
       return status;
     }
+    const InodeID child_ino = entry.ino;
     SwordFsInode child;
     status = txn.Get(key_.Inode(child_ino), &value);
     if (!status.ok()) {
@@ -690,12 +540,12 @@ Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
     if (!status.ok()) {
       return status;
     }
-    uint32_t type;
-    InodeID child_ino;
-    status = ParseDirValue(entry_value, &type, &child_ino);
+    SwordFsEntry entry;
+    status = entry.ParseFrom(entry_value);
     if (!status.ok()) {
       return status;
     }
+    const InodeID child_ino = entry.ino;
     status = txn.Get(key_.Inode(child_ino), &value);
     if (!status.ok()) {
       return status;
@@ -792,12 +642,13 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     if (!status.ok()) {
       return status;
     }
-    uint32_t source_type;
-    InodeID source_ino;
-    status = ParseDirValue(source_entry_value, &source_type, &source_ino);
+    SwordFsEntry source_entry;
+    status = source_entry.ParseFrom(source_entry_value);
     if (!status.ok()) {
       return status;
     }
+    const uint32_t source_type = source_entry.type;
+    const InodeID source_ino = source_entry.ino;
     status = txn.Get(key_.Inode(source_ino), &source_value);
     if (!status.ok()) {
       return status;
@@ -867,12 +718,13 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
       if (!target_exists) {
         return Status::NotFound("target does not exist for RENAME_EXCHANGE");
       }
-      uint32_t target_type;
-      InodeID target_ino;
-      status = ParseDirValue(target_entry_value, &target_type, &target_ino);
+      SwordFsEntry target_entry;
+      status = target_entry.ParseFrom(target_entry_value);
       if (!status.ok()) {
         return status;
       }
+      const uint32_t target_type = target_entry.type;
+      const InodeID target_ino = target_entry.ino;
       if (target_ino == source_ino) {
         return Status::OK();
       }
@@ -901,11 +753,19 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
           return Status::InvalidArgument("cannot exchange directory into its descendant");
         }
       }
-      status = txn.HSet(key_.Directory(old_parent_ino), old_name, SerializeDirValue(target_type, target_ino));
+      status = SwordFsEntry{std::string(old_name), target_type, target_ino}.SerializeTo(&target_entry_value);
       if (!status.ok()) {
         return status;
       }
-      status = txn.HSet(key_.Directory(new_parent_ino), new_name, SerializeDirValue(source_type, source_ino));
+      status = txn.HSet(key_.Directory(old_parent_ino), old_name, target_entry_value);
+      if (!status.ok()) {
+        return status;
+      }
+      status = SwordFsEntry{std::string(new_name), source_type, source_ino}.SerializeTo(&source_entry_value);
+      if (!status.ok()) {
+        return status;
+      }
+      status = txn.HSet(key_.Directory(new_parent_ino), new_name, source_entry_value);
       if (!status.ok()) {
         return status;
       }
@@ -949,12 +809,12 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
       return status;
     }
     if (target_exists) {
-      uint32_t target_type;
-      InodeID target_ino;
-      status = ParseDirValue(target_entry_value, &target_type, &target_ino);
+      SwordFsEntry target_entry;
+      status = target_entry.ParseFrom(target_entry_value);
       if (!status.ok()) {
         return status;
       }
+      const InodeID target_ino = target_entry.ino;
       if (target_ino == source_ino) {
         return Status::OK();
       }
@@ -1028,7 +888,11 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     if (!status.ok()) {
       return status;
     }
-    status = txn.HSet(key_.Directory(new_parent_ino), new_name, SerializeDirValue(source_type, source_ino));
+    status = SwordFsEntry{std::string(new_name), source_type, source_ino}.SerializeTo(&source_entry_value);
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.HSet(key_.Directory(new_parent_ino), new_name, source_entry_value);
     if (!status.ok()) {
       return status;
     }
@@ -1256,7 +1120,12 @@ Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::st
     if (!status.ok()) {
       return status;
     }
-    status = txn.HSet(key_.Directory(parent_ino), name, SerializeDirValue(DT_LNK, child_ino));
+    std::string dir_entry_value;
+    status = SwordFsEntry{std::string(name), DT_LNK, child_ino}.SerializeTo(&dir_entry_value);
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.HSet(key_.Directory(parent_ino), name, dir_entry_value);
     if (!status.ok()) {
       return status;
     }
@@ -1320,7 +1189,12 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
     inode.attr.nlink++;
     Touch(&inode, false, false, true);
     Touch(&parent, false, true, true);
-    status = txn.HSet(key_.Directory(newparent_ino), newname, SerializeDirValue(ModeToDt(inode.attr.mode), ino));
+    std::string dir_entry_value;
+    status = SwordFsEntry{std::string(newname), ModeToDt(inode.attr.mode), ino}.SerializeTo(&dir_entry_value);
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.HSet(key_.Directory(newparent_ino), newname, dir_entry_value);
     if (!status.ok()) {
       return status;
     }

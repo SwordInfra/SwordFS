@@ -34,8 +34,13 @@ class DirIterator {
  public:
   virtual ~DirIterator() = default;
 
-  virtual utils::Status Peek(uint64_t cookie, SwordFsEntry *entry) = 0;
-  virtual utils::Status Next(uint64_t cookie, SwordFsEntry *entry, uint64_t *next_cookie) = 0;
+  /// Reposition the iterator to |cookie|.
+  virtual utils::Status Seek(uint64_t cookie) = 0;
+  /// Inspect the entry at the current iterator position without advancing it.
+  virtual utils::Status Peek(SwordFsEntry *entry, uint64_t *next_cookie) = 0;
+  /// Advance to the position returned by the most recent successful Peek().
+  /// Calling Advance() without a pending entry violates the iterator contract.
+  virtual void Advance() = 0;
 };
 
 using DirIteratorPtr = std::shared_ptr<DirIterator>;
