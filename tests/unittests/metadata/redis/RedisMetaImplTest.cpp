@@ -212,6 +212,25 @@ TEST_F(RedisMetaImplTest, SetAttrSameOwnerKeepsSuidSgid) {
   EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), requested.mode & (S_ISUID | S_ISGID));
 }
 
+TEST_F(RedisMetaImplTest, TruncateRemovesChunkBeyondOldSizeRange) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+
+  SwordFsChunk stale;
+  stale.index = 10;
+  stale.start_offset = 10 * 4096;
+  stale.size = 4096;
+  ASSERT_TRUE(impl_->AddChunk(file.ino, stale).ok());
+
+  SwordFsAttr requested = file.attr;
+  requested.size = 100;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kSize, nullptr).ok());
+  ASSERT_TRUE(impl_->Truncate(file.ino, 50).ok());
+
+  SwordFsChunk actual;
+  EXPECT_TRUE(impl_->FindChunk(file.ino, stale.index, &actual).IsNotFound());
+}
+
 TEST_F(RedisMetaImplTest, SetAttrShrinkRemovesAndClampsChunks) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());

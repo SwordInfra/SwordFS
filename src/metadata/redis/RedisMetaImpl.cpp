@@ -4,6 +4,7 @@
 #include "metadata/redis/RedisMetaImpl.hpp"
 
 #include <dirent.h>
+#include <folly/Conv.h>
 #include <folly/container/F14Set.h>
 #include <folly/fibers/FiberManagerInternal.h>
 #include <folly/logging/xlog.h>
@@ -1354,45 +1355,61 @@ Status RedisMetaImpl::TruncateChunks(RedisMetaTxn &txn, InodeID ino, uint64_t ol
   const ChunkIndex boundary_idx = static_cast<ChunkIndex>(new_size / chunk_size_);
   const uint64_t boundary_offset = new_size % chunk_size_;
   const ChunkIndex first_removed_idx = boundary_idx + (boundary_offset != 0 ? 1 : 0);
-  const ChunkIndex old_chunk_count = static_cast<ChunkIndex>((old_size + chunk_size_ - 1) / chunk_size_);
 
+  constexpr size_t kScanBatchSize = 128;
+  uint64_t cursor = 0;
   std::optional<std::string> boundary_value;
-  if (boundary_offset != 0) {
-    std::string value;
-    auto status = txn.HGet(chunk_key, std::to_string(boundary_idx), &value);
-    if (status.ok()) {
+  std::vector<std::string> removed_fields;
+  do {
+    std::vector<std::pair<std::string, std::string>> values;
+    uint64_t next_cursor = 0;
+    auto status = txn.HScan(chunk_key, cursor, kScanBatchSize, &values, &next_cursor);
+    if (!status.ok()) {
+      return status;
+    }
+    for (auto &[field, chunk_value] : values) {
+      const auto idx = folly::tryTo<ChunkIndex>(field);
+      if (!idx.hasValue()) {
+        return Status::Malformed("invalid Redis chunk index");
+      }
+      if (idx.value() >= first_removed_idx) {
+        removed_fields.push_back(std::move(field));
+        continue;
+      }
+      if (boundary_offset == 0 || idx.value() != boundary_idx) {
+        continue;
+      }
+
       SwordFsChunk chunk;
-      status = chunk.ParseFrom(value);
+      status = chunk.ParseFrom(chunk_value);
       if (!status.ok()) {
         return status;
       }
       const uint64_t new_chunk_size = new_size - chunk.start_offset;
-      if (chunk.size > new_chunk_size) {
-        chunk.size = new_chunk_size;
-        status = chunk.SerializeTo(&value);
-        if (!status.ok()) {
-          return status;
-        }
-        boundary_value = std::move(value);
+      if (chunk.size <= new_chunk_size) {
+        continue;
       }
-    } else if (!status.IsNotFound()) {
-      return status;
+      chunk.size = new_chunk_size;
+      status = chunk.SerializeTo(&chunk_value);
+      if (!status.ok()) {
+        return status;
+      }
+      boundary_value = std::move(chunk_value);
     }
-  }
+    cursor = next_cursor;
+  } while (cursor != 0);
 
-  // RedisMetaTxn requires all reads before writes. Queue mutations only after
-  // the optional boundary lookup has finished.
+  // RedisMetaTxn requires all reads before writes. Each HSCAN batch is
+  // filtered immediately; only fields that actually need deletion and at
+  // most one boundary chunk survive until the mutation phase.
   if (boundary_value.has_value()) {
     auto status = txn.HSet(chunk_key, std::to_string(boundary_idx), *boundary_value);
     if (!status.ok()) {
       return status;
     }
   }
-  // Chunk fields use their fixed-size chunk index as the hash field. The old
-  // inode size therefore bounds every index that can exist, and HDEL is a
-  // no-op for sparse/missing chunks; no hash-wide scan is needed.
-  for (ChunkIndex idx = first_removed_idx; idx < old_chunk_count; ++idx) {
-    auto status = txn.HDel(chunk_key, std::to_string(idx));
+  for (const auto &field : removed_fields) {
+    auto status = txn.HDel(chunk_key, field);
     if (!status.ok()) {
       return status;
     }
