@@ -174,19 +174,18 @@ utils::Status InodeHandle::ReclaimData() {
     return utils::Status::OK();
   }
 
-  // 1. Enumerate every chunk the metadata engine still tracks for this
-  //    inode and issue a data-engine delete for each.
-  std::vector<metadata::SwordFsChunk> chunks;
-  status = meta_->ListChunks(ino_, &chunks);
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "ReclaimData: ListChunks(" << ino_ << ") failed: " << status.message();
-    return status;
-  }
-  for (const auto &chunk : chunks) {
-    status = data_->Delete(chunk.key);
+  // 1. Stream every chunk the metadata engine still tracks for this inode
+  //    and issue a data-engine delete without materializing the full map.
+  status = meta_->VisitChunks(ino_, [&](const metadata::SwordFsChunk &chunk) {
+    auto status = data_->Delete(chunk.key);
     if (!status.ok()) {
       SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << chunk.key << ") failed: " << status.message();
     }
+    return utils::Status::OK();
+  });
+  if (!status.ok()) {
+    SWORDFS_LOG_ERROR << "ReclaimData: VisitChunks(" << ino_ << ") failed: " << status.message();
+    return status;
   }
 
   // 2. Drop the inode from the metadata engine.

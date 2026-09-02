@@ -133,9 +133,9 @@ utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
 
   // meta->Unlink hands back the authoritative post-decrement nlink.
   uint64_t post_nlink = 0;
-  auto st = meta->Unlink(parent, name, &post_nlink);
-  if (!st.ok()) {
-    return st;
+  status = meta->Unlink(parent, name, &post_nlink);
+  if (!status.ok()) {
+    return status;
   }
 
   // Hardlink still alive? Then the inode (and its chunks) belong to
@@ -200,10 +200,10 @@ utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name, fuse_ino_t ne
       SWORDFS_LOG_ERROR << "Rename: failed to get InodeHandle for overwritten " << "inode " << result.overwritten_ino
                         << "; rename has already committed";
     } else if (!handle->MarkOrphanedIfOpen()) {
-      auto cleanup_status = handle->ReclaimData();
-      if (!cleanup_status.ok()) {
+      auto status = handle->ReclaimData();
+      if (!status.ok()) {
         SWORDFS_LOG_ERROR << "Rename: cleanup of overwritten inode " << result.overwritten_ino
-                          << " failed: " << cleanup_status.message();
+                          << " failed: " << status.message();
       }
     }
   }

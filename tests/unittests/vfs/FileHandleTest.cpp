@@ -141,7 +141,7 @@ class MockMetaEngine : public IMetaEngine {
     ++reclaim_calls;
     return reclaim_status;
   }
-  Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
+  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
@@ -530,7 +530,7 @@ TEST_F(FileHandleTest, InodeHandleOpenFdTracking) {
 // ────────────────────────────────────────────────────────────────
 //
 // ReclaimData fans a single call out to both the metadata engine
-// (ListChunks + ReclaimInode) and the data engine (Delete per chunk
+// (VisitChunks + ReclaimInode) and the data engine (Delete per chunk
 // key). These tests assert that the call sequence matches the
 // documented contract; the per-engine behaviour is exercised by the
 // metadata- and data-engine unit tests.
@@ -568,7 +568,7 @@ class FakeDataEngine : public swordfs::storage::IDataEngine {
   std::unordered_map<std::string, Status> fail_keys;
 };
 
-// Mock metadata engine: records ListChunks / ReclaimInode invocations
+// Mock metadata engine: records VisitChunks / ReclaimInode invocations
 // and returns a configurable chunk list + GetAttr (so the ReclaimData
 // guard sees the nlink value the test wants).
 class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
@@ -657,13 +657,18 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     last_reclaim_ino = ino;
     return Status::OK();
   }
-  Status ListChunks(InodeID ino, std::vector<swordfs::metadata::SwordFsChunk> *out) override {
-    ++list_chunks_calls;
-    last_list_ino = ino;
-    if (!list_chunks_status.ok()) {
-      return list_chunks_status;
+  Status VisitChunks(InodeID ino, const swordfs::metadata::ChunkVisitorFn &visitor) override {
+    ++visit_chunks_calls;
+    last_visit_ino = ino;
+    if (!visit_chunks_status.ok()) {
+      return visit_chunks_status;
     }
-    *out = chunks;
+    for (const auto &chunk : chunks) {
+      auto status = visitor(chunk);
+      if (!status.ok()) {
+        return status;
+      }
+    }
     return Status::OK();
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
@@ -679,11 +684,11 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
 
-  int list_chunks_calls = 0;
+  int visit_chunks_calls = 0;
   int reclaim_inode_calls = 0;
-  InodeID last_list_ino = 0;
+  InodeID last_visit_ino = 0;
   InodeID last_reclaim_ino = 0;
-  Status list_chunks_status = Status::OK();
+  Status visit_chunks_status = Status::OK();
   std::vector<swordfs::metadata::SwordFsChunk> chunks;
   std::unordered_map<InodeID, struct stat> attrs;
 };
@@ -739,15 +744,15 @@ TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
 
   ASSERT_TRUE(ReclaimInode(4242).ok());
 
-  // Order is ascending chunk index (ListChunks contract).
+  // The mock visits chunks in insertion order.
   EXPECT_EQ(data->delete_calls.size(), 2);
   EXPECT_EQ(data->delete_calls[0], "4242/0");
   EXPECT_EQ(data->delete_calls[1], "4242/1");
 
   // Both engines received exactly one call each.
-  EXPECT_EQ(meta->list_chunks_calls, 1);
+  EXPECT_EQ(meta->visit_chunks_calls, 1);
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
-  EXPECT_EQ(meta->last_list_ino, 4242);
+  EXPECT_EQ(meta->last_visit_ino, 4242);
   EXPECT_EQ(meta->last_reclaim_ino, 4242);
 }
 
@@ -779,7 +784,7 @@ TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
   ASSERT_TRUE(ReclaimInode(99).ok());
   EXPECT_EQ(data->delete_calls.size(), 1u);
   EXPECT_EQ(data->delete_calls[0], "99/0");
-  EXPECT_EQ(meta->list_chunks_calls, 1);
+  EXPECT_EQ(meta->visit_chunks_calls, 1);
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
 }
 
@@ -803,7 +808,7 @@ TEST_F(FileHandleTest, ReclaimDataCallsReclaimInodeEvenWhenChunkEmpty) {
   vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
   ASSERT_TRUE(ReclaimInode(123).ok());
-  EXPECT_EQ(meta->list_chunks_calls, 1);
+  EXPECT_EQ(meta->visit_chunks_calls, 1);
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
   EXPECT_TRUE(data->delete_calls.empty());
 }
@@ -840,7 +845,7 @@ TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
 }
 
-TEST_F(FileHandleTest, ReclaimDataPropagatesListChunksFailure) {
+TEST_F(FileHandleTest, ReclaimDataPropagatesVisitChunksFailure) {
   // If the metadata engine refuses to enumerate, the manager must
   // surface that error and NOT invoke ReclaimInode (we don't know
   // whether the inode exists from the manager's perspective).
@@ -849,7 +854,7 @@ TEST_F(FileHandleTest, ReclaimDataPropagatesListChunksFailure) {
   auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
   auto *data = data_up.get();
-  meta->list_chunks_status = Status::Internal("nope");
+  meta->visit_chunks_status = Status::Internal("nope");
   struct stat attr{};
   attr.st_nlink = 0;
   meta->SetAttr(42, attr);
@@ -860,7 +865,7 @@ TEST_F(FileHandleTest, ReclaimDataPropagatesListChunksFailure) {
 
   auto st = ReclaimInode(42);
   EXPECT_FALSE(st.ok());
-  EXPECT_EQ(meta->list_chunks_calls, 1);
+  EXPECT_EQ(meta->visit_chunks_calls, 1);
   EXPECT_EQ(meta->reclaim_inode_calls, 0);
   EXPECT_TRUE(data->delete_calls.empty());
 }
@@ -944,7 +949,7 @@ TEST_F(FileHandleTest, ReclaimDataIsIdempotentWhenInodeAlreadyGone) {
   // The metadata engine reports the inode as gone (NotFound on GetAttr).
   // The InodeHandle::ReclaimData guard treats that as a no-op success:
   // a concurrent reclaim has already finalised the cleanup on another
-  // thread. Without this guard, the manager would still call ListChunks
+  // thread. Without this guard, the manager would still call VisitChunks
   // and surface a NotFound to the caller as if it were a real failure.
   swordfs::volume::VolumeImpl::Initialize();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
@@ -959,7 +964,7 @@ TEST_F(FileHandleTest, ReclaimDataIsIdempotentWhenInodeAlreadyGone) {
   vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
   ASSERT_TRUE(ReclaimInode(42).ok());
-  EXPECT_EQ(meta->list_chunks_calls, 0);
+  EXPECT_EQ(meta->visit_chunks_calls, 0);
   EXPECT_EQ(meta->reclaim_inode_calls, 0);
   EXPECT_TRUE(data->delete_calls.empty());
 }

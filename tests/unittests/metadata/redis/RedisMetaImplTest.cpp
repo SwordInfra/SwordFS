@@ -59,6 +59,7 @@ class RedisMetaImplTest : public ::testing::Test {
     SwordFsVolume volume;
     volume.name = volume_name_;
     volume.meta_url = "redis://test";
+    volume.chunk_size = 4096;
     ASSERT_TRUE(impl_->FormatVolume(volume).ok());
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
@@ -183,9 +184,42 @@ TEST_F(RedisMetaImplTest, ConcurrentOpenDoesNotFailOnAtimeContention) {
   }
 }
 
+TEST_F(RedisMetaImplTest, SetAttrPreservesExplicitCtime) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+
+  SwordFsAttr requested = file.attr;
+  requested.ctime = 123;
+  requested.ctime_nsec = 456;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kCtime, nullptr).ok());
+
+  SwordFsInode actual;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_EQ(actual.attr.ctime, requested.ctime);
+  EXPECT_EQ(actual.attr.ctime_nsec, requested.ctime_nsec);
+}
+
+TEST_F(RedisMetaImplTest, SetAttrSameOwnerKeepsSuidSgid) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0755, &file).ok());
+
+  SwordFsAttr requested = file.attr;
+  requested.mode = S_IFREG | 06755;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kMode, &file).ok());
+  ASSERT_NE(file.attr.mode & (S_ISUID | S_ISGID), 0U);
+
+  requested = file.attr;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kUid, &file).ok());
+  EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), requested.mode & (S_ISUID | S_ISGID));
+}
+
 TEST_F(RedisMetaImplTest, SetAttrShrinkRemovesAndClampsChunks) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+
+  SwordFsAttr initial = file.attr;
+  initial.size = 8192;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, initial, SetAttrField::kSize, &file).ok());
 
   SwordFsChunk chunk0;
   chunk0.index = 0;

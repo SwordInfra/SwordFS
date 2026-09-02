@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -44,6 +45,7 @@ class DirIterator {
 };
 
 using DirIteratorPtr = std::shared_ptr<DirIterator>;
+using ChunkVisitorFn = std::function<Status(const SwordFsChunk &)>;
 
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
@@ -143,17 +145,16 @@ class IMetaEngine {
   ///
   /// @important  This does NOT delete the chunk objects from the data
   /// engine. The caller is responsible for invoking
-  /// `IDataEngine::Delete` on each chunk key first (use `ListChunks` to
+  /// `IDataEngine::Delete` on each chunk key first (use `VisitChunks` to
   /// enumerate). See `vfs::InodeHandle::ReclaimData` for the canonical
   /// implementation of the full cleanup.
   virtual Status ReclaimInode(InodeID ino) = 0;
 
-  /// Enumerate the chunk indices currently registered for |ino|. Fills
-  /// |*out| with `SwordFsChunk` entries (by value) ordered by ascending
-  /// chunk index. Used by the VFS layer when reclaiming an inode to
-  /// compute the per-chunk object keys it must delete via the data
-  /// engine. Returns OK with `*out` empty if the inode has no chunks.
-  virtual Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) = 0;
+  /// Visit the chunk metadata currently registered for |ino| without
+  /// materializing the complete chunk map in the caller. Backends should
+  /// stream or batch the enumeration when their storage API supports it.
+  /// Returns immediately if |visitor| returns an error.
+  virtual Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) = 0;
 
   /// Open a directory and create its per-open iterator. Implementations may
   /// share backend directory-entry prefetch/cache state between iterators.

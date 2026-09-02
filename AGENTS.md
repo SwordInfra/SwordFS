@@ -32,6 +32,12 @@
   // ────────────────────────────────────────────────────────────────
   ```
 
+## Git Commit Rules
+
+- **Prefer one commit per PR.** For follow-up fixes, review feedback, CI fixes, formatting, or other changes that do not represent a significant independent unit of work, reuse the PR's existing commit with `git commit --amend` instead of creating additional commits.
+- Create a new commit within the same PR only when the change is significant and logically independent enough to deserve separate review or rollback.
+- Before committing follow-up work on an existing PR, inspect the PR's commit history and amend the appropriate existing commit whenever practical. Avoid accumulating fixup, cleanup, formatting, or "address review" commits.
+
 ## Editing Rules
 
 - **NEVER use `sed`, `python`, `awk`, or any external command for direct file editing.** All file modifications MUST go through the `replace_string_in_file` tool so every change is visible and reviewable. This includes bulk find-and-replace operations — use `multi_replace_string_in_file` instead.
