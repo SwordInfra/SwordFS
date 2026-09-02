@@ -100,6 +100,20 @@ TEST(MetadataTypesTest, ChunkRoundTrip) {
   EXPECT_EQ(output.size, input.size);
 }
 
+TEST(MetadataTypesTest, EncoderFinishOverwritesExistingOutput) {
+  BufEncoder enc;
+  enc.U64(42);
+
+  std::string encoded = "stale-data";
+  enc.Finish(&encoded);
+
+  BufDecoder dec(encoded);
+  uint64_t value = 0;
+  ASSERT_TRUE(dec.U64(&value));
+  EXPECT_EQ(value, 42U);
+  EXPECT_TRUE(dec.Done());
+}
+
 TEST(MetadataTypesTest, DecoderReportsMalformedInput) {
   BufDecoder dec("\x01\x02\x03");
   uint64_t value = 0;
