@@ -265,7 +265,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status ReclaimInode(InodeID) override {
     return call_status_;
   }
-  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitor &) override {
+  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *iterator) override {

@@ -692,7 +692,7 @@ Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) 
   return store_.Transact([&](MemMetaTxn &txn) { return txn.FindChunk(ino, idx, chunk); });
 }
 
-Status MemMetaImpl::VisitChunks(InodeID ino, const ChunkVisitor &visitor) {
+Status MemMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
   if (!visitor) {
     return Status::InvalidArgument("chunk visitor is null");
   }

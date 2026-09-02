@@ -141,7 +141,7 @@ class MockMetaEngine : public IMetaEngine {
     ++reclaim_calls;
     return reclaim_status;
   }
-  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitor &) override {
+  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
@@ -657,7 +657,7 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     last_reclaim_ino = ino;
     return Status::OK();
   }
-  Status VisitChunks(InodeID ino, const swordfs::metadata::ChunkVisitor &visitor) override {
+  Status VisitChunks(InodeID ino, const swordfs::metadata::ChunkVisitorFn &visitor) override {
     ++visit_chunks_calls;
     last_visit_ino = ino;
     if (!visit_chunks_status.ok()) {

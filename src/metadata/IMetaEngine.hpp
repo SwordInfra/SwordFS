@@ -45,7 +45,7 @@ class DirIterator {
 };
 
 using DirIteratorPtr = std::shared_ptr<DirIterator>;
-using ChunkVisitor = std::function<Status(const SwordFsChunk &)>;
+using ChunkVisitorFn = std::function<Status(const SwordFsChunk &)>;
 
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
@@ -154,7 +154,7 @@ class IMetaEngine {
   /// materializing the complete chunk map in the caller. Backends should
   /// stream or batch the enumeration when their storage API supports it.
   /// Returns immediately if |visitor| returns an error.
-  virtual Status VisitChunks(InodeID ino, const ChunkVisitor &visitor) = 0;
+  virtual Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) = 0;
 
   /// Open a directory and create its per-open iterator. Implementations may
   /// share backend directory-entry prefetch/cache state between iterators.

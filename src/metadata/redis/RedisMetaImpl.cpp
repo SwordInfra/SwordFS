@@ -1250,7 +1250,7 @@ Status RedisMetaImpl::ReclaimInode(InodeID ino) {
   });
 }
 
-Status RedisMetaImpl::VisitChunks(InodeID ino, const ChunkVisitor &visitor) {
+Status RedisMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
   if (!visitor) {
     return Status::InvalidArgument("chunk visitor is null");
   }

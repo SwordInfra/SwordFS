@@ -49,6 +49,7 @@ class RedisMetaTxn {
   // invalidating it when QueuedRedis is destroyed.
   utils::Status ReleaseConnection();
 
+ private:
   std::optional<sw::redis::Transaction> transaction_;
   // Keep the Redis view returned by Transaction::redis() alive for the
   // entire transaction. redis-plus-plus requires this for pooled

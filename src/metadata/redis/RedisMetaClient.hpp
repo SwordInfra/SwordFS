@@ -44,6 +44,8 @@ class RedisMetaClient {
 
  private:
   utils::Status TransactImpl(const std::function<utils::Status(RedisMetaTxn &)> &callback);
+
+ private:
   std::unique_ptr<sw::redis::Redis> redis_;
   std::unique_ptr<utils::FiberThreadPool> pool_;
   int retry_attempts_;

@@ -107,7 +107,7 @@ class MissingMetaEngine final : public IMetaEngine {
   Status ReclaimInode(InodeID) override {
     return Status::OK();
   }
-  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitor &) override {
+  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
