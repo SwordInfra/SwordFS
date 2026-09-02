@@ -81,8 +81,7 @@ utils::Status RedisMetaTxn::HGet(std::string_view key, std::string_view field, s
 }
 
 utils::Status RedisMetaTxn::HScan(std::string_view key, uint64_t cursor, size_t count,
-                                  std::vector<std::pair<std::string, std::string>> *values,
-                                  uint64_t *next_cursor) {
+                                  std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor) {
   if (values == nullptr || next_cursor == nullptr) {
     return utils::Status::InvalidArgument("Redis HSCAN output is null");
   }
