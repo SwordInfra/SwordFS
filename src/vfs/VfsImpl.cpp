@@ -62,7 +62,7 @@ utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name, fuse_entry_pa
   return Status::OK();
 }
 
-utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
+utils::Status VfsImpl::GetAttr(fuse_ino_t ino, struct stat *attr) {
   SwordFsInode inode;
   Status status = VolumeImpl::Instance().meta_engine()->GetInode(ino, &inode);
   if (status.ok()) {
@@ -71,7 +71,7 @@ utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
   return status;
 }
 
-utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr, int to_set, struct stat *out_attr) {
+utils::Status VfsImpl::SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, struct stat *out_attr) {
   SetAttrField fields = FromFuseSetAttrFields(to_set);
   SwordFsAttr metadata_attr = SwordFsAttr::FromPosixStat(*attr);
   SwordFsInode inode;
@@ -83,11 +83,11 @@ utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr, int to_set, st
   return status;
 }
 
-utils::Status VfsImpl::Readlink(fuse_ino_t ino, std::string *target) {
+utils::Status VfsImpl::ReadLink(fuse_ino_t ino, std::string *target) {
   return VolumeImpl::Instance().meta_engine()->Readlink(ino, target);
 }
 
-utils::Status VfsImpl::Mknod(fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev) {
+utils::Status VfsImpl::MkNod(fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev) {
   (void)parent;
   (void)name;
   (void)mode;
@@ -95,7 +95,7 @@ utils::Status VfsImpl::Mknod(fuse_ino_t parent, const char *name, mode_t mode, d
   return Status::NotSupported("mknod");
 }
 
-utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry) {
+utils::Status VfsImpl::MkDir(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry) {
   SwordFsInode child;
   Status status = VolumeImpl::Instance().meta_engine()->MkDir(parent, name, static_cast<uint32_t>(mode), &child);
   if (!status.ok()) {
@@ -157,7 +157,7 @@ utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
   return utils::Status::OK();
 }
 
-utils::Status VfsImpl::Rmdir(fuse_ino_t parent, const char *name) {
+utils::Status VfsImpl::RmDir(fuse_ino_t parent, const char *name) {
   return VolumeImpl::Instance().meta_engine()->RmDir(parent, name);
 }
 
@@ -281,7 +281,7 @@ utils::Status VfsImpl::Release(fuse_ino_t ino, uint64_t fh) {
   return handle->Release();
 }
 
-utils::Status VfsImpl::Fsync(fuse_ino_t ino, int datasync, uint64_t fh) {
+utils::Status VfsImpl::FSync(fuse_ino_t ino, int datasync, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Fsync: ino=" << ino << " datasync=" << datasync << " fh=" << fh;
   auto handle = HandleManager::Instance().FindAs<FileHandle>(fh);
   if (!handle) {
@@ -290,7 +290,7 @@ utils::Status VfsImpl::Fsync(fuse_ino_t ino, int datasync, uint64_t fh) {
   return handle->Flush();
 }
 
-utils::Status VfsImpl::Opendir(fuse_ino_t ino, uint64_t *fh) {
+utils::Status VfsImpl::OpenDir(fuse_ino_t ino, uint64_t *fh) {
   std::shared_ptr<DirHandle> handle;
   auto status = DirHandle::Open(ino, &handle);
   if (status.ok()) {
@@ -355,18 +355,18 @@ static utils::Status ReaddirCommon(fuse_req_t req, size_t size, off_t off, uint6
   return handle->ReadDir(off, size, encoder, out);
 }
 
-utils::Status VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh, std::string *buf) {
+utils::Status VfsImpl::ReadDir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh, std::string *buf) {
   (void)ino;
   return ReaddirCommon(req, size, off, fh, FuseDirEntryEncoder::Mode::kNormal, buf);
 }
 
-utils::Status VfsImpl::Readdirplus(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh,
+utils::Status VfsImpl::ReadDirPlus(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh,
                                    std::string *buf) {
   (void)ino;
   return ReaddirCommon(req, size, off, fh, FuseDirEntryEncoder::Mode::kPlus, buf);
 }
 
-utils::Status VfsImpl::Releasedir(fuse_ino_t ino, uint64_t fh) {
+utils::Status VfsImpl::ReleaseDir(fuse_ino_t ino, uint64_t fh) {
   (void)ino;
   auto handle = HandleManager::Instance().FindAs<DirHandle>(fh);
   if (!handle) {
@@ -375,13 +375,13 @@ utils::Status VfsImpl::Releasedir(fuse_ino_t ino, uint64_t fh) {
   return handle->Release();
 }
 
-utils::Status VfsImpl::Fsyncdir(fuse_ino_t ino, int datasync) {
+utils::Status VfsImpl::FSyncDir(fuse_ino_t ino, int datasync) {
   (void)ino;
   (void)datasync;
   return Status::NotSupported("fsyncdir");
 }
 
-utils::Status VfsImpl::Statfs(fuse_ino_t ino, struct statvfs *stbuf) {
+utils::Status VfsImpl::StatFs(fuse_ino_t ino, struct statvfs *stbuf) {
   (void)ino;
   if (stbuf == nullptr) {
     return Status::InvalidArgument("statfs output is null");
@@ -404,7 +404,7 @@ utils::Status VfsImpl::Statfs(fuse_ino_t ino, struct statvfs *stbuf) {
   return Status::OK();
 }
 
-utils::Status VfsImpl::Setxattr(fuse_ino_t ino, const char *name, const char *value, size_t size, int flags) {
+utils::Status VfsImpl::SetXAttr(fuse_ino_t ino, const char *name, const char *value, size_t size, int flags) {
   (void)ino;
   (void)name;
   (void)value;
@@ -413,20 +413,20 @@ utils::Status VfsImpl::Setxattr(fuse_ino_t ino, const char *name, const char *va
   return Status::NotSupported("setxattr");
 }
 
-utils::Status VfsImpl::Getxattr(fuse_ino_t ino, const char *name, size_t size) {
+utils::Status VfsImpl::GetXAttr(fuse_ino_t ino, const char *name, size_t size) {
   (void)ino;
   (void)name;
   (void)size;
   return Status::NotSupported("getxattr");
 }
 
-utils::Status VfsImpl::Listxattr(fuse_ino_t ino, size_t size) {
+utils::Status VfsImpl::ListXAttr(fuse_ino_t ino, size_t size) {
   (void)ino;
   (void)size;
   return Status::NotSupported("listxattr");
 }
 
-utils::Status VfsImpl::Removexattr(fuse_ino_t ino, const char *name) {
+utils::Status VfsImpl::RemoveXAttr(fuse_ino_t ino, const char *name) {
   (void)ino;
   (void)name;
   return Status::NotSupported("removexattr");
@@ -460,7 +460,7 @@ utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name, mode_t mode, 
   return Status::OK();
 }
 
-utils::Status VfsImpl::Ioctl(fuse_ino_t ino, int cmd, void *arg, struct fuse_file_info *fi, unsigned flags,
+utils::Status VfsImpl::IoCtl(fuse_ino_t ino, int cmd, void *arg, struct fuse_file_info *fi, unsigned flags,
                              const void *in_buf, size_t in_bufsz, size_t out_bufsz) {
   (void)ino;
   (void)cmd;
@@ -482,14 +482,14 @@ utils::Status VfsImpl::RetrieveReply(fuse_req_t /*req*/, void *cookie, fuse_ino_
   return Status::NotSupported("retrieve_reply");
 }
 
-utils::Status VfsImpl::Flock(fuse_ino_t ino, struct fuse_file_info *fi, int op) {
+utils::Status VfsImpl::FLock(fuse_ino_t ino, struct fuse_file_info *fi, int op) {
   (void)ino;
   (void)fi;
   (void)op;
   return Status::NotSupported("flock");
 }
 
-utils::Status VfsImpl::Fallocate(fuse_ino_t ino, int mode, off_t offset, off_t length, struct fuse_file_info *fi) {
+utils::Status VfsImpl::FAllocate(fuse_ino_t ino, int mode, off_t offset, off_t length, struct fuse_file_info *fi) {
   (void)ino;
   (void)mode;
   (void)offset;
@@ -498,7 +498,7 @@ utils::Status VfsImpl::Fallocate(fuse_ino_t ino, int mode, off_t offset, off_t l
   return Status::NotSupported("fallocate");
 }
 
-utils::Status VfsImpl::Lseek(fuse_ino_t ino, off_t off, int whence, struct fuse_file_info *fi) {
+utils::Status VfsImpl::LSeek(fuse_ino_t ino, off_t off, int whence, struct fuse_file_info *fi) {
   (void)ino;
   (void)off;
   (void)whence;
@@ -506,14 +506,14 @@ utils::Status VfsImpl::Lseek(fuse_ino_t ino, off_t off, int whence, struct fuse_
   return Status::NotSupported("lseek");
 }
 
-utils::Status VfsImpl::Tmpfile(fuse_ino_t parent, mode_t mode, struct fuse_file_info *fi) {
+utils::Status VfsImpl::TmpFile(fuse_ino_t parent, mode_t mode, struct fuse_file_info *fi) {
   (void)parent;
   (void)mode;
   (void)fi;
   return Status::NotSupported("tmpfile");
 }
 
-utils::Status VfsImpl::Statx(fuse_ino_t ino, int flags, int mask, struct fuse_file_info *fi) {
+utils::Status VfsImpl::StatX(fuse_ino_t ino, int flags, int mask, struct fuse_file_info *fi) {
   (void)ino;
   (void)flags;
   (void)mask;

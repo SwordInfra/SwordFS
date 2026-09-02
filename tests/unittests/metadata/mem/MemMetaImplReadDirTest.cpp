@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Tests for directory iteration at the MemMetaImpl level.
-// Validates the data layer that feeds into VfsImpl::Readdir/Readdirplus
+// Validates the data layer that feeds into VfsImpl::ReadDir/ReadDirPlus
 // (the FUSE formatting fix is in PR #23).
 
 #include <dirent.h>
