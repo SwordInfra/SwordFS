@@ -177,9 +177,9 @@ utils::Status InodeHandle::ReclaimData() {
   // 1. Stream every chunk the metadata engine still tracks for this inode
   //    and issue a data-engine delete without materializing the full map.
   status = meta_->VisitChunks(ino_, [&](const metadata::SwordFsChunk &chunk) {
-    auto delete_status = data_->Delete(chunk.key);
-    if (!delete_status.ok()) {
-      SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << chunk.key << ") failed: " << delete_status.message();
+    auto status = data_->Delete(chunk.key);
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << chunk.key << ") failed: " << status.message();
     }
     return utils::Status::OK();
   });

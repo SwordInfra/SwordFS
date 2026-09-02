@@ -299,9 +299,9 @@ utils::Status FileReadWriter::Truncate(size_t size) {
   if (data_ && !dropped.empty()) {
     for (const auto idx : dropped) {
       const auto key = chunk::FormatChunkKey(ino_, idx);
-      auto st = data_->Delete(key);
-      if (!st.ok()) {
-        SWORDFS_LOG_ERROR << "FileReadWriter::Truncate: data->Delete(" << key << ") failed: " << st.message();
+      auto status = data_->Delete(key);
+      if (!status.ok()) {
+        SWORDFS_LOG_ERROR << "FileReadWriter::Truncate: data->Delete(" << key << ") failed: " << status.message();
       }
     }
   }

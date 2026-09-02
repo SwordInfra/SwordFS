@@ -37,6 +37,8 @@ int Status::ToErrno() const {
       return ENOMEM;
     case kNameTooLong:
       return ENAMETOOLONG;
+    case kIOError:
+      return EIO;
     default:
       return EIO;
   }

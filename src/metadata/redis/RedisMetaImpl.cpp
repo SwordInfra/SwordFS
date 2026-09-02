@@ -4,6 +4,7 @@
 #include "metadata/redis/RedisMetaImpl.hpp"
 
 #include <dirent.h>
+#include <folly/container/F14Set.h>
 #include <folly/fibers/FiberManagerInternal.h>
 #include <folly/logging/xlog.h>
 #include <sw/redis++/redis++.h>
@@ -16,7 +17,6 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -61,31 +61,18 @@ utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view 
 
 RegisterMetaEngine kRedisMetaEngine{"redis", CreateRedisMetaEngine};
 
-int64_t NowSeconds() {
-  return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
-int64_t NowNanoseconds() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
-             .count() %
-         1000000000;
-}
-
 void Touch(SwordFsInode *inode, bool atime, bool mtime, bool ctime) {
-  const int64_t seconds = NowSeconds();
-  const int64_t nanoseconds = NowNanoseconds();
+  SetAttrField fields = static_cast<SetAttrField>(0);
   if (atime) {
-    inode->attr.atime = seconds;
-    inode->attr.atime_nsec = nanoseconds;
+    fields |= SetAttrField::kAtime;
   }
   if (mtime) {
-    inode->attr.mtime = seconds;
-    inode->attr.mtime_nsec = nanoseconds;
+    fields |= SetAttrField::kMtime;
   }
   if (ctime) {
-    inode->attr.ctime = seconds;
-    inode->attr.ctime_nsec = nanoseconds;
+    fields |= SetAttrField::kCtime;
   }
+  inode->Touch(fields);
 }
 
 utils::Status ParseInode(std::string_view value, SwordFsInode *inode) {
@@ -666,35 +653,35 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
       return Status::Permission("sticky bit denied on source");
     }
 
-    auto is_descendant = [&](InodeID ancestor, InodeID candidate, bool *result_out) -> Status {
+    auto is_descendant = [&](InodeID ancestor_ino, InodeID candidate_ino, bool *result_out) -> Status {
       if (result_out == nullptr) {
         return Status::InvalidArgument("cycle check output is null");
       }
       *result_out = false;
-      InodeID current = candidate;
-      std::unordered_set<InodeID> visited;
-      while (current != 0) {
-        if (!visited.insert(current).second) {
+      InodeID current_ino = candidate_ino;
+      folly::F14FastSet<InodeID> visited;
+      while (current_ino != 0) {
+        if (!visited.insert(current_ino).second) {
           return Status::Malformed("directory parent cycle detected");
         }
-        if (current == ancestor) {
+        if (current_ino == ancestor_ino) {
           *result_out = true;
           return Status::OK();
         }
         std::string inode_value;
-        auto check_status = txn.Get(key_.Inode(current), &inode_value);
-        if (!check_status.ok()) {
-          return check_status;
+        auto status = txn.Get(key_.Inode(current_ino), &inode_value);
+        if (!status.ok()) {
+          return status;
         }
         SwordFsInode inode;
-        check_status = ParseInode(inode_value, &inode);
-        if (!check_status.ok()) {
-          return check_status;
+        status = ParseInode(inode_value, &inode);
+        if (!status.ok()) {
+          return status;
         }
-        if (inode.parent_ino == current) {
+        if (inode.parent_ino == current_ino) {
           break;
         }
-        current = inode.parent_ino;
+        current_ino = inode.parent_ino;
       }
       return Status::OK();
     };

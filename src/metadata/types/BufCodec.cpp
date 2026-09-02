@@ -84,7 +84,6 @@ void BufEncoder::Finish(std::string *out) {
   if (out == nullptr) {
     return;
   }
-  out->clear();
   impl_->buffer_->appendTo(*out);
 }
 
