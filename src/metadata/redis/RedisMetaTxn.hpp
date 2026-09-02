@@ -28,8 +28,6 @@ class RedisMetaTxn {
   // read and EXEC. Redis WATCH/MULTI details remain private to this class.
   utils::Status Get(std::string_view key, std::string *value);
   utils::Status HGet(std::string_view key, std::string_view field, std::string *value);
-  utils::Status HScan(std::string_view key, uint64_t cursor, size_t count,
-                      std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor);
   utils::Status HLen(std::string_view key, uint64_t *length);
   utils::Status Set(std::string_view key, std::string_view value);
   utils::Status HSet(std::string_view key, std::string_view field, std::string_view value);

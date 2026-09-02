@@ -940,6 +940,8 @@ Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttr
     }
     const uint64_t old_size = inode.attr.size;
     const bool size_changed = HasSetAttrField(fields, SetAttrField::kSize) && old_size != requested.size;
+    const bool owner_changed = (HasSetAttrField(fields, SetAttrField::kUid) && inode.attr.uid != requested.uid) ||
+                               (HasSetAttrField(fields, SetAttrField::kGid) && inode.attr.gid != requested.gid);
     const bool mtime_changed = size_changed && !HasSetAttrField(fields, SetAttrField::kMtime) &&
                                !HasSetAttrField(fields, SetAttrField::kMtimeNow);
     if (size_changed) {
@@ -977,10 +979,16 @@ Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttr
     if (HasSetAttrField(fields, SetAttrField::kMtimeNow)) {
       Touch(&inode, false, true, false);
     }
-    if (size_changed || HasSetAttrField(fields, SetAttrField::kUid) || HasSetAttrField(fields, SetAttrField::kGid)) {
+    if (HasSetAttrField(fields, SetAttrField::kCtime)) {
+      inode.attr.ctime = requested.ctime;
+      inode.attr.ctime_nsec = requested.ctime_nsec;
+    }
+    if (size_changed || owner_changed) {
       inode.attr.KillSUID();
     }
-    Touch(&inode, false, false, true);
+    if (!HasSetAttrField(fields, SetAttrField::kCtime)) {
+      Touch(&inode, false, false, true);
+    }
     status = SerializeInode(inode, &value);
     if (!status.ok()) {
       return status;
