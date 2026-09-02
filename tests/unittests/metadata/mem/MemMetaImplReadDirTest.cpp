@@ -45,10 +45,10 @@ class MemMetaImplReadDirTest : public ::testing::Test {
     if (!status.ok()) {
       return status;
     }
-    for (uint64_t cookie = 0;;) {
+    for (;;) {
       SwordFsEntry entry;
       uint64_t next_cookie = 0;
-      status = iterator->Next(cookie, &entry, &next_cookie);
+      status = iterator->Peek(&entry, &next_cookie);
       if (status.IsEndOfDirectory()) {
         return Status::OK();
       }
@@ -56,7 +56,7 @@ class MemMetaImplReadDirTest : public ::testing::Test {
         return status;
       }
       entries->push_back(std::move(entry));
-      cookie = next_cookie;
+      iterator->Advance();
     }
   }
 
@@ -111,7 +111,7 @@ TEST_F(MemMetaImplReadDirTest, OpenDirWithEntries) {
 // OpenDir: caller-owned iterator can be continued
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, OpenDirIteratorSupportsPeekNextAndSeek) {
+TEST_F(MemMetaImplReadDirTest, OpenDirIteratorSupportsPeekAdvanceAndSeek) {
   InodeID first_ino = 0, second_ino = 0;
   impl_->Create(kRoot, "first", 0644, &first_ino, nullptr);
   impl_->Create(kRoot, "second", 0644, &second_ino, nullptr);
@@ -122,26 +122,59 @@ TEST_F(MemMetaImplReadDirTest, OpenDirIteratorSupportsPeekNextAndSeek) {
 
   SwordFsEntry entry;
   uint64_t next_offset = 0;
-  ASSERT_TRUE(iterator->Peek(0, &entry).ok());
-  EXPECT_EQ(entry.name, ".");
-  ASSERT_TRUE(iterator->Next(0, &entry, &next_offset).ok());
+  ASSERT_TRUE(iterator->Peek(&entry, &next_offset).ok());
   EXPECT_EQ(entry.name, ".");
   EXPECT_EQ(next_offset, 1);
+  iterator->Advance();
 
-  ASSERT_TRUE(iterator->Next(1, &entry, &next_offset).ok());
+  ASSERT_TRUE(iterator->Peek(&entry, &next_offset).ok());
   EXPECT_EQ(entry.name, "..");
   EXPECT_EQ(next_offset, 2);
+  iterator->Advance();
 
-  ASSERT_TRUE(iterator->Next(2, &entry, &next_offset).ok());
+  ASSERT_TRUE(iterator->Peek(&entry, &next_offset).ok());
   EXPECT_EQ(next_offset, 3);
   const std::string first_entry_name = entry.name;
+  iterator->Advance();
 
   // A previously returned cookie can be used to seek backwards.
-  ASSERT_TRUE(iterator->Peek(2, &entry).ok());
-  EXPECT_EQ(entry.name, first_entry_name);
-  ASSERT_TRUE(iterator->Next(2, &entry, &next_offset).ok());
+  ASSERT_TRUE(iterator->Seek(2).ok());
+  ASSERT_TRUE(iterator->Peek(&entry, &next_offset).ok());
   EXPECT_EQ(entry.name, first_entry_name);
   EXPECT_EQ(next_offset, 3);
+  iterator->Advance();
+}
+
+TEST_F(MemMetaImplReadDirTest, OpenDirReturnsIndependentIterators) {
+  InodeID first_ino = 0, second_ino = 0;
+  impl_->Create(kRoot, "first", 0644, &first_ino, nullptr);
+  impl_->Create(kRoot, "second", 0644, &second_ino, nullptr);
+
+  DirIteratorPtr first_iterator;
+  DirIteratorPtr second_iterator;
+  ASSERT_TRUE(impl_->OpenDir(kRoot, &first_iterator).ok());
+  ASSERT_TRUE(impl_->OpenDir(kRoot, &second_iterator).ok());
+  ASSERT_NE(first_iterator, nullptr);
+  ASSERT_NE(second_iterator, nullptr);
+  EXPECT_NE(first_iterator, second_iterator);
+
+  SwordFsEntry entry;
+  uint64_t next_offset = 0;
+  ASSERT_TRUE(first_iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, ".");
+  EXPECT_EQ(next_offset, 1);
+  first_iterator->Advance();
+  ASSERT_TRUE(first_iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, "..");
+  EXPECT_EQ(next_offset, 2);
+  first_iterator->Advance();
+
+  // A second OpenDir owns an independent directory stream and can seek
+  // without depending on the first iterator state.
+  ASSERT_TRUE(second_iterator->Seek(2).ok());
+  ASSERT_TRUE(second_iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(next_offset, 3);
+  second_iterator->Advance();
 }
 
 TEST_F(MemMetaImplReadDirTest, OpenDirRejectsNonDirectory) {

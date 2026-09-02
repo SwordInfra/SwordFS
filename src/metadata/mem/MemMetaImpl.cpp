@@ -34,31 +34,38 @@ class MemoryDirIterator final : public DirIterator {
   explicit MemoryDirIterator(std::vector<SwordFsEntry> entries) : entries_(std::move(entries)) {
   }
 
-  Status Peek(uint64_t offset, SwordFsEntry *entry) override {
-    if (entry == nullptr) {
-      return Status::InvalidArgument("directory iterator output is null");
-    }
-    if (offset >= entries_.size()) {
-      return Status::EndOfDirectory("directory end");
-    }
-    *entry = entries_[static_cast<size_t>(offset)];
+  Status Seek(uint64_t cookie) override {
+    position_ = cookie;
+    pending_next_.reset();
     return Status::OK();
   }
 
-  Status Next(uint64_t offset, SwordFsEntry *entry, uint64_t *next_offset) override {
-    if (entry == nullptr || next_offset == nullptr) {
+  Status Peek(SwordFsEntry *entry, uint64_t *next_cookie) override {
+    if (entry == nullptr || next_cookie == nullptr) {
       return Status::InvalidArgument("directory iterator output is null");
     }
-    auto status = Peek(offset, entry);
-    if (!status.ok()) {
-      return status;
+    if (pending_next_) {
+      return Status::InvalidArgument("directory iterator has pending entry");
     }
-    *next_offset = offset + 1;
+    if (position_ >= entries_.size()) {
+      return Status::EndOfDirectory("directory end");
+    }
+    *entry = entries_[static_cast<size_t>(position_)];
+    *next_cookie = position_ + 1;
+    pending_next_ = *next_cookie;
     return Status::OK();
+  }
+
+  void Advance() override {
+    CHECK(pending_next_.has_value());
+    position_ = *pending_next_;
+    pending_next_.reset();
   }
 
  private:
   std::vector<SwordFsEntry> entries_;
+  uint64_t position_ = 0;
+  std::optional<uint64_t> pending_next_;
 };
 
 utils::Status CreateMemoryMetaEngine(std::string_view, std::string_view, std::unique_ptr<IMetaEngine> *out) {

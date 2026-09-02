@@ -4,8 +4,6 @@
 #pragma once
 
 #include <memory>
-#include <mutex>
-#include <unordered_map>
 
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/redis/RedisKey.hpp"
@@ -14,8 +12,6 @@
 namespace swordfs::metadata {
 
 class RedisMetaClient;
-class RedisDirEntryCache;
-class RedisDirCacheRegistry;
 
 // Redis metadata engine. Connection and transaction infrastructure is shared
 // with the persistent schema/format layer; metadata operations are added by
@@ -60,7 +56,6 @@ class RedisMetaImpl : public IMetaEngine {
 
   std::shared_ptr<RedisMetaClient> client_;
   redis::RedisKey key_;
-  std::shared_ptr<RedisDirCacheRegistry> dir_cache_registry_;
 };
 
 }  // namespace swordfs::metadata

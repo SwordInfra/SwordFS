@@ -156,21 +156,26 @@ namespace {
 
 class TestDirIterator final : public swordfs::metadata::DirIterator {
  public:
-  Status Peek(uint64_t offset, swordfs::metadata::SwordFsEntry *entry) override {
-    if (offset == 0) {
+  Status Seek(uint64_t cookie) override {
+    position_ = cookie;
+    return Status::OK();
+  }
+
+  Status Peek(swordfs::metadata::SwordFsEntry *entry, uint64_t *next_cookie) override {
+    if (position_ == 0) {
       *entry = {".", DT_DIR, 1};
+      *next_cookie = 1;
       return Status::OK();
     }
     return Status::EndOfDirectory("directory end");
   }
 
-  Status Next(uint64_t offset, swordfs::metadata::SwordFsEntry *entry, uint64_t *next_offset) override {
-    auto status = Peek(offset, entry);
-    if (status.ok()) {
-      *next_offset = offset + 1;
-    }
-    return status;
+  void Advance() override {
+    ++position_;
   }
+
+ private:
+  uint64_t position_ = 0;
 };
 
 class MockMetaEngine : public swordfs::metadata::IMetaEngine {
