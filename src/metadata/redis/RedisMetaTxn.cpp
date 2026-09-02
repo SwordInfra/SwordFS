@@ -80,9 +80,11 @@ utils::Status RedisMetaTxn::HGet(std::string_view key, std::string_view field, s
   }
 }
 
-utils::Status RedisMetaTxn::HGetAll(std::string_view key, std::vector<std::pair<std::string, std::string>> *values) {
-  if (values == nullptr) {
-    return utils::Status::InvalidArgument("Redis HGETALL output is null");
+utils::Status RedisMetaTxn::HScan(std::string_view key, uint64_t cursor, size_t count,
+                                  std::vector<std::pair<std::string, std::string>> *values,
+                                  uint64_t *next_cursor) {
+  if (values == nullptr || next_cursor == nullptr) {
+    return utils::Status::InvalidArgument("Redis HSCAN output is null");
   }
   try {
     if (has_writes_) {
@@ -90,14 +92,16 @@ utils::Status RedisMetaTxn::HGetAll(std::string_view key, std::vector<std::pair<
     }
     redis_->watch(key);
     values->clear();
-    redis_->hgetall(std::string(key), std::back_inserter(*values));
+    *next_cursor = cursor;
+    *next_cursor =
+        redis_->hscan(std::string(key), *next_cursor, static_cast<long long>(count), std::back_inserter(*values));
     return utils::Status::OK();
   } catch (const sw::redis::TimeoutError &) {
     throw;
   } catch (const sw::redis::ClosedError &) {
     throw;
   } catch (const sw::redis::Error &error) {
-    return RedisError("HGETALL", error);
+    return RedisError("HSCAN", error);
   }
 }
 

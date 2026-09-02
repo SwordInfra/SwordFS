@@ -692,8 +692,22 @@ Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) 
   return store_.Transact([&](MemMetaTxn &txn) { return txn.FindChunk(ino, idx, chunk); });
 }
 
-Status MemMetaImpl::ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) {
-  return store_.Transact([&](MemMetaTxn &txn) { return txn.ListChunks(ino, out); });
+Status MemMetaImpl::VisitChunks(InodeID ino, const ChunkVisitor &visitor) {
+  if (!visitor) {
+    return Status::InvalidArgument("chunk visitor is null");
+  }
+  std::vector<SwordFsChunk> chunks;
+  auto status = store_.Transact([&](MemMetaTxn &txn) { return txn.ListChunks(ino, &chunks); });
+  if (!status.ok()) {
+    return status;
+  }
+  for (const auto &chunk : chunks) {
+    status = visitor(chunk);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return Status::OK();
 }
 
 Status MemMetaImpl::Truncate(InodeID ino, uint64_t size) {

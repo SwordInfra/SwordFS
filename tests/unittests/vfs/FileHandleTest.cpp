@@ -141,7 +141,7 @@ class MockMetaEngine : public IMetaEngine {
     ++reclaim_calls;
     return reclaim_status;
   }
-  Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
+  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitor &) override {
     return Status::OK();
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
@@ -657,13 +657,18 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     last_reclaim_ino = ino;
     return Status::OK();
   }
-  Status ListChunks(InodeID ino, std::vector<swordfs::metadata::SwordFsChunk> *out) override {
+  Status VisitChunks(InodeID ino, const swordfs::metadata::ChunkVisitor &visitor) override {
     ++list_chunks_calls;
     last_list_ino = ino;
     if (!list_chunks_status.ok()) {
       return list_chunks_status;
     }
-    *out = chunks;
+    for (const auto &chunk : chunks) {
+      auto status = visitor(chunk);
+      if (!status.ok()) {
+        return status;
+      }
+    }
     return Status::OK();
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {

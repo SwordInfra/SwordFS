@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <charconv>
-#include <chrono>
 #include <deque>
 #include <exception>
 #include <mutex>
@@ -127,7 +126,7 @@ utils::Status RedisMetaImpl::FormatVolume(const SwordFsVolume &config) {
     return status;
   }
 
-  return client_->Transact([&](RedisMetaTxn &txn) {
+  status = client_->Transact([&](RedisMetaTxn &txn) {
     std::string existing;
     auto status = txn.Get(key_.Format(), &existing);
     if (status.ok()) {
@@ -150,6 +149,10 @@ utils::Status RedisMetaImpl::FormatVolume(const SwordFsVolume &config) {
     }
     return txn.Set(key_.Inode(kRootInodeId), root_value);
   });
+  if (status.ok()) {
+    chunk_size_ = config.chunk_size;
+  }
+  return status;
 }
 
 utils::Status RedisMetaImpl::LoadVolume(SwordFsVolume *config) {
@@ -181,6 +184,7 @@ utils::Status RedisMetaImpl::LoadVolume(SwordFsVolume *config) {
   if (!status.ok()) {
     return status;
   }
+  chunk_size_ = config->chunk_size;
   return utils::Status::OK();
 }
 
@@ -947,9 +951,16 @@ Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttr
     if (!status.ok()) {
       return status;
     }
-    const bool size_changed = HasSetAttrField(fields, SetAttrField::kSize) && inode.attr.size != requested.size;
+    const uint64_t old_size = inode.attr.size;
+    const bool size_changed = HasSetAttrField(fields, SetAttrField::kSize) && old_size != requested.size;
     const bool mtime_changed = size_changed && !HasSetAttrField(fields, SetAttrField::kMtime) &&
                                !HasSetAttrField(fields, SetAttrField::kMtimeNow);
+    if (size_changed) {
+      status = TruncateChunks(txn, ino, old_size, requested.size);
+      if (!status.ok()) {
+        return status;
+      }
+    }
     if (HasSetAttrField(fields, SetAttrField::kMode)) {
       inode.attr.mode = (inode.attr.mode & S_IFMT) | (requested.mode & 07777);
     }
@@ -983,39 +994,6 @@ Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttr
       inode.attr.KillSUID();
     }
     Touch(&inode, false, false, true);
-    if (size_changed) {
-      std::vector<std::pair<std::string, std::string>> chunks;
-      status = txn.HGetAll(key_.Chunk(ino), &chunks);
-      if (!status.ok()) {
-        return status;
-      }
-      for (const auto &[field, chunk_value] : chunks) {
-        SwordFsChunk chunk;
-        status = chunk.ParseFrom(chunk_value);
-        if (!status.ok()) {
-          return status;
-        }
-        if (chunk.start_offset >= inode.attr.size) {
-          status = txn.HDel(key_.Chunk(ino), field);
-          if (!status.ok()) {
-            return status;
-          }
-        } else {
-          const uint64_t new_chunk_size = inode.attr.size - chunk.start_offset;
-          if (chunk.size > new_chunk_size) {
-            chunk.size = new_chunk_size;
-            status = chunk.SerializeTo(&value);
-            if (!status.ok()) {
-              return status;
-            }
-            status = txn.HSet(key_.Chunk(ino), field, value);
-            if (!status.ok()) {
-              return status;
-            }
-          }
-        }
-      }
-    }
     status = SerializeInode(inode, &value);
     if (!status.ok()) {
       return status;
@@ -1285,9 +1263,9 @@ Status RedisMetaImpl::ReclaimInode(InodeID ino) {
   });
 }
 
-Status RedisMetaImpl::ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) {
-  if (!out) {
-    return Status::InvalidArgument("ListChunks output is null");
+Status RedisMetaImpl::VisitChunks(InodeID ino, const ChunkVisitor &visitor) {
+  if (!visitor) {
+    return Status::InvalidArgument("chunk visitor is null");
   }
   std::string inode_value;
   auto status = client_->Get(key_.Inode(ino), &inode_value);
@@ -1302,21 +1280,30 @@ Status RedisMetaImpl::ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) {
   if (!inode.IsRegular()) {
     return Status::InvalidArgument("not a regular file");
   }
-  std::vector<std::pair<std::string, std::string>> values;
-  status = client_->HGetAll(key_.Chunk(ino), &values);
-  if (!status.ok()) {
-    return status;
-  }
-  out->clear();
-  for (const auto &[field, chunk_value] : values) {
-    SwordFsChunk chunk;
-    status = chunk.ParseFrom(chunk_value);
+
+  constexpr size_t kScanBatchSize = 128;
+  uint64_t cursor = 0;
+  do {
+    std::vector<std::pair<std::string, std::string>> values;
+    uint64_t next_cursor = 0;
+    status = client_->HScan(key_.Chunk(ino), cursor, kScanBatchSize, &values, &next_cursor);
     if (!status.ok()) {
       return status;
     }
-    out->push_back(std::move(chunk));
-  }
-  std::sort(out->begin(), out->end(), [](const auto &a, const auto &b) { return a.index < b.index; });
+    for (const auto &[field, chunk_value] : values) {
+      (void)field;
+      SwordFsChunk chunk;
+      status = chunk.ParseFrom(chunk_value);
+      if (!status.ok()) {
+        return status;
+      }
+      status = visitor(chunk);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
   return Status::OK();
 }
 
@@ -1356,6 +1343,68 @@ Status RedisMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk
   return chunk->ParseFrom(value);
 }
 
+Status RedisMetaImpl::TruncateChunks(RedisMetaTxn &txn, InodeID ino, uint64_t old_size, uint64_t new_size) {
+  if (new_size >= old_size) {
+    return Status::OK();
+  }
+  if (chunk_size_ == 0) {
+    return Status::Internal("volume chunk size is not initialized");
+  }
+
+  const std::string chunk_key = key_.Chunk(ino);
+  if (new_size == 0) {
+    return txn.Del(chunk_key);
+  }
+
+  const ChunkIndex boundary_idx = static_cast<ChunkIndex>(new_size / chunk_size_);
+  const uint64_t boundary_offset = new_size % chunk_size_;
+  const ChunkIndex first_removed_idx = boundary_idx + (boundary_offset != 0 ? 1 : 0);
+  const ChunkIndex old_chunk_count = static_cast<ChunkIndex>((old_size + chunk_size_ - 1) / chunk_size_);
+
+  std::optional<std::string> boundary_value;
+  if (boundary_offset != 0) {
+    std::string value;
+    auto status = txn.HGet(chunk_key, std::to_string(boundary_idx), &value);
+    if (status.ok()) {
+      SwordFsChunk chunk;
+      status = chunk.ParseFrom(value);
+      if (!status.ok()) {
+        return status;
+      }
+      const uint64_t new_chunk_size = new_size - chunk.start_offset;
+      if (chunk.size > new_chunk_size) {
+        chunk.size = new_chunk_size;
+        status = chunk.SerializeTo(&value);
+        if (!status.ok()) {
+          return status;
+        }
+        boundary_value = std::move(value);
+      }
+    } else if (!status.IsNotFound()) {
+      return status;
+    }
+  }
+
+  // RedisMetaTxn requires all reads before writes. Queue mutations only after
+  // the optional boundary lookup has finished.
+  if (boundary_value.has_value()) {
+    auto status = txn.HSet(chunk_key, std::to_string(boundary_idx), *boundary_value);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  // Chunk fields use their fixed-size chunk index as the hash field. The old
+  // inode size therefore bounds every index that can exist, and HDEL is a
+  // no-op for sparse/missing chunks; no hash-wide scan is needed.
+  for (ChunkIndex idx = first_removed_idx; idx < old_chunk_count; ++idx) {
+    auto status = txn.HDel(chunk_key, std::to_string(idx));
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return Status::OK();
+}
+
 Status RedisMetaImpl::Truncate(InodeID ino, uint64_t size) {
   return client_->Transact([&](RedisMetaTxn &txn) {
     std::string value;
@@ -1368,43 +1417,17 @@ Status RedisMetaImpl::Truncate(InodeID ino, uint64_t size) {
     if (!status.ok()) {
       return status;
     }
-    if (inode.attr.size == size) {
+    const uint64_t old_size = inode.attr.size;
+    if (old_size == size) {
       return Status::OK();
+    }
+    status = TruncateChunks(txn, ino, old_size, size);
+    if (!status.ok()) {
+      return status;
     }
     inode.attr.size = size;
     inode.attr.KillSUID();
     Touch(&inode, false, true, true);
-    std::vector<std::pair<std::string, std::string>> chunks;
-    status = txn.HGetAll(key_.Chunk(ino), &chunks);
-    if (!status.ok()) {
-      return status;
-    }
-    for (const auto &[field, chunk_value] : chunks) {
-      SwordFsChunk chunk;
-      status = chunk.ParseFrom(chunk_value);
-      if (!status.ok()) {
-        return status;
-      }
-      if (chunk.start_offset >= size) {
-        status = txn.HDel(key_.Chunk(ino), field);
-        if (!status.ok()) {
-          return status;
-        }
-      } else {
-        const uint64_t new_chunk_size = size - chunk.start_offset;
-        if (chunk.size > new_chunk_size) {
-          chunk.size = new_chunk_size;
-          status = chunk.SerializeTo(&value);
-          if (!status.ok()) {
-            return status;
-          }
-          status = txn.HSet(key_.Chunk(ino), field, value);
-          if (!status.ok()) {
-            return status;
-          }
-        }
-      }
-    }
     status = SerializeInode(inode, &value);
     if (!status.ok()) {
       return status;
