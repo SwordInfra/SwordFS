@@ -4,7 +4,6 @@
 #include "metadata/redis/RedisMetaImpl.hpp"
 
 #include <dirent.h>
-#include <folly/Conv.h>
 #include <folly/container/F14Set.h>
 #include <folly/fibers/FiberManagerInternal.h>
 #include <folly/logging/xlog.h>
@@ -61,31 +60,6 @@ utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view 
 }
 
 RegisterMetaEngine kRedisMetaEngine{"redis", CreateRedisMetaEngine};
-
-void Touch(SwordFsInode *inode, bool atime, bool mtime, bool ctime) {
-  SetAttrField fields = static_cast<SetAttrField>(0);
-  if (atime) {
-    fields |= SetAttrField::kAtime;
-  }
-  if (mtime) {
-    fields |= SetAttrField::kMtime;
-  }
-  if (ctime) {
-    fields |= SetAttrField::kCtime;
-  }
-  inode->Touch(fields);
-}
-
-utils::Status ParseInode(std::string_view value, SwordFsInode *inode) {
-  if (inode == nullptr) {
-    return utils::Status::InvalidArgument("inode output is null");
-  }
-  return inode->ParseFrom(value);
-}
-
-utils::Status SerializeInode(const SwordFsInode &inode, std::string *value) {
-  return inode.SerializeTo(value);
-}
 
 }  // namespace
 
@@ -190,7 +164,7 @@ Status RedisMetaImpl::Lookup(InodeID parent_ino, std::string_view name, SwordFsI
     return status;
   }
   SwordFsInode parent;
-  status = ParseInode(value, &parent);
+  status = parent.ParseFrom(value);
   if (!status.ok()) {
     return status;
   }
@@ -211,7 +185,7 @@ Status RedisMetaImpl::Lookup(InodeID parent_ino, std::string_view name, SwordFsI
   if (!status.ok()) {
     return status;
   }
-  return ParseInode(entry_value, out);
+  return out->ParseFrom(entry_value);
 }
 
 Status RedisMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
@@ -223,7 +197,7 @@ Status RedisMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
   if (!status.ok()) {
     return status;
   }
-  return ParseInode(value, out);
+  return out->ParseFrom(value);
 }
 
 Status RedisMetaImpl::UpdateAtimeBestEffort(InodeID ino) {
@@ -234,12 +208,12 @@ Status RedisMetaImpl::UpdateAtimeBestEffort(InodeID ino) {
       return status;
     }
     SwordFsInode inode;
-    status = ParseInode(value, &inode);
+    status = inode.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
-    Touch(&inode, true, false, false);
-    status = SerializeInode(inode, &value);
+    inode.Touch(SetAttrField::kAtime);
+    status = inode.SerializeTo(&value);
     if (!status.ok()) {
       return status;
     }
@@ -295,7 +269,7 @@ Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t
     if (!status.ok()) {
       return status;
     }
-    status = ParseInode(value, &parent);
+    status = parent.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -317,9 +291,9 @@ Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t
     attr.uid = ctx.uid;
     attr.gid = parent.attr.gid;
     child = SwordFsInode(child_ino, attr, parent_ino);
-    Touch(&parent, false, true, true);
+    parent.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
     std::string child_value;
-    status = SerializeInode(child, &child_value);
+    status = child.SerializeTo(&child_value);
     if (!status.ok()) {
       return status;
     }
@@ -336,7 +310,7 @@ Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t
     if (!status.ok()) {
       return status;
     }
-    status = SerializeInode(parent, &value);
+    status = parent.SerializeTo(&value);
     if (!status.ok()) {
       return status;
     }
@@ -370,7 +344,7 @@ Status RedisMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t 
     if (!status.ok()) {
       return status;
     }
-    status = ParseInode(value, &parent);
+    status = parent.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -393,9 +367,9 @@ Status RedisMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t 
     attr.gid = parent.attr.gid;
     child = SwordFsInode(child_ino, attr, parent_ino);
     parent.attr.nlink++;
-    Touch(&parent, false, true, true);
+    parent.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
     std::string child_value;
-    status = SerializeInode(child, &child_value);
+    status = child.SerializeTo(&child_value);
     if (!status.ok()) {
       return status;
     }
@@ -412,7 +386,7 @@ Status RedisMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t 
     if (!status.ok()) {
       return status;
     }
-    status = SerializeInode(parent, &value);
+    status = parent.SerializeTo(&value);
     if (!status.ok()) {
       return status;
     }
@@ -440,7 +414,7 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t
     if (!status.ok()) {
       return status;
     }
-    status = ParseInode(value, &parent);
+    status = parent.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -466,7 +440,7 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t
     if (!status.ok()) {
       return status;
     }
-    status = ParseInode(value, &child);
+    status = child.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -477,13 +451,13 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t
       return Status::Permission("sticky bit denied");
     }
     child.attr.nlink--;
-    Touch(&child, false, false, true);
-    Touch(&parent, false, true, true);
+    child.Touch(SetAttrField::kCtime);
+    parent.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
     status = txn.HDel(key_.Directory(parent_ino), name);
     if (!status.ok()) {
       return status;
     }
-    status = SerializeInode(parent, &value);
+    status = parent.SerializeTo(&value);
     if (!status.ok()) {
       return status;
     }
@@ -491,7 +465,7 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t
     if (!status.ok()) {
       return status;
     }
-    status = SerializeInode(child, &value);
+    status = child.SerializeTo(&value);
     if (!status.ok()) {
       return status;
     }
@@ -518,7 +492,7 @@ Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
     if (!status.ok()) {
       return status;
     }
-    status = ParseInode(value, &parent);
+    status = parent.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -542,7 +516,7 @@ Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
     if (!status.ok()) {
       return status;
     }
-    status = ParseInode(value, &child);
+    status = child.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -561,7 +535,7 @@ Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
       return Status::NotEmpty("directory not empty");
     }
     parent.attr.nlink--;
-    Touch(&parent, false, true, true);
+    parent.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
     status = txn.HDel(key_.Directory(parent_ino), name);
     if (!status.ok()) {
       return status;
@@ -574,7 +548,7 @@ Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
     if (!status.ok()) {
       return status;
     }
-    status = SerializeInode(parent, &value);
+    status = parent.SerializeTo(&value);
     if (!status.ok()) {
       return status;
     }
@@ -599,13 +573,13 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
   return client_->Transact([&](RedisMetaTxn &txn) {
-    std::string old_parent_value, new_parent_value, source_value, source_entry_value, target_entry_value;
+    std::string old_parent_value, new_parent_value, source_value, target_value, source_entry_value, target_entry_value;
     auto status = txn.Get(key_.Inode(old_parent_ino), &old_parent_value);
     if (!status.ok()) {
       return status;
     }
     SwordFsInode old_parent;
-    status = ParseInode(old_parent_value, &old_parent);
+    status = old_parent.ParseFrom(old_parent_value);
     if (!status.ok()) {
       return status;
     }
@@ -617,7 +591,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
       return status;
     }
     SwordFsInode new_parent;
-    status = ParseInode(new_parent_value, &new_parent);
+    status = new_parent.ParseFrom(new_parent_value);
     if (!status.ok()) {
       return status;
     }
@@ -646,7 +620,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
       return status;
     }
     SwordFsInode source;
-    status = ParseInode(source_value, &source);
+    status = source.ParseFrom(source_value);
     if (!status.ok()) {
       return status;
     }
@@ -675,7 +649,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
           return status;
         }
         SwordFsInode inode;
-        status = ParseInode(inode_value, &inode);
+        status = inode.ParseFrom(inode_value);
         if (!status.ok()) {
           return status;
         }
@@ -721,11 +695,11 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
         return Status::OK();
       }
       SwordFsInode target;
-      status = txn.Get(key_.Inode(target_ino), &source_value);
+      status = txn.Get(key_.Inode(target_ino), &target_value);
       if (!status.ok()) {
         return status;
       }
-      status = ParseInode(source_value, &target);
+      status = target.ParseFrom(target_value);
       if (!status.ok()) {
         return status;
       }
@@ -763,11 +737,11 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
       }
       source.parent_ino = new_parent_ino;
       target.parent_ino = old_parent_ino;
-      Touch(&source, false, false, true);
-      Touch(&target, false, false, true);
-      Touch(&old_parent, false, true, true);
-      Touch(&new_parent, false, true, true);
-      status = SerializeInode(source, &source_value);
+      source.Touch(SetAttrField::kCtime);
+      target.Touch(SetAttrField::kCtime);
+      old_parent.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+      new_parent.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+      status = source.SerializeTo(&source_value);
       if (!status.ok()) {
         return status;
       }
@@ -775,15 +749,15 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
       if (!status.ok()) {
         return status;
       }
-      status = SerializeInode(target, &source_value);
+      status = target.SerializeTo(&target_value);
       if (!status.ok()) {
         return status;
       }
-      status = txn.Set(key_.Inode(target_ino), source_value);
+      status = txn.Set(key_.Inode(target_ino), target_value);
       if (!status.ok()) {
         return status;
       }
-      status = SerializeInode(old_parent, &old_parent_value);
+      status = old_parent.SerializeTo(&old_parent_value);
       if (!status.ok()) {
         return status;
       }
@@ -792,7 +766,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
         return status;
       }
       if (new_parent_ino != old_parent_ino) {
-        status = SerializeInode(new_parent, &new_parent_value);
+        status = new_parent.SerializeTo(&new_parent_value);
         if (!status.ok()) {
           return status;
         }
@@ -811,11 +785,11 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
         return Status::OK();
       }
       SwordFsInode target;
-      status = txn.Get(key_.Inode(target_ino), &source_value);
+      status = txn.Get(key_.Inode(target_ino), &target_value);
       if (!status.ok()) {
         return status;
       }
-      status = ParseInode(source_value, &target);
+      status = target.ParseFrom(target_value);
       if (!status.ok()) {
         return status;
       }
@@ -859,14 +833,14 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
         if (target.attr.nlink > 0) {
           target.attr.nlink--;
         }
-        Touch(&target, false, false, true);
+        target.Touch(SetAttrField::kCtime);
         if (target.attr.nlink == 0) { /* retain orphan for VFS reclaim */
         }
-        status = SerializeInode(target, &source_value);
+        status = target.SerializeTo(&target_value);
         if (!status.ok()) {
           return status;
         }
-        status = txn.Set(key_.Inode(target_ino), source_value);
+        status = txn.Set(key_.Inode(target_ino), target_value);
         if (!status.ok()) {
           return status;
         }
@@ -897,10 +871,10 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     } else {
       source.parent_ino = new_parent_ino;
     }
-    Touch(&source, false, false, true);
-    Touch(&old_parent, false, true, true);
-    Touch(&new_parent, false, true, true);
-    status = SerializeInode(source, &source_value);
+    source.Touch(SetAttrField::kCtime);
+    old_parent.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+    new_parent.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+    status = source.SerializeTo(&source_value);
     if (!status.ok()) {
       return status;
     }
@@ -908,7 +882,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     if (!status.ok()) {
       return status;
     }
-    status = SerializeInode(old_parent, &old_parent_value);
+    status = old_parent.SerializeTo(&old_parent_value);
     if (!status.ok()) {
       return status;
     }
@@ -917,7 +891,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
       return status;
     }
     if (new_parent_ino != old_parent_ino) {
-      status = SerializeInode(new_parent, &new_parent_value);
+      status = new_parent.SerializeTo(&new_parent_value);
       if (!status.ok()) {
         return status;
       }
@@ -935,7 +909,7 @@ Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttr
       return status;
     }
     SwordFsInode inode;
-    status = ParseInode(value, &inode);
+    status = inode.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -963,7 +937,7 @@ Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttr
     if (HasSetAttrField(fields, SetAttrField::kSize)) {
       inode.attr.size = requested.size;
       if (mtime_changed) {
-        Touch(&inode, false, true, false);
+        inode.Touch(SetAttrField::kMtime);
       }
     }
     if (HasSetAttrField(fields, SetAttrField::kAtime)) {
@@ -975,10 +949,10 @@ Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttr
       inode.attr.mtime_nsec = requested.mtime_nsec;
     }
     if (HasSetAttrField(fields, SetAttrField::kAtimeNow)) {
-      Touch(&inode, true, false, false);
+      inode.Touch(SetAttrField::kAtime);
     }
     if (HasSetAttrField(fields, SetAttrField::kMtimeNow)) {
-      Touch(&inode, false, true, false);
+      inode.Touch(SetAttrField::kMtime);
     }
     if (HasSetAttrField(fields, SetAttrField::kCtime)) {
       inode.attr.ctime = requested.ctime;
@@ -988,9 +962,9 @@ Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttr
       inode.attr.KillSUID();
     }
     if (!HasSetAttrField(fields, SetAttrField::kCtime)) {
-      Touch(&inode, false, false, true);
+      inode.Touch(SetAttrField::kCtime);
     }
-    status = SerializeInode(inode, &value);
+    status = inode.SerializeTo(&value);
     if (!status.ok()) {
       return status;
     }
@@ -1038,7 +1012,7 @@ Status RedisMetaImpl::Access(InodeID ino, uint32_t mask) {
     return status;
   }
   SwordFsInode inode;
-  status = ParseInode(value, &inode);
+  status = inode.ParseFrom(value);
   if (!status.ok()) {
     return status;
   }
@@ -1063,7 +1037,7 @@ Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::st
       return status;
     }
     SwordFsInode parent;
-    status = ParseInode(value, &parent);
+    status = parent.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -1085,8 +1059,8 @@ Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::st
     attr.gid = parent.attr.gid;
     attr.size = link.size();
     child = SwordFsInode(child_ino, attr, parent_ino, std::string(link));
-    Touch(&parent, false, true, true);
-    status = SerializeInode(child, &value);
+    parent.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+    status = child.SerializeTo(&value);
     if (!status.ok()) {
       return status;
     }
@@ -1103,7 +1077,7 @@ Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::st
     if (!status.ok()) {
       return status;
     }
-    status = SerializeInode(parent, &value);
+    status = parent.SerializeTo(&value);
     if (!status.ok()) {
       return status;
     }
@@ -1131,7 +1105,7 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
       return status;
     }
     SwordFsInode inode;
-    status = ParseInode(value, &inode);
+    status = inode.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -1143,7 +1117,7 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
       return status;
     }
     SwordFsInode parent;
-    status = ParseInode(value, &parent);
+    status = parent.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -1161,8 +1135,8 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
       return status;
     }
     inode.attr.nlink++;
-    Touch(&inode, false, false, true);
-    Touch(&parent, false, true, true);
+    inode.Touch(SetAttrField::kCtime);
+    parent.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
     std::string dir_entry_value;
     status = SwordFsEntry{std::string(newname), ModeToDt(inode.attr.mode), ino}.SerializeTo(&dir_entry_value);
     if (!status.ok()) {
@@ -1172,7 +1146,7 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
     if (!status.ok()) {
       return status;
     }
-    status = SerializeInode(inode, &value);
+    status = inode.SerializeTo(&value);
     if (!status.ok()) {
       return status;
     }
@@ -1180,7 +1154,7 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
     if (!status.ok()) {
       return status;
     }
-    status = SerializeInode(parent, &value);
+    status = parent.SerializeTo(&value);
     if (!status.ok()) {
       return status;
     }
@@ -1202,7 +1176,7 @@ Status RedisMetaImpl::Readlink(InodeID ino, std::string *target) {
     return status;
   }
   SwordFsInode inode;
-  status = ParseInode(value, &inode);
+  status = inode.ParseFrom(value);
   if (!status.ok()) {
     return status;
   }
@@ -1240,7 +1214,7 @@ Status RedisMetaImpl::ReclaimInode(InodeID ino) {
       return status;
     }
     SwordFsInode inode;
-    status = ParseInode(value, &inode);
+    status = inode.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -1269,7 +1243,7 @@ Status RedisMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
     return status;
   }
   SwordFsInode inode;
-  status = ParseInode(inode_value, &inode);
+  status = inode.ParseFrom(inode_value);
   if (!status.ok()) {
     return status;
   }
@@ -1316,7 +1290,7 @@ Status RedisMetaImpl::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
       return status;
     }
     SwordFsInode inode;
-    status = ParseInode(value, &inode);
+    status = inode.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -1355,61 +1329,45 @@ Status RedisMetaImpl::TruncateChunks(RedisMetaTxn &txn, InodeID ino, uint64_t ol
   const ChunkIndex boundary_idx = static_cast<ChunkIndex>(new_size / chunk_size_);
   const uint64_t boundary_offset = new_size % chunk_size_;
   const ChunkIndex first_removed_idx = boundary_idx + (boundary_offset != 0 ? 1 : 0);
+  const ChunkIndex old_chunk_count = static_cast<ChunkIndex>((old_size + chunk_size_ - 1) / chunk_size_);
 
-  constexpr size_t kScanBatchSize = 128;
-  uint64_t cursor = 0;
   std::optional<std::string> boundary_value;
-  std::vector<std::string> removed_fields;
-  do {
-    std::vector<std::pair<std::string, std::string>> values;
-    uint64_t next_cursor = 0;
-    auto status = txn.HScan(chunk_key, cursor, kScanBatchSize, &values, &next_cursor);
-    if (!status.ok()) {
-      return status;
-    }
-    for (auto &[field, chunk_value] : values) {
-      const auto idx = folly::tryTo<ChunkIndex>(field);
-      if (!idx.hasValue()) {
-        return Status::Malformed("invalid Redis chunk index");
-      }
-      if (idx.value() >= first_removed_idx) {
-        removed_fields.push_back(std::move(field));
-        continue;
-      }
-      if (boundary_offset == 0 || idx.value() != boundary_idx) {
-        continue;
-      }
-
+  if (boundary_offset != 0) {
+    std::string value;
+    auto status = txn.HGet(chunk_key, std::to_string(boundary_idx), &value);
+    if (status.ok()) {
       SwordFsChunk chunk;
-      status = chunk.ParseFrom(chunk_value);
+      status = chunk.ParseFrom(value);
       if (!status.ok()) {
         return status;
       }
       const uint64_t new_chunk_size = new_size - chunk.start_offset;
-      if (chunk.size <= new_chunk_size) {
-        continue;
+      if (chunk.size > new_chunk_size) {
+        chunk.size = new_chunk_size;
+        status = chunk.SerializeTo(&value);
+        if (!status.ok()) {
+          return status;
+        }
+        boundary_value = std::move(value);
       }
-      chunk.size = new_chunk_size;
-      status = chunk.SerializeTo(&chunk_value);
-      if (!status.ok()) {
-        return status;
-      }
-      boundary_value = std::move(chunk_value);
+    } else if (!status.IsNotFound()) {
+      return status;
     }
-    cursor = next_cursor;
-  } while (cursor != 0);
+  }
 
-  // RedisMetaTxn requires all reads before writes. Each HSCAN batch is
-  // filtered immediately; only fields that actually need deletion and at
-  // most one boundary chunk survive until the mutation phase.
+  // RedisMetaTxn requires all reads before writes. Queue mutations only after
+  // the optional boundary lookup has finished.
   if (boundary_value.has_value()) {
     auto status = txn.HSet(chunk_key, std::to_string(boundary_idx), *boundary_value);
     if (!status.ok()) {
       return status;
     }
   }
-  for (const auto &field : removed_fields) {
-    auto status = txn.HDel(chunk_key, field);
+  // Chunk fields use their fixed-size chunk index as the hash field. The old
+  // inode size bounds every valid index, and HDEL is harmless for sparse or
+  // missing chunks, so truncation never needs a hash-wide scan.
+  for (ChunkIndex idx = first_removed_idx; idx < old_chunk_count; ++idx) {
+    auto status = txn.HDel(chunk_key, std::to_string(idx));
     if (!status.ok()) {
       return status;
     }
@@ -1425,7 +1383,7 @@ Status RedisMetaImpl::Truncate(InodeID ino, uint64_t size) {
       return status;
     }
     SwordFsInode inode;
-    status = ParseInode(value, &inode);
+    status = inode.ParseFrom(value);
     if (!status.ok()) {
       return status;
     }
@@ -1439,8 +1397,8 @@ Status RedisMetaImpl::Truncate(InodeID ino, uint64_t size) {
     }
     inode.attr.size = size;
     inode.attr.KillSUID();
-    Touch(&inode, false, true, true);
-    status = SerializeInode(inode, &value);
+    inode.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+    status = inode.SerializeTo(&value);
     if (!status.ok()) {
       return status;
     }

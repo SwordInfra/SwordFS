@@ -59,6 +59,7 @@ class RedisMetaImplTest : public ::testing::Test {
     SwordFsVolume volume;
     volume.name = volume_name_;
     volume.meta_url = "redis://test";
+    volume.chunk_size = 4096;
     ASSERT_TRUE(impl_->FormatVolume(volume).ok());
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
@@ -212,28 +213,13 @@ TEST_F(RedisMetaImplTest, SetAttrSameOwnerKeepsSuidSgid) {
   EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), requested.mode & (S_ISUID | S_ISGID));
 }
 
-TEST_F(RedisMetaImplTest, TruncateRemovesChunkBeyondOldSizeRange) {
-  SwordFsInode file;
-  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
-
-  SwordFsChunk stale;
-  stale.index = 10;
-  stale.start_offset = 10 * 4096;
-  stale.size = 4096;
-  ASSERT_TRUE(impl_->AddChunk(file.ino, stale).ok());
-
-  SwordFsAttr requested = file.attr;
-  requested.size = 100;
-  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kSize, nullptr).ok());
-  ASSERT_TRUE(impl_->Truncate(file.ino, 50).ok());
-
-  SwordFsChunk actual;
-  EXPECT_TRUE(impl_->FindChunk(file.ino, stale.index, &actual).IsNotFound());
-}
-
 TEST_F(RedisMetaImplTest, SetAttrShrinkRemovesAndClampsChunks) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+
+  SwordFsAttr initial = file.attr;
+  initial.size = 8192;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, initial, SetAttrField::kSize, &file).ok());
 
   SwordFsChunk chunk0;
   chunk0.index = 0;

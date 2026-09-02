@@ -80,28 +80,6 @@ utils::Status RedisMetaTxn::HGet(std::string_view key, std::string_view field, s
   }
 }
 
-utils::Status RedisMetaTxn::HScan(std::string_view key, uint64_t cursor, size_t count,
-                                  std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor) {
-  if (values == nullptr || next_cursor == nullptr) {
-    return utils::Status::InvalidArgument("Redis HSCAN output is null");
-  }
-  try {
-    if (has_writes_) {
-      return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
-    }
-    redis_->watch(key);
-    values->clear();
-    *next_cursor = redis_->hscan(std::string(key), cursor, static_cast<long long>(count), std::back_inserter(*values));
-    return utils::Status::OK();
-  } catch (const sw::redis::TimeoutError &) {
-    throw;
-  } catch (const sw::redis::ClosedError &) {
-    throw;
-  } catch (const sw::redis::Error &error) {
-    return RedisError("HSCAN", error);
-  }
-}
-
 utils::Status RedisMetaTxn::HLen(std::string_view key, uint64_t *length) {
   if (length == nullptr) {
     return utils::Status::InvalidArgument("Redis HLEN output is null");
