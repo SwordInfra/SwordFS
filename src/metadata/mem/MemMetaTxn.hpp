@@ -119,7 +119,7 @@ class MemMetaTxn {
   // reclaimed immediately (and the parent loses the ".." backlink);
   // a non-empty directory returns NotEmpty.  Missing entries return
   // NotFound. Any successful removal bumps the parent's mtime/ctime.
-  Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink = nullptr);
+  Status Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result = nullptr);
 
   // Link an existing inode (by ino) into a directory (hard link).
   // Increments the inode's nlink; bumps the inode's ctime and the
@@ -153,6 +153,13 @@ class MemMetaTxn {
   // ────────────────────────────────────────────────────────────────
   // Open-unlink reclaim
   // ────────────────────────────────────────────────────────────────
+
+  Status StartSession();
+  Status RefreshSession();
+  Status StopSession();
+  Status AcquireOpen(InodeID ino);
+  Status ReleaseOpen(InodeID ino, bool *reclaimable);
+  Status ReapStaleSessions();
 
   // Move an orphaned inode out of the live inode table while preserving its
   // chunk metadata as a pending data-reclaim job. No-op for linked inodes.

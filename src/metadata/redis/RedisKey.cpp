@@ -19,6 +19,10 @@ std::string RedisKey::NextIno() const {
   return prefix_ + "next_ino";
 }
 
+std::string RedisKey::NextSession() const {
+  return prefix_ + "next_session";
+}
+
 std::string RedisKey::Inode(uint64_t ino) const {
   return folly::sformat("{}inode:{}", prefix_, ino);
 }
@@ -33,6 +37,22 @@ std::string RedisKey::Chunk(uint64_t ino) const {
 
 std::string RedisKey::InodeCount() const {
   return prefix_ + "inode_count";
+}
+
+std::string RedisKey::Sessions() const {
+  return prefix_ + "sessions";
+}
+
+std::string RedisKey::SessionHeartbeat(uint64_t session_id) const {
+  return folly::sformat("{}session:{}", prefix_, session_id);
+}
+
+std::string RedisKey::SessionOpens(uint64_t session_id) const {
+  return folly::sformat("{}session:{}:opens", prefix_, session_id);
+}
+
+std::string RedisKey::OpenInode(uint64_t ino) const {
+  return folly::sformat("{}open:{}", prefix_, ino);
 }
 
 std::string RedisKey::OrphanedInodes() const {

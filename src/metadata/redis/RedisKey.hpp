@@ -19,10 +19,15 @@ class RedisKey {
 
   std::string Format() const;
   std::string NextIno() const;
+  std::string NextSession() const;
   std::string Inode(uint64_t ino) const;
   std::string Directory(uint64_t parent_ino) const;
   std::string Chunk(uint64_t ino) const;
   std::string InodeCount() const;
+  std::string Sessions() const;
+  std::string SessionHeartbeat(uint64_t session_id) const;
+  std::string SessionOpens(uint64_t session_id) const;
+  std::string OpenInode(uint64_t ino) const;
   std::string OrphanedInodes() const;
   std::string DeletedFiles() const;
 

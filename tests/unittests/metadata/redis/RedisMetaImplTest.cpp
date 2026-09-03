@@ -32,6 +32,7 @@ using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::UnlinkResult;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -306,9 +307,9 @@ TEST_F(RedisMetaImplTest, UnlinkAndRmdirCoverSuccessAndTypeChecks) {
   EXPECT_EQ(impl_->Unlink(kRootInodeId, "dir", nullptr).code(), Status::kInvalidArgument);
   EXPECT_TRUE(impl_->RmDir(kRootInodeId, "file").IsNotDirectory());
 
-  uint64_t post_nlink = 99;
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", &post_nlink).ok());
-  EXPECT_EQ(post_nlink, 0U);
+  UnlinkResult unlink_result;
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", &unlink_result).ok());
+  EXPECT_EQ(unlink_result.post_nlink, 0U);
   EXPECT_TRUE(impl_->Lookup(kRootInodeId, "file", &file).IsNotFound());
   ASSERT_TRUE(impl_->ReclaimInode(file.ino).ok());
   EXPECT_TRUE(impl_->GetInode(file.ino, &file).IsNotFound());
@@ -509,9 +510,9 @@ TEST_F(RedisMetaImplTest, ReclaimPersistsFrozenChunkListUntilCompletion) {
   SwordFsChunk chunk{.index = 0, .start_offset = 0, .key = "object-key", .size = 10};
   ASSERT_TRUE(impl_->AddChunk(file.ino, chunk).ok());
 
-  uint64_t post_nlink = 1;
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", &post_nlink).ok());
-  ASSERT_EQ(post_nlink, 0U);
+  UnlinkResult unlink_result;
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", &unlink_result).ok());
+  ASSERT_EQ(unlink_result.post_nlink, 0U);
 
   std::vector<InodeID> orphaned;
   ASSERT_TRUE(impl_

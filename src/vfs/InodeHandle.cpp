@@ -26,17 +26,32 @@ InodeHandle::InodeHandle(metadata::InodeID ino)
 }
 
 utils::Status InodeHandle::Open(int flags) {
-  // Performs the open-time permission check and atime update.
-  auto meta = volume::VolumeImpl::Instance().meta_engine();
-  auto status = meta->Open(ino_);
+  // Reserve the local reference first so same-mount unlink cannot reclaim
+  // while the persistent open reference is being published. AcquireOpen is
+  // the cross-mount linearization point: it races atomically with reclaim on
+  // the inode/open-count keys.
+  AcquireRef();
+
+  auto status = meta_->AcquireOpen(ino_);
   if (!status.ok()) {
+    ReleaseFailedOpen(/*persistent_acquired=*/false);
     return status;
   }
 
-  AcquireRef();
+  // Permission/type checks and the atime update happen after the durable open
+  // reference exists. If they fail, rollback both reference layers.
+  status = meta_->Open(ino_);
+  if (!status.ok()) {
+    ReleaseFailedOpen(/*persistent_acquired=*/true);
+    return status;
+  }
 
   if (flags & O_TRUNC) {
-    return rw_->Truncate(0);
+    status = rw_->Truncate(0);
+    if (!status.ok()) {
+      ReleaseFailedOpen(/*persistent_acquired=*/true);
+      return status;
+    }
   }
   return utils::Status::OK();
 }
@@ -54,28 +69,48 @@ utils::Status InodeHandle::Flush() {
 }
 
 utils::Status InodeHandle::Close() {
-  auto state = ReleaseRef();
-  if (!state.is_last) {
-    return utils::Status::OK();
+  ReleaseState state{};
+  bool reclaimable = false;
+  utils::Status flush_status = utils::Status::OK();
+  utils::Status release_status = utils::Status::OK();
+  {
+    // Keep both the local and persistent open references alive while the final
+    // close flushes dirty data. Holding state_mutex_ through ReleaseOpen also
+    // prevents a same-mount Open from appearing between the persistent release
+    // and the local count transition.
+    std::unique_lock<std::mutex> lock(state_mutex_);
+    if (open_count_ == 0) {
+      return utils::Status::Internal("closing inode with no open references");
+    }
+    if (open_count_ == 1) {
+      flush_status = rw_->Flush();
+    }
+
+    release_status = meta_->ReleaseOpen(ino_, &reclaimable);
+    if (!release_status.ok()) {
+      SWORDFS_LOG_ERROR << "InodeHandle::Close: ReleaseOpen(" << ino_ << ") failed: " << release_status.message();
+    }
+
+    --open_count_;
+    const bool is_last = open_count_ == 0;
+    state = {is_last, is_last && orphaned_};
   }
 
-  auto status = rw_->Flush();
-  if (!status.ok()) {
-    return status;
-  }
-
-  // Reclaim exactly once, when the last reference to an orphaned inode
-  // is released.  state.orphaned was snapshotted atomically with the
-  // decrement inside ReleaseRef(), so this decision cannot race with
-  // MarkOrphanedIfOpen(). ReclaimData removes both the chunk objects
-  // (via the data engine) and the inode (via the metadata engine).
-  if (state.orphaned) {
-    auto status = ReclaimData();
-    if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "InodeHandle::Close: ReclaimData(" << ino_ << ") failed: " << status.message();
+  // A local unlink marks orphaned_, while a remote unlink is detected by the
+  // filesystem-wide open-count transition returned from ReleaseOpen(). If the
+  // persistent release failed, ReclaimInode's global-open guard will keep the
+  // inode alive; the session cleanup path can conservatively release it later.
+  if ((state.is_last && state.orphaned) || reclaimable) {
+    auto reclaim_status = ReclaimData();
+    if (!reclaim_status.ok()) {
+      SWORDFS_LOG_ERROR << "InodeHandle::Close: ReclaimData(" << ino_ << ") failed: " << reclaim_status.message();
     }
   }
-  return utils::Status::OK();
+
+  if (!flush_status.ok()) {
+    return flush_status;
+  }
+  return release_status;
 }
 
 bool InodeHandle::MarkOrphanedIfOpen() {
@@ -99,8 +134,30 @@ void InodeHandle::AcquireRef() {
 
 InodeHandle::ReleaseState InodeHandle::ReleaseRef() {
   std::lock_guard<std::mutex> lock(state_mutex_);
+  if (open_count_ == 0) {
+    return {false, false};
+  }
   bool is_last = (--open_count_ == 0);
   return {is_last, is_last && orphaned_};
+}
+
+void InodeHandle::ReleaseFailedOpen(bool persistent_acquired) {
+  bool reclaimable = false;
+  if (persistent_acquired) {
+    auto status = meta_->ReleaseOpen(ino_, &reclaimable);
+    if (!status.ok()) {
+      SWORDFS_LOG_WARN << "InodeHandle::Open rollback: ReleaseOpen(" << ino_ << ") failed: " << status.message();
+    }
+  }
+
+  auto state = ReleaseRef();
+  if (!state.orphaned && !reclaimable) {
+    return;
+  }
+  auto status = ReclaimData();
+  if (!status.ok()) {
+    SWORDFS_LOG_WARN << "InodeHandle::Open rollback: ReclaimData(" << ino_ << ") failed: " << status.message();
+  }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -143,12 +200,16 @@ std::shared_ptr<InodeHandle> InodeHandleManager::Get(metadata::InodeID ino, bool
 }
 
 utils::Status InodeHandle::ReclaimData() {
-  // Last-line-of-defence guards. Callers (VfsImpl::Unlink,
-  // InodeHandle::Close) are supposed to verify these *before* they call
-  // us, but they're racing with concurrent Link / Open on the same
-  // inode and may have made a decision on stale state. ReclaimData is
-  // the point of no return — once we Delete chunk objects from S3, no
-  // other thread can recover them — so we re-check here.
+  // Serialize the no-open check with AcquireRef(). Holding this lock through
+  // preparation and object deletion is intentional: once we decide an inode
+  // is reclaimable, no local Open may slip in before ReclaimInode publishes
+  // the durable deletion job.
+  std::unique_lock<std::mutex> lock(state_mutex_);
+  if (open_count_ > 0) {
+    SWORDFS_LOG_WARN << "ReclaimData(" << ino_ << ") refused: open handle still references it.";
+    return utils::Status::OK();
+  }
+
   metadata::SwordFsInode inode;
   Status status = meta_->GetInode(ino_, &inode);
   if (status.IsNotFound()) {
@@ -162,17 +223,11 @@ utils::Status InodeHandle::ReclaimData() {
   }
 
   if (inode.attr.nlink > 0) {
-    // Another directory entry still references this inode (a
-    // concurrent Link raced our Unlink). Refusing to reclaim keeps
-    // the chunk objects alive for the surviving name.
+    // Another directory entry still references this inode (a concurrent Link
+    // raced our Unlink). Refusing to reclaim keeps the chunk objects alive for
+    // the surviving name.
     SWORDFS_LOG_WARN << "ReclaimData(" << ino_ << ") refused: nlink=" << inode.attr.nlink
                      << " (>0). A concurrent Link won the race.";
-    return utils::Status::OK();
-  } else if (open_count() > 0) {
-    // An fd is still open on this inode. The caller should have
-    // routed through MarkOrphaned instead — refuse to drop the
-    // underlying chunks/inode out from under it.
-    SWORDFS_LOG_WARN << "ReclaimData(" << ino_ << ") refused: open handle still references it.";
     return utils::Status::OK();
   }
 

@@ -49,18 +49,56 @@ utils::Status GarbageCollector::Reclaim(metadata::InodeID ino) {
 }
 
 utils::Status GarbageCollector::Reconcile() {
-  // Snapshot identifiers before completing jobs. Redis HSCAN does not promise
-  // stable iteration when fields are removed from the hash being scanned.
+  utils::Status first_error = utils::Status::OK();
+
+  // Fence expired sessions first. Their persistent open references must be
+  // released before orphan eligibility is evaluated.
+  auto status = meta_->ReapStaleSessions();
+  if (!status.ok()) {
+    first_error = status;
+    SWORDFS_LOG_WARN << "GarbageCollector: stale-session reconciliation incomplete: " << status.message();
+  }
+
+  // Snapshot orphan identifiers before ReclaimInode removes their fields.
+  // VisitOrphanedInodes exposes only inodes whose filesystem-wide open count
+  // is zero, so this is safe to run from every live mount.
+  std::vector<metadata::InodeID> orphaned;
+  status = meta_->VisitOrphanedInodes([&](metadata::InodeID ino) {
+    orphaned.push_back(ino);
+    return utils::Status::OK();
+  });
+  if (!status.ok()) {
+    if (first_error.ok()) {
+      first_error = status;
+    }
+  } else {
+    for (metadata::InodeID ino : orphaned) {
+      auto reclaim_status = meta_->ReclaimInode(ino);
+      if (!reclaim_status.ok()) {
+        if (first_error.ok()) {
+          first_error = reclaim_status;
+        }
+        SWORDFS_LOG_WARN << "GarbageCollector: failed to prepare orphan inode " << ino << ": "
+                         << reclaim_status.message();
+      }
+    }
+  }
+
+  // Snapshot prepared jobs before completing them. Redis HSCAN does not
+  // promise stable iteration when fields are removed from the hash being
+  // scanned.
   std::vector<metadata::InodeID> pending;
-  auto status = meta_->VisitPendingReclaims([&](metadata::InodeID ino) {
+  status = meta_->VisitPendingReclaims([&](metadata::InodeID ino) {
     pending.push_back(ino);
     return utils::Status::OK();
   });
   if (!status.ok()) {
-    return status;
+    if (first_error.ok()) {
+      first_error = status;
+    }
+    return first_error;
   }
 
-  utils::Status first_error = utils::Status::OK();
   for (metadata::InodeID ino : pending) {
     auto collect_status = CollectOne(ino);
     if (!collect_status.ok()) {
@@ -74,34 +112,7 @@ utils::Status GarbageCollector::Reconcile() {
 }
 
 utils::Status GarbageCollector::Recover() {
-  // As with pending jobs, snapshot orphan candidates before ReclaimInode
-  // removes their hash fields.
-  std::vector<metadata::InodeID> orphaned;
-  auto status = meta_->VisitOrphanedInodes([&](metadata::InodeID ino) {
-    orphaned.push_back(ino);
-    return utils::Status::OK();
-  });
-  if (!status.ok()) {
-    return status;
-  }
-
-  utils::Status first_error = utils::Status::OK();
-  for (metadata::InodeID ino : orphaned) {
-    auto reclaim_status = meta_->ReclaimInode(ino);
-    if (!reclaim_status.ok()) {
-      if (first_error.ok()) {
-        first_error = reclaim_status;
-      }
-      SWORDFS_LOG_WARN << "GarbageCollector: failed to prepare orphan inode " << ino << ": "
-                       << reclaim_status.message();
-    }
-  }
-
-  status = Reconcile();
-  if (first_error.ok()) {
-    first_error = status;
-  }
-  return first_error;
+  return Reconcile();
 }
 
 }  // namespace swordfs::vfs

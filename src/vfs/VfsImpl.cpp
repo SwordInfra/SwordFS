@@ -124,36 +124,39 @@ utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
   // `MemMetaImpl::Unlink` above the store, so we don't repeat them here.
   auto *meta = VolumeImpl::Instance().meta_engine();
 
-  // Look up the child inode.
-  SwordFsInode child;
-  auto status = meta->Lookup(parent, name, &child);
+  // The unlink transaction returns both the inode actually detached and its
+  // authoritative post-decrement nlink. Do not Lookup first: another thread
+  // could replace the name between Lookup and Unlink and make us reclaim the
+  // wrong inode.
+  metadata::UnlinkResult result;
+  auto status = meta->Unlink(parent, name, &result);
   if (!status.ok()) {
     return status;
   }
 
-  // meta->Unlink hands back the authoritative post-decrement nlink.
-  uint64_t post_nlink = 0;
-  status = meta->Unlink(parent, name, &post_nlink);
-  if (!status.ok()) {
-    return status;
-  }
-
-  // Hardlink still alive? Then the inode (and its chunks) belong to
-  // another name; leave them alone.
-  if (post_nlink > 0) {
+  // Hardlink still alive? Then the inode (and its chunks) belong to another
+  // name; leave them alone.
+  if (result.post_nlink > 0) {
     return utils::Status::OK();
   }
 
-  auto handle = vfs::InodeHandleManager::Instance().Get(child.ino, /*create_if_missing=*/true);
+  auto handle = vfs::InodeHandleManager::Instance().Get(result.unlinked_ino, /*create_if_missing=*/true);
   if (!handle) {
-    return utils::Status::Internal("failed to get InodeHandle");
+    SWORDFS_LOG_ERROR << "Unlink: failed to get InodeHandle for inode " << result.unlinked_ino
+                      << "; unlink has already committed";
+    return utils::Status::OK();
   }
   if (!handle->MarkOrphanedIfOpen()) {
-    // ReclaimData removes both the chunk objects (via the data engine)
-    // and the inode (via the metadata engine).
-    return handle->ReclaimData();
+    // The namespace mutation is already committed and cannot be rolled back.
+    // Cleanup failures therefore stay in persistent GC state and must not turn
+    // a successful unlink into EIO/ENOENT-on-retry semantics for the caller.
+    status = handle->ReclaimData();
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "Unlink: cleanup of inode " << result.unlinked_ino
+                        << " failed after namespace commit: " << status.message();
+    }
   }
-  // Defer the actual cleanup until the last `Close`.
+  // Defer cleanup to the last Close when an fd remains open.
   return utils::Status::OK();
 }
 

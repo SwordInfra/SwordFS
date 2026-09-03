@@ -25,12 +25,18 @@ class MemMetaImpl : public IMetaEngine {
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
   Status GetInode(InodeID ino, SwordFsInode *out) override;
   Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
-  Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink = nullptr) override;
+  Status Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result = nullptr) override;
   Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
                 RenameFlag flags, RenameResult *result = nullptr) override;
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override;
   Status Access(InodeID ino, uint32_t mask) override;
   Status Open(InodeID ino) override;
+  Status StartSession() override;
+  Status RefreshSession() override;
+  Status StopSession() override;
+  Status AcquireOpen(InodeID ino) override;
+  Status ReleaseOpen(InodeID ino, bool *reclaimable) override;
+  Status ReapStaleSessions() override;
   Status ReclaimInode(InodeID ino) override;
   Status VisitOrphanedInodes(const InodeVisitorFn &visitor) override;
   Status VisitPendingReclaims(const InodeVisitorFn &visitor) override;

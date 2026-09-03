@@ -292,13 +292,15 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view old_name, 
     // so the VFS layer can perform the same open-fd-aware data cleanup it
     // uses for unlink(2).
     const InodeID victim_ino = victim->ino;
-    Status status = Unlink(new_parent_ino, new_name, nullptr);
+    const bool victim_is_dir = victim->IsDir();
+    UnlinkResult unlink_result;
+    Status status = Unlink(new_parent_ino, new_name, &unlink_result);
     if (!status.ok()) {
       return status;
     }
-    if (result && !victim->IsDir()) {
+    if (result && !victim_is_dir) {
       result->overwritten_ino = victim_ino;
-      result->overwritten_post_nlink = victim->attr.nlink;
+      result->overwritten_post_nlink = unlink_result.post_nlink;
     }
   }
 
@@ -320,7 +322,11 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view old_name, 
   return Status::OK();
 }
 
-Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) {
+Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result) {
+  if (result) {
+    *result = {};
+  }
+
   SwordFsInode *child = FindEntry(parent_ino, name);
   if (!child) {
     return Status::NotFound("entry not found");
@@ -331,6 +337,7 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name, uint64_t *p
   }
 
   SwordFsInode *parent = FindInode(parent_ino);
+  const InodeID child_ino = child->ino;
 
   // Remove the directory entry. Decrement nlink to track the hard-link
   // count. The inode (and its chunks) survive here; the caller decides
@@ -341,30 +348,26 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name, uint64_t *p
 
   if (child->IsDir()) {
     // The removed subdirectory's ".." no longer points back at the
-    // parent, so the parent loses a hard link.  Directories cannot be
+    // parent, so the parent loses a hard link. Directories cannot be
     // hard-linked; always reclaim immediately.
     parent->attr.nlink--;
-    DeleteInode(child->ino);
-    if (post_nlink) {
-      // Inode is gone — surface 0 so the caller doesn't try to read
-      // further metadata for it.
-      *post_nlink = 0;
+    DeleteInode(child_ino);
+    if (result) {
+      result->unlinked_ino = child_ino;
+      result->post_nlink = 0;
     }
     return Status::OK();
   }
 
-  // File: decrement nlink only. If no names remain, the inode stays
-  // alive until the caller (VfsImpl::Unlink or InodeHandle::Close)
-  // confirms no fd is open and calls ReclaimData.
+  // File: decrement nlink only. If no names remain, keep an orphan marker
+  // until the filesystem-wide open-reference count reaches zero.
   child->attr.nlink--;
   if (child->attr.nlink == 0) {
-    store_->orphaned_inodes_.insert(child->ino);
+    store_->orphaned_inodes_.insert(child_ino);
   }
-  if (post_nlink) {
-    // Read it back inside the same transaction so the caller sees the
-    // exact post-decrement value with no chance of a concurrent Link
-    // racing in between.
-    *post_nlink = child->attr.nlink;
+  if (result) {
+    result->unlinked_ino = child_ino;
+    result->post_nlink = child->attr.nlink;
   }
   return Status::OK();
 }
@@ -564,6 +567,114 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
   return Status::OK();
 }
 
+Status MemMetaTxn::StartSession() {
+  if (store_->session_id_ != 0 && store_->sessions_.contains(store_->session_id_)) {
+    return Status::OK();
+  }
+  store_->session_id_ = store_->next_session_id_++;
+  store_->sessions_.insert(store_->session_id_);
+  return Status::OK();
+}
+
+Status MemMetaTxn::RefreshSession() {
+  if (store_->session_id_ == 0 || !store_->sessions_.contains(store_->session_id_)) {
+    return Status::NotFound("memory metadata session is not active");
+  }
+  return Status::OK();
+}
+
+Status MemMetaTxn::StopSession() {
+  if (store_->session_id_ == 0) {
+    return Status::OK();
+  }
+
+  auto session_it = store_->session_opens_.find(store_->session_id_);
+  if (session_it != store_->session_opens_.end()) {
+    for (const auto &[ino, count] : session_it->second) {
+      auto global_it = store_->open_inodes_.find(ino);
+      if (global_it == store_->open_inodes_.end() || global_it->second < count) {
+        return Status::Malformed("invalid memory global open count");
+      }
+      global_it->second -= count;
+      if (global_it->second == 0) {
+        store_->open_inodes_.erase(global_it);
+      }
+    }
+    store_->session_opens_.erase(session_it);
+  }
+
+  store_->sessions_.erase(store_->session_id_);
+  store_->session_id_ = 0;
+  return Status::OK();
+}
+
+Status MemMetaTxn::AcquireOpen(InodeID ino) {
+  if (store_->session_id_ == 0 || !store_->sessions_.contains(store_->session_id_)) {
+    return Status::NotFound("memory metadata session is not active");
+  }
+  if (!FindInode(ino)) {
+    return Status::NotFound("inode not found");
+  }
+
+  auto &session_count = store_->session_opens_[store_->session_id_][ino];
+  auto &global_count = store_->open_inodes_[ino];
+  if (session_count == UINT64_MAX || global_count == UINT64_MAX) {
+    return Status::Internal("open reference count overflow");
+  }
+  ++session_count;
+  ++global_count;
+  return Status::OK();
+}
+
+Status MemMetaTxn::ReleaseOpen(InodeID ino, bool *reclaimable) {
+  if (reclaimable) {
+    *reclaimable = false;
+  }
+  if (store_->session_id_ == 0) {
+    return Status::OK();
+  }
+
+  auto session_it = store_->session_opens_.find(store_->session_id_);
+  if (session_it == store_->session_opens_.end()) {
+    return Status::OK();
+  }
+  auto open_it = session_it->second.find(ino);
+  if (open_it == session_it->second.end()) {
+    return Status::OK();
+  }
+
+  auto global_it = store_->open_inodes_.find(ino);
+  if (global_it == store_->open_inodes_.end() || global_it->second == 0) {
+    return Status::Malformed("missing memory global open count");
+  }
+
+  --open_it->second;
+  if (open_it->second == 0) {
+    session_it->second.erase(open_it);
+  }
+  if (session_it->second.empty()) {
+    store_->session_opens_.erase(session_it);
+  }
+
+  --global_it->second;
+  const bool no_global_opens = global_it->second == 0;
+  if (no_global_opens) {
+    store_->open_inodes_.erase(global_it);
+  }
+
+  SwordFsInode *inode = FindInode(ino);
+  if (reclaimable && no_global_opens && inode && inode->attr.nlink == 0) {
+    *reclaimable = true;
+  }
+  return Status::OK();
+}
+
+Status MemMetaTxn::ReapStaleSessions() {
+  // Memory metadata has no surviving state after a process crash, so there are
+  // no stale remote sessions to reap. StopSession handles normal teardown.
+  return Status::OK();
+}
+
 Status MemMetaTxn::ReclaimInode(InodeID ino) {
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
@@ -571,6 +682,10 @@ Status MemMetaTxn::ReclaimInode(InodeID ino) {
   }
   if (inode->attr.nlink != 0) {
     store_->orphaned_inodes_.erase(ino);
+    return Status::OK();
+  }
+  auto open_it = store_->open_inodes_.find(ino);
+  if (open_it != store_->open_inodes_.end() && open_it->second > 0) {
     return Status::OK();
   }
 
@@ -590,7 +705,14 @@ Status MemMetaTxn::ListOrphanedInodes(std::vector<InodeID> *out) {
   if (!out) {
     return Status::InvalidArgument("null out");
   }
-  out->assign(store_->orphaned_inodes_.begin(), store_->orphaned_inodes_.end());
+  out->clear();
+  out->reserve(store_->orphaned_inodes_.size());
+  for (InodeID ino : store_->orphaned_inodes_) {
+    auto open_it = store_->open_inodes_.find(ino);
+    if (open_it == store_->open_inodes_.end() || open_it->second == 0) {
+      out->push_back(ino);
+    }
+  }
   std::sort(out->begin(), out->end());
   return Status::OK();
 }

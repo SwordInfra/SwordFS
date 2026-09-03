@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 
 #include "metadata/IMetaEngine.hpp"
@@ -34,7 +35,7 @@ class RedisMetaImpl : public IMetaEngine {
   Status GetInode(InodeID ino, SwordFsInode *out) override;
   Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
-  Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) override;
+  Status Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
   Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
                 RenameFlag flags, RenameResult *result) override;
@@ -45,6 +46,12 @@ class RedisMetaImpl : public IMetaEngine {
   Status Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) override;
   Status Readlink(InodeID ino, std::string *target) override;
   Status Open(InodeID ino) override;
+  Status StartSession() override;
+  Status RefreshSession() override;
+  Status StopSession() override;
+  Status AcquireOpen(InodeID ino) override;
+  Status ReleaseOpen(InodeID ino, bool *reclaimable) override;
+  Status ReapStaleSessions() override;
   Status ReclaimInode(InodeID ino) override;
   Status VisitOrphanedInodes(const InodeVisitorFn &visitor) override;
   Status VisitPendingReclaims(const InodeVisitorFn &visitor) override;
@@ -63,8 +70,13 @@ class RedisMetaImpl : public IMetaEngine {
   Status UpdateAtimeBestEffort(InodeID ino);
 
  private:
+  Status CleanupSession(SessionID session_id, bool require_stale);
+
+ private:
   std::shared_ptr<RedisMetaClient> client_;
   redis::RedisKey key_;
+  std::chrono::milliseconds session_timeout_;
+  SessionID session_id_ = 0;
   uint64_t chunk_size_ = 0;
 };
 

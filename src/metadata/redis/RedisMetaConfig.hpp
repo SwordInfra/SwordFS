@@ -32,6 +32,10 @@ struct RedisMetaConfig {
   // Transaction retry policy.
   int retry_attempts = 3;
   std::chrono::milliseconds retry_backoff = std::chrono::milliseconds(20);
+
+  // Mount-session liveness. A sustained inode becomes reclaimable only after
+  // its owner session has missed heartbeats for this long.
+  std::chrono::milliseconds session_timeout = std::chrono::minutes(5);
 };
 
 utils::Status ParseRedisMetaUrl(std::string_view meta_url, RedisMetaConfig *config);

@@ -87,10 +87,14 @@ class InodeHandle {
   // Acquires one open-fd reference under state_mutex_.
   void AcquireRef();
 
-  // Releases one open-fd reference and returns the resulting state, so
-  // Close() can flush on the last reference and reclaim exactly once when
-  // the last reference to an orphaned inode is released.
+  // Releases one open-fd reference and returns the resulting state.
   ReleaseState ReleaseRef();
+
+  // Roll back the runtime reference reserved before open completes. When a
+  // persistent open reference was already published, release it as part of the
+  // same rollback. If unlink raced the failed open, this may make the inode
+  // reclaimable and drives the normal idempotent GC path.
+  void ReleaseFailedOpen(bool persistent_acquired);
 
   metadata::InodeID ino_;
   metadata::IMetaEngine *meta_;

@@ -8,6 +8,7 @@
 namespace swordfs::metadata {
 
 using InodeID = uint64_t;
+using SessionID = uint64_t;
 using ChunkIndex = uint32_t;
 
 constexpr InodeID kRootInodeId = 1;
@@ -54,6 +55,11 @@ inline SetAttrField FromFuseSetAttrFields(unsigned int fields) {
 inline RenameFlag FromFuseRenameFlags(unsigned int flags) {
   return static_cast<RenameFlag>(flags);
 }
+
+struct UnlinkResult {
+  InodeID unlinked_ino = 0;
+  uint64_t post_nlink = 0;
+};
 
 struct RenameResult {
   InodeID overwritten_ino = 0;

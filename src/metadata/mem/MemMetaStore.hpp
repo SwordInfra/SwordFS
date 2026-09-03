@@ -69,6 +69,8 @@ class MemMetaStore {
 
   mutable std::mutex mutex_;
   std::atomic<InodeID> next_ino_;
+  SessionID next_session_id_ = 1;
+  SessionID session_id_ = 0;
 
   folly::F14FastMap<InodeID, std::unique_ptr<SwordFsInode>> inodes_;
   folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode *>> dirs_;
@@ -76,9 +78,18 @@ class MemMetaStore {
   // Chunk metadata: inode → (index → SwordFsChunk).
   folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, SwordFsChunk>> chunks_;
 
-  // Inodes that lost their last namespace link but may still have a local
-  // open handle, plus frozen chunk maps awaiting data-object deletion.
+  // Active mount sessions plus persistent open-reference accounting. Memory
+  // mode is process-local, but it implements the same lifecycle contract as
+  // persistent backends so VFS behavior and tests stay backend-neutral.
+  folly::F14FastSet<SessionID> sessions_;
+  folly::F14FastMap<SessionID, folly::F14FastMap<InodeID, uint64_t>> session_opens_;
+  folly::F14FastMap<InodeID, uint64_t> open_inodes_;
+
+  // Inodes that lost their last namespace link, plus frozen chunk maps awaiting
+  // data-object deletion.
   folly::F14FastSet<InodeID> orphaned_inodes_;
+
+  // Frozen chunk maps awaiting data-object deletion.
   folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, SwordFsChunk>> deleted_files_;
 };
 

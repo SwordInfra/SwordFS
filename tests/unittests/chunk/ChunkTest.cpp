@@ -74,7 +74,7 @@ class MissingMetaEngine final : public IMetaEngine {
   Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, uint64_t *) override {
+  Status Unlink(InodeID, std::string_view, swordfs::metadata::UnlinkResult *) override {
     return Status::OK();
   }
   Status RmDir(InodeID, std::string_view) override {
@@ -102,6 +102,27 @@ class MissingMetaEngine final : public IMetaEngine {
     return Status::OK();
   }
   Status Open(InodeID) override {
+    return Status::OK();
+  }
+  Status StartSession() override {
+    return Status::OK();
+  }
+  Status RefreshSession() override {
+    return Status::OK();
+  }
+  Status StopSession() override {
+    return Status::OK();
+  }
+  Status AcquireOpen(InodeID) override {
+    return Status::OK();
+  }
+  Status ReleaseOpen(InodeID, bool *reclaimable) override {
+    if (reclaimable) {
+      *reclaimable = false;
+    }
+    return Status::OK();
+  }
+  Status ReapStaleSessions() override {
     return Status::OK();
   }
   Status ReclaimInode(InodeID) override {

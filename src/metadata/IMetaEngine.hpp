@@ -88,18 +88,11 @@ class IMetaEngine {
   virtual Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) = 0;
 
   /// POSIX unlink(2): detach the directory entry and decrement nlink.
-  /// On success, *post_nlink receives the authoritative nlink value the
-  /// caller needs to decide what to do next:
-  ///   - For a directory: the entry is removed and the inode is dropped
-  ///     atomically; *post_nlink is set to 0 (the inode no longer exists).
-  ///   - For a file: *post_nlink is the post-decrement nlink (which may
-  ///     still be >0 if another hardlink name exists, or ==0 if this
-  ///     was the last name).
-  ///
-  /// This avoids the TOCTOU race of reading nlink before the unlink and
-  /// deciding afterwards: the store is the only thing that mutates
-  /// nlink on this thread, and we read it back under the same lock.
-  virtual Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink = nullptr) = 0;
+  /// When |result| is non-null, the implementation returns the inode that was
+  /// actually detached plus its authoritative post-decrement nlink from the
+  /// same atomic mutation. This avoids a Lookup-before-Unlink TOCTOU race in
+  /// the VFS reclaim path.
+  virtual Status Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result = nullptr) = 0;
 
   /// Remove an empty directory. Decrements parent nlink.
   virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;
@@ -138,15 +131,33 @@ class IMetaEngine {
   /// validation + read permission) and updates atime.
   virtual Status Open(InodeID ino) = 0;
 
+  /// Start, refresh, and stop this mount's persistent metadata session.
+  /// Persistent backends use the session to own open-file references so a
+  /// crashed mount can be fenced and its references can be reconciled later.
+  virtual Status StartSession() = 0;
+  virtual Status RefreshSession() = 0;
+  virtual Status StopSession() = 0;
+
+  /// Persist one open-file reference owned by the current mount session.
+  /// AcquireOpen must fail if the inode disappeared before the reference could
+  /// be published. ReleaseOpen is idempotent and reports whether this release
+  /// dropped the filesystem-wide open count to zero for an unlinked inode.
+  virtual Status AcquireOpen(InodeID ino) = 0;
+  virtual Status ReleaseOpen(InodeID ino, bool *reclaimable) = 0;
+
+  /// Fence expired sessions and release all open references they still own.
+  /// Implementations must make partial cleanup restart-safe and idempotent.
+  virtual Status ReapStaleSessions() = 0;
+
   /// Prepare an unlinked inode for data reclamation. Once |ino| has nlink==0,
   /// atomically remove it from the live inode table, preserve its chunk list,
   /// and publish a durable pending-reclaim record. A linked inode is a no-op.
   /// Repeated calls are idempotent.
   virtual Status ReclaimInode(InodeID ino) = 0;
 
-  /// Visit inodes whose last namespace link was removed but which have not yet
-  /// been prepared for reclamation. Persistent backends use this list to close
-  /// the crash window between Unlink/Rename and the VFS open-handle decision.
+  /// Visit inodes whose last namespace link was removed and whose persistent
+  /// filesystem-wide open-reference count is zero. Stale session references
+  /// must be reconciled before an orphan becomes visible here.
   virtual Status VisitOrphanedInodes(const InodeVisitorFn &visitor) = 0;
 
   /// Visit durable, prepared reclaim jobs. The records must remain visible

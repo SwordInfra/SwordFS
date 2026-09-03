@@ -128,6 +128,10 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
     if (!status.ok()) {
       return status;
     }
+    status = meta_engine_->StartSession();
+    if (!status.ok()) {
+      return status;
+    }
     StartGarbageCollector();
   }
 
@@ -164,21 +168,52 @@ void VolumeImpl::StopGarbageCollector() {
 }
 
 void VolumeImpl::GarbageCollectorLoop() {
-  constexpr auto kReconcileInterval = std::chrono::minutes(1);
+  constexpr auto kHeartbeatInterval = std::chrono::seconds(10);
+  constexpr int kHeartbeatsPerReconcile = 6;
+  int heartbeat_count = 0;
+
   std::unique_lock<std::mutex> lock(garbage_collector_mutex_);
-  while (!garbage_collector_cv_.wait_for(lock, kReconcileInterval, [this] { return garbage_collector_stopping_; })) {
+  while (!garbage_collector_cv_.wait_for(lock, kHeartbeatInterval, [this] { return garbage_collector_stopping_; })) {
     lock.unlock();
-    vfs::GarbageCollector collector(meta_engine_.get(), data_engine_.get());
-    auto status = collector.Reconcile();
+
+    auto status = meta_engine_->RefreshSession();
     if (!status.ok()) {
-      SWORDFS_LOG_WARN << "periodic garbage reconciliation incomplete: " << status.message();
+      SWORDFS_LOG_WARN << "metadata session heartbeat failed: " << status.message();
     }
+
+    ++heartbeat_count;
+    if (heartbeat_count >= kHeartbeatsPerReconcile) {
+      heartbeat_count = 0;
+      vfs::GarbageCollector collector(meta_engine_.get(), data_engine_.get());
+      status = collector.Reconcile();
+      if (!status.ok()) {
+        SWORDFS_LOG_WARN << "periodic garbage reconciliation incomplete: " << status.message();
+      }
+    }
+
     lock.lock();
   }
 }
 
 void VolumeImpl::Shutdown() {
   StopGarbageCollector();
+
+  if (meta_engine_ != nullptr) {
+    auto status = meta_engine_->StopSession();
+    if (!status.ok()) {
+      SWORDFS_LOG_WARN << "failed to stop metadata session: " << status.message();
+    } else if (data_engine_ != nullptr) {
+      // Session removal makes any crash-window/current-session orphans
+      // immediately reclaimable. Finish one last pass while both engines are
+      // still alive; failures remain persistent for the next mount.
+      vfs::GarbageCollector collector(meta_engine_.get(), data_engine_.get());
+      status = collector.Recover();
+      if (!status.ok()) {
+        SWORDFS_LOG_WARN << "final garbage reconciliation incomplete: " << status.message();
+      }
+    }
+  }
+
   data_engine_.reset();
   meta_engine_.reset();
 }

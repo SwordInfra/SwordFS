@@ -142,6 +142,20 @@ utils::Status RedisMetaTxn::HDel(std::string_view key, std::string_view field) {
   }
 }
 
+utils::Status RedisMetaTxn::HIncrBy(std::string_view key, std::string_view field, int64_t delta) {
+  try {
+    transaction_->hincrby(std::string(key), std::string(field), delta);
+    has_writes_ = true;
+    return utils::Status::OK();
+  } catch (const sw::redis::TimeoutError &) {
+    throw;
+  } catch (const sw::redis::ClosedError &) {
+    throw;
+  } catch (const sw::redis::Error &error) {
+    return RedisError("HINCRBY", error);
+  }
+}
+
 utils::Status RedisMetaTxn::IncrBy(std::string_view key, int64_t delta) {
   try {
     transaction_->incrby(std::string(key), delta);

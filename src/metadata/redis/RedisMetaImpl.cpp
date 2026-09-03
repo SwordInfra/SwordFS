@@ -37,6 +37,12 @@
 namespace swordfs::metadata {
 
 namespace {
+
+int64_t UnixTimeMillis() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
 utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view volume_name,
                                     std::unique_ptr<IMetaEngine> *out) {
   if (out == nullptr) {
@@ -65,7 +71,9 @@ RegisterMetaEngine kRedisMetaEngine{"redis", CreateRedisMetaEngine};
 }  // namespace
 
 RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name)
-    : client_(std::make_shared<RedisMetaClient>(config)), key_(config.db, volume_name) {
+    : client_(std::make_shared<RedisMetaClient>(config)),
+      key_(config.db, volume_name),
+      session_timeout_(config.session_timeout) {
 }
 
 RedisMetaImpl::~RedisMetaImpl() = default;
@@ -403,12 +411,15 @@ Status RedisMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t 
   return status;
 }
 
-Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) {
+Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result) {
+  if (result) {
+    *result = {};
+  }
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot unlink . or ..");
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
-  const std::string orphaned_at = std::to_string(std::time(nullptr));
+  const std::string orphaned_at = std::to_string(UnixTimeMillis());
   return client_->Transact([&](RedisMetaTxn &txn) {
     SwordFsInode parent;
     std::string value;
@@ -481,8 +492,9 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t
         return status;
       }
     }
-    if (post_nlink) {
-      *post_nlink = child.attr.nlink;
+    if (result) {
+      result->unlinked_ino = child_ino;
+      result->post_nlink = child.attr.nlink;
     }
     return Status::OK();
   });
@@ -580,7 +592,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     return Status::Busy("cannot rename . or ..");
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
-  const std::string orphaned_at = std::to_string(std::time(nullptr));
+  const std::string orphaned_at = std::to_string(UnixTimeMillis());
   return client_->Transact([&](RedisMetaTxn &txn) {
     std::string old_parent_value, new_parent_value, source_value, target_value, source_entry_value, target_entry_value;
     auto status = txn.Get(key_.Inode(old_parent_ino), &old_parent_value);
@@ -1220,6 +1232,338 @@ Status RedisMetaImpl::Open(InodeID ino) {
   return UpdateAtimeBestEffort(ino);
 }
 
+Status RedisMetaImpl::StartSession() {
+  if (session_id_ != 0) {
+    return RefreshSession();
+  }
+
+  SessionID new_session_id = 0;
+  auto status = client_->Incr(key_.NextSession(), &new_session_id);
+  if (!status.ok()) {
+    return status;
+  }
+
+  const std::string session_field = std::to_string(new_session_id);
+  const std::string heartbeat = std::to_string(UnixTimeMillis());
+  status = client_->Transact([&](RedisMetaTxn &txn) {
+    auto status = txn.HSet(key_.Sessions(), session_field, "1");
+    if (!status.ok()) {
+      return status;
+    }
+    return txn.Set(key_.SessionHeartbeat(new_session_id), heartbeat);
+  });
+  if (status.ok()) {
+    session_id_ = new_session_id;
+  }
+  return status;
+}
+
+Status RedisMetaImpl::RefreshSession() {
+  if (session_id_ == 0) {
+    return Status::NotFound("Redis metadata session is not active");
+  }
+
+  const int64_t now = UnixTimeMillis();
+  const int64_t stale_before = now - session_timeout_.count();
+  return client_->Transact([&](RedisMetaTxn &txn) {
+    std::string heartbeat_value;
+    auto status = txn.Get(key_.SessionHeartbeat(session_id_), &heartbeat_value);
+    if (!status.ok()) {
+      return status;
+    }
+    int64_t heartbeat = 0;
+    const auto [end, error] =
+        std::from_chars(heartbeat_value.data(), heartbeat_value.data() + heartbeat_value.size(), heartbeat);
+    if (error != std::errc() || end != heartbeat_value.data() + heartbeat_value.size()) {
+      return Status::Malformed("invalid Redis session heartbeat");
+    }
+    if (heartbeat == 0 || heartbeat <= stale_before) {
+      return Status::Busy("Redis metadata session expired");
+    }
+    return txn.Set(key_.SessionHeartbeat(session_id_), std::to_string(now));
+  });
+}
+
+Status RedisMetaImpl::StopSession() {
+  if (session_id_ == 0) {
+    return Status::OK();
+  }
+
+  const SessionID session_id = session_id_;
+  auto status = CleanupSession(session_id, /*require_stale=*/false);
+  if (status.ok()) {
+    session_id_ = 0;
+  }
+  return status;
+}
+
+Status RedisMetaImpl::AcquireOpen(InodeID ino) {
+  if (session_id_ == 0) {
+    return Status::NotFound("Redis metadata session is not active");
+  }
+
+  const std::string ino_field = std::to_string(ino);
+  const int64_t stale_before = UnixTimeMillis() - session_timeout_.count();
+  return client_->Transact([&](RedisMetaTxn &txn) {
+    std::string heartbeat_value;
+    auto status = txn.Get(key_.SessionHeartbeat(session_id_), &heartbeat_value);
+    if (!status.ok()) {
+      return status;
+    }
+    int64_t heartbeat = 0;
+    const auto [end, error] =
+        std::from_chars(heartbeat_value.data(), heartbeat_value.data() + heartbeat_value.size(), heartbeat);
+    if (error != std::errc() || end != heartbeat_value.data() + heartbeat_value.size()) {
+      return Status::Malformed("invalid Redis session heartbeat");
+    }
+    if (heartbeat == 0 || heartbeat <= stale_before) {
+      return Status::Busy("Redis metadata session expired");
+    }
+
+    std::string inode_value;
+    status = txn.Get(key_.Inode(ino), &inode_value);
+    if (!status.ok()) {
+      return status;
+    }
+
+    status = txn.HIncrBy(key_.SessionOpens(session_id_), ino_field, 1);
+    if (!status.ok()) {
+      return status;
+    }
+    return txn.IncrBy(key_.OpenInode(ino), 1);
+  });
+}
+
+Status RedisMetaImpl::ReleaseOpen(InodeID ino, bool *reclaimable) {
+  if (reclaimable) {
+    *reclaimable = false;
+  }
+  if (session_id_ == 0) {
+    return Status::OK();
+  }
+
+  const std::string ino_field = std::to_string(ino);
+  auto status = client_->Transact([&](RedisMetaTxn &txn) {
+    std::string heartbeat_value;
+    auto status = txn.Get(key_.SessionHeartbeat(session_id_), &heartbeat_value);
+    if (status.IsNotFound()) {
+      return Status::OK();
+    }
+    if (!status.ok()) {
+      return status;
+    }
+    int64_t heartbeat = 0;
+    const auto [end, error] =
+        std::from_chars(heartbeat_value.data(), heartbeat_value.data() + heartbeat_value.size(), heartbeat);
+    if (error != std::errc() || end != heartbeat_value.data() + heartbeat_value.size()) {
+      return Status::Malformed("invalid Redis session heartbeat");
+    }
+    if (heartbeat == 0) {
+      // A stale-session reaper fenced this session and now owns all remaining
+      // persistent references. Retrying the local release would double-drop.
+      return Status::OK();
+    }
+
+    status = txn.HIncrBy(key_.SessionOpens(session_id_), ino_field, -1);
+    if (!status.ok()) {
+      return status;
+    }
+    return txn.IncrBy(key_.OpenInode(ino), -1);
+  });
+  if (!status.ok() || !reclaimable) {
+    return status;
+  }
+
+  // This is only a scheduling hint; ReclaimInode rechecks the scalar open key
+  // in its own transaction, so a concurrent Open after this read is safe.
+  std::string count_value;
+  status = client_->Get(key_.OpenInode(ino), &count_value);
+  if (status.IsNotFound()) {
+    return Status::OK();
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  int64_t open_count = 0;
+  const auto [count_end, count_error] =
+      std::from_chars(count_value.data(), count_value.data() + count_value.size(), open_count);
+  if (count_error != std::errc() || count_end != count_value.data() + count_value.size() || open_count < 0) {
+    return Status::Malformed("invalid global open count");
+  }
+  if (open_count != 0) {
+    return Status::OK();
+  }
+
+  SwordFsInode inode;
+  status = GetInode(ino, &inode);
+  if (status.IsNotFound()) {
+    return Status::OK();
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  *reclaimable = inode.attr.nlink == 0;
+  return Status::OK();
+}
+
+Status RedisMetaImpl::CleanupSession(SessionID session_id, bool require_stale) {
+  const std::string session_field = std::to_string(session_id);
+  const int64_t stale_before = UnixTimeMillis() - session_timeout_.count();
+  bool should_cleanup = false;
+
+  auto status = client_->Transact([&](RedisMetaTxn &txn) {
+    std::string heartbeat_value;
+    auto status = txn.Get(key_.SessionHeartbeat(session_id), &heartbeat_value);
+    if (status.IsNotFound()) {
+      // A missing heartbeat is already a fence. The scan index may have
+      // survived an interrupted cleanup, so finish draining its open refs.
+      should_cleanup = true;
+      return Status::OK();
+    }
+    if (!status.ok()) {
+      return status;
+    }
+    int64_t heartbeat = 0;
+    const auto [end, error] =
+        std::from_chars(heartbeat_value.data(), heartbeat_value.data() + heartbeat_value.size(), heartbeat);
+    if (error != std::errc() || end != heartbeat_value.data() + heartbeat_value.size()) {
+      return Status::Malformed("invalid Redis session heartbeat");
+    }
+    if (require_stale && heartbeat != 0 && heartbeat > stale_before) {
+      return Status::OK();
+    }
+    should_cleanup = true;
+    if (heartbeat == 0) {
+      return Status::OK();
+    }
+    // Heartbeat zero is a durable per-session fence. RefreshSession,
+    // AcquireOpen, and ReleaseOpen all watch this scalar key, so once EXEC
+    // commits no foreground operation can mutate this session's refs.
+    return txn.Set(key_.SessionHeartbeat(session_id), "0");
+  });
+  if (!status.ok()) {
+    return status;
+  }
+  if (!should_cleanup) {
+    return Status::OK();
+  }
+
+  std::vector<InodeID> open_inodes;
+  constexpr size_t kScanBatchSize = 128;
+  uint64_t cursor = 0;
+  do {
+    std::vector<std::pair<std::string, std::string>> values;
+    uint64_t next_cursor = 0;
+    status = client_->HScan(key_.SessionOpens(session_id), cursor, kScanBatchSize, &values, &next_cursor);
+    if (!status.ok()) {
+      return status;
+    }
+    for (const auto &[ino_field, count_value] : values) {
+      (void)count_value;
+      InodeID ino = 0;
+      const auto [end, error] = std::from_chars(ino_field.data(), ino_field.data() + ino_field.size(), ino);
+      if (error != std::errc() || end != ino_field.data() + ino_field.size()) {
+        return Status::Malformed("invalid inode field in Redis session open index");
+      }
+      open_inodes.push_back(ino);
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+
+  for (InodeID ino : open_inodes) {
+    const std::string ino_field = std::to_string(ino);
+    status = client_->Transact([&](RedisMetaTxn &txn) {
+      std::string count_value;
+      auto status = txn.HGet(key_.SessionOpens(session_id), ino_field, &count_value);
+      if (status.IsNotFound()) {
+        return Status::OK();
+      }
+      if (!status.ok()) {
+        return status;
+      }
+      int64_t session_count = 0;
+      const auto [end, error] =
+          std::from_chars(count_value.data(), count_value.data() + count_value.size(), session_count);
+      if (error != std::errc() || end != count_value.data() + count_value.size() || session_count < 0) {
+        return Status::Malformed("invalid session open count");
+      }
+      status = txn.HDel(key_.SessionOpens(session_id), ino_field);
+      if (!status.ok() || session_count == 0) {
+        return status;
+      }
+      return txn.IncrBy(key_.OpenInode(ino), -session_count);
+    });
+    if (!status.ok()) {
+      return status;
+    }
+  }
+
+  return client_->Transact([&](RedisMetaTxn &txn) {
+    auto status = txn.Del(key_.SessionOpens(session_id));
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.Del(key_.SessionHeartbeat(session_id));
+    if (!status.ok()) {
+      return status;
+    }
+    return txn.HDel(key_.Sessions(), session_field);
+  });
+}
+
+Status RedisMetaImpl::ReapStaleSessions() {
+  constexpr size_t kScanBatchSize = 128;
+  const int64_t stale_before = UnixTimeMillis() - session_timeout_.count();
+  std::vector<SessionID> stale_sessions;
+  uint64_t cursor = 0;
+  do {
+    std::vector<std::pair<std::string, std::string>> values;
+    uint64_t next_cursor = 0;
+    auto status = client_->HScan(key_.Sessions(), cursor, kScanBatchSize, &values, &next_cursor);
+    if (!status.ok()) {
+      return status;
+    }
+    for (const auto &[session_field, marker] : values) {
+      (void)marker;
+      SessionID session_id = 0;
+      const auto [end, error] =
+          std::from_chars(session_field.data(), session_field.data() + session_field.size(), session_id);
+      if (error != std::errc() || end != session_field.data() + session_field.size()) {
+        return Status::Malformed("invalid session field in Redis session index");
+      }
+
+      std::string heartbeat_value;
+      status = client_->Get(key_.SessionHeartbeat(session_id), &heartbeat_value);
+      if (status.IsNotFound()) {
+        stale_sessions.push_back(session_id);
+        continue;
+      }
+      if (!status.ok()) {
+        return status;
+      }
+      int64_t heartbeat = 0;
+      const auto [heartbeat_end, heartbeat_error] =
+          std::from_chars(heartbeat_value.data(), heartbeat_value.data() + heartbeat_value.size(), heartbeat);
+      if (heartbeat_error != std::errc() || heartbeat_end != heartbeat_value.data() + heartbeat_value.size()) {
+        return Status::Malformed("invalid Redis session heartbeat");
+      }
+      if (heartbeat == 0 || heartbeat <= stale_before) {
+        stale_sessions.push_back(session_id);
+      }
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+
+  utils::Status first_error = Status::OK();
+  for (SessionID session_id : stale_sessions) {
+    auto status = CleanupSession(session_id, /*require_stale=*/true);
+    if (!status.ok() && first_error.ok()) {
+      first_error = status;
+    }
+  }
+  return first_error;
+}
+
 Status RedisMetaImpl::ReclaimInode(InodeID ino) {
   const std::string deleted_at = std::to_string(std::time(nullptr));
   const std::string ino_field = std::to_string(ino);
@@ -1245,6 +1589,22 @@ Status RedisMetaImpl::ReclaimInode(InodeID ino) {
       return txn.HDel(key_.OrphanedInodes(), ino_field);
     }
 
+    std::string open_count_value;
+    status = txn.Get(key_.OpenInode(ino), &open_count_value);
+    if (status.ok()) {
+      int64_t open_count = 0;
+      const auto [end, error] =
+          std::from_chars(open_count_value.data(), open_count_value.data() + open_count_value.size(), open_count);
+      if (error != std::errc() || end != open_count_value.data() + open_count_value.size() || open_count < 0) {
+        return Status::Malformed("invalid global open count");
+      }
+      if (open_count > 0) {
+        return Status::OK();
+      }
+    } else if (!status.IsNotFound()) {
+      return status;
+    }
+
     // Publish the durable deletion record before removing the live inode.
     // MULTI/EXEC makes these mutations atomic; the chunk hash is deliberately
     // retained as the authoritative object list until CompleteReclaim().
@@ -1253,6 +1613,10 @@ Status RedisMetaImpl::ReclaimInode(InodeID ino) {
       return status;
     }
     status = txn.HDel(key_.OrphanedInodes(), ino_field);
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.Del(key_.OpenInode(ino));
     if (!status.ok()) {
       return status;
     }
@@ -1327,7 +1691,51 @@ Status RedisMetaImpl::VisitChunkHash(std::string_view hash_key, const ChunkVisit
 }
 
 Status RedisMetaImpl::VisitOrphanedInodes(const InodeVisitorFn &visitor) {
-  return VisitInodeHash(key_.OrphanedInodes(), visitor);
+  if (!visitor) {
+    return Status::InvalidArgument("inode visitor is null");
+  }
+
+  constexpr size_t kScanBatchSize = 128;
+  uint64_t cursor = 0;
+  do {
+    std::vector<std::pair<std::string, std::string>> values;
+    uint64_t next_cursor = 0;
+    auto status = client_->HScan(key_.OrphanedInodes(), cursor, kScanBatchSize, &values, &next_cursor);
+    if (!status.ok()) {
+      return status;
+    }
+    for (const auto &[ino_field, orphaned_at] : values) {
+      (void)orphaned_at;
+      InodeID ino = 0;
+      const auto [ino_end, ino_error] = std::from_chars(ino_field.data(), ino_field.data() + ino_field.size(), ino);
+      if (ino_error != std::errc() || ino_end != ino_field.data() + ino_field.size()) {
+        return Status::Malformed("invalid inode field in Redis orphan index");
+      }
+
+      std::string open_count_value;
+      status = client_->Get(key_.OpenInode(ino), &open_count_value);
+      if (status.ok()) {
+        int64_t open_count = 0;
+        const auto [end, error] =
+            std::from_chars(open_count_value.data(), open_count_value.data() + open_count_value.size(), open_count);
+        if (error != std::errc() || end != open_count_value.data() + open_count_value.size() || open_count < 0) {
+          return Status::Malformed("invalid global open count");
+        }
+        if (open_count > 0) {
+          continue;
+        }
+      } else if (!status.IsNotFound()) {
+        return status;
+      }
+
+      status = visitor(ino);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+  return Status::OK();
 }
 
 Status RedisMetaImpl::VisitPendingReclaims(const InodeVisitorFn &visitor) {

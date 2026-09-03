@@ -220,7 +220,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, uint64_t *) override {
+  Status Unlink(InodeID, std::string_view, swordfs::metadata::UnlinkResult *) override {
     return Status::OK();
   }
   Status RmDir(InodeID, std::string_view) override {
@@ -261,6 +261,27 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   }
   Status Open(InodeID) override {
     return call_status_;
+  }
+  Status StartSession() override {
+    return Status::OK();
+  }
+  Status RefreshSession() override {
+    return Status::OK();
+  }
+  Status StopSession() override {
+    return Status::OK();
+  }
+  Status AcquireOpen(InodeID) override {
+    return call_status_;
+  }
+  Status ReleaseOpen(InodeID, bool *reclaimable) override {
+    if (reclaimable) {
+      *reclaimable = false;
+    }
+    return call_status_;
+  }
+  Status ReapStaleSessions() override {
+    return Status::OK();
   }
   Status ReclaimInode(InodeID) override {
     return call_status_;

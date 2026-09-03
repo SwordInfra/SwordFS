@@ -212,14 +212,13 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t m
   return Status::OK();
 }
 
-Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) {
+Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result) {
   // Refuse to unlink "." or ".."
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot unlink . or ..");
   }
 
   const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
-  InodeID target_ino = 0;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode parent;
     Status status = txn.LookupInode(parent_ino, &parent);
@@ -251,20 +250,19 @@ Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t *
       return Status::InvalidArgument("cannot unlink directory");
     }
 
-    target_ino = target.ino;
-
-    // Unlink only detaches the directory entry and decrements nlink; the
-    // transaction hands back the authoritative post-decrement nlink in
-    // *post_nlink so the caller doesn't have to re-read it (avoiding the
-    // TOCTOU race that an unlink-before-read decision would have).
-    return txn.Unlink(parent_ino, name, post_nlink);
+    // Unlink only detaches the directory entry and decrements nlink. The
+    // result carries both the inode actually detached and its authoritative
+    // post-decrement nlink from this same transaction.
+    return txn.Unlink(parent_ino, name, result);
   });
 
   if (!status.ok()) {
     SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name << "' failed: " << status.message();
     return status;
   }
-  SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name << "' ino=" << target_ino;
+  if (result) {
+    SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name << "' ino=" << result->unlinked_ino;
+  }
   return Status::OK();
 }
 
@@ -437,6 +435,30 @@ Status MemMetaImpl::Open(InodeID ino) {
     SWORDFS_LOG_DEBUG << "Open: ino " << ino << " failed: " << status.message();
   }
   return status;
+}
+
+Status MemMetaImpl::StartSession() {
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.StartSession(); });
+}
+
+Status MemMetaImpl::RefreshSession() {
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.RefreshSession(); });
+}
+
+Status MemMetaImpl::StopSession() {
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.StopSession(); });
+}
+
+Status MemMetaImpl::AcquireOpen(InodeID ino) {
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.AcquireOpen(ino); });
+}
+
+Status MemMetaImpl::ReleaseOpen(InodeID ino, bool *reclaimable) {
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.ReleaseOpen(ino, reclaimable); });
+}
+
+Status MemMetaImpl::ReapStaleSessions() {
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.ReapStaleSessions(); });
 }
 
 Status MemMetaImpl::ReclaimInode(InodeID ino) {

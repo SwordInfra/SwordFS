@@ -129,6 +129,11 @@ utils::Status ParseQuery(std::string_view query, RedisMetaConfig *config) {
       if (!status.ok()) {
         return status;
       }
+    } else if (key == "session_timeout") {
+      auto status = ParseDuration(value, &config->session_timeout);
+      if (!status.ok()) {
+        return status;
+      }
     } else if (key == "pool_size") {
       int64_t parsed = 0;
       auto status = ParsePositiveInteger(value, key, &parsed);

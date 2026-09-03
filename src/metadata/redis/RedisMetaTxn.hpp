@@ -30,6 +30,7 @@ class RedisMetaTxn {
   utils::Status Set(std::string_view key, std::string_view value);
   utils::Status HSet(std::string_view key, std::string_view field, std::string_view value);
   utils::Status HDel(std::string_view key, std::string_view field);
+  utils::Status HIncrBy(std::string_view key, std::string_view field, int64_t delta);
   utils::Status IncrBy(std::string_view key, int64_t delta);
   utils::Status Del(std::string_view key);
 
