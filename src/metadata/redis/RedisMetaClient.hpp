@@ -11,8 +11,8 @@
 #include <optional>
 #include <string_view>
 
+#include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
-#include "metadata/redis/RedisMetaTxn.hpp"
 #include "utils/Status.hpp"
 
 namespace swordfs::utils {
@@ -40,10 +40,10 @@ class RedisMetaClient {
   // connection checked out from the Redis client's connection pool, so WATCH,
   // reads, MULTI, queued writes and EXEC share the same connection. Busy and
   // WATCH conflicts retry with bounded backoff.
-  utils::Status Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback);
+  utils::Status Transact(const std::function<utils::Status(RedisKvTxn &)> &callback);
 
  private:
-  utils::Status TransactImpl(const std::function<utils::Status(RedisMetaTxn &)> &callback);
+  utils::Status TransactImpl(const std::function<utils::Status(RedisKvTxn &)> &callback);
 
  private:
   std::unique_ptr<sw::redis::Redis> redis_;
