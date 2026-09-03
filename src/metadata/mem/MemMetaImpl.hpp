@@ -34,10 +34,9 @@ class MemMetaImpl : public IMetaEngine {
   Status ReclaimInode(InodeID ino) override;
 
   // Directory operations
-  Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) override;
   Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
-  Status OpenDir(InodeID ino) override;
+  Status OpenDir(InodeID ino, DirIteratorPtr *iterator) override;
 
   // Link / symlink operations
   Status Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) override;
@@ -47,7 +46,7 @@ class MemMetaImpl : public IMetaEngine {
   // Chunk metadata
   Status AddChunk(InodeID ino, const SwordFsChunk &chunk) override;
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
-  Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) override;
+  Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) override;
   Status Truncate(InodeID ino, uint64_t size) override;
 
   // Volume operations

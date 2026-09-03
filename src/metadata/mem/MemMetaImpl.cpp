@@ -10,8 +10,11 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <optional>
+#include <utility>
 
 #include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/Utils.hpp"
@@ -25,6 +28,46 @@
 namespace swordfs::metadata {
 
 namespace {
+
+class MemoryDirIterator final : public DirIterator {
+ public:
+  explicit MemoryDirIterator(std::vector<SwordFsEntry> entries) : entries_(std::move(entries)) {
+  }
+
+  Status Seek(uint64_t cookie) override {
+    position_ = cookie;
+    pending_next_.reset();
+    return Status::OK();
+  }
+
+  Status Peek(SwordFsEntry *entry, uint64_t *next_cookie) override {
+    if (entry == nullptr || next_cookie == nullptr) {
+      return Status::InvalidArgument("directory iterator output is null");
+    }
+    if (pending_next_) {
+      return Status::InvalidArgument("directory iterator has pending entry");
+    }
+    if (position_ >= entries_.size()) {
+      return Status::EndOfDirectory("directory end");
+    }
+    *entry = entries_[static_cast<size_t>(position_)];
+    *next_cookie = position_ + 1;
+    pending_next_ = *next_cookie;
+    return Status::OK();
+  }
+
+  void Advance() override {
+    CHECK(pending_next_.has_value());
+    position_ = *pending_next_;
+    pending_next_.reset();
+  }
+
+ private:
+  std::vector<SwordFsEntry> entries_;
+  uint64_t position_ = 0;
+  std::optional<uint64_t> pending_next_;
+};
+
 utils::Status CreateMemoryMetaEngine(std::string_view, std::string_view, std::unique_ptr<IMetaEngine> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("metadata engine output is null");
@@ -404,25 +447,6 @@ Status MemMetaImpl::ReclaimInode(InodeID ino) {
 // Directory operations
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaImpl::ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) {
-  Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
-    // ListEntries itself validates that |ino| exists and is a directory
-    // (NotFound / NotDirectory), and returns the full listing including
-    // the synthetic "." and ".." entries.
-    Status status = txn.ListEntries(ino, entries);
-    if (!status.ok()) {
-      return status;
-    }
-    // Reading directory contents updates atime on the directory.
-    return txn.TouchInode(ino, SetAttrField::kAtime);
-  });
-
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "ReadDir: ino " << ino << " failed: " << status.message();
-  }
-  return status;
-}
-
 Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
   if (name.size() > kMaxNameLength) {
     return Status::NameTooLong("directory name exceeds maximum length");
@@ -514,25 +538,27 @@ Status MemMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
   return Status::OK();
 }
 
-Status MemMetaImpl::OpenDir(InodeID ino) {
-  Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
-    SwordFsInode dir;
-    Status status = txn.LookupInode(ino, &dir);
-    if (!status.ok()) {
-      return status;
-    }
-    if (!dir.IsDir()) {
-      return Status::NotDirectory("not a directory");
-    }
+Status MemMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
+  if (iterator == nullptr) {
+    return Status::InvalidArgument("directory iterator output is null");
+  }
 
-    // Update atime on the directory.
-    return txn.TouchInode(ino, SetAttrField::kAtime);
-  });
-
+  std::vector<SwordFsEntry> snapshot;
+  auto status = store_.Transact([&](MemMetaTxn &txn) { return txn.ListEntries(ino, &snapshot); });
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "OpenDir: ino " << ino << " failed: " << status.message();
+    return status;
   }
-  return status;
+
+  *iterator = std::make_shared<MemoryDirIterator>(std::move(snapshot));
+
+  // Directory atime is a best-effort side effect and must not make opening
+  // the directory fail.
+  status = store_.Transact([&](MemMetaTxn &txn) { return txn.TouchInode(ino, SetAttrField::kAtime); });
+  if (!status.ok()) {
+    SWORDFS_LOG_WARN << "OpenDir: failed to update atime for ino " << ino << ": " << status.message();
+  }
+  return Status::OK();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -666,8 +692,22 @@ Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) 
   return store_.Transact([&](MemMetaTxn &txn) { return txn.FindChunk(ino, idx, chunk); });
 }
 
-Status MemMetaImpl::ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) {
-  return store_.Transact([&](MemMetaTxn &txn) { return txn.ListChunks(ino, out); });
+Status MemMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
+  if (!visitor) {
+    return Status::InvalidArgument("chunk visitor is null");
+  }
+  std::vector<SwordFsChunk> chunks;
+  auto status = store_.Transact([&](MemMetaTxn &txn) { return txn.ListChunks(ino, &chunks); });
+  if (!status.ok()) {
+    return status;
+  }
+  for (const auto &chunk : chunks) {
+    status = visitor(chunk);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return Status::OK();
 }
 
 Status MemMetaImpl::Truncate(InodeID ino, uint64_t size) {

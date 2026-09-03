@@ -20,8 +20,9 @@ class RedisKey {
   std::string Format() const;
   std::string NextIno() const;
   std::string Inode(uint64_t ino) const;
-  std::string Dentry(uint64_t parent_ino, std::string_view name) const;
-  std::string Chunk(uint64_t ino, uint32_t index) const;
+  std::string Directory(uint64_t parent_ino) const;
+  std::string Chunk(uint64_t ino) const;
+  std::string InodeCount() const;
 
  private:
   std::string prefix_;

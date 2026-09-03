@@ -21,6 +21,7 @@
 #include "utils/Context.hpp"
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
+#include "vfs/DirHandle.hpp"
 #include "vfs/FileHandle.hpp"
 #include "vfs/InodeHandle.hpp"
 #include "volume/VolumeImpl.hpp"
@@ -94,9 +95,6 @@ class MockMetaEngine : public IMetaEngine {
     }
     return Status::OK();
   }
-  Status ReadDir(InodeID, std::vector<swordfs::metadata::SwordFsEntry> *) override {
-    return Status::OK();
-  }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
     if (out) {
       *out = {};
@@ -143,10 +141,10 @@ class MockMetaEngine : public IMetaEngine {
     ++reclaim_calls;
     return reclaim_status;
   }
-  Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
+  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
-  Status OpenDir(InodeID) override {
+  Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
     return Status::OK();
   }
   Status AddChunk(InodeID, const SwordFsChunk &) override {
@@ -197,17 +195,21 @@ class FileHandleTest : public ::testing::Test {
   void TearDown() override {
     // Clean up any handles left by a test.
     for (uint64_t fh : fhs_) {
-      FileHandleManager::Instance().Release(fh);
+      if (auto handle = HandleManager::Instance().FindAs<FileHandle>(fh)) {
+        handle->Release();
+      } else if (auto handle = HandleManager::Instance().FindAs<DirHandle>(fh)) {
+        handle->Release();
+      }
     }
     volume::VolumeImpl::Initialize();
   }
 
   /// Helper: open a handle and remember it for cleanup.
   uint64_t OpenHandle(metadata::InodeID ino) {
-    FileHandle handle;
+    std::shared_ptr<FileHandle> handle;
     auto status = FileHandle::Open(ino, 0, &handle);
     EXPECT_TRUE(status.ok());
-    uint64_t fh = handle.fh();
+    uint64_t fh = handle->fh();
     fhs_.push_back(fh);
     return fh;
   }
@@ -221,8 +223,8 @@ class FileHandleTest : public ::testing::Test {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(FileHandleTest, InstanceIsSingleton) {
-  auto &a = FileHandleManager::Instance();
-  auto &b = FileHandleManager::Instance();
+  auto &a = HandleManager::Instance();
+  auto &b = HandleManager::Instance();
   EXPECT_EQ(&a, &b);
 }
 
@@ -233,13 +235,13 @@ TEST_F(FileHandleTest, InstanceIsSingleton) {
 TEST_F(FileHandleTest, OpenAndFind) {
   uint64_t fh = OpenHandle(42);
 
-  auto found = FileHandleManager::Instance().Find(fh);
-  EXPECT_TRUE(found.has_value());
+  auto found = HandleManager::Instance().FindAs<FileHandle>(fh);
+  EXPECT_NE(found, nullptr);
 }
 
 TEST_F(FileHandleTest, FindNonexistent) {
-  auto found = FileHandleManager::Instance().Find(999);
-  EXPECT_FALSE(found.has_value());
+  auto found = HandleManager::Instance().FindAs<FileHandle>(999);
+  EXPECT_EQ(found, nullptr);
 }
 
 TEST_F(FileHandleTest, OpenMultipleHandles) {
@@ -247,40 +249,37 @@ TEST_F(FileHandleTest, OpenMultipleHandles) {
   uint64_t fh2 = OpenHandle(20);
   EXPECT_NE(fh1, fh2);
 
-  auto f1 = FileHandleManager::Instance().Find(fh1);
-  auto f2 = FileHandleManager::Instance().Find(fh2);
+  auto f1 = HandleManager::Instance().FindAs<FileHandle>(fh1);
+  auto f2 = HandleManager::Instance().FindAs<FileHandle>(fh2);
 
-  ASSERT_TRUE(f1.has_value());
-  ASSERT_TRUE(f2.has_value());
+  ASSERT_NE(f1, nullptr);
+  ASSERT_NE(f2, nullptr);
   EXPECT_NE(f1->handle().get(), f2->handle().get());
 }
 
 // ────────────────────────────────────────────────────────────────
-// Release
+// HandleManager unregister
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(FileHandleTest, ReleaseRemovesHandle) {
   uint64_t fh = OpenHandle(7);
+  auto handle = HandleManager::Instance().FindAs<FileHandle>(fh);
+  ASSERT_NE(handle, nullptr);
+  ASSERT_TRUE(handle->Release().ok());
 
-  FileHandleManager::Instance().Release(fh);
-  EXPECT_FALSE(FileHandleManager::Instance().Find(fh).has_value());
-}
-
-TEST_F(FileHandleTest, ReleaseNonexistentNoCrash) {
-  // Releasing a handle that was never opened should not crash.
-  FileHandleManager::Instance().Release(999);
-  SUCCEED();
+  EXPECT_EQ(HandleManager::Instance().FindAs<FileHandle>(fh), nullptr);
 }
 
 TEST_F(FileHandleTest, ReleaseKeepsOtherHandles) {
   uint64_t fh1 = OpenHandle(1);
   uint64_t fh2 = OpenHandle(2);
+  auto f1 = HandleManager::Instance().FindAs<FileHandle>(fh1);
+  ASSERT_NE(f1, nullptr);
+  ASSERT_TRUE(f1->Release().ok());
 
-  FileHandleManager::Instance().Release(fh1);
-
-  EXPECT_FALSE(FileHandleManager::Instance().Find(fh1).has_value());
-  auto f2 = FileHandleManager::Instance().Find(fh2);
-  ASSERT_TRUE(f2.has_value());
+  EXPECT_EQ(HandleManager::Instance().FindAs<FileHandle>(fh1), nullptr);
+  auto f2 = HandleManager::Instance().FindAs<FileHandle>(fh2);
+  ASSERT_NE(f2, nullptr);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -296,21 +295,21 @@ TEST_F(FileHandleTest, OpenReturnsUniqueFh) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Shared ownership — Find keeps handle alive across Release
+// Shared ownership — Find keeps handle alive across Unregister
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleTest, FindKeepsHandleAliveAfterRelease) {
+TEST_F(FileHandleTest, FindKeepsHandleAliveAfterUnregister) {
   uint64_t fh = OpenHandle(55);
 
   // Hold a shared_ptr before releasing.
-  auto held = FileHandleManager::Instance().Find(fh);
-  ASSERT_TRUE(held.has_value());
+  auto held = HandleManager::Instance().FindAs<FileHandle>(fh);
+  ASSERT_NE(held, nullptr);
 
-  FileHandleManager::Instance().Release(fh);
+  ASSERT_TRUE(held->Release().ok());
   // Map entry is gone.
-  auto after = FileHandleManager::Instance().Find(fh);
-  EXPECT_FALSE(after.has_value());
-  ASSERT_TRUE(held.has_value());
+  auto after = HandleManager::Instance().FindAs<FileHandle>(fh);
+  EXPECT_EQ(after, nullptr);
+  ASSERT_NE(held, nullptr);
   EXPECT_NE(held->handle().get(), nullptr);  // still alive
 }
 
@@ -327,16 +326,16 @@ TEST_F(FileHandleTest, ConcurrentOpenAndFind) {
     threads.emplace_back([t] {
       for (int i = 0; i < kIters; ++i) {
         auto ino = static_cast<metadata::InodeID>(t * kIters + i + 100);
-        FileHandle handle;
+        std::shared_ptr<FileHandle> handle;
         auto status = FileHandle::Open(ino, 0, &handle);
         EXPECT_TRUE(status.ok());
-        auto found = FileHandleManager::Instance().Find(handle.fh());
-        EXPECT_TRUE(found.has_value());
+        auto found = HandleManager::Instance().FindAs<FileHandle>(handle->fh());
+        EXPECT_NE(found, nullptr);
         // Release eagerly: leaving 400 fh dangling across the test
         // boundary corrupts later open-count assertions (Get(ino, false)
         // would hand out handles with a non-zero open_count for these
         // synthetic inodes).
-        FileHandleManager::Instance().Release(handle.fh());
+        ASSERT_TRUE(handle->Release().ok());
       }
     });
   }
@@ -345,44 +344,62 @@ TEST_F(FileHandleTest, ConcurrentOpenAndFind) {
   }
 }
 
+class TestDirIterator final : public metadata::DirIterator {
+ public:
+  Status Seek(uint64_t) override {
+    return Status::OK();
+  }
+
+  Status Peek(metadata::SwordFsEntry *, uint64_t *) override {
+    return Status::EndOfDirectory("directory end");
+  }
+
+  void Advance() override {
+  }
+};
+
+metadata::DirIteratorPtr NewTestDirIterator() {
+  return std::make_shared<TestDirIterator>();
+}
+
 // ────────────────────────────────────────────────────────────────
-// OpenDir / ReleaseDir
+// Generic file and directory handles
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleTest, OpenDirAllocatesHandle) {
-  auto &mgr = FileHandleManager::Instance();
-  uint64_t dh = mgr.OpenDir(42);
-  EXPECT_GT(dh, 0u);
-  mgr.ReleaseDir(dh);
+TEST_F(FileHandleTest, RegisterAndFindDirectoryHandle) {
+  auto handle = std::make_shared<DirHandle>(NewTestDirIterator());
+  const uint64_t fh = HandleManager::Instance().Register(handle);
+
+  auto found = HandleManager::Instance().FindAs<DirHandle>(fh);
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(found, handle);
+  ASSERT_TRUE(handle->Release().ok());
 }
 
-TEST_F(FileHandleTest, OpenDirUniqueHandles) {
-  auto &mgr = FileHandleManager::Instance();
-  uint64_t dh1 = mgr.OpenDir(10);
-  uint64_t dh2 = mgr.OpenDir(20);
-  EXPECT_NE(dh1, dh2);
-  mgr.ReleaseDir(dh1);
-  mgr.ReleaseDir(dh2);
+TEST_F(FileHandleTest, RegisterAssignsUniqueHandlesAcrossTypes) {
+  std::shared_ptr<FileHandle> opened_file;
+  ASSERT_TRUE(FileHandle::Open(9007, 0, &opened_file).ok());
+  auto file_handle = HandleManager::Instance().FindAs<FileHandle>(opened_file->fh());
+  ASSERT_NE(file_handle, nullptr);
+
+  auto dir_handle = std::make_shared<DirHandle>(NewTestDirIterator());
+  const uint64_t dir_fh = HandleManager::Instance().Register(dir_handle);
+
+  EXPECT_NE(opened_file->fh(), dir_fh);
+  EXPECT_EQ(file_handle->fh(), opened_file->fh());
+  EXPECT_EQ(dir_handle->fh(), dir_fh);
+
+  ASSERT_TRUE(opened_file->Release().ok());
+  ASSERT_TRUE(dir_handle->Release().ok());
 }
 
-TEST_F(FileHandleTest, ReleaseDirNonexistentNoCrash) {
-  // Releasing a directory handle that was never allocated should not crash.
-  FileHandleManager::Instance().ReleaseDir(999);
-  SUCCEED();
-}
+TEST_F(FileHandleTest, FindAsRejectsWrongHandleType) {
+  auto handle = std::make_shared<DirHandle>(NewTestDirIterator());
+  const uint64_t fh = HandleManager::Instance().Register(handle);
 
-TEST_F(FileHandleTest, OpenDirAndReleaseDirLifecycle) {
-  auto &mgr = FileHandleManager::Instance();
-  constexpr metadata::InodeID kIno = 77;
-
-  uint64_t dh = mgr.OpenDir(kIno);
-  EXPECT_NE(dh, 0u);
-
-  // Release and then re-allocate — should get a new handle.
-  mgr.ReleaseDir(dh);
-  uint64_t dh2 = mgr.OpenDir(kIno);
-  EXPECT_NE(dh, dh2);
-  mgr.ReleaseDir(dh2);
+  EXPECT_EQ(HandleManager::Instance().FindAs<FileHandle>(fh), nullptr);
+  EXPECT_NE(HandleManager::Instance().FindAs<DirHandle>(fh), nullptr);
+  ASSERT_TRUE(handle->Release().ok());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -391,23 +408,23 @@ TEST_F(FileHandleTest, OpenDirAndReleaseDirLifecycle) {
 
 TEST_F(FileHandleTest, OpenMetaFailurePropagates) {
   mock_meta_->open_status = Status::Permission("denied");
-  FileHandle handle;
+  std::shared_ptr<FileHandle> handle;
   auto status = FileHandle::Open(42, 0, &handle);
   EXPECT_TRUE(status.IsPermission());
 }
 
 TEST_F(FileHandleTest, OpenTruncateAppliesOTrunc) {
-  FileHandle handle;
+  std::shared_ptr<FileHandle> handle;
   auto status = FileHandle::Open(42, O_TRUNC, &handle);
   ASSERT_TRUE(status.ok());
-  fhs_.push_back(handle.fh());
+  fhs_.push_back(handle->fh());
   EXPECT_EQ(mock_meta_->truncate_calls, 1);
   EXPECT_EQ(mock_meta_->last_truncate_size, 0u);
 }
 
 TEST_F(FileHandleTest, OpenTruncateFailurePropagates) {
   mock_meta_->truncate_status = Status::Internal("truncate failed");
-  FileHandle handle;
+  std::shared_ptr<FileHandle> handle;
   auto status = FileHandle::Open(42, O_TRUNC, &handle);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.code(), Status::kInternal);
@@ -446,18 +463,18 @@ TEST_F(FileHandleTest, InodeHandleRecreatedAfterExpiry) {
 // ────────────────────────────────────────────────────────────────
 
 TEST_F(FileHandleTest, CloseReclaimsOrphanedInode) {
-  FileHandle handle;
+  std::shared_ptr<FileHandle> handle;
   ASSERT_TRUE(FileHandle::Open(9004, 0, &handle).ok());
   auto inode_handle = InodeHandleManager::Instance().Get(9004, false);
   ASSERT_NE(inode_handle, nullptr);
   EXPECT_TRUE(inode_handle->MarkOrphanedIfOpen());
 
-  FileHandleManager::Instance().Release(handle.fh());
+  ASSERT_TRUE(handle->Release().ok());
   EXPECT_EQ(mock_meta_->reclaim_calls, 1);
 }
 
 TEST_F(FileHandleTest, CloseOnlyReclaimsOnLastReference) {
-  FileHandle h1, h2;
+  std::shared_ptr<FileHandle> h1, h2;
   ASSERT_TRUE(FileHandle::Open(9005, 0, &h1).ok());
   ASSERT_TRUE(FileHandle::Open(9005, 0, &h2).ok());
   auto inode_handle = InodeHandleManager::Instance().Get(9005, false);
@@ -465,12 +482,12 @@ TEST_F(FileHandleTest, CloseOnlyReclaimsOnLastReference) {
   EXPECT_TRUE(inode_handle->MarkOrphanedIfOpen());
 
   // First close: open count 2 → 1 — no reclaim yet.
-  FileHandleManager::Instance().Release(h1.fh());
+  ASSERT_TRUE(h1->Release().ok());
   EXPECT_EQ(mock_meta_->reclaim_calls, 0);
   EXPECT_EQ(inode_handle->open_count(), 1);
 
   // Final close: open count 1 → 0 — reclaim now.
-  FileHandleManager::Instance().Release(h2.fh());
+  ASSERT_TRUE(h2->Release().ok());
   EXPECT_EQ(mock_meta_->reclaim_calls, 1);
   EXPECT_EQ(inode_handle->open_count(), 0);
 }
@@ -497,14 +514,14 @@ TEST_F(FileHandleTest, InodeHandleOpenFdTracking) {
   EXPECT_EQ(InodeHandleManager::Instance().Get(test_ino, false), nullptr);
 
   // FileHandle::Open routes through mock_meta_ and creates the handle.
-  FileHandle handle;
+  std::shared_ptr<FileHandle> handle;
   ASSERT_TRUE(FileHandle::Open(test_ino, O_RDWR, &handle).ok());
   auto inode_handle = InodeHandleManager::Instance().Get(test_ino, false);
   ASSERT_NE(inode_handle, nullptr);
   EXPECT_GT(inode_handle->open_count(), 0u);
 
   // Release drops the open fd; the handle's open_count reflects it.
-  FileHandleManager::Instance().Release(handle.fh());
+  ASSERT_TRUE(handle->Release().ok());
   EXPECT_EQ(inode_handle->open_count(), 0u);
 }
 
@@ -513,7 +530,7 @@ TEST_F(FileHandleTest, InodeHandleOpenFdTracking) {
 // ────────────────────────────────────────────────────────────────
 //
 // ReclaimData fans a single call out to both the metadata engine
-// (ListChunks + ReclaimInode) and the data engine (Delete per chunk
+// (VisitChunks + ReclaimInode) and the data engine (Delete per chunk
 // key). These tests assert that the call sequence matches the
 // documented contract; the per-engine behaviour is exercised by the
 // metadata- and data-engine unit tests.
@@ -551,7 +568,7 @@ class FakeDataEngine : public swordfs::storage::IDataEngine {
   std::unordered_map<std::string, Status> fail_keys;
 };
 
-// Mock metadata engine: records ListChunks / ReclaimInode invocations
+// Mock metadata engine: records VisitChunks / ReclaimInode invocations
 // and returns a configurable chunk list + GetAttr (so the ReclaimData
 // guard sees the nlink value the test wants).
 class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
@@ -599,9 +616,6 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
   void SetAttr(InodeID ino, struct stat attr) {
     attrs[ino] = attr;
   }
-  Status ReadDir(InodeID, std::vector<swordfs::metadata::SwordFsEntry> *) override {
-    return Status::OK();
-  }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
@@ -643,16 +657,21 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     last_reclaim_ino = ino;
     return Status::OK();
   }
-  Status ListChunks(InodeID ino, std::vector<swordfs::metadata::SwordFsChunk> *out) override {
-    ++list_chunks_calls;
-    last_list_ino = ino;
-    if (!list_chunks_status.ok()) {
-      return list_chunks_status;
+  Status VisitChunks(InodeID ino, const swordfs::metadata::ChunkVisitorFn &visitor) override {
+    ++visit_chunks_calls;
+    last_visit_ino = ino;
+    if (!visit_chunks_status.ok()) {
+      return visit_chunks_status;
     }
-    *out = chunks;
+    for (const auto &chunk : chunks) {
+      auto status = visitor(chunk);
+      if (!status.ok()) {
+        return status;
+      }
+    }
     return Status::OK();
   }
-  Status OpenDir(InodeID) override {
+  Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
     return Status::OK();
   }
   Status AddChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
@@ -665,11 +684,11 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
 
-  int list_chunks_calls = 0;
+  int visit_chunks_calls = 0;
   int reclaim_inode_calls = 0;
-  InodeID last_list_ino = 0;
+  InodeID last_visit_ino = 0;
   InodeID last_reclaim_ino = 0;
-  Status list_chunks_status = Status::OK();
+  Status visit_chunks_status = Status::OK();
   std::vector<swordfs::metadata::SwordFsChunk> chunks;
   std::unordered_map<InodeID, struct stat> attrs;
 };
@@ -725,15 +744,15 @@ TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
 
   ASSERT_TRUE(ReclaimInode(4242).ok());
 
-  // Order is ascending chunk index (ListChunks contract).
+  // The mock visits chunks in insertion order.
   EXPECT_EQ(data->delete_calls.size(), 2);
   EXPECT_EQ(data->delete_calls[0], "4242/0");
   EXPECT_EQ(data->delete_calls[1], "4242/1");
 
   // Both engines received exactly one call each.
-  EXPECT_EQ(meta->list_chunks_calls, 1);
+  EXPECT_EQ(meta->visit_chunks_calls, 1);
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
-  EXPECT_EQ(meta->last_list_ino, 4242);
+  EXPECT_EQ(meta->last_visit_ino, 4242);
   EXPECT_EQ(meta->last_reclaim_ino, 4242);
 }
 
@@ -765,7 +784,7 @@ TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
   ASSERT_TRUE(ReclaimInode(99).ok());
   EXPECT_EQ(data->delete_calls.size(), 1u);
   EXPECT_EQ(data->delete_calls[0], "99/0");
-  EXPECT_EQ(meta->list_chunks_calls, 1);
+  EXPECT_EQ(meta->visit_chunks_calls, 1);
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
 }
 
@@ -789,7 +808,7 @@ TEST_F(FileHandleTest, ReclaimDataCallsReclaimInodeEvenWhenChunkEmpty) {
   vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
   ASSERT_TRUE(ReclaimInode(123).ok());
-  EXPECT_EQ(meta->list_chunks_calls, 1);
+  EXPECT_EQ(meta->visit_chunks_calls, 1);
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
   EXPECT_TRUE(data->delete_calls.empty());
 }
@@ -826,7 +845,7 @@ TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
 }
 
-TEST_F(FileHandleTest, ReclaimDataPropagatesListChunksFailure) {
+TEST_F(FileHandleTest, ReclaimDataPropagatesVisitChunksFailure) {
   // If the metadata engine refuses to enumerate, the manager must
   // surface that error and NOT invoke ReclaimInode (we don't know
   // whether the inode exists from the manager's perspective).
@@ -835,7 +854,7 @@ TEST_F(FileHandleTest, ReclaimDataPropagatesListChunksFailure) {
   auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
   auto *data = data_up.get();
-  meta->list_chunks_status = Status::Internal("nope");
+  meta->visit_chunks_status = Status::Internal("nope");
   struct stat attr{};
   attr.st_nlink = 0;
   meta->SetAttr(42, attr);
@@ -846,7 +865,7 @@ TEST_F(FileHandleTest, ReclaimDataPropagatesListChunksFailure) {
 
   auto st = ReclaimInode(42);
   EXPECT_FALSE(st.ok());
-  EXPECT_EQ(meta->list_chunks_calls, 1);
+  EXPECT_EQ(meta->visit_chunks_calls, 1);
   EXPECT_EQ(meta->reclaim_inode_calls, 0);
   EXPECT_TRUE(data->delete_calls.empty());
 }
@@ -912,7 +931,7 @@ TEST_F(FileHandleTest, ReclaimDataRefusesWhileAnOpenHandleHoldsTheInode) {
 
   // Open a file handle on this inode. The fixture's MockMetaEngine
   // lets everything through, so this just installs a tracked fh.
-  FileHandle fh;
+  std::shared_ptr<FileHandle> fh;
   ASSERT_TRUE(FileHandle::Open(7, O_RDONLY, &fh).ok());
   auto inode_handle = InodeHandleManager::Instance().Get(7, false);
   ASSERT_NE(inode_handle, nullptr);
@@ -923,14 +942,14 @@ TEST_F(FileHandleTest, ReclaimDataRefusesWhileAnOpenHandleHoldsTheInode) {
   EXPECT_EQ(meta->reclaim_inode_calls, 0);
 
   // Cleanup
-  FileHandleManager::Instance().Release(fh.fh());
+  ASSERT_TRUE(fh->Release().ok());
 }
 
 TEST_F(FileHandleTest, ReclaimDataIsIdempotentWhenInodeAlreadyGone) {
   // The metadata engine reports the inode as gone (NotFound on GetAttr).
   // The InodeHandle::ReclaimData guard treats that as a no-op success:
   // a concurrent reclaim has already finalised the cleanup on another
-  // thread. Without this guard, the manager would still call ListChunks
+  // thread. Without this guard, the manager would still call VisitChunks
   // and surface a NotFound to the caller as if it were a real failure.
   swordfs::volume::VolumeImpl::Initialize();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
@@ -945,7 +964,7 @@ TEST_F(FileHandleTest, ReclaimDataIsIdempotentWhenInodeAlreadyGone) {
   vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
   ASSERT_TRUE(ReclaimInode(42).ok());
-  EXPECT_EQ(meta->list_chunks_calls, 0);
+  EXPECT_EQ(meta->visit_chunks_calls, 0);
   EXPECT_EQ(meta->reclaim_inode_calls, 0);
   EXPECT_TRUE(data->delete_calls.empty());
 }

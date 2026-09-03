@@ -5,6 +5,7 @@
 // All VfsImpl methods return utils::Status (no FUSE dependency),
 // so they can be tested directly without any FUSE infrastructure.
 
+#include <dirent.h>
 #include <gtest/gtest.h>
 
 #include <cstring>
@@ -80,51 +81,51 @@ TEST(VfsImplTest, VolumeReturnsNonNullAfterInit) {
   } while (0)
 
 TEST(VfsImplTest, Mknod) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Mknod(1, "test", 0644, 0));
+  EXPECT_NOT_SUPPORTED(VfsImpl::MkNod(1, "test", 0644, 0));
 }
 
 TEST(VfsImplTest, Fsyncdir) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Fsyncdir(1, 0));
+  EXPECT_NOT_SUPPORTED(VfsImpl::FSyncDir(1, 0));
 }
 
 TEST(VfsImplTest, Setxattr) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Setxattr(1, "user.key", "val", 3, 0));
+  EXPECT_NOT_SUPPORTED(VfsImpl::SetXAttr(1, "user.key", "val", 3, 0));
 }
 
 TEST(VfsImplTest, Getxattr) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Getxattr(1, "user.key", 256));
+  EXPECT_NOT_SUPPORTED(VfsImpl::GetXAttr(1, "user.key", 256));
 }
 
 TEST(VfsImplTest, Listxattr) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Listxattr(1, 1024));
+  EXPECT_NOT_SUPPORTED(VfsImpl::ListXAttr(1, 1024));
 }
 
 TEST(VfsImplTest, Removexattr) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Removexattr(1, "user.key"));
+  EXPECT_NOT_SUPPORTED(VfsImpl::RemoveXAttr(1, "user.key"));
 }
 
 TEST(VfsImplTest, Ioctl) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Ioctl(1, 0, nullptr, nullptr, 0, nullptr, 0, 0));
+  EXPECT_NOT_SUPPORTED(VfsImpl::IoCtl(1, 0, nullptr, nullptr, 0, nullptr, 0, 0));
 }
 
 TEST(VfsImplTest, Flock) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Flock(1, nullptr, 0));
+  EXPECT_NOT_SUPPORTED(VfsImpl::FLock(1, nullptr, 0));
 }
 
 TEST(VfsImplTest, Fallocate) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Fallocate(1, 0, 0, 4096, nullptr));
+  EXPECT_NOT_SUPPORTED(VfsImpl::FAllocate(1, 0, 0, 4096, nullptr));
 }
 
 TEST(VfsImplTest, Lseek) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Lseek(1, 0, SEEK_SET, nullptr));
+  EXPECT_NOT_SUPPORTED(VfsImpl::LSeek(1, 0, SEEK_SET, nullptr));
 }
 
 TEST(VfsImplTest, Tmpfile) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Tmpfile(1, 0644, nullptr));
+  EXPECT_NOT_SUPPORTED(VfsImpl::TmpFile(1, 0644, nullptr));
 }
 
 TEST(VfsImplTest, Statx) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::Statx(1, 0, 0, nullptr));
+  EXPECT_NOT_SUPPORTED(VfsImpl::StatX(1, 0, 0, nullptr));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -153,6 +154,30 @@ TEST(VfsImplTest, Forget) {
 
 namespace {
 
+class TestDirIterator final : public swordfs::metadata::DirIterator {
+ public:
+  Status Seek(uint64_t cookie) override {
+    position_ = cookie;
+    return Status::OK();
+  }
+
+  Status Peek(swordfs::metadata::SwordFsEntry *entry, uint64_t *next_cookie) override {
+    if (position_ == 0) {
+      *entry = {".", DT_DIR, 1};
+      *next_cookie = 1;
+      return Status::OK();
+    }
+    return Status::EndOfDirectory("directory end");
+  }
+
+  void Advance() override {
+    ++position_;
+  }
+
+ private:
+  uint64_t position_ = 0;
+};
+
 class MockMetaEngine : public swordfs::metadata::IMetaEngine {
  public:
   Status Initialize() override {
@@ -180,9 +205,6 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
       out->ino = ino;
     }
     return call_status_;
-  }
-  Status ReadDir(InodeID, std::vector<swordfs::metadata::SwordFsEntry> *) override {
-    return Status::OK();
   }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
     if (out) {
@@ -243,10 +265,13 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status ReclaimInode(InodeID) override {
     return call_status_;
   }
-  Status ListChunks(InodeID, std::vector<swordfs::metadata::SwordFsChunk> *) override {
+  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
-  Status OpenDir(InodeID) override {
+  Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *iterator) override {
+    if (call_status_.ok() && iterator != nullptr) {
+      *iterator = std::make_shared<TestDirIterator>();
+    }
     return call_status_;
   }
   Status AddChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
@@ -290,41 +315,45 @@ class VfsImplIntegrationTest : public ::testing::Test {
 
 }  // namespace
 
-TEST_F(VfsImplIntegrationTest, OpendirSuccess) {
+TEST_F(VfsImplIntegrationTest, OpenDirSuccess) {
   uint64_t fh = 0;
-  auto status = VfsImpl::Opendir(1, &fh);
+  auto status = VfsImpl::OpenDir(1, &fh);
   EXPECT_TRUE(status.ok()) << status.message();
   EXPECT_NE(fh, 0u);
   // Clean up the directory handle.
-  VfsImpl::Releasedir(1, fh);
+  VfsImpl::ReleaseDir(1, fh);
 }
 
-TEST_F(VfsImplIntegrationTest, OpendirPermissionDenied) {
+TEST_F(VfsImplIntegrationTest, OpenDirPermissionDenied) {
   mock_meta_->set_status(Status::Permission("denied"));
 
   uint64_t fh = 0;
-  auto status = VfsImpl::Opendir(1, &fh);
+  auto status = VfsImpl::OpenDir(1, &fh);
   EXPECT_TRUE(status.IsPermission()) << status.message();
 }
 
-TEST_F(VfsImplIntegrationTest, Readdir) {
-  std::string buf;
-  auto status = VfsImpl::Readdir(nullptr, 1, 4096, 0, &buf);
-  EXPECT_TRUE(status.ok()) << status.message();
-}
-
-TEST_F(VfsImplIntegrationTest, Readdirplus) {
-  std::string buf;
-  auto status = VfsImpl::Readdirplus(nullptr, 1, 4096, 0, &buf);
-  EXPECT_TRUE(status.ok()) << status.message();
-}
-
-TEST_F(VfsImplIntegrationTest, ReleasedirSuccess) {
+TEST_F(VfsImplIntegrationTest, ReadDir) {
   uint64_t fh = 0;
-  auto status = VfsImpl::Opendir(2, &fh);
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf;
+  auto status = VfsImpl::ReadDir(nullptr, 1, 4096, 0, fh, &buf);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, ReadDirPlus) {
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf;
+  auto status = VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf);
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST_F(VfsImplIntegrationTest, ReleaseDirSuccess) {
+  uint64_t fh = 0;
+  auto status = VfsImpl::OpenDir(2, &fh);
   ASSERT_TRUE(status.ok());
 
-  status = VfsImpl::Releasedir(2, fh);
+  status = VfsImpl::ReleaseDir(2, fh);
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
@@ -347,7 +376,7 @@ TEST_F(VfsImplIntegrationTest, OpenPermissionDenied) {
 
 TEST_F(VfsImplIntegrationTest, StatfsSuccess) {
   struct statvfs stbuf;
-  auto status = VfsImpl::Statfs(1, &stbuf);
+  auto status = VfsImpl::StatFs(1, &stbuf);
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
@@ -364,13 +393,13 @@ TEST_F(VfsImplIntegrationTest, AccessDenied) {
 
 TEST_F(VfsImplIntegrationTest, GetattrSuccess) {
   struct stat attr;
-  auto status = VfsImpl::Getattr(1, &attr);
+  auto status = VfsImpl::GetAttr(1, &attr);
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
 TEST_F(VfsImplIntegrationTest, ReadlinkSuccess) {
   std::string target;
-  auto status = VfsImpl::Readlink(1, &target);
+  auto status = VfsImpl::ReadLink(1, &target);
   EXPECT_TRUE(status.ok()) << status.message();
 }
 

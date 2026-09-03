@@ -99,6 +99,11 @@ Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fi
   if (size_changed || owner_changed) {
     st.KillSUID();
   }
+  if (size_changed && !HasSetAttrField(fields, SetAttrField::kMtime) &&
+      !HasSetAttrField(fields, SetAttrField::kMtimeNow)) {
+    st.mtime = static_cast<int64_t>(::time(nullptr));
+    st.mtime_nsec = 0;
+  }
   if (!HasSetAttrField(fields, SetAttrField::kCtime)) {
     st.ctime = static_cast<int64_t>(::time(nullptr));
     st.ctime_nsec = 0;
@@ -132,6 +137,8 @@ Status MemMetaTxn::Truncate(InodeID ino, uint64_t size) {
   SwordFsAttr st = inode->attr;
   st.size = size;
   st.KillSUID();
+  st.mtime = static_cast<int64_t>(::time(nullptr));
+  st.mtime_nsec = 0;
   st.ctime = static_cast<int64_t>(::time(nullptr));
   st.ctime_nsec = 0;
 

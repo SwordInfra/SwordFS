@@ -18,10 +18,9 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
 }  // namespace
 
 RedisMetaTxn::RedisMetaTxn(sw::redis::Redis &redis)
-    // piped=false: issue commands directly on the transaction connection.
-    // new_connection=false: check out the connection from Redis's pool so
-    // WATCH, reads, MULTI, queued writes, and EXEC use the same connection.
-    : transaction_(redis.transaction(false, false)) {
+    // Use a pooled connection for the whole transaction. WATCH and the
+    // subsequent read must execute on the same connection as EXEC.
+    : transaction_(redis.transaction(false, false)), redis_(transaction_->redis()) {
 }
 
 utils::Status RedisMetaTxn::Get(std::string_view key, std::string *value) {
@@ -41,8 +40,8 @@ utils::Status RedisMetaTxn::Get(std::string_view key, std::string *value) {
     // WATCH must happen before the read so changes between GET and EXEC are
     // detected. This is Redis's optimistic transaction pattern: the read is
     // performed immediately, while queued writes are committed by EXEC.
-    transaction_->redis().watch(key);
-    auto result = transaction_->redis().get(key);
+    redis_->watch(key);
+    auto result = redis_->get(key);
     if (!result.has_value()) {
       return utils::Status::NotFound("Redis key not found");
     }
@@ -57,6 +56,50 @@ utils::Status RedisMetaTxn::Get(std::string_view key, std::string *value) {
   }
 }
 
+utils::Status RedisMetaTxn::HGet(std::string_view key, std::string_view field, std::string *value) {
+  if (value == nullptr) {
+    return utils::Status::InvalidArgument("Redis HGET output is null");
+  }
+  try {
+    if (has_writes_) {
+      return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
+    }
+    redis_->watch(key);
+    auto result = redis_->hget(std::string(key), std::string(field));
+    if (!result.has_value()) {
+      return utils::Status::NotFound("Redis hash field not found");
+    }
+    *value = std::move(*result);
+    return utils::Status::OK();
+  } catch (const sw::redis::TimeoutError &) {
+    throw;
+  } catch (const sw::redis::ClosedError &) {
+    throw;
+  } catch (const sw::redis::Error &error) {
+    return RedisError("HGET", error);
+  }
+}
+
+utils::Status RedisMetaTxn::HLen(std::string_view key, uint64_t *length) {
+  if (length == nullptr) {
+    return utils::Status::InvalidArgument("Redis HLEN output is null");
+  }
+  try {
+    if (has_writes_) {
+      return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
+    }
+    redis_->watch(key);
+    *length = redis_->hlen(std::string(key));
+    return utils::Status::OK();
+  } catch (const sw::redis::TimeoutError &) {
+    throw;
+  } catch (const sw::redis::ClosedError &) {
+    throw;
+  } catch (const sw::redis::Error &error) {
+    return RedisError("HLEN", error);
+  }
+}
+
 utils::Status RedisMetaTxn::Set(std::string_view key, std::string_view value) {
   try {
     transaction_->set(std::string(key), std::string(value));
@@ -68,6 +111,48 @@ utils::Status RedisMetaTxn::Set(std::string_view key, std::string_view value) {
     throw;
   } catch (const sw::redis::Error &error) {
     return RedisError("SET", error);
+  }
+}
+
+utils::Status RedisMetaTxn::HSet(std::string_view key, std::string_view field, std::string_view value) {
+  try {
+    transaction_->hset(std::string(key), std::string(field), std::string(value));
+    has_writes_ = true;
+    return utils::Status::OK();
+  } catch (const sw::redis::TimeoutError &) {
+    throw;
+  } catch (const sw::redis::ClosedError &) {
+    throw;
+  } catch (const sw::redis::Error &error) {
+    return RedisError("HSET", error);
+  }
+}
+
+utils::Status RedisMetaTxn::HDel(std::string_view key, std::string_view field) {
+  try {
+    transaction_->hdel(std::string(key), std::string(field));
+    has_writes_ = true;
+    return utils::Status::OK();
+  } catch (const sw::redis::TimeoutError &) {
+    throw;
+  } catch (const sw::redis::ClosedError &) {
+    throw;
+  } catch (const sw::redis::Error &error) {
+    return RedisError("HDEL", error);
+  }
+}
+
+utils::Status RedisMetaTxn::IncrBy(std::string_view key, int64_t delta) {
+  try {
+    transaction_->incrby(std::string(key), delta);
+    has_writes_ = true;
+    return utils::Status::OK();
+  } catch (const sw::redis::TimeoutError &) {
+    throw;
+  } catch (const sw::redis::ClosedError &) {
+    throw;
+  } catch (const sw::redis::Error &error) {
+    return RedisError("INCRBY", error);
   }
 }
 

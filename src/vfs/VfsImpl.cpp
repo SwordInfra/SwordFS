@@ -13,8 +13,10 @@
 #include "storage/IDataEngine.hpp"
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
+#include "vfs/DirHandle.hpp"
 #include "vfs/FileHandle.hpp"
 #include "vfs/FileReadWriter.hpp"
+#include "vfs/Handle.hpp"
 #include "vfs/InodeHandle.hpp"
 #include "volume/VolumeImpl.hpp"
 
@@ -60,7 +62,7 @@ utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name, fuse_entry_pa
   return Status::OK();
 }
 
-utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
+utils::Status VfsImpl::GetAttr(fuse_ino_t ino, struct stat *attr) {
   SwordFsInode inode;
   Status status = VolumeImpl::Instance().meta_engine()->GetInode(ino, &inode);
   if (status.ok()) {
@@ -69,7 +71,7 @@ utils::Status VfsImpl::Getattr(fuse_ino_t ino, struct stat *attr) {
   return status;
 }
 
-utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr, int to_set, struct stat *out_attr) {
+utils::Status VfsImpl::SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, struct stat *out_attr) {
   SetAttrField fields = FromFuseSetAttrFields(to_set);
   SwordFsAttr metadata_attr = SwordFsAttr::FromPosixStat(*attr);
   SwordFsInode inode;
@@ -81,11 +83,11 @@ utils::Status VfsImpl::Setattr(fuse_ino_t ino, struct stat *attr, int to_set, st
   return status;
 }
 
-utils::Status VfsImpl::Readlink(fuse_ino_t ino, std::string *target) {
+utils::Status VfsImpl::ReadLink(fuse_ino_t ino, std::string *target) {
   return VolumeImpl::Instance().meta_engine()->Readlink(ino, target);
 }
 
-utils::Status VfsImpl::Mknod(fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev) {
+utils::Status VfsImpl::MkNod(fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev) {
   (void)parent;
   (void)name;
   (void)mode;
@@ -93,7 +95,7 @@ utils::Status VfsImpl::Mknod(fuse_ino_t parent, const char *name, mode_t mode, d
   return Status::NotSupported("mknod");
 }
 
-utils::Status VfsImpl::Mkdir(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry) {
+utils::Status VfsImpl::MkDir(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry) {
   SwordFsInode child;
   Status status = VolumeImpl::Instance().meta_engine()->MkDir(parent, name, static_cast<uint32_t>(mode), &child);
   if (!status.ok()) {
@@ -131,9 +133,9 @@ utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
 
   // meta->Unlink hands back the authoritative post-decrement nlink.
   uint64_t post_nlink = 0;
-  auto st = meta->Unlink(parent, name, &post_nlink);
-  if (!st.ok()) {
-    return st;
+  status = meta->Unlink(parent, name, &post_nlink);
+  if (!status.ok()) {
+    return status;
   }
 
   // Hardlink still alive? Then the inode (and its chunks) belong to
@@ -155,7 +157,7 @@ utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
   return utils::Status::OK();
 }
 
-utils::Status VfsImpl::Rmdir(fuse_ino_t parent, const char *name) {
+utils::Status VfsImpl::RmDir(fuse_ino_t parent, const char *name) {
   return VolumeImpl::Instance().meta_engine()->RmDir(parent, name);
 }
 
@@ -198,10 +200,10 @@ utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name, fuse_ino_t ne
       SWORDFS_LOG_ERROR << "Rename: failed to get InodeHandle for overwritten " << "inode " << result.overwritten_ino
                         << "; rename has already committed";
     } else if (!handle->MarkOrphanedIfOpen()) {
-      auto cleanup_status = handle->ReclaimData();
-      if (!cleanup_status.ok()) {
+      auto status = handle->ReclaimData();
+      if (!status.ok()) {
         SWORDFS_LOG_ERROR << "Rename: cleanup of overwritten inode " << result.overwritten_ino
-                          << " failed: " << cleanup_status.message();
+                          << " failed: " << status.message();
       }
     }
   }
@@ -223,22 +225,22 @@ utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent, const char *ne
 }
 
 utils::Status VfsImpl::Open(fuse_ino_t ino, struct fuse_file_info *fi) {
-  FileHandle handle;
+  std::shared_ptr<FileHandle> handle;
   auto status = FileHandle::Open(ino, fi->flags, &handle);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Open FAILED: ino=" << ino << " — " << status.message();
     return status;
   }
-  SWORDFS_LOG_DEBUG << "Open: ino=" << ino << " fh=" << handle.fh();
-  fi->fh = handle.fh();
+  SWORDFS_LOG_DEBUG << "Open: ino=" << ino << " fh=" << handle->fh();
+  fi->fh = handle->fh();
   return Status::OK();
 }
 
 utils::Status VfsImpl::Read(fuse_ino_t ino, size_t size, off_t off, uint64_t fh, std::unique_ptr<folly::IOBuf> *data) {
   SWORDFS_LOG_DEBUG << "Read: ino=" << ino << " offset=" << off << " size=" << size;
-  auto handle = FileHandleManager::Instance().Find(fh);
+  auto handle = HandleManager::Instance().FindAs<FileHandle>(fh);
   if (!handle) {
-    return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
+    return Status::InvalidArgument("unknown file fh=" + std::to_string(fh));
   }
   auto buf = folly::IOBuf::create(size);
   auto status = handle->Read(size, off, buf.get());
@@ -250,9 +252,9 @@ utils::Status VfsImpl::Read(fuse_ino_t ino, size_t size, off_t off, uint64_t fh,
 }
 
 utils::Status VfsImpl::Write(fuse_ino_t ino, const folly::IOBuf &buf, off_t off, uint64_t fh) {
-  auto handle = FileHandleManager::Instance().Find(fh);
+  auto handle = HandleManager::Instance().FindAs<FileHandle>(fh);
   if (!handle) {
-    return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
+    return Status::InvalidArgument("unknown file fh=" + std::to_string(fh));
   }
   auto status = handle->Write(buf, off);
   if (!status.ok()) {
@@ -263,117 +265,123 @@ utils::Status VfsImpl::Write(fuse_ino_t ino, const folly::IOBuf &buf, off_t off,
 
 utils::Status VfsImpl::Flush(fuse_ino_t ino, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Flush: ino=" << ino << " fh=" << fh;
-  auto handle = FileHandleManager::Instance().Find(fh);
+  auto handle = HandleManager::Instance().FindAs<FileHandle>(fh);
   if (!handle) {
-    return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
+    return Status::InvalidArgument("unknown file fh=" + std::to_string(fh));
   }
   return handle->Flush();
 }
 
 utils::Status VfsImpl::Release(fuse_ino_t ino, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Release: ino=" << ino << " fh=" << fh;
-  return FileHandleManager::Instance().Release(fh);
+  auto handle = HandleManager::Instance().FindAs<FileHandle>(fh);
+  if (!handle) {
+    return Status::InvalidArgument("unknown file fh=" + std::to_string(fh));
+  }
+  return handle->Release();
 }
 
-utils::Status VfsImpl::Fsync(fuse_ino_t ino, int datasync, uint64_t fh) {
+utils::Status VfsImpl::FSync(fuse_ino_t ino, int datasync, uint64_t fh) {
   SWORDFS_LOG_DEBUG << "Fsync: ino=" << ino << " datasync=" << datasync << " fh=" << fh;
-  auto handle = FileHandleManager::Instance().Find(fh);
+  auto handle = HandleManager::Instance().FindAs<FileHandle>(fh);
   if (!handle) {
-    return Status::InvalidArgument("unknown fh=" + std::to_string(fh));
+    return Status::InvalidArgument("unknown file fh=" + std::to_string(fh));
   }
   return handle->Flush();
 }
 
-utils::Status VfsImpl::Opendir(fuse_ino_t ino, uint64_t *fh) {
-  // Permission check and atime update.
-  auto status = VolumeImpl::Instance().meta_engine()->OpenDir(ino);
-  if (!status.ok()) {
-    return status;
+utils::Status VfsImpl::OpenDir(fuse_ino_t ino, uint64_t *fh) {
+  std::shared_ptr<DirHandle> handle;
+  auto status = DirHandle::Open(ino, &handle);
+  if (status.ok()) {
+    *fh = handle->fh();
   }
-  *fh = FileHandleManager::Instance().OpenDir(ino);
-  return Status::OK();
+  return status;
 }
 
-// Common implementation for Readdir and Readdirplus.
-template <typename F>
-static utils::Status ReaddirCommon(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
-                                   swordfs::metadata::IMetaEngine *meta, F &&add_entry, std::string *out) {
-  using swordfs::metadata::SwordFsEntry;
+// Common implementation for Readdir and Readdirplus. Directory iteration
+// state belongs to the FUSE directory handle; the metadata iterator hides
+// backend-specific directory-entry caching and continuation state.
+class FuseDirEntryEncoder final : public DirEntryEncoder {
+ public:
+  enum class Mode {
+    kNormal,
+    kPlus,
+  };
 
-  std::vector<SwordFsEntry> entries;
-  Status status = meta->ReadDir(ino, &entries);
-  if (!status.ok()) {
-    return status;
+  FuseDirEntryEncoder(fuse_req_t req, Mode mode) : req_(req), mode_(mode) {
   }
 
-  std::vector<size_t> sizes(entries.size());
-  size_t cap = 0;
-  for (size_t i = 0; i < entries.size(); ++i) {
-    sizes[i] = add_entry(req, nullptr, 0, entries[i], 0);
-    cap += sizes[i];
+  size_t CalSpace(const metadata::SwordFsEntry &entry, off_t next_off) const override {
+    return AddEntry(entry, next_off, nullptr, 0);
   }
 
-  char *buf = static_cast<char *>(std::malloc(cap));
-  if (!buf) {
-    return Status::NoMemory("readdir buffer");
+  void Encode(const metadata::SwordFsEntry &entry, off_t next_off, size_t required, std::string *out) const override {
+    const size_t old_size = out->size();
+    out->resize(old_size + required);
+    AddEntry(entry, next_off, out->data() + old_size, required);
   }
 
-  size_t pos = 0;
-  for (size_t i = 0; i < entries.size() && pos < cap; ++i) {
-    size_t n = add_entry(req, buf + pos, cap - pos, entries[i], pos + sizes[i]);
-    if (n > cap - pos) {
-      break;
+ private:
+  size_t AddEntry(const metadata::SwordFsEntry &entry, off_t next_off, char *buf, size_t capacity) const {
+    if (mode_ == Mode::kPlus) {
+      fuse_entry_param ep = {};
+      ep.ino = entry.ino;
+      ep.attr.st_ino = entry.ino;
+      ep.attr.st_mode = entry.type << 12;
+      ep.attr_timeout = 1.0;
+      ep.entry_timeout = 1.0;
+      return fuse_add_direntry_plus(req_, buf, capacity, entry.name.c_str(), &ep, next_off);
     }
-    pos += n;
+
+    struct stat st = {};
+    st.st_ino = entry.ino;
+    st.st_mode = entry.type << 12;
+    return fuse_add_direntry(req_, buf, capacity, entry.name.c_str(), &st, next_off);
   }
 
-  if (static_cast<size_t>(off) < pos) {
-    out->assign(buf + off, std::min(pos - off, size));
+  fuse_req_t req_;
+  Mode mode_;
+};
+
+static utils::Status ReaddirCommon(fuse_req_t req, size_t size, off_t off, uint64_t fh, FuseDirEntryEncoder::Mode mode,
+                                   std::string *out) {
+  auto handle = HandleManager::Instance().FindAs<DirHandle>(fh);
+  if (!handle) {
+    return Status::InvalidArgument("unknown directory fh=" + std::to_string(fh));
   }
-  std::free(buf);
-  return Status::OK();
+
+  FuseDirEntryEncoder encoder(req, mode);
+  return handle->ReadDir(off, size, encoder, out);
 }
 
-utils::Status VfsImpl::Readdir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, std::string *buf) {
-  return ReaddirCommon(
-      req, ino, size, off, VolumeImpl::Instance().meta_engine(),
-      [](fuse_req_t r, char *p, size_t cap, const metadata::SwordFsEntry &e, off_t next_off) {
-        struct stat st = {};
-        st.st_ino = e.ino;
-        st.st_mode = e.type << 12;
-        return fuse_add_direntry(r, p, cap, e.name.c_str(), &st, next_off);
-      },
-      buf);
-}
-
-utils::Status VfsImpl::Readdirplus(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, std::string *buf) {
-  return ReaddirCommon(
-      req, ino, size, off, VolumeImpl::Instance().meta_engine(),
-      [](fuse_req_t r, char *p, size_t cap, const metadata::SwordFsEntry &e, off_t next_off) {
-        fuse_entry_param ep = {};
-        ep.ino = e.ino;
-        ep.attr.st_ino = e.ino;
-        ep.attr.st_mode = e.type << 12;
-        ep.attr_timeout = 1.0;
-        ep.entry_timeout = 1.0;
-        return fuse_add_direntry_plus(r, p, cap, e.name.c_str(), &ep, next_off);
-      },
-      buf);
-}
-
-utils::Status VfsImpl::Releasedir(fuse_ino_t ino, uint64_t fh) {
+utils::Status VfsImpl::ReadDir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh, std::string *buf) {
   (void)ino;
-  FileHandleManager::Instance().ReleaseDir(fh);
-  return Status::OK();
+  return ReaddirCommon(req, size, off, fh, FuseDirEntryEncoder::Mode::kNormal, buf);
 }
 
-utils::Status VfsImpl::Fsyncdir(fuse_ino_t ino, int datasync) {
+utils::Status VfsImpl::ReadDirPlus(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh,
+                                   std::string *buf) {
+  (void)ino;
+  return ReaddirCommon(req, size, off, fh, FuseDirEntryEncoder::Mode::kPlus, buf);
+}
+
+utils::Status VfsImpl::ReleaseDir(fuse_ino_t ino, uint64_t fh) {
+  (void)ino;
+  auto handle = HandleManager::Instance().FindAs<DirHandle>(fh);
+  if (!handle) {
+    return Status::InvalidArgument("unknown directory fh=" + std::to_string(fh));
+  }
+  return handle->Release();
+}
+
+utils::Status VfsImpl::FSyncDir(fuse_ino_t ino, int datasync) {
   (void)ino;
   (void)datasync;
   return Status::NotSupported("fsyncdir");
 }
 
-utils::Status VfsImpl::Statfs(fuse_ino_t ino, struct statvfs *stbuf) {
+utils::Status VfsImpl::StatFs(fuse_ino_t ino, struct statvfs *stbuf) {
   (void)ino;
   if (stbuf == nullptr) {
     return Status::InvalidArgument("statfs output is null");
@@ -396,7 +404,7 @@ utils::Status VfsImpl::Statfs(fuse_ino_t ino, struct statvfs *stbuf) {
   return Status::OK();
 }
 
-utils::Status VfsImpl::Setxattr(fuse_ino_t ino, const char *name, const char *value, size_t size, int flags) {
+utils::Status VfsImpl::SetXAttr(fuse_ino_t ino, const char *name, const char *value, size_t size, int flags) {
   (void)ino;
   (void)name;
   (void)value;
@@ -405,20 +413,20 @@ utils::Status VfsImpl::Setxattr(fuse_ino_t ino, const char *name, const char *va
   return Status::NotSupported("setxattr");
 }
 
-utils::Status VfsImpl::Getxattr(fuse_ino_t ino, const char *name, size_t size) {
+utils::Status VfsImpl::GetXAttr(fuse_ino_t ino, const char *name, size_t size) {
   (void)ino;
   (void)name;
   (void)size;
   return Status::NotSupported("getxattr");
 }
 
-utils::Status VfsImpl::Listxattr(fuse_ino_t ino, size_t size) {
+utils::Status VfsImpl::ListXAttr(fuse_ino_t ino, size_t size) {
   (void)ino;
   (void)size;
   return Status::NotSupported("listxattr");
 }
 
-utils::Status VfsImpl::Removexattr(fuse_ino_t ino, const char *name) {
+utils::Status VfsImpl::RemoveXAttr(fuse_ino_t ino, const char *name) {
   (void)ino;
   (void)name;
   return Status::NotSupported("removexattr");
@@ -436,23 +444,23 @@ utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name, mode_t mode, 
     SWORDFS_LOG_ERROR << "Create FAILED: parent=" << parent << " name='" << name << "' — " << status.message();
     return status;
   }
-  FileHandle handle;
+  std::shared_ptr<FileHandle> handle;
   status = FileHandle::Open(child.ino, fi->flags, &handle);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Create: Open FAILED: ino=" << child.ino << " — " << status.message();
     return status;
   }
-  fi->fh = handle.fh();
+  fi->fh = handle->fh();
   *entry = {};
   entry->ino = child.ino;
   child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
-  SWORDFS_LOG_DEBUG << "Create: ino=" << child.ino << " fh=" << handle.fh() << " name='" << name << "'";
+  SWORDFS_LOG_DEBUG << "Create: ino=" << child.ino << " fh=" << handle->fh() << " name='" << name << "'";
   return Status::OK();
 }
 
-utils::Status VfsImpl::Ioctl(fuse_ino_t ino, int cmd, void *arg, struct fuse_file_info *fi, unsigned flags,
+utils::Status VfsImpl::IoCtl(fuse_ino_t ino, int cmd, void *arg, struct fuse_file_info *fi, unsigned flags,
                              const void *in_buf, size_t in_bufsz, size_t out_bufsz) {
   (void)ino;
   (void)cmd;
@@ -474,14 +482,14 @@ utils::Status VfsImpl::RetrieveReply(fuse_req_t /*req*/, void *cookie, fuse_ino_
   return Status::NotSupported("retrieve_reply");
 }
 
-utils::Status VfsImpl::Flock(fuse_ino_t ino, struct fuse_file_info *fi, int op) {
+utils::Status VfsImpl::FLock(fuse_ino_t ino, struct fuse_file_info *fi, int op) {
   (void)ino;
   (void)fi;
   (void)op;
   return Status::NotSupported("flock");
 }
 
-utils::Status VfsImpl::Fallocate(fuse_ino_t ino, int mode, off_t offset, off_t length, struct fuse_file_info *fi) {
+utils::Status VfsImpl::FAllocate(fuse_ino_t ino, int mode, off_t offset, off_t length, struct fuse_file_info *fi) {
   (void)ino;
   (void)mode;
   (void)offset;
@@ -490,7 +498,7 @@ utils::Status VfsImpl::Fallocate(fuse_ino_t ino, int mode, off_t offset, off_t l
   return Status::NotSupported("fallocate");
 }
 
-utils::Status VfsImpl::Lseek(fuse_ino_t ino, off_t off, int whence, struct fuse_file_info *fi) {
+utils::Status VfsImpl::LSeek(fuse_ino_t ino, off_t off, int whence, struct fuse_file_info *fi) {
   (void)ino;
   (void)off;
   (void)whence;
@@ -498,14 +506,14 @@ utils::Status VfsImpl::Lseek(fuse_ino_t ino, off_t off, int whence, struct fuse_
   return Status::NotSupported("lseek");
 }
 
-utils::Status VfsImpl::Tmpfile(fuse_ino_t parent, mode_t mode, struct fuse_file_info *fi) {
+utils::Status VfsImpl::TmpFile(fuse_ino_t parent, mode_t mode, struct fuse_file_info *fi) {
   (void)parent;
   (void)mode;
   (void)fi;
   return Status::NotSupported("tmpfile");
 }
 
-utils::Status VfsImpl::Statx(fuse_ino_t ino, int flags, int mask, struct fuse_file_info *fi) {
+utils::Status VfsImpl::StatX(fuse_ino_t ino, int flags, int mask, struct fuse_file_info *fi) {
   (void)ino;
   (void)flags;
   (void)mask;

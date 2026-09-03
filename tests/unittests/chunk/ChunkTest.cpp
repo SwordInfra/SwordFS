@@ -68,9 +68,6 @@ class MissingMetaEngine final : public IMetaEngine {
   Status GetInode(InodeID, SwordFsInode *) override {
     return Status::OK();
   }
-  Status ReadDir(InodeID, std::vector<swordfs::metadata::SwordFsEntry> *) override {
-    return Status::OK();
-  }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
@@ -110,10 +107,10 @@ class MissingMetaEngine final : public IMetaEngine {
   Status ReclaimInode(InodeID) override {
     return Status::OK();
   }
-  Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
+  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
-  Status OpenDir(InodeID) override {
+  Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
     return Status::OK();
   }
   Status AddChunk(InodeID, const SwordFsChunk &) override {

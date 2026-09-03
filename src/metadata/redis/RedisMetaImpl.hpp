@@ -12,6 +12,7 @@
 namespace swordfs::metadata {
 
 class RedisMetaClient;
+class RedisMetaTxn;
 
 // Redis metadata engine. Connection and transaction infrastructure is shared
 // with the persistent schema/format layer; metadata operations are added by
@@ -31,7 +32,6 @@ class RedisMetaImpl : public IMetaEngine {
 
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
   Status GetInode(InodeID ino, SwordFsInode *out) override;
-  Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) override;
   Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) override;
@@ -46,15 +46,20 @@ class RedisMetaImpl : public IMetaEngine {
   Status Readlink(InodeID ino, std::string *target) override;
   Status Open(InodeID ino) override;
   Status ReclaimInode(InodeID ino) override;
-  Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) override;
-  Status OpenDir(InodeID ino) override;
+  Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) override;
+  Status OpenDir(InodeID ino, DirIteratorPtr *iterator) override;
   Status AddChunk(InodeID ino, const SwordFsChunk &chunk) override;
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
   Status Truncate(InodeID ino, uint64_t size) override;
 
  private:
-  std::unique_ptr<RedisMetaClient> client_;
+  Status TruncateChunks(RedisMetaTxn &txn, InodeID ino, uint64_t old_size, uint64_t new_size);
+  Status UpdateAtimeBestEffort(InodeID ino);
+
+ private:
+  std::shared_ptr<RedisMetaClient> client_;
   redis::RedisKey key_;
+  uint64_t chunk_size_ = 0;
 };
 
 }  // namespace swordfs::metadata

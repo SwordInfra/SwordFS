@@ -71,6 +71,9 @@ else()
     redis_plus_plus
     GIT_REPOSITORY https://github.com/sewenew/redis-plus-plus.git
     GIT_TAG a63ac43bf192772910b52e27cd2b42a6098a0071)
+  set(REDIS_PLUS_PLUS_CXX_STANDARD
+      20
+      CACHE STRING "" FORCE)
   set(REDIS_PLUS_PLUS_BUILD_TEST
       OFF
       CACHE BOOL "" FORCE)

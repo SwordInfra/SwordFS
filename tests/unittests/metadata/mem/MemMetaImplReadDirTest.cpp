@@ -1,8 +1,8 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// Tests for ReadDir / directory listing at the MemMetaImpl level.
-// Validates the data layer that feeds into VfsImpl::Readdir/Readdirplus
+// Tests for directory iteration at the MemMetaImpl level.
+// Validates the data layer that feeds into VfsImpl::ReadDir/ReadDirPlus
 // (the FUSE formatting fix is in PR #23).
 
 #include <dirent.h>
@@ -17,6 +17,7 @@
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
 
+using swordfs::metadata::DirIteratorPtr;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
 using swordfs::metadata::RenameFlag;
@@ -38,18 +39,39 @@ class MemMetaImplReadDirTest : public ::testing::Test {
     delete impl_;
   }
 
+  Status CollectEntries(InodeID ino, std::vector<SwordFsEntry> *entries) {
+    DirIteratorPtr iterator;
+    auto status = impl_->OpenDir(ino, &iterator);
+    if (!status.ok()) {
+      return status;
+    }
+    for (;;) {
+      SwordFsEntry entry;
+      uint64_t next_cookie = 0;
+      status = iterator->Peek(&entry, &next_cookie);
+      if (status.IsEndOfDirectory()) {
+        return Status::OK();
+      }
+      if (!status.ok()) {
+        return status;
+      }
+      entries->push_back(std::move(entry));
+      iterator->Advance();
+    }
+  }
+
   TestMemMetaImpl *impl_;
 };
 
 // ────────────────────────────────────────────────────────────────
-// ReadDir: empty directory
+// Empty directory
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, ReadDirEmpty) {
+TEST_F(MemMetaImplReadDirTest, OpenDirEmpty) {
   std::vector<SwordFsEntry> entries;
-  Status st = impl_->ReadDir(kRoot, &entries);
+  Status st = CollectEntries(kRoot, &entries);
   EXPECT_TRUE(st.ok()) << st.message();
-  // Root starts empty: ReadDir still emits "." and "..".
+  // Root starts empty: iteration still emits "." and "..".
   EXPECT_EQ(entries.size(), 2);
   EXPECT_EQ(entries[0].name, ".");
   EXPECT_EQ(entries[0].ino, kRoot);
@@ -58,10 +80,10 @@ TEST_F(MemMetaImplReadDirTest, ReadDirEmpty) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// ReadDir: non-empty directory
+// Non-empty directory
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, ReadDirWithEntries) {
+TEST_F(MemMetaImplReadDirTest, OpenDirWithEntries) {
   constexpr int kFiles = 10;
   for (int i = 0; i < kFiles; ++i) {
     InodeID ino = 0;
@@ -70,7 +92,7 @@ TEST_F(MemMetaImplReadDirTest, ReadDirWithEntries) {
   }
 
   std::vector<SwordFsEntry> entries;
-  EXPECT_TRUE(impl_->ReadDir(kRoot, &entries).ok());
+  EXPECT_TRUE(CollectEntries(kRoot, &entries).ok());
   EXPECT_EQ(entries.size(), kFiles + 2);  // +2 for "." and ".."
 
   // Verify no duplicate names.
@@ -86,29 +108,107 @@ TEST_F(MemMetaImplReadDirTest, ReadDirWithEntries) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// ReadDir: not a directory
+// OpenDir: caller-owned iterator can be continued
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, ReadDirNotADirectory) {
+TEST_F(MemMetaImplReadDirTest, OpenDirIteratorSupportsPeekAdvanceAndSeek) {
+  InodeID first_ino = 0, second_ino = 0;
+  impl_->Create(kRoot, "first", 0644, &first_ino, nullptr);
+  impl_->Create(kRoot, "second", 0644, &second_ino, nullptr);
+
+  DirIteratorPtr iterator;
+  ASSERT_TRUE(impl_->OpenDir(kRoot, &iterator).ok());
+  ASSERT_NE(iterator, nullptr);
+
+  SwordFsEntry entry;
+  uint64_t next_offset = 0;
+  ASSERT_TRUE(iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, ".");
+  EXPECT_EQ(next_offset, 1);
+  iterator->Advance();
+
+  ASSERT_TRUE(iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, "..");
+  EXPECT_EQ(next_offset, 2);
+  iterator->Advance();
+
+  ASSERT_TRUE(iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(next_offset, 3);
+  const std::string first_entry_name = entry.name;
+  iterator->Advance();
+
+  // A previously returned cookie can be used to seek backwards.
+  ASSERT_TRUE(iterator->Seek(2).ok());
+  ASSERT_TRUE(iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, first_entry_name);
+  EXPECT_EQ(next_offset, 3);
+  iterator->Advance();
+}
+
+TEST_F(MemMetaImplReadDirTest, OpenDirReturnsIndependentIterators) {
+  InodeID first_ino = 0, second_ino = 0;
+  impl_->Create(kRoot, "first", 0644, &first_ino, nullptr);
+  impl_->Create(kRoot, "second", 0644, &second_ino, nullptr);
+
+  DirIteratorPtr first_iterator;
+  DirIteratorPtr second_iterator;
+  ASSERT_TRUE(impl_->OpenDir(kRoot, &first_iterator).ok());
+  ASSERT_TRUE(impl_->OpenDir(kRoot, &second_iterator).ok());
+  ASSERT_NE(first_iterator, nullptr);
+  ASSERT_NE(second_iterator, nullptr);
+  EXPECT_NE(first_iterator, second_iterator);
+
+  SwordFsEntry entry;
+  uint64_t next_offset = 0;
+  ASSERT_TRUE(first_iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, ".");
+  EXPECT_EQ(next_offset, 1);
+  first_iterator->Advance();
+  ASSERT_TRUE(first_iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(entry.name, "..");
+  EXPECT_EQ(next_offset, 2);
+  first_iterator->Advance();
+
+  // A second OpenDir owns an independent directory stream and can seek
+  // without depending on the first iterator state.
+  ASSERT_TRUE(second_iterator->Seek(2).ok());
+  ASSERT_TRUE(second_iterator->Peek(&entry, &next_offset).ok());
+  EXPECT_EQ(next_offset, 3);
+  second_iterator->Advance();
+}
+
+TEST_F(MemMetaImplReadDirTest, OpenDirRejectsNonDirectory) {
   InodeID file_ino = 0;
   impl_->Create(kRoot, "regular", 0644, &file_ino, nullptr);
 
-  std::vector<SwordFsEntry> entries;
-  Status st = impl_->ReadDir(file_ino, &entries);
+  DirIteratorPtr iterator;
+  EXPECT_EQ(impl_->OpenDir(file_ino, &iterator).code(), Status::kNotDirectory);
+}
+
+// ────────────────────────────────────────────────────────────────
+// ReadDir: not a directory
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(MemMetaImplReadDirTest, OpenDirNotADirectory) {
+  InodeID file_ino = 0;
+  impl_->Create(kRoot, "regular", 0644, &file_ino, nullptr);
+
+  DirIteratorPtr iterator;
+  Status st = impl_->OpenDir(file_ino, &iterator);
   EXPECT_TRUE(st.IsNotDirectory()) << st.message();
 }
 
 // ────────────────────────────────────────────────────────────────
-// ReadDir: directory with mixed file types
+// Directory with mixed file types
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, ReadDirMixedTypes) {
+TEST_F(MemMetaImplReadDirTest, OpenDirMixedTypes) {
   InodeID f_ino = 0, d_ino = 0;
   impl_->Create(kRoot, "file.txt", 0644, &f_ino, nullptr);
   impl_->MkDir(kRoot, "subdir", 0755, &d_ino, nullptr);
 
   std::vector<SwordFsEntry> entries;
-  EXPECT_TRUE(impl_->ReadDir(kRoot, &entries).ok());
+  EXPECT_TRUE(CollectEntries(kRoot, &entries).ok());
   EXPECT_EQ(entries.size(), 4);  // 2 real + "." + ".."
 
   for (const auto &e : entries) {
@@ -125,10 +225,10 @@ TEST_F(MemMetaImplReadDirTest, ReadDirMixedTypes) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// ReadDir: after rename, entries are consistent
+// After rename, entries are consistent
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, ReadDirAfterMove) {
+TEST_F(MemMetaImplReadDirTest, OpenDirAfterMove) {
   InodeID dir_a_ino = 0, dir_b_ino = 0;
   impl_->MkDir(kRoot, "a", 0755, &dir_a_ino, nullptr);
   impl_->MkDir(kRoot, "b", 0755, &dir_b_ino, nullptr);
@@ -141,12 +241,12 @@ TEST_F(MemMetaImplReadDirTest, ReadDirAfterMove) {
 
   // Dir A should be empty (apart from "." and "..")
   std::vector<SwordFsEntry> entries_a;
-  impl_->ReadDir(dir_a_ino, &entries_a);
+  ASSERT_TRUE(CollectEntries(dir_a_ino, &entries_a).ok());
   EXPECT_EQ(entries_a.size(), 2);
 
   // Dir B should have "target" + "." + ".."
   std::vector<SwordFsEntry> entries_b;
-  impl_->ReadDir(dir_b_ino, &entries_b);
+  ASSERT_TRUE(CollectEntries(dir_b_ino, &entries_b).ok());
   EXPECT_EQ(entries_b.size(), 3);
   // Find the real entry (skip "." and "..")
   const SwordFsEntry *target_entry = nullptr;
@@ -162,25 +262,25 @@ TEST_F(MemMetaImplReadDirTest, ReadDirAfterMove) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// ReadDir: after delete, entry is gone
+// After delete, entry is gone
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, ReadDirAfterUnlink) {
+TEST_F(MemMetaImplReadDirTest, OpenDirAfterUnlink) {
   InodeID f_ino = 0;
   impl_->Create(kRoot, "to_delete", 0644, &f_ino, nullptr);
 
   impl_->Unlink(kRoot, "to_delete");
 
   std::vector<SwordFsEntry> entries;
-  impl_->ReadDir(kRoot, &entries);
+  ASSERT_TRUE(CollectEntries(kRoot, &entries).ok());
   EXPECT_EQ(entries.size(), 2);  // just "." and ".."
 }
 
 // ────────────────────────────────────────────────────────────────
-// ReadDir: large directory (batch-read simulation)
+// Large directory
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, ReadDirLargeDirectory) {
+TEST_F(MemMetaImplReadDirTest, OpenDirLargeDirectory) {
   constexpr int kFiles = 200;
   for (int i = 0; i < kFiles; ++i) {
     InodeID ino = 0;
@@ -188,7 +288,7 @@ TEST_F(MemMetaImplReadDirTest, ReadDirLargeDirectory) {
   }
 
   std::vector<SwordFsEntry> entries;
-  EXPECT_TRUE(impl_->ReadDir(kRoot, &entries).ok());
+  EXPECT_TRUE(CollectEntries(kRoot, &entries).ok());
   EXPECT_EQ(entries.size(), kFiles + 2);
 
   // All real inodes should be unique.
@@ -199,5 +299,5 @@ TEST_F(MemMetaImplReadDirTest, ReadDirLargeDirectory) {
     }
     inodes.insert(e.ino);
   }
-  EXPECT_EQ(inodes.size(), kFiles) << "Duplicate inodes in ReadDir output";
+  EXPECT_EQ(inodes.size(), kFiles) << "Duplicate inodes in directory iteration output";
 }

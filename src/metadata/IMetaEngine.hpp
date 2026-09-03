@@ -8,6 +8,8 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,6 +26,26 @@ using Status = swordfs::utils::Status;
 using SwordFsContext = swordfs::utils::SwordFsContext;
 
 namespace swordfs::metadata {
+
+// Backend-neutral directory iteration state. The iterator is an independent
+// view of a directory enumeration; backend implementations may share the
+// underlying prefetched directory entries between iterators. |offset| is an
+// opaque FUSE directory cookie, interpreted by the iterator implementation.
+class DirIterator {
+ public:
+  virtual ~DirIterator() = default;
+
+  /// Reposition the iterator to |cookie|.
+  virtual utils::Status Seek(uint64_t cookie) = 0;
+  /// Inspect the entry at the current iterator position without advancing it.
+  virtual utils::Status Peek(SwordFsEntry *entry, uint64_t *next_cookie) = 0;
+  /// Advance to the position returned by the most recent successful Peek().
+  /// Calling Advance() without a pending entry violates the iterator contract.
+  virtual void Advance() = 0;
+};
+
+using DirIteratorPtr = std::shared_ptr<DirIterator>;
+using ChunkVisitorFn = std::function<Status(const SwordFsChunk &)>;
 
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
@@ -57,9 +79,6 @@ class IMetaEngine {
 
   /// Get an inode metadata snapshot.
   virtual Status GetInode(InodeID ino, SwordFsInode *out) = 0;
-
-  /// List all entries in a directory.
-  virtual Status ReadDir(InodeID ino, std::vector<SwordFsEntry> *entries) = 0;
 
   /// Create a regular file.
   virtual Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) = 0;
@@ -126,21 +145,20 @@ class IMetaEngine {
   ///
   /// @important  This does NOT delete the chunk objects from the data
   /// engine. The caller is responsible for invoking
-  /// `IDataEngine::Delete` on each chunk key first (use `ListChunks` to
+  /// `IDataEngine::Delete` on each chunk key first (use `VisitChunks` to
   /// enumerate). See `vfs::InodeHandle::ReclaimData` for the canonical
   /// implementation of the full cleanup.
   virtual Status ReclaimInode(InodeID ino) = 0;
 
-  /// Enumerate the chunk indices currently registered for |ino|. Fills
-  /// |*out| with `SwordFsChunk` entries (by value) ordered by ascending
-  /// chunk index. Used by the VFS layer when reclaiming an inode to
-  /// compute the per-chunk object keys it must delete via the data
-  /// engine. Returns OK with `*out` empty if the inode has no chunks.
-  virtual Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) = 0;
+  /// Visit the chunk metadata currently registered for |ino| without
+  /// materializing the complete chunk map in the caller. Backends should
+  /// stream or batch the enumeration when their storage API supports it.
+  /// Returns immediately if |visitor| returns an error.
+  virtual Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) = 0;
 
-  /// Open a directory for reading. Performs permission check and updates
-  /// atime. Handle allocation is now managed by FileHandleManager.
-  virtual Status OpenDir(InodeID ino) = 0;
+  /// Open a directory and create its per-open iterator. Implementations may
+  /// share backend directory-entry prefetch/cache state between iterators.
+  virtual Status OpenDir(InodeID ino, DirIteratorPtr *iterator) = 0;
 
   // ────────────────────────────────────────────────────────────────
   // Chunk metadata

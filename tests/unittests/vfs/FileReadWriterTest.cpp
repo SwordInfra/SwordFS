@@ -171,9 +171,6 @@ class MockMetaEngine : public IMetaEngine {
     }
     return Status::OK();
   }
-  Status ReadDir(InodeID, std::vector<swordfs::metadata::SwordFsEntry> *) override {
-    return Status::OK();
-  }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
@@ -220,10 +217,10 @@ class MockMetaEngine : public IMetaEngine {
   Status ReclaimInode(InodeID) override {
     return Status::OK();
   }
-  Status ListChunks(InodeID, std::vector<SwordFsChunk> *) override {
+  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
-  Status OpenDir(InodeID) override {
+  Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
     return Status::OK();
   }
 
@@ -462,24 +459,24 @@ TEST_F(FileReadWriterTest, SparseReadWithMultipleHoles) {
 // Shared FileReadWriter across file handles
 // ────────────────────────────────────────────────────────────────
 //
-// FileHandleManager ensures that two open() calls for the same inode
-// share a single FileReadWriter instance.  These tests verify that
+// HandleManager ensures that two open() calls for the same inode share a
+// single FileReadWriter instance. These tests verify that
 // writes through one handle are visible when reading through another.
 
 TEST_F(FileReadWriterTest, UnflushedWriteVisibleAcrossHandles) {
   RunInTestFiber([&] {
     uint64_t fh1 = 0, fh2 = 0;
-    auto &mgr = swordfs::vfs::FileHandleManager::Instance();
-    swordfs::vfs::FileHandle opened1, opened2;
+    auto &mgr = swordfs::vfs::HandleManager::Instance();
+    std::shared_ptr<swordfs::vfs::FileHandle> opened1, opened2;
     ASSERT_TRUE(swordfs::vfs::FileHandle::Open(kIno, 0, &opened1).ok());
     ASSERT_TRUE(swordfs::vfs::FileHandle::Open(kIno, 0, &opened2).ok());
-    fh1 = opened1.fh();
-    fh2 = opened2.fh();
+    fh1 = opened1->fh();
+    fh2 = opened2->fh();
 
-    auto h1 = mgr.Find(fh1);
-    auto h2 = mgr.Find(fh2);
-    ASSERT_TRUE(h1.has_value());
-    ASSERT_TRUE(h2.has_value());
+    auto h1 = mgr.FindAs<swordfs::vfs::FileHandle>(fh1);
+    auto h2 = mgr.FindAs<swordfs::vfs::FileHandle>(fh2);
+    ASSERT_NE(h1, nullptr);
+    ASSERT_NE(h2, nullptr);
     EXPECT_EQ(h1->handle().get(), h2->handle().get());
 
     // Write through handle 1, read through handle 2 (same instance).
@@ -488,8 +485,8 @@ TEST_F(FileReadWriterTest, UnflushedWriteVisibleAcrossHandles) {
     ASSERT_TRUE(h2->Read(300, 100, out.get()).ok());
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('Z', 300));
 
-    mgr.Release(fh1);
-    mgr.Release(fh2);
+    ASSERT_TRUE(h1->Release().ok());
+    ASSERT_TRUE(h2->Release().ok());
   });
 }
 
@@ -500,15 +497,17 @@ TEST_F(FileReadWriterTest, UnflushedWriteVisibleAcrossHandles) {
 TEST_F(FileReadWriterTest, FlushedDataVisibleAcrossHandles) {
   RunInTestFiber([&] {
     uint64_t fh1 = 0, fh2 = 0;
-    auto &mgr = swordfs::vfs::FileHandleManager::Instance();
-    swordfs::vfs::FileHandle opened1, opened2;
+    auto &mgr = swordfs::vfs::HandleManager::Instance();
+    std::shared_ptr<swordfs::vfs::FileHandle> opened1, opened2;
     ASSERT_TRUE(swordfs::vfs::FileHandle::Open(kIno, 0, &opened1).ok());
     ASSERT_TRUE(swordfs::vfs::FileHandle::Open(kIno, 0, &opened2).ok());
-    fh1 = opened1.fh();
-    fh2 = opened2.fh();
+    fh1 = opened1->fh();
+    fh2 = opened2->fh();
 
-    auto h1 = mgr.Find(fh1);
-    auto h2 = mgr.Find(fh2);
+    auto h1 = mgr.FindAs<swordfs::vfs::FileHandle>(fh1);
+    auto h2 = mgr.FindAs<swordfs::vfs::FileHandle>(fh2);
+    ASSERT_NE(h1, nullptr);
+    ASSERT_NE(h2, nullptr);
 
     // Write + flush through handle 1.
     ASSERT_TRUE(h1->Write(Buf(Repeat('X', 500)), 0).ok());
@@ -519,8 +518,8 @@ TEST_F(FileReadWriterTest, FlushedDataVisibleAcrossHandles) {
     ASSERT_TRUE(h2->Read(500, 0, out.get()).ok());
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('X', 500));
 
-    mgr.Release(fh1);
-    mgr.Release(fh2);
+    ASSERT_TRUE(h1->Release().ok());
+    ASSERT_TRUE(h2->Release().ok());
   });
 }
 

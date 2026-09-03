@@ -23,12 +23,16 @@ std::string RedisKey::Inode(uint64_t ino) const {
   return folly::sformat("{}inode:{}", prefix_, ino);
 }
 
-std::string RedisKey::Dentry(uint64_t parent_ino, std::string_view name) const {
-  return folly::sformat("{}dentry:{}:{}", prefix_, parent_ino, name);
+std::string RedisKey::Directory(uint64_t parent_ino) const {
+  return folly::sformat("{}dir:{}", prefix_, parent_ino);
 }
 
-std::string RedisKey::Chunk(uint64_t ino, uint32_t index) const {
-  return folly::sformat("{}chunk:{}:{}", prefix_, ino, index);
+std::string RedisKey::Chunk(uint64_t ino) const {
+  return folly::sformat("{}chunk:{}", prefix_, ino);
+}
+
+std::string RedisKey::InodeCount() const {
+  return prefix_ + "inode_count";
 }
 
 }  // namespace swordfs::metadata::redis

@@ -17,6 +17,7 @@ class Status {
   enum Code : int {
     kOk = 0,
     kNotFound,         // ENOENT
+    kEndOfDirectory,   // directory iteration reached the end
     kAlreadyExists,    // EEXIST
     kNotDirectory,     // ENOTDIR
     kIsDirectory,      // EISDIR
@@ -46,6 +47,9 @@ class Status {
   }
   bool IsNotFound() const {
     return code_ == kNotFound;
+  }
+  bool IsEndOfDirectory() const {
+    return code_ == kEndOfDirectory;
   }
   bool IsAlreadyExists() const {
     return code_ == kAlreadyExists;
@@ -85,8 +89,7 @@ class Status {
     return msg_;
   }
 
-  /// Maps the internal code to the matching negative errno value, suitable
-  /// for fuse_reply_err(req, st.ToErrno()).
+  /// Maps externally visible errors to errno. Internal-only status codes use EIO.
   int ToErrno() const;
 
   // factories
@@ -96,6 +99,9 @@ class Status {
   }
   static Status NotFound(std::string msg) {
     return Status(kNotFound, std::move(msg));
+  }
+  static Status EndOfDirectory(std::string msg) {
+    return Status(kEndOfDirectory, std::move(msg));
   }
   static Status AlreadyExists(std::string msg) {
     return Status(kAlreadyExists, std::move(msg));

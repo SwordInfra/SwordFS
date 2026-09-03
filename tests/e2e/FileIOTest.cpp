@@ -226,6 +226,20 @@ TEST_F(FileIOTest, TruncateExtend) {
   EXPECT_EQ(st.st_size, 10);
 }
 
+TEST_F(FileIOTest, TruncateShrinkThenExtendClearsStaleChunkData) {
+  const std::string name = "truncate_stale.bin";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "hello world"), 0);
+  ASSERT_EQ(fixture_.Truncate(name, 5), 0);
+  ASSERT_EQ(fixture_.Truncate(name, 11), 0);
+
+  std::string content;
+  ASSERT_EQ(fixture_.ReadFile(name, &content), 0);
+  ASSERT_EQ(content.size(), 11U);
+  EXPECT_EQ(content.substr(0, 5), "hello");
+  EXPECT_EQ(content.substr(5), std::string(6, '\0'));
+}
+
 // ────────────────────────────────────────────────────────────────
 // Open-unlink semantics: unlink while fd open, then close
 // ────────────────────────────────────────────────────────────────

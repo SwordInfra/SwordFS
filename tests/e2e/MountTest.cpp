@@ -44,9 +44,10 @@ TEST_F(MountTest, DataPersistsAfterRemount) {
   fixture_.TearDown();
   ASSERT_TRUE(fixture_.SetUp());
 
-  // Data stored in memory://local metadata does not survive unmount,
-  // but the mount cycle itself must be clean.
+  // Redis metadata survives unmount, so the namespace and file contents
+  // must still be intact after the remount.
   EXPECT_TRUE(fixture_.IsMounted());
+  EXPECT_TRUE(fixture_.FileEquals(name, 15, Fixture::Hash64("persistent data")));
 }
 
 // ────────────────────────────────────────────────────────────────
