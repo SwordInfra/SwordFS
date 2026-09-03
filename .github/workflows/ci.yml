@@ -68,16 +68,16 @@ jobs:
 
       - name: Run clang-tidy (changed files only)
         run: |
-          if git rev-parse origin/main >/dev/null 2>&1; then
-            BASE="origin/main"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
           else
-            BASE=$(git rev-list --max-parents=0 HEAD)
+            BASE="${{ github.event.before }}"
           fi
           CHANGED=$(git diff --name-only --diff-filter=ACMR "$BASE"...HEAD \
-            | grep -E '\.(cpp|hpp)$' | grep '^src/' || true)
+            | grep -E '^(src|include|tests)/.*\.(cpp|hpp)$' || true)
           if [ -n "$CHANGED" ]; then
-            echo "$CHANGED" | xargs run-clang-tidy -p build -j $(nproc) \
-              --warnings-as-errors='*' || true
+            echo "$CHANGED" | xargs run-clang-tidy -p build -j "$(nproc)" \
+              --warnings-as-errors='*'
           else
             echo "No C++ source changes detected."
           fi
