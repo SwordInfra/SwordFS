@@ -619,6 +619,58 @@ TEST_F(RedisMetaImplTest, LinkCancelsOrphanCandidate) {
   EXPECT_TRUE(impl_->GetInode(file.ino, &file).ok());
 }
 
+TEST_F(RedisMetaImplTest, GarbageCollectionVisitorsValidateAndPropagateCallbacks) {
+  EXPECT_EQ(impl_->VisitOrphanedInodes({}).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->VisitPendingReclaims({}).code(), Status::kInvalidArgument);
+
+  size_t missing_chunk_visits = 0;
+  ASSERT_TRUE(impl_
+                  ->VisitReclaimChunks(999999,
+                                       [&](const SwordFsChunk &) {
+                                         ++missing_chunk_visits;
+                                         return Status::OK();
+                                       })
+                  .ok());
+  EXPECT_EQ(missing_chunk_visits, 0U);
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+  ASSERT_TRUE(impl_->AddChunk(file.ino, SwordFsChunk{.index = 0, .key = "object"}).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+
+  EXPECT_EQ(impl_->VisitOrphanedInodes([](InodeID) { return Status::IOError("stop orphan scan"); }).code(),
+            Status::kIOError);
+  ASSERT_TRUE(impl_->ReclaimInode(file.ino).ok());
+  EXPECT_EQ(impl_->VisitPendingReclaims([](InodeID) { return Status::IOError("stop pending scan"); }).code(),
+            Status::kIOError);
+  EXPECT_EQ(impl_->VisitReclaimChunks(file.ino, [](const SwordFsChunk &) { return Status::IOError("stop chunk scan"); })
+                .code(),
+            Status::kIOError);
+  EXPECT_EQ(impl_->VisitReclaimChunks(file.ino, {}).code(), Status::kInvalidArgument);
+}
+
+TEST_F(RedisMetaImplTest, GarbageCollectionVisitorsRejectMalformedIndexesAndChunks) {
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  auto redis = RawRedis();
+
+  redis.hset(key.OrphanedInodes(), "invalid-inode", "1");
+  EXPECT_TRUE(impl_->VisitOrphanedInodes([](InodeID) { return Status::OK(); }).IsMalformed());
+  redis.del(key.OrphanedInodes());
+
+  redis.hset(key.DeletedFiles(), "invalid-inode", "1");
+  EXPECT_TRUE(impl_->VisitPendingReclaims([](InodeID) { return Status::OK(); }).IsMalformed());
+  redis.del(key.DeletedFiles());
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+  ASSERT_TRUE(impl_->AddChunk(file.ino, SwordFsChunk{.index = 0, .key = "object"}).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+  ASSERT_TRUE(impl_->ReclaimInode(file.ino).ok());
+
+  redis.hset(key.Chunk(file.ino), "0", "malformed-chunk");
+  EXPECT_TRUE(impl_->VisitReclaimChunks(file.ino, [](const SwordFsChunk &) { return Status::OK(); }).IsMalformed());
+}
+
 TEST_F(RedisMetaImplTest, PermissionChecksRejectMutationsForUnprivilegedCaller) {
   SwordFsAttr root_attr;
   SwordFsInode root;

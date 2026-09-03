@@ -246,32 +246,66 @@ TEST_F(FileIOTest, TruncateShrinkThenExtendClearsStaleChunkData) {
 //
 // POSIX guarantees that a file that has been unlinked can still be
 // read/written through a pre-existing fd, and that its data only goes
-// away once the last fd is closed. After this refactor the metadata
-// engine defers inode deletion via the runtime `OpenHandleTracker`
-// (see `OpenHandleTracker.hpp`); this end-to-end test verifies the
-// contract from the filesystem-client perspective.
+// away once the last fd is closed. In addition to the namespace behavior,
+// verify that #143's persistent GC lifecycle reaches the backing object.
 
 TEST_F(FileIOTest, UnlinkWhileOpenKeepsFileReadable) {
   const std::string name = "open_unlink.txt";
   ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR), 0);
   ASSERT_EQ(fixture_.WriteFile(name, "payload"), 0);
-  ASSERT_EQ(::close(fixture_.OpenFile(name, O_RDONLY)), 0);
+
+  struct stat before;
+  ASSERT_EQ(fixture_.Stat(name, &before), 0);
+  ASSERT_TRUE(fixture_.ChunkObjectExists(before.st_ino, 0));
 
   int fd = fixture_.OpenFile(name, O_RDONLY);
   ASSERT_GE(fd, 0);
 
-  // unlink while fd is still open.
+  // Unlink while fd is still open. The namespace entry disappears, but the
+  // durable chunk object must remain until the last runtime reference closes.
   ASSERT_EQ(fixture_.UnlinkFile(name), 0);
+  EXPECT_TRUE(fixture_.ChunkObjectExists(before.st_ino, 0));
 
-  // fd must still read the original contents.
   char buf[16] = {};
   ssize_t n = ::pread(fd, buf, sizeof(buf), 0);
   ASSERT_EQ(n, 7);
   EXPECT_STREQ(buf, "payload");
   ASSERT_EQ(::close(fd), 0);
 
-  // After the last close, the name is gone AND the inode is gone: a
-  // fresh lookup returns ENOENT.
+  // release(2) drives ReclaimInode -> object deletion -> CompleteReclaim.
+  // Poll because FUSE release processing may finish just after close returns.
+  EXPECT_TRUE(fixture_.WaitForChunkObjectGone(before.st_ino, 0));
+
   struct stat st;
   EXPECT_EQ(fixture_.Stat(name, &st), -1);
+}
+
+TEST_F(FileIOTest, MountStartupRecoversOrphanLeftByCrashedDaemon) {
+  const std::string name = "crash_orphan.txt";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "recover me"), 0);
+
+  struct stat before;
+  ASSERT_EQ(fixture_.Stat(name, &before), 0);
+  ASSERT_TRUE(fixture_.ChunkObjectExists(before.st_ino, 0));
+
+  int fd = fixture_.OpenFile(name, O_RDONLY);
+  ASSERT_GE(fd, 0);
+  ASSERT_EQ(fixture_.UnlinkFile(name), 0);
+
+  // The unlink transaction has durably recorded the orphan, but the open fd
+  // keeps the live inode and its object in place. Kill the daemon before its
+  // normal last-close path can prepare or complete reclamation.
+  ASSERT_TRUE(fixture_.ChunkObjectExists(before.st_ino, 0));
+  ASSERT_TRUE(fixture_.CrashMount());
+  ::close(fd);
+
+  // A fresh mount must discover the orphan marker, publish the reclaim job,
+  // delete the frozen chunk list, and complete the job during startup.
+  ASSERT_TRUE(fixture_.Remount());
+  EXPECT_TRUE(fixture_.WaitForChunkObjectGone(before.st_ino, 0));
+
+  struct stat st;
+  EXPECT_EQ(fixture_.Stat(name, &st), -1);
+  EXPECT_EQ(errno, ENOENT);
 }
