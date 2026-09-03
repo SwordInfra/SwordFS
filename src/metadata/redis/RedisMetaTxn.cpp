@@ -1,223 +1,315 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
+#include <dirent.h>
+#include <folly/container/F14Set.h>
+#include <sys/stat.h>
+
+#include <algorithm>
+#include <string>
+#include <utility>
+
+#include "metadata/Utils.hpp"
+#include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaTxn.hpp"
 
-#include <folly/logging/xlog.h>
-
-#include "metadata/redis/RedisMetaClient.hpp"
-#include "utils/Logging.hpp"
-
 namespace swordfs::metadata {
-namespace {
 
-utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
-  return utils::Status::IOError("Redis " + std::string(operation) + " failed: " + error.what());
+RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size)
+    : txn_(txn), key_(key), chunk_size_(chunk_size) {
 }
 
-}  // namespace
-
-RedisMetaTxn::RedisMetaTxn(sw::redis::Redis &redis)
-    // Use a pooled connection for the whole transaction. WATCH and the
-    // subsequent read must execute on the same connection as EXEC.
-    : transaction_(redis.transaction(false, false)), redis_(transaction_->redis()) {
-}
-
-utils::Status RedisMetaTxn::Get(std::string_view key, std::string *value) {
-  if (value == nullptr) {
-    return utils::Status::InvalidArgument("Redis GET output is null");
+utils::Status RedisMetaTxn::LookupInode(InodeID ino, SwordFsInode *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("inode output is null");
   }
-  try {
-    // GET is executed immediately because callers need its value to compute
-    // subsequent metadata mutations. Once a write is queued, redis-plus-plus
-    // has entered MULTI, so a subsequent GET through the transaction would be
-    // queued instead of returning its value. Keep this transaction model's
-    // read-before-write restriction rather than mixing immediate reads with
-    // queued commands.
-    if (has_writes_) {
-      return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
+
+  std::string value;
+  auto status = txn_.Get(key_.Inode(ino), &value);
+  if (!status.ok()) {
+    return status;
+  }
+  return out->ParseFrom(value);
+}
+
+utils::Status RedisMetaTxn::GetEntry(InodeID parent_ino, std::string_view name, SwordFsEntry *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("entry output is null");
+  }
+
+  std::string value;
+  auto status = txn_.HGet(key_.Directory(parent_ino), name, &value);
+  if (!status.ok()) {
+    return status;
+  }
+  return out->ParseFrom(value);
+}
+
+utils::Status RedisMetaTxn::LookupEntry(InodeID parent_ino, std::string_view name, SwordFsInode *out) {
+  SwordFsInode parent;
+  auto status = LookupInode(parent_ino, &parent);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!parent.IsDir()) {
+    return utils::Status::NotDirectory("parent is not a directory");
+  }
+
+  SwordFsEntry entry;
+  status = GetEntry(parent_ino, name, &entry);
+  if (!status.ok()) {
+    return status;
+  }
+  return LookupInode(entry.ino, out);
+}
+
+utils::Status RedisMetaTxn::EntryExists(InodeID parent_ino, std::string_view name, bool *exists) {
+  if (exists == nullptr) {
+    return utils::Status::InvalidArgument("entry existence output is null");
+  }
+
+  SwordFsEntry entry;
+  auto status = GetEntry(parent_ino, name, &entry);
+  if (status.IsNotFound()) {
+    *exists = false;
+    return utils::Status::OK();
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  *exists = true;
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaTxn::IsDirEmpty(InodeID ino, bool *empty) {
+  if (empty == nullptr) {
+    return utils::Status::InvalidArgument("directory empty output is null");
+  }
+  SwordFsInode dir;
+  auto status = LookupInode(ino, &dir);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!dir.IsDir()) {
+    return utils::Status::NotDirectory("not a directory");
+  }
+  uint64_t length = 0;
+  status = txn_.HLen(key_.Directory(ino), &length);
+  if (!status.ok()) {
+    return status;
+  }
+  *empty = length == 0;
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaTxn::IsDescendantOf(InodeID ancestor_ino, InodeID child_ino, bool *result) {
+  if (result == nullptr) {
+    return utils::Status::InvalidArgument("descendant check output is null");
+  }
+  *result = false;
+  InodeID current_ino = child_ino;
+  folly::F14FastSet<InodeID> visited;
+  while (current_ino != 0) {
+    if (!visited.insert(current_ino).second) {
+      return utils::Status::Malformed("directory parent cycle detected");
     }
-    // WATCH must happen before the read so changes between GET and EXEC are
-    // detected. This is Redis's optimistic transaction pattern: the read is
-    // performed immediately, while queued writes are committed by EXEC.
-    redis_->watch(key);
-    auto result = redis_->get(key);
-    if (!result.has_value()) {
-      return utils::Status::NotFound("Redis key not found");
+    if (current_ino == ancestor_ino) {
+      *result = true;
+      return utils::Status::OK();
     }
-    *value = std::move(*result);
-    return utils::Status::OK();
-  } catch (const sw::redis::TimeoutError &) {
-    throw;
-  } catch (const sw::redis::ClosedError &) {
-    throw;
-  } catch (const sw::redis::Error &error) {
-    return RedisError("GET", error);
-  }
-}
-
-utils::Status RedisMetaTxn::HGet(std::string_view key, std::string_view field, std::string *value) {
-  if (value == nullptr) {
-    return utils::Status::InvalidArgument("Redis HGET output is null");
-  }
-  try {
-    if (has_writes_) {
-      return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
+    SwordFsInode inode;
+    auto status = LookupInode(current_ino, &inode);
+    if (!status.ok()) {
+      return status;
     }
-    redis_->watch(key);
-    auto result = redis_->hget(std::string(key), std::string(field));
-    if (!result.has_value()) {
-      return utils::Status::NotFound("Redis hash field not found");
+    if (inode.parent_ino == current_ino) {
+      break;
     }
-    *value = std::move(*result);
-    return utils::Status::OK();
-  } catch (const sw::redis::TimeoutError &) {
-    throw;
-  } catch (const sw::redis::ClosedError &) {
-    throw;
-  } catch (const sw::redis::Error &error) {
-    return RedisError("HGET", error);
+    current_ino = inode.parent_ino;
   }
+  return utils::Status::OK();
 }
 
-utils::Status RedisMetaTxn::HLen(std::string_view key, uint64_t *length) {
-  if (length == nullptr) {
-    return utils::Status::InvalidArgument("Redis HLEN output is null");
+utils::Status RedisMetaTxn::InsertInode(const SwordFsInode &inode) {
+  if (inode.ino == 0 || inode.attr.ino != inode.ino) {
+    return utils::Status::InvalidArgument("invalid inode record");
   }
-  try {
-    if (has_writes_) {
-      return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
+
+  SwordFsInode existing;
+  auto status = LookupInode(inode.ino, &existing);
+  if (status.ok()) {
+    return utils::Status::AlreadyExists("inode already exists");
+  }
+  if (!status.IsNotFound()) {
+    return status;
+  }
+  return SetInode(inode);
+}
+
+utils::Status RedisMetaTxn::SetInode(const SwordFsInode &inode) {
+  if (inode.ino == 0 || inode.attr.ino != inode.ino) {
+    return utils::Status::InvalidArgument("invalid inode record");
+  }
+  std::string value;
+  auto status = inode.SerializeTo(&value);
+  if (!status.ok()) {
+    return status;
+  }
+  return txn_.Set(key_.Inode(inode.ino), value);
+}
+
+utils::Status RedisMetaTxn::DeleteInode(InodeID ino) {
+  return txn_.Del(key_.Inode(ino));
+}
+
+utils::Status RedisMetaTxn::AdjustNlink(SwordFsInode *inode, int delta, uint64_t *nlink) {
+  if (inode == nullptr) {
+    return utils::Status::InvalidArgument("inode is null");
+  }
+  if (delta < 0) {
+    const uint64_t amount = static_cast<uint64_t>(-static_cast<int64_t>(delta));
+    inode->attr.nlink = inode->attr.nlink > amount ? inode->attr.nlink - amount : 0;
+  } else {
+    inode->attr.nlink += static_cast<uint64_t>(delta);
+  }
+  if (nlink != nullptr) {
+    *nlink = inode->attr.nlink;
+  }
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaTxn::LinkEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &child,
+                                      SwordFsInode *parent) {
+  if (parent == nullptr) {
+    return utils::Status::InvalidArgument("parent inode is null");
+  }
+  if (!parent->IsDir()) {
+    return utils::Status::NotDirectory("parent is not a directory");
+  }
+
+  if (child.IsDir()) {
+    parent->attr.nlink++;
+  }
+  parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+
+  SwordFsEntry entry{std::string(name), ModeToDt(child.attr.mode), child.ino};
+  std::string value;
+  auto status = entry.SerializeTo(&value);
+  if (!status.ok()) {
+    return status;
+  }
+  return txn_.HSet(key_.Directory(parent_ino), name, value);
+}
+
+utils::Status RedisMetaTxn::UnlinkEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &target,
+                                        SwordFsInode *parent) {
+  if (parent == nullptr) {
+    return utils::Status::InvalidArgument("parent inode is null");
+  }
+  if (!parent->IsDir()) {
+    return utils::Status::NotDirectory("parent is not a directory");
+  }
+
+  if (target.IsDir() && parent->attr.nlink > 0) {
+    parent->attr.nlink--;
+  }
+  parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  return txn_.HDel(key_.Directory(parent_ino), name);
+}
+
+utils::Status RedisMetaTxn::ReplaceEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &child,
+                                         SwordFsInode *parent) {
+  if (parent == nullptr) {
+    return utils::Status::InvalidArgument("parent inode is null");
+  }
+  if (!parent->IsDir()) {
+    return utils::Status::NotDirectory("parent is not a directory");
+  }
+
+  parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  SwordFsEntry entry{std::string(name), ModeToDt(child.attr.mode), child.ino};
+  std::string value;
+  auto status = entry.SerializeTo(&value);
+  if (!status.ok()) {
+    return status;
+  }
+  return txn_.HSet(key_.Directory(parent_ino), name, value);
+}
+
+utils::Status RedisMetaTxn::DeleteDirectory(InodeID ino) {
+  return txn_.Del(key_.Directory(ino));
+}
+
+utils::Status RedisMetaTxn::AdjustInodeCount(int64_t delta) {
+  return txn_.IncrBy(key_.InodeCount(), delta);
+}
+
+utils::Status RedisMetaTxn::LookupChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
+  if (chunk == nullptr) {
+    return utils::Status::InvalidArgument("chunk output is null");
+  }
+
+  std::string value;
+  auto status = txn_.HGet(key_.Chunk(ino), std::to_string(idx), &value);
+  if (!status.ok()) {
+    return status;
+  }
+  return chunk->ParseFrom(value);
+}
+
+utils::Status RedisMetaTxn::SetChunk(InodeID ino, const SwordFsChunk &chunk) {
+  std::string value;
+  auto status = chunk.SerializeTo(&value);
+  if (!status.ok()) {
+    return status;
+  }
+  return txn_.HSet(key_.Chunk(ino), std::to_string(chunk.index), value);
+}
+
+utils::Status RedisMetaTxn::DeleteChunks(InodeID ino) {
+  return txn_.Del(key_.Chunk(ino));
+}
+
+utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size) {
+  if (new_size >= old_size) {
+    return utils::Status::OK();
+  }
+  if (chunk_size_ == 0) {
+    return utils::Status::Internal("volume chunk size is not initialized");
+  }
+  if (new_size == 0) {
+    return DeleteChunks(ino);
+  }
+
+  const ChunkIndex boundary_idx = static_cast<ChunkIndex>(new_size / chunk_size_);
+  const uint64_t boundary_offset = new_size % chunk_size_;
+  const ChunkIndex first_removed_idx = boundary_idx + (boundary_offset != 0 ? 1 : 0);
+  const ChunkIndex old_chunk_count = static_cast<ChunkIndex>((old_size + chunk_size_ - 1) / chunk_size_);
+
+  if (boundary_offset != 0) {
+    SwordFsChunk chunk;
+    auto status = LookupChunk(ino, boundary_idx, &chunk);
+    if (status.ok()) {
+      const uint64_t new_chunk_size = new_size - chunk.start_offset;
+      if (chunk.size > new_chunk_size) {
+        chunk.size = new_chunk_size;
+        status = SetChunk(ino, chunk);
+        if (!status.ok()) {
+          return status;
+        }
+      }
+    } else if (!status.IsNotFound()) {
+      return status;
     }
-    redis_->watch(key);
-    *length = redis_->hlen(std::string(key));
-    return utils::Status::OK();
-  } catch (const sw::redis::TimeoutError &) {
-    throw;
-  } catch (const sw::redis::ClosedError &) {
-    throw;
-  } catch (const sw::redis::Error &error) {
-    return RedisError("HLEN", error);
   }
-}
 
-utils::Status RedisMetaTxn::Set(std::string_view key, std::string_view value) {
-  try {
-    transaction_->set(std::string(key), std::string(value));
-    has_writes_ = true;
-    return utils::Status::OK();
-  } catch (const sw::redis::TimeoutError &) {
-    throw;
-  } catch (const sw::redis::ClosedError &) {
-    throw;
-  } catch (const sw::redis::Error &error) {
-    return RedisError("SET", error);
-  }
-}
-
-utils::Status RedisMetaTxn::HSet(std::string_view key, std::string_view field, std::string_view value) {
-  try {
-    transaction_->hset(std::string(key), std::string(field), std::string(value));
-    has_writes_ = true;
-    return utils::Status::OK();
-  } catch (const sw::redis::TimeoutError &) {
-    throw;
-  } catch (const sw::redis::ClosedError &) {
-    throw;
-  } catch (const sw::redis::Error &error) {
-    return RedisError("HSET", error);
-  }
-}
-
-utils::Status RedisMetaTxn::HDel(std::string_view key, std::string_view field) {
-  try {
-    transaction_->hdel(std::string(key), std::string(field));
-    has_writes_ = true;
-    return utils::Status::OK();
-  } catch (const sw::redis::TimeoutError &) {
-    throw;
-  } catch (const sw::redis::ClosedError &) {
-    throw;
-  } catch (const sw::redis::Error &error) {
-    return RedisError("HDEL", error);
-  }
-}
-
-utils::Status RedisMetaTxn::IncrBy(std::string_view key, int64_t delta) {
-  try {
-    transaction_->incrby(std::string(key), delta);
-    has_writes_ = true;
-    return utils::Status::OK();
-  } catch (const sw::redis::TimeoutError &) {
-    throw;
-  } catch (const sw::redis::ClosedError &) {
-    throw;
-  } catch (const sw::redis::Error &error) {
-    return RedisError("INCRBY", error);
-  }
-}
-
-utils::Status RedisMetaTxn::Del(std::string_view key) {
-  try {
-    transaction_->del(std::string(key));
-    has_writes_ = true;
-    return utils::Status::OK();
-  } catch (const sw::redis::TimeoutError &) {
-    throw;
-  } catch (const sw::redis::ClosedError &) {
-    throw;
-  } catch (const sw::redis::Error &error) {
-    return RedisError("DEL", error);
-  }
-}
-
-utils::Status RedisMetaTxn::ReleaseConnection() {
-  try {
-    transaction_->ping();
-    transaction_->exec();
-    return utils::Status::OK();
-  } catch (const sw::redis::WatchError &) {
-    return utils::Status::Busy("Redis watched key changed");
-  } catch (const sw::redis::TimeoutError &error) {
-    return utils::Status::IOError("Redis read-only transaction timed out: " + std::string(error.what()));
-  } catch (const sw::redis::ClosedError &error) {
-    return utils::Status::IOError("Redis read-only transaction connection closed: " + std::string(error.what()));
-  } catch (const sw::redis::Error &error) {
-    return RedisError("read-only transaction", error);
-  }
-}
-
-void RedisMetaTxn::Discard() noexcept {
-  try {
-    if (!has_writes_) {
-      // QueuedRedis only returns a pooled connection after EXEC/DISCARD has
-      // reset its internal transaction state. Open a harmless transaction so
-      // read-only and pre-commit error paths do not invalidate the pool slot.
-      transaction_->ping();
+  for (ChunkIndex idx = first_removed_idx; idx < old_chunk_count; ++idx) {
+    auto status = txn_.HDel(key_.Chunk(ino), std::to_string(idx));
+    if (!status.ok()) {
+      return status;
     }
-    transaction_->discard();
-  } catch (const sw::redis::Error &) {
   }
-}
-
-utils::Status RedisMetaTxn::Commit() {
-  if (!has_writes_) {
-    return ReleaseConnection();
-  }
-  try {
-    transaction_->exec();
-    return utils::Status::OK();
-  } catch (const sw::redis::WatchError &) {
-    (void)ReleaseConnection();
-    return utils::Status::Busy("Redis watched key changed");
-  } catch (const sw::redis::TimeoutError &error) {
-    SWORDFS_LOG_WARN << "Redis transaction EXEC timed out; commit result is ambiguous: " << error.what();
-    return utils::Status::IOError("Redis transaction commit is ambiguous after EXEC: " + std::string(error.what()));
-  } catch (const sw::redis::ClosedError &error) {
-    SWORDFS_LOG_WARN << "Redis transaction EXEC connection closed; commit result is ambiguous: " << error.what();
-    return utils::Status::IOError("Redis transaction commit is ambiguous after EXEC: " + std::string(error.what()));
-  } catch (const sw::redis::Error &error) {
-    return RedisError("transaction EXEC", error);
-  }
+  return utils::Status::OK();
 }
 
 }  // namespace swordfs::metadata
