@@ -265,6 +265,18 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status ReclaimInode(InodeID) override {
     return call_status_;
   }
+  Status VisitOrphanedInodes(const swordfs::metadata::InodeVisitorFn &) override {
+    return Status::OK();
+  }
+  Status VisitPendingReclaims(const swordfs::metadata::InodeVisitorFn &) override {
+    return Status::OK();
+  }
+  Status VisitReclaimChunks(InodeID ino, const swordfs::metadata::ChunkVisitorFn &visitor) override {
+    return VisitChunks(ino, visitor);
+  }
+  Status CompleteReclaim(InodeID) override {
+    return Status::OK();
+  }
   Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }

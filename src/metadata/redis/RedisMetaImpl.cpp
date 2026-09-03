@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <ctime>
 #include <deque>
 #include <exception>
 #include <mutex>
@@ -396,6 +397,7 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t
     return Status::InvalidArgument("cannot unlink . or ..");
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
+  const std::string orphaned_at = std::to_string(std::time(nullptr));
   return client_->Transact([&](RedisMetaTxn &txn) {
     SwordFsInode parent;
     std::string value;
@@ -461,6 +463,12 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t
     status = txn.Set(key_.Inode(child_ino), value);
     if (!status.ok()) {
       return status;
+    }
+    if (child.attr.nlink == 0) {
+      status = txn.HSet(key_.OrphanedInodes(), std::to_string(child_ino), orphaned_at);
+      if (!status.ok()) {
+        return status;
+      }
     }
     if (post_nlink) {
       *post_nlink = child.attr.nlink;
@@ -561,6 +569,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     return Status::Busy("cannot rename . or ..");
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
+  const std::string orphaned_at = std::to_string(std::time(nullptr));
   return client_->Transact([&](RedisMetaTxn &txn) {
     std::string old_parent_value, new_parent_value, source_value, target_value, source_entry_value, target_entry_value;
     auto status = txn.Get(key_.Inode(old_parent_ino), &old_parent_value);
@@ -823,8 +832,6 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
           target.attr.nlink--;
         }
         target.Touch(SetAttrField::kCtime);
-        if (target.attr.nlink == 0) { /* retain orphan for VFS reclaim */
-        }
         status = target.SerializeTo(&target_value);
         if (!status.ok()) {
           return status;
@@ -832,6 +839,12 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
         status = txn.Set(key_.Inode(target_ino), target_value);
         if (!status.ok()) {
           return status;
+        }
+        if (target.attr.nlink == 0) {
+          status = txn.HSet(key_.OrphanedInodes(), std::to_string(target_ino), orphaned_at);
+          if (!status.ok()) {
+            return status;
+          }
         }
         if (result) {
           result->overwritten_ino = target_ino;
@@ -1148,6 +1161,10 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
       return status;
     }
     status = txn.Set(key_.Inode(newparent_ino), value);
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.HDel(key_.OrphanedInodes(), std::to_string(ino));
     if (status.ok() && out) {
       *out = inode;
     }
@@ -1193,11 +1210,15 @@ Status RedisMetaImpl::Open(InodeID ino) {
 }
 
 Status RedisMetaImpl::ReclaimInode(InodeID ino) {
+  const std::string deleted_at = std::to_string(std::time(nullptr));
+  const std::string ino_field = std::to_string(ino);
   return client_->Transact([&](RedisMetaTxn &txn) {
     std::string value;
     auto status = txn.Get(key_.Inode(ino), &value);
     if (status.IsNotFound()) {
-      return Status::OK();
+      // A previous ambiguous EXEC may already have prepared this inode.
+      // Removing a stale orphan marker is safe and keeps retries idempotent.
+      return txn.HDel(key_.OrphanedInodes(), ino_field);
     }
     if (!status.ok()) {
       return status;
@@ -1208,9 +1229,19 @@ Status RedisMetaImpl::ReclaimInode(InodeID ino) {
       return status;
     }
     if (inode.attr.nlink != 0) {
-      return Status::OK();
+      // A concurrent Link won. The inode is live again, so cancel the
+      // orphan candidate instead of publishing a deletion job.
+      return txn.HDel(key_.OrphanedInodes(), ino_field);
     }
-    status = txn.Del(key_.Chunk(ino));
+
+    // Publish the durable deletion record before removing the live inode.
+    // MULTI/EXEC makes these mutations atomic; the chunk hash is deliberately
+    // retained as the authoritative object list until CompleteReclaim().
+    status = txn.HSet(key_.DeletedFiles(), ino_field, deleted_at);
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.HDel(key_.OrphanedInodes(), ino_field);
     if (!status.ok()) {
       return status;
     }
@@ -1219,6 +1250,107 @@ Status RedisMetaImpl::ReclaimInode(InodeID ino) {
       return status;
     }
     return txn.IncrBy(key_.InodeCount(), -1);
+  });
+}
+
+Status RedisMetaImpl::VisitInodeHash(std::string_view hash_key, const InodeVisitorFn &visitor) {
+  if (!visitor) {
+    return Status::InvalidArgument("inode visitor is null");
+  }
+
+  constexpr size_t kScanBatchSize = 128;
+  uint64_t cursor = 0;
+  do {
+    std::vector<std::pair<std::string, std::string>> values;
+    uint64_t next_cursor = 0;
+    auto status = client_->HScan(hash_key, cursor, kScanBatchSize, &values, &next_cursor);
+    if (!status.ok()) {
+      return status;
+    }
+    for (const auto &[field, value] : values) {
+      (void)value;
+      InodeID ino = 0;
+      const auto [end, error] = std::from_chars(field.data(), field.data() + field.size(), ino);
+      if (error != std::errc() || end != field.data() + field.size()) {
+        return Status::Malformed("invalid inode field in Redis GC index");
+      }
+      status = visitor(ino);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+  return Status::OK();
+}
+
+Status RedisMetaImpl::VisitChunkHash(std::string_view hash_key, const ChunkVisitorFn &visitor) {
+  if (!visitor) {
+    return Status::InvalidArgument("chunk visitor is null");
+  }
+
+  constexpr size_t kScanBatchSize = 128;
+  uint64_t cursor = 0;
+  do {
+    std::vector<std::pair<std::string, std::string>> values;
+    uint64_t next_cursor = 0;
+    auto status = client_->HScan(hash_key, cursor, kScanBatchSize, &values, &next_cursor);
+    if (!status.ok()) {
+      return status;
+    }
+    for (const auto &[field, chunk_value] : values) {
+      (void)field;
+      SwordFsChunk chunk;
+      status = chunk.ParseFrom(chunk_value);
+      if (!status.ok()) {
+        return status;
+      }
+      status = visitor(chunk);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+  return Status::OK();
+}
+
+Status RedisMetaImpl::VisitOrphanedInodes(const InodeVisitorFn &visitor) {
+  return VisitInodeHash(key_.OrphanedInodes(), visitor);
+}
+
+Status RedisMetaImpl::VisitPendingReclaims(const InodeVisitorFn &visitor) {
+  return VisitInodeHash(key_.DeletedFiles(), visitor);
+}
+
+Status RedisMetaImpl::VisitReclaimChunks(InodeID ino, const ChunkVisitorFn &visitor) {
+  std::string deleted_at;
+  auto status = client_->HGet(key_.DeletedFiles(), std::to_string(ino), &deleted_at);
+  if (status.IsNotFound()) {
+    return Status::OK();
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  return VisitChunkHash(key_.Chunk(ino), visitor);
+}
+
+Status RedisMetaImpl::CompleteReclaim(InodeID ino) {
+  const std::string ino_field = std::to_string(ino);
+  return client_->Transact([&](RedisMetaTxn &txn) {
+    std::string deleted_at;
+    auto status = txn.HGet(key_.DeletedFiles(), ino_field, &deleted_at);
+    if (status.IsNotFound()) {
+      return Status::OK();
+    }
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.Del(key_.Chunk(ino));
+    if (!status.ok()) {
+      return status;
+    }
+    return txn.HDel(key_.DeletedFiles(), ino_field);
   });
 }
 
@@ -1239,31 +1371,7 @@ Status RedisMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
   if (!inode.IsRegular()) {
     return Status::InvalidArgument("not a regular file");
   }
-
-  constexpr size_t kScanBatchSize = 128;
-  uint64_t cursor = 0;
-  do {
-    std::vector<std::pair<std::string, std::string>> values;
-    uint64_t next_cursor = 0;
-    status = client_->HScan(key_.Chunk(ino), cursor, kScanBatchSize, &values, &next_cursor);
-    if (!status.ok()) {
-      return status;
-    }
-    for (const auto &[field, chunk_value] : values) {
-      (void)field;
-      SwordFsChunk chunk;
-      status = chunk.ParseFrom(chunk_value);
-      if (!status.ok()) {
-        return status;
-      }
-      status = visitor(chunk);
-      if (!status.ok()) {
-        return status;
-      }
-    }
-    cursor = next_cursor;
-  } while (cursor != 0);
-  return Status::OK();
+  return VisitChunkHash(key_.Chunk(ino), visitor);
 }
 
 Status RedisMetaImpl::AddChunk(InodeID ino, const SwordFsChunk &chunk) {

@@ -3,6 +3,11 @@
 
 #include "tests/e2e/Fixture.hpp"
 
+#include <aws/core/Aws.h>
+#include <aws/core/http/HttpTypes.h>
+#include <aws/s3/S3Client.h>
+#include <aws/s3/S3ClientConfiguration.h>
+#include <aws/s3/model/HeadObjectRequest.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <folly/FileUtil.h>
@@ -28,9 +33,54 @@
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/Utils.hpp"
+#include "storage/StorageUrl.hpp"
 
 namespace swordfs {
 namespace e2e {
+namespace {
+
+void EnsureAwsSdkInit() {
+  static const struct AwsSdkGuard {
+    AwsSdkGuard() {
+      Aws::SDKOptions options;
+      Aws::InitAPI(options);
+    }
+    ~AwsSdkGuard() {
+      Aws::SDKOptions options;
+      Aws::ShutdownAPI(options);
+    }
+  } guard;
+  (void)guard;
+}
+
+bool ParseBucketUrl(std::string_view bucket_url, std::string *endpoint, std::string *bucket, std::string *prefix) {
+  utils::StorageUrl url;
+  if (!utils::StorageUrl::Parse(bucket_url, &url) || url.scheme != "s3") {
+    return false;
+  }
+
+  std::string path = url.path;
+  if (!path.empty() && path.front() == '/') {
+    path.erase(path.begin());
+  }
+  const auto slash = path.find('/');
+  if (slash == std::string::npos) {
+    *bucket = std::move(path);
+    prefix->clear();
+  } else {
+    *bucket = path.substr(0, slash);
+    *prefix = path.substr(slash + 1);
+  }
+  if (bucket->empty()) {
+    return false;
+  }
+
+  const char *no_ssl = std::getenv("SWORDFS_S3_NO_SSL");
+  *endpoint = std::string(no_ssl && no_ssl[0] == '1' ? "http://" : "https://") + url.host;
+  return true;
+}
+
+}  // namespace
 
 // ────────────────────────────────────────────────────────────────
 // Construction / Destruction
@@ -203,6 +253,93 @@ bool Fixture::StopMount() {
   }
   mounted_ = false;
   return true;
+}
+
+bool Fixture::CrashMount() {
+  if (!mounted_ || daemon_pid_ <= 0) {
+    return false;
+  }
+  if (::kill(daemon_pid_, SIGKILL) != 0 && errno != ESRCH) {
+    std::fprintf(stderr, "E2E: failed to kill daemon %d: %s\n", daemon_pid_, std::strerror(errno));
+    return false;
+  }
+
+  for (int i = 0; i < 50; ++i) {
+    if (::kill(daemon_pid_, 0) != 0 && errno == ESRCH) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  // The FUSE mount remains attached after SIGKILL. Detach it without giving
+  // the dead daemon any opportunity to run normal unmount cleanup.
+  if (!StopMount()) {
+    return false;
+  }
+  return true;
+}
+
+bool Fixture::Remount() {
+  if (mounted_ && !StopMount()) {
+    return false;
+  }
+  if (!StartMount()) {
+    return false;
+  }
+  if (!WaitForMount()) {
+    StopMount();
+    return false;
+  }
+  return true;
+}
+
+bool Fixture::ChunkObjectExists(metadata::InodeID ino, metadata::ChunkIndex idx) const {
+  EnsureAwsSdkInit();
+
+  std::string endpoint;
+  std::string bucket;
+  std::string prefix;
+  if (!ParseBucketUrl(bucket_url_, &endpoint, &bucket, &prefix)) {
+    ADD_FAILURE() << "Invalid E2E bucket URL: " << bucket_url_;
+    return false;
+  }
+
+  Aws::S3::S3ClientConfiguration config;
+  config.endpointOverride = endpoint;
+  const char *virtual_hosted = std::getenv("SWORDFS_S3_VIRTUAL_HOSTED");
+  config.useVirtualAddressing = virtual_hosted && virtual_hosted[0] == '1';
+  if (const char *region = std::getenv("AWS_DEFAULT_REGION"); region && region[0] != '\0') {
+    config.region = region;
+  }
+  Aws::S3::S3Client client(config);
+
+  const std::string chunk_key = std::to_string(ino) + "/" + std::to_string(idx);
+  const std::string object_key = prefix.empty() ? chunk_key : prefix + "/" + chunk_key;
+  Aws::S3::Model::HeadObjectRequest request;
+  request.SetBucket(bucket);
+  request.SetKey(object_key);
+  auto outcome = client.HeadObject(request);
+  if (outcome.IsSuccess()) {
+    return true;
+  }
+  if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+    return false;
+  }
+
+  ADD_FAILURE() << "S3 HeadObject failed for " << object_key << ": " << outcome.GetError().GetMessage();
+  return false;
+}
+
+bool Fixture::WaitForChunkObjectGone(metadata::InodeID ino, metadata::ChunkIndex idx,
+                                     std::chrono::milliseconds timeout) const {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  do {
+    if (!ChunkObjectExists(ino, idx)) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return !ChunkObjectExists(ino, idx);
 }
 
 bool Fixture::IsDaemonGone() const {

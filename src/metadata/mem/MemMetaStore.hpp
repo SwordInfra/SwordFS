@@ -19,6 +19,7 @@
 #pragma once
 
 #include <folly/container/F14Map.h>
+#include <folly/container/F14Set.h>
 #include <sys/stat.h>
 
 #include <atomic>
@@ -74,6 +75,11 @@ class MemMetaStore {
 
   // Chunk metadata: inode → (index → SwordFsChunk).
   folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, SwordFsChunk>> chunks_;
+
+  // Inodes that lost their last namespace link but may still have a local
+  // open handle, plus frozen chunk maps awaiting data-object deletion.
+  folly::F14FastSet<InodeID> orphaned_inodes_;
+  folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, SwordFsChunk>> deleted_files_;
 };
 
 }  // namespace swordfs::metadata

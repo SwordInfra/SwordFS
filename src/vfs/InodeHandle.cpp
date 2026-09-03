@@ -12,6 +12,7 @@
 #include "storage/IDataEngine.hpp"
 #include "utils/Logging.hpp"
 #include "vfs/FileReadWriter.hpp"
+#include "vfs/GarbageCollector.hpp"
 #include "volume/VolumeImpl.hpp"
 
 namespace swordfs::vfs {
@@ -151,10 +152,11 @@ utils::Status InodeHandle::ReclaimData() {
   metadata::SwordFsInode inode;
   Status status = meta_->GetInode(ino_, &inode);
   if (status.IsNotFound()) {
-    // Inode already gone — a concurrent reclaim won the race. The
-    // chunk objects are presumably already deleted too. Idempotent
-    // success.
-    return utils::Status::OK();
+    // A previous attempt may already have removed the live inode while its
+    // durable deletion job is still pending. Drive that job again instead of
+    // assuming the data objects disappeared with the inode metadata.
+    GarbageCollector collector(meta_, data_);
+    return collector.Reclaim(ino_);
   } else if (!status.ok()) {
     return status;
   }
@@ -166,7 +168,7 @@ utils::Status InodeHandle::ReclaimData() {
     SWORDFS_LOG_WARN << "ReclaimData(" << ino_ << ") refused: nlink=" << inode.attr.nlink
                      << " (>0). A concurrent Link won the race.";
     return utils::Status::OK();
-  } else if (open_count_ > 0) {
+  } else if (open_count() > 0) {
     // An fd is still open on this inode. The caller should have
     // routed through MarkOrphaned instead — refuse to drop the
     // underlying chunks/inode out from under it.
@@ -174,22 +176,11 @@ utils::Status InodeHandle::ReclaimData() {
     return utils::Status::OK();
   }
 
-  // 1. Stream every chunk the metadata engine still tracks for this inode
-  //    and issue a data-engine delete without materializing the full map.
-  status = meta_->VisitChunks(ino_, [&](const metadata::SwordFsChunk &chunk) {
-    auto status = data_->Delete(chunk.key);
-    if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << chunk.key << ") failed: " << status.message();
-    }
-    return utils::Status::OK();
-  });
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "ReclaimData: VisitChunks(" << ino_ << ") failed: " << status.message();
-    return status;
-  }
-
-  // 2. Drop the inode from the metadata engine.
-  return meta_->ReclaimInode(ino_);
+  // Persist the deletion job and freeze its chunk list before deleting any
+  // data object. A failed or interrupted delete leaves the job discoverable
+  // for the mount-time and periodic reconciler.
+  GarbageCollector collector(meta_, data_);
+  return collector.Reclaim(ino_);
 }
 
 }  // namespace swordfs::vfs

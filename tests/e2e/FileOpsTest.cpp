@@ -335,6 +335,9 @@ TEST_F(FileOpsTest, RenameOverExistingFile) {
 
   struct stat before;
   ASSERT_EQ(fixture_.Stat(old_name, &before), 0);
+  struct stat victim;
+  ASSERT_EQ(fixture_.Stat(new_name, &victim), 0);
+  ASSERT_TRUE(fixture_.ChunkObjectExists(victim.st_ino, 0));
 
   ASSERT_EQ(fixture_.Rename(old_name, new_name), 0);
 
@@ -348,6 +351,7 @@ TEST_F(FileOpsTest, RenameOverExistingFile) {
   EXPECT_EQ(st.st_nlink, before.st_nlink);
   EXPECT_EQ(st.st_size, before.st_size);
   EXPECT_TRUE(fixture_.FileEquals(new_name, content.size(), Fixture::Hash64(content)));
+  EXPECT_TRUE(fixture_.WaitForChunkObjectGone(victim.st_ino, 0));
 }
 
 TEST_F(FileOpsTest, RenameFileToSelf) {

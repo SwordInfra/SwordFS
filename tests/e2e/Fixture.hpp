@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -111,6 +112,20 @@ class Fixture {
 
   /// Return true if the mount is currently active.
   bool IsMounted();
+
+  /// Abruptly kill the mounted daemon and detach the resulting stale FUSE mount.
+  /// The formatted volume and backing-store state are intentionally preserved.
+  bool CrashMount();
+
+  /// Mount the already-formatted volume again without reformatting it.
+  bool Remount();
+
+  /// Return true if the S3 object backing one flushed chunk currently exists.
+  bool ChunkObjectExists(metadata::InodeID ino, metadata::ChunkIndex idx) const;
+
+  /// Poll object storage until the chunk object disappears or |timeout| expires.
+  bool WaitForChunkObjectGone(metadata::InodeID ino, metadata::ChunkIndex idx,
+                              std::chrono::milliseconds timeout = std::chrono::seconds(5)) const;
 
   /// Return true if the daemon process recorded during SetUp is gone.
   bool IsDaemonGone() const;

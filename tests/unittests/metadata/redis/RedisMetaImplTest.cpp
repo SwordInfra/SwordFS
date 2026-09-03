@@ -508,6 +508,174 @@ TEST_F(RedisMetaImplTest, ReclaimKeepsLinkedInodesAndRemovesOrphans) {
   EXPECT_TRUE(impl_->ReclaimInode(file.ino).ok());
 }
 
+TEST_F(RedisMetaImplTest, ReclaimPersistsFrozenChunkListUntilCompletion) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+  SwordFsChunk chunk{.index = 0, .start_offset = 0, .key = "object-key", .size = 10};
+  ASSERT_TRUE(impl_->AddChunk(file.ino, chunk).ok());
+
+  uint64_t post_nlink = 1;
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", &post_nlink).ok());
+  ASSERT_EQ(post_nlink, 0U);
+
+  std::vector<InodeID> orphaned;
+  ASSERT_TRUE(impl_
+                  ->VisitOrphanedInodes([&](InodeID ino) {
+                    orphaned.push_back(ino);
+                    return Status::OK();
+                  })
+                  .ok());
+  ASSERT_EQ(orphaned, std::vector<InodeID>{file.ino});
+
+  ASSERT_TRUE(impl_->ReclaimInode(file.ino).ok());
+  EXPECT_TRUE(impl_->GetInode(file.ino, &file).IsNotFound());
+
+  std::vector<InodeID> pending;
+  ASSERT_TRUE(impl_
+                  ->VisitPendingReclaims([&](InodeID ino) {
+                    pending.push_back(ino);
+                    return Status::OK();
+                  })
+                  .ok());
+  ASSERT_EQ(pending, std::vector<InodeID>{file.ino});
+
+  std::vector<SwordFsChunk> garbage_chunks;
+  ASSERT_TRUE(impl_
+                  ->VisitReclaimChunks(file.ino,
+                                       [&](const SwordFsChunk &garbage_chunk) {
+                                         garbage_chunks.push_back(garbage_chunk);
+                                         return Status::OK();
+                                       })
+                  .ok());
+  ASSERT_EQ(garbage_chunks.size(), 1U);
+  EXPECT_EQ(garbage_chunks.front().key, chunk.key);
+
+  swordfs::metadata::redis::RedisKey redis_key(config_.db, volume_name_);
+  EXPECT_EQ(RawRedis().hlen(redis_key.Chunk(file.ino)), 1);
+
+  ASSERT_TRUE(impl_->CompleteReclaim(file.ino).ok());
+  EXPECT_EQ(RawRedis().hlen(redis_key.Chunk(file.ino)), 0);
+
+  pending.clear();
+  ASSERT_TRUE(impl_
+                  ->VisitPendingReclaims([&](InodeID ino) {
+                    pending.push_back(ino);
+                    return Status::OK();
+                  })
+                  .ok());
+  EXPECT_TRUE(pending.empty());
+  EXPECT_TRUE(impl_->CompleteReclaim(file.ino).ok());
+}
+
+TEST_F(RedisMetaImplTest, RenameOverwritePublishesOrphanCandidate) {
+  SwordFsInode source;
+  SwordFsInode victim;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "source", 0644, &source).ok());
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "victim", 0644, &victim).ok());
+  ASSERT_TRUE(
+      impl_->AddChunk(victim.ino, SwordFsChunk{.index = 0, .start_offset = 0, .key = "victim-object", .size = 10})
+          .ok());
+
+  swordfs::metadata::RenameResult result;
+  ASSERT_TRUE(
+      impl_->Rename(kRootInodeId, "source", kRootInodeId, "victim", swordfs::metadata::RenameFlag::kNone, &result)
+          .ok());
+  ASSERT_EQ(result.overwritten_ino, victim.ino);
+  ASSERT_EQ(result.overwritten_post_nlink, 0U);
+
+  std::vector<InodeID> orphaned;
+  ASSERT_TRUE(impl_
+                  ->VisitOrphanedInodes([&](InodeID ino) {
+                    orphaned.push_back(ino);
+                    return Status::OK();
+                  })
+                  .ok());
+  ASSERT_EQ(orphaned, std::vector<InodeID>{victim.ino});
+
+  ASSERT_TRUE(impl_->ReclaimInode(victim.ino).ok());
+  size_t chunk_count = 0;
+  ASSERT_TRUE(impl_
+                  ->VisitReclaimChunks(victim.ino,
+                                       [&](const SwordFsChunk &chunk) {
+                                         EXPECT_EQ(chunk.key, "victim-object");
+                                         ++chunk_count;
+                                         return Status::OK();
+                                       })
+                  .ok());
+  EXPECT_EQ(chunk_count, 1U);
+}
+
+TEST_F(RedisMetaImplTest, LinkCancelsOrphanCandidate) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+  ASSERT_TRUE(impl_->Link(file.ino, kRootInodeId, "linked-again", &file).ok());
+
+  size_t orphan_count = 0;
+  ASSERT_TRUE(impl_
+                  ->VisitOrphanedInodes([&](InodeID) {
+                    ++orphan_count;
+                    return Status::OK();
+                  })
+                  .ok());
+  EXPECT_EQ(orphan_count, 0U);
+
+  ASSERT_TRUE(impl_->ReclaimInode(file.ino).ok());
+  EXPECT_TRUE(impl_->GetInode(file.ino, &file).ok());
+}
+
+TEST_F(RedisMetaImplTest, GarbageCollectionVisitorsValidateAndPropagateCallbacks) {
+  EXPECT_EQ(impl_->VisitOrphanedInodes({}).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->VisitPendingReclaims({}).code(), Status::kInvalidArgument);
+
+  size_t missing_chunk_visits = 0;
+  ASSERT_TRUE(impl_
+                  ->VisitReclaimChunks(999999,
+                                       [&](const SwordFsChunk &) {
+                                         ++missing_chunk_visits;
+                                         return Status::OK();
+                                       })
+                  .ok());
+  EXPECT_EQ(missing_chunk_visits, 0U);
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+  ASSERT_TRUE(impl_->AddChunk(file.ino, SwordFsChunk{.index = 0, .key = "object"}).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+
+  EXPECT_EQ(impl_->VisitOrphanedInodes([](InodeID) { return Status::IOError("stop orphan scan"); }).code(),
+            Status::kIOError);
+  ASSERT_TRUE(impl_->ReclaimInode(file.ino).ok());
+  EXPECT_EQ(impl_->VisitPendingReclaims([](InodeID) { return Status::IOError("stop pending scan"); }).code(),
+            Status::kIOError);
+  EXPECT_EQ(impl_->VisitReclaimChunks(file.ino, [](const SwordFsChunk &) { return Status::IOError("stop chunk scan"); })
+                .code(),
+            Status::kIOError);
+  EXPECT_EQ(impl_->VisitReclaimChunks(file.ino, {}).code(), Status::kInvalidArgument);
+}
+
+TEST_F(RedisMetaImplTest, GarbageCollectionVisitorsRejectMalformedIndexesAndChunks) {
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  auto redis = RawRedis();
+
+  redis.hset(key.OrphanedInodes(), "invalid-inode", "1");
+  EXPECT_TRUE(impl_->VisitOrphanedInodes([](InodeID) { return Status::OK(); }).IsMalformed());
+  redis.del(key.OrphanedInodes());
+
+  redis.hset(key.DeletedFiles(), "invalid-inode", "1");
+  EXPECT_TRUE(impl_->VisitPendingReclaims([](InodeID) { return Status::OK(); }).IsMalformed());
+  redis.del(key.DeletedFiles());
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+  ASSERT_TRUE(impl_->AddChunk(file.ino, SwordFsChunk{.index = 0, .key = "object"}).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+  ASSERT_TRUE(impl_->ReclaimInode(file.ino).ok());
+
+  redis.hset(key.Chunk(file.ino), "0", "malformed-chunk");
+  EXPECT_TRUE(impl_->VisitReclaimChunks(file.ino, [](const SwordFsChunk &) { return Status::OK(); }).IsMalformed());
+}
+
 TEST_F(RedisMetaImplTest, PermissionChecksRejectMutationsForUnprivilegedCaller) {
   SwordFsAttr root_attr;
   SwordFsInode root;

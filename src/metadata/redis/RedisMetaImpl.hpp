@@ -50,6 +50,10 @@ class RedisMetaImpl : public IMetaEngine {
   Status Readlink(InodeID ino, std::string *target) override;
   Status Open(InodeID ino) override;
   Status ReclaimInode(InodeID ino) override;
+  Status VisitOrphanedInodes(const InodeVisitorFn &visitor) override;
+  Status VisitPendingReclaims(const InodeVisitorFn &visitor) override;
+  Status VisitReclaimChunks(InodeID ino, const ChunkVisitorFn &visitor) override;
+  Status CompleteReclaim(InodeID ino) override;
   Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) override;
   Status OpenDir(InodeID ino, DirIteratorPtr *iterator) override;
   Status AddChunk(InodeID ino, const SwordFsChunk &chunk) override;
@@ -57,6 +61,8 @@ class RedisMetaImpl : public IMetaEngine {
   Status Truncate(InodeID ino, uint64_t size) override;
 
  private:
+  Status VisitInodeHash(std::string_view hash_key, const InodeVisitorFn &visitor);
+  Status VisitChunkHash(std::string_view hash_key, const ChunkVisitorFn &visitor);
   Status TruncateChunks(RedisMetaTxn &txn, InodeID ino, uint64_t old_size, uint64_t new_size);
   Status UpdateAtimeBestEffort(InodeID ino);
 

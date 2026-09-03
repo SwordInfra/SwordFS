@@ -494,6 +494,20 @@ TEST_F(MemMetaStoreTest, ReclaimInodeKeepsLinkedInode) {
   EXPECT_EQ(out.ino, f.ino);
 }
 
+TEST_F(MemMetaStoreTest, GarbageCollectionListsRejectNullOutputsAndAllowMissingJobs) {
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListOrphanedInodes(nullptr); });
+  EXPECT_EQ(status.code(), Status::kInvalidArgument);
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListPendingReclaims(nullptr); });
+  EXPECT_EQ(status.code(), Status::kInvalidArgument);
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListReclaimChunks(999, nullptr); });
+  EXPECT_EQ(status.code(), Status::kInvalidArgument);
+
+  std::vector<SwordFsChunk> chunks;
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListReclaimChunks(999, &chunks); });
+  EXPECT_TRUE(status.ok());
+  EXPECT_TRUE(chunks.empty());
+}
+
 // ────────────────────────────────────────────────────────────────
 // ListChunks — drives the VFS coordinator's chunk enumeration path.
 // ────────────────────────────────────────────────────────────────

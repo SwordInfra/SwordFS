@@ -154,11 +154,16 @@ class MemMetaTxn {
   // Open-unlink reclaim
   // ────────────────────────────────────────────────────────────────
 
-  // Delete |ino| and its chunk-metadata map if the inode is orphaned
-  // (nlink==0).  No-op otherwise.
+  // Move an orphaned inode out of the live inode table while preserving its
+  // chunk metadata as a pending data-reclaim job. No-op for linked inodes.
   Status ReclaimInode(InodeID ino);
 
-  // Snapshot every chunk registered for |ino|, ascending chunk index.
+  Status ListOrphanedInodes(std::vector<InodeID> *out);
+  Status ListPendingReclaims(std::vector<InodeID> *out);
+  Status ListReclaimChunks(InodeID ino, std::vector<SwordFsChunk> *out);
+  Status CompleteReclaim(InodeID ino);
+
+  // Snapshot every chunk registered for live |ino|, ascending chunk index.
   Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out);
 
  private:
