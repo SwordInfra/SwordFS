@@ -30,8 +30,8 @@ class DataEngineRegistry {
   /// Return whether a data engine with the given scheme is registered.
   bool Available(std::string_view name) const;
 
-  /// Create a data engine using its registered factory.
-  utils::Status Create(std::string_view name, std::unique_ptr<IDataEngine> *out) const;
+  /// Create a data engine instance using its registered factory.
+  utils::Status CreateInstance(std::string_view name, std::unique_ptr<IDataEngine> *out) const;
 
  private:
   DataEngineRegistry() = default;

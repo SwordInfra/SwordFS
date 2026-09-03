@@ -3,55 +3,90 @@
 
 #pragma once
 
-#include <sw/redis++/redis++.h>
-
-#include <optional>
-#include <string>
+#include <cstdint>
 #include <string_view>
 
+#include "metadata/redis/RedisKey.hpp"
+#include "metadata/types/Chunk.hpp"
+#include "metadata/types/Common.hpp"
+#include "metadata/types/Entry.hpp"
+#include "metadata/types/Inode.hpp"
 #include "utils/Status.hpp"
 
 namespace swordfs::metadata {
 
-class RedisMetaClient;
+class RedisKvTxn;
 
-// One optimistic metadata transaction attempt backed by Redis. All reads,
-// queued writes and EXEC operations use the same connection checked out from
-// the Redis client's connection pool. Redis WATCH/MULTI/EXEC details are kept
-// inside this implementation; callers only see key/value operations.
-// The object is only valid for the lifetime of RedisMetaClient::Transact().
+// Metadata operations bound to one optimistic Redis transaction.
+//
+// Public methods express complete metadata semantics that must stay atomic;
+// low-level Redis metadata primitives remain private. RedisMetaImpl owns POSIX
+// policy and passes any already-read transaction snapshots explicitly so
+// semantic operations do not repeat Redis reads.
 class RedisMetaTxn {
  public:
-  // WATCH is issued before each read so Redis can detect changes between the
-  // read and EXEC. Redis WATCH/MULTI details remain private to this class.
-  utils::Status Get(std::string_view key, std::string *value);
-  utils::Status HGet(std::string_view key, std::string_view field, std::string *value);
-  utils::Status HLen(std::string_view key, uint64_t *length);
-  utils::Status Set(std::string_view key, std::string_view value);
-  utils::Status HSet(std::string_view key, std::string_view field, std::string_view value);
-  utils::Status HDel(std::string_view key, std::string_view field);
-  utils::Status IncrBy(std::string_view key, int64_t delta);
-  utils::Status Del(std::string_view key);
+  RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size);
+
+  // ────────────────────────────────────────────────────────────────
+  // Reads
+  // ────────────────────────────────────────────────────────────────
+  utils::Status LookupInode(InodeID ino, SwordFsInode *out);
+  utils::Status LookupEntry(InodeID parent_ino, std::string_view name, SwordFsInode *out);
+  utils::Status LookupEntry(const SwordFsInode &parent, std::string_view name, SwordFsInode *out);
+
+  // ────────────────────────────────────────────────────────────────
+  // Inode operations
+  // ────────────────────────────────────────────────────────────────
+  utils::Status SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out = nullptr);
+  utils::Status Truncate(InodeID ino, uint64_t size);
+  utils::Status TouchInode(InodeID ino, SetAttrField fields);
+  utils::Status ReclaimInode(InodeID ino);
+
+  // ────────────────────────────────────────────────────────────────
+  // Directory-entry operations
+  // ────────────────────────────────────────────────────────────────
+  // Atomically add a newly allocated inode to a directory. The caller owns
+  // POSIX policy checks and inode construction; this operation owns the Redis
+  // metadata invariants: dentry uniqueness, inode persistence, parent metadata
+  // persistence and the global inode count.
+  utils::Status AddEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &child, SwordFsInode *parent);
+  utils::Status UnlinkFile(InodeID parent_ino, std::string_view name, SwordFsInode *parent, SwordFsInode *child,
+                           UnlinkResult *result);
+  utils::Status RemoveDirectory(InodeID parent_ino, std::string_view name, SwordFsInode *parent,
+                                const SwordFsInode &child);
+  utils::Status MoveEntry(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
+                          std::string_view new_name, SwordFsInode *old_parent, SwordFsInode *new_parent,
+                          SwordFsInode *source, SwordFsInode *target, bool overwrite, RenameResult *result);
+  utils::Status ExchangeEntries(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
+                                std::string_view new_name, SwordFsInode *old_parent, SwordFsInode *new_parent,
+                                SwordFsInode *source, SwordFsInode *target);
+  utils::Status LinkExistingEntry(InodeID parent_ino, std::string_view name, SwordFsInode *parent, SwordFsInode *inode);
+
+  // ────────────────────────────────────────────────────────────────
+  // Chunk operations
+  // ────────────────────────────────────────────────────────────────
+  utils::Status AddChunk(InodeID ino, const SwordFsChunk &chunk);
 
  private:
-  friend class RedisMetaClient;
-  explicit RedisMetaTxn(sw::redis::Redis &redis);
-
-  void Discard() noexcept;
-  utils::Status Commit();
-
-  // Finish a read-only transaction with a harmless queued command so
-  // redis-plus-plus returns the checked-out pooled connection instead of
-  // invalidating it when QueuedRedis is destroyed.
-  utils::Status ReleaseConnection();
+  utils::Status SetInode(const SwordFsInode &inode);
+  utils::Status DeleteInode(InodeID ino);
+  utils::Status AdjustNlink(SwordFsInode *inode, int delta, uint64_t *nlink = nullptr);
+  utils::Status LinkEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &child, SwordFsInode *parent);
+  utils::Status SetChunk(InodeID ino, const SwordFsChunk &chunk);
+  utils::Status TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size);
+  utils::Status DeleteChunks(InodeID ino);
+  utils::Status IsDescendantOf(InodeID ancestor_ino, InodeID child_ino, bool *result);
+  utils::Status DetachEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &target,
+                            SwordFsInode *parent);
+  utils::Status ReplaceEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &child,
+                             SwordFsInode *parent);
+  utils::Status AdjustInodeCount(int64_t delta);
+  utils::Status LookupChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
 
  private:
-  std::optional<sw::redis::Transaction> transaction_;
-  // Keep the Redis view returned by Transaction::redis() alive for the
-  // entire transaction. redis-plus-plus requires this for pooled
-  // transaction connections.
-  std::optional<sw::redis::Redis> redis_;
-  bool has_writes_ = false;
+  RedisKvTxn &txn_;
+  const redis::RedisKey &key_;
+  uint64_t chunk_size_;
 };
 
 }  // namespace swordfs::metadata

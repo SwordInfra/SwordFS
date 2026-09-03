@@ -12,7 +12,7 @@
 #include <thread>
 
 #include "config/ConfigCenter.hpp"
-#include "metadata/redis/RedisMetaTxn.hpp"
+#include "metadata/redis/RedisKvTxn.hpp"
 #include "utils/FiberThreadPool.hpp"
 #include "utils/Logging.hpp"
 
@@ -144,10 +144,10 @@ utils::Status RedisMetaClient::Incr(std::string_view key, uint64_t *value) {
   });
 }
 
-utils::Status RedisMetaClient::TransactImpl(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
+utils::Status RedisMetaClient::TransactImpl(const std::function<utils::Status(RedisKvTxn &)> &callback) {
   for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
     try {
-      RedisMetaTxn transaction(*redis_);
+      RedisKvTxn transaction(*redis_);
       auto status = callback(transaction);
       if (!status.ok()) {
         transaction.Discard();
@@ -176,7 +176,7 @@ utils::Status RedisMetaClient::TransactImpl(const std::function<utils::Status(Re
   return utils::Status::Busy("Redis transaction retry limit exceeded");
 }
 
-utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
+utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisKvTxn &)> &callback) {
   return pool_->Run([this, &callback] { return TransactImpl(callback); });
 }
 

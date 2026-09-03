@@ -32,6 +32,7 @@ using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::UnlinkResult;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -311,9 +312,10 @@ TEST_F(RedisMetaImplTest, UnlinkAndRmdirCoverSuccessAndTypeChecks) {
   EXPECT_EQ(impl_->Unlink(kRootInodeId, "dir", nullptr).code(), Status::kInvalidArgument);
   EXPECT_TRUE(impl_->RmDir(kRootInodeId, "file").IsNotDirectory());
 
-  uint64_t post_nlink = 99;
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", &post_nlink).ok());
-  EXPECT_EQ(post_nlink, 0U);
+  UnlinkResult unlink_result;
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", &unlink_result).ok());
+  EXPECT_EQ(unlink_result.unlinked_ino, file.ino);
+  EXPECT_EQ(unlink_result.post_nlink, 0U);
   EXPECT_TRUE(impl_->Lookup(kRootInodeId, "file", &file).IsNotFound());
   ASSERT_TRUE(impl_->ReclaimInode(file.ino).ok());
   EXPECT_TRUE(impl_->GetInode(file.ino, &file).IsNotFound());
@@ -340,6 +342,16 @@ TEST_F(RedisMetaImplTest, RenameCoversMoveOverwriteNoReplaceAndExchange) {
   EXPECT_TRUE(
       impl_->Rename(kRootInodeId, "first", kRootInodeId, "second", swordfs::metadata::RenameFlag::kNoReplace, nullptr)
           .IsAlreadyExists());
+  EXPECT_EQ(impl_
+                ->Rename(kRootInodeId, "first", kRootInodeId, "second",
+                         swordfs::metadata::RenameFlag::kNoReplace | swordfs::metadata::RenameFlag::kExchange, nullptr)
+                .code(),
+            Status::kInvalidArgument);
+  EXPECT_EQ(impl_
+                ->Rename(kRootInodeId, "first", kRootInodeId, "second",
+                         static_cast<swordfs::metadata::RenameFlag>(1u << 7), nullptr)
+                .code(),
+            Status::kInvalidArgument);
 
   swordfs::metadata::RenameResult result;
   ASSERT_TRUE(
@@ -420,7 +432,7 @@ TEST_F(RedisMetaImplTest, SetAttrAccessAndStatFsCoverCommonFields) {
   swordfs::metadata::SwordFsStatFs stat;
   ASSERT_TRUE(impl_->StatFs(&stat).ok());
   EXPECT_GE(stat.files, 2U);
-  EXPECT_EQ(stat.name_max, 255U);
+  EXPECT_EQ(stat.name_max, impl_->GetLimits().max_name_length);
   EXPECT_EQ(impl_->StatFs(nullptr).code(), Status::kInvalidArgument);
 }
 
@@ -641,6 +653,41 @@ TEST_F(RedisMetaImplTest, SymlinkAndLinkValidateLongNamesAndParentTypes) {
   EXPECT_TRUE(impl_->Symlink(kRootInodeId, "link", "target", nullptr).IsAlreadyExists());
 }
 
+TEST_F(RedisMetaImplTest, UnlinkRejectsLinkCountUnderflowWithoutRemovingEntry) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+
+  file.attr.nlink = 0;
+  std::string value;
+  ASSERT_TRUE(file.SerializeTo(&value).ok());
+
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  auto redis = RawRedis();
+  redis.set(key.Inode(file.ino), value);
+
+  UnlinkResult result;
+  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file", &result).IsMalformed());
+  EXPECT_TRUE(redis.hexists(key.Directory(kRootInodeId), "file"));
+}
+
+TEST_F(RedisMetaImplTest, RmDirRejectsParentLinkCountUnderflowWithoutRemovingDirectory) {
+  SwordFsInode dir;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
+
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  auto redis = RawRedis();
+  std::string value = redis.get(key.Inode(kRootInodeId)).value_or("");
+  SwordFsInode root;
+  ASSERT_TRUE(root.ParseFrom(value).ok());
+  root.attr.nlink = 2;
+  ASSERT_TRUE(root.SerializeTo(&value).ok());
+  redis.set(key.Inode(kRootInodeId), value);
+
+  EXPECT_TRUE(impl_->RmDir(kRootInodeId, "dir").IsMalformed());
+  EXPECT_TRUE(redis.hexists(key.Directory(kRootInodeId), "dir"));
+  EXPECT_TRUE(redis.exists(key.Inode(dir.ino)));
+}
+
 TEST_F(RedisMetaImplTest, MalformedParentMetadataIsRejectedAcrossMutatingOperations) {
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
   auto redis = RawRedis();
@@ -696,6 +743,10 @@ TEST_F(RedisMetaImplTest, MalformedDirectoryEntryIsRejectedByEntryConsumers) {
 
   SwordFsInode out;
   EXPECT_TRUE(impl_->Lookup(kRootInodeId, "file", &out).IsMalformed());
+  EXPECT_TRUE(impl_->Create(kRootInodeId, "file", 0644, nullptr).IsMalformed());
+  EXPECT_TRUE(impl_->MkDir(kRootInodeId, "file", 0755, nullptr).IsMalformed());
+  EXPECT_TRUE(impl_->Symlink(kRootInodeId, "file", "target", nullptr).IsMalformed());
+  EXPECT_TRUE(impl_->Link(file.ino, kRootInodeId, "file", nullptr).IsMalformed());
   EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).IsMalformed());
   EXPECT_TRUE(impl_->RmDir(kRootInodeId, "file").IsMalformed());
   EXPECT_TRUE(impl_->Rename(kRootInodeId, "file", kRootInodeId, "moved", swordfs::metadata::RenameFlag::kNone, nullptr)
@@ -805,6 +856,29 @@ TEST_F(RedisMetaImplTest, RenameChecksNewParentAndNonEmptyTargetDirectory) {
                   ->Rename(source_parent.ino, "source", target_parent.ino, "moved",
                            swordfs::metadata::RenameFlag::kNone, nullptr)
                   .IsPermission());
+}
+
+TEST_F(RedisMetaImplTest, CreatePreservesRequestUidAcrossRedisWorker) {
+  SwordFsInode parent;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "parent", 0755, &parent).ok());
+
+  SwordFsAttr attr = parent.attr;
+  attr.uid = 1234;
+  ASSERT_TRUE(impl_->SetAttr(parent.ino, attr, SetAttrField::kUid, &parent).ok());
+
+  SwordFsContext ctx;
+  ctx.uid = 1234;
+  ctx.gid = 1234;
+  folly::fibers::local<SwordFsContext>() = ctx;
+
+  SwordFsInode child;
+  ASSERT_TRUE(impl_->MkDir(parent.ino, "child", 0755, &child).ok());
+  EXPECT_EQ(child.attr.uid, 1234U);
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(child.ino, "file", 0600, &file).ok());
+  EXPECT_EQ(file.attr.uid, 1234U);
+  EXPECT_TRUE(impl_->Access(file.ino, R_OK | W_OK).ok());
 }
 
 TEST_F(RedisMetaImplTest, OpenRejectsUnreadableRegularFile) {

@@ -87,18 +87,12 @@ class IMetaEngine {
   virtual Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) = 0;
 
   /// POSIX unlink(2): detach the directory entry and decrement nlink.
-  /// On success, *post_nlink receives the authoritative nlink value the
-  /// caller needs to decide what to do next:
-  ///   - For a directory: the entry is removed and the inode is dropped
-  ///     atomically; *post_nlink is set to 0 (the inode no longer exists).
-  ///   - For a file: *post_nlink is the post-decrement nlink (which may
-  ///     still be >0 if another hardlink name exists, or ==0 if this
-  ///     was the last name).
-  ///
-  /// This avoids the TOCTOU race of reading nlink before the unlink and
-  /// deciding afterwards: the store is the only thing that mutates
-  /// nlink on this thread, and we read it back under the same lock.
-  virtual Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink = nullptr) = 0;
+  /// When |result| is non-null, the implementation returns both the inode
+  /// actually detached from |parent_ino/name| and its authoritative
+  /// post-decrement nlink as part of the same atomic metadata mutation.
+  /// This lets callers make orphan/reclaim decisions without a separate
+  /// pre-unlink lookup that could race with rename or replacement.
+  virtual Status Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result = nullptr) = 0;
 
   /// Remove an empty directory. Decrements parent nlink.
   virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;

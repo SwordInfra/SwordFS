@@ -27,6 +27,7 @@ using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::UnlinkResult;
 using swordfs::vfs::VfsImpl;
 
 // Minimal no-op data engine. The VfsImplIntegrationTest fixture must
@@ -193,6 +194,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     return {};
   }
   Status Lookup(InodeID, std::string_view, SwordFsInode *out) override {
+    ++lookup_calls_;
     if (out) {
       *out = {};
       out->ino = 2;
@@ -220,7 +222,11 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, uint64_t *) override {
+  Status Unlink(InodeID, std::string_view, UnlinkResult *result) override {
+    if (result != nullptr) {
+      result->unlinked_ino = 77;
+      result->post_nlink = 1;
+    }
     return Status::OK();
   }
   Status RmDir(InodeID, std::string_view) override {
@@ -288,8 +294,13 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     call_status_ = s;
   }
 
+  int lookup_calls() const {
+    return lookup_calls_;
+  }
+
  private:
   Status call_status_{Status::OK()};
+  int lookup_calls_ = 0;
 };
 
 class VfsImplIntegrationTest : public ::testing::Test {
@@ -314,6 +325,12 @@ class VfsImplIntegrationTest : public ::testing::Test {
 };
 
 }  // namespace
+
+TEST_F(VfsImplIntegrationTest, UnlinkUsesAtomicMetadataResultWithoutLookup) {
+  auto status = VfsImpl::Unlink(1, "file");
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(mock_meta_->lookup_calls(), 0);
+}
 
 TEST_F(VfsImplIntegrationTest, OpenDirSuccess) {
   uint64_t fh = 0;

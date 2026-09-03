@@ -217,9 +217,8 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name, uint32_t 
   }
 
   auto &ctx = folly::fibers::local<swordfs::utils::SwordFsContext>();
-  SwordFsAttr attr(store_->next_ino_.fetch_add(1, std::memory_order_relaxed), static_cast<uint32_t>(mode));
-  attr.uid = ctx.uid;
-  attr.gid = parent->attr.gid;
+  SwordFsAttr attr(store_->next_ino_.fetch_add(1, std::memory_order_relaxed), static_cast<uint32_t>(mode), ctx.uid,
+                   parent->attr.gid);
 
   auto child = std::make_unique<SwordFsInode>(attr.ino, attr, parent_ino);
   SwordFsInode *child_ptr = child.get();

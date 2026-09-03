@@ -27,7 +27,7 @@ Status CreateMetaEngine(std::string_view meta_url, std::string_view volume_name,
   }
 
   try {
-    return swordfs::metadata::MetaEngineRegistry::Instance().Create(url.scheme, meta_url, volume_name, out);
+    return swordfs::metadata::MetaEngineRegistry::Instance().CreateInstance(url.scheme, meta_url, volume_name, out);
   } catch (const std::exception &error) {
     return Status::IOError("metadata engine initialization failed: " + std::string(error.what()));
   }
@@ -42,7 +42,7 @@ Status CreateDataEngine(std::string_view bucket, std::unique_ptr<swordfs::storag
   if (!utils::StorageUrl::Parse(bucket, &url)) {
     return Status::InvalidArgument("invalid bucket URL: " + std::string(bucket));
   }
-  return swordfs::storage::DataEngineRegistry::Instance().Create(url.scheme, out);
+  return swordfs::storage::DataEngineRegistry::Instance().CreateInstance(url.scheme, out);
 }
 
 }  // namespace

@@ -31,6 +31,8 @@ namespace storage {
 /// S3-compatible object storage engine using AWS SDK for C++.
 class S3DataEngine : public IDataEngine {
  public:
+  static Status CreateInstance(std::unique_ptr<IDataEngine> *out);
+
   S3DataEngine();
   ~S3DataEngine() override;
 

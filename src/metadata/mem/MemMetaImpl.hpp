@@ -19,8 +19,8 @@ namespace swordfs::metadata {
 
 class MemMetaImpl : public IMetaEngine {
  public:
-  static utils::Status Create(std::string_view meta_url, std::string_view volume_name,
-                              std::unique_ptr<IMetaEngine> *out);
+  static utils::Status CreateInstance(std::string_view meta_url, std::string_view volume_name,
+                                      std::unique_ptr<IMetaEngine> *out);
 
   MemMetaImpl() = default;
   ~MemMetaImpl() override = default;
@@ -29,7 +29,7 @@ class MemMetaImpl : public IMetaEngine {
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
   Status GetInode(InodeID ino, SwordFsInode *out) override;
   Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
-  Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink = nullptr) override;
+  Status Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result = nullptr) override;
   Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
                 RenameFlag flags, RenameResult *result = nullptr) override;
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override;

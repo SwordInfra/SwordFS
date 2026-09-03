@@ -7,21 +7,19 @@
 #include <string>
 
 #include "metadata/IMetaEngine.hpp"
-#include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
+#include "metadata/redis/RedisMetaOps.hpp"
 
 namespace swordfs::metadata {
 
-class RedisMetaClient;
-class RedisMetaTxn;
-
-// Redis metadata engine. Connection and transaction infrastructure is shared
-// with the persistent schema/format layer; metadata operations are added by
-// subsequent issues.
+// Redis metadata engine policy layer. POSIX validation, permissions and flag
+// dispatch live here. RedisMetaOps exposes standalone metadata operations,
+// RedisMetaTxn owns transaction-scoped metadata semantics, and
+// RedisMetaClient/RedisKvTxn own raw Redis access and transaction mechanics.
 class RedisMetaImpl : public IMetaEngine {
  public:
-  static utils::Status Create(std::string_view meta_url, std::string_view volume_name,
-                              std::unique_ptr<IMetaEngine> *out);
+  static utils::Status CreateInstance(std::string_view meta_url, std::string_view volume_name,
+                                      std::unique_ptr<IMetaEngine> *out);
 
   RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name);
   ~RedisMetaImpl() override;
@@ -38,7 +36,7 @@ class RedisMetaImpl : public IMetaEngine {
   Status GetInode(InodeID ino, SwordFsInode *out) override;
   Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
-  Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) override;
+  Status Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
   Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
                 RenameFlag flags, RenameResult *result) override;
@@ -57,13 +55,11 @@ class RedisMetaImpl : public IMetaEngine {
   Status Truncate(InodeID ino, uint64_t size) override;
 
  private:
-  Status TruncateChunks(RedisMetaTxn &txn, InodeID ino, uint64_t old_size, uint64_t new_size);
-  Status UpdateAtimeBestEffort(InodeID ino);
+  Status CreateNode(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out);
+  void UpdateAtimeBestEffort(InodeID ino);
 
  private:
-  std::shared_ptr<RedisMetaClient> client_;
-  redis::RedisKey key_;
-  uint64_t chunk_size_ = 0;
+  RedisMetaOps ops_;
 };
 
 }  // namespace swordfs::metadata

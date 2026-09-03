@@ -36,6 +36,7 @@ using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::UnlinkResult;
 using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
 using swordfs::utils::Status;
@@ -74,7 +75,7 @@ class MissingMetaEngine final : public IMetaEngine {
   Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, uint64_t *) override {
+  Status Unlink(InodeID, std::string_view, UnlinkResult *) override {
     return Status::OK();
   }
   Status RmDir(InodeID, std::string_view) override {

@@ -62,12 +62,12 @@ void EnsureAwsSdkInit() {
 
 }  // namespace
 
-Status CreateS3DataEngine(std::unique_ptr<IDataEngine> *out) {
+Status S3DataEngine::CreateInstance(std::unique_ptr<IDataEngine> *out) {
   *out = std::make_unique<S3DataEngine>();
   return Status::OK();
 }
 
-RegisterDataEngine kS3DataEngine{"s3", CreateS3DataEngine};
+RegisterDataEngine kS3DataEngine{"s3", S3DataEngine::CreateInstance};
 
 S3DataEngine::S3DataEngine() = default;
 
