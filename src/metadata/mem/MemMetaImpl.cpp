@@ -13,11 +13,11 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
-#include <optional>
 #include <utility>
 
 #include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/Utils.hpp"
+#include "metadata/mem/MemDirIterator.hpp"
 #include "metadata/mem/VolumeFile.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
@@ -27,62 +27,19 @@
 
 namespace swordfs::metadata {
 
-namespace {
+// MemMeta-specific filesystem limits.
+constexpr uint64_t kMaxNameLength = 255;  // POSIX NAME_MAX
+constexpr uint64_t kMaxFreeInodes = UINT64_MAX;
 
-class MemoryDirIterator final : public DirIterator {
- public:
-  explicit MemoryDirIterator(std::vector<SwordFsEntry> entries) : entries_(std::move(entries)) {
-  }
+const RegisterMetaEngine kMemoryMetaEngine{"memory", MemMetaImpl::Create};
 
-  Status Seek(uint64_t cookie) override {
-    position_ = cookie;
-    pending_next_.reset();
-    return Status::OK();
-  }
-
-  Status Peek(SwordFsEntry *entry, uint64_t *next_cookie) override {
-    if (entry == nullptr || next_cookie == nullptr) {
-      return Status::InvalidArgument("directory iterator output is null");
-    }
-    if (pending_next_) {
-      return Status::InvalidArgument("directory iterator has pending entry");
-    }
-    if (position_ >= entries_.size()) {
-      return Status::EndOfDirectory("directory end");
-    }
-    *entry = entries_[static_cast<size_t>(position_)];
-    *next_cookie = position_ + 1;
-    pending_next_ = *next_cookie;
-    return Status::OK();
-  }
-
-  void Advance() override {
-    CHECK(pending_next_.has_value());
-    position_ = *pending_next_;
-    pending_next_.reset();
-  }
-
- private:
-  std::vector<SwordFsEntry> entries_;
-  uint64_t position_ = 0;
-  std::optional<uint64_t> pending_next_;
-};
-
-utils::Status CreateMemoryMetaEngine(std::string_view, std::string_view, std::unique_ptr<IMetaEngine> *out) {
+utils::Status MemMetaImpl::Create(std::string_view, std::string_view, std::unique_ptr<IMetaEngine> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("metadata engine output is null");
   }
   *out = std::make_unique<MemMetaImpl>();
   return utils::Status::OK();
 }
-
-// MemMeta-specific filesystem limits.
-constexpr uint64_t kMaxNameLength = 255;  // POSIX NAME_MAX
-constexpr uint64_t kMaxFreeInodes = UINT64_MAX;
-
-RegisterMetaEngine kMemoryMetaEngine{"memory", CreateMemoryMetaEngine};
-
-}  // namespace
 
 // Transaction model: every method below runs its metadata mutation as a
 // single store_.Transact() script, so each IMetaEngine operation is atomic.
@@ -550,7 +507,7 @@ Status MemMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
     return status;
   }
 
-  *iterator = std::make_shared<MemoryDirIterator>(std::move(snapshot));
+  *iterator = std::make_shared<MemDirIterator>(std::move(snapshot));
 
   // Directory atime is a best-effort side effect and must not make opening
   // the directory fail.

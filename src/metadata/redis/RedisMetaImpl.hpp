@@ -4,6 +4,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/redis/RedisKey.hpp"
@@ -19,6 +20,9 @@ class RedisMetaTxn;
 // subsequent issues.
 class RedisMetaImpl : public IMetaEngine {
  public:
+  static utils::Status Create(std::string_view meta_url, std::string_view volume_name,
+                              std::unique_ptr<IMetaEngine> *out);
+
   RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name);
   ~RedisMetaImpl() override;
 

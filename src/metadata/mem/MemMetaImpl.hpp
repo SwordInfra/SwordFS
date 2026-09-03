@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <memory>
 #include <mutex>
 #include <string>
 
@@ -18,6 +19,9 @@ namespace swordfs::metadata {
 
 class MemMetaImpl : public IMetaEngine {
  public:
+  static utils::Status Create(std::string_view meta_url, std::string_view volume_name,
+                              std::unique_ptr<IMetaEngine> *out);
+
   MemMetaImpl() = default;
   ~MemMetaImpl() override = default;
 

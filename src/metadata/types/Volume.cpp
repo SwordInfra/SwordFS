@@ -15,7 +15,6 @@ std::string SwordFsVolume::SerializeTo() const {
   BufEncoder enc;
   enc.Header(RecordType::kVolume);
   enc.String(name);
-  enc.String(meta_url);
   enc.String(storage);
   enc.String(bucket);
   enc.String(region);
@@ -29,7 +28,6 @@ utils::Status SwordFsVolume::ParseFrom(std::string_view data) {
   SwordFsVolume volume;
   dec.Header(RecordType::kVolume);
   dec.String(&volume.name);
-  dec.String(&volume.meta_url);
   dec.String(&volume.storage);
   dec.String(&volume.bucket);
   dec.String(&volume.region);

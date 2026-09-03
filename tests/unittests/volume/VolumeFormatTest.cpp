@@ -42,7 +42,6 @@ class VolumeFileTest : public ::testing::Test {
 SwordFsVolume MakeVolume() {
   SwordFsVolume volume;
   volume.name = "test-vol-" + std::to_string(::getpid());
-  volume.meta_url = "memory://local";
   volume.storage = "s3";
   volume.bucket = "s3://endpoint/mybucket/prefix";
   volume.region = "us-east-1";
@@ -52,7 +51,6 @@ SwordFsVolume MakeVolume() {
 
 TEST(SwordFsVolumeTest, SerializeToAndParseFromRoundTrip) {
   SwordFsVolume original = MakeVolume();
-  original.meta_url = "redis://localhost:6379/3";
   original.chunk_size = 128ULL * 1024 * 1024;
 
   std::string encoded = original.SerializeTo();
@@ -61,7 +59,6 @@ TEST(SwordFsVolumeTest, SerializeToAndParseFromRoundTrip) {
   Status st = parsed.ParseFrom(encoded);
   ASSERT_TRUE(st.ok()) << st.message();
   EXPECT_EQ(parsed.name, original.name);
-  EXPECT_EQ(parsed.meta_url, original.meta_url);
   EXPECT_EQ(parsed.storage, original.storage);
   EXPECT_EQ(parsed.bucket, original.bucket);
   EXPECT_EQ(parsed.region, original.region);
@@ -93,7 +90,6 @@ TEST_F(VolumeFileTest, WriteAndReadRoundTrip) {
   st = file.Read(&restored);
   ASSERT_TRUE(st.ok()) << st.message();
   EXPECT_EQ(restored.name, original.name);
-  EXPECT_EQ(restored.meta_url, original.meta_url);
   EXPECT_EQ(restored.storage, original.storage);
   EXPECT_EQ(restored.bucket, original.bucket);
   EXPECT_EQ(restored.region, original.region);
