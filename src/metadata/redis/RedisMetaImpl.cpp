@@ -35,8 +35,7 @@
 
 namespace swordfs::metadata {
 
-namespace {
-utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view volume_name,
+utils::Status RedisMetaImpl::Create(std::string_view meta_url, std::string_view volume_name,
                                     std::unique_ptr<IMetaEngine> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("metadata engine output is null");
@@ -59,9 +58,7 @@ utils::Status CreateRedisMetaEngine(std::string_view meta_url, std::string_view 
   }
 }
 
-RegisterMetaEngine kRedisMetaEngine{"redis", CreateRedisMetaEngine};
-
-}  // namespace
+const RegisterMetaEngine kRedisMetaEngine{"redis", RedisMetaImpl::Create};
 
 RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view volume_name)
     : client_(std::make_shared<RedisMetaClient>(config)), key_(config.db, volume_name) {
@@ -81,7 +78,7 @@ utils::Status RedisMetaImpl::FormatVolume(const SwordFsVolume &config) {
   SwordFsInode root;
   root.ino = kRootInodeId;
   root.parent_ino = kRootInodeId;
-  root.attr = SwordFsAttr(kRootInodeId, S_IFDIR | 0777);
+  root.attr = SwordFsAttr(kRootInodeId, S_IFDIR | 0755);
   std::string root_value;
   auto status = root.SerializeTo(&root_value);
   if (!status.ok()) {
@@ -101,7 +98,7 @@ utils::Status RedisMetaImpl::FormatVolume(const SwordFsVolume &config) {
     if (!status.ok()) {
       return status;
     }
-    status = txn.Set(key_.NextIno(), std::to_string(kRootInodeId + 1));
+    status = txn.Set(key_.NextIno(), std::to_string(kRootInodeId));
     if (!status.ok()) {
       return status;
     }
@@ -128,25 +125,17 @@ utils::Status RedisMetaImpl::LoadVolume(SwordFsVolume *config) {
     return status;
   }
 
-  std::string root_value;
-  status = client_->Get(key_.Inode(kRootInodeId), &root_value);
+  SwordFsVolume loaded;
+  status = loaded.ParseFrom(value);
   if (!status.ok()) {
     return status;
+  }
+  if (loaded.name != config->name) {
+    return utils::Status::Malformed("volume name does not match Redis metadata namespace");
   }
 
-  SwordFsInode root;
-  status = root.ParseFrom(root_value);
-  if (!status.ok()) {
-    return status;
-  }
-  if (root.ino != kRootInodeId || !root.IsDir()) {
-    return utils::Status::InvalidArgument("Redis metadata root inode is invalid");
-  }
-  status = config->ParseFrom(value);
-  if (!status.ok()) {
-    return status;
-  }
-  chunk_size_ = config->chunk_size;
+  chunk_size_ = loaded.chunk_size;
+  *config = std::move(loaded);
   return utils::Status::OK();
 }
 

@@ -69,7 +69,6 @@ void VolumeImpl::set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine> 
 }
 
 Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
-  config_.meta_url = cfg.meta_url();
   config_.name = cfg.volume();
   config_.storage = cfg.storage_backend();
   config_.bucket = cfg.bucket_url();
@@ -79,7 +78,7 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
   }
   config_.chunk_size = cfg.chunk_size();
 
-  auto status = CreateMetaEngine(config_.meta_url, config_.name, &meta_engine_);
+  auto status = CreateMetaEngine(cfg.meta_url(), config_.name, &meta_engine_);
   if (!status.ok()) {
     return status;
   }
@@ -96,10 +95,9 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
 }
 
 Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
-  config_.meta_url = cfg.meta_url();
   config_.name = cfg.volume();
 
-  auto status = CreateMetaEngine(config_.meta_url, config_.name, &meta_engine_);
+  auto status = CreateMetaEngine(cfg.meta_url(), config_.name, &meta_engine_);
   if (!status.ok()) {
     return status;
   }

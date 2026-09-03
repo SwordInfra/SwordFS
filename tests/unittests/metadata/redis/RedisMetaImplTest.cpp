@@ -60,7 +60,6 @@ class RedisMetaImplTest : public ::testing::Test {
     ASSERT_TRUE(impl_->Initialize().ok());
     SwordFsVolume volume;
     volume.name = volume_name_;
-    volume.meta_url = "redis://test";
     volume.chunk_size = 4096;
     ASSERT_TRUE(impl_->FormatVolume(volume).ok());
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
@@ -261,17 +260,23 @@ TEST_F(RedisMetaImplTest, SetAttrShrinkRemovesAndClampsChunks) {
 
 TEST_F(RedisMetaImplTest, VolumeAndBasicLookupOperations) {
   SwordFsVolume volume;
+  volume.name = volume_name_;
   ASSERT_TRUE(impl_->LoadVolume(&volume).ok());
   EXPECT_EQ(volume.name, volume_name_);
   EXPECT_EQ(volume.chunk_size, 4096U);
   EXPECT_EQ(impl_->LoadVolume(nullptr).code(), Status::kInvalidArgument);
   EXPECT_TRUE(impl_->FormatVolume(volume).IsAlreadyExists());
 
+  SwordFsInode root;
+  ASSERT_TRUE(impl_->GetInode(kRootInodeId, &root).ok());
+  EXPECT_EQ(root.attr.mode & 0777u, 0755u);
+
   const auto limits = impl_->GetLimits();
   EXPECT_EQ(limits.max_name_length, 255U);
 
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+  EXPECT_EQ(file.ino, kRootInodeId + 1);
   SwordFsInode found;
   ASSERT_TRUE(impl_->Lookup(kRootInodeId, "file", &found).ok());
   EXPECT_EQ(found.ino, file.ino);
@@ -734,16 +739,8 @@ TEST_F(RedisMetaImplTest, LoadVolumeAndStatFsRejectCorruptPersistentState) {
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
   auto redis = RawRedis();
 
-  SwordFsInode root;
-  ASSERT_TRUE(impl_->GetInode(kRootInodeId, &root).ok());
-  std::string root_value;
-  ASSERT_TRUE(root.SerializeTo(&root_value).ok());
-
   SwordFsVolume volume;
-  redis.set(key.Inode(kRootInodeId), "malformed");
-  EXPECT_TRUE(impl_->LoadVolume(&volume).IsMalformed());
-  redis.set(key.Inode(kRootInodeId), root_value);
-
+  volume.name = volume_name_;
   redis.set(key.Format(), "malformed");
   EXPECT_TRUE(impl_->LoadVolume(&volume).IsMalformed());
 
@@ -820,27 +817,27 @@ TEST_F(RedisMetaImplTest, OpenRejectsUnreadableRegularFile) {
   EXPECT_TRUE(impl_->Open(file.ino).IsPermission());
 }
 
-TEST_F(RedisMetaImplTest, LoadVolumeRejectsMissingAndInvalidRoot) {
+TEST_F(RedisMetaImplTest, LoadVolumeUsesVolumeMetadataAndValidatesName) {
   RedisMetaConfig config = config_;
   const std::string other_name = volume_name_ + "-unformatted";
   RedisMetaImpl other(config, other_name);
   ASSERT_TRUE(other.Initialize().ok());
   SwordFsVolume volume;
+  volume.name = other_name;
   EXPECT_TRUE(other.LoadVolume(&volume).IsNotFound());
 
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
   auto redis = RawRedis();
   redis.del(key.Inode(kRootInodeId));
-  EXPECT_TRUE(impl_->LoadVolume(&volume).IsNotFound());
+  volume.name = volume_name_;
+  ASSERT_TRUE(impl_->LoadVolume(&volume).ok());
+  EXPECT_EQ(volume.name, volume_name_);
 
-  SwordFsInode invalid_root;
-  invalid_root.ino = kRootInodeId;
-  invalid_root.parent_ino = kRootInodeId;
-  invalid_root.attr = SwordFsAttr(kRootInodeId, S_IFREG | 0644);
-  std::string value;
-  ASSERT_TRUE(invalid_root.SerializeTo(&value).ok());
-  redis.set(key.Inode(kRootInodeId), value);
-  EXPECT_EQ(impl_->LoadVolume(&volume).code(), Status::kInvalidArgument);
+  SwordFsVolume malformed = volume;
+  malformed.name = volume_name_ + "-mismatch";
+  redis.set(key.Format(), malformed.SerializeTo());
+  volume.name = volume_name_;
+  EXPECT_TRUE(impl_->LoadVolume(&volume).IsMalformed());
 }
 
 }  // namespace
