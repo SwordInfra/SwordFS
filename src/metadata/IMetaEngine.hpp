@@ -46,6 +46,7 @@ class DirIterator {
 
 using DirIteratorPtr = std::shared_ptr<DirIterator>;
 using ChunkVisitorFn = std::function<Status(const SwordFsChunk &)>;
+using InodeVisitorFn = std::function<Status(InodeID)>;
 
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
@@ -137,20 +138,29 @@ class IMetaEngine {
   /// validation + read permission) and updates atime.
   virtual Status Open(InodeID ino) = 0;
 
-  /// Delete an inode that was previously unlinked. Called by the VFS layer
-  /// once it has verified no open file descriptor still references the
-  /// inode (e.g. from the last `Close` after an open-unlink). The metadata
-  /// engine removes the inode and its chunk-metadata map when nlink has
-  /// dropped to zero; otherwise this is a no-op.
-  ///
-  /// @important  This does NOT delete the chunk objects from the data
-  /// engine. The caller is responsible for invoking
-  /// `IDataEngine::Delete` on each chunk key first (use `VisitChunks` to
-  /// enumerate). See `vfs::InodeHandle::ReclaimData` for the canonical
-  /// implementation of the full cleanup.
+  /// Prepare an unlinked inode for data reclamation. Once |ino| has nlink==0,
+  /// atomically remove it from the live inode table, preserve its chunk list,
+  /// and publish a durable pending-reclaim record. A linked inode is a no-op.
+  /// Repeated calls are idempotent.
   virtual Status ReclaimInode(InodeID ino) = 0;
 
-  /// Visit the chunk metadata currently registered for |ino| without
+  /// Visit inodes whose last namespace link was removed but which have not yet
+  /// been prepared for reclamation. Persistent backends use this list to close
+  /// the crash window between Unlink/Rename and the VFS open-handle decision.
+  virtual Status VisitOrphanedInodes(const InodeVisitorFn &visitor) = 0;
+
+  /// Visit durable, prepared reclaim jobs. The records must remain visible
+  /// until CompleteReclaim succeeds.
+  virtual Status VisitPendingReclaims(const InodeVisitorFn &visitor) = 0;
+
+  /// Visit the frozen chunk list owned by a prepared reclaim job.
+  virtual Status VisitReclaimChunks(InodeID ino, const ChunkVisitorFn &visitor) = 0;
+
+  /// Remove a prepared reclaim job and its frozen chunk metadata after all
+  /// data-object deletes have succeeded. Repeated calls are idempotent.
+  virtual Status CompleteReclaim(InodeID ino) = 0;
+
+  /// Visit the chunk metadata currently registered for a live |ino| without
   /// materializing the complete chunk map in the caller. Backends should
   /// stream or batch the enumeration when their storage API supports it.
   /// Returns immediately if |visitor| returns an error.

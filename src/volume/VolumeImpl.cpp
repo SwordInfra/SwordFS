@@ -5,12 +5,16 @@
 
 #include <folly/logging/xlog.h>
 
+#include <chrono>
+
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
 #include "storage/DataEngineRegistry.hpp"
 #include "storage/IDataEngine.hpp"
 #include "storage/StorageUrl.hpp"
+#include "utils/Logging.hpp"
+#include "vfs/GarbageCollector.hpp"
 
 namespace swordfs::volume {
 namespace {
@@ -48,7 +52,10 @@ Status CreateDataEngine(std::string_view bucket, std::unique_ptr<swordfs::storag
 }  // namespace
 
 VolumeImpl::VolumeImpl() = default;
-VolumeImpl::~VolumeImpl() = default;
+
+VolumeImpl::~VolumeImpl() {
+  Shutdown();
+}
 
 std::unique_ptr<VolumeImpl> VolumeImpl::instance_;
 
@@ -121,12 +128,57 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
     if (!status.ok()) {
       return status;
     }
+    StartGarbageCollector();
   }
 
   return Status::OK();
 }
 
+void VolumeImpl::StartGarbageCollector() {
+  if (meta_engine_ == nullptr || data_engine_ == nullptr || garbage_collector_thread_.joinable()) {
+    return;
+  }
+
+  vfs::GarbageCollector collector(meta_engine_.get(), data_engine_.get());
+  auto status = collector.Recover();
+  if (!status.ok()) {
+    SWORDFS_LOG_WARN << "initial garbage reconciliation incomplete: " << status.message();
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(garbage_collector_mutex_);
+    garbage_collector_stopping_ = false;
+  }
+  garbage_collector_thread_ = std::thread([this] { GarbageCollectorLoop(); });
+}
+
+void VolumeImpl::StopGarbageCollector() {
+  {
+    std::lock_guard<std::mutex> lock(garbage_collector_mutex_);
+    garbage_collector_stopping_ = true;
+  }
+  garbage_collector_cv_.notify_all();
+  if (garbage_collector_thread_.joinable()) {
+    garbage_collector_thread_.join();
+  }
+}
+
+void VolumeImpl::GarbageCollectorLoop() {
+  constexpr auto kReconcileInterval = std::chrono::minutes(1);
+  std::unique_lock<std::mutex> lock(garbage_collector_mutex_);
+  while (!garbage_collector_cv_.wait_for(lock, kReconcileInterval, [this] { return garbage_collector_stopping_; })) {
+    lock.unlock();
+    vfs::GarbageCollector collector(meta_engine_.get(), data_engine_.get());
+    auto status = collector.Reconcile();
+    if (!status.ok()) {
+      SWORDFS_LOG_WARN << "periodic garbage reconciliation incomplete: " << status.message();
+    }
+    lock.lock();
+  }
+}
+
 void VolumeImpl::Shutdown() {
+  StopGarbageCollector();
   data_engine_.reset();
   meta_engine_.reset();
 }

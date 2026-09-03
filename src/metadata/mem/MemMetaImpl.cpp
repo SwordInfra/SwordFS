@@ -443,6 +443,64 @@ Status MemMetaImpl::ReclaimInode(InodeID ino) {
   return store_.Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
 }
 
+Status MemMetaImpl::VisitOrphanedInodes(const InodeVisitorFn &visitor) {
+  if (!visitor) {
+    return Status::InvalidArgument("inode visitor is null");
+  }
+  std::vector<InodeID> inodes;
+  auto status = store_.Transact([&](MemMetaTxn &txn) { return txn.ListOrphanedInodes(&inodes); });
+  if (!status.ok()) {
+    return status;
+  }
+  for (InodeID ino : inodes) {
+    status = visitor(ino);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return Status::OK();
+}
+
+Status MemMetaImpl::VisitPendingReclaims(const InodeVisitorFn &visitor) {
+  if (!visitor) {
+    return Status::InvalidArgument("inode visitor is null");
+  }
+  std::vector<InodeID> inodes;
+  auto status = store_.Transact([&](MemMetaTxn &txn) { return txn.ListPendingReclaims(&inodes); });
+  if (!status.ok()) {
+    return status;
+  }
+  for (InodeID ino : inodes) {
+    status = visitor(ino);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return Status::OK();
+}
+
+Status MemMetaImpl::VisitReclaimChunks(InodeID ino, const ChunkVisitorFn &visitor) {
+  if (!visitor) {
+    return Status::InvalidArgument("chunk visitor is null");
+  }
+  std::vector<SwordFsChunk> chunks;
+  auto status = store_.Transact([&](MemMetaTxn &txn) { return txn.ListReclaimChunks(ino, &chunks); });
+  if (!status.ok()) {
+    return status;
+  }
+  for (const auto &chunk : chunks) {
+    status = visitor(chunk);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return Status::OK();
+}
+
+Status MemMetaImpl::CompleteReclaim(InodeID ino) {
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.CompleteReclaim(ino); });
+}
+
 // ────────────────────────────────────────────────────────────────
 // Directory operations
 // ────────────────────────────────────────────────────────────────

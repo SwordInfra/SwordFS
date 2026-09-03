@@ -141,6 +141,18 @@ class MockMetaEngine : public IMetaEngine {
     ++reclaim_calls;
     return reclaim_status;
   }
+  Status VisitOrphanedInodes(const swordfs::metadata::InodeVisitorFn &) override {
+    return Status::OK();
+  }
+  Status VisitPendingReclaims(const swordfs::metadata::InodeVisitorFn &) override {
+    return Status::OK();
+  }
+  Status VisitReclaimChunks(InodeID ino, const swordfs::metadata::ChunkVisitorFn &visitor) override {
+    return VisitChunks(ino, visitor);
+  }
+  Status CompleteReclaim(InodeID) override {
+    return Status::OK();
+  }
   Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
@@ -657,6 +669,18 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     last_reclaim_ino = ino;
     return Status::OK();
   }
+  Status VisitOrphanedInodes(const swordfs::metadata::InodeVisitorFn &) override {
+    return Status::OK();
+  }
+  Status VisitPendingReclaims(const swordfs::metadata::InodeVisitorFn &) override {
+    return Status::OK();
+  }
+  Status VisitReclaimChunks(InodeID ino, const swordfs::metadata::ChunkVisitorFn &visitor) override {
+    return VisitChunks(ino, visitor);
+  }
+  Status CompleteReclaim(InodeID) override {
+    return Status::OK();
+  }
   Status VisitChunks(InodeID ino, const swordfs::metadata::ChunkVisitorFn &visitor) override {
     ++visit_chunks_calls;
     last_visit_ino = ino;
@@ -813,10 +837,9 @@ TEST_F(FileHandleTest, ReclaimDataCallsReclaimInodeEvenWhenChunkEmpty) {
   EXPECT_TRUE(data->delete_calls.empty());
 }
 
-TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
-  // A failing per-chunk Delete must not stop the cleanup: every chunk
-  // gets attempted and ReclaimInode still runs. A stranded object is
-  // GC's job; the metadata view must converge regardless.
+TEST_F(FileHandleTest, ReclaimDataKeepsJobAfterPerChunkFailure) {
+  // A failing per-chunk Delete does not stop independent delete attempts,
+  // but the error is returned so the persistent GC job is not finalized.
   swordfs::volume::VolumeImpl::Initialize();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
@@ -839,16 +862,15 @@ TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
   vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(meta_up.release()));
   vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
-  ASSERT_TRUE(ReclaimInode(1).ok());
+  EXPECT_FALSE(ReclaimInode(1).ok());
   // Both chunks were attempted despite the failure on "1/0".
   EXPECT_EQ(data->delete_calls.size(), 2);
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
 }
 
 TEST_F(FileHandleTest, ReclaimDataPropagatesVisitChunksFailure) {
-  // If the metadata engine refuses to enumerate, the manager must
-  // surface that error and NOT invoke ReclaimInode (we don't know
-  // whether the inode exists from the manager's perspective).
+  // Preparation happens before enumeration so the authoritative chunk list
+  // remains durable when enumeration fails.
   swordfs::volume::VolumeImpl::Initialize();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
@@ -866,7 +888,7 @@ TEST_F(FileHandleTest, ReclaimDataPropagatesVisitChunksFailure) {
   auto st = ReclaimInode(42);
   EXPECT_FALSE(st.ok());
   EXPECT_EQ(meta->visit_chunks_calls, 1);
-  EXPECT_EQ(meta->reclaim_inode_calls, 0);
+  EXPECT_EQ(meta->reclaim_inode_calls, 1);
   EXPECT_TRUE(data->delete_calls.empty());
 }
 
@@ -946,11 +968,9 @@ TEST_F(FileHandleTest, ReclaimDataRefusesWhileAnOpenHandleHoldsTheInode) {
 }
 
 TEST_F(FileHandleTest, ReclaimDataIsIdempotentWhenInodeAlreadyGone) {
-  // The metadata engine reports the inode as gone (NotFound on GetAttr).
-  // The InodeHandle::ReclaimData guard treats that as a no-op success:
-  // a concurrent reclaim has already finalised the cleanup on another
-  // thread. Without this guard, the manager would still call VisitChunks
-  // and surface a NotFound to the caller as if it were a real failure.
+  // The live inode is gone, but a previous attempt may still have a durable
+  // deletion job. Re-entering the collector is safe and lets it finish any
+  // retained chunk list.
   swordfs::volume::VolumeImpl::Initialize();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
@@ -964,8 +984,8 @@ TEST_F(FileHandleTest, ReclaimDataIsIdempotentWhenInodeAlreadyGone) {
   vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
   ASSERT_TRUE(ReclaimInode(42).ok());
-  EXPECT_EQ(meta->visit_chunks_calls, 0);
-  EXPECT_EQ(meta->reclaim_inode_calls, 0);
+  EXPECT_EQ(meta->visit_chunks_calls, 1);
+  EXPECT_EQ(meta->reclaim_inode_calls, 1);
   EXPECT_TRUE(data->delete_calls.empty());
 }
 

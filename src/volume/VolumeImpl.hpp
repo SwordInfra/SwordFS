@@ -8,9 +8,12 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string_view>
+#include <thread>
 
 #include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
@@ -104,12 +107,21 @@ class VolumeImpl {
   void set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine> data);
 
  private:
+  void StartGarbageCollector();
+  void StopGarbageCollector();
+  void GarbageCollectorLoop();
+
   swordfs::metadata::SwordFsVolume config_;
   // Test-only override of config_.chunk_size; std::nullopt means
   // "use config_.chunk_size". Production code never sets this.
   std::optional<uint64_t> chunk_size_override_;
   std::unique_ptr<swordfs::metadata::IMetaEngine> meta_engine_;
   std::unique_ptr<swordfs::storage::IDataEngine> data_engine_;
+
+  std::mutex garbage_collector_mutex_;
+  std::condition_variable garbage_collector_cv_;
+  bool garbage_collector_stopping_ = false;
+  std::thread garbage_collector_thread_;
 
   static std::unique_ptr<VolumeImpl> instance_;
 };

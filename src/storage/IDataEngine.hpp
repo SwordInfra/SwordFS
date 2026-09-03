@@ -72,7 +72,8 @@ class IDataEngine {
   /// |out|, which must have tailroom() >= expected size.
   virtual Status Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) = 0;
 
-  /// Delete a chunk (called by the garbage collector).
+  /// Delete a chunk (called by the garbage collector). Implementations must
+  /// be idempotent: deleting an already-absent key returns success.
   virtual Status Delete(std::string_view key) = 0;
 };
 

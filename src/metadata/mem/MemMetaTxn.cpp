@@ -357,6 +357,9 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name, uint64_t *p
   // alive until the caller (VfsImpl::Unlink or InodeHandle::Close)
   // confirms no fd is open and calls ReclaimData.
   child->attr.nlink--;
+  if (child->attr.nlink == 0) {
+    store_->orphaned_inodes_.insert(child->ino);
+  }
   if (post_nlink) {
     // Read it back inside the same transaction so the caller sees the
     // exact post-decrement value with no chance of a concurrent Link
@@ -383,6 +386,7 @@ Status MemMetaTxn::LinkExistingEntry(InodeID parent_ino, std::string_view name, 
   }
 
   inode->attr.nlink++;
+  store_->orphaned_inodes_.erase(ino);
   LinkEntry(parent_ino, name, inode);
   inode->Touch(SetAttrField::kCtime);
   parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
@@ -563,11 +567,68 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
 Status MemMetaTxn::ReclaimInode(InodeID ino) {
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
-    return Status::OK();  // already reclaimed
+    return Status::OK();  // already prepared or reclaimed
   }
-  if (inode->attr.nlink == 0) {
-    DeleteInode(ino);
+  if (inode->attr.nlink != 0) {
+    store_->orphaned_inodes_.erase(ino);
+    return Status::OK();
   }
+
+  auto chunks = store_->chunks_.find(ino);
+  if (chunks == store_->chunks_.end()) {
+    store_->deleted_files_.try_emplace(ino);
+  } else {
+    store_->deleted_files_[ino] = std::move(chunks->second);
+    store_->chunks_.erase(chunks);
+  }
+  store_->orphaned_inodes_.erase(ino);
+  DeleteInode(ino);
+  return Status::OK();
+}
+
+Status MemMetaTxn::ListOrphanedInodes(std::vector<InodeID> *out) {
+  if (!out) {
+    return Status::InvalidArgument("null out");
+  }
+  out->assign(store_->orphaned_inodes_.begin(), store_->orphaned_inodes_.end());
+  std::sort(out->begin(), out->end());
+  return Status::OK();
+}
+
+Status MemMetaTxn::ListPendingReclaims(std::vector<InodeID> *out) {
+  if (!out) {
+    return Status::InvalidArgument("null out");
+  }
+  out->clear();
+  out->reserve(store_->deleted_files_.size());
+  for (const auto &[ino, chunks] : store_->deleted_files_) {
+    (void)chunks;
+    out->push_back(ino);
+  }
+  std::sort(out->begin(), out->end());
+  return Status::OK();
+}
+
+Status MemMetaTxn::ListReclaimChunks(InodeID ino, std::vector<SwordFsChunk> *out) {
+  if (!out) {
+    return Status::InvalidArgument("null out");
+  }
+  out->clear();
+  auto it = store_->deleted_files_.find(ino);
+  if (it == store_->deleted_files_.end()) {
+    return Status::OK();
+  }
+  out->reserve(it->second.size());
+  for (const auto &[idx, chunk] : it->second) {
+    (void)idx;
+    out->push_back(chunk);
+  }
+  std::sort(out->begin(), out->end(), [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
+  return Status::OK();
+}
+
+Status MemMetaTxn::CompleteReclaim(InodeID ino) {
+  store_->deleted_files_.erase(ino);
   return Status::OK();
 }
 

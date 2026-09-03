@@ -32,6 +32,10 @@ class MemMetaImpl : public IMetaEngine {
   Status Access(InodeID ino, uint32_t mask) override;
   Status Open(InodeID ino) override;
   Status ReclaimInode(InodeID ino) override;
+  Status VisitOrphanedInodes(const InodeVisitorFn &visitor) override;
+  Status VisitPendingReclaims(const InodeVisitorFn &visitor) override;
+  Status VisitReclaimChunks(InodeID ino, const ChunkVisitorFn &visitor) override;
+  Status CompleteReclaim(InodeID ino) override;
 
   // Directory operations
   Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
