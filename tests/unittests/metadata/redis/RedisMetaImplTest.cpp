@@ -696,6 +696,10 @@ TEST_F(RedisMetaImplTest, MalformedDirectoryEntryIsRejectedByEntryConsumers) {
 
   SwordFsInode out;
   EXPECT_TRUE(impl_->Lookup(kRootInodeId, "file", &out).IsMalformed());
+  EXPECT_TRUE(impl_->Create(kRootInodeId, "file", 0644, nullptr).IsMalformed());
+  EXPECT_TRUE(impl_->MkDir(kRootInodeId, "file", 0755, nullptr).IsMalformed());
+  EXPECT_TRUE(impl_->Symlink(kRootInodeId, "file", "target", nullptr).IsMalformed());
+  EXPECT_TRUE(impl_->Link(file.ino, kRootInodeId, "file", nullptr).IsMalformed());
   EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).IsMalformed());
   EXPECT_TRUE(impl_->RmDir(kRootInodeId, "file").IsMalformed());
   EXPECT_TRUE(impl_->Rename(kRootInodeId, "file", kRootInodeId, "moved", swordfs::metadata::RenameFlag::kNone, nullptr)
@@ -805,6 +809,29 @@ TEST_F(RedisMetaImplTest, RenameChecksNewParentAndNonEmptyTargetDirectory) {
                   ->Rename(source_parent.ino, "source", target_parent.ino, "moved",
                            swordfs::metadata::RenameFlag::kNone, nullptr)
                   .IsPermission());
+}
+
+TEST_F(RedisMetaImplTest, CreatePreservesRequestUidAcrossRedisWorker) {
+  SwordFsInode parent;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "parent", 0755, &parent).ok());
+
+  SwordFsAttr attr = parent.attr;
+  attr.uid = 1234;
+  ASSERT_TRUE(impl_->SetAttr(parent.ino, attr, SetAttrField::kUid, &parent).ok());
+
+  SwordFsContext ctx;
+  ctx.uid = 1234;
+  ctx.gid = 1234;
+  folly::fibers::local<SwordFsContext>() = ctx;
+
+  SwordFsInode child;
+  ASSERT_TRUE(impl_->MkDir(parent.ino, "child", 0755, &child).ok());
+  EXPECT_EQ(child.attr.uid, 1234U);
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(child.ino, "file", 0600, &file).ok());
+  EXPECT_EQ(file.attr.uid, 1234U);
+  EXPECT_TRUE(impl_->Access(file.ino, R_OK | W_OK).ok());
 }
 
 TEST_F(RedisMetaImplTest, OpenRejectsUnreadableRegularFile) {
