@@ -15,7 +15,8 @@ class RedisMetaClient;
 
 class RedisDirIterator final : public DirIterator {
  public:
-  RedisDirIterator(std::shared_ptr<RedisMetaClient> client, std::string key, std::vector<SwordFsEntry> prefix_entries);
+  // The metadata engine owns client and must outlive iterators it creates.
+  RedisDirIterator(RedisMetaClient &client, std::string key, std::vector<SwordFsEntry> prefix_entries);
   ~RedisDirIterator() override;
 
   RedisDirIterator(const RedisDirIterator &) = delete;

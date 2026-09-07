@@ -19,7 +19,6 @@
 
 #include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/Utils.hpp"
-#include "metadata/redis/RedisMetaTxn.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
@@ -84,7 +83,7 @@ Status RedisMetaImpl::Lookup(InodeID parent_ino, std::string_view name, SwordFsI
   if (out == nullptr) {
     return Status::InvalidArgument("Lookup output is null");
   }
-  return ops_.Transact([&](RedisMetaTxn &txn) { return txn.LookupEntry(parent_ino, name, out); });
+  return ops_.Transact([&](RedisMetaOpsContext &ctx) { return ops_.LookupEntry(ctx, parent_ino, name, out); });
 }
 
 Status RedisMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
@@ -92,14 +91,14 @@ Status RedisMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
 }
 
 Status RedisMetaImpl::UpdateAtimeBestEffort(InodeID ino) {
-  auto status = ops_.Transact([&](RedisMetaTxn &txn) {
+  auto status = ops_.Transact([&](RedisMetaOpsContext &ctx) {
     SwordFsInode inode;
-    auto status = txn.LookupInode(ino, &inode);
+    auto status = ops_.LookupInode(ctx, ino, &inode);
     if (!status.ok()) {
       return status;
     }
     inode.Touch(SetAttrField::kAtime);
-    return txn.SetInode(inode);
+    return ops_.SetInode(ctx, inode);
   });
   if (!status.ok()) {
     SWORDFS_LOG_WARN << "failed to update atime for inode " << ino << ": " << status.message();
@@ -147,9 +146,9 @@ Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t
     return status;
   }
   SwordFsInode child;
-  status = ops_.Transact([&](RedisMetaTxn &txn) {
+  status = ops_.Transact([&](RedisMetaOpsContext &txn_ctx) {
     SwordFsInode parent;
-    auto status = txn.LookupInode(parent_ino, &parent);
+    auto status = ops_.LookupInode(txn_ctx, parent_ino, &parent);
     if (!status.ok()) {
       return status;
     }
@@ -160,7 +159,7 @@ Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t
       return Status::Permission("access denied on parent");
     }
     bool exists = false;
-    status = txn.EntryExists(parent_ino, name, &exists);
+    status = ops_.EntryExists(txn_ctx, parent_ino, name, &exists);
     if (!status.ok()) {
       return status;
     }
@@ -171,19 +170,19 @@ Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t
     attr.uid = ctx.uid;
     attr.gid = parent.attr.gid;
     child = SwordFsInode(child_ino, attr, parent_ino);
-    status = txn.InsertInode(child);
+    status = ops_.InsertInode(txn_ctx, child);
     if (!status.ok()) {
       return status;
     }
-    status = txn.LinkEntry(parent_ino, name, child, &parent);
+    status = ops_.LinkEntry(txn_ctx, parent_ino, name, child, &parent);
     if (!status.ok()) {
       return status;
     }
-    status = txn.SetInode(parent);
+    status = ops_.SetInode(txn_ctx, parent);
     if (!status.ok()) {
       return status;
     }
-    return txn.AdjustInodeCount(1);
+    return ops_.AdjustInodeCount(txn_ctx, 1);
   });
   if (status.ok() && out) {
     *out = child;
@@ -202,9 +201,9 @@ Status RedisMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t 
     return status;
   }
   SwordFsInode child;
-  status = ops_.Transact([&](RedisMetaTxn &txn) {
+  status = ops_.Transact([&](RedisMetaOpsContext &txn_ctx) {
     SwordFsInode parent;
-    auto status = txn.LookupInode(parent_ino, &parent);
+    auto status = ops_.LookupInode(txn_ctx, parent_ino, &parent);
     if (!status.ok()) {
       return status;
     }
@@ -215,7 +214,7 @@ Status RedisMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t 
       return Status::Permission("access denied on parent");
     }
     bool exists = false;
-    status = txn.EntryExists(parent_ino, name, &exists);
+    status = ops_.EntryExists(txn_ctx, parent_ino, name, &exists);
     if (!status.ok()) {
       return status;
     }
@@ -226,19 +225,19 @@ Status RedisMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t 
     attr.uid = ctx.uid;
     attr.gid = parent.attr.gid;
     child = SwordFsInode(child_ino, attr, parent_ino);
-    status = txn.InsertInode(child);
+    status = ops_.InsertInode(txn_ctx, child);
     if (!status.ok()) {
       return status;
     }
-    status = txn.LinkEntry(parent_ino, name, child, &parent);
+    status = ops_.LinkEntry(txn_ctx, parent_ino, name, child, &parent);
     if (!status.ok()) {
       return status;
     }
-    status = txn.SetInode(parent);
+    status = ops_.SetInode(txn_ctx, parent);
     if (!status.ok()) {
       return status;
     }
-    return txn.AdjustInodeCount(1);
+    return ops_.AdjustInodeCount(txn_ctx, 1);
   });
   if (status.ok() && out) {
     *out = child;
@@ -251,9 +250,9 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t
     return Status::InvalidArgument("cannot unlink . or ..");
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
-  return ops_.Transact([&](RedisMetaTxn &txn) {
+  return ops_.Transact([&](RedisMetaOpsContext &txn_ctx) {
     SwordFsInode parent;
-    auto status = txn.LookupInode(parent_ino, &parent);
+    auto status = ops_.LookupInode(txn_ctx, parent_ino, &parent);
     if (!status.ok()) {
       return status;
     }
@@ -264,7 +263,7 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t
       return Status::Permission("access denied on parent");
     }
     SwordFsInode child;
-    status = txn.LookupEntry(parent_ino, name, &child);
+    status = ops_.LookupEntry(txn_ctx, parent_ino, name, &child);
     if (!status.ok()) {
       return status;
     }
@@ -274,20 +273,20 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t
     if (!parent.CheckStickyDelete(ctx.uid, child)) {
       return Status::Permission("sticky bit denied");
     }
-    status = txn.UnlinkEntry(parent_ino, name, child, &parent);
+    status = ops_.UnlinkEntry(txn_ctx, parent_ino, name, child, &parent);
     if (!status.ok()) {
       return status;
     }
-    status = txn.AdjustNlink(&child, -1, post_nlink);
+    status = ops_.AdjustNlink(txn_ctx, &child, -1, post_nlink);
     if (!status.ok()) {
       return status;
     }
     child.Touch(SetAttrField::kCtime);
-    status = txn.SetInode(parent);
+    status = ops_.SetInode(txn_ctx, parent);
     if (!status.ok()) {
       return status;
     }
-    return txn.SetInode(child);
+    return ops_.SetInode(txn_ctx, child);
   });
 }
 
@@ -296,9 +295,9 @@ Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
     return Status::InvalidArgument("cannot remove . or ..");
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
-  return ops_.Transact([&](RedisMetaTxn &txn) {
+  return ops_.Transact([&](RedisMetaOpsContext &txn_ctx) {
     SwordFsInode parent;
-    auto status = txn.LookupInode(parent_ino, &parent);
+    auto status = ops_.LookupInode(txn_ctx, parent_ino, &parent);
     if (!status.ok()) {
       return status;
     }
@@ -309,7 +308,7 @@ Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
       return Status::Permission("access denied on parent");
     }
     SwordFsInode child;
-    status = txn.LookupEntry(parent_ino, name, &child);
+    status = ops_.LookupEntry(txn_ctx, parent_ino, name, &child);
     if (!status.ok()) {
       return status;
     }
@@ -320,30 +319,30 @@ Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
       return Status::Permission("sticky bit denied");
     }
     bool empty = false;
-    status = txn.IsDirEmpty(child.ino, &empty);
+    status = ops_.IsDirEmpty(txn_ctx, child.ino, &empty);
     if (!status.ok()) {
       return status;
     }
     if (!empty) {
       return Status::NotEmpty("directory not empty");
     }
-    status = txn.UnlinkEntry(parent_ino, name, child, &parent);
+    status = ops_.UnlinkEntry(txn_ctx, parent_ino, name, child, &parent);
     if (!status.ok()) {
       return status;
     }
-    status = txn.DeleteDirectory(child.ino);
+    status = ops_.DeleteDirectory(txn_ctx, child.ino);
     if (!status.ok()) {
       return status;
     }
-    status = txn.DeleteInode(child.ino);
+    status = ops_.DeleteInode(txn_ctx, child.ino);
     if (!status.ok()) {
       return status;
     }
-    status = txn.SetInode(parent);
+    status = ops_.SetInode(txn_ctx, parent);
     if (!status.ok()) {
       return status;
     }
-    return txn.AdjustInodeCount(-1);
+    return ops_.AdjustInodeCount(txn_ctx, -1);
   });
 }
 
@@ -360,9 +359,9 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
   }
 
   const auto ctx = folly::fibers::local<SwordFsContext>();
-  return ops_.Transact([&](RedisMetaTxn &txn) {
+  return ops_.Transact([&](RedisMetaOpsContext &txn_ctx) {
     SwordFsInode old_parent;
-    auto status = txn.LookupInode(old_parent_ino, &old_parent);
+    auto status = ops_.LookupInode(txn_ctx, old_parent_ino, &old_parent);
     if (!status.ok()) {
       return status;
     }
@@ -372,7 +371,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     SwordFsInode new_parent;
     SwordFsInode *new_parent_ptr = &old_parent;
     if (new_parent_ino != old_parent_ino) {
-      status = txn.LookupInode(new_parent_ino, &new_parent);
+      status = ops_.LookupInode(txn_ctx, new_parent_ino, &new_parent);
       if (!status.ok()) {
         return status;
       }
@@ -389,7 +388,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     }
 
     SwordFsInode source;
-    status = txn.LookupEntry(old_parent_ino, old_name, &source);
+    status = ops_.LookupEntry(txn_ctx, old_parent_ino, old_name, &source);
     if (!status.ok()) {
       return status;
     }
@@ -398,7 +397,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     }
     if (source.IsDir()) {
       bool cycle = false;
-      status = txn.IsDescendantOf(source.ino, new_parent_ino, &cycle);
+      status = ops_.IsDescendantOf(txn_ctx, source.ino, new_parent_ino, &cycle);
       if (!status.ok()) {
         return status;
       }
@@ -410,7 +409,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     const bool no_replace = HasRenameFlag(flags, RenameFlag::kNoReplace);
     if (no_replace) {
       bool target_exists = false;
-      status = txn.EntryExists(new_parent_ino, new_name, &target_exists);
+      status = ops_.EntryExists(txn_ctx, new_parent_ino, new_name, &target_exists);
       if (!status.ok()) {
         return status;
       }
@@ -422,7 +421,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     SwordFsInode target;
     bool target_exists = false;
     if (!no_replace || HasRenameFlag(flags, RenameFlag::kExchange)) {
-      status = txn.LookupEntry(new_parent_ino, new_name, &target);
+      status = ops_.LookupEntry(txn_ctx, new_parent_ino, new_name, &target);
       target_exists = status.ok();
       if (!target_exists && !status.IsNotFound()) {
         return status;
@@ -444,7 +443,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
       }
       if (target.IsDir()) {
         bool cycle = false;
-        status = txn.IsDescendantOf(target.ino, old_parent_ino, &cycle);
+        status = ops_.IsDescendantOf(txn_ctx, target.ino, old_parent_ino, &cycle);
         if (!status.ok()) {
           return status;
         }
@@ -452,11 +451,11 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
           return Status::InvalidArgument("cannot exchange directory into its descendant");
         }
       }
-      status = txn.ReplaceEntry(old_parent_ino, old_name, target, &old_parent);
+      status = ops_.ReplaceEntry(txn_ctx, old_parent_ino, old_name, target, &old_parent);
       if (!status.ok()) {
         return status;
       }
-      status = txn.ReplaceEntry(new_parent_ino, new_name, source, new_parent_ptr);
+      status = ops_.ReplaceEntry(txn_ctx, new_parent_ino, new_name, source, new_parent_ptr);
       if (!status.ok()) {
         return status;
       }
@@ -464,21 +463,21 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
       target.parent_ino = old_parent_ino;
       source.Touch(SetAttrField::kCtime);
       target.Touch(SetAttrField::kCtime);
-      status = txn.SetInode(old_parent);
+      status = ops_.SetInode(txn_ctx, old_parent);
       if (!status.ok()) {
         return status;
       }
       if (new_parent_ptr != &old_parent) {
-        status = txn.SetInode(*new_parent_ptr);
+        status = ops_.SetInode(txn_ctx, *new_parent_ptr);
         if (!status.ok()) {
           return status;
         }
       }
-      status = txn.SetInode(source);
+      status = ops_.SetInode(txn_ctx, source);
       if (!status.ok()) {
         return status;
       }
-      return txn.SetInode(target);
+      return ops_.SetInode(txn_ctx, target);
     }
 
     if (target_exists) {
@@ -488,7 +487,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
       }
       if (target.IsDir()) {
         bool empty = false;
-        status = txn.IsDirEmpty(target.ino, &empty);
+        status = ops_.IsDirEmpty(txn_ctx, target.ino, &empty);
         if (!status.ok()) {
           return status;
         }
@@ -496,26 +495,26 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
           return Status::NotEmpty("target directory not empty");
         }
       }
-      status = txn.UnlinkEntry(new_parent_ino, new_name, target, new_parent_ptr);
+      status = ops_.UnlinkEntry(txn_ctx, new_parent_ino, new_name, target, new_parent_ptr);
       if (!status.ok()) {
         return status;
       }
       if (target.IsDir()) {
-        status = txn.DeleteDirectory(target.ino);
+        status = ops_.DeleteDirectory(txn_ctx, target.ino);
         if (!status.ok()) {
           return status;
         }
-        status = txn.DeleteInode(target.ino);
+        status = ops_.DeleteInode(txn_ctx, target.ino);
         if (!status.ok()) {
           return status;
         }
-        status = txn.AdjustInodeCount(-1);
+        status = ops_.AdjustInodeCount(txn_ctx, -1);
         if (!status.ok()) {
           return status;
         }
       } else {
         uint64_t post_nlink = 0;
-        status = txn.AdjustNlink(&target, -1, &post_nlink);
+        status = ops_.AdjustNlink(txn_ctx, &target, -1, &post_nlink);
         if (!status.ok()) {
           return status;
         }
@@ -527,40 +526,40 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
       }
     }
 
-    status = txn.UnlinkEntry(old_parent_ino, old_name, source, &old_parent);
+    status = ops_.UnlinkEntry(txn_ctx, old_parent_ino, old_name, source, &old_parent);
     if (!status.ok()) {
       return status;
     }
-    status = txn.LinkEntry(new_parent_ino, new_name, source, new_parent_ptr);
+    status = ops_.LinkEntry(txn_ctx, new_parent_ino, new_name, source, new_parent_ptr);
     if (!status.ok()) {
       return status;
     }
     source.parent_ino = new_parent_ino;
     source.Touch(SetAttrField::kCtime);
-    status = txn.SetInode(old_parent);
+    status = ops_.SetInode(txn_ctx, old_parent);
     if (!status.ok()) {
       return status;
     }
     if (new_parent_ptr != &old_parent) {
-      status = txn.SetInode(*new_parent_ptr);
+      status = ops_.SetInode(txn_ctx, *new_parent_ptr);
       if (!status.ok()) {
         return status;
       }
     }
     if (target_exists && !target.IsDir()) {
-      status = txn.SetInode(target);
+      status = ops_.SetInode(txn_ctx, target);
       if (!status.ok()) {
         return status;
       }
     }
-    return txn.SetInode(source);
+    return ops_.SetInode(txn_ctx, source);
   });
 }
 
 Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out) {
-  return ops_.Transact([&](RedisMetaTxn &txn) {
+  return ops_.Transact([&](RedisMetaOpsContext &txn_ctx) {
     SwordFsInode inode;
-    auto status = txn.LookupInode(ino, &inode);
+    auto status = ops_.LookupInode(txn_ctx, ino, &inode);
     if (!status.ok()) {
       return status;
     }
@@ -572,7 +571,7 @@ Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttr
                                (HasSetAttrField(fields, SetAttrField::kGid) && attr.gid != requested.gid);
 
     if (size_changed) {
-      status = txn.TruncateChunks(ino, old_size, requested.size);
+      status = ops_.TruncateChunks(txn_ctx, ino, old_size, requested.size);
       if (!status.ok()) {
         return status;
       }
@@ -626,7 +625,7 @@ Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttr
     }
 
     inode.attr = attr;
-    status = txn.SetInode(inode);
+    status = ops_.SetInode(txn_ctx, inode);
     if (!status.ok()) {
       return status;
     }
@@ -678,9 +677,9 @@ Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::st
     return status;
   }
   SwordFsInode child;
-  status = ops_.Transact([&](RedisMetaTxn &txn) {
+  status = ops_.Transact([&](RedisMetaOpsContext &txn_ctx) {
     SwordFsInode parent;
-    auto status = txn.LookupInode(parent_ino, &parent);
+    auto status = ops_.LookupInode(txn_ctx, parent_ino, &parent);
     if (!status.ok()) {
       return status;
     }
@@ -691,7 +690,7 @@ Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::st
       return Status::Permission("access denied on parent");
     }
     bool exists = false;
-    status = txn.EntryExists(parent_ino, name, &exists);
+    status = ops_.EntryExists(txn_ctx, parent_ino, name, &exists);
     if (!status.ok()) {
       return status;
     }
@@ -703,19 +702,19 @@ Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::st
     attr.gid = parent.attr.gid;
     attr.size = link.size();
     child = SwordFsInode(child_ino, attr, parent_ino, std::string(link));
-    status = txn.InsertInode(child);
+    status = ops_.InsertInode(txn_ctx, child);
     if (!status.ok()) {
       return status;
     }
-    status = txn.LinkEntry(parent_ino, name, child, &parent);
+    status = ops_.LinkEntry(txn_ctx, parent_ino, name, child, &parent);
     if (!status.ok()) {
       return status;
     }
-    status = txn.SetInode(parent);
+    status = ops_.SetInode(txn_ctx, parent);
     if (!status.ok()) {
       return status;
     }
-    return txn.AdjustInodeCount(1);
+    return ops_.AdjustInodeCount(txn_ctx, 1);
   });
   if (status.ok() && out) {
     *out = child;
@@ -728,9 +727,9 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
     return Status::NameTooLong("link name exceeds maximum length");
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
-  return ops_.Transact([&](RedisMetaTxn &txn) {
+  return ops_.Transact([&](RedisMetaOpsContext &txn_ctx) {
     SwordFsInode inode;
-    auto status = txn.LookupInode(ino, &inode);
+    auto status = ops_.LookupInode(txn_ctx, ino, &inode);
     if (!status.ok()) {
       return status;
     }
@@ -738,7 +737,7 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
       return Status::NotPermitted("cannot hard-link directory");
     }
     SwordFsInode parent;
-    status = txn.LookupInode(newparent_ino, &parent);
+    status = ops_.LookupInode(txn_ctx, newparent_ino, &parent);
     if (!status.ok()) {
       return status;
     }
@@ -749,27 +748,27 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
       return Status::Permission("access denied on parent");
     }
     bool exists = false;
-    status = txn.EntryExists(newparent_ino, newname, &exists);
+    status = ops_.EntryExists(txn_ctx, newparent_ino, newname, &exists);
     if (!status.ok()) {
       return status;
     }
     if (exists) {
       return Status::AlreadyExists("entry already exists");
     }
-    status = txn.LinkEntry(newparent_ino, newname, inode, &parent);
+    status = ops_.LinkEntry(txn_ctx, newparent_ino, newname, inode, &parent);
     if (!status.ok()) {
       return status;
     }
-    status = txn.AdjustNlink(&inode, 1);
+    status = ops_.AdjustNlink(txn_ctx, &inode, 1);
     if (!status.ok()) {
       return status;
     }
     inode.Touch(SetAttrField::kCtime);
-    status = txn.SetInode(parent);
+    status = ops_.SetInode(txn_ctx, parent);
     if (!status.ok()) {
       return status;
     }
-    status = txn.SetInode(inode);
+    status = ops_.SetInode(txn_ctx, inode);
     if (!status.ok()) {
       return status;
     }
@@ -813,9 +812,9 @@ Status RedisMetaImpl::Open(InodeID ino) {
 }
 
 Status RedisMetaImpl::ReclaimInode(InodeID ino) {
-  return ops_.Transact([&](RedisMetaTxn &txn) {
+  return ops_.Transact([&](RedisMetaOpsContext &txn_ctx) {
     SwordFsInode inode;
-    auto status = txn.LookupInode(ino, &inode);
+    auto status = ops_.LookupInode(txn_ctx, ino, &inode);
     if (status.IsNotFound()) {
       return Status::OK();
     }
@@ -825,15 +824,15 @@ Status RedisMetaImpl::ReclaimInode(InodeID ino) {
     if (inode.attr.nlink != 0) {
       return Status::OK();
     }
-    status = txn.DeleteChunks(ino);
+    status = ops_.DeleteChunks(txn_ctx, ino);
     if (!status.ok()) {
       return status;
     }
-    status = txn.DeleteInode(ino);
+    status = ops_.DeleteInode(txn_ctx, ino);
     if (!status.ok()) {
       return status;
     }
-    return txn.AdjustInodeCount(-1);
+    return ops_.AdjustInodeCount(txn_ctx, -1);
   });
 }
 
@@ -854,16 +853,16 @@ Status RedisMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
 }
 
 Status RedisMetaImpl::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
-  return ops_.Transact([&](RedisMetaTxn &txn) {
+  return ops_.Transact([&](RedisMetaOpsContext &txn_ctx) {
     SwordFsInode inode;
-    auto status = txn.LookupInode(ino, &inode);
+    auto status = ops_.LookupInode(txn_ctx, ino, &inode);
     if (!status.ok()) {
       return status;
     }
     if (!inode.IsRegular()) {
       return Status::InvalidArgument("not a regular file");
     }
-    return txn.SetChunk(ino, chunk);
+    return ops_.SetChunk(txn_ctx, ino, chunk);
   });
 }
 
@@ -872,23 +871,23 @@ Status RedisMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk
 }
 
 Status RedisMetaImpl::Truncate(InodeID ino, uint64_t size) {
-  return ops_.Transact([&](RedisMetaTxn &txn) {
+  return ops_.Transact([&](RedisMetaOpsContext &txn_ctx) {
     SwordFsInode inode;
-    auto status = txn.LookupInode(ino, &inode);
+    auto status = ops_.LookupInode(txn_ctx, ino, &inode);
     if (!status.ok()) {
       return status;
     }
     if (inode.attr.size == size) {
       return Status::OK();
     }
-    status = txn.TruncateChunks(ino, inode.attr.size, size);
+    status = ops_.TruncateChunks(txn_ctx, ino, inode.attr.size, size);
     if (!status.ok()) {
       return status;
     }
     inode.attr.size = size;
     inode.attr.KillSUID();
     inode.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
-    return txn.SetInode(inode);
+    return ops_.SetInode(txn_ctx, inode);
   });
 }
 

@@ -19,7 +19,6 @@
 #include "metadata/redis/RedisMetaClient.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/redis/RedisMetaOps.hpp"
-#include "metadata/redis/RedisMetaTxn.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Inode.hpp"
 
@@ -476,14 +475,15 @@ TEST(RedisMetaOpsTest, GetInodeUsesDirectMetadataReadPath) {
   EXPECT_EQ(invalid_status.code(), utils::Status::kInvalidArgument);
 }
 
-TEST(RedisMetaTxnTest, EntryMutationsCarryStateThroughParameters) {
+TEST(RedisMetaOpsTxnTest, EntryMutationsCarryStateThroughParameters) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("entries"));
+  const std::string volume_name = UniqueVolumeName("entries");
+  RedisMetaOps ops(config, volume_name);
+  const redis::RedisKey key(config.db, volume_name);
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
@@ -492,18 +492,16 @@ TEST(RedisMetaTxnTest, EntryMutationsCarryStateThroughParameters) {
   redis.set(key.InodeCount(), "1");
 
   const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-
+    return ops.Transact([&](RedisMetaOpsContext &ctx) {
       bool empty = false;
-      auto status = txn.IsDirEmpty(kRootInodeId, &empty);
+      auto status = ops.IsDirEmpty(ctx, kRootInodeId, &empty);
       if (!status.ok()) {
         return status;
       }
       EXPECT_TRUE(empty);
 
       bool exists = true;
-      status = txn.EntryExists(kRootInodeId, "child", &exists);
+      status = ops.EntryExists(ctx, kRootInodeId, "child", &exists);
       if (!status.ok()) {
         return status;
       }
@@ -511,19 +509,19 @@ TEST(RedisMetaTxnTest, EntryMutationsCarryStateThroughParameters) {
 
       SwordFsAttr child_attr(2, S_IFDIR | 0755);
       SwordFsInode child(2, child_attr, kRootInodeId);
-      status = txn.InsertInode(child);
+      status = ops.InsertInode(ctx, child);
       if (!status.ok()) {
         return status;
       }
-      status = txn.LinkEntry(kRootInodeId, "child", child, &root);
+      status = ops.LinkEntry(ctx, kRootInodeId, "child", child, &root);
       if (!status.ok()) {
         return status;
       }
-      status = txn.SetInode(root);
+      status = ops.SetInode(ctx, root);
       if (!status.ok()) {
         return status;
       }
-      return txn.AdjustInodeCount(1);
+      return ops.AdjustInodeCount(ctx, 1);
     });
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -537,37 +535,35 @@ TEST(RedisMetaTxnTest, EntryMutationsCarryStateThroughParameters) {
   EXPECT_EQ(persisted_root.attr.nlink, 3U);
 }
 
-TEST(RedisMetaTxnTest, InsertInodeRejectsPersistedInode) {
+TEST(RedisMetaOpsTxnTest, InsertInodeRejectsPersistedInode) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("insert"));
+  const std::string volume_name = UniqueVolumeName("insert");
+  RedisMetaOps ops(config, volume_name);
+  const redis::RedisKey key(config.db, volume_name);
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr original_attr(7, S_IFREG | 0644);
   SwordFsInode original(7, original_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, original).ok());
 
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      return txn.InsertInode(original);
-    });
-  });
+  const auto status = RunInFiber(
+      [&] { return ops.Transact([&](RedisMetaOpsContext &ctx) { return ops.InsertInode(ctx, original); }); });
   EXPECT_TRUE(status.IsAlreadyExists());
 }
 
-TEST(RedisMetaTxnTest, EntryRemovalUsesExplicitParentAndTargetState) {
+TEST(RedisMetaOpsTxnTest, EntryRemovalUsesExplicitParentAndTargetState) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("dir-empty"));
+  const std::string volume_name = UniqueVolumeName("dir-empty");
+  RedisMetaOps ops(config, volume_name);
+  const redis::RedisKey key(config.db, volume_name);
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
@@ -579,34 +575,34 @@ TEST(RedisMetaTxnTest, EntryRemovalUsesExplicitParentAndTargetState) {
   ASSERT_TRUE(SeedEntry(redis, key, kRootInodeId, SwordFsEntry{"file", DT_REG, child.ino}).ok());
 
   const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
+    return ops.Transact([&](RedisMetaOpsContext &ctx) {
       bool empty = true;
-      auto status = txn.IsDirEmpty(kRootInodeId, &empty);
+      auto status = ops.IsDirEmpty(ctx, kRootInodeId, &empty);
       if (!status.ok()) {
         return status;
       }
       EXPECT_FALSE(empty);
 
-      status = txn.UnlinkEntry(kRootInodeId, "file", child, &root);
+      status = ops.UnlinkEntry(ctx, kRootInodeId, "file", child, &root);
       if (!status.ok()) {
         return status;
       }
-      return txn.SetInode(root);
+      return ops.SetInode(ctx, root);
     });
   });
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(redis.hlen(key.Directory(kRootInodeId)), 0);
 }
 
-TEST(RedisMetaTxnTest, DeletePrimitivesPersistWithoutWorkingSet) {
+TEST(RedisMetaOpsTxnTest, DeletePrimitivesPersistWithoutWorkingSet) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("deletes"));
+  const std::string volume_name = UniqueVolumeName("deletes");
+  RedisMetaOps ops(config, volume_name);
+  const redis::RedisKey key(config.db, volume_name);
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr dir_attr(2, S_IFDIR | 0755);
@@ -615,13 +611,12 @@ TEST(RedisMetaTxnTest, DeletePrimitivesPersistWithoutWorkingSet) {
   ASSERT_TRUE(SeedEntry(redis, key, dir.ino, SwordFsEntry{"stale", DT_REG, 3}).ok());
 
   const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      auto status = txn.DeleteDirectory(dir.ino);
+    return ops.Transact([&](RedisMetaOpsContext &ctx) {
+      auto status = ops.DeleteDirectory(ctx, dir.ino);
       if (!status.ok()) {
         return status;
       }
-      return txn.DeleteInode(dir.ino);
+      return ops.DeleteInode(ctx, dir.ino);
     });
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -629,14 +624,15 @@ TEST(RedisMetaTxnTest, DeletePrimitivesPersistWithoutWorkingSet) {
   EXPECT_FALSE(redis.exists(key.Inode(dir.ino)));
 }
 
-TEST(RedisMetaTxnTest, ReadPrimitivesValidateOutputsAndDetectParentCycles) {
+TEST(RedisMetaOpsTxnTest, ReadPrimitivesValidateOutputsAndDetectParentCycles) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("read-primitives"));
+  const std::string volume_name = UniqueVolumeName("read-primitives");
+  RedisMetaOps ops(config, volume_name);
+  const redis::RedisKey key(config.db, volume_name);
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(2, S_IFREG | 0644);
@@ -650,40 +646,45 @@ TEST(RedisMetaTxnTest, ReadPrimitivesValidateOutputsAndDetectParentCycles) {
   ASSERT_TRUE(SeedInode(redis, key, second).ok());
 
   const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      EXPECT_EQ(txn.LookupInode(file.ino, nullptr).code(), utils::Status::kInvalidArgument);
+    return ops.Transact([&](RedisMetaOpsContext &ctx) {
+      EXPECT_EQ(ops.LookupInode(ctx, file.ino, nullptr).code(), utils::Status::kInvalidArgument);
 
       bool exists = true;
-      auto status = txn.EntryExists(file.ino, "missing", &exists);
+      auto status = ops.EntryExists(ctx, file.ino, "missing", &exists);
       if (!status.ok()) {
         return status;
       }
       EXPECT_FALSE(exists);
-      EXPECT_EQ(txn.EntryExists(file.ino, "missing", nullptr).code(), utils::Status::kInvalidArgument);
+      EXPECT_EQ(ops.EntryExists(ctx, file.ino, "missing", nullptr).code(), utils::Status::kInvalidArgument);
 
       bool empty = false;
-      EXPECT_TRUE(txn.IsDirEmpty(file.ino, &empty).IsNotDirectory());
-      EXPECT_EQ(txn.IsDirEmpty(file.ino, nullptr).code(), utils::Status::kInvalidArgument);
+      EXPECT_TRUE(ops.IsDirEmpty(ctx, file.ino, &empty).IsNotDirectory());
+      EXPECT_EQ(ops.IsDirEmpty(ctx, file.ino, nullptr).code(), utils::Status::kInvalidArgument);
 
       bool descendant = false;
-      EXPECT_TRUE(txn.IsDescendantOf(99, first.ino, &descendant).IsMalformed());
-      EXPECT_EQ(txn.IsDescendantOf(99, first.ino, nullptr).code(), utils::Status::kInvalidArgument);
+      EXPECT_TRUE(ops.IsDescendantOf(ctx, 99, first.ino, &descendant).IsMalformed());
+      EXPECT_EQ(ops.IsDescendantOf(ctx, 99, first.ino, nullptr).code(), utils::Status::kInvalidArgument);
       return utils::Status::OK();
     });
   });
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
-TEST(RedisMetaTxnTest, TruncateChunksClampsPersistedBoundaryChunk) {
+TEST(RedisMetaOpsTxnTest, TruncateChunksClampsPersistedBoundaryChunk) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("truncate-staged"));
+  const std::string volume_name = UniqueVolumeName("truncate-staged");
+  RedisMetaOps ops(config, volume_name);
+  const redis::RedisKey key(config.db, volume_name);
   sw::redis::Redis redis(ConnectionOptions(config));
+
+  SwordFsVolume volume;
+  volume.name = volume_name;
+  volume.chunk_size = 4096;
+  ASSERT_TRUE(RunInFiber([&] { return ops.FormatVolume(volume); }).ok());
 
   SwordFsChunk first_chunk{0, 0, "first", 4096};
   SwordFsChunk second_chunk{1, 4096, "second", 4096};
@@ -694,12 +695,8 @@ TEST(RedisMetaTxnTest, TruncateChunksClampsPersistedBoundaryChunk) {
   redis.hset(key.Chunk(9), "0", first_data);
   redis.hset(key.Chunk(9), "1", second_data);
 
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      return txn.TruncateChunks(9, 8192, 1024);
-    });
-  });
+  const auto status = RunInFiber(
+      [&] { return ops.Transact([&](RedisMetaOpsContext &ctx) { return ops.TruncateChunks(ctx, 9, 8192, 1024); }); });
   ASSERT_TRUE(status.ok()) << status.message();
 
   const auto first_value = redis.hget(key.Chunk(9), "0");
@@ -709,24 +706,26 @@ TEST(RedisMetaTxnTest, TruncateChunksClampsPersistedBoundaryChunk) {
   EXPECT_EQ(first.size, 1024U);
   EXPECT_FALSE(redis.hexists(key.Chunk(9), "1"));
 
+  const std::string uninitialized_volume_name = UniqueVolumeName("truncate-uninitialized");
+  RedisMetaOps uninitialized_ops(config, uninitialized_volume_name);
   const auto invalid_status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 0);
-      EXPECT_EQ(txn.TruncateChunks(9, 4096, 1024).code(), utils::Status::kInternal);
+    return uninitialized_ops.Transact([&](RedisMetaOpsContext &ctx) {
+      EXPECT_EQ(uninitialized_ops.TruncateChunks(ctx, 9, 4096, 1024).code(), utils::Status::kInternal);
       return utils::Status::OK();
     });
   });
   EXPECT_TRUE(invalid_status.ok()) << invalid_status.message();
 }
 
-TEST(RedisMetaTxnTest, SetChunkAfterDeleteChunksKeepsNewChunk) {
+TEST(RedisMetaOpsTxnTest, SetChunkAfterDeleteChunksKeepsNewChunk) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("chunks"));
+  const std::string volume_name = UniqueVolumeName("chunks");
+  RedisMetaOps ops(config, volume_name);
+  const redis::RedisKey key(config.db, volume_name);
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsChunk old_chunk{0, 0, "old", 4096};
@@ -735,14 +734,13 @@ TEST(RedisMetaTxnTest, SetChunkAfterDeleteChunksKeepsNewChunk) {
   redis.hset(key.Chunk(9), "0", value);
 
   const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      auto status = txn.DeleteChunks(9);
+    return ops.Transact([&](RedisMetaOpsContext &ctx) {
+      auto status = ops.DeleteChunks(ctx, 9);
       if (!status.ok()) {
         return status;
       }
       SwordFsChunk new_chunk{1, 4096, "new", 1024};
-      return txn.SetChunk(9, new_chunk);
+      return ops.SetChunk(ctx, 9, new_chunk);
     });
   });
   ASSERT_TRUE(status.ok()) << status.message();

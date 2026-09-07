@@ -1,53 +1,99 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
+#include "metadata/redis/RedisMetaTxn.hpp"
+
 #include <dirent.h>
 #include <folly/container/F14Set.h>
 #include <sys/stat.h>
 
-#include <algorithm>
 #include <string>
 #include <utility>
 
 #include "metadata/Utils.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
-#include "metadata/redis/RedisMetaTxn.hpp"
+#include "metadata/redis/RedisMetaClient.hpp"
 
 namespace swordfs::metadata {
 
-RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size)
-    : txn_(txn), key_(key), chunk_size_(chunk_size) {
+RedisMetaTxn::RedisMetaTxn(RedisMetaClient &raw, const redis::RedisKey &key, const uint64_t &chunk_size)
+    : raw_(raw), key_(key), chunk_size_(chunk_size) {
 }
 
-utils::Status RedisMetaTxn::LookupInode(InodeID ino, SwordFsInode *out) {
+utils::Status RedisMetaTxn::Transact(const TransactFn &callback) {
+  return raw_.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaOpsContext ctx(kv_txn);
+    return callback(ctx);
+  });
+}
+
+utils::Status RedisMetaTxn::FormatVolume(const SwordFsVolume &config) {
+  SwordFsInode root;
+  root.ino = kRootInodeId;
+  root.parent_ino = kRootInodeId;
+  root.attr = SwordFsAttr(kRootInodeId, S_IFDIR | 0755);
+  std::string root_value;
+  auto status = root.SerializeTo(&root_value);
+  if (!status.ok()) {
+    return status;
+  }
+
+  return Transact([&](RedisMetaOpsContext &ctx) {
+    std::string existing;
+    auto status = ctx.txn_.Get(key_.Format(), &existing);
+    if (status.ok()) {
+      return utils::Status::AlreadyExists("Redis metadata volume is already formatted");
+    }
+    if (!status.IsNotFound()) {
+      return status;
+    }
+    status = ctx.txn_.Set(key_.Format(), config.SerializeTo());
+    if (!status.ok()) {
+      return status;
+    }
+    status = ctx.txn_.Set(key_.NextIno(), std::to_string(kRootInodeId));
+    if (!status.ok()) {
+      return status;
+    }
+    status = ctx.txn_.Set(key_.InodeCount(), "1");
+    if (!status.ok()) {
+      return status;
+    }
+    return ctx.txn_.Set(key_.Inode(kRootInodeId), root_value);
+  });
+}
+
+utils::Status RedisMetaTxn::LookupInode(RedisMetaOpsContext &ctx, InodeID ino, SwordFsInode *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("inode output is null");
   }
 
   std::string value;
-  auto status = txn_.Get(key_.Inode(ino), &value);
+  auto status = ctx.txn_.Get(key_.Inode(ino), &value);
   if (!status.ok()) {
     return status;
   }
   return out->ParseFrom(value);
 }
 
-utils::Status RedisMetaTxn::GetEntry(InodeID parent_ino, std::string_view name, SwordFsEntry *out) {
+utils::Status RedisMetaTxn::GetEntry(RedisMetaOpsContext &ctx, InodeID parent_ino, std::string_view name,
+                                     SwordFsEntry *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("entry output is null");
   }
 
   std::string value;
-  auto status = txn_.HGet(key_.Directory(parent_ino), name, &value);
+  auto status = ctx.txn_.HGet(key_.Directory(parent_ino), name, &value);
   if (!status.ok()) {
     return status;
   }
   return out->ParseFrom(value);
 }
 
-utils::Status RedisMetaTxn::LookupEntry(InodeID parent_ino, std::string_view name, SwordFsInode *out) {
+utils::Status RedisMetaTxn::LookupEntry(RedisMetaOpsContext &ctx, InodeID parent_ino, std::string_view name,
+                                        SwordFsInode *out) {
   SwordFsInode parent;
-  auto status = LookupInode(parent_ino, &parent);
+  auto status = LookupInode(ctx, parent_ino, &parent);
   if (!status.ok()) {
     return status;
   }
@@ -56,20 +102,21 @@ utils::Status RedisMetaTxn::LookupEntry(InodeID parent_ino, std::string_view nam
   }
 
   SwordFsEntry entry;
-  status = GetEntry(parent_ino, name, &entry);
+  status = GetEntry(ctx, parent_ino, name, &entry);
   if (!status.ok()) {
     return status;
   }
-  return LookupInode(entry.ino, out);
+  return LookupInode(ctx, entry.ino, out);
 }
 
-utils::Status RedisMetaTxn::EntryExists(InodeID parent_ino, std::string_view name, bool *exists) {
+utils::Status RedisMetaTxn::EntryExists(RedisMetaOpsContext &ctx, InodeID parent_ino, std::string_view name,
+                                        bool *exists) {
   if (exists == nullptr) {
     return utils::Status::InvalidArgument("entry existence output is null");
   }
 
   SwordFsEntry entry;
-  auto status = GetEntry(parent_ino, name, &entry);
+  auto status = GetEntry(ctx, parent_ino, name, &entry);
   if (status.IsNotFound()) {
     *exists = false;
     return utils::Status::OK();
@@ -81,12 +128,12 @@ utils::Status RedisMetaTxn::EntryExists(InodeID parent_ino, std::string_view nam
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaTxn::IsDirEmpty(InodeID ino, bool *empty) {
+utils::Status RedisMetaTxn::IsDirEmpty(RedisMetaOpsContext &ctx, InodeID ino, bool *empty) {
   if (empty == nullptr) {
     return utils::Status::InvalidArgument("directory empty output is null");
   }
   SwordFsInode dir;
-  auto status = LookupInode(ino, &dir);
+  auto status = LookupInode(ctx, ino, &dir);
   if (!status.ok()) {
     return status;
   }
@@ -94,7 +141,7 @@ utils::Status RedisMetaTxn::IsDirEmpty(InodeID ino, bool *empty) {
     return utils::Status::NotDirectory("not a directory");
   }
   uint64_t length = 0;
-  status = txn_.HLen(key_.Directory(ino), &length);
+  status = ctx.txn_.HLen(key_.Directory(ino), &length);
   if (!status.ok()) {
     return status;
   }
@@ -102,7 +149,8 @@ utils::Status RedisMetaTxn::IsDirEmpty(InodeID ino, bool *empty) {
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaTxn::IsDescendantOf(InodeID ancestor_ino, InodeID child_ino, bool *result) {
+utils::Status RedisMetaTxn::IsDescendantOf(RedisMetaOpsContext &ctx, InodeID ancestor_ino, InodeID child_ino,
+                                           bool *result) {
   if (result == nullptr) {
     return utils::Status::InvalidArgument("descendant check output is null");
   }
@@ -118,7 +166,7 @@ utils::Status RedisMetaTxn::IsDescendantOf(InodeID ancestor_ino, InodeID child_i
       return utils::Status::OK();
     }
     SwordFsInode inode;
-    auto status = LookupInode(current_ino, &inode);
+    auto status = LookupInode(ctx, current_ino, &inode);
     if (!status.ok()) {
       return status;
     }
@@ -130,23 +178,23 @@ utils::Status RedisMetaTxn::IsDescendantOf(InodeID ancestor_ino, InodeID child_i
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaTxn::InsertInode(const SwordFsInode &inode) {
+utils::Status RedisMetaTxn::InsertInode(RedisMetaOpsContext &ctx, const SwordFsInode &inode) {
   if (inode.ino == 0 || inode.attr.ino != inode.ino) {
     return utils::Status::InvalidArgument("invalid inode record");
   }
 
   SwordFsInode existing;
-  auto status = LookupInode(inode.ino, &existing);
+  auto status = LookupInode(ctx, inode.ino, &existing);
   if (status.ok()) {
     return utils::Status::AlreadyExists("inode already exists");
   }
   if (!status.IsNotFound()) {
     return status;
   }
-  return SetInode(inode);
+  return SetInode(ctx, inode);
 }
 
-utils::Status RedisMetaTxn::SetInode(const SwordFsInode &inode) {
+utils::Status RedisMetaTxn::SetInode(RedisMetaOpsContext &ctx, const SwordFsInode &inode) {
   if (inode.ino == 0 || inode.attr.ino != inode.ino) {
     return utils::Status::InvalidArgument("invalid inode record");
   }
@@ -155,14 +203,14 @@ utils::Status RedisMetaTxn::SetInode(const SwordFsInode &inode) {
   if (!status.ok()) {
     return status;
   }
-  return txn_.Set(key_.Inode(inode.ino), value);
+  return ctx.txn_.Set(key_.Inode(inode.ino), value);
 }
 
-utils::Status RedisMetaTxn::DeleteInode(InodeID ino) {
-  return txn_.Del(key_.Inode(ino));
+utils::Status RedisMetaTxn::DeleteInode(RedisMetaOpsContext &ctx, InodeID ino) {
+  return ctx.txn_.Del(key_.Inode(ino));
 }
 
-utils::Status RedisMetaTxn::AdjustNlink(SwordFsInode *inode, int delta, uint64_t *nlink) {
+utils::Status RedisMetaTxn::AdjustNlink(RedisMetaOpsContext &, SwordFsInode *inode, int delta, uint64_t *nlink) {
   if (inode == nullptr) {
     return utils::Status::InvalidArgument("inode is null");
   }
@@ -178,8 +226,8 @@ utils::Status RedisMetaTxn::AdjustNlink(SwordFsInode *inode, int delta, uint64_t
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaTxn::LinkEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &child,
-                                      SwordFsInode *parent) {
+utils::Status RedisMetaTxn::LinkEntry(RedisMetaOpsContext &ctx, InodeID parent_ino, std::string_view name,
+                                      const SwordFsInode &child, SwordFsInode *parent) {
   if (parent == nullptr) {
     return utils::Status::InvalidArgument("parent inode is null");
   }
@@ -198,11 +246,11 @@ utils::Status RedisMetaTxn::LinkEntry(InodeID parent_ino, std::string_view name,
   if (!status.ok()) {
     return status;
   }
-  return txn_.HSet(key_.Directory(parent_ino), name, value);
+  return ctx.txn_.HSet(key_.Directory(parent_ino), name, value);
 }
 
-utils::Status RedisMetaTxn::UnlinkEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &target,
-                                        SwordFsInode *parent) {
+utils::Status RedisMetaTxn::UnlinkEntry(RedisMetaOpsContext &ctx, InodeID parent_ino, std::string_view name,
+                                        const SwordFsInode &target, SwordFsInode *parent) {
   if (parent == nullptr) {
     return utils::Status::InvalidArgument("parent inode is null");
   }
@@ -214,11 +262,11 @@ utils::Status RedisMetaTxn::UnlinkEntry(InodeID parent_ino, std::string_view nam
     parent->attr.nlink--;
   }
   parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
-  return txn_.HDel(key_.Directory(parent_ino), name);
+  return ctx.txn_.HDel(key_.Directory(parent_ino), name);
 }
 
-utils::Status RedisMetaTxn::ReplaceEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &child,
-                                         SwordFsInode *parent) {
+utils::Status RedisMetaTxn::ReplaceEntry(RedisMetaOpsContext &ctx, InodeID parent_ino, std::string_view name,
+                                         const SwordFsInode &child, SwordFsInode *parent) {
   if (parent == nullptr) {
     return utils::Status::InvalidArgument("parent inode is null");
   }
@@ -233,44 +281,45 @@ utils::Status RedisMetaTxn::ReplaceEntry(InodeID parent_ino, std::string_view na
   if (!status.ok()) {
     return status;
   }
-  return txn_.HSet(key_.Directory(parent_ino), name, value);
+  return ctx.txn_.HSet(key_.Directory(parent_ino), name, value);
 }
 
-utils::Status RedisMetaTxn::DeleteDirectory(InodeID ino) {
-  return txn_.Del(key_.Directory(ino));
+utils::Status RedisMetaTxn::DeleteDirectory(RedisMetaOpsContext &ctx, InodeID ino) {
+  return ctx.txn_.Del(key_.Directory(ino));
 }
 
-utils::Status RedisMetaTxn::AdjustInodeCount(int64_t delta) {
-  return txn_.IncrBy(key_.InodeCount(), delta);
+utils::Status RedisMetaTxn::AdjustInodeCount(RedisMetaOpsContext &ctx, int64_t delta) {
+  return ctx.txn_.IncrBy(key_.InodeCount(), delta);
 }
 
-utils::Status RedisMetaTxn::LookupChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
+utils::Status RedisMetaTxn::LookupChunk(RedisMetaOpsContext &ctx, InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
   if (chunk == nullptr) {
     return utils::Status::InvalidArgument("chunk output is null");
   }
 
   std::string value;
-  auto status = txn_.HGet(key_.Chunk(ino), std::to_string(idx), &value);
+  auto status = ctx.txn_.HGet(key_.Chunk(ino), std::to_string(idx), &value);
   if (!status.ok()) {
     return status;
   }
   return chunk->ParseFrom(value);
 }
 
-utils::Status RedisMetaTxn::SetChunk(InodeID ino, const SwordFsChunk &chunk) {
+utils::Status RedisMetaTxn::SetChunk(RedisMetaOpsContext &ctx, InodeID ino, const SwordFsChunk &chunk) {
   std::string value;
   auto status = chunk.SerializeTo(&value);
   if (!status.ok()) {
     return status;
   }
-  return txn_.HSet(key_.Chunk(ino), std::to_string(chunk.index), value);
+  return ctx.txn_.HSet(key_.Chunk(ino), std::to_string(chunk.index), value);
 }
 
-utils::Status RedisMetaTxn::DeleteChunks(InodeID ino) {
-  return txn_.Del(key_.Chunk(ino));
+utils::Status RedisMetaTxn::DeleteChunks(RedisMetaOpsContext &ctx, InodeID ino) {
+  return ctx.txn_.Del(key_.Chunk(ino));
 }
 
-utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size) {
+utils::Status RedisMetaTxn::TruncateChunks(RedisMetaOpsContext &ctx, InodeID ino, uint64_t old_size,
+                                           uint64_t new_size) {
   if (new_size >= old_size) {
     return utils::Status::OK();
   }
@@ -278,7 +327,7 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
     return utils::Status::Internal("volume chunk size is not initialized");
   }
   if (new_size == 0) {
-    return DeleteChunks(ino);
+    return DeleteChunks(ctx, ino);
   }
 
   const ChunkIndex boundary_idx = static_cast<ChunkIndex>(new_size / chunk_size_);
@@ -288,12 +337,12 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
 
   if (boundary_offset != 0) {
     SwordFsChunk chunk;
-    auto status = LookupChunk(ino, boundary_idx, &chunk);
+    auto status = LookupChunk(ctx, ino, boundary_idx, &chunk);
     if (status.ok()) {
       const uint64_t new_chunk_size = new_size - chunk.start_offset;
       if (chunk.size > new_chunk_size) {
         chunk.size = new_chunk_size;
-        status = SetChunk(ino, chunk);
+        status = SetChunk(ctx, ino, chunk);
         if (!status.ok()) {
           return status;
         }
@@ -304,7 +353,7 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
   }
 
   for (ChunkIndex idx = first_removed_idx; idx < old_chunk_count; ++idx) {
-    auto status = txn_.HDel(key_.Chunk(ino), std::to_string(idx));
+    auto status = ctx.txn_.HDel(key_.Chunk(ino), std::to_string(idx));
     if (!status.ok()) {
       return status;
     }

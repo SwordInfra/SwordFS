@@ -13,9 +13,8 @@
 namespace swordfs::metadata {
 
 // Redis metadata engine policy layer. POSIX validation, permissions and flag
-// dispatch live here; RedisMetaOps owns the backend metadata schema and
-// reusable metadata primitives, while RedisMetaClient/RedisKvTxn own raw Redis
-// access and transaction mechanics.
+// dispatch live here; RedisMetaOps is the only Redis metadata operation facade
+// exposed to this layer and owns both direct and transactional backend access.
 class RedisMetaImpl : public IMetaEngine {
  public:
   static utils::Status Create(std::string_view meta_url, std::string_view volume_name,

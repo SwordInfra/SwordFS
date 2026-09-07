@@ -19,8 +19,7 @@ constexpr size_t kHScanCount = 128;
 
 class RedisDirEntryCache final {
  public:
-  RedisDirEntryCache(std::shared_ptr<RedisMetaClient> client, std::string key)
-      : client_(std::move(client)), key_(std::move(key)) {
+  RedisDirEntryCache(RedisMetaClient &client, std::string key) : client_(client), key_(std::move(key)) {
     Reset();
   }
 
@@ -77,7 +76,7 @@ class RedisDirEntryCache final {
       // cursor_ is Redis' opaque HSCAN continuation cursor. kHScanCount is only
       // a work/result-size hint; Redis may return more or fewer entries. A
       // returned cursor of 0 means the complete hash scan has finished.
-      auto status = client_->HScan(key_, cursor_, kHScanCount, &values, &next_cursor);
+      auto status = client_.HScan(key_, cursor_, kHScanCount, &values, &next_cursor);
       if (!status.ok()) {
         return status;
       }
@@ -99,7 +98,7 @@ class RedisDirEntryCache final {
   }
 
  private:
-  std::shared_ptr<RedisMetaClient> client_;
+  RedisMetaClient &client_;
   std::string key_;
   std::vector<std::pair<std::string, std::string>> entries_;
   size_t base_index_ = 0;
@@ -111,8 +110,8 @@ class RedisDirEntryCache final {
 
 class RedisDirIterator::Impl {
  public:
-  Impl(std::shared_ptr<RedisMetaClient> client, std::string key, std::vector<SwordFsEntry> prefix_entries)
-      : cache_(std::move(client), std::move(key)), prefix_entries_(std::move(prefix_entries)) {
+  Impl(RedisMetaClient &client, std::string key, std::vector<SwordFsEntry> prefix_entries)
+      : cache_(client, std::move(key)), prefix_entries_(std::move(prefix_entries)) {
   }
 
   Status Seek(uint64_t cookie) {
@@ -161,9 +160,8 @@ class RedisDirIterator::Impl {
   std::optional<uint64_t> pending_next_;
 };
 
-RedisDirIterator::RedisDirIterator(std::shared_ptr<RedisMetaClient> client, std::string key,
-                                   std::vector<SwordFsEntry> prefix_entries)
-    : impl_(std::make_unique<Impl>(std::move(client), std::move(key), std::move(prefix_entries))) {
+RedisDirIterator::RedisDirIterator(RedisMetaClient &client, std::string key, std::vector<SwordFsEntry> prefix_entries)
+    : impl_(std::make_unique<Impl>(client, std::move(key), std::move(prefix_entries))) {
 }
 
 RedisDirIterator::~RedisDirIterator() = default;
