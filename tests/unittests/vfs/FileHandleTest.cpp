@@ -41,6 +41,7 @@ using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::UnlinkResult;
 using swordfs::utils::Status;
 
 // Minimal no-op data engine. The fixture needs to install one so the
@@ -107,7 +108,7 @@ class MockMetaEngine : public IMetaEngine {
   Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, uint64_t *) override {
+  Status Unlink(InodeID, std::string_view, UnlinkResult *) override {
     return Status::OK();
   }
   Status RmDir(InodeID, std::string_view) override {
@@ -622,7 +623,7 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
   Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, uint64_t *) override {
+  Status Unlink(InodeID, std::string_view, UnlinkResult *) override {
     return Status::OK();
   }
   Status RmDir(InodeID, std::string_view) override {

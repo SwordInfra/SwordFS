@@ -470,7 +470,7 @@ metadata::Limits Fixture::GetLimits() const {
   std::string scheme;
   auto status = metadata::ParseUrlScheme(url, &scheme);
   if (status.ok()) {
-    status = metadata::MetaEngineRegistry::Instance().Create(scheme, url, volume_name_, &engine);
+    status = metadata::MetaEngineRegistry::Instance().CreateInstance(scheme, url, volume_name_, &engine);
   }
   if (!status.ok()) {
     ADD_FAILURE() << "Failed to create metadata engine: " << status.message();

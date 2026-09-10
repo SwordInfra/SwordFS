@@ -22,6 +22,7 @@ using swordfs::metadata::MemMetaImpl;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsInode;
+using swordfs::metadata::UnlinkResult;
 using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
@@ -724,7 +725,10 @@ TEST_F(MemMetaImplTest, UnlinkOnHardlinkedInodeKeepsInodeAlive) {
   ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
   ASSERT_EQ(attr.st_nlink, 2);
 
-  ASSERT_TRUE(impl_->Unlink(kRoot, "orig").ok());
+  UnlinkResult unlink_result;
+  ASSERT_TRUE(impl_->Unlink(kRoot, "orig", &unlink_result).ok());
+  EXPECT_EQ(unlink_result.unlinked_ino, f_ino);
+  EXPECT_EQ(unlink_result.post_nlink, 1U);
 
   // nlink must drop to 1, not zero, and the inode must still exist.
   ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());

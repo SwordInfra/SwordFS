@@ -27,13 +27,11 @@
 
 namespace swordfs::metadata {
 
-// MemMeta-specific filesystem limits.
-constexpr uint64_t kMaxNameLength = 255;  // POSIX NAME_MAX
-constexpr uint64_t kMaxFreeInodes = UINT64_MAX;
+constexpr Limits kMemLimits{.max_name_length = 255, .max_free_inodes = UINT64_MAX};
 
-const RegisterMetaEngine kMemoryMetaEngine{"memory", MemMetaImpl::Create};
+const RegisterMetaEngine kMemoryMetaEngine{"memory", MemMetaImpl::CreateInstance};
 
-utils::Status MemMetaImpl::Create(std::string_view, std::string_view, std::unique_ptr<IMetaEngine> *out) {
+utils::Status MemMetaImpl::CreateInstance(std::string_view, std::string_view, std::unique_ptr<IMetaEngine> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("metadata engine output is null");
   }
@@ -133,7 +131,7 @@ Status MemMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
 }
 
 Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
-  if (name.size() > kMaxNameLength) {
+  if (name.size() > kMemLimits.max_name_length) {
     return Status::NameTooLong("file name exceeds maximum length");
   }
 
@@ -169,14 +167,14 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t m
   return Status::OK();
 }
 
-Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) {
+Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result) {
   // Refuse to unlink "." or ".."
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot unlink . or ..");
   }
 
   const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
-  InodeID target_ino = 0;
+  UnlinkResult unlink_result;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode parent;
     Status status = txn.LookupInode(parent_ino, &parent);
@@ -208,20 +206,18 @@ Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, uint64_t *
       return Status::InvalidArgument("cannot unlink directory");
     }
 
-    target_ino = target.ino;
-
-    // Unlink only detaches the directory entry and decrements nlink; the
-    // transaction hands back the authoritative post-decrement nlink in
-    // *post_nlink so the caller doesn't have to re-read it (avoiding the
-    // TOCTOU race that an unlink-before-read decision would have).
-    return txn.Unlink(parent_ino, name, post_nlink);
+    unlink_result.unlinked_ino = target.ino;
+    return txn.Unlink(parent_ino, name, &unlink_result.post_nlink);
   });
 
   if (!status.ok()) {
     SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name << "' failed: " << status.message();
     return status;
   }
-  SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name << "' ino=" << target_ino;
+  if (result != nullptr) {
+    *result = unlink_result;
+  }
+  SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name << "' ino=" << unlink_result.unlinked_ino;
   return Status::OK();
 }
 
@@ -230,7 +226,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, In
   if (result) {
     *result = {};
   }
-  if (new_name.size() > kMaxNameLength) {
+  if (new_name.size() > kMemLimits.max_name_length) {
     return Status::NameTooLong("target name exceeds maximum length");
   }
 
@@ -405,7 +401,7 @@ Status MemMetaImpl::ReclaimInode(InodeID ino) {
 // ────────────────────────────────────────────────────────────────
 
 Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
-  if (name.size() > kMaxNameLength) {
+  if (name.size() > kMemLimits.max_name_length) {
     return Status::NameTooLong("directory name exceeds maximum length");
   }
 
@@ -523,7 +519,7 @@ Status MemMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
 // ────────────────────────────────────────────────────────────────
 
 Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) {
-  if (name.size() > kMaxNameLength) {
+  if (name.size() > kMemLimits.max_name_length) {
     return Status::NameTooLong("symlink name exceeds maximum length");
   }
 
@@ -571,7 +567,7 @@ Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::stri
 }
 
 Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) {
-  if (newname.size() > kMaxNameLength) {
+  if (newname.size() > kMemLimits.max_name_length) {
     return Status::NameTooLong("link name exceeds maximum length");
   }
 
@@ -697,7 +693,7 @@ Status MemMetaImpl::StatFs(SwordFsStatFs *stbuf) {
 }
 
 Limits MemMetaImpl::GetLimits() const {
-  return Limits{kMaxNameLength, kMaxFreeInodes};
+  return kMemLimits;
 }
 
 }  // namespace swordfs::metadata

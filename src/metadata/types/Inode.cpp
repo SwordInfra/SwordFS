@@ -13,11 +13,14 @@
 
 namespace swordfs::metadata {
 
-SwordFsAttr::SwordFsAttr(uint64_t ino, uint32_t mode) : ino(ino), mode(mode) {
+SwordFsAttr::SwordFsAttr(uint64_t ino, uint32_t mode)
+    : SwordFsAttr(ino, mode, static_cast<uint64_t>(::getuid()), static_cast<uint64_t>(::getgid())) {
+}
+
+SwordFsAttr::SwordFsAttr(uint64_t ino, uint32_t mode, uint64_t uid, uint64_t gid)
+    : ino(ino), mode(mode), uid(uid), gid(gid) {
   nlink = S_ISDIR(mode) ? 2 : 1;
   size = S_ISDIR(mode) ? 4096 : 0;
-  uid = static_cast<uint64_t>(::getuid());
-  gid = static_cast<uint64_t>(::getgid());
   blksize = 4096;
   atime = mtime = ctime = static_cast<int64_t>(::time(nullptr));
 }

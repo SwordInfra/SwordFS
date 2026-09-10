@@ -32,9 +32,9 @@ class MetaEngineRegistry {
   /// Return whether a metadata engine with the given name is registered.
   bool Available(std::string_view name) const;
 
-  /// Create a metadata engine using its registered factory.
-  utils::Status Create(std::string_view name, std::string_view meta_url, std::string_view volume_name,
-                       std::unique_ptr<IMetaEngine> *out) const;
+  /// Create a metadata engine instance using its registered factory.
+  utils::Status CreateInstance(std::string_view name, std::string_view meta_url, std::string_view volume_name,
+                               std::unique_ptr<IMetaEngine> *out) const;
 
  private:
   MetaEngineRegistry() = default;

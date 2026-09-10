@@ -120,31 +120,23 @@ utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
   //   - nlink == 0 && some fd still open: mark the InodeHandle as
   //     orphaned and let the last `Close` call `ReclaimData`.
   //
-  // Permission and sticky-bit checks are already enforced by
-  // `MemMetaImpl::Unlink` above the store, so we don't repeat them here.
+  // Permission and sticky-bit checks are enforced atomically by the
+  // metadata engine, so we don't repeat them here.
   auto *meta = VolumeImpl::Instance().meta_engine();
 
-  // Look up the child inode.
-  SwordFsInode child;
-  auto status = meta->Lookup(parent, name, &child);
-  if (!status.ok()) {
-    return status;
-  }
-
-  // meta->Unlink hands back the authoritative post-decrement nlink.
-  uint64_t post_nlink = 0;
-  status = meta->Unlink(parent, name, &post_nlink);
+  metadata::UnlinkResult result;
+  auto status = meta->Unlink(parent, name, &result);
   if (!status.ok()) {
     return status;
   }
 
   // Hardlink still alive? Then the inode (and its chunks) belong to
   // another name; leave them alone.
-  if (post_nlink > 0) {
+  if (result.post_nlink > 0) {
     return utils::Status::OK();
   }
 
-  auto handle = vfs::InodeHandleManager::Instance().Get(child.ino, /*create_if_missing=*/true);
+  auto handle = vfs::InodeHandleManager::Instance().Get(result.unlinked_ino, /*create_if_missing=*/true);
   if (!handle) {
     return utils::Status::Internal("failed to get InodeHandle");
   }

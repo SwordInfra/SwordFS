@@ -36,6 +36,7 @@ struct SwordFsAttr {
 
   SwordFsAttr() = default;
   SwordFsAttr(uint64_t ino, uint32_t mode);
+  SwordFsAttr(uint64_t ino, uint32_t mode, uint64_t uid, uint64_t gid);
 
   void KillSUID();
 

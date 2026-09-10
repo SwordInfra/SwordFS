@@ -51,7 +51,7 @@ TEST(DataEngineRegistryTest, RegisteredEngineIsAvailableAndCanBeCreated) {
   EXPECT_TRUE(registry.Available("test"));
 
   std::unique_ptr<swordfs::storage::IDataEngine> engine;
-  auto status = registry.Create("test", &engine);
+  auto status = registry.CreateInstance("test", &engine);
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_NE(engine, nullptr);
 }
@@ -61,13 +61,13 @@ TEST(DataEngineRegistryTest, UnknownEngineIsNotSupported) {
   EXPECT_FALSE(registry.Available("does-not-exist"));
 
   std::unique_ptr<swordfs::storage::IDataEngine> engine;
-  auto status = registry.Create("does-not-exist", &engine);
+  auto status = registry.CreateInstance("does-not-exist", &engine);
   EXPECT_TRUE(status.IsNotSupported());
   EXPECT_EQ(engine, nullptr);
 }
 
 TEST(DataEngineRegistryTest, NullOutputIsRejected) {
   auto &registry = swordfs::storage::DataEngineRegistry::Instance();
-  auto status = registry.Create("test", nullptr);
+  auto status = registry.CreateInstance("test", nullptr);
   EXPECT_EQ(status.code(), swordfs::utils::Status::kInvalidArgument);
 }
