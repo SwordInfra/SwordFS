@@ -33,6 +33,7 @@
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
 #include "metadata/types/Inode.hpp"
+#include "utils/Synchronization.hpp"
 
 namespace swordfs::metadata {
 
@@ -56,7 +57,7 @@ class MemMetaStore {
   // a real transaction.
   template <typename F>
   decltype(auto) Transact(F &&f) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<utils::FiberMutex> lock(mutex_);
     MemMetaTxn txn(this);
     return std::forward<F>(f)(txn);
   }
@@ -66,7 +67,7 @@ class MemMetaStore {
   // exactly one critical section over mutex_.
   friend class MemMetaTxn;
 
-  mutable std::mutex mutex_;
+  mutable utils::FiberMutex mutex_;
   std::atomic<InodeID> next_ino_;
 
   folly::F14FastMap<InodeID, std::unique_ptr<SwordFsInode>> inodes_;

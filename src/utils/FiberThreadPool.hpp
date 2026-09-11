@@ -27,6 +27,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "utils/ExecutionDomain.hpp"
+
 namespace swordfs::utils {
 
 class FiberThreadPool {
@@ -45,6 +47,7 @@ class FiberThreadPool {
     folly::fibers::Baton baton;
 
     folly::via(pool_.get(), [&] {
+      ScopedBlockingThreadDomain domain;
       result = folly::makeTryWith([&] { return fn(); });
       baton.post();
     });
@@ -61,7 +64,10 @@ class FiberThreadPool {
 
   template <typename Fn>
   auto RunInThread(Fn &&fn) -> decltype(fn()) {
-    auto future = folly::via(pool_.get(), [fn = std::forward<Fn>(fn)]() mutable { return fn(); });
+    auto future = folly::via(pool_.get(), [fn = std::forward<Fn>(fn)]() mutable {
+      ScopedBlockingThreadDomain domain;
+      return fn();
+    });
     if constexpr (std::is_void_v<decltype(fn())>) {
       std::move(future).get();
       return;

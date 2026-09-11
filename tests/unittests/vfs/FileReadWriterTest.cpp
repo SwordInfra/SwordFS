@@ -101,6 +101,19 @@ class MockDataEngine : public IDataEngine {
   }
 
   Status Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) override {
+    if (get_started_ != nullptr) {
+      auto *started = get_started_;
+      auto *release = get_release_;
+      get_started_ = nullptr;
+      get_release_ = nullptr;
+      started->post();
+      release->wait();
+    } else if (concurrent_get_started_ != nullptr) {
+      auto *started = concurrent_get_started_;
+      concurrent_get_started_ = nullptr;
+      started->post();
+    }
+
     auto it = store_.find(std::string(key));
     if (it == store_.end()) {
       return Status::NotFound("chunk not found");
@@ -134,11 +147,21 @@ class MockDataEngine : public IDataEngine {
     return out;
   }
 
+  void BlockNextGet(folly::fibers::Baton *started, folly::fibers::Baton *release,
+                    folly::fibers::Baton *concurrent_get_started = nullptr) {
+    get_started_ = started;
+    get_release_ = release;
+    concurrent_get_started_ = concurrent_get_started;
+  }
+
   std::vector<std::string> delete_calls;
   Status delete_status = Status::OK();
 
  private:
   std::unordered_map<std::string, std::string> store_;
+  folly::fibers::Baton *get_started_{nullptr};
+  folly::fibers::Baton *get_release_{nullptr};
+  folly::fibers::Baton *concurrent_get_started_{nullptr};
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -630,4 +653,112 @@ TEST_F(FileReadWriterTest, TruncateToleratesDataDeleteFailure) {
     EXPECT_EQ(mock_meta_->truncate_calls, 1);
     EXPECT_EQ(mock_meta_->file_size(), 0);
   });
+}
+
+TEST_F(FileReadWriterTest, ConcurrentReadsProceedWhileAnotherReadWaitsForBackend) {
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_chunk_size_for_test(kChunkSize);
+
+  SwordFsChunk chunk{};
+  chunk.index = 0;
+  chunk.start_offset = 0;
+  chunk.key = std::to_string(kIno) + "/0";
+  chunk.size = kChunkSize;
+  ASSERT_TRUE(mock_meta_->AddChunk(kIno, chunk).ok());
+  auto data = std::make_unique<folly::IOBuf>(Buf(Repeat('R', kChunkSize)));
+  ASSERT_TRUE(mock_data_->Put(chunk.key, std::move(data)).ok());
+
+  auto rw = Make(kChunkSize);
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton first_get_started;
+  folly::fibers::Baton release_first_get;
+  folly::fibers::Baton second_get_started;
+  folly::fibers::Baton first_done;
+  folly::fibers::Baton second_done;
+  mock_data_->BlockNextGet(&first_get_started, &release_first_get, &second_get_started);
+
+  Status first_status;
+  Status second_status;
+  auto first_out = folly::IOBuf::create(kChunkSize);
+  auto second_out = folly::IOBuf::create(kChunkSize);
+  fm.addTask([&] {
+    first_status = rw.Read(kChunkSize, 0, first_out.get());
+    first_done.post();
+  });
+  fm.addTask([&] {
+    first_get_started.wait();
+    second_status = rw.Read(kChunkSize, 0, second_out.get());
+    second_done.post();
+  });
+
+  while (!second_get_started.try_wait() || !second_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_TRUE(second_status.ok());
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(second_out->data()), second_out->length()),
+            Repeat('R', kChunkSize));
+
+  release_first_get.post();
+  while (!first_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_TRUE(first_status.ok());
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(first_out->data()), first_out->length()),
+            Repeat('R', kChunkSize));
+  vol.clear_chunk_size_for_test();
+}
+
+TEST_F(FileReadWriterTest, TruncateWaitsForBlockedReadWithoutBlockingEventBase) {
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_chunk_size_for_test(kChunkSize);
+
+  SwordFsChunk chunk{};
+  chunk.index = 0;
+  chunk.start_offset = 0;
+  chunk.key = std::to_string(kIno) + "/0";
+  chunk.size = kChunkSize;
+  ASSERT_TRUE(mock_meta_->AddChunk(kIno, chunk).ok());
+  auto data = std::make_unique<folly::IOBuf>(Buf(Repeat('R', kChunkSize)));
+  ASSERT_TRUE(mock_data_->Put(chunk.key, std::move(data)).ok());
+
+  auto rw = Make(kChunkSize);
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton get_started;
+  folly::fibers::Baton release_get;
+  folly::fibers::Baton truncate_started;
+  folly::fibers::Baton read_done;
+  folly::fibers::Baton truncate_done;
+  mock_data_->BlockNextGet(&get_started, &release_get);
+
+  Status read_status;
+  Status truncate_status;
+  auto out = folly::IOBuf::create(kChunkSize);
+  fm.addTask([&] {
+    read_status = rw.Read(kChunkSize, 0, out.get());
+    read_done.post();
+  });
+  fm.addTask([&] {
+    get_started.wait();
+    truncate_started.post();
+    truncate_status = rw.Truncate(0);
+    truncate_done.post();
+  });
+
+  while (!get_started.try_wait() || !truncate_started.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_EQ(mock_meta_->truncate_calls, 0);
+
+  release_get.post();
+  while (!read_done.try_wait() || !truncate_done.try_wait()) {
+    evb.loopOnce();
+  }
+
+  EXPECT_TRUE(read_status.ok());
+  EXPECT_TRUE(truncate_status.ok());
+  EXPECT_EQ(mock_meta_->truncate_calls, 1);
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('R', kChunkSize));
+  vol.clear_chunk_size_for_test();
 }

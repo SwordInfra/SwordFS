@@ -17,6 +17,7 @@
 
 #include "utils/FiberThreadPool.hpp"
 
+using swordfs::utils::ExecutionDomain;
 using swordfs::utils::FiberThreadPool;
 
 template <typename Fn>
@@ -40,6 +41,11 @@ void RunInFiber(Fn &&fn) {
 TEST(FiberThreadPoolTest, RunFromThreadReturnsValue) {
   FiberThreadPool pool(1);
   EXPECT_EQ(pool.Run([] { return 42; }), 42);
+}
+
+TEST(FiberThreadPoolTest, WorkerRunsInBlockingThreadDomain) {
+  FiberThreadPool pool(1);
+  EXPECT_EQ(pool.Run([] { return swordfs::utils::CurrentExecutionDomain(); }), ExecutionDomain::kBlockingThread);
 }
 
 TEST(FiberThreadPoolTest, RunFromFiberReturnsValue) {

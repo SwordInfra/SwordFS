@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "metadata/redis/RedisMetaClient.hpp"
+#include "utils/Synchronization.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -154,7 +155,7 @@ class RedisDirIterator::Impl {
   }
 
  private:
-  std::mutex mutex_;
+  utils::FiberMutex mutex_;
   RedisDirEntryCache cache_;
   std::vector<SwordFsEntry> prefix_entries_;
   uint64_t position_ = 0;
