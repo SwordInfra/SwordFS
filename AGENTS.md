@@ -32,6 +32,14 @@
   // ────────────────────────────────────────────────────────────────
   ```
 
+## Fiber Synchronization Rules
+
+- Production code MUST use the synchronization semantic types from `utils/Synchronization.hpp`; do not directly use `std::*mutex`, `std::condition_variable`, pthread mutexes, or Folly mutex implementations.
+- SwordFS has two explicit execution domains: fiber business logic and blocking/POSIX worker logic (Redis/S3 through `FiberThreadPool`). Fiber context is detected from Folly's active fiber; `FiberThreadPool` explicitly marks worker callbacks as the blocking-thread domain.
+- Use `utils::FiberMutex` / `utils::FiberRWMutex` only for state owned by fiber-reachable business logic. Use `utils::ThreadMutex` only for state that is strictly owned by blocking/control POSIX threads. Do not add a hybrid mutex type; cross-domain coordination should be redesigned with atomics plus `utils::FiberBaton` hand-off instead of weakening the domain contract.
+- In Debug builds, semantic mutex wrappers assert when a `ThreadMutex` is acquired from the fiber domain or a fiber mutex is acquired from the blocking-thread domain. These execution-domain checks are intentionally disabled in Release builds. Unknown context remains allowed for initialization and direct unit-test code.
+- The `check_fiber_safety` build target enforces raw synchronization bans and is a dependency of `swordfs_lib`. Do not bypass or weaken the check to make a build pass; classify the synchronization semantics correctly instead.
+
 ## Git Commit Rules
 
 - **Prefer one commit per PR.** For follow-up fixes, review feedback, CI fixes, formatting, or other changes that do not represent a significant independent unit of work, reuse the PR's existing commit with `git commit --amend` instead of creating additional commits.

@@ -33,6 +33,7 @@ utils::Status DirHandle::Release() {
 }
 
 utils::Status DirHandle::ReadDir(off_t off, size_t size, const DirEntryEncoder &encoder, std::string *out) {
+  std::lock_guard<utils::FiberMutex> lock(mutex_);
   CHECK(out != nullptr);
   out->clear();
   if (size == 0) {

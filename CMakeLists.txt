@@ -129,7 +129,15 @@ find_library(ZSTD_LIB zstd)
 file(GLOB_RECURSE SWORDFS_SOURCES src/*.cpp src/*.h)
 list(FILTER SWORDFS_SOURCES EXCLUDE REGEX "src/cmd/Main\.cpp$")
 
+add_custom_target(
+  check_fiber_safety
+  COMMAND ${CMAKE_COMMAND} -DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR} -P
+          ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-fiber-safety.cmake
+  COMMENT "Checking fiber-safe synchronization primitives"
+  VERBATIM)
+
 add_library(swordfs_lib OBJECT ${SWORDFS_SOURCES})
+add_dependencies(swordfs_lib check_fiber_safety)
 target_link_libraries(
   swordfs_lib PUBLIC ${CMAKE_DL_LIBS} ${AWSSDK_LINK_LIBRARIES} Folly::folly
                      ${FUSE3_LIBRARY} ${REDIS_PLUS_PLUS_TARGET})

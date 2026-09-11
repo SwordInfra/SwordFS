@@ -14,13 +14,12 @@
 
 #include <cstdint>
 #include <memory>
-#include <mutex>
-#include <shared_mutex>
 
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Status.hpp"
+#include "utils/Synchronization.hpp"
 
 namespace folly {
 class IOBuf;
@@ -96,7 +95,7 @@ class InodeHandle {
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
   std::shared_ptr<FileReadWriter> rw_;
-  mutable std::mutex state_mutex_;
+  mutable utils::FiberMutex state_mutex_;
   uint64_t open_count_{0};
   bool orphaned_ = false;
 };
@@ -124,7 +123,7 @@ class InodeHandleManager {
  private:
   InodeHandleManager();
 
-  mutable std::shared_mutex mutex_;
+  mutable utils::FiberMutex mutex_;
   std::unique_ptr<InodeHandleMap> inode_handles_;
 };
 
