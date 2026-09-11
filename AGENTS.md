@@ -35,9 +35,9 @@
 ## Fiber Synchronization Rules
 
 - Production code MUST use the synchronization semantic types from `utils/Synchronization.hpp`; do not directly use `std::*mutex`, `std::condition_variable`, pthread mutexes, or Folly mutex implementations.
-- SwordFS has two explicit execution domains: fiber business logic and blocking/POSIX worker logic (Redis/S3 through `FiberThreadPool`). Fiber context is detected from Folly's active fiber; `FiberThreadPool` explicitly marks worker callbacks as the blocking-thread domain.
+- SwordFS has exactly two execution domains: `kFiber` for code actively running as a Folly fiber, and `kThread` for every normal POSIX-thread context (including Redis/S3 workers, initialization, shutdown, and control threads). There is no `kUnknown` compatibility domain.
 - Use `utils::FiberMutex` / `utils::FiberRWMutex` only for state owned by fiber-reachable business logic. Use `utils::ThreadMutex` only for state that is strictly owned by blocking/control POSIX threads. Do not add a hybrid mutex type; cross-domain coordination should be redesigned with atomics plus `utils::FiberBaton` hand-off instead of weakening the domain contract.
-- In Debug builds, semantic mutex wrappers assert when a `ThreadMutex` is acquired from the fiber domain or a fiber mutex is acquired from the blocking-thread domain. These execution-domain checks are intentionally disabled in Release builds. Unknown context remains allowed for initialization and direct unit-test code.
+- In Debug builds, semantic mutex wrappers assert when a `ThreadMutex` is acquired from the fiber domain or a fiber mutex is acquired from the thread domain. These execution-domain checks are intentionally disabled in Release builds. Unit tests for fiber-only production paths MUST run those paths inside a real FiberManager instead of bypassing the execution-domain contract.
 - The `check_fiber_safety` build target enforces raw synchronization bans and is a dependency of `swordfs_lib`. Do not bypass or weaken the check to make a build pass; classify the synchronization semantics correctly instead.
 
 ## Git Commit Rules

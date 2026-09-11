@@ -17,7 +17,7 @@ using swordfs::utils::FiberRuntime;
 
 TEST(FiberRuntimeTest, SubmittedTaskRunsInFiberDomain) {
   FiberRuntime runtime;
-  std::atomic<swordfs::utils::ExecutionDomain> domain{swordfs::utils::ExecutionDomain::kUnknown};
+  std::atomic<swordfs::utils::ExecutionDomain> domain{swordfs::utils::ExecutionDomain::kThread};
 
   ASSERT_TRUE(
       runtime.Submit([&] { domain.store(swordfs::utils::CurrentExecutionDomain(), std::memory_order_release); }));

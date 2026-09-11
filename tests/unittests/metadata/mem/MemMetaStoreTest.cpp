@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
+#include "FiberTest.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 #include "utils/Status.hpp"
 
@@ -54,7 +55,7 @@ class MemMetaStoreTest : public ::testing::Test {
 // Constructor & InodeCount
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, ConstructorCreatesRoot) {
+FIBER_TEST_F(MemMetaStoreTest, ConstructorCreatesRoot) {
   size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(count, 1);
 
@@ -68,13 +69,13 @@ TEST_F(MemMetaStoreTest, ConstructorCreatesRoot) {
 // LookupInode
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, LookupInodeNotFound) {
+FIBER_TEST_F(MemMetaStoreTest, LookupInodeNotFound) {
   SwordFsInode out;
   Status status = Lookup(999, &out);
   EXPECT_TRUE(status.IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, LookupInodeWithNullOut) {
+FIBER_TEST_F(MemMetaStoreTest, LookupInodeWithNullOut) {
   EXPECT_TRUE(Lookup(kRoot).ok());
 }
 
@@ -82,7 +83,7 @@ TEST_F(MemMetaStoreTest, LookupInodeWithNullOut) {
 // AddEntry
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, AddEntryCreatesFile) {
+FIBER_TEST_F(MemMetaStoreTest, AddEntryCreatesFile) {
   SwordFsInode child;
   Status status = Add(kRoot, "hello.txt", kRegFile, &child);
 
@@ -94,7 +95,7 @@ TEST_F(MemMetaStoreTest, AddEntryCreatesFile) {
   EXPECT_EQ(count, 2);
 }
 
-TEST_F(MemMetaStoreTest, AddEntryCreatesDirectory) {
+FIBER_TEST_F(MemMetaStoreTest, AddEntryCreatesDirectory) {
   SwordFsInode child;
   Status status = Add(kRoot, "subdir", kDir, &child);
 
@@ -102,19 +103,19 @@ TEST_F(MemMetaStoreTest, AddEntryCreatesDirectory) {
   EXPECT_TRUE(child.IsDir());
 }
 
-TEST_F(MemMetaStoreTest, AddEntryAlreadyExists) {
+FIBER_TEST_F(MemMetaStoreTest, AddEntryAlreadyExists) {
   Add(kRoot, "file", kRegFile);
 
   Status status = Add(kRoot, "file", kRegFile);
   EXPECT_TRUE(status.IsAlreadyExists());
 }
 
-TEST_F(MemMetaStoreTest, AddEntryParentNotFound) {
+FIBER_TEST_F(MemMetaStoreTest, AddEntryParentNotFound) {
   Status status = Add(42, "orphan", kRegFile);
   EXPECT_TRUE(status.IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, AddEntryParentNotDirectory) {
+FIBER_TEST_F(MemMetaStoreTest, AddEntryParentNotDirectory) {
   // Create a regular file first
   SwordFsInode f;
   Add(kRoot, "regular", kRegFile, &f);
@@ -128,7 +129,7 @@ TEST_F(MemMetaStoreTest, AddEntryParentNotDirectory) {
 // LookupEntry
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, LookupEntryFound) {
+FIBER_TEST_F(MemMetaStoreTest, LookupEntryFound) {
   SwordFsInode created;
   Add(kRoot, "found", kRegFile, &created);
 
@@ -138,7 +139,7 @@ TEST_F(MemMetaStoreTest, LookupEntryFound) {
   EXPECT_EQ(out.ino, created.ino);
 }
 
-TEST_F(MemMetaStoreTest, LookupEntryNotFound) {
+FIBER_TEST_F(MemMetaStoreTest, LookupEntryNotFound) {
   Status status = LookupChild(kRoot, "nonexistent");
   EXPECT_TRUE(status.IsNotFound());
 }
@@ -147,7 +148,7 @@ TEST_F(MemMetaStoreTest, LookupEntryNotFound) {
 // MoveEntry
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, MoveEntrySuccess) {
+FIBER_TEST_F(MemMetaStoreTest, MoveEntrySuccess) {
   // Create dir: root/sub/
   SwordFsInode sub;
   Add(kRoot, "sub", kDir, &sub);
@@ -171,7 +172,7 @@ TEST_F(MemMetaStoreTest, MoveEntrySuccess) {
   EXPECT_EQ(moved.parent_ino, sub.ino);
 }
 
-TEST_F(MemMetaStoreTest, MoveEntryOldParentNotFound) {
+FIBER_TEST_F(MemMetaStoreTest, MoveEntryOldParentNotFound) {
   SwordFsInode sub;
   Add(kRoot, "dst", kDir, &sub);
 
@@ -179,7 +180,7 @@ TEST_F(MemMetaStoreTest, MoveEntryOldParentNotFound) {
   EXPECT_TRUE(status.IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, MoveEntryNewParentNotFound) {
+FIBER_TEST_F(MemMetaStoreTest, MoveEntryNewParentNotFound) {
   SwordFsInode f;
   Add(kRoot, "f", kRegFile, &f);
 
@@ -187,7 +188,7 @@ TEST_F(MemMetaStoreTest, MoveEntryNewParentNotFound) {
   EXPECT_TRUE(status.IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, MoveEntryTargetExists) {
+FIBER_TEST_F(MemMetaStoreTest, MoveEntryTargetExists) {
   SwordFsInode d1;
   Add(kRoot, "d1", kDir, &d1);
 
@@ -206,7 +207,7 @@ TEST_F(MemMetaStoreTest, MoveEntryTargetExists) {
 // Unlink
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
+FIBER_TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   // Unlink only detaches the directory entry and decrements nlink.
   // The inode survives until the caller (VfsImpl::Unlink or
   // InodeHandle::Close) calls ReclaimData. Callers that want immediate
@@ -234,14 +235,14 @@ TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, UnlinkMissingEntryReturnsNotFound) {
+FIBER_TEST_F(MemMetaStoreTest, UnlinkMissingEntryReturnsNotFound) {
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "nonexistent"); });
   EXPECT_TRUE(status.IsNotFound());
   size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(count, 1);
 }
 
-TEST_F(MemMetaStoreTest, UnlinkNonEmptyDirectory) {
+FIBER_TEST_F(MemMetaStoreTest, UnlinkNonEmptyDirectory) {
   SwordFsInode sub;
   Add(kRoot, "sub", kDir, &sub);
 
@@ -254,7 +255,7 @@ TEST_F(MemMetaStoreTest, UnlinkNonEmptyDirectory) {
   EXPECT_EQ(count, 3);  // root + sub + f
 }
 
-TEST_F(MemMetaStoreTest, UnlinkEmptyDirectory) {
+FIBER_TEST_F(MemMetaStoreTest, UnlinkEmptyDirectory) {
   SwordFsInode sub;
   Add(kRoot, "sub", kDir, &sub);
   InodeID sub_ino = sub.ino;
@@ -271,7 +272,7 @@ TEST_F(MemMetaStoreTest, UnlinkEmptyDirectory) {
 // ListEntries
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, ListEntriesSuccess) {
+FIBER_TEST_F(MemMetaStoreTest, ListEntriesSuccess) {
   Add(kRoot, "a.txt", kRegFile);
   Add(kRoot, "b.txt", kRegFile);
   Add(kRoot, "c", kDir);
@@ -282,14 +283,14 @@ TEST_F(MemMetaStoreTest, ListEntriesSuccess) {
   EXPECT_EQ(entries.size(), 5);  // 3 real + "." + ".."
 }
 
-TEST_F(MemMetaStoreTest, ListEntriesEmptyDir) {
+FIBER_TEST_F(MemMetaStoreTest, ListEntriesEmptyDir) {
   std::vector<SwordFsEntry> entries;
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListEntries(kRoot, &entries); });
   EXPECT_TRUE(status.ok());
   EXPECT_EQ(entries.size(), 2);  // just "." and ".."
 }
 
-TEST_F(MemMetaStoreTest, ListEntriesNotFound) {
+FIBER_TEST_F(MemMetaStoreTest, ListEntriesNotFound) {
   std::vector<SwordFsEntry> entries;
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ListEntries(42, &entries); });
   EXPECT_TRUE(status.IsNotFound());
@@ -299,7 +300,7 @@ TEST_F(MemMetaStoreTest, ListEntriesNotFound) {
 // IsDescendantOf
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, IsDescendantOfDirectChild) {
+FIBER_TEST_F(MemMetaStoreTest, IsDescendantOfDirectChild) {
   SwordFsInode sub;
   Add(kRoot, "sub", kDir, &sub);
 
@@ -307,7 +308,7 @@ TEST_F(MemMetaStoreTest, IsDescendantOfDirectChild) {
   EXPECT_TRUE(result);
 }
 
-TEST_F(MemMetaStoreTest, IsDescendantOfGrandchild) {
+FIBER_TEST_F(MemMetaStoreTest, IsDescendantOfGrandchild) {
   SwordFsInode sub;
   Add(kRoot, "sub", kDir, &sub);
   SwordFsInode leaf;
@@ -319,7 +320,7 @@ TEST_F(MemMetaStoreTest, IsDescendantOfGrandchild) {
   EXPECT_TRUE(from_sub);
 }
 
-TEST_F(MemMetaStoreTest, IsDescendantOfNotDescendant) {
+FIBER_TEST_F(MemMetaStoreTest, IsDescendantOfNotDescendant) {
   SwordFsInode a;
   Add(kRoot, "a", kDir, &a);
   SwordFsInode b;
@@ -332,7 +333,7 @@ TEST_F(MemMetaStoreTest, IsDescendantOfNotDescendant) {
   EXPECT_FALSE(result);
 }
 
-TEST_F(MemMetaStoreTest, IsDescendantOfSelf) {
+FIBER_TEST_F(MemMetaStoreTest, IsDescendantOfSelf) {
   bool result = store_->Transact([&](MemMetaTxn &txn) { return txn.IsDescendantOf(kRoot, kRoot); });
   EXPECT_FALSE(result);
 }
@@ -352,7 +353,7 @@ SwordFsChunk MakeChunk(ChunkIndex index, uint64_t start_offset, size_t size) {
 }
 }  // namespace
 
-TEST_F(MemMetaStoreTest, AddChunkAndFindChunk) {
+FIBER_TEST_F(MemMetaStoreTest, AddChunkAndFindChunk) {
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.AddChunk(42, MakeChunk(0, 0, 100)); });
   ASSERT_TRUE(status.ok());
 
@@ -365,7 +366,7 @@ TEST_F(MemMetaStoreTest, AddChunkAndFindChunk) {
   EXPECT_EQ(out.size, 100);
 }
 
-TEST_F(MemMetaStoreTest, AddChunkDuplicateFails) {
+FIBER_TEST_F(MemMetaStoreTest, AddChunkDuplicateFails) {
   SwordFsChunk chunk = MakeChunk(0, 0, 100);
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.AddChunk(42, chunk); });
   ASSERT_TRUE(status.ok());
@@ -373,7 +374,7 @@ TEST_F(MemMetaStoreTest, AddChunkDuplicateFails) {
   EXPECT_TRUE(status.IsAlreadyExists());
 }
 
-TEST_F(MemMetaStoreTest, FindChunkNotFound) {
+FIBER_TEST_F(MemMetaStoreTest, FindChunkNotFound) {
   SwordFsChunk out;
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
   EXPECT_TRUE(status.IsNotFound());
@@ -383,14 +384,14 @@ TEST_F(MemMetaStoreTest, FindChunkNotFound) {
 // TruncateChunks
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, TruncateChunksNoChunksIsNoOp) {
+FIBER_TEST_F(MemMetaStoreTest, TruncateChunksNoChunksIsNoOp) {
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 0); });
   EXPECT_TRUE(status.ok());
   status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 100); });
   EXPECT_TRUE(status.ok());
 }
 
-TEST_F(MemMetaStoreTest, TruncateChunksToZeroRemovesAllChunks) {
+FIBER_TEST_F(MemMetaStoreTest, TruncateChunksToZeroRemovesAllChunks) {
   Status status = store_->Transact([&](MemMetaTxn &txn) -> Status {
     Status status = txn.AddChunk(42, MakeChunk(0, 0, 100));
     if (!status.ok()) {
@@ -409,7 +410,7 @@ TEST_F(MemMetaStoreTest, TruncateChunksToZeroRemovesAllChunks) {
   EXPECT_TRUE(status.IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, TruncateChunksDropsChunksBeyondNewSize) {
+FIBER_TEST_F(MemMetaStoreTest, TruncateChunksDropsChunksBeyondNewSize) {
   Status status = store_->Transact([&](MemMetaTxn &txn) -> Status {
     Status status = txn.AddChunk(42, MakeChunk(0, 0, 100));
     if (!status.ok()) {
@@ -431,7 +432,7 @@ TEST_F(MemMetaStoreTest, TruncateChunksDropsChunksBeyondNewSize) {
   EXPECT_TRUE(status.IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, TruncateChunksClampsStraddlingChunk) {
+FIBER_TEST_F(MemMetaStoreTest, TruncateChunksClampsStraddlingChunk) {
   Status status = store_->Transact([&](MemMetaTxn &txn) -> Status {
     Status status = txn.AddChunk(42, MakeChunk(0, 0, 100));
     if (!status.ok()) {
@@ -457,12 +458,12 @@ TEST_F(MemMetaStoreTest, TruncateChunksClampsStraddlingChunk) {
 // ReclaimInode (open-unlink)
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, ReclaimInodeMissingInodeIsNoOp) {
+FIBER_TEST_F(MemMetaStoreTest, ReclaimInodeMissingInodeIsNoOp) {
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(999); });
   EXPECT_TRUE(status.ok());
 }
 
-TEST_F(MemMetaStoreTest, ReclaimInodeDeletesOrphanedInode) {
+FIBER_TEST_F(MemMetaStoreTest, ReclaimInodeDeletesOrphanedInode) {
   SwordFsInode f;
   Add(kRoot, "f", kRegFile, &f);
   InodeID ino = f.ino;
@@ -480,7 +481,7 @@ TEST_F(MemMetaStoreTest, ReclaimInodeDeletesOrphanedInode) {
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 }
 
-TEST_F(MemMetaStoreTest, ReclaimInodeKeepsLinkedInode) {
+FIBER_TEST_F(MemMetaStoreTest, ReclaimInodeKeepsLinkedInode) {
   SwordFsInode f;
   Add(kRoot, "f", kRegFile, &f);
   InodeID ino = f.ino;  // nlink == 1 — not orphaned
@@ -498,7 +499,7 @@ TEST_F(MemMetaStoreTest, ReclaimInodeKeepsLinkedInode) {
 // ListChunks — drives the VFS coordinator's chunk enumeration path.
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreTest, ListChunksEmptyInodeIsOk) {
+FIBER_TEST_F(MemMetaStoreTest, ListChunksEmptyInodeIsOk) {
   // No chunks registered: ListChunks must return an empty vector,
   // not an error. The coordinator relies on this to distinguish
   // "no data to delete" from "metadata failure".
@@ -511,7 +512,7 @@ TEST_F(MemMetaStoreTest, ListChunksEmptyInodeIsOk) {
   EXPECT_TRUE(out.empty());
 }
 
-TEST_F(MemMetaStoreTest, ListChunksNullOutIsError) {
+FIBER_TEST_F(MemMetaStoreTest, ListChunksNullOutIsError) {
   // Defensive: callers must hand in a valid pointer. A null out
   // would silently lose the chunks the coordinator needs to drive
   // data-engine Deletes — better to fail loudly.
@@ -519,7 +520,7 @@ TEST_F(MemMetaStoreTest, ListChunksNullOutIsError) {
   EXPECT_TRUE(status.code() == Status::kInvalidArgument);
 }
 
-TEST_F(MemMetaStoreTest, ListChunksReturnsRegisteredChunksInIndexOrder) {
+FIBER_TEST_F(MemMetaStoreTest, ListChunksReturnsRegisteredChunksInIndexOrder) {
   constexpr uint64_t kChunkSize = 65536;
   SwordFsInode f;
   Add(kRoot, "f", kRegFile, &f);

@@ -22,8 +22,8 @@ class MemMetaImpl : public IMetaEngine {
   static utils::Status CreateInstance(std::string_view meta_url, std::string_view volume_name,
                                       std::unique_ptr<IMetaEngine> *out);
 
-  MemMetaImpl() = default;
-  ~MemMetaImpl() override = default;
+  MemMetaImpl();
+  ~MemMetaImpl() override;
 
   // Entry operations
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;

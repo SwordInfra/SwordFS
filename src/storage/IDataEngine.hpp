@@ -43,12 +43,13 @@ struct DataEngineLimits {
 /// by the concrete engine (e.g. "chunks/0/1/23_0_4" for object storage).
 /// The engine itself has no knowledge of inodes or file-system concepts.
 ///
-/// @important  Implementations MUST dispatch blocking I/O
-/// (e.g. SDK calls to object storage) to a background thread pool
-/// and suspend the calling fiber rather than blocking the OS thread.
-/// Blocking the thread starves all other fibers on the same
-/// EventBase.  See S3DataEngine for the recommended pattern
-/// (FiberThreadPool + folly::fibers::Baton).
+/// Execution-domain contract: construction/destruction and Initialize() are
+/// POSIX-thread lifecycle operations; Head/Put/Get/Delete are fiber-domain
+/// runtime operations. Implementations MUST dispatch blocking I/O (e.g. SDK
+/// calls to object storage) to a background thread pool and suspend the
+/// calling fiber rather than blocking the EventBase thread. See S3DataEngine
+/// for the recommended pattern: an explicit BlockingExecutor::RunFromFiber()
+/// transition to a POSIX worker thread.
 class IDataEngine {
  public:
   virtual ~IDataEngine() = default;

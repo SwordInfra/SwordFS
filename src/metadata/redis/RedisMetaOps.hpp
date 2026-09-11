@@ -23,7 +23,7 @@
 namespace swordfs::metadata {
 
 class DirIterator;
-class RedisMetaClient;
+class RedisBackendContext;
 class RedisMetaTxn;
 
 // Redis-backed SwordFS metadata operations.
@@ -32,11 +32,17 @@ class RedisMetaTxn;
 // owns the Redis metadata schema boundary: callers work with SwordFS metadata
 // objects rather than Redis keys or serialized values. Complete metadata
 // operations hide whether they need a direct Redis command or an internal
-// transaction; RedisMetaImpl uses Transact() only when it must compose multiple
-// transaction-scoped primitives into one atomic POSIX operation.
+// transaction; RedisMetaImpl uses TransactFromFiber() only when it must compose
+// multiple transaction-scoped primitives into one atomic POSIX operation.
 class RedisMetaOps {
  public:
   RedisMetaOps(const RedisMetaConfig &config, std::string_view volume_name);
+  ~RedisMetaOps();
+
+  RedisMetaOps(const RedisMetaOps &) = delete;
+  RedisMetaOps &operator=(const RedisMetaOps &) = delete;
+  RedisMetaOps(RedisMetaOps &&) = delete;
+  RedisMetaOps &operator=(RedisMetaOps &&) = delete;
 
   utils::Status Initialize();
   utils::Status FormatVolume(const SwordFsVolume &config);
@@ -62,10 +68,12 @@ class RedisMetaOps {
   // multiple metadata primitives into one atomic POSIX operation. Standalone
   // metadata operations should be exposed as RedisMetaOps methods instead of
   // making callers open a transaction just to invoke one primitive.
-  utils::Status Transact(const std::function<utils::Status(RedisMetaTxn &)> &callback);
+  // The caller is fiber-domain, but the callback itself executes on the Redis
+  // POSIX worker because it directly drives RedisMetaTxn/RedisKvTxn.
+  utils::Status TransactFromFiber(const std::function<utils::Status(RedisMetaTxn &)> &callback);
 
  private:
-  std::shared_ptr<RedisMetaClient> client_;
+  std::shared_ptr<RedisBackendContext> backend_;
   redis::RedisKey key_;
   uint64_t chunk_size_ = 0;
 };
