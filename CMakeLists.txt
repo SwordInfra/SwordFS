@@ -184,8 +184,10 @@ add_executable(swordfs_test ${TEST_SOURCES})
 target_link_libraries(swordfs_test PRIVATE swordfs_lib gtest gtest_main)
 # Ensure FetchContent gtest headers take priority over any system/conda gtest
 target_include_directories(
-  swordfs_test BEFORE PRIVATE ${googletest_SOURCE_DIR}/googletest/include
-                              ${googletest_SOURCE_DIR}/googletest)
+  swordfs_test BEFORE
+  PRIVATE ${googletest_SOURCE_DIR}/googletest/include
+          ${googletest_SOURCE_DIR}/googletest
+          ${CMAKE_CURRENT_SOURCE_DIR}/tests/unittests)
 target_compile_definitions(swordfs_test PRIVATE _FILE_OFFSET_BITS=64)
 
 include(GoogleTest)

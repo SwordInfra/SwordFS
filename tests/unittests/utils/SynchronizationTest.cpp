@@ -12,12 +12,23 @@
 namespace swordfs::utils {
 namespace {
 
-TEST(SynchronizationTest, FiberMutexAllowsFiberAndUnknownDomains) {
-  FiberMutex mutex;
-  {
-    std::lock_guard<FiberMutex> lock(mutex);
-  }
+TEST(SynchronizationTest, ExecutionDomainDistinguishesFiberAndThread) {
+  EXPECT_EQ(CurrentExecutionDomain(), ExecutionDomain::kThread);
 
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton done;
+  fm.addTask([&] {
+    EXPECT_EQ(CurrentExecutionDomain(), ExecutionDomain::kFiber);
+    done.post();
+  });
+  while (!done.try_wait()) {
+    evb.loopOnce();
+  }
+}
+
+TEST(SynchronizationTest, FiberMutexAllowsFiberDomain) {
+  FiberMutex mutex;
   folly::EventBase evb;
   auto &fm = folly::fibers::getFiberManager(evb);
   folly::fibers::Baton done;
@@ -30,26 +41,57 @@ TEST(SynchronizationTest, FiberMutexAllowsFiberAndUnknownDomains) {
   }
 }
 
-TEST(SynchronizationTest, ThreadMutexAllowsBlockingThreadAndUnknownDomains) {
+TEST(SynchronizationTest, ThreadMutexAllowsThreadDomain) {
   ThreadMutex mutex;
-  {
-    std::lock_guard<ThreadMutex> lock(mutex);
-  }
-  {
-    ScopedBlockingThreadDomain domain;
-    std::lock_guard<ThreadMutex> lock(mutex);
-  }
+  std::lock_guard<ThreadMutex> lock(mutex);
 }
 
 #ifndef NDEBUG
-TEST(SynchronizationTest, FiberMutexRejectsBlockingThreadDomain) {
+TEST(SynchronizationTest, FiberMutexRejectsThreadDomain) {
   EXPECT_DEATH(
       {
-        ScopedBlockingThreadDomain domain;
         FiberMutex mutex;
         mutex.lock();
       },
-      "fiber synchronization primitive used from blocking-thread domain");
+      "execution-domain violation at .*expected=fiber, actual=POSIX-thread");
+}
+
+TEST(SynchronizationTest, FiberMutexUnlockRejectsThreadDomain) {
+  EXPECT_DEATH(
+      {
+        FiberMutex mutex;
+        folly::EventBase evb;
+        auto &fm = folly::fibers::getFiberManager(evb);
+        folly::fibers::Baton locked;
+        fm.addTask([&] {
+          mutex.lock();
+          locked.post();
+        });
+        while (!locked.try_wait()) {
+          evb.loopOnce();
+        }
+        mutex.unlock();
+      },
+      "execution-domain violation at .*expected=fiber, actual=POSIX-thread");
+}
+
+TEST(SynchronizationTest, FiberRWMutexUnlockSharedRejectsThreadDomain) {
+  EXPECT_DEATH(
+      {
+        FiberRWMutex mutex;
+        folly::EventBase evb;
+        auto &fm = folly::fibers::getFiberManager(evb);
+        folly::fibers::Baton locked;
+        fm.addTask([&] {
+          mutex.lock_shared();
+          locked.post();
+        });
+        while (!locked.try_wait()) {
+          evb.loopOnce();
+        }
+        mutex.unlock_shared();
+      },
+      "execution-domain violation at .*expected=fiber, actual=POSIX-thread");
 }
 
 TEST(SynchronizationTest, ThreadMutexRejectsFiberDomain) {
@@ -63,7 +105,20 @@ TEST(SynchronizationTest, ThreadMutexRejectsFiberDomain) {
         });
         evb.loop();
       },
-      "thread synchronization primitive used from fiber domain");
+      "execution-domain violation at .*expected=POSIX-thread, actual=fiber");
+}
+
+TEST(SynchronizationTest, ThreadMutexUnlockRejectsFiberDomain) {
+  EXPECT_DEATH(
+      {
+        ThreadMutex mutex;
+        mutex.lock();
+        folly::EventBase evb;
+        auto &fm = folly::fibers::getFiberManager(evb);
+        fm.addTask([&] { mutex.unlock(); });
+        evb.loop();
+      },
+      "execution-domain violation at .*expected=POSIX-thread, actual=fiber");
 }
 #endif
 

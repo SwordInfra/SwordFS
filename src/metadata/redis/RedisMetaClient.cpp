@@ -11,10 +11,8 @@
 #include <stdexcept>
 #include <thread>
 
-#include "config/ConfigCenter.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
-#include "utils/FiberThreadPool.hpp"
-#include "utils/Logging.hpp"
+#include "utils/ExecutionDomain.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -50,10 +48,8 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
 }  // namespace
 
 RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config)
-    : pool_(std::make_unique<utils::FiberThreadPool>(
-          static_cast<size_t>(swordfs::config::ConfigCenter::Instance().meta_thread_count()))),
-      retry_attempts_(config.retry_attempts),
-      retry_backoff_(config.retry_backoff) {
+    : retry_attempts_(config.retry_attempts), retry_backoff_(config.retry_backoff) {
+  utils::ExpectInThreadDomain();
   if (retry_attempts_ <= 0) {
     throw std::invalid_argument("retry_attempts must be positive");
   }
@@ -63,88 +59,86 @@ RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config)
   redis_ = std::make_unique<sw::redis::Redis>(MakeConnectionOptions(config), pool_options);
 }
 
-RedisMetaClient::~RedisMetaClient() = default;
+RedisMetaClient::~RedisMetaClient() {
+  utils::ExpectInThreadDomain();
+}
 
 utils::Status RedisMetaClient::Ping() {
-  return pool_->Run([this] {
-    try {
-      redis_->ping();
-      return utils::Status::OK();
-    } catch (const sw::redis::Error &error) {
-      return RedisError("PING", error);
-    }
-  });
+  utils::ExpectInThreadDomain();
+  try {
+    redis_->ping();
+    return utils::Status::OK();
+  } catch (const sw::redis::Error &error) {
+    return RedisError("PING", error);
+  }
 }
 
 utils::Status RedisMetaClient::Get(std::string_view key, std::string *value) {
+  utils::ExpectInThreadDomain();
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis GET output is null");
   }
-  return pool_->Run([this, key, value] {
-    try {
-      auto result = redis_->get(std::string(key));
-      if (!result.has_value()) {
-        return utils::Status::NotFound("Redis key not found");
-      }
-      *value = std::move(*result);
-      return utils::Status::OK();
-    } catch (const sw::redis::Error &error) {
-      return RedisError("GET", error);
+  try {
+    auto result = redis_->get(std::string(key));
+    if (!result.has_value()) {
+      return utils::Status::NotFound("Redis key not found");
     }
-  });
+    *value = std::move(*result);
+    return utils::Status::OK();
+  } catch (const sw::redis::Error &error) {
+    return RedisError("GET", error);
+  }
 }
 
 utils::Status RedisMetaClient::HGet(std::string_view key, std::string_view field, std::string *value) {
+  utils::ExpectInThreadDomain();
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis HGET output is null");
   }
-  return pool_->Run([this, key, field, value] {
-    try {
-      auto result = redis_->hget(std::string(key), std::string(field));
-      if (!result.has_value()) {
-        return utils::Status::NotFound("Redis hash field not found");
-      }
-      *value = std::move(*result);
-      return utils::Status::OK();
-    } catch (const sw::redis::Error &error) {
-      return RedisError("HGET", error);
+  try {
+    auto result = redis_->hget(std::string(key), std::string(field));
+    if (!result.has_value()) {
+      return utils::Status::NotFound("Redis hash field not found");
     }
-  });
+    *value = std::move(*result);
+    return utils::Status::OK();
+  } catch (const sw::redis::Error &error) {
+    return RedisError("HGET", error);
+  }
 }
 
 utils::Status RedisMetaClient::HScan(std::string_view key, uint64_t cursor, size_t count,
                                      std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor) {
+  utils::ExpectInThreadDomain();
   if (values == nullptr || next_cursor == nullptr) {
     return utils::Status::InvalidArgument("Redis HSCAN output is null");
   }
-  return pool_->Run([this, key, cursor, count, values, next_cursor] {
-    try {
-      values->clear();
-      *next_cursor = cursor;
-      *next_cursor =
-          redis_->hscan(std::string(key), *next_cursor, static_cast<long long>(count), std::back_inserter(*values));
-      return utils::Status::OK();
-    } catch (const sw::redis::Error &error) {
-      return RedisError("HSCAN", error);
-    }
-  });
+  try {
+    values->clear();
+    *next_cursor = cursor;
+    *next_cursor =
+        redis_->hscan(std::string(key), *next_cursor, static_cast<long long>(count), std::back_inserter(*values));
+    return utils::Status::OK();
+  } catch (const sw::redis::Error &error) {
+    return RedisError("HSCAN", error);
+  }
 }
 
 utils::Status RedisMetaClient::Incr(std::string_view key, uint64_t *value) {
+  utils::ExpectInThreadDomain();
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis INCR output is null");
   }
-  return pool_->Run([this, key, value] {
-    try {
-      *value = redis_->incr(std::string(key));
-      return utils::Status::OK();
-    } catch (const sw::redis::Error &error) {
-      return RedisError("INCR", error);
-    }
-  });
+  try {
+    *value = redis_->incr(std::string(key));
+    return utils::Status::OK();
+  } catch (const sw::redis::Error &error) {
+    return RedisError("INCR", error);
+  }
 }
 
-utils::Status RedisMetaClient::TransactImpl(const std::function<utils::Status(RedisKvTxn &)> &callback) {
+utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisKvTxn &)> &callback) {
+  utils::ExpectInThreadDomain();
   for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
     try {
       RedisKvTxn transaction(*redis_);
@@ -174,10 +168,6 @@ utils::Status RedisMetaClient::TransactImpl(const std::function<utils::Status(Re
   }
 
   return utils::Status::Busy("Redis transaction retry limit exceeded");
-}
-
-utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisKvTxn &)> &callback) {
-  return pool_->Run([this, &callback] { return TransactImpl(callback); });
 }
 
 }  // namespace swordfs::metadata

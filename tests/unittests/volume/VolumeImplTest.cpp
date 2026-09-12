@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <string>
 
+#include "FiberTest.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/mem/VolumeFile.hpp"
 #include "storage/IDataEngine.hpp"
@@ -44,6 +45,14 @@ class VolumeImplTest : public ::testing::Test {
 
   std::string tmpdir_;
 };
+
+#ifndef NDEBUG
+TEST(VolumeImplDomainTest, LifecycleRejectsFiberCaller) {
+  EXPECT_DEATH(
+      { swordfs::test::RunInTestFiber([] { VolumeImpl::Initialize(); }); },
+      "execution-domain violation at .*expected=POSIX-thread, actual=fiber");
+}
+#endif
 
 // ── CreateFrom ──────────────────────────────────────────────────────
 

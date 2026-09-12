@@ -15,19 +15,28 @@
 #include <folly/io/IOBuf.h>
 #include <folly/logging/xlog.h>
 
+#include <algorithm>
 #include <thread>
 
 #include "config/ConfigCenter.hpp"
 #include "storage/DataEngineRegistry.hpp"
 #include "storage/StorageUrl.hpp"
 #include "storage/s3/S3StreamBuf.hpp"
-#include "utils/FiberThreadPool.hpp"
+#include "utils/BlockingExecutor.hpp"
+#include "utils/ExecutionDomain.hpp"
 #include "utils/Logging.hpp"
 #include "volume/VolumeImpl.hpp"
 
 namespace swordfs::storage {
 
-S3DataEngine::~S3DataEngine() = default;
+S3DataEngine::~S3DataEngine() {
+  utils::ExpectInThreadDomain();
+  if (executor_ != nullptr) {
+    executor_->Shutdown();
+  }
+  client_.reset();
+  executor_.reset();
+}
 
 // ────────────────────────────────────────────────────────────────
 // AWS SDK lifetime — initialised on first S3DataEngine creation
@@ -72,14 +81,16 @@ RegisterDataEngine kS3DataEngine{"s3", S3DataEngine::CreateInstance};
 S3DataEngine::S3DataEngine() = default;
 
 Status S3DataEngine::Initialize() {
+  utils::ExpectInThreadDomain();
   auto status = ParseBucketUrl();
   if (!status.ok()) {
     return status;
   }
 
-  int n = swordfs::config::ConfigCenter::Instance().storage_thread_count();
-  pool_ =
-      std::make_shared<utils::FiberThreadPool>(n > 0 ? static_cast<size_t>(n) : std::thread::hardware_concurrency());
+  const int configured_threads = swordfs::config::ConfigCenter::Instance().storage_thread_count();
+  const size_t worker_count = configured_threads > 0 ? static_cast<size_t>(configured_threads)
+                                                     : std::max<size_t>(1, std::thread::hardware_concurrency());
+  executor_ = std::make_unique<utils::BlockingExecutor>(worker_count, "swordfs-s3");
 
   EnsureAwsSdkInit();
   Aws::S3::S3ClientConfiguration aws_cfg;
@@ -145,7 +156,8 @@ DataEngineLimits S3DataEngine::Limits() const {
 }
 
 bool S3DataEngine::Head(std::string_view key, size_t *size) {
-  return pool_->Run([this, key, size] {
+  return executor_->RunFromFiber([this, key, size] {
+    utils::ExpectInThreadDomain();
     Aws::S3::Model::HeadObjectRequest req;
     req.SetBucket(bucket_);
     req.SetKey(ObjectKey(key));
@@ -163,7 +175,8 @@ bool S3DataEngine::Head(std::string_view key, size_t *size) {
 
 Status S3DataEngine::Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) {
   try {
-    return pool_->Run([this, key, d = std::move(data)] {
+    return executor_->RunFromFiber([this, key, d = std::move(data)] {
+      utils::ExpectInThreadDomain();
       Aws::S3::Model::PutObjectRequest req;
       req.SetBucket(bucket_);
       req.SetKey(ObjectKey(key));
@@ -194,7 +207,8 @@ Status S3DataEngine::Put(std::string_view key, std::unique_ptr<folly::IOBuf> dat
 
 Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) {
   try {
-    return pool_->Run([this, key, out, offset, size] {
+    return executor_->RunFromFiber([this, key, out, offset, size] {
+      utils::ExpectInThreadDomain();
       Aws::S3::Model::GetObjectRequest req;
       req.SetBucket(bucket_);
       req.SetKey(ObjectKey(key));
@@ -248,7 +262,8 @@ Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size, folly
 }
 
 Status S3DataEngine::Delete(std::string_view key) {
-  return pool_->Run([this, key] {
+  return executor_->RunFromFiber([this, key] {
+    utils::ExpectInThreadDomain();
     Aws::S3::Model::DeleteObjectRequest req;
     req.SetBucket(bucket_);
     req.SetKey(ObjectKey(key));

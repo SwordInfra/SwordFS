@@ -26,6 +26,7 @@
 #include "metadata/types/Inode.hpp"
 #include "metadata/types/Volume.hpp"
 #include "utils/Context.hpp"
+#include "utils/ExecutionDomain.hpp"
 #include "utils/Logging.hpp"
 
 namespace swordfs::metadata {
@@ -34,6 +35,7 @@ constexpr Limits kRedisLimits{.max_name_length = 255, .max_free_inodes = UINT64_
 
 utils::Status RedisMetaImpl::CreateInstance(std::string_view meta_url, std::string_view volume_name,
                                             std::unique_ptr<IMetaEngine> *out) {
+  utils::ExpectInThreadDomain();
   if (out == nullptr) {
     return utils::Status::InvalidArgument("metadata engine output is null");
   }
@@ -63,6 +65,7 @@ RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view vol
 RedisMetaImpl::~RedisMetaImpl() = default;
 
 utils::Status RedisMetaImpl::Initialize() {
+  utils::ExpectInThreadDomain();
   try {
     return ops_.Initialize();
   } catch (const std::exception &error) {
@@ -71,10 +74,12 @@ utils::Status RedisMetaImpl::Initialize() {
 }
 
 utils::Status RedisMetaImpl::FormatVolume(const SwordFsVolume &config) {
+  utils::ExpectInThreadDomain();
   return ops_.FormatVolume(config);
 }
 
 utils::Status RedisMetaImpl::LoadVolume(SwordFsVolume *config) {
+  utils::ExpectInThreadDomain();
   return ops_.LoadVolume(config);
 }
 
@@ -83,10 +88,12 @@ Limits RedisMetaImpl::GetLimits() const {
 }
 
 Status RedisMetaImpl::Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   return ops_.LookupEntry(parent_ino, name, out);
 }
 
 Status RedisMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   return ops_.GetInode(ino, out);
 }
 
@@ -98,6 +105,7 @@ void RedisMetaImpl::UpdateAtimeBestEffort(InodeID ino) {
 }
 
 Status RedisMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
+  utils::ExpectInFiberDomain();
   if (iterator == nullptr) {
     return Status::InvalidArgument("directory iterator output is null");
   }
@@ -124,6 +132,7 @@ Status RedisMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
 }
 
 Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   if (name.size() > kRedisLimits.max_name_length) {
     return Status::NameTooLong("file name exceeds maximum length");
   }
@@ -131,6 +140,7 @@ Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t
 }
 
 Status RedisMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   if (name.size() > kRedisLimits.max_name_length) {
     return Status::NameTooLong("directory name exceeds maximum length");
   }
@@ -149,7 +159,7 @@ Status RedisMetaImpl::CreateNode(InodeID parent_ino, std::string_view name, uint
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
   SwordFsInode child;
-  status = ops_.Transact([&](RedisMetaTxn &txn) {
+  status = ops_.TransactFromFiber([&](RedisMetaTxn &txn) {
     SwordFsInode parent;
     auto status = txn.LookupInode(parent_ino, &parent);
     if (!status.ok()) {
@@ -172,12 +182,13 @@ Status RedisMetaImpl::CreateNode(InodeID parent_ino, std::string_view name, uint
 }
 
 Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result) {
+  utils::ExpectInFiberDomain();
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot unlink . or ..");
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
   UnlinkResult unlink_result;
-  auto status = ops_.Transact([&](RedisMetaTxn &txn) {
+  auto status = ops_.TransactFromFiber([&](RedisMetaTxn &txn) {
     SwordFsInode parent;
     auto status = txn.LookupInode(parent_ino, &parent);
     if (!status.ok()) {
@@ -209,11 +220,12 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, UnlinkRe
 }
 
 Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
+  utils::ExpectInFiberDomain();
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot remove . or ..");
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
-  return ops_.Transact([&](RedisMetaTxn &txn) {
+  return ops_.TransactFromFiber([&](RedisMetaTxn &txn) {
     SwordFsInode parent;
     auto status = txn.LookupInode(parent_ino, &parent);
     if (!status.ok()) {
@@ -242,6 +254,7 @@ Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
 
 Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
                              std::string_view new_name, RenameFlag flags, RenameResult *result) {
+  utils::ExpectInFiberDomain();
   if (result != nullptr) {
     *result = {};
   }
@@ -266,7 +279,7 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
 
   const auto ctx = folly::fibers::local<SwordFsContext>();
   RenameResult rename_result;
-  auto status = ops_.Transact([&](RedisMetaTxn &txn) {
+  auto status = ops_.TransactFromFiber([&](RedisMetaTxn &txn) {
     SwordFsInode old_parent;
     auto status = txn.LookupInode(old_parent_ino, &old_parent);
     if (!status.ok()) {
@@ -338,10 +351,12 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
 }
 
 Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   return ops_.SetAttr(ino, requested, fields, out);
 }
 
 Status RedisMetaImpl::StatFs(SwordFsStatFs *stbuf) {
+  utils::ExpectInFiberDomain();
   if (!stbuf) {
     return Status::InvalidArgument("statfs output is null");
   }
@@ -363,6 +378,7 @@ Status RedisMetaImpl::StatFs(SwordFsStatFs *stbuf) {
 }
 
 Status RedisMetaImpl::Access(InodeID ino, uint32_t mask) {
+  utils::ExpectInFiberDomain();
   const auto ctx = folly::fibers::local<SwordFsContext>();
   SwordFsInode inode;
   auto status = ops_.GetInode(ino, &inode);
@@ -373,6 +389,7 @@ Status RedisMetaImpl::Access(InodeID ino, uint32_t mask) {
 }
 
 Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   if (name.size() > kRedisLimits.max_name_length) {
     return Status::NameTooLong("symlink name exceeds maximum length");
   }
@@ -383,7 +400,7 @@ Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::st
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
   SwordFsInode child;
-  status = ops_.Transact([&](RedisMetaTxn &txn) {
+  status = ops_.TransactFromFiber([&](RedisMetaTxn &txn) {
     SwordFsInode parent;
     auto status = txn.LookupInode(parent_ino, &parent);
     if (!status.ok()) {
@@ -407,12 +424,13 @@ Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::st
 }
 
 Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   if (newname.size() > kRedisLimits.max_name_length) {
     return Status::NameTooLong("link name exceeds maximum length");
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
   SwordFsInode linked;
-  auto status = ops_.Transact([&](RedisMetaTxn &txn) {
+  auto status = ops_.TransactFromFiber([&](RedisMetaTxn &txn) {
     SwordFsInode inode;
     auto status = txn.LookupInode(ino, &inode);
     if (!status.ok()) {
@@ -446,6 +464,7 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
 }
 
 Status RedisMetaImpl::Readlink(InodeID ino, std::string *target) {
+  utils::ExpectInFiberDomain();
   if (!target) {
     return Status::InvalidArgument("Readlink output is null");
   }
@@ -462,6 +481,7 @@ Status RedisMetaImpl::Readlink(InodeID ino, std::string *target) {
 }
 
 Status RedisMetaImpl::Open(InodeID ino) {
+  utils::ExpectInFiberDomain();
   SwordFsInode inode;
   auto status = ops_.GetInode(ino, &inode);
   if (!status.ok()) {
@@ -479,10 +499,12 @@ Status RedisMetaImpl::Open(InodeID ino) {
 }
 
 Status RedisMetaImpl::ReclaimInode(InodeID ino) {
+  utils::ExpectInFiberDomain();
   return ops_.ReclaimInode(ino);
 }
 
 Status RedisMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
+  utils::ExpectInFiberDomain();
   if (!visitor) {
     return Status::InvalidArgument("chunk visitor is null");
   }
@@ -499,14 +521,17 @@ Status RedisMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
 }
 
 Status RedisMetaImpl::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
+  utils::ExpectInFiberDomain();
   return ops_.AddChunk(ino, chunk);
 }
 
 Status RedisMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
+  utils::ExpectInFiberDomain();
   return ops_.FindChunk(ino, idx, chunk);
 }
 
 Status RedisMetaImpl::Truncate(InodeID ino, uint64_t size) {
+  utils::ExpectInFiberDomain();
   return ops_.Truncate(ino, size);
 }
 

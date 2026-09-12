@@ -14,6 +14,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "metadata/redis/RedisBackendContext.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
@@ -22,6 +23,7 @@
 #include "metadata/redis/RedisMetaTxn.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Inode.hpp"
+#include "utils/ExecutionDomain.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -117,7 +119,7 @@ TEST(RedisMetaClientTest, BinaryValueRoundTrip) {
   cleanup.set(key, value);
 
   std::string actual;
-  auto status = RunInFiber([&] { return store.Get(key, &actual); });
+  auto status = store.Get(key, &actual);
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(actual.size(), value.size());
   EXPECT_EQ(actual, value);
@@ -134,25 +136,27 @@ TEST(RedisMetaClientTest, BinaryValueSurvivesWriteTransaction) {
   const std::string parent_key = "swordfs:txn:parent";
   const std::string child_key = "swordfs:txn:child";
   const std::string child_value(172, '\0');
+  std::atomic<bool> callback_in_thread_domain{false};
 
-  auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &txn) {
-      std::string ignored;
-      auto status = txn.Get(parent_key, &ignored);
-      if (!status.IsNotFound()) {
-        return status;
-      }
-      status = txn.Set(child_key, child_value);
-      if (!status.ok()) {
-        return status;
-      }
-      return txn.Set(parent_key, "parent");
-    });
+  auto status = store.Transact([&](RedisKvTxn &txn) {
+    callback_in_thread_domain.store(utils::CurrentExecutionDomain() == utils::ExecutionDomain::kThread,
+                                    std::memory_order_relaxed);
+    std::string ignored;
+    auto status = txn.Get(parent_key, &ignored);
+    if (!status.IsNotFound()) {
+      return status;
+    }
+    status = txn.Set(child_key, child_value);
+    if (!status.ok()) {
+      return status;
+    }
+    return txn.Set(parent_key, "parent");
   });
   ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_TRUE(callback_in_thread_domain.load(std::memory_order_relaxed));
 
   std::string actual;
-  status = RunInFiber([&] { return store.Get(child_key, &actual); });
+  status = store.Get(child_key, &actual);
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(actual.size(), child_value.size());
   EXPECT_EQ(actual, child_value);
@@ -169,38 +173,34 @@ TEST(RedisMetaClientTest, StandalonePingAndWatchReadMultiExec) {
   }
 
   RedisMetaClient store(config);
-  auto status = RunInFiber([&] { return store.Ping(); });
+  auto status = store.Ping();
   ASSERT_TRUE(status.ok()) << status.message();
 
   const std::string key = "swordfs:phase0:watch-read-write";
   sw::redis::Redis cleanup(ConnectionOptions(config));
   cleanup.set(key, "before");
 
-  status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &transaction) {
-      std::string value;
-      auto txn_status = transaction.Get(key, &value);
-      if (!txn_status.ok()) {
-        return txn_status;
-      }
-      EXPECT_EQ(value, "before");
-      return transaction.Set(key, "ok");
-    });
+  status = store.Transact([&](RedisKvTxn &transaction) {
+    std::string value;
+    auto txn_status = transaction.Get(key, &value);
+    if (!txn_status.ok()) {
+      return txn_status;
+    }
+    EXPECT_EQ(value, "before");
+    return transaction.Set(key, "ok");
   });
   ASSERT_TRUE(status.ok()) << status.message();
 
-  status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &transaction) {
-      std::string value;
-      auto txn_status = transaction.Get(key, &value);
-      if (!txn_status.ok()) {
-        return txn_status;
-      }
-      if (value != "ok") {
-        return utils::Status::IOError("unexpected Redis value");
-      }
-      return utils::Status::OK();
-    });
+  status = store.Transact([&](RedisKvTxn &transaction) {
+    std::string value;
+    auto txn_status = transaction.Get(key, &value);
+    if (!txn_status.ok()) {
+      return txn_status;
+    }
+    if (value != "ok") {
+      return utils::Status::IOError("unexpected Redis value");
+    }
+    return utils::Status::OK();
   });
   EXPECT_TRUE(status.ok()) << status.message();
   cleanup.del(key);
@@ -218,20 +218,18 @@ TEST(RedisMetaClientTest, RetriesWatchConflict) {
 
   RedisMetaClient store(config);
   int attempts = 0;
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &transaction) {
-      ++attempts;
-      std::string value;
-      auto txn_status = transaction.Get(key, &value);
-      if (!txn_status.ok()) {
-        return txn_status;
-      }
+  const auto status = store.Transact([&](RedisKvTxn &transaction) {
+    ++attempts;
+    std::string value;
+    auto txn_status = transaction.Get(key, &value);
+    if (!txn_status.ok()) {
+      return txn_status;
+    }
 
-      if (attempts == 1) {
-        other.set(key, "raced");
-      }
-      return transaction.Set(key, "committed");
-    });
+    if (attempts == 1) {
+      other.set(key, "raced");
+    }
+    return transaction.Set(key, "committed");
   });
 
   ASSERT_TRUE(status.ok()) << status.message();
@@ -254,20 +252,18 @@ TEST(RedisMetaClientTest, RetriesReadOnlyWatchConflict) {
 
   RedisMetaClient store(config);
   int attempts = 0;
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &transaction) {
-      ++attempts;
-      std::string value;
-      auto txn_status = transaction.Get(key, &value);
-      if (!txn_status.ok()) {
-        return txn_status;
-      }
+  const auto status = store.Transact([&](RedisKvTxn &transaction) {
+    ++attempts;
+    std::string value;
+    auto txn_status = transaction.Get(key, &value);
+    if (!txn_status.ok()) {
+      return txn_status;
+    }
 
-      if (attempts == 1) {
-        other.set(key, "raced");
-      }
-      return utils::Status::OK();
-    });
+    if (attempts == 1) {
+      other.set(key, "raced");
+    }
+    return utils::Status::OK();
   });
 
   ASSERT_TRUE(status.ok()) << status.message();
@@ -283,14 +279,12 @@ TEST(RedisMetaClientTest, RetriesExplicitPreCommitFailure) {
 
   RedisMetaClient store(config);
   int attempts = 0;
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &transaction) {
-      ++attempts;
-      if (attempts == 1) {
-        return utils::Status::Busy("retry");
-      }
-      return transaction.Set("swordfs:phase0:retry", "ok");
-    });
+  const auto status = store.Transact([&](RedisKvTxn &transaction) {
+    ++attempts;
+    if (attempts == 1) {
+      return utils::Status::Busy("retry");
+    }
+    return transaction.Set("swordfs:phase0:retry", "ok");
   });
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(attempts, 2);
@@ -311,13 +305,11 @@ TEST(RedisMetaClientTest, RetriesUntilLimitIsExceeded) {
   config.retry_attempts = 3;
   RedisMetaClient store(config);
   int attempts = 0;
-  RunInFiber([&] {
-    const auto status = store.Transact([&](RedisKvTxn &) {
-      ++attempts;
-      return utils::Status::Busy("retry");
-    });
-    EXPECT_TRUE(status.IsBusy());
+  const auto status = store.Transact([&](RedisKvTxn &) {
+    ++attempts;
+    return utils::Status::Busy("retry");
   });
+  EXPECT_TRUE(status.IsBusy());
   EXPECT_EQ(attempts, 3);
 }
 
@@ -332,11 +324,9 @@ TEST(RedisMetaClientTest, ReadOnlyTransactionCommitsAsNoOp) {
   sw::redis::Redis cleanup(ConnectionOptions(config));
   cleanup.set(key, "value");
 
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &transaction) {
-      std::string value;
-      return transaction.Get(key, &value);
-    });
+  const auto status = store.Transact([&](RedisKvTxn &transaction) {
+    std::string value;
+    return transaction.Get(key, &value);
   });
   EXPECT_TRUE(status.ok()) << status.message();
   cleanup.del(key);
@@ -350,23 +340,21 @@ TEST(RedisMetaClientTest, KvTransactionValidatesOutputsAndRejectsReadAfterWrite)
 
   RedisMetaClient store(config);
   const std::string key = "swordfs:kv-validation";
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &txn) {
-      EXPECT_EQ(txn.Get(key, nullptr).code(), utils::Status::kInvalidArgument);
-      EXPECT_EQ(txn.HGet(key, "field", nullptr).code(), utils::Status::kInvalidArgument);
-      EXPECT_EQ(txn.HLen(key, nullptr).code(), utils::Status::kInvalidArgument);
+  const auto status = store.Transact([&](RedisKvTxn &txn) {
+    EXPECT_EQ(txn.Get(key, nullptr).code(), utils::Status::kInvalidArgument);
+    EXPECT_EQ(txn.HGet(key, "field", nullptr).code(), utils::Status::kInvalidArgument);
+    EXPECT_EQ(txn.HLen(key, nullptr).code(), utils::Status::kInvalidArgument);
 
-      auto status = txn.Set(key, "value");
-      if (!status.ok()) {
-        return status;
-      }
-      std::string value;
-      uint64_t length = 0;
-      EXPECT_EQ(txn.Get(key, &value).code(), utils::Status::kInvalidArgument);
-      EXPECT_EQ(txn.HGet(key, "field", &value).code(), utils::Status::kInvalidArgument);
-      EXPECT_EQ(txn.HLen(key, &length).code(), utils::Status::kInvalidArgument);
-      return utils::Status::OK();
-    });
+    auto status = txn.Set(key, "value");
+    if (!status.ok()) {
+      return status;
+    }
+    std::string value;
+    uint64_t length = 0;
+    EXPECT_EQ(txn.Get(key, &value).code(), utils::Status::kInvalidArgument);
+    EXPECT_EQ(txn.HGet(key, "field", &value).code(), utils::Status::kInvalidArgument);
+    EXPECT_EQ(txn.HLen(key, &length).code(), utils::Status::kInvalidArgument);
+    return utils::Status::OK();
   });
   EXPECT_TRUE(status.ok()) << status.message();
 
@@ -390,35 +378,33 @@ TEST(RedisMetaClientTest, KvTransactionCommitsHashCounterAndDeleteMutations) {
   redis.set(deleted_key, "value");
   redis.hset(hash_key, "old", "old-value");
 
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &txn) {
-      std::string value;
-      auto status = txn.HGet(hash_key, "old", &value);
-      if (!status.ok()) {
-        return status;
-      }
-      EXPECT_EQ(value, "old-value");
-      uint64_t length = 0;
-      status = txn.HLen(hash_key, &length);
-      if (!status.ok()) {
-        return status;
-      }
-      EXPECT_EQ(length, 1U);
+  const auto status = store.Transact([&](RedisKvTxn &txn) {
+    std::string value;
+    auto status = txn.HGet(hash_key, "old", &value);
+    if (!status.ok()) {
+      return status;
+    }
+    EXPECT_EQ(value, "old-value");
+    uint64_t length = 0;
+    status = txn.HLen(hash_key, &length);
+    if (!status.ok()) {
+      return status;
+    }
+    EXPECT_EQ(length, 1U);
 
-      status = txn.HSet(hash_key, "new", "new-value");
-      if (!status.ok()) {
-        return status;
-      }
-      status = txn.HDel(hash_key, "old");
-      if (!status.ok()) {
-        return status;
-      }
-      status = txn.IncrBy(counter_key, 5);
-      if (!status.ok()) {
-        return status;
-      }
-      return txn.Del(deleted_key);
-    });
+    status = txn.HSet(hash_key, "new", "new-value");
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.HDel(hash_key, "old");
+    if (!status.ok()) {
+      return status;
+    }
+    status = txn.IncrBy(counter_key, 5);
+    if (!status.ok()) {
+      return status;
+    }
+    return txn.Del(deleted_key);
   });
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(redis.hget(hash_key, "new").value_or(""), "new-value");
@@ -437,17 +423,71 @@ TEST(RedisMetaClientTest, PreservesCallbackErrorWithoutQueuedWrite) {
   }
 
   RedisMetaClient store(config);
-  const auto status = RunInFiber([&] {
-    return store.Transact([](RedisKvTxn &transaction) {
-      std::string value;
-      const auto get_status = transaction.Get("swordfs:phase0:missing", &value);
-      if (!get_status.ok()) {
-        return get_status;
-      }
-      return utils::Status::NotFound("expected missing key");
-    });
+  const auto status = store.Transact([](RedisKvTxn &transaction) {
+    std::string value;
+    const auto get_status = transaction.Get("swordfs:phase0:missing", &value);
+    if (!get_status.ok()) {
+      return get_status;
+    }
+    return utils::Status::NotFound("expected missing key");
   });
   EXPECT_TRUE(status.IsNotFound()) << status.message();
+}
+
+TEST(RedisMetaOpsTest, BackendContextMayBeReleasedByFiberAfterThreadShutdown) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.retry_attempts = 1;
+
+  auto ops = std::make_unique<RedisMetaOps>(config, UniqueVolumeName("lifecycle"));
+  std::shared_ptr<DirIterator> iterator;
+  RunInFiber([&] {
+    ASSERT_TRUE(ops->CreateDirIterator(kRootInodeId, {}, &iterator).ok());
+    ASSERT_NE(iterator, nullptr);
+  });
+
+  // RedisMetaOps is the thread-domain lifecycle owner. Its destructor drains
+  // and clears the blocking backend resources while the iterator may still be
+  // alive. Releasing the last iterator/context reference on a fiber must then
+  // be safe because no blocking resource remains to be destroyed there.
+  ops.reset();
+  RunInFiber([&] { iterator.reset(); });
+}
+
+#ifndef NDEBUG
+TEST(RedisMetaClientTest, RejectsFiberDomainCalls) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  RedisMetaClient store(config);
+
+  EXPECT_DEATH(
+      {
+        RunInFiber([&] {
+          std::string value;
+          (void)store.Get("swordfs:wrong-domain", &value);
+        });
+      },
+      "execution-domain violation at .*expected=POSIX-thread, actual=fiber");
+}
+#endif
+
+TEST(RedisMetaOpsTest, TransactionCallbackRunsInThreadDomain) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaOps ops(config, UniqueVolumeName("callback-domain"));
+  utils::ExecutionDomain callback_domain = utils::ExecutionDomain::kFiber;
+  const auto status = RunInFiber([&] {
+    return ops.TransactFromFiber([&](RedisMetaTxn &) {
+      callback_domain = utils::CurrentExecutionDomain();
+      return utils::Status::OK();
+    });
+  });
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(callback_domain, utils::ExecutionDomain::kThread);
 }
 
 TEST(RedisMetaOpsTest, GetInodeUsesDirectMetadataReadPath) {
@@ -519,14 +559,12 @@ TEST(RedisMetaTxnTest, EntryMutationsCarryStateThroughParameters) {
   ASSERT_TRUE(SeedInode(redis, key, root).ok());
   redis.set(key.InodeCount(), "1");
 
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
 
-      SwordFsAttr child_attr(2, S_IFDIR | 0755);
-      SwordFsInode child(2, child_attr, kRootInodeId);
-      return txn.AddEntry(kRootInodeId, "child", child, &root);
-    });
+    SwordFsAttr child_attr(2, S_IFDIR | 0755);
+    SwordFsInode child(2, child_attr, kRootInodeId);
+    return txn.AddEntry(kRootInodeId, "child", child, &root);
   });
   ASSERT_TRUE(status.ok()) << status.message();
 
@@ -560,11 +598,9 @@ TEST(RedisMetaTxnTest, AddEntryRejectsExistingNameWithoutPersistingChild) {
 
   SwordFsAttr child_attr(8, S_IFREG | 0644);
   SwordFsInode child(8, child_attr, kRootInodeId);
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      return txn.AddEntry(kRootInodeId, "child", child, &root);
-    });
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.AddEntry(kRootInodeId, "child", child, &root);
   });
   EXPECT_TRUE(status.IsAlreadyExists());
   EXPECT_FALSE(redis.exists(key.Inode(child.ino)));
@@ -589,12 +625,10 @@ TEST(RedisMetaTxnTest, MoveEntryPersistsExplicitState) {
   ASSERT_TRUE(SeedInode(redis, key, child).ok());
   ASSERT_TRUE(SeedEntry(redis, key, kRootInodeId, SwordFsEntry{"file", DT_REG, child.ino}).ok());
 
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      return txn.MoveEntry(kRootInodeId, "file", kRootInodeId, "moved", &root, &root, &child, nullptr,
-                           /*overwrite=*/true, nullptr);
-    });
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.MoveEntry(kRootInodeId, "file", kRootInodeId, "moved", &root, &root, &child, nullptr,
+                         /*overwrite=*/true, nullptr);
   });
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_FALSE(redis.hexists(key.Directory(kRootInodeId), "file"));
@@ -621,11 +655,9 @@ TEST(RedisMetaTxnTest, RemoveDirectoryPersistsLifecycleState) {
   ASSERT_TRUE(SeedEntry(redis, key, kRootInodeId, SwordFsEntry{"dir", DT_DIR, dir.ino}).ok());
   redis.set(key.InodeCount(), "2");
 
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      return txn.RemoveDirectory(kRootInodeId, "dir", &root, dir);
-    });
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.RemoveDirectory(kRootInodeId, "dir", &root, dir);
   });
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_FALSE(redis.hexists(key.Directory(kRootInodeId), "dir"));
@@ -652,18 +684,16 @@ TEST(RedisMetaTxnTest, ReadPrimitivesValidateOutputs) {
   SwordFsInode file(2, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      EXPECT_EQ(txn.LookupInode(file.ino, nullptr).code(), utils::Status::kInvalidArgument);
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    EXPECT_EQ(txn.LookupInode(file.ino, nullptr).code(), utils::Status::kInvalidArgument);
 
-      SwordFsInode missing;
-      auto status = txn.LookupEntry(file.ino, "missing", &missing);
-      EXPECT_TRUE(status.IsNotDirectory());
-      EXPECT_EQ(txn.LookupEntry(file.ino, "missing", nullptr).code(), utils::Status::kInvalidArgument);
+    SwordFsInode missing;
+    auto status = txn.LookupEntry(file.ino, "missing", &missing);
+    EXPECT_TRUE(status.IsNotDirectory());
+    EXPECT_EQ(txn.LookupEntry(file.ino, "missing", nullptr).code(), utils::Status::kInvalidArgument);
 
-      return utils::Status::OK();
-    });
+    return utils::Status::OK();
   });
   EXPECT_TRUE(status.ok()) << status.message();
 }
@@ -683,12 +713,10 @@ TEST(RedisMetaTxnTest, LookupEntryRejectsDanglingDirectoryEntry) {
   ASSERT_TRUE(SeedInode(redis, key, root).ok());
   ASSERT_TRUE(SeedEntry(redis, key, kRootInodeId, SwordFsEntry{"dangling", DT_REG, 99}).ok());
 
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      SwordFsInode out;
-      return txn.LookupEntry(kRootInodeId, "dangling", &out);
-    });
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    SwordFsInode out;
+    return txn.LookupEntry(kRootInodeId, "dangling", &out);
   });
   EXPECT_TRUE(status.IsMalformed()) << status.message();
 }
@@ -717,11 +745,9 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
   redis.hset(key.Chunk(9), "0", first_data);
   redis.hset(key.Chunk(9), "1", second_data);
 
-  const auto status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      return txn.Truncate(9, 1024);
-    });
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.Truncate(9, 1024);
   });
   ASSERT_TRUE(status.ok()) << status.message();
 
@@ -734,12 +760,10 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
 
   file.attr.size = 4096;
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
-  const auto invalid_status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 0);
-      EXPECT_EQ(txn.Truncate(9, 1024).code(), utils::Status::kInternal);
-      return utils::Status::OK();
-    });
+  const auto invalid_status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 0);
+    EXPECT_EQ(txn.Truncate(9, 1024).code(), utils::Status::kInternal);
+    return utils::Status::OK();
   });
   EXPECT_TRUE(invalid_status.ok()) << invalid_status.message();
 }
@@ -759,20 +783,16 @@ TEST(RedisMetaTxnTest, AddChunkRejectsDuplicateIndex) {
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
   SwordFsChunk chunk{0, 0, "first", 4096};
-  const auto first_status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      return txn.AddChunk(9, chunk);
-    });
+  const auto first_status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.AddChunk(9, chunk);
   });
   ASSERT_TRUE(first_status.ok()) << first_status.message();
 
   chunk.key = "replacement";
-  const auto duplicate_status = RunInFiber([&] {
-    return store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      return txn.AddChunk(9, chunk);
-    });
+  const auto duplicate_status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.AddChunk(9, chunk);
   });
   EXPECT_TRUE(duplicate_status.IsAlreadyExists()) << duplicate_status.message();
 

@@ -10,7 +10,7 @@ services:
       retries: 30
 
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     ports:
       - "${MINIO_PORT:-9000}:9000"
     environment:

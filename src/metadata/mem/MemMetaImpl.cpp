@@ -23,6 +23,7 @@
 #include "metadata/types/Entry.hpp"
 #include "metadata/types/Inode.hpp"
 #include "metadata/types/Volume.hpp"
+#include "utils/ExecutionDomain.hpp"
 #include "utils/Logging.hpp"
 
 namespace swordfs::metadata {
@@ -31,12 +32,21 @@ constexpr Limits kMemLimits{.max_name_length = 255, .max_free_inodes = UINT64_MA
 
 const RegisterMetaEngine kMemoryMetaEngine{"memory", MemMetaImpl::CreateInstance};
 
+MemMetaImpl::MemMetaImpl() {
+  utils::ExpectInThreadDomain();
+}
+
 utils::Status MemMetaImpl::CreateInstance(std::string_view, std::string_view, std::unique_ptr<IMetaEngine> *out) {
+  utils::ExpectInThreadDomain();
   if (out == nullptr) {
     return utils::Status::InvalidArgument("metadata engine output is null");
   }
   *out = std::make_unique<MemMetaImpl>();
   return utils::Status::OK();
+}
+
+MemMetaImpl::~MemMetaImpl() {
+  utils::ExpectInThreadDomain();
 }
 
 // Transaction model: every method below runs its metadata mutation as a
@@ -72,10 +82,12 @@ utils::Status MemMetaImpl::CreateInstance(std::string_view, std::string_view, st
 // ────────────────────────────────────────────────────────────────
 
 Status MemMetaImpl::Initialize() {
+  utils::ExpectInThreadDomain();
   return Status::OK();
 }
 
 Status MemMetaImpl::FormatVolume(const SwordFsVolume &config) {
+  utils::ExpectInThreadDomain();
   mem::VolumeFile file{config.name};
   if (file.Exists()) {
     return Status::AlreadyExists("volume already exists: " + config.name);
@@ -84,6 +96,7 @@ Status MemMetaImpl::FormatVolume(const SwordFsVolume &config) {
 }
 
 Status MemMetaImpl::LoadVolume(SwordFsVolume *config) {
+  utils::ExpectInThreadDomain();
   if (config == nullptr) {
     return Status::InvalidArgument("memory volume config output is null");
   }
@@ -95,6 +108,7 @@ Status MemMetaImpl::LoadVolume(SwordFsVolume *config) {
 // ────────────────────────────────────────────────────────────────
 
 Status MemMetaImpl::Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   SwordFsInode child;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     Status status = txn.LookupEntry(parent_ino, name, &child);
@@ -117,6 +131,7 @@ Status MemMetaImpl::Lookup(InodeID parent_ino, std::string_view name, SwordFsIno
 }
 
 Status MemMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   SwordFsInode inode;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status { return txn.LookupInode(ino, &inode); });
 
@@ -131,6 +146,7 @@ Status MemMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
 }
 
 Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   if (name.size() > kMemLimits.max_name_length) {
     return Status::NameTooLong("file name exceeds maximum length");
   }
@@ -168,6 +184,7 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t m
 }
 
 Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result) {
+  utils::ExpectInFiberDomain();
   // Refuse to unlink "." or ".."
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot unlink . or ..");
@@ -223,6 +240,7 @@ Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, UnlinkResu
 
 Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
                            std::string_view new_name, RenameFlag flags, RenameResult *result) {
+  utils::ExpectInFiberDomain();
   if (result) {
     *result = {};
   }
@@ -322,6 +340,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, In
 }
 
 Status MemMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   SwordFsInode result;
   Status status = store_.Transact(
       [&](MemMetaTxn &txn) -> Status { return txn.SetAttr(ino, attr, fields, out ? &result : nullptr); });
@@ -337,6 +356,7 @@ Status MemMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField f
 }
 
 Status MemMetaImpl::Access(InodeID ino, uint32_t mask) {
+  utils::ExpectInFiberDomain();
   const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
   return store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode inode;
@@ -353,6 +373,7 @@ Status MemMetaImpl::Access(InodeID ino, uint32_t mask) {
 }
 
 Status MemMetaImpl::Open(InodeID ino) {
+  utils::ExpectInFiberDomain();
   const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode inode;
@@ -393,6 +414,7 @@ Status MemMetaImpl::Open(InodeID ino) {
 }
 
 Status MemMetaImpl::ReclaimInode(InodeID ino) {
+  utils::ExpectInFiberDomain();
   return store_.Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
 }
 
@@ -401,6 +423,7 @@ Status MemMetaImpl::ReclaimInode(InodeID ino) {
 // ────────────────────────────────────────────────────────────────
 
 Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   if (name.size() > kMemLimits.max_name_length) {
     return Status::NameTooLong("directory name exceeds maximum length");
   }
@@ -439,6 +462,7 @@ Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mo
 }
 
 Status MemMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
+  utils::ExpectInFiberDomain();
   // Cannot remove "." or ".."
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot remove . or ..");
@@ -492,6 +516,7 @@ Status MemMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
 }
 
 Status MemMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
+  utils::ExpectInFiberDomain();
   if (iterator == nullptr) {
     return Status::InvalidArgument("directory iterator output is null");
   }
@@ -519,6 +544,7 @@ Status MemMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
 // ────────────────────────────────────────────────────────────────
 
 Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   if (name.size() > kMemLimits.max_name_length) {
     return Status::NameTooLong("symlink name exceeds maximum length");
   }
@@ -567,6 +593,7 @@ Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::stri
 }
 
 Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
   if (newname.size() > kMemLimits.max_name_length) {
     return Status::NameTooLong("link name exceeds maximum length");
   }
@@ -612,6 +639,7 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view ne
 }
 
 Status MemMetaImpl::Readlink(InodeID ino, std::string *target) {
+  utils::ExpectInFiberDomain();
   SwordFsInode inode;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     Status status = txn.LookupInode(ino, &inode);
@@ -638,14 +666,17 @@ Status MemMetaImpl::Readlink(InodeID ino, std::string *target) {
 // ────────────────────────────────────────────────────────────────
 
 Status MemMetaImpl::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
+  utils::ExpectInFiberDomain();
   return store_.Transact([&](MemMetaTxn &txn) { return txn.AddChunk(ino, chunk); });
 }
 
 Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
+  utils::ExpectInFiberDomain();
   return store_.Transact([&](MemMetaTxn &txn) { return txn.FindChunk(ino, idx, chunk); });
 }
 
 Status MemMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
+  utils::ExpectInFiberDomain();
   if (!visitor) {
     return Status::InvalidArgument("chunk visitor is null");
   }
@@ -664,6 +695,7 @@ Status MemMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
 }
 
 Status MemMetaImpl::Truncate(InodeID ino, uint64_t size) {
+  utils::ExpectInFiberDomain();
   Status status = store_.Transact([&](MemMetaTxn &txn) { return txn.Truncate(ino, size); });
   if (!status.ok()) {
     SWORDFS_LOG_DEBUG << "Truncate: ino " << ino << " to " << size << " failed: " << status.message();
@@ -676,6 +708,7 @@ Status MemMetaImpl::Truncate(InodeID ino, uint64_t size) {
 // ────────────────────────────────────────────────────────────────
 
 Status MemMetaImpl::StatFs(SwordFsStatFs *stbuf) {
+  utils::ExpectInFiberDomain();
   if (stbuf == nullptr) {
     return Status::InvalidArgument("statfs output is null");
   }

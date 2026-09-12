@@ -8,19 +8,17 @@
 #include <chrono>
 #include <functional>
 #include <memory>
-#include <optional>
 #include <string_view>
+#include <vector>
 
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "utils/Status.hpp"
 
-namespace swordfs::utils {
-class FiberThreadPool;
-}  // namespace swordfs::utils
-
 namespace swordfs::metadata {
 
+// Synchronous Redis adapter. This component is intentionally thread-domain
+// only: callers must perform any fiber -> thread transition before invoking it.
 class RedisMetaClient {
  public:
   explicit RedisMetaClient(const RedisMetaConfig &config);
@@ -36,18 +34,12 @@ class RedisMetaClient {
   utils::Status HScan(std::string_view key, uint64_t cursor, size_t count,
                       std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor);
 
-  // Runs an optimistic transaction. Every attempt exclusively uses one
-  // connection checked out from the Redis client's connection pool, so WATCH,
-  // reads, MULTI, queued writes and EXEC share the same connection. Busy and
-  // WATCH conflicts retry with bounded backoff.
+  // Runs one optimistic transaction entirely on the calling POSIX thread.
+  // WATCH, reads, MULTI, queued writes and EXEC share one Redis connection.
   utils::Status Transact(const std::function<utils::Status(RedisKvTxn &)> &callback);
 
  private:
-  utils::Status TransactImpl(const std::function<utils::Status(RedisKvTxn &)> &callback);
-
- private:
   std::unique_ptr<sw::redis::Redis> redis_;
-  std::unique_ptr<utils::FiberThreadPool> pool_;
   int retry_attempts_;
   std::chrono::milliseconds retry_backoff_;
 };

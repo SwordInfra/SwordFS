@@ -13,40 +13,22 @@
 
 namespace swordfs::utils {
 
-namespace detail {
-
-inline void CheckFiberSynchronizationDomain() {
-#ifndef NDEBUG
-  DCHECK(CurrentExecutionDomain() != ExecutionDomain::kBlockingThread)
-      << "fiber synchronization primitive used from blocking-thread domain";
-#endif
-}
-
-inline void CheckThreadSynchronizationDomain() {
-#ifndef NDEBUG
-  DCHECK(CurrentExecutionDomain() != ExecutionDomain::kFiber)
-      << "thread synchronization primitive used from fiber domain";
-#endif
-}
-
-}  // namespace detail
-
-// Synchronization for state owned by fiber-reachable business logic. Unknown
-// context is allowed for initialization and direct unit tests; explicitly
-// marked blocking-thread work is rejected in debug builds.
+// Synchronization for state owned by fiber-reachable business logic. In Debug
+// builds it may only be acquired while a Folly fiber is actively executing.
 class FiberMutex {
  public:
   void lock() {
-    detail::CheckFiberSynchronizationDomain();
+    ExpectInFiberDomain();
     mutex_.lock();
   }
 
   bool try_lock() {
-    detail::CheckFiberSynchronizationDomain();
+    ExpectInFiberDomain();
     return mutex_.try_lock();
   }
 
   void unlock() {
+    ExpectInFiberDomain();
     mutex_.unlock();
   }
 
@@ -57,30 +39,32 @@ class FiberMutex {
 class FiberRWMutex {
  public:
   void lock() {
-    detail::CheckFiberSynchronizationDomain();
+    ExpectInFiberDomain();
     mutex_.lock();
   }
 
   bool try_lock() {
-    detail::CheckFiberSynchronizationDomain();
+    ExpectInFiberDomain();
     return mutex_.try_lock();
   }
 
   void unlock() {
+    ExpectInFiberDomain();
     mutex_.unlock();
   }
 
   void lock_shared() {
-    detail::CheckFiberSynchronizationDomain();
+    ExpectInFiberDomain();
     mutex_.lock_shared();
   }
 
   bool try_lock_shared() {
-    detail::CheckFiberSynchronizationDomain();
+    ExpectInFiberDomain();
     return mutex_.try_lock_shared();
   }
 
   void unlock_shared() {
+    ExpectInFiberDomain();
     mutex_.unlock_shared();
   }
 
@@ -88,21 +72,22 @@ class FiberRWMutex {
   folly::fibers::TimedRWMutexWritePriority<folly::fibers::Baton> mutex_;
 };
 
-// Synchronization for blocking/POSIX-thread-only state. Fiber use is a
-// programming error and is rejected in debug builds.
+// Synchronization for POSIX-thread-only state. Fiber use is a programming
+// error and is rejected in Debug builds.
 class ThreadMutex {
  public:
   void lock() {
-    detail::CheckThreadSynchronizationDomain();
+    ExpectInThreadDomain();
     mutex_.lock();
   }
 
   bool try_lock() {
-    detail::CheckThreadSynchronizationDomain();
+    ExpectInThreadDomain();
     return mutex_.try_lock();
   }
 
   void unlock() {
+    ExpectInThreadDomain();
     mutex_.unlock();
   }
 
