@@ -78,7 +78,7 @@ utils::Status InodeHandle::Close() {
 }
 
 bool InodeHandle::MarkOrphanedIfOpen() {
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  std::lock_guard<utils::FiberMutex> lock(state_mutex_);
   if (open_count_ == 0) {
     return false;
   }
@@ -87,17 +87,17 @@ bool InodeHandle::MarkOrphanedIfOpen() {
 }
 
 uint64_t InodeHandle::open_count() const {
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  std::lock_guard<utils::FiberMutex> lock(state_mutex_);
   return open_count_;
 }
 
 void InodeHandle::AcquireRef() {
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  std::lock_guard<utils::FiberMutex> lock(state_mutex_);
   ++open_count_;
 }
 
 InodeHandle::ReleaseState InodeHandle::ReleaseRef() {
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  std::lock_guard<utils::FiberMutex> lock(state_mutex_);
   bool is_last = (--open_count_ == 0);
   return {is_last, is_last && orphaned_};
 }
@@ -119,12 +119,12 @@ InodeHandleManager &InodeHandleManager::Instance() {
 }
 
 void InodeHandleManager::Initialize() {
-  std::unique_lock lock(mutex_);
+  std::lock_guard<utils::FiberMutex> lock(mutex_);
   inode_handles_->clear();
 }
 
 std::shared_ptr<InodeHandle> InodeHandleManager::Get(metadata::InodeID ino, bool create_if_missing) {
-  std::unique_lock lock(mutex_);
+  std::lock_guard<utils::FiberMutex> lock(mutex_);
   auto it = inode_handles_->find(ino);
   if (it != inode_handles_->end()) {
     if (auto handle = it->second.lock()) {
@@ -166,7 +166,7 @@ utils::Status InodeHandle::ReclaimData() {
     SWORDFS_LOG_WARN << "ReclaimData(" << ino_ << ") refused: nlink=" << inode.attr.nlink
                      << " (>0). A concurrent Link won the race.";
     return utils::Status::OK();
-  } else if (open_count_ > 0) {
+  } else if (open_count() > 0) {
     // An fd is still open on this inode. The caller should have
     // routed through MarkOrphaned instead — refuse to drop the
     // underlying chunks/inode out from under it.

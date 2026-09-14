@@ -14,10 +14,13 @@
 #include <folly/container/F14Map.h>
 
 #include <cstdint>
+#include <memory>
+#include <vector>
 
 #include "chunk/Chunk.hpp"
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
+#include "utils/Synchronization.hpp"
 
 namespace folly {
 class IOBuf;
@@ -43,22 +46,22 @@ namespace vfs {
 
 class FileChunkManager {
  public:
-  using Map = folly::F14FastMap<metadata::ChunkIndex, chunk::Chunk>;
+  using Map = folly::F14FastMap<metadata::ChunkIndex, std::shared_ptr<chunk::Chunk>>;
 
   explicit FileChunkManager(metadata::InodeID ino) : ino_(ino) {
   }
 
-  /// Get the chunk at |idx|.  If not in the map, creates and
-  /// initializes it.  Returns nullptr on error or when
+  /// Get the chunk at |idx|. If not in the map, creates and
+  /// initializes it. Returns nullptr on error or when
   /// create_if_missing=false and no flushed data exists.
-  /// The pointer is valid only until the next non-const call.
-  chunk::Chunk *Get(metadata::ChunkIndex idx, bool create_if_missing);
+  /// The shared pointer keeps the chunk alive if the map is changed.
+  std::shared_ptr<chunk::Chunk> Get(metadata::ChunkIndex idx, bool create_if_missing);
 
   /// Return the next chunk that has data and is not yet sealed.
-  /// Seals it before returning.  Returns nullptr when all chunks
-  /// have been flushed.  The pointer is valid until the next
-  /// non-const call.
-  chunk::Chunk *GetNextFlushable();
+  /// Seals it before returning. Returns nullptr when all chunks
+  /// have been flushed. The shared pointer keeps it alive while
+  /// the caller performs the upload.
+  std::shared_ptr<chunk::Chunk> GetNextFlushable();
 
   /// Truncate cached chunks to those below |new_last_idx|.  Chunks at
   /// or beyond |new_last_idx| are dropped (their indices are appended
@@ -70,7 +73,7 @@ class FileChunkManager {
  private:
   metadata::InodeID ino_;
   size_t chunk_size_;
-  mutable std::mutex mutex_;
+  mutable utils::FiberMutex mutex_;
   Map chunks_;
 };
 
@@ -106,6 +109,11 @@ class FileReadWriter {
   size_t chunk_size_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
+  // Coordinate operations for one inode. Reads may proceed concurrently;
+  // writes, flushes, and truncates take exclusive ownership so they cannot
+  // race chunk state transitions. Fiber-aware waiting never blocks the
+  // EventBase driver thread.
+  mutable utils::FiberRWMutex operation_mutex_;
   FileChunkManager chunks_;
 };
 

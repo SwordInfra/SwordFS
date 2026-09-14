@@ -23,7 +23,7 @@ class S3Client;
 namespace swordfs {
 
 namespace utils {
-class FiberThreadPool;
+class BlockingExecutor;
 }
 
 namespace storage {
@@ -56,7 +56,7 @@ class S3DataEngine : public IDataEngine {
   std::string region_;
   std::string bucket_;
   std::string prefix_;
-  std::shared_ptr<swordfs::utils::FiberThreadPool> pool_;
+  std::unique_ptr<swordfs::utils::BlockingExecutor> executor_;
   std::unique_ptr<Aws::S3::S3Client> client_;
 };
 

@@ -12,6 +12,7 @@
 
 #include <set>
 
+#include "FiberTest.hpp"
 #include "TestMemMetaImpl.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "utils/Context.hpp"
@@ -67,7 +68,7 @@ class MemMetaImplReadDirTest : public ::testing::Test {
 // Empty directory
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, OpenDirEmpty) {
+FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirEmpty) {
   std::vector<SwordFsEntry> entries;
   Status st = CollectEntries(kRoot, &entries);
   EXPECT_TRUE(st.ok()) << st.message();
@@ -83,7 +84,7 @@ TEST_F(MemMetaImplReadDirTest, OpenDirEmpty) {
 // Non-empty directory
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, OpenDirWithEntries) {
+FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirWithEntries) {
   constexpr int kFiles = 10;
   for (int i = 0; i < kFiles; ++i) {
     InodeID ino = 0;
@@ -111,7 +112,7 @@ TEST_F(MemMetaImplReadDirTest, OpenDirWithEntries) {
 // OpenDir: caller-owned iterator can be continued
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, OpenDirIteratorSupportsPeekAdvanceAndSeek) {
+FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirIteratorSupportsPeekAdvanceAndSeek) {
   InodeID first_ino = 0, second_ino = 0;
   impl_->Create(kRoot, "first", 0644, &first_ino, nullptr);
   impl_->Create(kRoot, "second", 0644, &second_ino, nullptr);
@@ -145,7 +146,7 @@ TEST_F(MemMetaImplReadDirTest, OpenDirIteratorSupportsPeekAdvanceAndSeek) {
   iterator->Advance();
 }
 
-TEST_F(MemMetaImplReadDirTest, OpenDirReturnsIndependentIterators) {
+FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirReturnsIndependentIterators) {
   InodeID first_ino = 0, second_ino = 0;
   impl_->Create(kRoot, "first", 0644, &first_ino, nullptr);
   impl_->Create(kRoot, "second", 0644, &second_ino, nullptr);
@@ -177,7 +178,7 @@ TEST_F(MemMetaImplReadDirTest, OpenDirReturnsIndependentIterators) {
   second_iterator->Advance();
 }
 
-TEST_F(MemMetaImplReadDirTest, OpenDirRejectsNonDirectory) {
+FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirRejectsNonDirectory) {
   InodeID file_ino = 0;
   impl_->Create(kRoot, "regular", 0644, &file_ino, nullptr);
 
@@ -189,7 +190,7 @@ TEST_F(MemMetaImplReadDirTest, OpenDirRejectsNonDirectory) {
 // ReadDir: not a directory
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, OpenDirNotADirectory) {
+FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirNotADirectory) {
   InodeID file_ino = 0;
   impl_->Create(kRoot, "regular", 0644, &file_ino, nullptr);
 
@@ -202,7 +203,7 @@ TEST_F(MemMetaImplReadDirTest, OpenDirNotADirectory) {
 // Directory with mixed file types
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, OpenDirMixedTypes) {
+FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirMixedTypes) {
   InodeID f_ino = 0, d_ino = 0;
   impl_->Create(kRoot, "file.txt", 0644, &f_ino, nullptr);
   impl_->MkDir(kRoot, "subdir", 0755, &d_ino, nullptr);
@@ -228,7 +229,7 @@ TEST_F(MemMetaImplReadDirTest, OpenDirMixedTypes) {
 // After rename, entries are consistent
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, OpenDirAfterMove) {
+FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirAfterMove) {
   InodeID dir_a_ino = 0, dir_b_ino = 0;
   impl_->MkDir(kRoot, "a", 0755, &dir_a_ino, nullptr);
   impl_->MkDir(kRoot, "b", 0755, &dir_b_ino, nullptr);
@@ -265,7 +266,7 @@ TEST_F(MemMetaImplReadDirTest, OpenDirAfterMove) {
 // After delete, entry is gone
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, OpenDirAfterUnlink) {
+FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirAfterUnlink) {
   InodeID f_ino = 0;
   impl_->Create(kRoot, "to_delete", 0644, &f_ino, nullptr);
 
@@ -280,7 +281,7 @@ TEST_F(MemMetaImplReadDirTest, OpenDirAfterUnlink) {
 // Large directory
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplReadDirTest, OpenDirLargeDirectory) {
+FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirLargeDirectory) {
   constexpr int kFiles = 200;
   for (int i = 0; i < kFiles; ++i) {
     InodeID ino = 0;

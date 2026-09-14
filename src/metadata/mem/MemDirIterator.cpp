@@ -7,18 +7,22 @@
 
 #include <utility>
 
+#include "utils/ExecutionDomain.hpp"
+
 namespace swordfs::metadata {
 
 MemDirIterator::MemDirIterator(std::vector<SwordFsEntry> entries) : entries_(std::move(entries)) {
 }
 
 Status MemDirIterator::Seek(uint64_t cookie) {
+  utils::ExpectInFiberDomain();
   position_ = cookie;
   pending_next_.reset();
   return Status::OK();
 }
 
 Status MemDirIterator::Peek(SwordFsEntry *entry, uint64_t *next_cookie) {
+  utils::ExpectInFiberDomain();
   if (entry == nullptr || next_cookie == nullptr) {
     return Status::InvalidArgument("directory iterator output is null");
   }
@@ -36,6 +40,7 @@ Status MemDirIterator::Peek(SwordFsEntry *entry, uint64_t *next_cookie) {
 }
 
 void MemDirIterator::Advance() {
+  utils::ExpectInFiberDomain();
   CHECK(pending_next_.has_value());
   position_ = *pending_next_;
   pending_next_.reset();

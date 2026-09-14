@@ -6,6 +6,7 @@
 #include <folly/logging/xlog.h>
 
 #include "metadata/redis/RedisMetaClient.hpp"
+#include "utils/ExecutionDomain.hpp"
 #include "utils/Logging.hpp"
 
 namespace swordfs::metadata {
@@ -15,8 +16,14 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
   return utils::Status::IOError("Redis " + std::string(operation) + " failed: " + error.what());
 }
 
+sw::redis::Transaction CreateTransaction(sw::redis::Redis &redis) {
+  utils::ExpectInThreadDomain();
+  return redis.transaction(false, false);
+}
+
 template <typename Fn>
 utils::Status RunRedisCommand(const char *operation, Fn &&fn) {
+  utils::ExpectInThreadDomain();
   try {
     return fn();
   } catch (const sw::redis::TimeoutError &) {
@@ -31,7 +38,8 @@ utils::Status RunRedisCommand(const char *operation, Fn &&fn) {
 }  // namespace
 
 RedisKvTxn::RedisKvTxn(sw::redis::Redis &redis)
-    : transaction_(redis.transaction(false, false)), redis_(transaction_->redis()) {
+    : transaction_(std::make_unique<sw::redis::Transaction>(CreateTransaction(redis))),
+      redis_(std::make_unique<sw::redis::Redis>(transaction_->redis())) {
 }
 
 utils::Status RedisKvTxn::Get(std::string_view key, std::string *value) {
@@ -125,6 +133,7 @@ utils::Status RedisKvTxn::Del(std::string_view key) {
 }
 
 utils::Status RedisKvTxn::ReleaseConnection() {
+  utils::ExpectInThreadDomain();
   try {
     transaction_->ping();
     transaction_->exec();
@@ -141,16 +150,19 @@ utils::Status RedisKvTxn::ReleaseConnection() {
 }
 
 void RedisKvTxn::Discard() noexcept {
+  utils::ExpectInThreadDomain();
   try {
     if (!has_writes_) {
       transaction_->ping();
     }
     transaction_->discard();
-  } catch (const sw::redis::Error &) {
+  } catch (const sw::redis::Error &error) {
+    SWORDFS_LOG_DEBUG << "Redis transaction discard failed: " << error.what();
   }
 }
 
 utils::Status RedisKvTxn::Commit() {
+  utils::ExpectInThreadDomain();
   if (!has_writes_) {
     return ReleaseConnection();
   }

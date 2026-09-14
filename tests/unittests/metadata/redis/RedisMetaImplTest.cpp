@@ -8,10 +8,13 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <functional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
+#include "FiberTest.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/redis/RedisMetaImpl.hpp"
@@ -66,7 +69,9 @@ class RedisMetaImplTest : public ::testing::Test {
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
 
-  sw::redis::Redis RawRedis() const {
+  template <typename Fn>
+  decltype(auto) WithRawRedisOnThread(Fn &&fn) const {
+    swordfs::utils::ExpectInThreadDomain();
     sw::redis::ConnectionOptions options;
     options.host = config_.host;
     options.port = config_.port;
@@ -77,7 +82,14 @@ class RedisMetaImplTest : public ::testing::Test {
     if (config_.password.has_value()) {
       options.password = *config_.password;
     }
-    return sw::redis::Redis(options);
+    sw::redis::Redis redis(options);
+    return std::invoke(std::forward<Fn>(fn), redis);
+  }
+
+  template <typename Fn>
+  decltype(auto) RunWithRawRedisFromFiber(Fn &&fn) const {
+    return swordfs::test::RunInTestThreadFromFiber(
+        [this, fn = std::forward<Fn>(fn)]() mutable -> decltype(auto) { return WithRawRedisOnThread(std::move(fn)); });
   }
 
   std::unique_ptr<RedisMetaImpl> impl_;
@@ -85,7 +97,7 @@ class RedisMetaImplTest : public ::testing::Test {
   std::string volume_name_;
 };
 
-TEST_F(RedisMetaImplTest, OpenDirReturnsIndependentIteratorsAndSupportsSeek) {
+FIBER_TEST_F(RedisMetaImplTest, OpenDirReturnsIndependentIteratorsAndSupportsSeek) {
   SwordFsInode first;
   SwordFsInode second;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "first", 0644, &first).ok());
@@ -138,7 +150,7 @@ TEST_F(RedisMetaImplTest, OpenDirReturnsIndependentIteratorsAndSupportsSeek) {
   second_iterator->Advance();
 }
 
-TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesSameParentNlink) {
+FIBER_TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesSameParentNlink) {
   SwordFsInode src;
   SwordFsInode dst;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "src", 0777, &src).ok());
@@ -155,7 +167,7 @@ TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesSameParentNlin
   EXPECT_EQ(root.attr.nlink, 3U);
 }
 
-TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesCrossParentNlink) {
+FIBER_TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesCrossParentNlink) {
   SwordFsInode dir_a;
   SwordFsInode dir_b;
   SwordFsInode src;
@@ -177,7 +189,7 @@ TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesCrossParentNli
   EXPECT_EQ(new_parent.attr.nlink, 3U);
 }
 
-TEST_F(RedisMetaImplTest, ConcurrentOpenDoesNotFailOnAtimeContention) {
+FIBER_TEST_F(RedisMetaImplTest, ConcurrentOpenDoesNotFailOnAtimeContention) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
 
@@ -187,10 +199,10 @@ TEST_F(RedisMetaImplTest, ConcurrentOpenDoesNotFailOnAtimeContention) {
   std::vector<Status> statuses(kThreadCount);
   threads.reserve(kThreadCount);
   for (size_t i = 0; i < kThreadCount; ++i) {
-    threads.emplace_back([this, &statuses, file_ino, i] {
+    threads.push_back(swordfs::test::StartFiberTestThread([this, &statuses, file_ino, i] {
       folly::fibers::local<SwordFsContext>() = SwordFsContext{};
       statuses[i] = impl_->Open(file_ino);
-    });
+    }));
   }
   for (auto &thread : threads) {
     thread.join();
@@ -200,7 +212,7 @@ TEST_F(RedisMetaImplTest, ConcurrentOpenDoesNotFailOnAtimeContention) {
   }
 }
 
-TEST_F(RedisMetaImplTest, SetAttrPreservesExplicitCtime) {
+FIBER_TEST_F(RedisMetaImplTest, SetAttrPreservesExplicitCtime) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
 
@@ -215,7 +227,7 @@ TEST_F(RedisMetaImplTest, SetAttrPreservesExplicitCtime) {
   EXPECT_EQ(actual.attr.ctime_nsec, requested.ctime_nsec);
 }
 
-TEST_F(RedisMetaImplTest, SetAttrSameOwnerKeepsSuidSgid) {
+FIBER_TEST_F(RedisMetaImplTest, SetAttrSameOwnerKeepsSuidSgid) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0755, &file).ok());
 
@@ -229,7 +241,7 @@ TEST_F(RedisMetaImplTest, SetAttrSameOwnerKeepsSuidSgid) {
   EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), requested.mode & (S_ISUID | S_ISGID));
 }
 
-TEST_F(RedisMetaImplTest, SetAttrShrinkRemovesAndClampsChunks) {
+FIBER_TEST_F(RedisMetaImplTest, SetAttrShrinkRemovesAndClampsChunks) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
 
@@ -259,14 +271,15 @@ TEST_F(RedisMetaImplTest, SetAttrShrinkRemovesAndClampsChunks) {
   EXPECT_TRUE(impl_->FindChunk(file.ino, 1, &actual).IsNotFound());
 }
 
-TEST_F(RedisMetaImplTest, VolumeAndBasicLookupOperations) {
+FIBER_TEST_F(RedisMetaImplTest, VolumeAndBasicLookupOperations) {
   SwordFsVolume volume;
   volume.name = volume_name_;
-  ASSERT_TRUE(impl_->LoadVolume(&volume).ok());
+  ASSERT_TRUE(swordfs::test::RunInTestThreadFromFiber([&] { return impl_->LoadVolume(&volume); }).ok());
   EXPECT_EQ(volume.name, volume_name_);
   EXPECT_EQ(volume.chunk_size, 4096U);
-  EXPECT_EQ(impl_->LoadVolume(nullptr).code(), Status::kInvalidArgument);
-  EXPECT_TRUE(impl_->FormatVolume(volume).IsAlreadyExists());
+  EXPECT_EQ(swordfs::test::RunInTestThreadFromFiber([&] { return impl_->LoadVolume(nullptr); }).code(),
+            Status::kInvalidArgument);
+  EXPECT_TRUE(swordfs::test::RunInTestThreadFromFiber([&] { return impl_->FormatVolume(volume); }).IsAlreadyExists());
 
   SwordFsInode root;
   ASSERT_TRUE(impl_->GetInode(kRootInodeId, &root).ok());
@@ -287,7 +300,7 @@ TEST_F(RedisMetaImplTest, VolumeAndBasicLookupOperations) {
   EXPECT_TRUE(impl_->Lookup(file.ino, "child", &found).IsNotDirectory());
 }
 
-TEST_F(RedisMetaImplTest, CreateAndMkdirValidateNamesParentsAndDuplicates) {
+FIBER_TEST_F(RedisMetaImplTest, CreateAndMkdirValidateNamesParentsAndDuplicates) {
   const std::string long_name(256, 'x');
   EXPECT_TRUE(impl_->Create(kRootInodeId, long_name, 0644, nullptr).IsNameTooLong());
   EXPECT_TRUE(impl_->MkDir(kRootInodeId, long_name, 0755, nullptr).IsNameTooLong());
@@ -301,7 +314,7 @@ TEST_F(RedisMetaImplTest, CreateAndMkdirValidateNamesParentsAndDuplicates) {
   EXPECT_TRUE(impl_->Create(999999, "child", 0644, nullptr).IsNotFound());
 }
 
-TEST_F(RedisMetaImplTest, UnlinkAndRmdirCoverSuccessAndTypeChecks) {
+FIBER_TEST_F(RedisMetaImplTest, UnlinkAndRmdirCoverSuccessAndTypeChecks) {
   SwordFsInode file;
   SwordFsInode dir;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
@@ -327,7 +340,7 @@ TEST_F(RedisMetaImplTest, UnlinkAndRmdirCoverSuccessAndTypeChecks) {
   ASSERT_TRUE(impl_->RmDir(kRootInodeId, "dir").ok());
 }
 
-TEST_F(RedisMetaImplTest, RenameCoversMoveOverwriteNoReplaceAndExchange) {
+FIBER_TEST_F(RedisMetaImplTest, RenameCoversMoveOverwriteNoReplaceAndExchange) {
   SwordFsInode first;
   SwordFsInode second;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "first", 0644, &first).ok());
@@ -375,7 +388,7 @@ TEST_F(RedisMetaImplTest, RenameCoversMoveOverwriteNoReplaceAndExchange) {
           .IsNotFound());
 }
 
-TEST_F(RedisMetaImplTest, RenameRejectsTypeMismatchAndDirectoryCycles) {
+FIBER_TEST_F(RedisMetaImplTest, RenameRejectsTypeMismatchAndDirectoryCycles) {
   SwordFsInode dir;
   SwordFsInode file;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
@@ -396,7 +409,7 @@ TEST_F(RedisMetaImplTest, RenameRejectsTypeMismatchAndDirectoryCycles) {
       Status::kInvalidArgument);
 }
 
-TEST_F(RedisMetaImplTest, SetAttrAccessAndStatFsCoverCommonFields) {
+FIBER_TEST_F(RedisMetaImplTest, SetAttrAccessAndStatFsCoverCommonFields) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 06755, &file).ok());
 
@@ -436,7 +449,7 @@ TEST_F(RedisMetaImplTest, SetAttrAccessAndStatFsCoverCommonFields) {
   EXPECT_EQ(impl_->StatFs(nullptr).code(), Status::kInvalidArgument);
 }
 
-TEST_F(RedisMetaImplTest, SymlinkHardLinkAndOpenBehaveLikePosixMetadata) {
+FIBER_TEST_F(RedisMetaImplTest, SymlinkHardLinkAndOpenBehaveLikePosixMetadata) {
   SwordFsInode link;
   ASSERT_TRUE(impl_->Symlink(kRootInodeId, "link", "target/path", &link).ok());
   std::string target;
@@ -459,7 +472,7 @@ TEST_F(RedisMetaImplTest, SymlinkHardLinkAndOpenBehaveLikePosixMetadata) {
   EXPECT_TRUE(impl_->Open(file.ino).ok());
 }
 
-TEST_F(RedisMetaImplTest, ChunkVisitFindAndTruncateCoverSparseMetadata) {
+FIBER_TEST_F(RedisMetaImplTest, ChunkVisitFindAndTruncateCoverSparseMetadata) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   ASSERT_TRUE(impl_->Truncate(file.ino, 9000).ok());
@@ -492,7 +505,7 @@ TEST_F(RedisMetaImplTest, ChunkVisitFindAndTruncateCoverSparseMetadata) {
   ASSERT_TRUE(impl_->Truncate(file.ino, 0).ok());
 }
 
-TEST_F(RedisMetaImplTest, ChunkAndOpenOperationsRejectWrongInodeTypes) {
+FIBER_TEST_F(RedisMetaImplTest, ChunkAndOpenOperationsRejectWrongInodeTypes) {
   SwordFsInode dir;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
   SwordFsChunk chunk{.index = 0, .start_offset = 0, .size = 1};
@@ -508,7 +521,7 @@ TEST_F(RedisMetaImplTest, ChunkAndOpenOperationsRejectWrongInodeTypes) {
   EXPECT_TRUE(impl_->OpenDir(file.ino, &iterator).IsNotDirectory());
 }
 
-TEST_F(RedisMetaImplTest, ReclaimKeepsLinkedInodesAndRemovesOrphans) {
+FIBER_TEST_F(RedisMetaImplTest, ReclaimKeepsLinkedInodesAndRemovesOrphans) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   ASSERT_TRUE(impl_->ReclaimInode(file.ino).ok());
@@ -520,7 +533,7 @@ TEST_F(RedisMetaImplTest, ReclaimKeepsLinkedInodesAndRemovesOrphans) {
   EXPECT_TRUE(impl_->ReclaimInode(file.ino).ok());
 }
 
-TEST_F(RedisMetaImplTest, PermissionChecksRejectMutationsForUnprivilegedCaller) {
+FIBER_TEST_F(RedisMetaImplTest, PermissionChecksRejectMutationsForUnprivilegedCaller) {
   SwordFsAttr root_attr;
   SwordFsInode root;
   ASSERT_TRUE(impl_->GetInode(kRootInodeId, &root).ok());
@@ -551,7 +564,7 @@ TEST_F(RedisMetaImplTest, PermissionChecksRejectMutationsForUnprivilegedCaller) 
   EXPECT_TRUE(impl_->Link(file.ino, kRootInodeId, "hard", nullptr).IsPermission());
 }
 
-TEST_F(RedisMetaImplTest, StickyDirectoryProtectsEntriesOwnedByOtherUsers) {
+FIBER_TEST_F(RedisMetaImplTest, StickyDirectoryProtectsEntriesOwnedByOtherUsers) {
   SwordFsInode sticky;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "sticky", 0777, &sticky).ok());
   SwordFsAttr attr = sticky.attr;
@@ -577,7 +590,7 @@ TEST_F(RedisMetaImplTest, StickyDirectoryProtectsEntriesOwnedByOtherUsers) {
                   .IsPermission());
 }
 
-TEST_F(RedisMetaImplTest, RenameExchangeDirectoriesAcrossParentsUpdatesParents) {
+FIBER_TEST_F(RedisMetaImplTest, RenameExchangeDirectoriesAcrossParentsUpdatesParents) {
   SwordFsInode left;
   SwordFsInode right;
   SwordFsInode left_dir;
@@ -598,7 +611,7 @@ TEST_F(RedisMetaImplTest, RenameExchangeDirectoriesAcrossParentsUpdatesParents) 
   EXPECT_EQ(found.parent_ino, right.ino);
 }
 
-TEST_F(RedisMetaImplTest, RenameSameInodeThroughHardLinkIsNoOp) {
+FIBER_TEST_F(RedisMetaImplTest, RenameSameInodeThroughHardLinkIsNoOp) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   ASSERT_TRUE(impl_->Link(file.ino, kRootInodeId, "alias", nullptr).ok());
@@ -610,7 +623,7 @@ TEST_F(RedisMetaImplTest, RenameSameInodeThroughHardLinkIsNoOp) {
           .ok());
 }
 
-TEST_F(RedisMetaImplTest, SetAttrNowAndGrowPreserveExpectedMetadata) {
+FIBER_TEST_F(RedisMetaImplTest, SetAttrNowAndGrowPreserveExpectedMetadata) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 06755, &file).ok());
   const auto old_atime = file.attr.atime;
@@ -628,7 +641,7 @@ TEST_F(RedisMetaImplTest, SetAttrNowAndGrowPreserveExpectedMetadata) {
   EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), 0U);
 }
 
-TEST_F(RedisMetaImplTest, VisitChunksPropagatesVisitorFailure) {
+FIBER_TEST_F(RedisMetaImplTest, VisitChunksPropagatesVisitorFailure) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   SwordFsChunk chunk{.index = 0, .start_offset = 0, .size = 1};
@@ -638,7 +651,7 @@ TEST_F(RedisMetaImplTest, VisitChunksPropagatesVisitorFailure) {
   EXPECT_EQ(status.code(), Status::kIOError);
 }
 
-TEST_F(RedisMetaImplTest, SymlinkAndLinkValidateLongNamesAndParentTypes) {
+FIBER_TEST_F(RedisMetaImplTest, SymlinkAndLinkValidateLongNamesAndParentTypes) {
   const std::string long_name(256, 'x');
   EXPECT_TRUE(impl_->Symlink(kRootInodeId, long_name, "target", nullptr).IsNameTooLong());
 
@@ -653,7 +666,7 @@ TEST_F(RedisMetaImplTest, SymlinkAndLinkValidateLongNamesAndParentTypes) {
   EXPECT_TRUE(impl_->Symlink(kRootInodeId, "link", "target", nullptr).IsAlreadyExists());
 }
 
-TEST_F(RedisMetaImplTest, UnlinkRejectsLinkCountUnderflowWithoutRemovingEntry) {
+FIBER_TEST_F(RedisMetaImplTest, UnlinkRejectsLinkCountUnderflowWithoutRemovingEntry) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
 
@@ -662,36 +675,38 @@ TEST_F(RedisMetaImplTest, UnlinkRejectsLinkCountUnderflowWithoutRemovingEntry) {
   ASSERT_TRUE(file.SerializeTo(&value).ok());
 
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
-  auto redis = RawRedis();
-  redis.set(key.Inode(file.ino), value);
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.Inode(file.ino), value); });
 
   UnlinkResult result;
   EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file", &result).IsMalformed());
-  EXPECT_TRUE(redis.hexists(key.Directory(kRootInodeId), "file"));
+  EXPECT_TRUE(RunWithRawRedisFromFiber(
+      [&](sw::redis::Redis &redis) { return redis.hexists(key.Directory(kRootInodeId), "file"); }));
 }
 
-TEST_F(RedisMetaImplTest, RmDirRejectsParentLinkCountUnderflowWithoutRemovingDirectory) {
+FIBER_TEST_F(RedisMetaImplTest, RmDirRejectsParentLinkCountUnderflowWithoutRemovingDirectory) {
   SwordFsInode dir;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
 
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
-  auto redis = RawRedis();
-  std::string value = redis.get(key.Inode(kRootInodeId)).value_or("");
+  std::string value = RunWithRawRedisFromFiber(
+      [&](sw::redis::Redis &redis) { return redis.get(key.Inode(kRootInodeId)).value_or(""); });
   SwordFsInode root;
   ASSERT_TRUE(root.ParseFrom(value).ok());
   root.attr.nlink = 2;
   ASSERT_TRUE(root.SerializeTo(&value).ok());
-  redis.set(key.Inode(kRootInodeId), value);
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.Inode(kRootInodeId), value); });
 
   EXPECT_TRUE(impl_->RmDir(kRootInodeId, "dir").IsMalformed());
-  EXPECT_TRUE(redis.hexists(key.Directory(kRootInodeId), "dir"));
-  EXPECT_TRUE(redis.exists(key.Inode(dir.ino)));
+  const auto [entry_exists, inode_exists] = RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
+    return std::pair{redis.hexists(key.Directory(kRootInodeId), "dir"), redis.exists(key.Inode(dir.ino))};
+  });
+  EXPECT_TRUE(entry_exists);
+  EXPECT_TRUE(inode_exists);
 }
 
-TEST_F(RedisMetaImplTest, MalformedParentMetadataIsRejectedAcrossMutatingOperations) {
+FIBER_TEST_F(RedisMetaImplTest, MalformedParentMetadataIsRejectedAcrossMutatingOperations) {
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
-  auto redis = RawRedis();
-  redis.set(key.Inode(kRootInodeId), "malformed");
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.Inode(kRootInodeId), "malformed"); });
 
   SwordFsInode out;
   EXPECT_TRUE(impl_->Lookup(kRootInodeId, "x", &out).IsMalformed());
@@ -705,13 +720,12 @@ TEST_F(RedisMetaImplTest, MalformedParentMetadataIsRejectedAcrossMutatingOperati
   EXPECT_TRUE(impl_->Access(kRootInodeId, R_OK).IsMalformed());
 }
 
-TEST_F(RedisMetaImplTest, MalformedInodeMetadataIsRejectedAcrossReadAndWriteOperations) {
+FIBER_TEST_F(RedisMetaImplTest, MalformedInodeMetadataIsRejectedAcrossReadAndWriteOperations) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
 
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
-  auto redis = RawRedis();
-  redis.set(key.Inode(file.ino), "malformed");
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.Inode(file.ino), "malformed"); });
 
   SwordFsInode out;
   SwordFsAttr attr;
@@ -733,13 +747,13 @@ TEST_F(RedisMetaImplTest, MalformedInodeMetadataIsRejectedAcrossReadAndWriteOper
   EXPECT_TRUE(impl_->Truncate(file.ino, 1).IsMalformed());
 }
 
-TEST_F(RedisMetaImplTest, MalformedDirectoryEntryIsRejectedByEntryConsumers) {
+FIBER_TEST_F(RedisMetaImplTest, MalformedDirectoryEntryIsRejectedByEntryConsumers) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
 
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
-  auto redis = RawRedis();
-  redis.hset(key.Directory(kRootInodeId), "file", "malformed");
+  RunWithRawRedisFromFiber(
+      [&](sw::redis::Redis &redis) { redis.hset(key.Directory(kRootInodeId), "file", "malformed"); });
 
   SwordFsInode out;
   EXPECT_TRUE(impl_->Lookup(kRootInodeId, "file", &out).IsMalformed());
@@ -753,15 +767,14 @@ TEST_F(RedisMetaImplTest, MalformedDirectoryEntryIsRejectedByEntryConsumers) {
                   .IsMalformed());
 }
 
-TEST_F(RedisMetaImplTest, MalformedRenameTargetInodeIsRejected) {
+FIBER_TEST_F(RedisMetaImplTest, MalformedRenameTargetInodeIsRejected) {
   SwordFsInode source;
   SwordFsInode target;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "source", 0644, &source).ok());
   ASSERT_TRUE(impl_->Create(kRootInodeId, "target", 0644, &target).ok());
 
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
-  auto redis = RawRedis();
-  redis.set(key.Inode(target.ino), "malformed");
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.Inode(target.ino), "malformed"); });
 
   EXPECT_TRUE(
       impl_->Rename(kRootInodeId, "source", kRootInodeId, "target", swordfs::metadata::RenameFlag::kNone, nullptr)
@@ -771,14 +784,13 @@ TEST_F(RedisMetaImplTest, MalformedRenameTargetInodeIsRejected) {
           .IsMalformed());
 }
 
-TEST_F(RedisMetaImplTest, MalformedChunkMetadataIsRejectedByVisitorsAndTruncate) {
+FIBER_TEST_F(RedisMetaImplTest, MalformedChunkMetadataIsRejectedByVisitorsAndTruncate) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   ASSERT_TRUE(impl_->Truncate(file.ino, 4096).ok());
 
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
-  auto redis = RawRedis();
-  redis.hset(key.Chunk(file.ino), "0", "malformed");
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.hset(key.Chunk(file.ino), "0", "malformed"); });
 
   SwordFsChunk chunk;
   EXPECT_TRUE(impl_->FindChunk(file.ino, 0, &chunk).IsMalformed());
@@ -786,21 +798,20 @@ TEST_F(RedisMetaImplTest, MalformedChunkMetadataIsRejectedByVisitorsAndTruncate)
   EXPECT_TRUE(impl_->Truncate(file.ino, 100).IsMalformed());
 }
 
-TEST_F(RedisMetaImplTest, LoadVolumeAndStatFsRejectCorruptPersistentState) {
+FIBER_TEST_F(RedisMetaImplTest, LoadVolumeAndStatFsRejectCorruptPersistentState) {
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
-  auto redis = RawRedis();
 
   SwordFsVolume volume;
   volume.name = volume_name_;
-  redis.set(key.Format(), "malformed");
-  EXPECT_TRUE(impl_->LoadVolume(&volume).IsMalformed());
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.Format(), "malformed"); });
+  EXPECT_TRUE(swordfs::test::RunInTestThreadFromFiber([&] { return impl_->LoadVolume(&volume); }).IsMalformed());
 
-  redis.set(key.InodeCount(), "not-a-number");
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.InodeCount(), "not-a-number"); });
   swordfs::metadata::SwordFsStatFs stat;
   EXPECT_EQ(impl_->StatFs(&stat).code(), Status::kIOError);
 }
 
-TEST_F(RedisMetaImplTest, MissingMetadataReturnsNotFoundConsistently) {
+FIBER_TEST_F(RedisMetaImplTest, MissingMetadataReturnsNotFoundConsistently) {
   constexpr InodeID kMissingIno = 999999;
   SwordFsInode inode;
   SwordFsAttr attr;
@@ -828,7 +839,7 @@ TEST_F(RedisMetaImplTest, MissingMetadataReturnsNotFoundConsistently) {
   EXPECT_TRUE(impl_->Truncate(kMissingIno, 1).IsNotFound());
 }
 
-TEST_F(RedisMetaImplTest, RenameChecksNewParentAndNonEmptyTargetDirectory) {
+FIBER_TEST_F(RedisMetaImplTest, RenameChecksNewParentAndNonEmptyTargetDirectory) {
   SwordFsInode source_parent;
   SwordFsInode source;
   SwordFsInode target_parent;
@@ -858,7 +869,7 @@ TEST_F(RedisMetaImplTest, RenameChecksNewParentAndNonEmptyTargetDirectory) {
                   .IsPermission());
 }
 
-TEST_F(RedisMetaImplTest, CreatePreservesRequestUidAcrossRedisWorker) {
+FIBER_TEST_F(RedisMetaImplTest, CreatePreservesRequestUidAcrossRedisWorker) {
   SwordFsInode parent;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "parent", 0755, &parent).ok());
 
@@ -881,7 +892,7 @@ TEST_F(RedisMetaImplTest, CreatePreservesRequestUidAcrossRedisWorker) {
   EXPECT_TRUE(impl_->Access(file.ino, R_OK | W_OK).ok());
 }
 
-TEST_F(RedisMetaImplTest, OpenRejectsUnreadableRegularFile) {
+FIBER_TEST_F(RedisMetaImplTest, OpenRejectsUnreadableRegularFile) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0600, &file).ok());
   SwordFsContext ctx;
@@ -901,15 +912,14 @@ TEST_F(RedisMetaImplTest, LoadVolumeUsesVolumeMetadataAndValidatesName) {
   EXPECT_TRUE(other.LoadVolume(&volume).IsNotFound());
 
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
-  auto redis = RawRedis();
-  redis.del(key.Inode(kRootInodeId));
+  WithRawRedisOnThread([&](sw::redis::Redis &redis) { redis.del(key.Inode(kRootInodeId)); });
   volume.name = volume_name_;
   ASSERT_TRUE(impl_->LoadVolume(&volume).ok());
   EXPECT_EQ(volume.name, volume_name_);
 
   SwordFsVolume malformed = volume;
   malformed.name = volume_name_ + "-mismatch";
-  redis.set(key.Format(), malformed.SerializeTo());
+  WithRawRedisOnThread([&](sw::redis::Redis &redis) { redis.set(key.Format(), malformed.SerializeTo()); });
   volume.name = volume_name_;
   EXPECT_TRUE(impl_->LoadVolume(&volume).IsMalformed());
 }

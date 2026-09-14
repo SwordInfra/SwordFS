@@ -6,6 +6,8 @@
 #include <folly/container/F14Map.h>
 #include <folly/logging/xlog.h>
 
+#include <shared_mutex>
+
 namespace swordfs::vfs {
 
 struct HandleMap : folly::F14FastMap<uint64_t, std::shared_ptr<Handle>> {};
@@ -22,18 +24,18 @@ HandleManager &HandleManager::Instance() {
   return instance;
 }
 
-uint64_t HandleManager::Register(std::shared_ptr<Handle> handle) {
+uint64_t HandleManager::Register(const std::shared_ptr<Handle> &handle) {
   CHECK(handle != nullptr);
-  std::unique_lock lock(mutex_);
+  std::lock_guard<utils::FiberRWMutex> lock(mutex_);
   const auto fh = next_fh_++;
   handle->fh_ = fh;
-  auto [it, inserted] = handles_->emplace(fh, std::move(handle));
+  auto [it, inserted] = handles_->emplace(fh, handle);
   CHECK(inserted);
   return fh;
 }
 
 std::shared_ptr<Handle> HandleManager::FindHandle(uint64_t fh) {
-  std::shared_lock lock(mutex_);
+  std::shared_lock<utils::FiberRWMutex> lock(mutex_);
   auto it = handles_->find(fh);
   if (it == handles_->end()) {
     return nullptr;
@@ -42,7 +44,7 @@ std::shared_ptr<Handle> HandleManager::FindHandle(uint64_t fh) {
 }
 
 void HandleManager::Unregister(uint64_t fh) {
-  std::unique_lock lock(mutex_);
+  std::lock_guard<utils::FiberRWMutex> lock(mutex_);
   handles_->erase(fh);
 }
 

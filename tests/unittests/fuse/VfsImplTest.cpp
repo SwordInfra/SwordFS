@@ -11,6 +11,7 @@
 #include <cstring>
 #include <memory>
 
+#include "FiberTest.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
 #include "vfs/VfsImpl.hpp"
@@ -326,13 +327,13 @@ class VfsImplIntegrationTest : public ::testing::Test {
 
 }  // namespace
 
-TEST_F(VfsImplIntegrationTest, UnlinkUsesAtomicMetadataResultWithoutLookup) {
+FIBER_TEST_F(VfsImplIntegrationTest, UnlinkUsesAtomicMetadataResultWithoutLookup) {
   auto status = VfsImpl::Unlink(1, "file");
   EXPECT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_meta_->lookup_calls(), 0);
 }
 
-TEST_F(VfsImplIntegrationTest, OpenDirSuccess) {
+FIBER_TEST_F(VfsImplIntegrationTest, OpenDirSuccess) {
   uint64_t fh = 0;
   auto status = VfsImpl::OpenDir(1, &fh);
   EXPECT_TRUE(status.ok()) << status.message();
@@ -341,7 +342,7 @@ TEST_F(VfsImplIntegrationTest, OpenDirSuccess) {
   VfsImpl::ReleaseDir(1, fh);
 }
 
-TEST_F(VfsImplIntegrationTest, OpenDirPermissionDenied) {
+FIBER_TEST_F(VfsImplIntegrationTest, OpenDirPermissionDenied) {
   mock_meta_->set_status(Status::Permission("denied"));
 
   uint64_t fh = 0;
@@ -349,7 +350,7 @@ TEST_F(VfsImplIntegrationTest, OpenDirPermissionDenied) {
   EXPECT_TRUE(status.IsPermission()) << status.message();
 }
 
-TEST_F(VfsImplIntegrationTest, ReadDir) {
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDir) {
   uint64_t fh = 0;
   ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
   std::string buf;
@@ -357,7 +358,7 @@ TEST_F(VfsImplIntegrationTest, ReadDir) {
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
-TEST_F(VfsImplIntegrationTest, ReadDirPlus) {
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlus) {
   uint64_t fh = 0;
   ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
   std::string buf;
@@ -365,7 +366,7 @@ TEST_F(VfsImplIntegrationTest, ReadDirPlus) {
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
-TEST_F(VfsImplIntegrationTest, ReleaseDirSuccess) {
+FIBER_TEST_F(VfsImplIntegrationTest, ReleaseDirSuccess) {
   uint64_t fh = 0;
   auto status = VfsImpl::OpenDir(2, &fh);
   ASSERT_TRUE(status.ok());
@@ -374,7 +375,7 @@ TEST_F(VfsImplIntegrationTest, ReleaseDirSuccess) {
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
-TEST_F(VfsImplIntegrationTest, OpenSuccess) {
+FIBER_TEST_F(VfsImplIntegrationTest, OpenSuccess) {
   struct fuse_file_info fi = {};
   auto status = VfsImpl::Open(42, &fi);
   EXPECT_TRUE(status.ok()) << status.message();
@@ -383,7 +384,7 @@ TEST_F(VfsImplIntegrationTest, OpenSuccess) {
   VfsImpl::Release(42, fi.fh);
 }
 
-TEST_F(VfsImplIntegrationTest, OpenPermissionDenied) {
+FIBER_TEST_F(VfsImplIntegrationTest, OpenPermissionDenied) {
   mock_meta_->set_status(Status::Permission("denied"));
 
   struct fuse_file_info fi = {};
@@ -391,42 +392,42 @@ TEST_F(VfsImplIntegrationTest, OpenPermissionDenied) {
   EXPECT_TRUE(status.IsPermission()) << status.message();
 }
 
-TEST_F(VfsImplIntegrationTest, StatfsSuccess) {
+FIBER_TEST_F(VfsImplIntegrationTest, StatfsSuccess) {
   struct statvfs stbuf;
   auto status = VfsImpl::StatFs(1, &stbuf);
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
-TEST_F(VfsImplIntegrationTest, AccessSuccess) {
+FIBER_TEST_F(VfsImplIntegrationTest, AccessSuccess) {
   auto status = VfsImpl::Access(1, R_OK);
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
-TEST_F(VfsImplIntegrationTest, AccessDenied) {
+FIBER_TEST_F(VfsImplIntegrationTest, AccessDenied) {
   mock_meta_->set_status(Status::Permission("denied"));
   auto status = VfsImpl::Access(1, R_OK);
   EXPECT_TRUE(status.IsPermission()) << status.message();
 }
 
-TEST_F(VfsImplIntegrationTest, GetattrSuccess) {
+FIBER_TEST_F(VfsImplIntegrationTest, GetattrSuccess) {
   struct stat attr;
   auto status = VfsImpl::GetAttr(1, &attr);
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
-TEST_F(VfsImplIntegrationTest, ReadlinkSuccess) {
+FIBER_TEST_F(VfsImplIntegrationTest, ReadlinkSuccess) {
   std::string target;
   auto status = VfsImpl::ReadLink(1, &target);
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
-TEST_F(VfsImplIntegrationTest, SymlinkSuccess) {
+FIBER_TEST_F(VfsImplIntegrationTest, SymlinkSuccess) {
   fuse_entry_param entry{};
   auto status = VfsImpl::Symlink("/target", 1, "link", &entry);
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
-TEST_F(VfsImplIntegrationTest, LinkSuccess) {
+FIBER_TEST_F(VfsImplIntegrationTest, LinkSuccess) {
   fuse_entry_param entry{};
   auto status = VfsImpl::Link(2, 1, "hardlink", &entry);
   EXPECT_TRUE(status.ok()) << status.message();

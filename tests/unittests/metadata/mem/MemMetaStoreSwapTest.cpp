@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "FiberTest.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 #include "utils/Status.hpp"
 
@@ -47,7 +48,7 @@ class MemMetaStoreSwapTest : public ::testing::Test {
 // Basic cross-directory swap
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreSwapTest, CrossDirectorySwap) {
+FIBER_TEST_F(MemMetaStoreSwapTest, CrossDirectorySwap) {
   SwordFsInode dir_a, dir_b;
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "a", kDir, &dir_a); });
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "b", kDir, &dir_b); });
@@ -74,7 +75,7 @@ TEST_F(MemMetaStoreSwapTest, CrossDirectorySwap) {
 // Same-directory swap (different names)
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreSwapTest, SameDirectorySwapDifferentNames) {
+FIBER_TEST_F(MemMetaStoreSwapTest, SameDirectorySwapDifferentNames) {
   SwordFsInode fa, fb;
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "alpha", kRegFile, &fa); });
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "beta", kRegFile, &fb); });
@@ -98,7 +99,7 @@ TEST_F(MemMetaStoreSwapTest, SameDirectorySwapDifferentNames) {
 // type checking is done at the MemMetaImpl layer)
 // ────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreSwapTest, SwapFileWithDirectory) {
+FIBER_TEST_F(MemMetaStoreSwapTest, SwapFileWithDirectory) {
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "f", kRegFile, nullptr); });
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "d", kDir, nullptr); });
 
@@ -120,7 +121,7 @@ TEST_F(MemMetaStoreSwapTest, SwapFileWithDirectory) {
 // SwapEntry: missing source A
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreSwapTest, SwapMissingSourceA) {
+FIBER_TEST_F(MemMetaStoreSwapTest, SwapMissingSourceA) {
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "b", kRegFile, nullptr); });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.SwapEntries(kRoot, "no_such", kRoot, "b"); });
@@ -131,7 +132,7 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingSourceA) {
 // SwapEntry: missing source B
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreSwapTest, SwapMissingSourceB) {
+FIBER_TEST_F(MemMetaStoreSwapTest, SwapMissingSourceB) {
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "a", kRegFile, nullptr); });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.SwapEntries(kRoot, "a", kRoot, "no_such"); });
@@ -142,7 +143,7 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingSourceB) {
 // SwapEntry: missing parent A
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreSwapTest, SwapMissingParentA) {
+FIBER_TEST_F(MemMetaStoreSwapTest, SwapMissingParentA) {
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "b", kRegFile, nullptr); });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.SwapEntries(9999, "a", kRoot, "b"); });
@@ -153,7 +154,7 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingParentA) {
 // SwapEntry: missing parent B
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreSwapTest, SwapMissingParentB) {
+FIBER_TEST_F(MemMetaStoreSwapTest, SwapMissingParentB) {
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "a", kRegFile, nullptr); });
 
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.SwapEntries(kRoot, "a", 9999, "b"); });
@@ -164,7 +165,7 @@ TEST_F(MemMetaStoreSwapTest, SwapMissingParentB) {
 // SwapEntry: concurrent swap (no double-free / data race)
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreSwapTest, ConcurrentSwapConsistency) {
+FIBER_TEST_F(MemMetaStoreSwapTest, ConcurrentSwapConsistency) {
   // Set up two pairs to swap concurrently.
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "a1", kRegFile, nullptr); });
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "a2", kRegFile, nullptr); });
@@ -184,8 +185,8 @@ TEST_F(MemMetaStoreSwapTest, ConcurrentSwapConsistency) {
     }
   };
 
-  std::thread t1(swapper, 0);
-  std::thread t2(swapper, 1);
+  std::thread t1([&] { swordfs::test::RunInTestFiber([&] { swapper(0); }); });
+  std::thread t2([&] { swordfs::test::RunInTestFiber([&] { swapper(1); }); });
   t1.join();
   t2.join();
 
@@ -202,7 +203,7 @@ TEST_F(MemMetaStoreSwapTest, ConcurrentSwapConsistency) {
 // SwapEntry: same entry (name) in the same directory — no-op
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreSwapTest, SwapSameEntryNoOp) {
+FIBER_TEST_F(MemMetaStoreSwapTest, SwapSameEntryNoOp) {
   SwordFsInode f;
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "only", kRegFile, &f); });
 
@@ -220,7 +221,7 @@ TEST_F(MemMetaStoreSwapTest, SwapSameEntryNoOp) {
 // SwapEntry: cross-directory swap of directories
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreSwapTest, SwapDirectoriesCrossDirectory) {
+FIBER_TEST_F(MemMetaStoreSwapTest, SwapDirectoriesCrossDirectory) {
   SwordFsInode dir_a, dir_b;
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "a", kDir, &dir_a); });
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "b", kDir, &dir_b); });
@@ -261,7 +262,7 @@ TEST_F(MemMetaStoreSwapTest, SwapDirectoriesCrossDirectory) {
 // under DIFFERENT parents and verifies each inode's parent_ino follows
 // the swap, so ListEntries synthesizes the correct ".." entry.
 
-TEST_F(MemMetaStoreSwapTest, SwapAcrossDifferentParentsUpdatesParentIno) {
+FIBER_TEST_F(MemMetaStoreSwapTest, SwapAcrossDifferentParentsUpdatesParentIno) {
   SwordFsInode p1, p2;
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "p1", kDir, &p1); });
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "p2", kDir, &p2); });
@@ -305,7 +306,7 @@ TEST_F(MemMetaStoreSwapTest, SwapAcrossDifferentParentsUpdatesParentIno) {
 // RENAME_EXCHANGE must reject cycles just like a plain rename does —
 // in both directions.
 
-TEST_F(MemMetaStoreSwapTest, SwapDirectoryIntoOwnSubtreeFails) {
+FIBER_TEST_F(MemMetaStoreSwapTest, SwapDirectoryIntoOwnSubtreeFails) {
   // Build root/b/x/a: dir_a is a descendant of dir_b.
   SwordFsInode dir_b;
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "b", kDir, &dir_b); });

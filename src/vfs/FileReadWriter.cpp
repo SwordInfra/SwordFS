@@ -8,6 +8,7 @@
 #include <folly/logging/xlog.h>
 
 #include <algorithm>
+#include <shared_mutex>
 #include <vector>
 
 #include "chunk/Chunk.hpp"
@@ -33,11 +34,11 @@ class MultiChunkReadWriter {
   /// Submit a read from |c| at chunk-relative |off| for up to |len|
   /// bytes into |window|.  |window| should be a takeOwnership IOBuf
   /// pointing to the correct slice of the parent output buffer.
-  void SubmitRead(chunk::Chunk *c, off_t off, size_t len, std::unique_ptr<folly::IOBuf> window) {
+  void SubmitRead(std::shared_ptr<chunk::Chunk> c, off_t off, size_t len, std::unique_ptr<folly::IOBuf> window) {
     auto p = std::make_unique<Pending>();
     p->window = std::move(window);
     auto &fm = folly::fibers::FiberManager::getFiberManager();
-    fm.addTask([c, off, len, raw = p.get()] {
+    fm.addTask([c = std::move(c), off, len, raw = p.get()] {
       raw->status = c->Read(off, len, raw->window.get());
       raw->bytes = raw->window->length();
       raw->baton.post();
@@ -83,37 +84,37 @@ class MultiChunkReadWriter {
 // FileChunkManager
 // ────────────────────────────────────────────────────────────────
 
-chunk::Chunk *FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_missing) {
-  std::lock_guard<std::mutex> lock(mutex_);
+std::shared_ptr<chunk::Chunk> FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_missing) {
+  std::lock_guard<utils::FiberMutex> lock(mutex_);
   auto it = chunks_.find(idx);
   if (it != chunks_.end()) {
-    return &it->second;
+    return it->second;
   }
   // Not cached — try lazy-load from metadata engine.
-  auto c = chunk::Chunk(ino_, idx);
-  auto status = c.Initialize();
+  auto chunk = std::make_shared<chunk::Chunk>(ino_, idx);
+  auto status = chunk->Initialize();
   if (!status.ok()) {
     return nullptr;
-  } else if (c.IsFlushed() || create_if_missing) {
-    it = chunks_.try_emplace(idx, std::move(c)).first;
-    return &it->second;
+  } else if (chunk->IsFlushed() || create_if_missing) {
+    it = chunks_.try_emplace(idx, std::move(chunk)).first;
+    return it->second;
   }
   return nullptr;
 }
 
-chunk::Chunk *FileChunkManager::GetNextFlushable() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto &[idx, c] : chunks_) {
-    if (c.Flushable()) {
-      c.Seal();
-      return &c;
+std::shared_ptr<chunk::Chunk> FileChunkManager::GetNextFlushable() {
+  std::lock_guard<utils::FiberMutex> lock(mutex_);
+  for (auto &[idx, chunk] : chunks_) {
+    if (chunk->Flushable()) {
+      chunk->Seal();
+      return chunk;
     }
   }
   return nullptr;
 }
 
 void FileChunkManager::Truncate(metadata::ChunkIndex new_last_idx, std::vector<metadata::ChunkIndex> *dropped) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<utils::FiberMutex> lock(mutex_);
   for (auto it = chunks_.begin(); it != chunks_.end();) {
     if (it->first >= new_last_idx) {
       if (dropped) {
@@ -143,6 +144,7 @@ FileReadWriter::FileReadWriter(InodeID ino)
 // ────────────────────────────────────────────────────────────────
 
 utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
+  std::lock_guard<utils::FiberRWMutex> operation_lock(operation_mutex_);
   SWORDFS_LOG_DEBUG << "FileReadWriter::Write: ino=" << ino_ << " size=" << buf.length() << " off=" << off;
   size_t remaining = buf.length();
   off_t cur_off = off;
@@ -150,7 +152,7 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
   while (remaining > 0) {
     metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(cur_off / static_cast<off_t>(chunk_size_));
 
-    auto *c = chunks_.Get(idx, /*create_if_missing=*/true);
+    auto c = chunks_.Get(idx, /*create_if_missing=*/true);
     if (!c) {
       return utils::Status::Internal("FileReadWriter::Write: failed to get chunk");
     }
@@ -176,6 +178,7 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
 // ────────────────────────────────────────────────────────────────
 
 utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
+  std::shared_lock<utils::FiberRWMutex> operation_lock(operation_mutex_);
   MultiChunkReadWriter multi;
   size_t remaining = size;
   off_t cur_off = off;
@@ -184,7 +187,7 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   while (remaining > 0) {
     // 1) Try the unified chunk map (dirty + flushed).
     metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(cur_off / static_cast<off_t>(chunk_size_));
-    auto *c = chunks_.Get(idx, /*create_if_missing=*/false);
+    auto c = chunks_.Get(idx, /*create_if_missing=*/false);
 
     // cur_off may fall within the chunk's index range (e.g. a 64 MiB
     // chunk that only has 500 bytes of data — offsets [500, 64 MiB)
@@ -231,9 +234,10 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
 // ────────────────────────────────────────────────────────────────
 
 utils::Status FileReadWriter::Flush() {
+  std::lock_guard<utils::FiberRWMutex> operation_lock(operation_mutex_);
   off_t file_end = 0;
   utils::Status first_error;
-  while (auto *c = chunks_.GetNextFlushable()) {
+  while (auto c = chunks_.GetNextFlushable()) {
     auto idx = c->index();
     auto status = c->Flush();
     if (!status.ok()) {
@@ -271,6 +275,7 @@ utils::Status FileReadWriter::Flush() {
 }
 
 utils::Status FileReadWriter::Truncate(size_t size) {
+  std::lock_guard<utils::FiberRWMutex> operation_lock(operation_mutex_);
   auto status = meta_->Truncate(ino_, size);
   if (!status.ok()) {
     return status;

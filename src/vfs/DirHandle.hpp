@@ -8,6 +8,7 @@
 
 #include "metadata/IMetaEngine.hpp"
 #include "utils/Status.hpp"
+#include "utils/Synchronization.hpp"
 #include "vfs/Handle.hpp"
 
 namespace swordfs::vfs {
@@ -30,6 +31,7 @@ class DirHandle : public Handle {
   utils::Status ReadDir(off_t off, size_t size, const DirEntryEncoder &encoder, std::string *out);
 
  private:
+  utils::FiberMutex mutex_;
   metadata::DirIteratorPtr iterator_;
 };
 

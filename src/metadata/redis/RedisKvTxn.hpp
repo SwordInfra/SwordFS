@@ -5,7 +5,7 @@
 
 #include <sw/redis++/redis++.h>
 
-#include <optional>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -39,8 +39,8 @@ class RedisKvTxn {
   utils::Status ReleaseConnection();
 
  private:
-  std::optional<sw::redis::Transaction> transaction_;
-  std::optional<sw::redis::Redis> redis_;
+  std::unique_ptr<sw::redis::Transaction> transaction_;
+  std::unique_ptr<sw::redis::Redis> redis_;
   bool has_writes_ = false;
 };
 

@@ -5,9 +5,9 @@
 
 #include <cstdint>
 #include <memory>
-#include <shared_mutex>
 
 #include "utils/Status.hpp"
+#include "utils/Synchronization.hpp"
 
 namespace swordfs::vfs {
 
@@ -36,7 +36,7 @@ class HandleManager {
   static HandleManager &Instance();
 
   /// Assign a fresh handle id and register |handle|. Returns the assigned fh.
-  uint64_t Register(std::shared_ptr<Handle> handle);
+  uint64_t Register(const std::shared_ptr<Handle> &handle);
 
   /// Unregister |fh| from the registry.
   void Unregister(uint64_t fh);
@@ -54,7 +54,7 @@ class HandleManager {
   std::shared_ptr<Handle> FindHandle(uint64_t fh);
 
  private:
-  mutable std::shared_mutex mutex_;
+  mutable utils::FiberRWMutex mutex_;
   uint64_t next_fh_{1};
   std::unique_ptr<HandleMap> handles_;
 };

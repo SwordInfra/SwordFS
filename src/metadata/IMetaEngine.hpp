@@ -50,12 +50,19 @@ using ChunkVisitorFn = std::function<Status(const SwordFsChunk &)>;
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
 
-/// Concurrency contract: every method on this interface must be atomic
-/// and thread-safe.  Concurrent observers must never see an intermediate
-/// state of a composite operation (e.g. a Rename whose target has been
-/// unlinked but whose source has not yet been moved).  For KV-backed
-/// implementations each method is expected to map onto a single
-/// transaction.
+/// Concurrency and execution-domain contract:
+///
+/// - engine construction/destruction plus Initialize/FormatVolume/LoadVolume
+///   are lifecycle/control operations and execute in the POSIX-thread domain;
+/// - runtime filesystem operations execute in the fiber domain;
+/// - every runtime operation must be atomic with respect to concurrent
+///   observers. Concurrent callers must never see an intermediate state of a
+///   composite operation (e.g. a Rename whose target has been unlinked but
+///   whose source has not yet been moved). For KV-backed implementations each
+///   operation is expected to map onto a single transaction where required.
+///
+/// Implementations should validate these semantic boundaries directly rather
+/// than relying on an incidental mutex acquisition to detect misuse.
 class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
