@@ -36,7 +36,7 @@ class HandleManager {
   static HandleManager &Instance();
 
   /// Assign a fresh handle id and register |handle|. Returns the assigned fh.
-  uint64_t Register(std::shared_ptr<Handle> handle);
+  uint64_t Register(const std::shared_ptr<Handle> &handle);
 
   /// Unregister |fh| from the registry.
   void Unregister(uint64_t fh);

@@ -24,12 +24,12 @@ HandleManager &HandleManager::Instance() {
   return instance;
 }
 
-uint64_t HandleManager::Register(std::shared_ptr<Handle> handle) {
+uint64_t HandleManager::Register(const std::shared_ptr<Handle> &handle) {
   CHECK(handle != nullptr);
   std::lock_guard<utils::FiberRWMutex> lock(mutex_);
   const auto fh = next_fh_++;
   handle->fh_ = fh;
-  auto [it, inserted] = handles_->emplace(fh, std::move(handle));
+  auto [it, inserted] = handles_->emplace(fh, handle);
   CHECK(inserted);
   return fh;
 }

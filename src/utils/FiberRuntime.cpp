@@ -6,6 +6,7 @@
 #include <folly/io/async/EventBase.h>
 #include <glog/logging.h>
 
+#include <cstdint>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -18,7 +19,7 @@ ThreadMutex g_mutex;
 std::vector<std::shared_ptr<FiberBaton>> g_shutdown_waiters;
 std::vector<std::shared_ptr<FiberRuntime>> g_runtimes;
 
-enum class RuntimeState {
+enum class RuntimeState : std::uint8_t {
   kStopped,
   kRunning,
   kStopping,

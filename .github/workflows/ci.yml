@@ -52,14 +52,10 @@ jobs:
       - name: Install dependencies
         run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
 
-      - name: Global test setup
+      - name: Unit test setup
         run: |
           sudo mkdir -p /etc/swordfs
           sudo chown "$(id -u):$(id -g)" /etc/swordfs
-          sudo modprobe fuse
-          sudo chmod 666 /dev/fuse
-          getent group fuse || sudo groupadd fuse
-          sudo usermod -aG fuse "$(whoami)"
 
       - name: Install Debug CI tools
         if: matrix.build_type == 'Debug'
@@ -79,7 +75,7 @@ jobs:
           fi
 
       - name: Build
-        run: cmake --build build --target swordfs swordfs_test swordfs_e2e_test
+        run: cmake --build build --target swordfs swordfs_test
 
       - name: Run clang-tidy (changed files only)
         if: matrix.build_type == 'Debug'
@@ -108,10 +104,6 @@ jobs:
             grep '<skipped' unit-test-results.xml
             exit 1
           fi
-
-      - name: Test (E2E)
-        run: |
-          sg fuse -c "bash scripts/run-e2e.sh --gtest_color=no"
 
       - name: Generate coverage report
         if: matrix.build_type == 'Debug'
@@ -157,3 +149,46 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.info
           fail_ci_if_error: false
+
+  e2e-test:
+    name: e2e-test (Release)
+    needs: clang-format
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 2
+          submodules: false
+
+      - name: Restore native dependency cache
+        uses: actions/cache@v4
+        with:
+          path: .deps/install
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native-deps-cache.env') }}
+
+      - name: Install dependencies
+        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
+
+      - name: E2E test setup
+        run: |
+          sudo mkdir -p /etc/swordfs
+          sudo chown "$(id -u):$(id -g)" /etc/swordfs
+          sudo modprobe fuse
+          sudo chmod 666 /dev/fuse
+          getent group fuse || sudo groupadd fuse
+          sudo usermod -aG fuse "$(whoami)"
+
+      - name: Configure Release
+        run: |
+          cmake --preset release \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install"
+
+      - name: Build E2E
+        run: cmake --build build --target swordfs swordfs_e2e_test
+
+      - name: Test (E2E)
+        run: sg fuse -c "bash scripts/run-e2e.sh --gtest_color=no"
