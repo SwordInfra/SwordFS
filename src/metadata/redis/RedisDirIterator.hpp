@@ -11,11 +11,12 @@
 
 namespace swordfs::metadata {
 
-class RedisMetaClient;
+class RedisBackendContext;
 
 class RedisDirIterator final : public DirIterator {
  public:
-  RedisDirIterator(std::shared_ptr<RedisMetaClient> client, std::string key, std::vector<SwordFsEntry> prefix_entries);
+  RedisDirIterator(std::shared_ptr<RedisBackendContext> backend, std::string key,
+                   std::vector<SwordFsEntry> prefix_entries);
   ~RedisDirIterator() override;
 
   RedisDirIterator(const RedisDirIterator &) = delete;

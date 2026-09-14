@@ -58,15 +58,39 @@ foreach(source_file IN LISTS SWORDFS_SOURCE_FILES)
       )
     endif()
   endif()
+
+  string(FIND "${source_text}" "sw::redis::" redis_api_pos)
+  if(NOT redis_api_pos EQUAL -1
+     AND NOT relative_path STREQUAL "src/metadata/redis/RedisMetaClient.cpp"
+     AND NOT relative_path STREQUAL "src/metadata/redis/RedisMetaClient.hpp"
+     AND NOT relative_path STREQUAL "src/metadata/redis/RedisKvTxn.cpp"
+     AND NOT relative_path STREQUAL "src/metadata/redis/RedisKvTxn.hpp")
+    list(
+      APPEND
+      violations
+      "${relative_path}: direct redis++ usage is outside the Redis blocking-I/O boundary; route Redis work through RedisMetaClient and an explicit BlockingExecutor transition"
+    )
+  endif()
+
+  string(FIND "${source_text}" "Aws::S3::" s3_api_pos)
+  if(NOT s3_api_pos EQUAL -1
+     AND NOT relative_path STREQUAL "src/storage/s3/S3DataEngine.cpp"
+     AND NOT relative_path STREQUAL "src/storage/s3/S3DataEngine.hpp")
+    list(
+      APPEND
+      violations
+      "${relative_path}: direct AWS S3 SDK usage is outside the S3 blocking-I/O boundary; route S3 work through S3DataEngine and an explicit BlockingExecutor transition"
+    )
+  endif()
 endforeach()
 
 if(violations)
   list(JOIN violations "\n  - " violation_text)
   message(
     FATAL_ERROR
-      "Fiber-safety synchronization check failed:\n  - ${violation_text}\n"
-      "Use the semantic synchronization wrappers so execution-domain mistakes can be detected in Debug builds."
+      "Fiber-safety execution-domain check failed:\n  - ${violation_text}\n"
+      "Use semantic synchronization wrappers and keep blocking backends behind their thread-domain boundaries."
   )
 endif()
 
-message(STATUS "Fiber-safety synchronization check passed")
+message(STATUS "Fiber-safety execution-domain check passed")

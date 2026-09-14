@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "FiberTest.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
@@ -175,33 +176,37 @@ class MockMetaEngine : public IMetaEngine {
 class FileHandleTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    // Volume lifecycle is control-plane work and follows the production
+    // topology: initialize it on the gtest POSIX thread before entering a
+    // fiber for runtime-only state reset.
     volume::VolumeImpl::Initialize();
-    // Drop any per-inode state left by a prior test. The
-    // InodeHandleManager is a process-lifetime singleton; without this
-    // reset, leaked InodeHandles (especially with non-zero open_count)
-    // would make Get(ino, false) hand out stale handles and ReclaimData's
-    // last-line-of-defence guard refuse on arbitrary later inodes. The
-    // same Initialize() is also called on the production mount path.
-    InodeHandleManager::Instance().Initialize();
+    swordfs::test::RunInTestFiber([&] {
+      // Drop any per-inode state left by a prior test. The
+      // InodeHandleManager is fiber-owned runtime state.
+      InodeHandleManager::Instance().Initialize();
+    });
+
     auto meta = std::make_unique<MockMetaEngine>();
     mock_meta_ = meta.get();
     volume::VolumeImpl::Instance().set_meta_engine(std::move(meta));
     // ReclaimData now requires a data engine (production invariant —
-    // --bucket is required). Tests that exercise the orphan-close
-    // reclaim path (e.g. CloseReclaimsOrphanedInode) would otherwise
-    // trip the CHECK(), so install a no-op fake here.
+    // --bucket is required). Tests that exercise the orphan-close reclaim
+    // path install a no-op fake here.
     volume::VolumeImpl::Instance().set_data_engine(std::make_unique<NoopDataEngine>());
   }
 
   void TearDown() override {
-    // Clean up any handles left by a test.
-    for (uint64_t fh : fhs_) {
-      if (auto handle = HandleManager::Instance().FindAs<FileHandle>(fh)) {
-        handle->Release();
-      } else if (auto handle = HandleManager::Instance().FindAs<DirHandle>(fh)) {
-        handle->Release();
+    swordfs::test::RunInTestFiber([&] {
+      // Clean up any handles left by a test.
+      for (uint64_t fh : fhs_) {
+        if (auto handle = HandleManager::Instance().FindAs<FileHandle>(fh)) {
+          handle->Release();
+        } else if (auto handle = HandleManager::Instance().FindAs<DirHandle>(fh)) {
+          handle->Release();
+        }
       }
-    }
+    });
+    // Destroy/reset injected engines on the POSIX test thread.
     volume::VolumeImpl::Initialize();
   }
 
@@ -223,7 +228,7 @@ class FileHandleTest : public ::testing::Test {
 // Singleton
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleTest, InstanceIsSingleton) {
+FIBER_TEST_F(FileHandleTest, InstanceIsSingleton) {
   auto &a = HandleManager::Instance();
   auto &b = HandleManager::Instance();
   EXPECT_EQ(&a, &b);
@@ -233,19 +238,19 @@ TEST_F(FileHandleTest, InstanceIsSingleton) {
 // Open + Find
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleTest, OpenAndFind) {
+FIBER_TEST_F(FileHandleTest, OpenAndFind) {
   uint64_t fh = OpenHandle(42);
 
   auto found = HandleManager::Instance().FindAs<FileHandle>(fh);
   EXPECT_NE(found, nullptr);
 }
 
-TEST_F(FileHandleTest, FindNonexistent) {
+FIBER_TEST_F(FileHandleTest, FindNonexistent) {
   auto found = HandleManager::Instance().FindAs<FileHandle>(999);
   EXPECT_EQ(found, nullptr);
 }
 
-TEST_F(FileHandleTest, OpenMultipleHandles) {
+FIBER_TEST_F(FileHandleTest, OpenMultipleHandles) {
   uint64_t fh1 = OpenHandle(10);
   uint64_t fh2 = OpenHandle(20);
   EXPECT_NE(fh1, fh2);
@@ -262,7 +267,7 @@ TEST_F(FileHandleTest, OpenMultipleHandles) {
 // HandleManager unregister
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleTest, ReleaseRemovesHandle) {
+FIBER_TEST_F(FileHandleTest, ReleaseRemovesHandle) {
   uint64_t fh = OpenHandle(7);
   auto handle = HandleManager::Instance().FindAs<FileHandle>(fh);
   ASSERT_NE(handle, nullptr);
@@ -271,7 +276,7 @@ TEST_F(FileHandleTest, ReleaseRemovesHandle) {
   EXPECT_EQ(HandleManager::Instance().FindAs<FileHandle>(fh), nullptr);
 }
 
-TEST_F(FileHandleTest, ReleaseKeepsOtherHandles) {
+FIBER_TEST_F(FileHandleTest, ReleaseKeepsOtherHandles) {
   uint64_t fh1 = OpenHandle(1);
   uint64_t fh2 = OpenHandle(2);
   auto f1 = HandleManager::Instance().FindAs<FileHandle>(fh1);
@@ -289,7 +294,7 @@ TEST_F(FileHandleTest, ReleaseKeepsOtherHandles) {
 
 // With auto-allocated fh, duplicates cannot occur — every Open gets a
 // unique handle.
-TEST_F(FileHandleTest, OpenReturnsUniqueFh) {
+FIBER_TEST_F(FileHandleTest, OpenReturnsUniqueFh) {
   uint64_t fh1 = OpenHandle(100);
   uint64_t fh2 = OpenHandle(200);
   EXPECT_NE(fh1, fh2);
@@ -299,7 +304,7 @@ TEST_F(FileHandleTest, OpenReturnsUniqueFh) {
 // Shared ownership — Find keeps handle alive across Unregister
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleTest, FindKeepsHandleAliveAfterUnregister) {
+FIBER_TEST_F(FileHandleTest, FindKeepsHandleAliveAfterUnregister) {
   uint64_t fh = OpenHandle(55);
 
   // Hold a shared_ptr before releasing.
@@ -318,13 +323,13 @@ TEST_F(FileHandleTest, FindKeepsHandleAliveAfterUnregister) {
 // Concurrency — basic multi-threaded access
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleTest, ConcurrentOpenAndFind) {
+FIBER_TEST_F(FileHandleTest, ConcurrentOpenAndFind) {
   constexpr int kThreads = 4;
   constexpr int kIters = 100;
 
   std::vector<std::thread> threads;
   for (int t = 0; t < kThreads; ++t) {
-    threads.emplace_back([t] {
+    threads.push_back(swordfs::test::StartFiberTestThread([t] {
       for (int i = 0; i < kIters; ++i) {
         auto ino = static_cast<metadata::InodeID>(t * kIters + i + 100);
         std::shared_ptr<FileHandle> handle;
@@ -338,7 +343,7 @@ TEST_F(FileHandleTest, ConcurrentOpenAndFind) {
         // synthetic inodes).
         ASSERT_TRUE(handle->Release().ok());
       }
-    });
+    }));
   }
   for (auto &th : threads) {
     th.join();
@@ -367,7 +372,7 @@ metadata::DirIteratorPtr NewTestDirIterator() {
 // Generic file and directory handles
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleTest, RegisterAndFindDirectoryHandle) {
+FIBER_TEST_F(FileHandleTest, RegisterAndFindDirectoryHandle) {
   auto handle = std::make_shared<DirHandle>(NewTestDirIterator());
   const uint64_t fh = HandleManager::Instance().Register(handle);
 
@@ -377,7 +382,7 @@ TEST_F(FileHandleTest, RegisterAndFindDirectoryHandle) {
   ASSERT_TRUE(handle->Release().ok());
 }
 
-TEST_F(FileHandleTest, RegisterAssignsUniqueHandlesAcrossTypes) {
+FIBER_TEST_F(FileHandleTest, RegisterAssignsUniqueHandlesAcrossTypes) {
   std::shared_ptr<FileHandle> opened_file;
   ASSERT_TRUE(FileHandle::Open(9007, 0, &opened_file).ok());
   auto file_handle = HandleManager::Instance().FindAs<FileHandle>(opened_file->fh());
@@ -394,7 +399,7 @@ TEST_F(FileHandleTest, RegisterAssignsUniqueHandlesAcrossTypes) {
   ASSERT_TRUE(dir_handle->Release().ok());
 }
 
-TEST_F(FileHandleTest, FindAsRejectsWrongHandleType) {
+FIBER_TEST_F(FileHandleTest, FindAsRejectsWrongHandleType) {
   auto handle = std::make_shared<DirHandle>(NewTestDirIterator());
   const uint64_t fh = HandleManager::Instance().Register(handle);
 
@@ -407,14 +412,14 @@ TEST_F(FileHandleTest, FindAsRejectsWrongHandleType) {
 // FileHandle::Open error propagation
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleTest, OpenMetaFailurePropagates) {
+FIBER_TEST_F(FileHandleTest, OpenMetaFailurePropagates) {
   mock_meta_->open_status = Status::Permission("denied");
   std::shared_ptr<FileHandle> handle;
   auto status = FileHandle::Open(42, 0, &handle);
   EXPECT_TRUE(status.IsPermission());
 }
 
-TEST_F(FileHandleTest, OpenTruncateAppliesOTrunc) {
+FIBER_TEST_F(FileHandleTest, OpenTruncateAppliesOTrunc) {
   std::shared_ptr<FileHandle> handle;
   auto status = FileHandle::Open(42, O_TRUNC, &handle);
   ASSERT_TRUE(status.ok());
@@ -423,7 +428,7 @@ TEST_F(FileHandleTest, OpenTruncateAppliesOTrunc) {
   EXPECT_EQ(mock_meta_->last_truncate_size, 0u);
 }
 
-TEST_F(FileHandleTest, OpenTruncateFailurePropagates) {
+FIBER_TEST_F(FileHandleTest, OpenTruncateFailurePropagates) {
   mock_meta_->truncate_status = Status::Internal("truncate failed");
   std::shared_ptr<FileHandle> handle;
   auto status = FileHandle::Open(42, O_TRUNC, &handle);
@@ -435,11 +440,11 @@ TEST_F(FileHandleTest, OpenTruncateFailurePropagates) {
 // InodeHandleManager
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleTest, InodeHandleGetMissingWithoutCreate) {
+FIBER_TEST_F(FileHandleTest, InodeHandleGetMissingWithoutCreate) {
   EXPECT_EQ(InodeHandleManager::Instance().Get(9001, /*create_if_missing=*/false), nullptr);
 }
 
-TEST_F(FileHandleTest, InodeHandleGetExistingTracksOpenCount) {
+FIBER_TEST_F(FileHandleTest, InodeHandleGetExistingTracksOpenCount) {
   uint64_t fh = OpenHandle(9002);
   auto inode_handle = InodeHandleManager::Instance().Get(9002, false);
   ASSERT_NE(inode_handle, nullptr);
@@ -447,7 +452,7 @@ TEST_F(FileHandleTest, InodeHandleGetExistingTracksOpenCount) {
   EXPECT_EQ(inode_handle->open_count(), 1);
 }
 
-TEST_F(FileHandleTest, InodeHandleRecreatedAfterExpiry) {
+FIBER_TEST_F(FileHandleTest, InodeHandleRecreatedAfterExpiry) {
   {
     auto inode_handle = InodeHandleManager::Instance().Get(9003, true);
     ASSERT_NE(inode_handle, nullptr);
@@ -463,7 +468,7 @@ TEST_F(FileHandleTest, InodeHandleRecreatedAfterExpiry) {
 // InodeHandle open-unlink reclaim
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileHandleTest, CloseReclaimsOrphanedInode) {
+FIBER_TEST_F(FileHandleTest, CloseReclaimsOrphanedInode) {
   std::shared_ptr<FileHandle> handle;
   ASSERT_TRUE(FileHandle::Open(9004, 0, &handle).ok());
   auto inode_handle = InodeHandleManager::Instance().Get(9004, false);
@@ -474,7 +479,7 @@ TEST_F(FileHandleTest, CloseReclaimsOrphanedInode) {
   EXPECT_EQ(mock_meta_->reclaim_calls, 1);
 }
 
-TEST_F(FileHandleTest, CloseOnlyReclaimsOnLastReference) {
+FIBER_TEST_F(FileHandleTest, CloseOnlyReclaimsOnLastReference) {
   std::shared_ptr<FileHandle> h1, h2;
   ASSERT_TRUE(FileHandle::Open(9005, 0, &h1).ok());
   ASSERT_TRUE(FileHandle::Open(9005, 0, &h2).ok());
@@ -493,7 +498,7 @@ TEST_F(FileHandleTest, CloseOnlyReclaimsOnLastReference) {
   EXPECT_EQ(inode_handle->open_count(), 0);
 }
 
-TEST_F(FileHandleTest, MarkOrphanedIfOpenFalseWhenNoOpenFds) {
+FIBER_TEST_F(FileHandleTest, MarkOrphanedIfOpenFalseWhenNoOpenFds) {
   auto inode_handle = InodeHandleManager::Instance().Get(9006, true);
   ASSERT_NE(inode_handle, nullptr);
   EXPECT_FALSE(inode_handle->MarkOrphanedIfOpen());
@@ -509,7 +514,7 @@ TEST_F(FileHandleTest, MarkOrphanedIfOpenFalseWhenNoOpenFds) {
 // reclaim. The case below exercises the lifecycle: no handle → open fd
 // → handle present with open_count>0 → close → open_count back to 0.
 
-TEST_F(FileHandleTest, InodeHandleOpenFdTracking) {
+FIBER_TEST_F(FileHandleTest, InodeHandleOpenFdTracking) {
   // No handle yet -> Get without create reports absence.
   InodeID test_ino = 9998;
   EXPECT_EQ(InodeHandleManager::Instance().Get(test_ino, false), nullptr);
@@ -708,11 +713,13 @@ static Status ReclaimInode(metadata::InodeID ino) {
   return handle->ReclaimData();
 }
 
-TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
-  // Ensure the singleton exists before we touch it — the fixture's
-  // SetUp() normally does this, but a test run via --gtest_filter may
-  // bypass it.
-  swordfs::volume::VolumeImpl::Initialize();
+void ResetVolumeFromFiberForTest() {
+  swordfs::test::RunInTestThreadFromFiber([] { swordfs::volume::VolumeImpl::Initialize(); });
+}
+
+FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
+  // Reset lifecycle state on the POSIX test worker, not on this fiber.
+  ResetVolumeFromFiberForTest();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
   // Keep raw pointers around for assertions after the engines move into
@@ -757,14 +764,14 @@ TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
   EXPECT_EQ(meta->last_reclaim_ino, 4242);
 }
 
-TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
+FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
   // Counterpart of ReclaimDataWithNoDataEngineStillDropsInode from the
   // pre-CHECK() era. The data engine is now a hard requirement on the
   // ReclaimData path (the production mount always installs one via
   // `--bucket`); exercising the chunk-delete loop with a real (fake)
   // data engine covers the same "delete every chunk + drop inode"
   // contract that test used to assert.
-  swordfs::volume::VolumeImpl::Initialize();
+  ResetVolumeFromFiberForTest();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
@@ -789,12 +796,12 @@ TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
 }
 
-TEST_F(FileHandleTest, ReclaimDataCallsReclaimInodeEvenWhenChunkEmpty) {
+FIBER_TEST_F(FileHandleTest, ReclaimDataCallsReclaimInodeEvenWhenChunkEmpty) {
   // Inode with zero registered chunks: the manager must still invoke
   // ReclaimInode so the inode is dropped from the metadata engine.
   // A data engine is still required (see CHECK in ReclaimData) — even
   // though no Delete call will be issued, the engine must be installed.
-  swordfs::volume::VolumeImpl::Initialize();
+  ResetVolumeFromFiberForTest();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
@@ -814,11 +821,11 @@ TEST_F(FileHandleTest, ReclaimDataCallsReclaimInodeEvenWhenChunkEmpty) {
   EXPECT_TRUE(data->delete_calls.empty());
 }
 
-TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
+FIBER_TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
   // A failing per-chunk Delete must not stop the cleanup: every chunk
   // gets attempted and ReclaimInode still runs. A stranded object is
   // GC's job; the metadata view must converge regardless.
-  swordfs::volume::VolumeImpl::Initialize();
+  ResetVolumeFromFiberForTest();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
@@ -846,11 +853,11 @@ TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
 }
 
-TEST_F(FileHandleTest, ReclaimDataPropagatesVisitChunksFailure) {
+FIBER_TEST_F(FileHandleTest, ReclaimDataPropagatesVisitChunksFailure) {
   // If the metadata engine refuses to enumerate, the manager must
   // surface that error and NOT invoke ReclaimInode (we don't know
   // whether the inode exists from the manager's perspective).
-  swordfs::volume::VolumeImpl::Initialize();
+  ResetVolumeFromFiberForTest();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
@@ -903,12 +910,12 @@ Engines InstallEnginesForInode(InodeID ino, nlink_t nlink) {
 
 }  // namespace
 
-TEST_F(FileHandleTest, ReclaimDataRefusesWhenNlinkStillPositive) {
+FIBER_TEST_F(FileHandleTest, ReclaimDataRefusesWhenNlinkStillPositive) {
   // A caller (VfsImpl::Unlink racing a Link) decided nlink==0 and
   // called ReclaimData, but a Link landed between its check and
   // ours. The point of no return is here — refuse to drop the chunk
   // objects from under the surviving hardlink name.
-  swordfs::volume::VolumeImpl::Initialize();
+  ResetVolumeFromFiberForTest();
   auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/2);
   // Add a chunk so we'd have something to delete if the guard fell
   // through; the absence of any delete is what we actually verify.
@@ -923,11 +930,11 @@ TEST_F(FileHandleTest, ReclaimDataRefusesWhenNlinkStillPositive) {
   EXPECT_EQ(meta->reclaim_inode_calls, 0) << "ReclaimData must NOT drop the inode while nlink > 0";
 }
 
-TEST_F(FileHandleTest, ReclaimDataRefusesWhileAnOpenHandleHoldsTheInode) {
+FIBER_TEST_F(FileHandleTest, ReclaimDataRefusesWhileAnOpenHandleHoldsTheInode) {
   // Caller forgot to route through MarkOrphaned — refuse so the
   // open fd's reads continue to work. The data engine must see no
   // Delete calls.
-  swordfs::volume::VolumeImpl::Initialize();
+  ResetVolumeFromFiberForTest();
   auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/0);
 
   // Open a file handle on this inode. The fixture's MockMetaEngine
@@ -946,13 +953,13 @@ TEST_F(FileHandleTest, ReclaimDataRefusesWhileAnOpenHandleHoldsTheInode) {
   ASSERT_TRUE(fh->Release().ok());
 }
 
-TEST_F(FileHandleTest, ReclaimDataIsIdempotentWhenInodeAlreadyGone) {
+FIBER_TEST_F(FileHandleTest, ReclaimDataIsIdempotentWhenInodeAlreadyGone) {
   // The metadata engine reports the inode as gone (NotFound on GetAttr).
   // The InodeHandle::ReclaimData guard treats that as a no-op success:
   // a concurrent reclaim has already finalised the cleanup on another
   // thread. Without this guard, the manager would still call VisitChunks
   // and surface a NotFound to the caller as if it were a real failure.
-  swordfs::volume::VolumeImpl::Initialize();
+  ResetVolumeFromFiberForTest();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();

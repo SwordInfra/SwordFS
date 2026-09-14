@@ -4,42 +4,59 @@
 #pragma once
 
 #include <folly/fibers/FiberManagerInternal.h>
+#include <glog/logging.h>
+
+#include <source_location>
+#include <string_view>
 
 namespace swordfs::utils {
 
 enum class ExecutionDomain {
-  kUnknown,
   kFiber,
-  kBlockingThread,
+  kThread,
 };
 
-// Explicit marking is needed only for blocking-worker code. Fiber identity is
-// derived from Folly's active fiber so it remains correct across fiber yields
-// and switches on the same EventBase thread.
-inline thread_local bool t_blocking_thread_domain = false;
-
+// SwordFS intentionally has only two synchronization domains. Code actively
+// running as a Folly fiber belongs to kFiber; every other execution context is
+// a normal POSIX-thread context and belongs to kThread. Tests for fiber-only
+// code must therefore execute inside a real FiberManager rather than relying on
+// an unclassified compatibility path.
 inline ExecutionDomain CurrentExecutionDomain() {
-  if (folly::fibers::onFiber()) {
-    return ExecutionDomain::kFiber;
-  }
-  return t_blocking_thread_domain ? ExecutionDomain::kBlockingThread : ExecutionDomain::kUnknown;
+  return folly::fibers::onFiber() ? ExecutionDomain::kFiber : ExecutionDomain::kThread;
 }
 
-class ScopedBlockingThreadDomain {
- public:
-  ScopedBlockingThreadDomain() : previous_(t_blocking_thread_domain) {
-    t_blocking_thread_domain = true;
+inline std::string_view ExecutionDomainName(ExecutionDomain domain) {
+  switch (domain) {
+    case ExecutionDomain::kFiber:
+      return "fiber";
+    case ExecutionDomain::kThread:
+      return "POSIX-thread";
   }
+  return "invalid";
+}
 
-  ~ScopedBlockingThreadDomain() {
-    t_blocking_thread_domain = previous_;
-  }
+// Execution-domain ownership is a component/API contract, not only a locking
+// rule. Capture the caller automatically so violations identify the exact
+// semantic boundary without requiring hand-written reason strings.
+inline void CheckExecutionDomain(ExecutionDomain expected,
+                                 std::source_location location = std::source_location::current()) {
+#ifndef NDEBUG
+  const auto actual = CurrentExecutionDomain();
+  DCHECK(actual == expected) << "execution-domain violation at " << location.file_name() << ':' << location.line()
+                             << " in " << location.function_name() << ": expected=" << ExecutionDomainName(expected)
+                             << ", actual=" << ExecutionDomainName(actual);
+#else
+  (void)expected;
+  (void)location;
+#endif
+}
 
-  ScopedBlockingThreadDomain(const ScopedBlockingThreadDomain &) = delete;
-  ScopedBlockingThreadDomain &operator=(const ScopedBlockingThreadDomain &) = delete;
+inline void ExpectInFiberDomain(std::source_location location = std::source_location::current()) {
+  CheckExecutionDomain(ExecutionDomain::kFiber, location);
+}
 
- private:
-  bool previous_;
-};
+inline void ExpectInThreadDomain(std::source_location location = std::source_location::current()) {
+  CheckExecutionDomain(ExecutionDomain::kThread, location);
+}
 
 }  // namespace swordfs::utils

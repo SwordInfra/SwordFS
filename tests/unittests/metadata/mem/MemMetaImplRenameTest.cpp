@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
+#include "FiberTest.hpp"
 #include "TestMemMetaImpl.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "utils/Context.hpp"
@@ -43,7 +44,7 @@ class MemMetaImplRenameTest : public ::testing::Test {
 // Basic Rename
 // ════════════════════════════════════════════════════════════════════
 
-TEST_F(MemMetaImplRenameTest, BasicRenameFile) {
+FIBER_TEST_F(MemMetaImplRenameTest, BasicRenameFile) {
   InodeID f_ino = 0;
   impl_->Create(kRoot, "old_name", 0644, &f_ino, nullptr);
 
@@ -56,17 +57,17 @@ TEST_F(MemMetaImplRenameTest, BasicRenameFile) {
   EXPECT_EQ(found, f_ino);
 }
 
-TEST_F(MemMetaImplRenameTest, RenameSourceNotFound) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameSourceNotFound) {
   Status st = impl_->Rename(kRoot, "no_such", kRoot, "new", RenameFlag::kNone);
   EXPECT_TRUE(st.IsNotFound()) << st.message();
 }
 
-TEST_F(MemMetaImplRenameTest, RenameRefusesDot) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameRefusesDot) {
   Status st = impl_->Rename(kRoot, ".", kRoot, "new", RenameFlag::kNone);
   EXPECT_TRUE(st.IsBusy()) << "should refuse to rename '.'";
 }
 
-TEST_F(MemMetaImplRenameTest, RenameRefusesDotDot) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameRefusesDotDot) {
   InodeID sub_ino = 0;
   impl_->MkDir(kRoot, "sub", 0755, &sub_ino, nullptr);
   InodeID f_ino = 0;
@@ -80,7 +81,7 @@ TEST_F(MemMetaImplRenameTest, RenameRefusesDotDot) {
 // Rename: overwrite existing file
 // ════════════════════════════════════════════════════════════════════
 
-TEST_F(MemMetaImplRenameTest, RenameOverwriteFileReportsVictim) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameOverwriteFileReportsVictim) {
   InodeID f1_ino = 0, f2_ino = 0;
   impl_->Create(kRoot, "src", 0644, &f1_ino, nullptr);
   impl_->Create(kRoot, "dst", 0644, &f2_ino, nullptr);
@@ -107,7 +108,7 @@ TEST_F(MemMetaImplRenameTest, RenameOverwriteFileReportsVictim) {
 // Rename: overwrite empty directory
 // ════════════════════════════════════════════════════════════════════
 
-TEST_F(MemMetaImplRenameTest, RenameOverwriteEmptyDirectory) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameOverwriteEmptyDirectory) {
   InodeID dir1_ino = 0, dir2_ino = 0;
   impl_->MkDir(kRoot, "a", 0755, &dir1_ino, nullptr);
   impl_->MkDir(kRoot, "b", 0755, &dir2_ino, nullptr);
@@ -127,7 +128,7 @@ TEST_F(MemMetaImplRenameTest, RenameOverwriteEmptyDirectory) {
 // Rename: cross-directory directory move -> nlink adjustments
 // ════════════════════════════════════════════════════════════════════
 
-TEST_F(MemMetaImplRenameTest, RenameDirectoryCrossDirectoryUpdatesNlink) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameDirectoryCrossDirectoryUpdatesNlink) {
   InodeID src_ino = 0, dst_ino = 0;
   impl_->MkDir(kRoot, "src", 0755, &src_ino, nullptr);
   impl_->MkDir(kRoot, "dst", 0755, &dst_ino, nullptr);
@@ -154,7 +155,7 @@ TEST_F(MemMetaImplRenameTest, RenameDirectoryCrossDirectoryUpdatesNlink) {
 // Rename: same-directory move of directory -> nlink unchanged
 // ════════════════════════════════════════════════════════════════════
 
-TEST_F(MemMetaImplRenameTest, RenameDirectorySameDirectoryNlinkUnchanged) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameDirectorySameDirectoryNlinkUnchanged) {
   InodeID dir_ino = 0;
   impl_->MkDir(kRoot, "parent", 0755, &dir_ino, nullptr);
   InodeID sub_ino = 0;
@@ -175,7 +176,7 @@ TEST_F(MemMetaImplRenameTest, RenameDirectorySameDirectoryNlinkUnchanged) {
 // Rename: cannot move directory into its own subtree
 // ════════════════════════════════════════════════════════════════════
 
-TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoSubtreeFails) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoSubtreeFails) {
   InodeID a_ino = 0, b_ino = 0;
   impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
   impl_->MkDir(a_ino, "b", 0755, &b_ino, nullptr);
@@ -188,7 +189,7 @@ TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoSubtreeFails) {
 // Rename: file <-> directory type mismatch on overwrite
 // ════════════════════════════════════════════════════════════════════
 
-TEST_F(MemMetaImplRenameTest, RenameFileOverDirectoryFails) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameFileOverDirectoryFails) {
   InodeID f_ino = 0, d_ino = 0;
   impl_->Create(kRoot, "f", 0644, &f_ino, nullptr);
   impl_->MkDir(kRoot, "d", 0755, &d_ino, nullptr);
@@ -197,7 +198,7 @@ TEST_F(MemMetaImplRenameTest, RenameFileOverDirectoryFails) {
   EXPECT_EQ(st.code(), Status::kIsDirectory) << st.message();
 }
 
-TEST_F(MemMetaImplRenameTest, RenameDirectoryOverFileFails) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameDirectoryOverFileFails) {
   InodeID f_ino = 0, d_ino = 0;
   impl_->Create(kRoot, "f", 0644, &f_ino, nullptr);
   impl_->MkDir(kRoot, "d", 0755, &d_ino, nullptr);
@@ -210,7 +211,7 @@ TEST_F(MemMetaImplRenameTest, RenameDirectoryOverFileFails) {
 // Rename: overwrite non-empty directory fails
 // ════════════════════════════════════════════════════════════════════
 
-TEST_F(MemMetaImplRenameTest, RenameOverwriteNonEmptyDirectoryFails) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameOverwriteNonEmptyDirectoryFails) {
   InodeID d1_ino = 0, d2_ino = 0;
   impl_->MkDir(kRoot, "d1", 0755, &d1_ino, nullptr);
   impl_->MkDir(kRoot, "d2", 0755, &d2_ino, nullptr);
@@ -225,7 +226,7 @@ TEST_F(MemMetaImplRenameTest, RenameOverwriteNonEmptyDirectoryFails) {
 // Rename: nlink accounting with multiple directories
 // ════════════════════════════════════════════════════════════════════
 
-TEST_F(MemMetaImplRenameTest, NlinkAccountingMultipleDirs) {
+FIBER_TEST_F(MemMetaImplRenameTest, NlinkAccountingMultipleDirs) {
   struct stat root_before;
   impl_->GetAttr(kRoot, &root_before);
   nlink_t initial = root_before.st_nlink;
@@ -265,7 +266,7 @@ TEST_F(MemMetaImplRenameTest, NlinkAccountingMultipleDirs) {
 // Rename: directory into itself (META-01)
 // ════════════════════════════════════════════════════════════════════
 
-TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoItselfFails) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoItselfFails) {
   InodeID a_ino = 0;
   impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
 
@@ -283,7 +284,7 @@ TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoItselfFails) {
   EXPECT_TRUE(S_ISDIR(attr.st_mode));
 }
 
-TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoOwnSubtreeStillFails) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoOwnSubtreeStillFails) {
   InodeID a_ino = 0, b_ino = 0;
   impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
   impl_->MkDir(a_ino, "b", 0755, &b_ino, nullptr);
@@ -296,7 +297,7 @@ TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoOwnSubtreeStillFails) {
   EXPECT_EQ(found, a_ino);
 }
 
-TEST_F(MemMetaImplRenameTest, RenameExchangeDirectoryIntoItselfFails) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameExchangeDirectoryIntoItselfFails) {
   InodeID a_ino = 0, b_ino = 0;
   impl_->MkDir(kRoot, "a", 0755, &a_ino, nullptr);
   impl_->MkDir(a_ino, "b", 0755, &b_ino, nullptr);
@@ -314,7 +315,7 @@ TEST_F(MemMetaImplRenameTest, RenameExchangeDirectoryIntoItselfFails) {
   EXPECT_EQ(found, b_ino);
 }
 
-TEST_F(MemMetaImplRenameTest, RenameExchangeWithAncestorDirectoryFails) {
+FIBER_TEST_F(MemMetaImplRenameTest, RenameExchangeWithAncestorDirectoryFails) {
   // Build root/b/x/a: dir b is an ancestor of dir a.
   InodeID b_ino = 0, x_ino = 0, a_ino = 0;
   impl_->MkDir(kRoot, "b", 0755, &b_ino, nullptr);

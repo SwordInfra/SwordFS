@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "FiberTest.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "utils/Status.hpp"
 #include "vfs/DirHandle.hpp"
@@ -127,7 +128,7 @@ const TestDirEntryEncoder &Encoder() {
   return encoder;
 }
 
-TEST(DirHandleTest, ReadDirAcceptsZeroSize) {
+FIBER_TEST(DirHandleTest, ReadDirAcceptsZeroSize) {
   auto handle = std::make_shared<DirHandle>(std::make_shared<TestDirIterator>(std::vector<SwordFsEntry>{}));
   std::string output = "stale";
 
@@ -135,7 +136,7 @@ TEST(DirHandleTest, ReadDirAcceptsZeroSize) {
   EXPECT_TRUE(output.empty());
 }
 
-TEST(DirHandleTest, ReadDirEncodesEntriesAndAdvancesOffset) {
+FIBER_TEST(DirHandleTest, ReadDirEncodesEntriesAndAdvancesOffset) {
   auto handle = std::make_shared<DirHandle>(
       std::make_shared<TestDirIterator>(std::vector<SwordFsEntry>{{"one", DT_REG, 10}, {"two", DT_DIR, 20}}));
 
@@ -144,7 +145,7 @@ TEST(DirHandleTest, ReadDirEncodesEntriesAndAdvancesOffset) {
   EXPECT_EQ(output, "one:10:1two:20:2");
 }
 
-TEST(DirHandleTest, ReadDirResumesFromOffset) {
+FIBER_TEST(DirHandleTest, ReadDirResumesFromOffset) {
   auto handle = std::make_shared<DirHandle>(
       std::make_shared<TestDirIterator>(std::vector<SwordFsEntry>{{"one", DT_REG, 10}, {"two", DT_DIR, 20}}));
 
@@ -153,7 +154,7 @@ TEST(DirHandleTest, ReadDirResumesFromOffset) {
   EXPECT_EQ(output, "two:20:2");
 }
 
-TEST(DirHandleTest, ReadDirStopsWhenEntryDoesNotFit) {
+FIBER_TEST(DirHandleTest, ReadDirStopsWhenEntryDoesNotFit) {
   auto handle =
       std::make_shared<DirHandle>(std::make_shared<TestDirIterator>(std::vector<SwordFsEntry>{{"one", DT_REG, 10}}));
 
@@ -163,7 +164,7 @@ TEST(DirHandleTest, ReadDirStopsWhenEntryDoesNotFit) {
   EXPECT_TRUE(output.empty());
 }
 
-TEST(DirHandleTest, ReadDirReturnsEndOfDirectoryAsSuccess) {
+FIBER_TEST(DirHandleTest, ReadDirReturnsEndOfDirectoryAsSuccess) {
   auto handle = std::make_shared<DirHandle>(std::make_shared<TestDirIterator>(std::vector<SwordFsEntry>{}));
 
   std::string output = "stale";

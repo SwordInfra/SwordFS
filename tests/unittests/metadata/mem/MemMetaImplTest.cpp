@@ -12,6 +12,7 @@
 #include <barrier>
 #include <thread>
 
+#include "FiberTest.hpp"
 #include "TestMemMetaImpl.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "utils/Context.hpp"
@@ -32,6 +33,15 @@ static constexpr uid_t kOwner = 1000;
 static constexpr uid_t kOther = 2000;
 static constexpr gid_t kGroup = 100;
 static constexpr gid_t kOtherGroup = 200;
+
+#ifndef NDEBUG
+TEST(MemMetaImplDomainTest, RuntimeApiRejectsThreadCaller) {
+  TestMemMetaImpl impl;
+  SwordFsInode inode;
+  EXPECT_DEATH(
+      { (void)impl.GetInode(kRoot, &inode); }, "execution-domain violation at .*expected=fiber, actual=POSIX-thread");
+}
+#endif
 
 class MemMetaImplTest : public ::testing::Test {
  protected:
@@ -144,7 +154,7 @@ class MemMetaImplTest : public ::testing::Test {
 // Create permission checks
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, CreateOwnerWithWriteAndExecSucceeds) {
+FIBER_TEST_F(MemMetaImplTest, CreateOwnerWithWriteAndExecSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
   SetContext(kOwner, kOtherGroup);
 
@@ -153,7 +163,7 @@ TEST_F(MemMetaImplTest, CreateOwnerWithWriteAndExecSucceeds) {
   EXPECT_TRUE(st.ok()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, CreateOwnerWithoutWriteFails) {
+FIBER_TEST_F(MemMetaImplTest, CreateOwnerWithoutWriteFails) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0500);  // r-x, no write
   SetContext(kOwner, kOtherGroup);
 
@@ -162,7 +172,7 @@ TEST_F(MemMetaImplTest, CreateOwnerWithoutWriteFails) {
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, CreateOwnerWithoutExecFails) {
+FIBER_TEST_F(MemMetaImplTest, CreateOwnerWithoutExecFails) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0600);  // rw-, no exec
   SetContext(kOwner, kOtherGroup);
 
@@ -171,7 +181,7 @@ TEST_F(MemMetaImplTest, CreateOwnerWithoutExecFails) {
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, CreateOwnerNoPermsFails) {
+FIBER_TEST_F(MemMetaImplTest, CreateOwnerNoPermsFails) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0000);
   SetContext(kOwner, kOtherGroup);
 
@@ -180,7 +190,7 @@ TEST_F(MemMetaImplTest, CreateOwnerNoPermsFails) {
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, CreateRootAlwaysSucceeds) {
+FIBER_TEST_F(MemMetaImplTest, CreateRootAlwaysSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0000);  // no perms at all
   SetContext(0, 0);                                  // root
 
@@ -189,7 +199,7 @@ TEST_F(MemMetaImplTest, CreateRootAlwaysSucceeds) {
   EXPECT_TRUE(st.ok()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, CreateGroupMemberWithWriteExecSucceeds) {
+FIBER_TEST_F(MemMetaImplTest, CreateGroupMemberWithWriteExecSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0770);
   // kOther is NOT the owner, but IS in kGroup
   SetDirOwner(dir_ino, kOther, kGroup);
@@ -199,7 +209,7 @@ TEST_F(MemMetaImplTest, CreateGroupMemberWithWriteExecSucceeds) {
   EXPECT_TRUE(st.ok()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, CreateGroupMemberWithoutWriteFails) {
+FIBER_TEST_F(MemMetaImplTest, CreateGroupMemberWithoutWriteFails) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0750);  // group has r-x only
   // Caller is in kGroup but is NOT the owner (kOwner=1000).
   SetContext(3000, kGroup);
@@ -208,7 +218,7 @@ TEST_F(MemMetaImplTest, CreateGroupMemberWithoutWriteFails) {
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, CreateOtherWithWriteExecSucceeds) {
+FIBER_TEST_F(MemMetaImplTest, CreateOtherWithWriteExecSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0777);
   // Not owner, not in group
   SetDirOwner(dir_ino, kOwner, kGroup);
@@ -218,7 +228,7 @@ TEST_F(MemMetaImplTest, CreateOtherWithWriteExecSucceeds) {
   EXPECT_TRUE(st.ok()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, CreateOtherWithoutWriteFails) {
+FIBER_TEST_F(MemMetaImplTest, CreateOtherWithoutWriteFails) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0755);  // other has r-x only
   SetDirOwner(dir_ino, kOwner, kGroup);
   SetContext(kOther, kOtherGroup);
@@ -231,7 +241,7 @@ TEST_F(MemMetaImplTest, CreateOtherWithoutWriteFails) {
 // MkDir permission checks
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, MkDirPermissionDeniedWithoutWrite) {
+FIBER_TEST_F(MemMetaImplTest, MkDirPermissionDeniedWithoutWrite) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0500);  // no write for owner
   SetContext(kOwner, kOtherGroup);
 
@@ -239,7 +249,7 @@ TEST_F(MemMetaImplTest, MkDirPermissionDeniedWithoutWrite) {
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, MkDirRootAlwaysSucceeds) {
+FIBER_TEST_F(MemMetaImplTest, MkDirRootAlwaysSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0000);
   SetContext(0, 0);
 
@@ -251,7 +261,7 @@ TEST_F(MemMetaImplTest, MkDirRootAlwaysSucceeds) {
 // Access permission checks
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, AccessOwnerPermissions) {
+FIBER_TEST_F(MemMetaImplTest, AccessOwnerPermissions) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);  // owner rwx
   SetContext(kOwner, kOtherGroup);
 
@@ -261,7 +271,7 @@ TEST_F(MemMetaImplTest, AccessOwnerPermissions) {
   EXPECT_TRUE(impl_->Access(dir_ino, R_OK | W_OK).ok());
 }
 
-TEST_F(MemMetaImplTest, AccessOwnerReadOnly) {
+FIBER_TEST_F(MemMetaImplTest, AccessOwnerReadOnly) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0400);  // owner r--
   SetContext(kOwner, kOtherGroup);
 
@@ -270,7 +280,7 @@ TEST_F(MemMetaImplTest, AccessOwnerReadOnly) {
   EXPECT_TRUE(impl_->Access(dir_ino, X_OK).IsPermission());
 }
 
-TEST_F(MemMetaImplTest, AccessGroupPermissions) {
+FIBER_TEST_F(MemMetaImplTest, AccessGroupPermissions) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0070);  // group rwx
   SetDirOwner(dir_ino, kOther, kGroup);
   // Caller is NOT the owner (kOther=2000), but IS in kGroup (100).
@@ -281,7 +291,7 @@ TEST_F(MemMetaImplTest, AccessGroupPermissions) {
   EXPECT_TRUE(impl_->Access(dir_ino, X_OK).ok());
 }
 
-TEST_F(MemMetaImplTest, AccessOtherPermissions) {
+FIBER_TEST_F(MemMetaImplTest, AccessOtherPermissions) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0007);  // other rwx
   SetDirOwner(dir_ino, kOwner, kGroup);
   SetContext(kOther, kOtherGroup);
@@ -291,14 +301,14 @@ TEST_F(MemMetaImplTest, AccessOtherPermissions) {
   EXPECT_TRUE(impl_->Access(dir_ino, X_OK).ok());
 }
 
-TEST_F(MemMetaImplTest, AccessRootAlwaysHasFullAccess) {
+FIBER_TEST_F(MemMetaImplTest, AccessRootAlwaysHasFullAccess) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0000);  // no perms
   SetContext(0, 0);
 
   EXPECT_TRUE(impl_->Access(dir_ino, R_OK | W_OK | X_OK).ok());
 }
 
-TEST_F(MemMetaImplTest, AccessNotFoundFails) {
+FIBER_TEST_F(MemMetaImplTest, AccessNotFoundFails) {
   SetContext(kOwner, kGroup);
   Status st = impl_->Access(99999, R_OK);
   EXPECT_TRUE(st.IsNotFound());
@@ -308,7 +318,7 @@ TEST_F(MemMetaImplTest, AccessNotFoundFails) {
 // Unlink permission checks
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, UnlinkOwnerWithWriteSucceeds) {
+FIBER_TEST_F(MemMetaImplTest, UnlinkOwnerWithWriteSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
   // Create a file owned by kOwner (the creator)
   SetContext(kOwner, kOtherGroup);
@@ -317,7 +327,7 @@ TEST_F(MemMetaImplTest, UnlinkOwnerWithWriteSucceeds) {
   EXPECT_TRUE(impl_->Unlink(dir_ino, "f").ok());
 }
 
-TEST_F(MemMetaImplTest, UnlinkWithoutWriteOnParentFails) {
+FIBER_TEST_F(MemMetaImplTest, UnlinkWithoutWriteOnParentFails) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
   SetContext(kOwner, kOtherGroup);
   impl_->Create(dir_ino, "f", 0644, nullptr);
@@ -333,7 +343,7 @@ TEST_F(MemMetaImplTest, UnlinkWithoutWriteOnParentFails) {
 // Unlink sticky-bit checks
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, UnlinkStickyBitOwnerCanDelete) {
+FIBER_TEST_F(MemMetaImplTest, UnlinkStickyBitOwnerCanDelete) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01700);  // sticky + rwx for owner
   SetContext(kOwner, kOtherGroup);
   impl_->Create(dir_ino, "f", 0644, nullptr);
@@ -343,7 +353,7 @@ TEST_F(MemMetaImplTest, UnlinkStickyBitOwnerCanDelete) {
   EXPECT_TRUE(impl_->Unlink(dir_ino, "f").ok());
 }
 
-TEST_F(MemMetaImplTest, UnlinkStickyBitFileOwnerCanDelete) {
+FIBER_TEST_F(MemMetaImplTest, UnlinkStickyBitFileOwnerCanDelete) {
   // Dir owned by kOther, sticky bit
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);  // sticky + rwx for all
   SetDirOwner(dir_ino, kOther, kGroup);
@@ -356,7 +366,7 @@ TEST_F(MemMetaImplTest, UnlinkStickyBitFileOwnerCanDelete) {
   EXPECT_TRUE(impl_->Unlink(dir_ino, "f").ok());
 }
 
-TEST_F(MemMetaImplTest, UnlinkStickyBitNonOwnerCannotDelete) {
+FIBER_TEST_F(MemMetaImplTest, UnlinkStickyBitNonOwnerCannotDelete) {
   // Dir owned by kOther, sticky bit
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
   SetDirOwner(dir_ino, kOther, kGroup);
@@ -371,7 +381,7 @@ TEST_F(MemMetaImplTest, UnlinkStickyBitNonOwnerCannotDelete) {
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, UnlinkStickyBitRootCanDelete) {
+FIBER_TEST_F(MemMetaImplTest, UnlinkStickyBitRootCanDelete) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
   SetDirOwner(dir_ino, kOther, kGroup);
   SetContext(kOwner, kOtherGroup);
@@ -386,7 +396,7 @@ TEST_F(MemMetaImplTest, UnlinkStickyBitRootCanDelete) {
 // RmDir sticky-bit checks
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, RmDirStickyBitOwnerCanDelete) {
+FIBER_TEST_F(MemMetaImplTest, RmDirStickyBitOwnerCanDelete) {
   // Sticky dir owned by kOther, writable for all.
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
   SetDirOwner(dir_ino, kOther, kGroup);
@@ -400,7 +410,7 @@ TEST_F(MemMetaImplTest, RmDirStickyBitOwnerCanDelete) {
   EXPECT_TRUE(impl_->RmDir(dir_ino, "sub").ok());
 }
 
-TEST_F(MemMetaImplTest, RmDirStickyBitNonOwnerCannotDelete) {
+FIBER_TEST_F(MemMetaImplTest, RmDirStickyBitNonOwnerCannotDelete) {
   // Sticky dir owned by kOther, writable for all.
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
   SetDirOwner(dir_ino, kOther, kGroup);
@@ -420,7 +430,7 @@ TEST_F(MemMetaImplTest, RmDirStickyBitNonOwnerCannotDelete) {
 // Rename permission checks
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnOldParent) {
+FIBER_TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnOldParent) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0777);  // writable for all
   SetContext(kOwner, kOtherGroup);
@@ -433,7 +443,7 @@ TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnOldParent) {
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnNewParent) {
+FIBER_TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnNewParent) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0777);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(kOwner, kOtherGroup);
@@ -446,7 +456,7 @@ TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnNewParent) {
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, RenameRootSucceedsRegardlessOfPerms) {
+FIBER_TEST_F(MemMetaImplTest, RenameRootSucceedsRegardlessOfPerms) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0000);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0000);
   SetContext(kOwner, kOtherGroup);
@@ -459,7 +469,7 @@ TEST_F(MemMetaImplTest, RenameRootSucceedsRegardlessOfPerms) {
   EXPECT_TRUE(st.ok()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, RenameStickyBitNonOwnerCannotMoveOut) {
+FIBER_TEST_F(MemMetaImplTest, RenameStickyBitNonOwnerCannotMoveOut) {
   // Sticky src dir owned by kOther, writable for all; dst fully open.
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 01777);
   SetDirOwner(src_ino, kOther, kGroup);
@@ -475,7 +485,7 @@ TEST_F(MemMetaImplTest, RenameStickyBitNonOwnerCannotMoveOut) {
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, RenameStickyBitCannotOverwriteOthersFile) {
+FIBER_TEST_F(MemMetaImplTest, RenameStickyBitCannotOverwriteOthersFile) {
   // dst is a sticky dir owned by kOther and already holds kOther's file;
   // src is fully open.
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0777);
@@ -499,7 +509,7 @@ TEST_F(MemMetaImplTest, RenameStickyBitCannotOverwriteOthersFile) {
 // RENAME flags tests
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, RenameNoReplaceSucceedsWhenTargetFree) {
+FIBER_TEST_F(MemMetaImplTest, RenameNoReplaceSucceedsWhenTargetFree) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
@@ -515,7 +525,7 @@ TEST_F(MemMetaImplTest, RenameNoReplaceSucceedsWhenTargetFree) {
   EXPECT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
 }
 
-TEST_F(MemMetaImplTest, RenameNoReplaceFailsWhenTargetExists) {
+FIBER_TEST_F(MemMetaImplTest, RenameNoReplaceFailsWhenTargetExists) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
@@ -533,7 +543,7 @@ TEST_F(MemMetaImplTest, RenameNoReplaceFailsWhenTargetExists) {
   EXPECT_EQ(f1_ino, found);
 }
 
-TEST_F(MemMetaImplTest, RenameExchangeSucceeds) {
+FIBER_TEST_F(MemMetaImplTest, RenameExchangeSucceeds) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
@@ -553,7 +563,7 @@ TEST_F(MemMetaImplTest, RenameExchangeSucceeds) {
   EXPECT_EQ(f1_ino, found);
 }
 
-TEST_F(MemMetaImplTest, RenameExchangeFailsWhenTargetMissing) {
+FIBER_TEST_F(MemMetaImplTest, RenameExchangeFailsWhenTargetMissing) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
@@ -564,7 +574,7 @@ TEST_F(MemMetaImplTest, RenameExchangeFailsWhenTargetMissing) {
   EXPECT_TRUE(st.IsNotFound()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
+FIBER_TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
@@ -582,7 +592,7 @@ TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
 // RmDir permission checks
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, RmDirRequiresWriteExecOnParent) {
+FIBER_TEST_F(MemMetaImplTest, RmDirRequiresWriteExecOnParent) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "parent", 0700);
   SetContext(kOwner, kOtherGroup);
   MakeDir(dir_ino, "sub", 0755);
@@ -594,7 +604,7 @@ TEST_F(MemMetaImplTest, RmDirRequiresWriteExecOnParent) {
   EXPECT_TRUE(st.IsPermission()) << st.message();
 }
 
-TEST_F(MemMetaImplTest, RmDirRootAlwaysSucceeds) {
+FIBER_TEST_F(MemMetaImplTest, RmDirRootAlwaysSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "parent", 0000);
   SetContext(0, 0);
   MakeDir(dir_ino, "sub", 0755);
@@ -608,7 +618,7 @@ TEST_F(MemMetaImplTest, RmDirRootAlwaysSucceeds) {
 // Open permission checks
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, OpenRequiresReadPermission) {
+FIBER_TEST_F(MemMetaImplTest, OpenRequiresReadPermission) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
   SetContext(kOwner, kOtherGroup);
   InodeID f_ino = 0;
@@ -625,7 +635,7 @@ TEST_F(MemMetaImplTest, OpenRequiresReadPermission) {
   EXPECT_TRUE(s.IsPermission()) << s.message();
 }
 
-TEST_F(MemMetaImplTest, OpenRootSucceedsWithoutReadPerm) {
+FIBER_TEST_F(MemMetaImplTest, OpenRootSucceedsWithoutReadPerm) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
   SetContext(kOwner, kOtherGroup);
   InodeID f_ino = 0;
@@ -646,12 +656,12 @@ TEST_F(MemMetaImplTest, OpenRootSucceedsWithoutReadPerm) {
 // Truncate
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, TruncateNotFound) {
+FIBER_TEST_F(MemMetaImplTest, TruncateNotFound) {
   Status status = impl_->Truncate(999, 0);
   EXPECT_TRUE(status.IsNotFound());
 }
 
-TEST_F(MemMetaImplTest, TruncateUpdatesSizeAndClearsSuidSgid) {
+FIBER_TEST_F(MemMetaImplTest, TruncateUpdatesSizeAndClearsSuidSgid) {
   InodeID f_ino = 0;
   ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
 
@@ -669,7 +679,7 @@ TEST_F(MemMetaImplTest, TruncateUpdatesSizeAndClearsSuidSgid) {
   EXPECT_EQ(out.st_mode & S_ISGID, 0u);
 }
 
-TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
+FIBER_TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
   InodeID f_ino = 0;
   ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
 
@@ -689,7 +699,7 @@ TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
 // SetAttr size change → Truncate
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
+FIBER_TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
   InodeID f_ino = 0;
   ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
 
@@ -706,7 +716,7 @@ TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
   EXPECT_EQ(out.attr.mode & S_ISGID, 0u);
 }
 
-TEST_F(MemMetaImplTest, ReclaimInodeMissingInodeIsNoOp) {
+FIBER_TEST_F(MemMetaImplTest, ReclaimInodeMissingInodeIsNoOp) {
   EXPECT_TRUE(impl_->ReclaimInode(999).ok());
 }
 
@@ -714,7 +724,7 @@ TEST_F(MemMetaImplTest, ReclaimInodeMissingInodeIsNoOp) {
 // other names (and any chunk objects they share) are still in use. The
 // e2e tests FileOpsTest.Hardlink* cover the POSIX contract end-to-end;
 // this single-engine test pins the metadata-only invariant.
-TEST_F(MemMetaImplTest, UnlinkOnHardlinkedInodeKeepsInodeAlive) {
+FIBER_TEST_F(MemMetaImplTest, UnlinkOnHardlinkedInodeKeepsInodeAlive) {
   InodeID f_ino = 0;
   SetContext(0, 0);
   ASSERT_TRUE(impl_->Create(kRoot, "orig", 0644, &f_ino, nullptr).ok());
@@ -748,7 +758,7 @@ TEST_F(MemMetaImplTest, UnlinkOnHardlinkedInodeKeepsInodeAlive) {
 // must NOT refuse these ops just because nlink dropped to 0.
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaImplTest, OpenAcceptsUnlinkedButLiveInode) {
+FIBER_TEST_F(MemMetaImplTest, OpenAcceptsUnlinkedButLiveInode) {
   // POSIX open-unlink: the directory entry is gone, but the inode
   // stays alive because some fd is still referencing it. Subsequent
   // meta-engine calls on the ino (Open/GetAttr/Access/...) must
@@ -788,7 +798,7 @@ TEST_F(MemMetaImplTest, OpenAcceptsUnlinkedButLiveInode) {
 // it observed the intermediate state (target gone, source not yet
 // moved), which is exactly the data-loss window from META-03.
 
-TEST_F(MemMetaImplTest, ConcurrentRenameOverwriteHasNoObservableGap) {
+FIBER_TEST_F(MemMetaImplTest, ConcurrentRenameOverwriteHasNoObservableGap) {
   constexpr int kRounds = 500;
 
   SetContext(0, 0);
@@ -800,7 +810,7 @@ TEST_F(MemMetaImplTest, ConcurrentRenameOverwriteHasNoObservableGap) {
   std::barrier gate(3);
 
   // Creator: keeps probing whether "dst" can be created.
-  std::thread creator([&]() {
+  auto creator = swordfs::test::StartFiberTestThread([&]() {
     gate.arrive_and_wait();
     while (!stop.load(std::memory_order_relaxed)) {
       Status status = impl_->Create(kRoot, "dst", 0644, nullptr, nullptr);
@@ -811,7 +821,7 @@ TEST_F(MemMetaImplTest, ConcurrentRenameOverwriteHasNoObservableGap) {
   });
 
   // Renamer: repeatedly overwrites "dst" with a fresh "src".
-  std::thread renamer([&]() {
+  auto renamer = swordfs::test::StartFiberTestThread([&]() {
     gate.arrive_and_wait();
     for (int i = 0; i < kRounds; ++i) {
       Status status = impl_->Create(kRoot, "src", 0644, nullptr, nullptr);
@@ -846,7 +856,7 @@ TEST_F(MemMetaImplTest, ConcurrentRenameOverwriteHasNoObservableGap) {
 // exist, so every exchange must succeed, and afterwards both names must
 // resolve to the two original inodes — none may be lost or duplicated.
 
-TEST_F(MemMetaImplTest, ConcurrentExchangeKeepsBothInodes) {
+FIBER_TEST_F(MemMetaImplTest, ConcurrentExchangeKeepsBothInodes) {
   constexpr int kRounds = 500;
 
   SetContext(0, 0);
@@ -867,8 +877,8 @@ TEST_F(MemMetaImplTest, ConcurrentExchangeKeepsBothInodes) {
     }
   };
 
-  std::thread t1(worker, "a", "b");
-  std::thread t2(worker, "b", "a");
+  auto t1 = swordfs::test::StartFiberTestThread(worker, "a", "b");
+  auto t2 = swordfs::test::StartFiberTestThread(worker, "b", "a");
   gate.arrive_and_wait();
   t1.join();
   t2.join();

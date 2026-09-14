@@ -18,6 +18,7 @@
 #include "fuse/Limits.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
+#include "utils/ExecutionDomain.hpp"
 #include "utils/FiberRuntime.hpp"
 #include "utils/Logging.hpp"
 #include "vfs/VfsImpl.hpp"
@@ -30,10 +31,15 @@ namespace {
 
 template <typename Fn>
 void RunFuseInFiber(fuse_req_t req, Fn &&fn) {
-  ::swordfs::utils::RunInFiber(std::forward<Fn>(fn), [req] {
-    SWORDFS_LOG_ERROR << "Failed to admit FUSE request into the fiber runtime";
-    fuse_reply_err(req, EIO);
-  });
+  ::swordfs::utils::RunInFiber(
+      [fn = std::forward<Fn>(fn)]() mutable {
+        ::swordfs::utils::ExpectInFiberDomain();
+        fn();
+      },
+      [req] {
+        SWORDFS_LOG_ERROR << "Failed to admit FUSE request into the fiber runtime";
+        fuse_reply_err(req, EIO);
+      });
 }
 
 }  // namespace

@@ -26,15 +26,21 @@ jobs:
         run: pre-commit run --all-files
 
   build-and-test:
+    name: build-and-test (${{ matrix.build_type }})
     needs: clang-format
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 0
           submodules: false
 
       - name: Restore native dependency cache
@@ -55,29 +61,41 @@ jobs:
           getent group fuse || sudo groupadd fuse
           sudo usermod -aG fuse "$(whoami)"
 
-      - name: Install CI tools
+      - name: Install Debug CI tools
+        if: matrix.build_type == 'Debug'
         run: sudo apt-get install -y -qq lcov clang-tidy
 
       - name: Configure
         run: |
           sudo rm -rf build
-          cmake --preset default -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install" -DCMAKE_CXX_FLAGS="--coverage" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+          if [ "${{ matrix.build_type }}" = "Debug" ]; then
+            cmake --preset default \
+              -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install" \
+              -DCMAKE_CXX_FLAGS="--coverage" \
+              -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+          else
+            cmake --preset release \
+              -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install"
+          fi
 
       - name: Build
         run: cmake --build build --target swordfs swordfs_test swordfs_e2e_test
 
       - name: Run clang-tidy (changed files only)
+        if: matrix.build_type == 'Debug'
         run: |
-          if git rev-parse origin/main >/dev/null 2>&1; then
-            BASE="origin/main"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
           else
-            BASE=$(git rev-list --max-parents=0 HEAD)
+            BASE=$(git rev-parse HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
           fi
+          echo "clang-tidy base: $BASE"
           CHANGED=$(git diff --name-only --diff-filter=ACMR "$BASE"...HEAD \
             | grep -E '\.(cpp|hpp)$' | grep '^src/' || true)
           if [ -n "$CHANGED" ]; then
+            printf '%s\n' "$CHANGED"
             echo "$CHANGED" | xargs run-clang-tidy -p build -j $(nproc) \
-              --warnings-as-errors='*' || true
+              -warnings-as-errors='*'
           else
             echo "No C++ source changes detected."
           fi
@@ -96,6 +114,7 @@ jobs:
           sg fuse -c "bash scripts/run-e2e.sh --gtest_color=no"
 
       - name: Generate coverage report
+        if: matrix.build_type == 'Debug'
         run: |
           # Run the entire coverage pipeline with relaxed error handling.
           # lcov 2.x (Ubuntu 24.04) is stricter than 1.x and may exit non-zero
@@ -132,6 +151,7 @@ jobs:
           fi
 
       - name: Upload coverage to Codecov
+        if: matrix.build_type == 'Debug'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

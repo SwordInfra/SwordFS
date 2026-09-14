@@ -17,6 +17,7 @@
 #include <thread>
 #include <vector>
 
+#include "FiberTest.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 #include "utils/Status.hpp"
 
@@ -51,7 +52,7 @@ class MemMetaStoreConcurrencyTest : public ::testing::Test {
 // Concurrent AddEntry — no duplicate names under same parent
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntryNoDuplicate) {
+FIBER_TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntryNoDuplicate) {
   constexpr int kThreads = 8;
   constexpr int kPerThread = 50;  // total = 400 insertions
 
@@ -73,7 +74,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntryNoDuplicate) {
 
   std::vector<std::thread> threads;
   for (int t = 0; t < kThreads; ++t) {
-    threads.emplace_back(worker, t);
+    threads.emplace_back([&, t] { swordfs::test::RunInTestFiber([&] { worker(t); }); });
   }
   for (auto &t : threads) {
     t.join();
@@ -90,7 +91,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntryNoDuplicate) {
 // Concurrent AddEntry — same name, only ONE should succeed
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntrySameName) {
+FIBER_TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntrySameName) {
   constexpr int kThreads = 16;
 
   std::atomic<int> success_count{0};
@@ -116,7 +117,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntrySameName) {
 
   std::vector<std::thread> threads;
   for (int t = 0; t < kThreads; ++t) {
-    threads.emplace_back(worker);
+    threads.emplace_back([&] { swordfs::test::RunInTestFiber(worker); });
   }
   for (auto &t : threads) {
     t.join();
@@ -132,7 +133,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntrySameName) {
 // Concurrent MoveEntry — atomic check-then-act
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveEntryAtomicity) {
+FIBER_TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveEntryAtomicity) {
   // Set up: root/src/file + root/dst/
   SwordFsInode src_dir;
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "src", kDir, &src_dir); });
@@ -166,7 +167,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveEntryAtomicity) {
 
   std::vector<std::thread> threads;
   for (int t = 0; t < kThreads; ++t) {
-    threads.emplace_back(worker, t);
+    threads.emplace_back([&, t] { swordfs::test::RunInTestFiber([&] { worker(t); }); });
   }
   for (auto &t : threads) {
     t.join();
@@ -192,7 +193,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveEntryAtomicity) {
 // Concurrent Unlink + AddEntry — no stale snapshot use
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreConcurrencyTest, ConcurrentRemoveAndAdd) {
+FIBER_TEST_F(MemMetaStoreConcurrencyTest, ConcurrentRemoveAndAdd) {
   // Create 100 files under root
   constexpr int kFiles = 100;
   std::vector<InodeID> inodes;
@@ -240,10 +241,11 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentRemoveAndAdd) {
   };
 
   std::vector<std::thread> threads;
-  // 4 removers + 4 adders
+  // 4 removers + 4 adders. Each POSIX worker establishes its own real
+  // FiberManager before entering fiber-owned metadata code.
   for (int t = 0; t < kThreads; ++t) {
-    threads.emplace_back(remover, t);
-    threads.emplace_back(adder, t);
+    threads.emplace_back([&, t] { swordfs::test::RunInTestFiber([&] { remover(t); }); });
+    threads.emplace_back([&, t] { swordfs::test::RunInTestFiber([&] { adder(t); }); });
   }
   for (auto &t : threads) {
     t.join();
@@ -259,7 +261,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentRemoveAndAdd) {
 // Concurrent AddEntry + ListEntries — snapshot consistency
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddAndList) {
+FIBER_TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddAndList) {
   constexpr int kAdders = 4;
   constexpr int kListers = 2;
   constexpr int kFiles = 50;
@@ -304,10 +306,10 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddAndList) {
 
   std::vector<std::thread> threads;
   for (int t = 0; t < kAdders; ++t) {
-    threads.emplace_back(adder, t);
+    threads.emplace_back([&, t] { swordfs::test::RunInTestFiber([&] { adder(t); }); });
   }
   for (int t = 0; t < kListers; ++t) {
-    threads.emplace_back(lister);
+    threads.emplace_back([&] { swordfs::test::RunInTestFiber(lister); });
   }
 
   start.store(true, std::memory_order_release);
@@ -324,7 +326,7 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddAndList) {
 // Concurrent move from multiple sources to same target
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveToSameTarget) {
+FIBER_TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveToSameTarget) {
   // Set up: root/a/file1, root/b/file2, root/dst/
   SwordFsInode dir_a, dir_b, dir_dst;
   store_->Transact([&](MemMetaTxn &txn) { return txn.AddEntry(kRoot, "a", kDir, &dir_a); });
@@ -361,8 +363,8 @@ TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveToSameTarget) {
     }
   };
 
-  std::thread t1(mover_a);
-  std::thread t2(mover_b);
+  std::thread t1([&] { swordfs::test::RunInTestFiber(mover_a); });
+  std::thread t2([&] { swordfs::test::RunInTestFiber(mover_b); });
   t1.join();
   t2.join();
 

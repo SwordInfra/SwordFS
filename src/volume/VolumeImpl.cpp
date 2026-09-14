@@ -11,6 +11,7 @@
 #include "storage/DataEngineRegistry.hpp"
 #include "storage/IDataEngine.hpp"
 #include "storage/StorageUrl.hpp"
+#include "utils/ExecutionDomain.hpp"
 
 namespace swordfs::volume {
 namespace {
@@ -48,11 +49,14 @@ Status CreateDataEngine(std::string_view bucket, std::unique_ptr<swordfs::storag
 }  // namespace
 
 VolumeImpl::VolumeImpl() = default;
-VolumeImpl::~VolumeImpl() = default;
+VolumeImpl::~VolumeImpl() {
+  utils::ExpectInThreadDomain();
+}
 
 std::unique_ptr<VolumeImpl> VolumeImpl::instance_;
 
 void VolumeImpl::Initialize() {
+  utils::ExpectInThreadDomain();
   instance_ = std::make_unique<VolumeImpl>();
 }
 
@@ -69,6 +73,7 @@ void VolumeImpl::set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine> 
 }
 
 Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
+  utils::ExpectInThreadDomain();
   config_.name = cfg.volume();
   config_.storage = cfg.storage_backend();
   config_.bucket = cfg.bucket_url();
@@ -95,6 +100,7 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
 }
 
 Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
+  utils::ExpectInThreadDomain();
   config_.name = cfg.volume();
 
   auto status = CreateMetaEngine(cfg.meta_url(), config_.name, &meta_engine_);
@@ -125,6 +131,7 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
 }
 
 void VolumeImpl::Shutdown() {
+  utils::ExpectInThreadDomain();
   data_engine_.reset();
   meta_engine_.reset();
 }

@@ -10,7 +10,10 @@
 #include <utility>
 #include <vector>
 
+#include "metadata/redis/RedisBackendContext.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
+#include "utils/BlockingExecutor.hpp"
+#include "utils/ExecutionDomain.hpp"
 #include "utils/Synchronization.hpp"
 
 namespace swordfs::metadata {
@@ -20,8 +23,8 @@ constexpr size_t kHScanCount = 128;
 
 class RedisDirEntryCache final {
  public:
-  RedisDirEntryCache(std::shared_ptr<RedisMetaClient> client, std::string key)
-      : client_(std::move(client)), key_(std::move(key)) {
+  RedisDirEntryCache(std::shared_ptr<RedisBackendContext> backend, std::string key)
+      : backend_(std::move(backend)), key_(std::move(key)) {
     Reset();
   }
 
@@ -56,29 +59,21 @@ class RedisDirEntryCache final {
   }
 
   Status EnsureLoaded(size_t index) {
-    // Only the HSCAN batch containing the requested index is retained. A
-    // backward seek may therefore refer to an entry that has already been
-    // discarded; restart the scan from directory index 0 in that case.
     if (index < base_index_) {
       Reset();
     }
-
     if (index < base_index_ + entries_.size()) {
       return Status::OK();
     }
 
-    // The requested index is beyond the cached batch. Advance the logical base
-    // to the next HSCAN batch and release the current batch before scanning.
     base_index_ += entries_.size();
     entries_.clear();
 
     while (!exhausted_) {
       std::vector<std::pair<std::string, std::string>> values;
       uint64_t next_cursor = cursor_;
-      // cursor_ is Redis' opaque HSCAN continuation cursor. kHScanCount is only
-      // a work/result-size hint; Redis may return more or fewer entries. A
-      // returned cursor of 0 means the complete hash scan has finished.
-      auto status = client_->HScan(key_, cursor_, kHScanCount, &values, &next_cursor);
+      auto status = backend_->executor().RunFromFiber(
+          [&] { return backend_->client().HScan(key_, cursor_, kHScanCount, &values, &next_cursor); });
       if (!status.ok()) {
         return status;
       }
@@ -86,21 +81,16 @@ class RedisDirEntryCache final {
       if (cursor_ == 0) {
         exhausted_ = true;
       }
-
-      // This batch covers [base_index_, base_index_ + values.size()). Cache it
-      // only when it contains the requested index; otherwise skip it entirely.
       if (index < base_index_ + values.size()) {
         entries_ = std::move(values);
         return Status::OK();
       }
-
       base_index_ += values.size();
     }
     return Status::OK();
   }
 
- private:
-  std::shared_ptr<RedisMetaClient> client_;
+  std::shared_ptr<RedisBackendContext> backend_;
   std::string key_;
   std::vector<std::pair<std::string, std::string>> entries_;
   size_t base_index_ = 0;
@@ -112,8 +102,8 @@ class RedisDirEntryCache final {
 
 class RedisDirIterator::Impl {
  public:
-  Impl(std::shared_ptr<RedisMetaClient> client, std::string key, std::vector<SwordFsEntry> prefix_entries)
-      : cache_(std::move(client), std::move(key)), prefix_entries_(std::move(prefix_entries)) {
+  Impl(std::shared_ptr<RedisBackendContext> backend, std::string key, std::vector<SwordFsEntry> prefix_entries)
+      : cache_(std::move(backend), std::move(key)), prefix_entries_(std::move(prefix_entries)) {
   }
 
   Status Seek(uint64_t cookie) {
@@ -154,7 +144,6 @@ class RedisDirIterator::Impl {
     pending_next_.reset();
   }
 
- private:
   utils::FiberMutex mutex_;
   RedisDirEntryCache cache_;
   std::vector<SwordFsEntry> prefix_entries_;
@@ -162,22 +151,25 @@ class RedisDirIterator::Impl {
   std::optional<uint64_t> pending_next_;
 };
 
-RedisDirIterator::RedisDirIterator(std::shared_ptr<RedisMetaClient> client, std::string key,
+RedisDirIterator::RedisDirIterator(std::shared_ptr<RedisBackendContext> backend, std::string key,
                                    std::vector<SwordFsEntry> prefix_entries)
-    : impl_(std::make_unique<Impl>(std::move(client), std::move(key), std::move(prefix_entries))) {
+    : impl_(std::make_unique<Impl>(std::move(backend), std::move(key), std::move(prefix_entries))) {
 }
 
 RedisDirIterator::~RedisDirIterator() = default;
 
 Status RedisDirIterator::Seek(uint64_t cookie) {
+  utils::ExpectInFiberDomain();
   return impl_->Seek(cookie);
 }
 
 Status RedisDirIterator::Peek(SwordFsEntry *entry, uint64_t *next_cookie) {
+  utils::ExpectInFiberDomain();
   return impl_->Peek(entry, next_cookie);
 }
 
 void RedisDirIterator::Advance() {
+  utils::ExpectInFiberDomain();
   impl_->Advance();
 }
 
