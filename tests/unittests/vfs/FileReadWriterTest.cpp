@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -282,7 +283,7 @@ class MockMetaEngine : public IMetaEngine {
   }
 
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override {
-    if (!find_chunk_status.ok()) {
+    if (!find_chunk_status.ok() && (!find_chunk_error_idx.has_value() || *find_chunk_error_idx == idx)) {
       return find_chunk_status;
     }
     auto it = chunks_.find(ino);
@@ -323,6 +324,7 @@ class MockMetaEngine : public IMetaEngine {
   Status publish_chunk_status = Status::OK();
   bool publish_chunk_commit_on_error = false;
   Status find_chunk_status = Status::OK();
+  std::optional<ChunkIndex> find_chunk_error_idx;
 
  private:
   void TruncateChunks(InodeID ino, uint64_t size) {
@@ -518,6 +520,107 @@ TEST_F(FileReadWriterTest, EmptyOutputOnNoData) {
     EXPECT_EQ(out->length(), 64);
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), std::string(64, '\0'));
   });
+}
+
+TEST_F(FileReadWriterTest, MissingChunkMetadataReadsAsSparseZeros) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    mock_meta_->find_chunk_status = Status::NotFound("chunk is not materialized");
+
+    auto out = folly::IOBuf::create(64);
+    auto status = rw.Read(64, 0, out.get());
+
+    ASSERT_TRUE(status.ok()) << status.message();
+    ASSERT_EQ(out->length(), 64);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), std::string(64, '\0'));
+  });
+}
+
+TEST_F(FileReadWriterTest, ChunkMetadataIOErrorPropagatesFromRead) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    mock_meta_->find_chunk_status = Status::IOError("injected metadata read failure");
+
+    auto out = folly::IOBuf::create(64);
+    auto status = rw.Read(64, 0, out.get());
+
+    EXPECT_EQ(status.code(), Status::kIOError);
+    EXPECT_EQ(status.message(), "injected metadata read failure");
+    EXPECT_EQ(out->length(), 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, MalformedChunkMetadataPropagatesFromRead) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    mock_meta_->find_chunk_status = Status::Malformed("injected malformed chunk metadata");
+
+    auto out = folly::IOBuf::create(64);
+    auto status = rw.Read(64, 0, out.get());
+
+    EXPECT_TRUE(status.IsMalformed());
+    EXPECT_EQ(status.message(), "injected malformed chunk metadata");
+    EXPECT_EQ(out->length(), 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, ChunkMetadataIOErrorPropagatesFromWrite) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    mock_meta_->find_chunk_status = Status::IOError("injected metadata write lookup failure");
+
+    auto status = rw.Write(Buf("data"), 0);
+
+    EXPECT_EQ(status.code(), Status::kIOError);
+    EXPECT_EQ(status.message(), "injected metadata write lookup failure");
+  });
+}
+
+TEST_F(FileReadWriterTest, CrossChunkMetadataErrorDrainsSubmittedReadBeforeReturning) {
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_chunk_size_for_test(kChunkSize);
+
+  SwordFsChunk first{};
+  first.index = 0;
+  first.start_offset = 0;
+  first.key = std::to_string(kIno) + "/0";
+  first.size = kChunkSize;
+  ASSERT_TRUE(mock_meta_->AddChunk(kIno, first).ok());
+  auto data = std::make_unique<folly::IOBuf>(Buf(Repeat('R', kChunkSize)));
+  ASSERT_TRUE(mock_data_->Put(first.key, std::move(data)).ok());
+
+  mock_meta_->find_chunk_status = Status::IOError("injected second-chunk metadata failure");
+  mock_meta_->find_chunk_error_idx = 1;
+
+  auto rw = Make(kChunkSize * 2);
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton get_started;
+  folly::fibers::Baton release_get;
+  folly::fibers::Baton read_done;
+  mock_data_->BlockNextGet(&get_started, &release_get);
+
+  Status read_status;
+  auto out = folly::IOBuf::create(kChunkSize * 2);
+  fm.addTask([&] {
+    read_status = rw.Read(kChunkSize * 2, 0, out.get());
+    read_done.post();
+  });
+
+  while (!get_started.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_FALSE(read_done.try_wait());
+
+  release_get.post();
+  while (!read_done.try_wait()) {
+    evb.loopOnce();
+  }
+
+  EXPECT_EQ(read_status.code(), Status::kIOError);
+  EXPECT_EQ(read_status.message(), "injected second-chunk metadata failure");
+  EXPECT_EQ(out->length(), 0);
+  vol.clear_chunk_size_for_test();
 }
 
 TEST_F(FileReadWriterTest, SparseReadWithMultipleHoles) {
@@ -849,7 +952,7 @@ TEST_F(FileReadWriterTest, TruncateDeletesDroppedChunkObjects) {
       ASSERT_TRUE(mock_data_->Put(chunk.key, std::move(buf)).ok());
     }
     // Materialise each chunk in FileChunkManager by reading it; the
-    // reader path uses chunks_.Get(idx, false) which still triggers
+    // reader path uses FileChunkManager::Get in lookup-only mode, which triggers
     // Chunk::Initialize → meta->FindChunk → state kFlushed.
     for (ChunkIndex i = 0; i < 3; ++i) {
       auto out = folly::IOBuf::create(kChunkSize);

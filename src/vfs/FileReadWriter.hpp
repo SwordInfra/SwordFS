@@ -51,11 +51,12 @@ class FileChunkManager {
   explicit FileChunkManager(metadata::InodeID ino) : ino_(ino) {
   }
 
-  /// Get the chunk at |idx|. If not in the map, creates and
-  /// initializes it. Returns nullptr on error or when
-  /// create_if_missing=false and no flushed data exists.
+  /// Get the chunk at |idx|. If not in the map, creates and initializes it.
+  /// A successful lookup with |*out == nullptr| means no materialized chunk
+  /// exists and |create_if_missing| is false. Initialization failures are
+  /// returned as Status and are never encoded as a null chunk.
   /// The shared pointer keeps the chunk alive if the map is changed.
-  std::shared_ptr<chunk::Chunk> Get(metadata::ChunkIndex idx, bool create_if_missing);
+  utils::Status Get(metadata::ChunkIndex idx, bool create_if_missing, std::shared_ptr<chunk::Chunk> *out);
 
   /// Snapshot chunks with pending data, including sealed chunks from a
   /// previous failed flush. The caller may attempt each snapshot entry once
