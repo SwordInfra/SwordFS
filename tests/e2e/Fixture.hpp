@@ -46,6 +46,14 @@ class Fixture {
   /// Unmount and clean up.
   void TearDown();
 
+  /// Restart the SwordFS daemon against the same Redis volume and object
+  /// prefix. The old daemon must exit before a fresh client is mounted.
+  bool Remount();
+
+  /// Kill the SwordFS daemon without a clean unmount, recover the stale FUSE
+  /// mount, then start a fresh daemon against the same persistent backends.
+  bool CrashAndRemount();
+
   // ── POSIX wrappers ───────────────────────────────────────────
 
   /// stat() on a file or directory under the mountpoint.
