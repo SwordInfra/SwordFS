@@ -170,6 +170,12 @@ class IMetaEngine {
   /// the data via the data engine.
   virtual Status AddChunk(InodeID ino, const SwordFsChunk &chunk) = 0;
 
+  /// Atomically publish a flushed chunk and grow the file to include it.
+  /// Re-publishing an identical descriptor is idempotent; a different
+  /// descriptor at the same index is a conflict. File size growth is
+  /// monotonic and must not invoke truncate semantics.
+  virtual Status PublishChunk(InodeID ino, const SwordFsChunk &chunk) = 0;
+
   /// Find the chunk at |idx|.  Returns OK and fills |*chunk| if a
   /// matching chunk is registered for the given inode.
   virtual Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) = 0;

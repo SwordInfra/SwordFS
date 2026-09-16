@@ -51,6 +51,7 @@ class RedisMetaImpl : public IMetaEngine {
   Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) override;
   Status OpenDir(InodeID ino, DirIteratorPtr *iterator) override;
   Status AddChunk(InodeID ino, const SwordFsChunk &chunk) override;
+  Status PublishChunk(InodeID ino, const SwordFsChunk &chunk) override;
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
   Status Truncate(InodeID ino, uint64_t size) override;
 

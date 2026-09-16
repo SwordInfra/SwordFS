@@ -670,6 +670,11 @@ Status MemMetaImpl::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
   return store_.Transact([&](MemMetaTxn &txn) { return txn.AddChunk(ino, chunk); });
 }
 
+Status MemMetaImpl::PublishChunk(InodeID ino, const SwordFsChunk &chunk) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.PublishChunk(ino, chunk); });
+}
+
 Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
   utils::ExpectInFiberDomain();
   return store_.Transact([&](MemMetaTxn &txn) { return txn.FindChunk(ino, idx, chunk); });

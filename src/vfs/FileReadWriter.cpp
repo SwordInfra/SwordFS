@@ -102,25 +102,40 @@ std::shared_ptr<chunk::Chunk> FileChunkManager::Get(metadata::ChunkIndex idx, bo
   return nullptr;
 }
 
-std::shared_ptr<chunk::Chunk> FileChunkManager::GetNextFlushable() {
+std::vector<std::shared_ptr<chunk::Chunk>> FileChunkManager::GetFlushable() {
   std::lock_guard<utils::FiberMutex> lock(mutex_);
+  std::vector<std::shared_ptr<chunk::Chunk>> flushable;
   for (auto &[idx, chunk] : chunks_) {
     if (chunk->Flushable()) {
-      chunk->Seal();
-      return chunk;
+      flushable.push_back(chunk);
     }
   }
-  return nullptr;
+  return flushable;
 }
 
-void FileChunkManager::Truncate(metadata::ChunkIndex new_last_idx, std::vector<metadata::ChunkIndex> *dropped) {
+void FileChunkManager::TruncateToSize(size_t size, size_t chunk_size, std::vector<metadata::ChunkIndex> *dropped) {
   std::lock_guard<utils::FiberMutex> lock(mutex_);
+  if (chunk_size == 0) {
+    for (const auto &[idx, _] : chunks_) {
+      if (dropped) {
+        dropped->push_back(idx);
+      }
+    }
+    chunks_.clear();
+    return;
+  }
+
+  const auto boundary_idx = static_cast<metadata::ChunkIndex>(size / chunk_size);
+  const size_t boundary_size = size % chunk_size;
   for (auto it = chunks_.begin(); it != chunks_.end();) {
-    if (it->first >= new_last_idx) {
+    if (it->first > boundary_idx || (it->first == boundary_idx && boundary_size == 0)) {
       if (dropped) {
         dropped->push_back(it->first);
       }
       it = chunks_.erase(it);
+    } else if (it->first == boundary_idx) {
+      it->second->Truncate(boundary_size);
+      ++it;
     } else {
       ++it;
     }
@@ -235,9 +250,8 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
 
 utils::Status FileReadWriter::Flush() {
   std::lock_guard<utils::FiberRWMutex> operation_lock(operation_mutex_);
-  off_t file_end = 0;
   utils::Status first_error;
-  while (auto c = chunks_.GetNextFlushable()) {
+  for (const auto &c : chunks_.GetFlushable()) {
     auto idx = c->index();
     auto status = c->Flush();
     if (!status.ok()) {
@@ -248,30 +262,11 @@ utils::Status FileReadWriter::Flush() {
       }
       continue;
     }
-    if (c->DataEnd() > file_end) {
-      file_end = c->DataEnd();
-    }
     // Chunk stays in the map with kFlushed state — future reads
     // will route through Chunk::Read() → data_->Get().
   }
-  if (!first_error.ok()) {
-    return first_error;
-  }
 
-  // Update file size if the file grew.
-  if (file_end > 0) {
-    metadata::SwordFsInode inode;
-    if (meta_->GetInode(ino_, &inode).ok() && file_end > inode.attr.size) {
-      metadata::SwordFsAttr new_attr;
-      new_attr.size = file_end;
-      auto status = meta_->SetAttr(ino_, new_attr, metadata::SetAttrField::kSize, nullptr);
-      if (!status.ok()) {
-        SWORDFS_LOG_ERROR << "FileReadWriter::Flush size update FAILED: ino=" << ino_ << " — " << status.message();
-      }
-    }
-  }
-
-  return Status::OK();
+  return first_error;
 }
 
 utils::Status FileReadWriter::Truncate(size_t size) {
@@ -280,19 +275,8 @@ utils::Status FileReadWriter::Truncate(size_t size) {
   if (!status.ok()) {
     return status;
   }
-  // Drop cached chunks at or beyond the new last chunk.  The chunk
-  // containing the truncated offset (if any) is kept and will be
-  // re-loaded from metadata on next access.  Chunks below it remain
-  // so reads can hit them directly.
   std::vector<metadata::ChunkIndex> dropped;
-  if (chunk_size_ > 0) {
-    // The first chunk index beyond the truncated file size; cached
-    // chunks at or past this index are dropped.
-    const auto new_last_idx = static_cast<metadata::ChunkIndex>((size + chunk_size_ - 1) / chunk_size_);
-    chunks_.Truncate(new_last_idx, &dropped);
-  } else {
-    chunks_.Truncate(0, &dropped);
-  }
+  chunks_.TruncateToSize(size, chunk_size_, &dropped);
 
   // Drop the now-orphaned chunk objects from the data engine. The
   // metadata side already pruned its chunk map via meta_->Truncate(),
@@ -311,6 +295,19 @@ utils::Status FileReadWriter::Truncate(size_t size) {
     }
   }
 
+  return utils::Status::OK();
+}
+
+utils::Status FileReadWriter::SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields,
+                                      metadata::SwordFsInode *out) {
+  std::lock_guard<utils::FiberRWMutex> operation_lock(operation_mutex_);
+  auto status = meta_->SetAttr(ino_, attr, fields, out);
+  if (!status.ok()) {
+    return status;
+  }
+  if (metadata::HasSetAttrField(fields, metadata::SetAttrField::kSize)) {
+    chunks_.TruncateToSize(attr.size, chunk_size_, nullptr);
+  }
   return utils::Status::OK();
 }
 

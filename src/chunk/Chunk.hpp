@@ -61,11 +61,15 @@ class Chunk {
   /// Returns OK if there is nothing to flush.
   utils::Status Flush();
 
+  /// Discard bytes at or beyond |size| within this chunk while preserving
+  /// the surviving prefix for a later flush/read.
+  void Truncate(size_t size);
+
   bool IsFlushed() const {
     return state_ == State::kFlushed;
   }
   bool Flushable() const {
-    return state_ == State::kWriting && wb_ && wb_->size() > 0;
+    return (state_ == State::kWriting || state_ == State::kSealed) && wb_ && wb_->size() > 0;
   }
 
   // ──────────────────────────────────────────────────────────────
