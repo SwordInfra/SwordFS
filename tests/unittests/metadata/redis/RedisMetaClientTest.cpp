@@ -166,6 +166,38 @@ TEST(RedisMetaClientTest, BinaryValueSurvivesWriteTransaction) {
   cleanup.del(child_key);
 }
 
+TEST(RedisMetaClientTest, DetectsExecCommandErrorAndReportsPossiblePartialCommit) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  sw::redis::Redis redis(ConnectionOptions(config));
+  const std::string wrong_type_key = UniqueVolumeName("exec-wrongtype");
+  const std::string later_key = UniqueVolumeName("exec-later-write");
+  redis.del(wrong_type_key);
+  redis.del(later_key);
+  redis.set(wrong_type_key, "string-value");
+
+  const auto status = store.Transact([&](RedisKvTxn &txn) {
+    auto txn_status = txn.HSet(wrong_type_key, "field", "value");
+    if (!txn_status.ok()) {
+      return txn_status;
+    }
+    return txn.Set(later_key, "applied");
+  });
+
+  EXPECT_EQ(status.code(), utils::Status::kIOError);
+  EXPECT_NE(status.message().find("commit may be partial"), std::string::npos);
+  const auto later_value = redis.get(later_key);
+  ASSERT_TRUE(later_value.has_value());
+  EXPECT_EQ(*later_value, "applied");
+
+  redis.del(wrong_type_key);
+  redis.del(later_key);
+}
+
 TEST(RedisMetaClientTest, StandalonePingAndWatchReadMultiExec) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {

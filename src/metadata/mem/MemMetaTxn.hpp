@@ -148,6 +148,7 @@ class MemMetaTxn {
 
   Status AddChunk(InodeID ino, const SwordFsChunk &chunk);
   Status PublishChunk(InodeID ino, const SwordFsChunk &chunk);
+  Status ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement);
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
   Status TruncateChunks(InodeID ino, uint64_t new_size);
 

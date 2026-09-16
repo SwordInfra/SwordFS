@@ -50,6 +50,7 @@ class MemMetaImpl : public IMetaEngine {
   // Chunk metadata
   Status AddChunk(InodeID ino, const SwordFsChunk &chunk) override;
   Status PublishChunk(InodeID ino, const SwordFsChunk &chunk) override;
+  Status ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement) override;
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
   Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) override;
   Status Truncate(InodeID ino, uint64_t size) override;

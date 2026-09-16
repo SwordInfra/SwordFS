@@ -60,6 +60,7 @@ class RedisMetaOps {
   utils::Status ReclaimInode(InodeID ino);
   utils::Status AddChunk(InodeID ino, const SwordFsChunk &chunk);
   utils::Status PublishChunk(InodeID ino, const SwordFsChunk &chunk);
+  utils::Status ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement);
   utils::Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
   utils::Status VisitChunks(InodeID ino, const std::function<utils::Status(const SwordFsChunk &)> &visitor);
   utils::Status GetInodeCount(uint64_t *count);

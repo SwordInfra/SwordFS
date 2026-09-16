@@ -151,7 +151,11 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
   const bool owner_changed = (HasSetAttrField(fields, SetAttrField::kUid) && attr.uid != requested.uid) ||
                              (HasSetAttrField(fields, SetAttrField::kGid) && attr.gid != requested.gid);
 
-  if (size_changed) {
+  if (HasSetAttrField(fields, SetAttrField::kSize)) {
+    // Redis MULTI/EXEC can partially apply a chunk descriptor update while
+    // leaving inode.size unchanged. Even a size-preserving setattr must
+    // reconcile chunk metadata so a later retry does not observe a descriptor
+    // beyond the requested EOF.
     status = TruncateChunks(ino, old_size, requested.size);
     if (!status.ok()) {
       return status;
@@ -222,13 +226,12 @@ utils::Status RedisMetaTxn::Truncate(InodeID ino, uint64_t size) {
   if (!status.ok()) {
     return status;
   }
-  if (inode.attr.size == size) {
-    return utils::Status::OK();
-  }
-
   status = TruncateChunks(ino, inode.attr.size, size);
   if (!status.ok()) {
     return status;
+  }
+  if (inode.attr.size == size) {
+    return utils::Status::OK();
   }
   inode.attr.size = size;
   inode.attr.KillSUID();
@@ -707,6 +710,53 @@ utils::Status RedisMetaTxn::PublishChunk(InodeID ino, const SwordFsChunk &chunk)
   return utils::Status::OK();
 }
 
+utils::Status RedisMetaTxn::ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement) {
+  if (expected.index != replacement.index || expected.start_offset != replacement.start_offset) {
+    return utils::Status::InvalidArgument("replacement must preserve chunk index and start offset");
+  }
+  if (replacement.size > std::numeric_limits<uint64_t>::max() - replacement.start_offset) {
+    return utils::Status::InvalidArgument("chunk end offset overflows");
+  }
+
+  SwordFsInode inode;
+  auto status = LookupInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!inode.IsRegular()) {
+    return utils::Status::InvalidArgument("not a regular file");
+  }
+
+  SwordFsChunk current;
+  status = LookupChunk(ino, expected.index, &current);
+  if (!status.ok()) {
+    return status;
+  }
+  const bool replacement_already_published = current == replacement;
+  if (!replacement_already_published && !(current == expected)) {
+    return utils::Status::AlreadyExists("chunk changed before replacement at index " + std::to_string(expected.index));
+  }
+
+  if (!replacement_already_published) {
+    status = SetChunk(ino, replacement);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+
+  // Redis MULTI/EXEC does not roll back earlier commands when a later queued
+  // command fails at execution time. Re-applying the inode side effects when
+  // the replacement descriptor is already present lets a retry converge from
+  // a partial EXEC where SetChunk succeeded but SetInode did not.
+  const uint64_t chunk_end = replacement.start_offset + replacement.size;
+  if (chunk_end > inode.attr.size) {
+    inode.attr.size = chunk_end;
+  }
+  inode.attr.KillSUID();
+  inode.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  return SetInode(inode);
+}
+
 utils::Status RedisMetaTxn::SetChunk(InodeID ino, const SwordFsChunk &chunk) {
   std::string value;
   auto status = chunk.SerializeTo(&value);
@@ -721,7 +771,7 @@ utils::Status RedisMetaTxn::DeleteChunks(InodeID ino) {
 }
 
 utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size) {
-  if (new_size >= old_size) {
+  if (new_size > old_size) {
     return utils::Status::OK();
   }
   if (chunk_size_ == 0) {

@@ -530,6 +530,11 @@ Status RedisMetaImpl::PublishChunk(InodeID ino, const SwordFsChunk &chunk) {
   return ops_.PublishChunk(ino, chunk);
 }
 
+Status RedisMetaImpl::ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement) {
+  utils::ExpectInFiberDomain();
+  return ops_.ReplaceChunk(ino, expected, replacement);
+}
+
 Status RedisMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
   utils::ExpectInFiberDomain();
   return ops_.FindChunk(ino, idx, chunk);

@@ -84,6 +84,25 @@ TEST_F(PersistenceTest, FsyncPersistsDataAndSizeAcrossRemount) {
   EXPECT_TRUE(fixture_.FileEquals(name, payload.size(), Fixture::Hash64(payload)));
 }
 
+TEST_F(PersistenceTest, RewrittenFlushedChunkPersistsAcrossRemount) {
+  const std::string name = "rewrite_persist.bin";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, "hello world"), 0);
+
+  int fd = fixture_.OpenFile(name, O_RDWR);
+  ASSERT_GE(fd, 0);
+  ASSERT_EQ(::pwrite(fd, "HELLO", 5, 0), 5);
+  ASSERT_EQ(::fsync(fd), 0);
+  ASSERT_EQ(::close(fd), 0);
+
+  ASSERT_TRUE(fixture_.Remount());
+
+  struct stat st{};
+  ASSERT_EQ(fixture_.Stat(name, &st), 0);
+  EXPECT_EQ(st.st_size, 11);
+  EXPECT_TRUE(fixture_.FileEquals(name, 11, Fixture::Hash64("HELLO world")));
+}
+
 TEST_F(PersistenceTest, FsyncPersistsDataAndSizeAcrossDaemonCrash) {
   const std::string name = "fsync_crash_persist.bin";
   const std::string payload = "fsync crash persistence payload";

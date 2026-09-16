@@ -65,8 +65,9 @@ class FileChunkManager {
 
   /// Apply a file-size change to cached chunks. A partial boundary chunk
   /// keeps only its surviving prefix; chunks wholly beyond EOF are dropped
-  /// and reported through |dropped| when non-null.
-  void TruncateToSize(size_t size, size_t chunk_size, std::vector<metadata::ChunkIndex> *dropped);
+  /// and their authoritative persisted object keys are reported through
+  /// |dropped_keys| when non-null.
+  void TruncateToSize(size_t size, size_t chunk_size, std::vector<std::string> *dropped_keys);
 
  private:
   metadata::InodeID ino_;

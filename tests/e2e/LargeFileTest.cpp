@@ -44,6 +44,32 @@ TEST_F(LargeFileTest, WriteCrossingChunkBoundary) {
   EXPECT_TRUE(fixture_.FileEquals(name, data.size(), Fixture::Hash64(data)));
 }
 
+TEST_F(LargeFileTest, RewriteAcrossPublishedChunkBoundaryPreservesFullFile) {
+  constexpr size_t kChunkSize = 64ULL * 1024 * 1024;
+  constexpr size_t kSize = 80ULL * 1024 * 1024;
+  constexpr size_t kRewriteSize = 4096;
+  constexpr off_t kRewriteOffset = static_cast<off_t>(kChunkSize - kRewriteSize / 2);
+  const char *name = "big_rewrite.bin";
+
+  std::string expected = MakeDeterministicPayload(kSize);
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR | O_TRUNC), 0);
+  ASSERT_EQ(fixture_.WriteFile(name, expected), 0);
+
+  // The first close publishes both chunks. Reopen and overwrite 2 KiB on
+  // each side of the 64 MiB boundary so both persisted chunks must hydrate,
+  // publish new object revisions, and preserve all untouched bytes.
+  const std::string replacement = MakeDeterministicPayload(kRewriteSize);
+  int fd = fixture_.OpenFile(name, O_RDWR);
+  ASSERT_GE(fd, 0);
+  ASSERT_EQ(::pwrite(fd, replacement.data(), replacement.size(), kRewriteOffset),
+            static_cast<ssize_t>(replacement.size()));
+  ASSERT_EQ(::fsync(fd), 0);
+  ASSERT_EQ(::close(fd), 0);
+
+  expected.replace(static_cast<size_t>(kRewriteOffset), replacement.size(), replacement);
+  EXPECT_TRUE(fixture_.FileEquals(name, expected.size(), Fixture::Hash64(expected)));
+}
+
 TEST_F(LargeFileTest, ReadPastEndOfFile) {
   ASSERT_EQ(fixture_.CreateFile("small.bin", 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
   ASSERT_EQ(fixture_.WriteFile("small.bin", "hello"), 0);

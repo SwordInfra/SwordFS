@@ -16,6 +16,22 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
   return utils::Status::IOError("Redis " + std::string(operation) + " failed: " + error.what());
 }
 
+utils::Status ValidateWriteExecReplies(sw::redis::QueuedReplies replies) {
+  for (std::size_t i = 0; i < replies.size(); ++i) {
+    try {
+      (void)replies.get(i);
+    } catch (const sw::redis::Error &error) {
+      // Redis MULTI/EXEC does not roll back commands that succeeded before a
+      // later command returned an error. Surface this explicitly so callers
+      // can reconcile/retry instead of treating a potentially partial commit
+      // as success.
+      return utils::Status::IOError("Redis transaction EXEC command failed; commit may be partial: " +
+                                    std::string(error.what()));
+    }
+  }
+  return utils::Status::OK();
+}
+
 sw::redis::Transaction CreateTransaction(sw::redis::Redis &redis) {
   utils::ExpectInThreadDomain();
   return redis.transaction(false, false);
@@ -167,8 +183,7 @@ utils::Status RedisKvTxn::Commit() {
     return ReleaseConnection();
   }
   try {
-    transaction_->exec();
-    return utils::Status::OK();
+    return ValidateWriteExecReplies(transaction_->exec());
   } catch (const sw::redis::WatchError &) {
     (void)ReleaseConnection();
     return utils::Status::Busy("Redis watched key changed");

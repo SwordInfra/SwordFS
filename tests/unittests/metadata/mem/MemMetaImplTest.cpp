@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <barrier>
+#include <limits>
 #include <thread>
 
 #include "FiberTest.hpp"
@@ -750,6 +751,83 @@ FIBER_TEST_F(MemMetaImplTest, PublishChunkIsIdempotentAndGrowsSizeMonotonically)
   SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &stored).ok());
   EXPECT_EQ(stored.key, first.key);
+}
+
+FIBER_TEST_F(MemMetaImplTest, ReplaceChunkUsesCompareAndSwapAndIsIdempotent) {
+  InodeID f_ino = 0;
+  ASSERT_TRUE(CreateFile(kRoot, "replace", 0644, &f_ino).ok());
+
+  SwordFsChunk first{.index = 0, .start_offset = 0, .key = "replace/0", .size = 128};
+  ASSERT_TRUE(impl_->PublishChunk(f_ino, first).ok());
+
+  struct stat mode{};
+  mode.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(f_ino, &mode, SetAttrField::kMode, nullptr).ok());
+
+  auto replacement = first;
+  replacement.key = "replace/0/version-2";
+  replacement.size = 64;
+  ASSERT_TRUE(impl_->ReplaceChunk(f_ino, first, replacement).ok());
+  ASSERT_TRUE(impl_->ReplaceChunk(f_ino, first, replacement).ok());
+
+  SwordFsChunk stored;
+  ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &stored).ok());
+  EXPECT_EQ(stored, replacement);
+
+  struct stat attr{};
+  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
+  EXPECT_EQ(attr.st_size, 128);
+  EXPECT_EQ(attr.st_mode & (S_ISUID | S_ISGID), 0U);
+
+  auto stale_replacement = replacement;
+  stale_replacement.key = "replace/0/stale";
+  EXPECT_TRUE(impl_->ReplaceChunk(f_ino, first, stale_replacement).IsAlreadyExists());
+
+  auto grown = replacement;
+  grown.key = "replace/0/version-3";
+  grown.size = 256;
+  ASSERT_TRUE(impl_->ReplaceChunk(f_ino, replacement, grown).ok());
+  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
+  EXPECT_EQ(attr.st_size, 256);
+}
+
+FIBER_TEST_F(MemMetaImplTest, ReplaceChunkRejectsInvalidTargetsAndDescriptors) {
+  SwordFsChunk expected{.index = 0, .start_offset = 0, .key = "old", .size = 64};
+  auto replacement = expected;
+  replacement.key = "new";
+
+  EXPECT_TRUE(impl_->ReplaceChunk(999999, expected, replacement).IsNotFound());
+
+  InodeID dir_ino = 0;
+  ASSERT_TRUE(MakeDir(kRoot, "replace-dir", 0755, &dir_ino).ok());
+  EXPECT_EQ(impl_->ReplaceChunk(dir_ino, expected, replacement).code(), Status::kInvalidArgument);
+
+  InodeID empty_file_ino = 0;
+  ASSERT_TRUE(CreateFile(kRoot, "replace-empty", 0644, &empty_file_ino).ok());
+  EXPECT_TRUE(impl_->ReplaceChunk(empty_file_ino, expected, replacement).IsNotFound());
+
+  auto mismatched = replacement;
+  mismatched.index = 1;
+  EXPECT_EQ(impl_->ReplaceChunk(empty_file_ino, expected, mismatched).code(), Status::kInvalidArgument);
+
+  mismatched = replacement;
+  mismatched.start_offset = 1;
+  EXPECT_EQ(impl_->ReplaceChunk(empty_file_ino, expected, mismatched).code(), Status::kInvalidArgument);
+
+  auto overflowing_expected = expected;
+  overflowing_expected.start_offset = 1;
+  auto overflowing = replacement;
+  overflowing.start_offset = 1;
+  overflowing.size = std::numeric_limits<uint64_t>::max();
+  EXPECT_EQ(impl_->ReplaceChunk(empty_file_ino, overflowing_expected, overflowing).code(), Status::kInvalidArgument);
+
+  InodeID file_ino = 0;
+  ASSERT_TRUE(CreateFile(kRoot, "replace-missing-index", 0644, &file_ino).ok());
+  ASSERT_TRUE(impl_->PublishChunk(file_ino, expected).ok());
+  SwordFsChunk missing{.index = 1, .start_offset = 4096, .key = "old-1", .size = 64};
+  auto missing_replacement = missing;
+  missing_replacement.key = "new-1";
+  EXPECT_TRUE(impl_->ReplaceChunk(file_ino, missing, missing_replacement).IsNotFound());
 }
 
 FIBER_TEST_F(MemMetaImplTest, ReclaimInodeMissingInodeIsNoOp) {
