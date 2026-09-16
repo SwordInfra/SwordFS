@@ -23,6 +23,7 @@
 #include "utils/Status.hpp"
 #include "vfs/FileHandle.hpp"
 #include "vfs/FileReadWriter.hpp"
+#include "vfs/VfsImpl.hpp"
 #include "volume/VolumeImpl.hpp"
 
 using swordfs::metadata::ChunkIndex;
@@ -96,6 +97,10 @@ class MockDataEngine : public IDataEngine {
   }
 
   Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) override {
+    ++put_calls;
+    if (!put_status.ok() && (fail_put_key.empty() || key == fail_put_key)) {
+      return put_status;
+    }
     store_[std::string(key)] = std::string(reinterpret_cast<const char *>(data->data()), data->length());
     return Status::OK();
   }
@@ -156,6 +161,9 @@ class MockDataEngine : public IDataEngine {
 
   std::vector<std::string> delete_calls;
   Status delete_status = Status::OK();
+  Status put_status = Status::OK();
+  std::string fail_put_key;
+  int put_calls = 0;
 
  private:
   std::unordered_map<std::string, std::string> store_;
@@ -210,9 +218,10 @@ class MockMetaEngine : public IMetaEngine {
   Status Rename(InodeID, std::string_view, InodeID, std::string_view, RenameFlag, RenameResult *) override {
     return Status::OK();
   }
-  Status SetAttr(InodeID, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override {
+  Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override {
     if (HasSetAttrField(fields, SetAttrField::kSize)) {
       file_size_ = static_cast<off_t>(attr.size);
+      TruncateChunks(ino, attr.size);
     }
     if (out) {
       *out = {};
@@ -253,7 +262,29 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
 
+  Status PublishChunk(InodeID ino, const SwordFsChunk &chunk) override {
+    if (!publish_chunk_status.ok() && !publish_chunk_commit_on_error) {
+      return publish_chunk_status;
+    }
+
+    auto &chunk_map = chunks_[ino];
+    auto it = chunk_map.find(chunk.index);
+    if (it != chunk_map.end()) {
+      const auto &existing = it->second;
+      if (!(existing == chunk)) {
+        return Status::AlreadyExists("conflicting chunk");
+      }
+    } else {
+      chunk_map.emplace(chunk.index, chunk);
+    }
+    file_size_ = std::max(file_size_, static_cast<off_t>(chunk.start_offset + chunk.size));
+    return publish_chunk_status;
+  }
+
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override {
+    if (!find_chunk_status.ok()) {
+      return find_chunk_status;
+    }
     auto it = chunks_.find(ino);
     if (it == chunks_.end()) {
       return Status::NotFound("");
@@ -273,7 +304,7 @@ class MockMetaEngine : public IMetaEngine {
     if (!truncate_status_.ok()) {
       return truncate_status_;
     }
-    chunks_.erase(ino);
+    TruncateChunks(ino, size);
     file_size_ = static_cast<off_t>(size);
     return Status::OK();
   }
@@ -289,6 +320,29 @@ class MockMetaEngine : public IMetaEngine {
   }
 
   int truncate_calls = 0;
+  Status publish_chunk_status = Status::OK();
+  bool publish_chunk_commit_on_error = false;
+  Status find_chunk_status = Status::OK();
+
+ private:
+  void TruncateChunks(InodeID ino, uint64_t size) {
+    auto ino_it = chunks_.find(ino);
+    if (ino_it == chunks_.end()) {
+      return;
+    }
+    for (auto it = ino_it->second.begin(); it != ino_it->second.end();) {
+      auto &chunk = it->second;
+      if (chunk.start_offset >= size) {
+        it = ino_it->second.erase(it);
+        continue;
+      }
+      const uint64_t max_size = size - chunk.start_offset;
+      if (chunk.size > max_size) {
+        chunk.size = max_size;
+      }
+      ++it;
+    }
+  }
 
  private:
   off_t file_size_ = 0;
@@ -475,6 +529,188 @@ TEST_F(FileReadWriterTest, SparseReadWithMultipleHoles) {
     auto out = folly::IOBuf::create(kChunkSize * 4);
     ASSERT_TRUE(rw.Read(kChunkSize * 4, 0, out.get()).ok());
     std::string expected = Repeat('A', kChunkSize) + std::string(kChunkSize * 2, '\0') + Repeat('B', kChunkSize);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
+  });
+}
+
+// ────────────────────────────────────────────────────────────────
+// Flush publication and retry semantics
+// ────────────────────────────────────────────────────────────────
+
+TEST_F(FileReadWriterTest, FlushRetriesPutFailureUntilDataIsPublished) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    const std::string payload = Repeat('P', 128);
+    ASSERT_TRUE(rw.Write(Buf(payload), 0).ok());
+
+    mock_data_->put_status = Status::IOError("injected put failure");
+    EXPECT_FALSE(rw.Flush().ok());
+    EXPECT_FALSE(rw.Flush().ok());
+
+    mock_data_->put_status = Status::OK();
+    ASSERT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_meta_->file_size(), static_cast<off_t>(payload.size()));
+
+    SwordFsChunk chunk;
+    EXPECT_TRUE(mock_meta_->FindChunk(kIno, 0, &chunk).ok());
+    FileReadWriter reopened(kIno);
+    auto out = folly::IOBuf::create(payload.size());
+    ASSERT_TRUE(reopened.Read(payload.size(), 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), payload);
+  });
+}
+
+TEST_F(FileReadWriterTest, FlushRetriesPublicationFailureUntilMetadataCommits) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    const std::string payload = Repeat('M', 128);
+    ASSERT_TRUE(rw.Write(Buf(payload), 0).ok());
+
+    mock_meta_->publish_chunk_status = Status::IOError("injected publication failure");
+    EXPECT_FALSE(rw.Flush().ok());
+    EXPECT_FALSE(rw.Flush().ok());
+
+    mock_meta_->publish_chunk_status = Status::OK();
+    ASSERT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_meta_->file_size(), static_cast<off_t>(payload.size()));
+
+    FileReadWriter reopened(kIno);
+    auto out = folly::IOBuf::create(payload.size());
+    ASSERT_TRUE(reopened.Read(payload.size(), 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), payload);
+  });
+}
+
+TEST_F(FileReadWriterTest, FlushResolvesCommittedPublicationRetryWithoutAnotherPut) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    const std::string payload = Repeat('A', 128);
+    ASSERT_TRUE(rw.Write(Buf(payload), 0).ok());
+
+    mock_meta_->publish_chunk_commit_on_error = true;
+    mock_meta_->publish_chunk_status = Status::IOError("response lost after commit");
+    EXPECT_FALSE(rw.Flush().ok());
+    ASSERT_EQ(mock_data_->put_calls, 1);
+    ASSERT_EQ(mock_meta_->file_size(), static_cast<off_t>(payload.size()));
+
+    mock_meta_->publish_chunk_commit_on_error = false;
+    mock_meta_->publish_chunk_status = Status::OK();
+    EXPECT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_data_->put_calls, 1);
+  });
+}
+
+TEST_F(FileReadWriterTest, FlushRejectsConflictingPublishedChunkBeforeRetryingPut) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    const std::string payload = Repeat('C', 128);
+    ASSERT_TRUE(rw.Write(Buf(payload), 0).ok());
+
+    mock_meta_->publish_chunk_status = Status::IOError("injected publication failure");
+    EXPECT_FALSE(rw.Flush().ok());
+    ASSERT_EQ(mock_data_->put_calls, 1);
+
+    SwordFsChunk conflicting{};
+    conflicting.index = 0;
+    conflicting.start_offset = 0;
+    conflicting.key = "other-object";
+    conflicting.size = payload.size();
+    ASSERT_TRUE(mock_meta_->AddChunk(kIno, conflicting).ok());
+
+    mock_meta_->publish_chunk_status = Status::OK();
+    auto status = rw.Flush();
+    EXPECT_TRUE(status.IsAlreadyExists());
+    EXPECT_EQ(mock_data_->put_calls, 1);
+  });
+}
+
+TEST_F(FileReadWriterTest, FlushNeverShrinksExistingFileSize) {
+  RunInTestFiber([&] {
+    auto rw = Make(4096);
+    ASSERT_TRUE(rw.Write(Buf(Repeat('S', 128)), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_meta_->file_size(), 4096);
+  });
+}
+
+TEST_F(FileReadWriterTest, FlushContinuesOtherChunksAfterOneChunkFails) {
+  RunInTestFiber([&] {
+    auto &vol = swordfs::volume::VolumeImpl::Instance();
+    vol.set_chunk_size_for_test(kChunkSize);
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
+    ASSERT_TRUE(rw.Write(Buf(Repeat('B', 128)), static_cast<off_t>(kChunkSize)).ok());
+
+    mock_data_->put_status = Status::IOError("injected first-chunk failure");
+    mock_data_->fail_put_key = std::to_string(kIno) + "/0";
+    EXPECT_FALSE(rw.Flush().ok());
+
+    SwordFsChunk chunk;
+    EXPECT_TRUE(mock_meta_->FindChunk(kIno, 1, &chunk).ok());
+    EXPECT_TRUE(mock_meta_->FindChunk(kIno, 0, &chunk).IsNotFound());
+
+    mock_data_->put_status = Status::OK();
+    mock_data_->fail_put_key.clear();
+    EXPECT_TRUE(rw.Flush().ok());
+    EXPECT_TRUE(mock_meta_->FindChunk(kIno, 0, &chunk).ok());
+    EXPECT_EQ(mock_meta_->file_size(), static_cast<off_t>(kChunkSize + 128));
+    vol.clear_chunk_size_for_test();
+  });
+}
+
+TEST_F(FileReadWriterTest, SetAttrTruncateOrdersAfterAmbiguousFlushRetry) {
+  RunInTestFiber([&] {
+    auto &vol = swordfs::volume::VolumeImpl::Instance();
+    vol.set_chunk_size_for_test(kChunkSize);
+
+    std::shared_ptr<swordfs::vfs::FileHandle> handle;
+    ASSERT_TRUE(swordfs::vfs::FileHandle::Open(kIno, 0, &handle).ok());
+    const std::string payload = Repeat('T', 200);
+    ASSERT_TRUE(handle->Write(Buf(payload), 0).ok());
+
+    mock_meta_->publish_chunk_commit_on_error = true;
+    mock_meta_->publish_chunk_status = Status::IOError("response lost after commit");
+    EXPECT_FALSE(handle->Flush().ok());
+    ASSERT_EQ(mock_data_->put_calls, 1);
+
+    struct stat attr{};
+    attr.st_size = 64;
+    ASSERT_TRUE(swordfs::vfs::VfsImpl::SetAttr(kIno, &attr, static_cast<int>(SetAttrField::kSize), nullptr).ok());
+
+    mock_meta_->publish_chunk_commit_on_error = false;
+    mock_meta_->publish_chunk_status = Status::OK();
+    ASSERT_TRUE(handle->Flush().ok());
+    EXPECT_EQ(mock_data_->put_calls, 1);
+    EXPECT_EQ(mock_meta_->file_size(), 64);
+
+    SwordFsChunk chunk;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &chunk).ok());
+    EXPECT_EQ(chunk.size, 64);
+
+    FileReadWriter reopened(kIno);
+    auto out = folly::IOBuf::create(128);
+    ASSERT_TRUE(reopened.Read(128, 0, out.get()).ok());
+    const std::string expected = Repeat('T', 64) + std::string(64, '\0');
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
+
+    ASSERT_TRUE(handle->Release().ok());
+    vol.clear_chunk_size_for_test();
+  });
+}
+
+TEST_F(FileReadWriterTest, WriteAfterPartialTruncateZeroFillsDiscardedRange) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf(Repeat('T', 200)), 0).ok());
+
+    SwordFsAttr attr{};
+    attr.size = 64;
+    ASSERT_TRUE(rw.SetAttr(attr, SetAttrField::kSize, nullptr).ok());
+    ASSERT_TRUE(rw.Write(Buf("Z"), 100).ok());
+
+    auto out = folly::IOBuf::create(101);
+    ASSERT_TRUE(rw.Read(101, 0, out.get()).ok());
+    std::string expected = Repeat('T', 64) + std::string(36, '\0') + "Z";
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
   });
 }

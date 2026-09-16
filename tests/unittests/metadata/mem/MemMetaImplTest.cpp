@@ -22,6 +22,7 @@ using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
+using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::UnlinkResult;
 using swordfs::metadata::test::TestMemMetaImpl;
@@ -714,6 +715,41 @@ FIBER_TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
   EXPECT_EQ(out.attr.size, 2048);
   EXPECT_EQ(out.attr.mode & S_ISUID, 0u);
   EXPECT_EQ(out.attr.mode & S_ISGID, 0u);
+}
+
+FIBER_TEST_F(MemMetaImplTest, PublishChunkIsIdempotentAndGrowsSizeMonotonically) {
+  InodeID f_ino = 0;
+  ASSERT_TRUE(CreateFile(kRoot, "publish", 0644, &f_ino).ok());
+
+  SwordFsChunk first{};
+  first.index = 0;
+  first.start_offset = 0;
+  first.key = "publish/0";
+  first.size = 128;
+  ASSERT_TRUE(impl_->PublishChunk(f_ino, first).ok());
+  ASSERT_TRUE(impl_->PublishChunk(f_ino, first).ok());
+
+  struct stat attr{};
+  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
+  EXPECT_EQ(attr.st_size, 128);
+
+  SwordFsChunk later{};
+  later.index = 2;
+  later.start_offset = 512;
+  later.key = "publish/2";
+  later.size = 64;
+  ASSERT_TRUE(impl_->PublishChunk(f_ino, later).ok());
+  ASSERT_TRUE(impl_->PublishChunk(f_ino, first).ok());
+  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
+  EXPECT_EQ(attr.st_size, 576);
+
+  auto conflicting = first;
+  conflicting.key = "different-object";
+  EXPECT_TRUE(impl_->PublishChunk(f_ino, conflicting).IsAlreadyExists());
+
+  SwordFsChunk stored;
+  ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &stored).ok());
+  EXPECT_EQ(stored.key, first.key);
 }
 
 FIBER_TEST_F(MemMetaImplTest, ReclaimInodeMissingInodeIsNoOp) {

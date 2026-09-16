@@ -525,6 +525,11 @@ Status RedisMetaImpl::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
   return ops_.AddChunk(ino, chunk);
 }
 
+Status RedisMetaImpl::PublishChunk(InodeID ino, const SwordFsChunk &chunk) {
+  utils::ExpectInFiberDomain();
+  return ops_.PublishChunk(ino, chunk);
+}
+
 Status RedisMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
   utils::ExpectInFiberDomain();
   return ops_.FindChunk(ino, idx, chunk);

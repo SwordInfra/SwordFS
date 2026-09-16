@@ -176,6 +176,24 @@ TEST(WriteBufTest, WriteExtendsBufferNonContiguous) {
   wb.Write(0, Buf(Repeat('A', 100)));
   wb.Write(150, Buf(Repeat('B', 50)));
   EXPECT_EQ(wb.size(), 200);
+
+  auto out = folly::IOBuf::create(kChunkSize);
+  ASSERT_TRUE(wb.CopyOut(0, 200, out.get()).ok());
+  std::string expected = Repeat('A', 100) + std::string(50, '\0') + Repeat('B', 50);
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
+}
+
+TEST(WriteBufTest, WriteAfterTruncateDoesNotExposeDiscardedTail) {
+  WriteBuf wb(kChunkSize);
+  ASSERT_TRUE(wb.Write(0, Buf(Repeat('T', 200))).ok());
+  wb.Truncate(64);
+  ASSERT_EQ(wb.size(), 64);
+
+  ASSERT_TRUE(wb.Write(100, Buf("Z")).ok());
+  auto out = folly::IOBuf::create(kChunkSize);
+  ASSERT_TRUE(wb.CopyOut(0, 101, out.get()).ok());
+  std::string expected = Repeat('T', 64) + std::string(36, '\0') + "Z";
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
 }
 
 TEST(WriteBufTest, CopyOutNegativeOffset) {

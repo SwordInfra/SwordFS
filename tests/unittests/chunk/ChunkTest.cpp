@@ -117,6 +117,9 @@ class MissingMetaEngine final : public IMetaEngine {
   Status AddChunk(InodeID, const SwordFsChunk &) override {
     return Status::OK();
   }
+  Status PublishChunk(InodeID, const SwordFsChunk &) override {
+    return Status::OK();
+  }
   Status Truncate(InodeID, uint64_t) override {
     return Status::OK();
   }

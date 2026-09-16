@@ -19,6 +19,8 @@ struct SwordFsChunk {
   std::string key;
   uint64_t size;
 
+  bool operator==(const SwordFsChunk &) const = default;
+
   utils::Status SerializeTo(std::string *out) const;
   utils::Status ParseFrom(std::string_view data);
 };

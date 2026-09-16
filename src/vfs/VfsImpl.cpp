@@ -75,8 +75,17 @@ utils::Status VfsImpl::SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, st
   SetAttrField fields = FromFuseSetAttrFields(to_set);
   SwordFsAttr metadata_attr = SwordFsAttr::FromPosixStat(*attr);
   SwordFsInode inode;
-  Status status =
-      VolumeImpl::Instance().meta_engine()->SetAttr(ino, metadata_attr, fields, out_attr ? &inode : nullptr);
+  Status status;
+  if (metadata::HasSetAttrField(fields, SetAttrField::kSize)) {
+    auto handle = InodeHandleManager::Instance().Get(ino, false);
+    if (handle) {
+      status = handle->SetAttr(metadata_attr, fields, out_attr ? &inode : nullptr);
+    } else {
+      status = VolumeImpl::Instance().meta_engine()->SetAttr(ino, metadata_attr, fields, out_attr ? &inode : nullptr);
+    }
+  } else {
+    status = VolumeImpl::Instance().meta_engine()->SetAttr(ino, metadata_attr, fields, out_attr ? &inode : nullptr);
+  }
   if (status.ok() && out_attr) {
     inode.attr.ToPosixStat(out_attr);
   }
@@ -296,7 +305,7 @@ utils::Status VfsImpl::OpenDir(fuse_ino_t ino, uint64_t *fh) {
 // backend-specific directory-entry caching and continuation state.
 class FuseDirEntryEncoder final : public DirEntryEncoder {
  public:
-  enum class Mode {
+  enum class Mode : uint8_t {
     kNormal,
     kPlus,
   };

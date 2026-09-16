@@ -66,6 +66,7 @@ class RedisMetaTxn {
   // Chunk operations
   // ────────────────────────────────────────────────────────────────
   utils::Status AddChunk(InodeID ino, const SwordFsChunk &chunk);
+  utils::Status PublishChunk(InodeID ino, const SwordFsChunk &chunk);
 
  private:
   utils::Status SetInode(const SwordFsInode &inode);

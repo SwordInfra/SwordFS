@@ -178,6 +178,11 @@ utils::Status RedisMetaOps::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.AddChunk(ino, chunk); });
 }
 
+utils::Status RedisMetaOps::PublishChunk(InodeID ino, const SwordFsChunk &chunk) {
+  utils::ExpectInFiberDomain();
+  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PublishChunk(ino, chunk); });
+}
+
 utils::Status RedisMetaOps::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
   utils::ExpectInFiberDomain();
   if (chunk == nullptr) {

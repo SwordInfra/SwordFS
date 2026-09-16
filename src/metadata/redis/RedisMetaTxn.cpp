@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -666,6 +667,44 @@ utils::Status RedisMetaTxn::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
     return status;
   }
   return SetChunk(ino, chunk);
+}
+
+utils::Status RedisMetaTxn::PublishChunk(InodeID ino, const SwordFsChunk &chunk) {
+  SwordFsInode inode;
+  auto status = LookupInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!inode.IsRegular()) {
+    return utils::Status::InvalidArgument("not a regular file");
+  }
+  if (chunk.size > std::numeric_limits<uint64_t>::max() - chunk.start_offset) {
+    return utils::Status::InvalidArgument("chunk end offset overflows");
+  }
+
+  SwordFsChunk existing;
+  status = LookupChunk(ino, chunk.index, &existing);
+  if (status.ok()) {
+    if (!(existing == chunk)) {
+      return utils::Status::AlreadyExists("conflicting chunk already exists at index " + std::to_string(chunk.index));
+    }
+  } else if (status.IsNotFound()) {
+    status = SetChunk(ino, chunk);
+    if (!status.ok()) {
+      return status;
+    }
+  } else {
+    return status;
+  }
+
+  const uint64_t chunk_end = chunk.start_offset + chunk.size;
+  if (chunk_end > inode.attr.size) {
+    inode.attr.size = chunk_end;
+    inode.attr.KillSUID();
+    inode.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+    return SetInode(inode);
+  }
+  return utils::Status::OK();
 }
 
 utils::Status RedisMetaTxn::SetChunk(InodeID ino, const SwordFsChunk &chunk) {

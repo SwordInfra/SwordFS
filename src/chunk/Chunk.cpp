@@ -6,6 +6,7 @@
 #include <folly/io/IOBuf.h>
 #include <folly/logging/xlog.h>
 
+#include <algorithm>
 #include <cstring>
 
 #include "metadata/IMetaEngine.hpp"
@@ -65,16 +66,53 @@ void Chunk::Seal() {
   state_ = State::kSealed;
 }
 
+void Chunk::Truncate(size_t size) {
+  if (IsFlushed()) {
+    flushed_size_ = std::min(flushed_size_, size);
+    return;
+  }
+  if (wb_) {
+    wb_->Truncate(size);
+  }
+}
+
 utils::Status Chunk::Flush() {
   if (IsFlushed() || !wb_ || wb_->size() == 0) {
     return utils::Status::OK();
   }
 
+  const bool retrying = !IsWriting();
   if (IsWriting()) {
     Seal();
   }
 
   flushed_size_ = wb_->size();
+  const auto chunk_meta = BuildMeta();
+
+  // A failed/ambiguous publication leaves the chunk sealed. Before retrying
+  // the object Put, resolve metadata first so a committed previous attempt is
+  // completed idempotently and a conflicting descriptor cannot be overwritten.
+  if (retrying) {
+    metadata::SwordFsChunk existing;
+    auto status = meta_->FindChunk(ino_, index_, &existing);
+    if (status.ok()) {
+      if (!(existing == chunk_meta)) {
+        return utils::Status::AlreadyExists("Chunk::Flush: conflicting published chunk at index " +
+                                            std::to_string(index_));
+      }
+      status = meta_->PublishChunk(ino_, chunk_meta);
+      if (!status.ok()) {
+        return status;
+      }
+      state_ = State::kFlushed;
+      wb_.reset();
+      return utils::Status::OK();
+    }
+    if (!status.IsNotFound()) {
+      return status;
+    }
+  }
+
   auto data = wb_->CloneBuf();
   auto status = data_->Put(ChunkKey(), std::move(data));
   if (!status.ok()) {
@@ -83,9 +121,9 @@ utils::Status Chunk::Flush() {
     return status;
   }
 
-  status = meta_->AddChunk(ino_, BuildMeta());
+  status = meta_->PublishChunk(ino_, chunk_meta);
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: AddChunk ino=" << ino_ << " chunk=" << index_
+    SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: PublishChunk ino=" << ino_ << " chunk=" << index_
                       << " size=" << flushed_size_ << " — " << status.message();
     return status;
   }

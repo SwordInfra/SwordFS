@@ -57,22 +57,18 @@ class FileChunkManager {
   /// The shared pointer keeps the chunk alive if the map is changed.
   std::shared_ptr<chunk::Chunk> Get(metadata::ChunkIndex idx, bool create_if_missing);
 
-  /// Return the next chunk that has data and is not yet sealed.
-  /// Seals it before returning. Returns nullptr when all chunks
-  /// have been flushed. The shared pointer keeps it alive while
-  /// the caller performs the upload.
-  std::shared_ptr<chunk::Chunk> GetNextFlushable();
+  /// Snapshot chunks with pending data, including sealed chunks from a
+  /// previous failed flush. The caller may attempt each snapshot entry once
+  /// without repeatedly selecting the same failed chunk.
+  std::vector<std::shared_ptr<chunk::Chunk>> GetFlushable();
 
-  /// Truncate cached chunks to those below |new_last_idx|.  Chunks at
-  /// or beyond |new_last_idx| are dropped (their indices are appended
-  /// to |*dropped| if non-null) so the caller can issue data-engine
-  /// Deletes. Chunks below remain so reads can still hit them directly.
-  /// No-op when |new_last_idx| is the smallest representable value.
-  void Truncate(metadata::ChunkIndex new_last_idx, std::vector<metadata::ChunkIndex> *dropped);
+  /// Apply a file-size change to cached chunks. A partial boundary chunk
+  /// keeps only its surviving prefix; chunks wholly beyond EOF are dropped
+  /// and reported through |dropped| when non-null.
+  void TruncateToSize(size_t size, size_t chunk_size, std::vector<metadata::ChunkIndex> *dropped);
 
  private:
   metadata::InodeID ino_;
-  size_t chunk_size_;
   mutable utils::FiberMutex mutex_;
   Map chunks_;
 };
@@ -103,6 +99,10 @@ class FileReadWriter {
   /// Truncate to |size| bytes.  Updates chunk metadata in the metadata
   /// engine and drops cached chunks.  Used by O_TRUNC (size=0).
   utils::Status Truncate(size_t size);
+
+  /// Apply setattr while coordinating size changes with the local chunk
+  /// cache so pending writes cannot be republished past a successful truncate.
+  utils::Status SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields, metadata::SwordFsInode *out);
 
  private:
   InodeID ino_;

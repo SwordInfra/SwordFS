@@ -651,6 +651,32 @@ FIBER_TEST_F(RedisMetaImplTest, VisitChunksPropagatesVisitorFailure) {
   EXPECT_EQ(status.code(), Status::kIOError);
 }
 
+FIBER_TEST_F(RedisMetaImplTest, PublishChunkIsIdempotentAndGrowsSizeMonotonically) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "publish", 0644, &file).ok());
+
+  SwordFsChunk first{.index = 0, .start_offset = 0, .key = "publish/0", .size = 128};
+  ASSERT_TRUE(impl_->PublishChunk(file.ino, first).ok());
+  ASSERT_TRUE(impl_->PublishChunk(file.ino, first).ok());
+
+  ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
+  EXPECT_EQ(file.attr.size, 128U);
+
+  SwordFsChunk later{.index = 2, .start_offset = 8192, .key = "publish/2", .size = 64};
+  ASSERT_TRUE(impl_->PublishChunk(file.ino, later).ok());
+  ASSERT_TRUE(impl_->PublishChunk(file.ino, first).ok());
+  ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
+  EXPECT_EQ(file.attr.size, 8256U);
+
+  auto conflicting = first;
+  conflicting.key = "different-object";
+  EXPECT_TRUE(impl_->PublishChunk(file.ino, conflicting).IsAlreadyExists());
+
+  SwordFsChunk stored;
+  ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
+  EXPECT_EQ(stored.key, first.key);
+}
+
 FIBER_TEST_F(RedisMetaImplTest, SymlinkAndLinkValidateLongNamesAndParentTypes) {
   const std::string long_name(256, 'x');
   EXPECT_TRUE(impl_->Symlink(kRootInodeId, long_name, "target", nullptr).IsNameTooLong());

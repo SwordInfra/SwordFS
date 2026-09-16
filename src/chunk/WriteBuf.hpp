@@ -51,6 +51,9 @@ class WriteBuf {
   /// Number of valid bytes in the buffer.
   size_t size() const;
 
+  /// Keep only the first |size| valid bytes.
+  void Truncate(size_t size);
+
  private:
   std::unique_ptr<folly::IOBuf> buf_;
 };

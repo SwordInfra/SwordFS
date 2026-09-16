@@ -152,6 +152,9 @@ class MockMetaEngine : public IMetaEngine {
   Status AddChunk(InodeID, const SwordFsChunk &) override {
     return Status::OK();
   }
+  Status PublishChunk(InodeID, const SwordFsChunk &) override {
+    return Status::OK();
+  }
   Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
     return Status::NotFound("no chunk");
   }
@@ -681,6 +684,9 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status AddChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
+    return Status::OK();
+  }
+  Status PublishChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
     return Status::OK();
   }
   Status FindChunk(InodeID, swordfs::metadata::ChunkIndex, swordfs::metadata::SwordFsChunk *) override {

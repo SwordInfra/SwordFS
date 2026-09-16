@@ -8,6 +8,7 @@
 #include <folly/fibers/FiberManagerInternal.h>
 
 #include <algorithm>
+#include <limits>
 
 #include "metadata/Types.hpp"
 #include "metadata/Utils.hpp"
@@ -509,6 +510,38 @@ Status MemMetaTxn::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
     return Status::AlreadyExists("chunk already exists at index " + std::to_string(chunk.index));
   }
   chunk_map[chunk.index] = chunk;
+  return Status::OK();
+}
+
+Status MemMetaTxn::PublishChunk(InodeID ino, const SwordFsChunk &chunk) {
+  auto *inode = FindInode(ino);
+  if (inode == nullptr) {
+    return Status::NotFound("inode not found: " + std::to_string(ino));
+  }
+  if (!inode->IsRegular()) {
+    return Status::InvalidArgument("not a regular file");
+  }
+  if (chunk.size > std::numeric_limits<uint64_t>::max() - chunk.start_offset) {
+    return Status::InvalidArgument("chunk end offset overflows");
+  }
+
+  auto &chunk_map = store_->chunks_[ino];
+  auto it = chunk_map.find(chunk.index);
+  if (it != chunk_map.end()) {
+    const auto &existing = it->second;
+    if (!(existing == chunk)) {
+      return Status::AlreadyExists("conflicting chunk already exists at index " + std::to_string(chunk.index));
+    }
+  } else {
+    chunk_map.emplace(chunk.index, chunk);
+  }
+
+  const uint64_t chunk_end = chunk.start_offset + chunk.size;
+  if (chunk_end > inode->attr.size) {
+    inode->attr.size = chunk_end;
+    inode->attr.KillSUID();
+    inode->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  }
   return Status::OK();
 }
 
