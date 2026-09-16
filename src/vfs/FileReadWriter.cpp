@@ -49,15 +49,10 @@ class MultiChunkReadWriter {
   /// Block until all submitted reads finish.  Returns the first
   /// non-OK status, or OK.
   Status Collect() {
-    // 1. Wait for every fiber to finish.  Each fiber lambda dereferences
-    //    |raw| (a raw pointer into the matching Pending), so we must let
-    //    all of them complete before this object — and |ops_| — can be
-    //    destroyed.  Returning early after the first failure would leave
-    //    in-flight fibers writing into freed memory.
-    for (auto &p : ops_) {
-      p->baton.wait();
-    }
-    // 2. Now it is safe to inspect status / accumulate bytes.
+    Drain();
+
+    // All submitted fibers are complete, so it is safe to inspect status /
+    // accumulate bytes.
     for (auto &p : ops_) {
       if (!p->status.ok()) {
         return p->status;
@@ -65,6 +60,16 @@ class MultiChunkReadWriter {
       total_ += p->bytes;
     }
     return Status::OK();
+  }
+
+  /// Wait for every submitted read to finish without changing which later
+  /// lookup error the caller returns. Each fiber lambda dereferences |raw|
+  /// (a pointer into its Pending), so no path may destroy this object while
+  /// an operation remains in flight.
+  void Drain() {
+    for (auto &p : ops_) {
+      p->baton.wait();
+    }
   }
 
  private:
@@ -84,22 +89,28 @@ class MultiChunkReadWriter {
 // FileChunkManager
 // ────────────────────────────────────────────────────────────────
 
-std::shared_ptr<chunk::Chunk> FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_missing) {
+utils::Status FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_missing,
+                                    std::shared_ptr<chunk::Chunk> *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("FileChunkManager::Get output is null");
+  }
+  out->reset();
   std::lock_guard<utils::FiberMutex> lock(mutex_);
   auto it = chunks_.find(idx);
   if (it != chunks_.end()) {
-    return it->second;
+    *out = it->second;
+    return utils::Status::OK();
   }
   // Not cached — try lazy-load from metadata engine.
   auto chunk = std::make_shared<chunk::Chunk>(ino_, idx);
   auto status = chunk->Initialize();
   if (!status.ok()) {
-    return nullptr;
+    return status;
   } else if (chunk->IsFlushed() || create_if_missing) {
     it = chunks_.try_emplace(idx, std::move(chunk)).first;
-    return it->second;
+    *out = it->second;
   }
-  return nullptr;
+  return utils::Status::OK();
 }
 
 std::vector<std::shared_ptr<chunk::Chunk>> FileChunkManager::GetFlushable() {
@@ -167,16 +178,20 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
   while (remaining > 0) {
     metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(cur_off / static_cast<off_t>(chunk_size_));
 
-    auto c = chunks_.Get(idx, /*create_if_missing=*/true);
+    std::shared_ptr<chunk::Chunk> c;
+    auto status = chunks_.Get(idx, /*create_if_missing=*/true, &c);
+    if (!status.ok()) {
+      return status;
+    }
     if (!c) {
-      return utils::Status::Internal("FileReadWriter::Write: failed to get chunk");
+      return utils::Status::Internal("FileReadWriter::Write: chunk lookup succeeded without a chunk");
     }
 
     size_t room = chunk_size_ - (cur_off % chunk_size_);
     size_t n = std::min(remaining, room);
     auto slice = folly::IOBuf::takeOwnership(
         const_cast<uint8_t *>(buf.data()) + (cur_off - off), n, n, +[](void *, void *) {}, nullptr, false);
-    auto status = c->Write(cur_off, *slice);
+    status = c->Write(cur_off, *slice);
     if (!status.ok()) {
       SWORDFS_LOG_ERROR << "FileReadWriter::Write FAILED: ino=" << ino_ << " off=" << cur_off << " chunk=" << c->index()
                         << " — " << status.message();
@@ -202,7 +217,12 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   while (remaining > 0) {
     // 1) Try the unified chunk map (dirty + flushed).
     metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(cur_off / static_cast<off_t>(chunk_size_));
-    auto c = chunks_.Get(idx, /*create_if_missing=*/false);
+    std::shared_ptr<chunk::Chunk> c;
+    auto status = chunks_.Get(idx, /*create_if_missing=*/false, &c);
+    if (!status.ok()) {
+      multi.Drain();
+      return status;
+    }
 
     // cur_off may fall within the chunk's index range (e.g. a 64 MiB
     // chunk that only has 500 bytes of data — offsets [500, 64 MiB)
