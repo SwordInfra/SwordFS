@@ -41,8 +41,7 @@ TEST_F(MountTest, DataPersistsAfterRemount) {
   ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
   ASSERT_EQ(fixture_.WriteFile(name, "persistent data"), 0);
 
-  fixture_.TearDown();
-  ASSERT_TRUE(fixture_.SetUp());
+  ASSERT_TRUE(fixture_.Remount());
 
   // Redis metadata survives unmount, so the namespace and file contents
   // must still be intact after the remount.

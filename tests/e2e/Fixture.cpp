@@ -106,6 +106,42 @@ void Fixture::TearDown() {
   }
 }
 
+bool Fixture::Remount() {
+  TearDown();
+  if (!IsDaemonGone()) {
+    std::fprintf(stderr, "E2E: previous daemon did not exit before remount\n");
+    if (daemon_pid_ > 0) {
+      ::kill(daemon_pid_, SIGKILL);
+    }
+    return false;
+  }
+  return SetUp();
+}
+
+bool Fixture::CrashAndRemount() {
+  if (daemon_pid_ <= 0) {
+    std::fprintf(stderr, "E2E: no daemon pid recorded before crash remount\n");
+    return false;
+  }
+
+  if (::kill(daemon_pid_, SIGKILL) != 0 && errno != ESRCH) {
+    std::fprintf(stderr, "E2E: failed to kill daemon %d: %s\n", daemon_pid_, std::strerror(errno));
+    return false;
+  }
+
+  constexpr int kMaxRetries = 40;
+  for (int i = 0; i < kMaxRetries; ++i) {
+    if (::kill(daemon_pid_, 0) != 0 && errno == ESRCH) {
+      TearDown();
+      return SetUp();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+
+  std::fprintf(stderr, "E2E: killed daemon %d did not exit before crash remount\n", daemon_pid_);
+  return false;
+}
+
 // ────────────────────────────────────────────────────────────────
 // Format
 // ────────────────────────────────────────────────────────────────
