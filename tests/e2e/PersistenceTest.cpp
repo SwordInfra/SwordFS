@@ -11,31 +11,13 @@
 #include <unistd.h>
 
 #include <cerrno>
-#include <cstdint>
 #include <string>
 
 #include "tests/e2e/Fixture.hpp"
+#include "tests/e2e/Utils.hpp"
 
 using swordfs::e2e::Fixture;
-
-namespace {
-
-std::string MakeDeterministicPayload(size_t size) {
-  std::string data(size, '\0');
-  uint64_t state = 0x9e3779b97f4a7c15ULL;
-  for (size_t i = 0; i < size; ++i) {
-    // xorshift64*: deterministic, cheap, and position-sensitive enough that
-    // reordered/repeated blocks or swapped chunk objects change the hash.
-    state ^= state >> 12;
-    state ^= state << 25;
-    state ^= state >> 27;
-    state *= 0x2545f4914f6cdd1dULL;
-    data[i] = static_cast<char>(state >> 56);
-  }
-  return data;
-}
-
-}  // namespace
+using swordfs::e2e::MakeDeterministicPayload;
 
 class PersistenceTest : public ::testing::Test {
  protected:

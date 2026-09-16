@@ -13,8 +13,10 @@
 #include <cstring>
 
 #include "tests/e2e/Fixture.hpp"
+#include "tests/e2e/Utils.hpp"
 
 using swordfs::e2e::Fixture;
+using swordfs::e2e::MakeDeterministicPayload;
 
 class LargeFileTest : public ::testing::Test {
  protected:
@@ -35,7 +37,7 @@ TEST_F(LargeFileTest, WriteCrossingChunkBoundary) {
   // Default chunk size is 64 MiB.  Write 80 MiB to cross at least one
   // chunk boundary.
   constexpr size_t kSize = 80ULL * 1024 * 1024;  // 80 MiB
-  std::string data(kSize, 'A');
+  std::string data = MakeDeterministicPayload(kSize);
   const char *name = "big.bin";
   ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
   ASSERT_EQ(fixture_.WriteFile(name, data), 0);

@@ -194,7 +194,7 @@ include(GoogleTest)
 gtest_discover_tests(swordfs_test)
 
 # End-to-end tests (tests/e2e/)
-file(GLOB_RECURSE E2E_TEST_SOURCES tests/e2e/*.cpp)
+file(GLOB_RECURSE E2E_TEST_SOURCES CONFIGURE_DEPENDS tests/e2e/*.cpp)
 add_executable(swordfs_e2e_test ${E2E_TEST_SOURCES})
 target_link_libraries(swordfs_e2e_test PRIVATE swordfs_lib gtest gtest_main)
 target_include_directories(
