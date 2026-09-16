@@ -103,36 +103,27 @@ TEST_F(FileIOTest, GapWrite) {
 // Append
 // ────────────────────────────────────────────────────────────────
 
-TEST_F(FileIOTest, ReopenAndWriteFails) {
+TEST_F(FileIOTest, ReopenAndOverwritePreservesUntouchedBytes) {
   const std::string name = "reopen.bin";
   ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
 
-  // First write + close triggers chunk flush (→ kFlushed).
-  ASSERT_EQ(fixture_.WriteFile(name, "hello"), 0);
+  // First write + close publishes the chunk.
+  ASSERT_EQ(fixture_.WriteFile(name, "hello world"), 0);
 
-  // Re-opening for write should fail because the flushed chunk is
-  // not writable.
+  // Re-opening must hydrate the published chunk before modifying it so the
+  // untouched suffix survives the overwrite.
   int fd = fixture_.OpenFile(name, O_WRONLY);
   ASSERT_GE(fd, 0);
-  const std::string extra = " world";
-  ssize_t n = ::write(fd, extra.c_str(), extra.size());
-  EXPECT_EQ(n, -1) << "expected write to fail on flushed chunk, got n=" << n;
-  EXPECT_EQ(errno, EINVAL) << "expected EINVAL";
-  ::close(fd);
+  ASSERT_EQ(::write(fd, "HELLO", 5), 5);
+  ASSERT_EQ(::close(fd), 0);
 
-  // Unchanged: still only "hello".
-  EXPECT_TRUE(fixture_.FileEquals(name, 5, Fixture::Hash64("hello")));
+  EXPECT_TRUE(fixture_.FileEquals(name, 11, Fixture::Hash64("HELLO world")));
 }
 
 // FIXME: O_SYNC/O_DSYNC write-through is not yet implemented.
-// O_SYNC requires every write() to be durable before it returns, i.e. the
-// touched chunk must be flushed on each write.  That is blocked by the same
-// overwrite-after-flush limitation as ReopenAndWriteFails: a flushed chunk
-// cannot accept further writes (no JuiceFS-style slice merge yet), so the
-// second write below would fail with EINVAL.  O_DIRECT (bypass the chunk
-// buffer) is a related gap.  Enable this test once slice/overwrite
-// semantics land and the O_SYNC/O_DSYNC/O_DIRECT paths are wired through
-// FileHandle → InodeHandle → FileReadWriter.
+// O_SYNC requires every write() to be durable before it returns. Flushed
+// chunks are writable now, but the FUSE write path still does not honor the
+// stronger per-write durability contract. O_DIRECT is a separate gap.
 TEST_F(FileIOTest, DISABLED_OSyncWriteIsDurable) {
   const std::string name = "osync.bin";
   ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
@@ -147,12 +138,7 @@ TEST_F(FileIOTest, DISABLED_OSyncWriteIsDurable) {
   EXPECT_TRUE(fixture_.FileEquals(name, 11, Fixture::Hash64("hello world")));
 }
 
-// FIXME: Cross-open append is not yet supported.
-// When a file is closed and reopened with O_APPEND, the dirty chunk
-// from the first open is flushed and removed; the second open creates
-// a fresh FileReadWriter whose WriteBuf only covers the newly written
-// range, losing the prefix data in the flushed chunk.
-TEST_F(FileIOTest, DISABLED_AppendToFile) {
+TEST_F(FileIOTest, AppendToFileAcrossOpen) {
   const std::string name = "append.txt";
   ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_WRONLY | O_TRUNC), 0);
   ASSERT_EQ(fixture_.WriteFile(name, "hello"), 0);
@@ -165,6 +151,21 @@ TEST_F(FileIOTest, DISABLED_AppendToFile) {
   ASSERT_EQ(n, 6);
 
   EXPECT_TRUE(fixture_.FileEquals(name, 11, Fixture::Hash64("hello world")));
+}
+
+TEST_F(FileIOTest, FsyncThenOverwriteSameFd) {
+  const std::string name = "fsync_overwrite.bin";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR | O_TRUNC), 0);
+
+  int fd = fixture_.OpenFile(name, O_RDWR);
+  ASSERT_GE(fd, 0);
+  ASSERT_EQ(::write(fd, "hello world", 11), 11);
+  ASSERT_EQ(::fsync(fd), 0);
+  ASSERT_EQ(::pwrite(fd, "HELLO", 5, 0), 5);
+  ASSERT_EQ(::fsync(fd), 0);
+  ASSERT_EQ(::close(fd), 0);
+
+  EXPECT_TRUE(fixture_.FileEquals(name, 11, Fixture::Hash64("HELLO world")));
 }
 
 TEST_F(FileIOTest, AppendMultipleWithinSameOpen) {

@@ -120,6 +120,10 @@ class MockDataEngine : public IDataEngine {
       started->post();
     }
 
+    if (!get_status.ok()) {
+      return get_status;
+    }
+
     auto it = store_.find(std::string(key));
     if (it == store_.end()) {
       return Status::NotFound("chunk not found");
@@ -162,6 +166,7 @@ class MockDataEngine : public IDataEngine {
 
   std::vector<std::string> delete_calls;
   Status delete_status = Status::OK();
+  Status get_status = Status::OK();
   Status put_status = Status::OK();
   std::string fail_put_key;
   int put_calls = 0;
@@ -282,6 +287,30 @@ class MockMetaEngine : public IMetaEngine {
     return publish_chunk_status;
   }
 
+  Status ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement) override {
+    ++replace_chunk_calls;
+    if (!replace_chunk_status.ok() && !replace_chunk_commit_on_error && !replace_chunk_descriptor_only_on_error) {
+      return replace_chunk_status;
+    }
+    auto &chunk_map = chunks_[ino];
+    auto it = chunk_map.find(expected.index);
+    if (it == chunk_map.end()) {
+      return Status::NotFound("chunk not found");
+    }
+    if (it->second == replacement) {
+      file_size_ = std::max(file_size_, static_cast<off_t>(replacement.start_offset + replacement.size));
+      return replace_chunk_status;
+    }
+    if (!(it->second == expected)) {
+      return Status::AlreadyExists("chunk changed before replacement");
+    }
+    it->second = replacement;
+    if (!replace_chunk_descriptor_only_on_error) {
+      file_size_ = std::max(file_size_, static_cast<off_t>(replacement.start_offset + replacement.size));
+    }
+    return replace_chunk_status;
+  }
+
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override {
     if (!find_chunk_status.ok() && (!find_chunk_error_idx.has_value() || *find_chunk_error_idx == idx)) {
       return find_chunk_status;
@@ -321,8 +350,12 @@ class MockMetaEngine : public IMetaEngine {
   }
 
   int truncate_calls = 0;
+  int replace_chunk_calls = 0;
   Status publish_chunk_status = Status::OK();
   bool publish_chunk_commit_on_error = false;
+  Status replace_chunk_status = Status::OK();
+  bool replace_chunk_commit_on_error = false;
+  bool replace_chunk_descriptor_only_on_error = false;
   Status find_chunk_status = Status::OK();
   std::optional<ChunkIndex> find_chunk_error_idx;
 
@@ -883,6 +916,392 @@ TEST_F(FileReadWriterTest, FlushedDataVisibleAcrossHandles) {
 
     ASSERT_TRUE(h1->Release().ok());
     ASSERT_TRUE(h2->Release().ok());
+  });
+}
+
+TEST_F(FileReadWriterTest, WriteAfterFlushOverwritesExistingChunkWithoutLosingUntouchedBytes) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    FileReadWriter reopened(kIno);
+    auto out = folly::IOBuf::create(11);
+    ASSERT_TRUE(reopened.Read(11, 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "HELLO world");
+    EXPECT_EQ(mock_meta_->file_size(), 11);
+  });
+}
+
+TEST_F(FileReadWriterTest, ReopenedWriterAppendsWithinExistingFlushedChunk) {
+  RunInTestFiber([&] {
+    auto initial = Make();
+    ASSERT_TRUE(initial.Write(Buf("hello"), 0).ok());
+    ASSERT_TRUE(initial.Flush().ok());
+
+    FileReadWriter reopened(kIno);
+    ASSERT_TRUE(reopened.Write(Buf(" world"), 5).ok());
+    ASSERT_TRUE(reopened.Flush().ok());
+
+    FileReadWriter reader(kIno);
+    auto out = folly::IOBuf::create(11);
+    ASSERT_TRUE(reader.Read(11, 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "hello world");
+    EXPECT_EQ(mock_meta_->file_size(), 11);
+  });
+}
+
+TEST_F(FileReadWriterTest, RewritePublishesVersionedObjectAndRetiresOldObjectAfterCommit) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    SwordFsChunk first;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &first).ok());
+    ASSERT_EQ(first.key, std::to_string(kIno) + "/0");
+
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    SwordFsChunk replacement;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &replacement).ok());
+    EXPECT_NE(replacement.key, first.key);
+    EXPECT_EQ(replacement.size, 11U);
+    EXPECT_EQ(mock_data_->StoredKeys(), std::vector<std::string>{replacement.key});
+    EXPECT_NE(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), first.key),
+              mock_data_->delete_calls.end());
+  });
+}
+
+TEST_F(FileReadWriterTest, RewritePutFailureKeepsOldVersionAuthoritativeAndCanRetry) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    SwordFsChunk first;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &first).ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+
+    mock_data_->put_status = Status::IOError("rewrite put failed");
+    EXPECT_TRUE(rw.Flush().code() == Status::kIOError);
+
+    SwordFsChunk still_first;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &still_first).ok());
+    EXPECT_EQ(still_first, first);
+    FileReadWriter old_reader(kIno);
+    auto old_out = folly::IOBuf::create(11);
+    ASSERT_TRUE(old_reader.Read(11, 0, old_out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(old_out->data()), old_out->length()), "hello world");
+
+    mock_data_->put_status = Status::OK();
+    ASSERT_TRUE(rw.Flush().ok());
+    FileReadWriter new_reader(kIno);
+    auto new_out = folly::IOBuf::create(11);
+    ASSERT_TRUE(new_reader.Read(11, 0, new_out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(new_out->data()), new_out->length()), "HELLO world");
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteResolvesAmbiguousMetadataCommitWithoutAnotherPut) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    ASSERT_EQ(mock_data_->put_calls, 1);
+
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+    mock_meta_->replace_chunk_commit_on_error = true;
+    mock_meta_->replace_chunk_status = Status::IOError("replacement reply lost after commit");
+    EXPECT_EQ(rw.Flush().code(), Status::kIOError);
+    ASSERT_EQ(mock_data_->put_calls, 2);
+    ASSERT_EQ(mock_meta_->replace_chunk_calls, 1);
+
+    mock_meta_->replace_chunk_commit_on_error = false;
+    mock_meta_->replace_chunk_status = Status::OK();
+    ASSERT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_data_->put_calls, 2);
+    EXPECT_EQ(mock_meta_->replace_chunk_calls, 2);
+
+    FileReadWriter reader(kIno);
+    auto out = folly::IOBuf::create(11);
+    ASSERT_TRUE(reader.Read(11, 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "HELLO world");
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteRetryRepairsMetadataSideEffectsAfterPartialCommit) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    ASSERT_EQ(mock_meta_->file_size(), 5);
+    ASSERT_EQ(mock_data_->put_calls, 1);
+
+    ASSERT_TRUE(rw.Write(Buf(" world"), 5).ok());
+    mock_meta_->replace_chunk_descriptor_only_on_error = true;
+    mock_meta_->replace_chunk_status = Status::IOError("inode side effect failed after descriptor commit");
+    EXPECT_EQ(rw.Flush().code(), Status::kIOError);
+    EXPECT_EQ(mock_meta_->file_size(), 5);
+    ASSERT_EQ(mock_data_->put_calls, 2);
+    ASSERT_EQ(mock_meta_->replace_chunk_calls, 1);
+
+    SwordFsChunk replacement;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &replacement).ok());
+    EXPECT_EQ(replacement.size, 11U);
+
+    mock_meta_->replace_chunk_descriptor_only_on_error = false;
+    mock_meta_->replace_chunk_status = Status::OK();
+    ASSERT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_data_->put_calls, 2);
+    EXPECT_EQ(mock_meta_->replace_chunk_calls, 2);
+    EXPECT_EQ(mock_meta_->file_size(), 11);
+
+    FileReadWriter reader(kIno);
+    auto out = folly::IOBuf::create(11);
+    ASSERT_TRUE(reader.Read(11, 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "hello world");
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteRetryNeverDeletesObjectStillReferencedByMetadata) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    ASSERT_TRUE(rw.Write(Buf(" world"), 5).ok());
+    mock_meta_->replace_chunk_descriptor_only_on_error = true;
+    mock_meta_->replace_chunk_status = Status::IOError("descriptor committed, inode side effect failed");
+    EXPECT_EQ(rw.Flush().code(), Status::kIOError);
+
+    SwordFsChunk current;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &current).ok());
+    ASSERT_EQ(current.size, 11U);
+    ASSERT_NE(current.key, std::to_string(kIno) + "/0");
+
+    current.size = 10;
+    ASSERT_TRUE(mock_meta_->AddChunk(kIno, current).ok());
+    mock_meta_->replace_chunk_descriptor_only_on_error = false;
+    mock_meta_->replace_chunk_status = Status::OK();
+
+    EXPECT_TRUE(rw.Flush().IsAlreadyExists());
+    const auto stored_keys = mock_data_->StoredKeys();
+    EXPECT_NE(std::find(stored_keys.begin(), stored_keys.end(), current.key), stored_keys.end());
+    EXPECT_EQ(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), current.key),
+              mock_data_->delete_calls.end());
+  });
+}
+
+TEST_F(FileReadWriterTest, TruncateAfterFailedRewriteCleansCommittedAndPendingObjects) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    SwordFsChunk first;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &first).ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+    mock_meta_->replace_chunk_status = Status::IOError("replacement failed before commit");
+    EXPECT_EQ(rw.Flush().code(), Status::kIOError);
+
+    auto keys_before_truncate = mock_data_->StoredKeys();
+    ASSERT_EQ(keys_before_truncate.size(), 2U);
+    EXPECT_NE(std::find(keys_before_truncate.begin(), keys_before_truncate.end(), first.key),
+              keys_before_truncate.end());
+
+    mock_meta_->replace_chunk_status = Status::OK();
+    ASSERT_TRUE(rw.Truncate(0).ok());
+    EXPECT_TRUE(mock_data_->StoredKeys().empty());
+    EXPECT_EQ(mock_meta_->file_size(), 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteHydrationPropagatesBackendReadFailure) {
+  RunInTestFiber([&] {
+    SwordFsChunk chunk{.index = 0, .start_offset = 0, .key = "seed/0", .size = 11};
+    ASSERT_TRUE(mock_meta_->AddChunk(kIno, chunk).ok());
+    auto data = std::make_unique<folly::IOBuf>(Buf("hello world"));
+    ASSERT_TRUE(mock_data_->Put(chunk.key, std::move(data)).ok());
+
+    mock_data_->get_status = Status::IOError("hydrate read failed");
+    auto rw = Make(11);
+    const auto status = rw.Write(Buf("H"), 0);
+    EXPECT_EQ(status.code(), Status::kIOError);
+    EXPECT_EQ(status.message(), "hydrate read failed");
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteHydrationRejectsObjectShorterThanDescriptor) {
+  RunInTestFiber([&] {
+    SwordFsChunk chunk{.index = 0, .start_offset = 0, .key = "seed/0", .size = 11};
+    ASSERT_TRUE(mock_meta_->AddChunk(kIno, chunk).ok());
+    auto data = std::make_unique<folly::IOBuf>(Buf("short"));
+    ASSERT_TRUE(mock_data_->Put(chunk.key, std::move(data)).ok());
+
+    auto rw = Make(11);
+    const auto status = rw.Write(Buf("H"), 0);
+    EXPECT_EQ(status.code(), Status::kIOError);
+    EXPECT_NE(status.message().find("shorter than metadata descriptor"), std::string::npos);
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteHydrationRejectsDescriptorLargerThanChunk) {
+  RunInTestFiber([&] {
+    auto &vol = swordfs::volume::VolumeImpl::Instance();
+    vol.set_chunk_size_for_test(8);
+
+    SwordFsChunk chunk{.index = 0, .start_offset = 0, .key = "seed/0", .size = 9};
+    ASSERT_TRUE(mock_meta_->AddChunk(kIno, chunk).ok());
+    auto rw = Make(9);
+    const auto status = rw.Write(Buf("H"), 0);
+    EXPECT_TRUE(status.IsMalformed());
+
+    vol.clear_chunk_size_for_test();
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteHydratesZeroLengthPublishedChunkWithoutBackendRead) {
+  RunInTestFiber([&] {
+    SwordFsChunk chunk{.index = 0, .start_offset = 0, .key = "seed/0", .size = 0};
+    ASSERT_TRUE(mock_meta_->AddChunk(kIno, chunk).ok());
+
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("new"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    FileReadWriter reader(kIno);
+    auto out = folly::IOBuf::create(3);
+    ASSERT_TRUE(reader.Read(3, 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "new");
+  });
+}
+
+TEST_F(FileReadWriterTest, WriteAfterFailedInitialFlushRejectsSealedChunkMutation) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello"), 0).ok());
+    mock_meta_->publish_chunk_status = Status::IOError("publication failed");
+    ASSERT_EQ(rw.Flush().code(), Status::kIOError);
+
+    const auto status = rw.Write(Buf("H"), 0);
+    EXPECT_EQ(status.code(), Status::kInvalidArgument);
+    EXPECT_NE(status.message().find("sealed"), std::string::npos);
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteRetryPropagatesMetadataLookupFailure) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+
+    mock_meta_->replace_chunk_status = Status::IOError("replacement failed");
+    ASSERT_EQ(rw.Flush().code(), Status::kIOError);
+
+    mock_meta_->replace_chunk_status = Status::OK();
+    mock_meta_->find_chunk_status = Status::IOError("retry lookup failed");
+    const auto status = rw.Flush();
+    EXPECT_EQ(status.code(), Status::kIOError);
+    EXPECT_EQ(status.message(), "retry lookup failed");
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteRetryRejectsChangedDescriptorAndCleansPendingObject) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    SwordFsChunk first;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &first).ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+    mock_meta_->replace_chunk_status = Status::IOError("replacement failed");
+    ASSERT_EQ(rw.Flush().code(), Status::kIOError);
+
+    const auto keys = mock_data_->StoredKeys();
+    ASSERT_EQ(keys.size(), 2U);
+    const auto pending = keys[0] == first.key ? keys[1] : keys[0];
+
+    auto winner = first;
+    winner.key = "winner/0";
+    ASSERT_TRUE(mock_meta_->AddChunk(kIno, winner).ok());
+    mock_meta_->replace_chunk_status = Status::OK();
+    mock_data_->delete_status = Status::IOError("cleanup failed");
+
+    const auto status = rw.Flush();
+    EXPECT_TRUE(status.IsAlreadyExists());
+    EXPECT_NE(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), pending),
+              mock_data_->delete_calls.end());
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteConflictCleansNewObjectEvenWhenDeleteReportsFailure) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+
+    mock_meta_->replace_chunk_status = Status::AlreadyExists("winner changed");
+    mock_data_->delete_status = Status::IOError("cleanup failed");
+    const auto status = rw.Flush();
+    EXPECT_TRUE(status.IsAlreadyExists());
+    EXPECT_EQ(mock_meta_->replace_chunk_calls, 1);
+    EXPECT_EQ(mock_data_->delete_calls.size(), 1U);
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteSuccessToleratesOldObjectDeleteFailure) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    mock_data_->delete_status = Status::IOError("old object cleanup failed");
+
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    FileReadWriter reader(kIno);
+    auto out = folly::IOBuf::create(11);
+    ASSERT_TRUE(reader.Read(11, 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "HELLO world");
+  });
+}
+
+TEST_F(FileReadWriterTest, PartialTruncateOfDirtyRewriteClampsExpectedDescriptor) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+
+    ASSERT_TRUE(rw.Truncate(5).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    FileReadWriter reader(kIno);
+    auto out = folly::IOBuf::create(5);
+    ASSERT_TRUE(reader.Read(5, 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "HELLO");
+  });
+}
+
+TEST_F(FileReadWriterTest, TruncateAfterFailedInitialPublicationCleansUploadedObject) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello"), 0).ok());
+    mock_meta_->publish_chunk_status = Status::IOError("publication failed");
+    ASSERT_EQ(rw.Flush().code(), Status::kIOError);
+    ASSERT_EQ(mock_data_->StoredKeys(), std::vector<std::string>{std::to_string(kIno) + "/0"});
+
+    mock_meta_->publish_chunk_status = Status::OK();
+    ASSERT_TRUE(rw.Truncate(0).ok());
+    EXPECT_TRUE(mock_data_->StoredKeys().empty());
   });
 }
 

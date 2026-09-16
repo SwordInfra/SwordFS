@@ -124,24 +124,15 @@ std::vector<std::shared_ptr<chunk::Chunk>> FileChunkManager::GetFlushable() {
   return flushable;
 }
 
-void FileChunkManager::TruncateToSize(size_t size, size_t chunk_size, std::vector<metadata::ChunkIndex> *dropped) {
+void FileChunkManager::TruncateToSize(size_t size, size_t chunk_size, std::vector<std::string> *dropped_keys) {
   std::lock_guard<utils::FiberMutex> lock(mutex_);
-  if (chunk_size == 0) {
-    for (const auto &[idx, _] : chunks_) {
-      if (dropped) {
-        dropped->push_back(idx);
-      }
-    }
-    chunks_.clear();
-    return;
-  }
-
   const auto boundary_idx = static_cast<metadata::ChunkIndex>(size / chunk_size);
   const size_t boundary_size = size % chunk_size;
   for (auto it = chunks_.begin(); it != chunks_.end();) {
     if (it->first > boundary_idx || (it->first == boundary_idx && boundary_size == 0)) {
-      if (dropped) {
-        dropped->push_back(it->first);
+      if (dropped_keys) {
+        auto keys = it->second->ObjectKeysForCleanup();
+        dropped_keys->insert(dropped_keys->end(), keys.begin(), keys.end());
       }
       it = chunks_.erase(it);
     } else if (it->first == boundary_idx) {
@@ -295,8 +286,8 @@ utils::Status FileReadWriter::Truncate(size_t size) {
   if (!status.ok()) {
     return status;
   }
-  std::vector<metadata::ChunkIndex> dropped;
-  chunks_.TruncateToSize(size, chunk_size_, &dropped);
+  std::vector<std::string> dropped_keys;
+  chunks_.TruncateToSize(size, chunk_size_, &dropped_keys);
 
   // Drop the now-orphaned chunk objects from the data engine. The
   // metadata side already pruned its chunk map via meta_->Truncate(),
@@ -305,9 +296,8 @@ utils::Status FileReadWriter::Truncate(size_t size) {
   // propagated — a missing chunk object is recoverable on next access
   // (read of that chunk index returns NotFound), whereas a partial
   // metadata truncate would corrupt the file size view.
-  if (data_ && !dropped.empty()) {
-    for (const auto idx : dropped) {
-      const auto key = chunk::FormatChunkKey(ino_, idx);
+  if (data_ && !dropped_keys.empty()) {
+    for (const auto &key : dropped_keys) {
       auto status = data_->Delete(key);
       if (!status.ok()) {
         SWORDFS_LOG_ERROR << "FileReadWriter::Truncate: data->Delete(" << key << ") failed: " << status.message();

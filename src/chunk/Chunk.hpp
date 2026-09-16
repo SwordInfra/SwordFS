@@ -1,15 +1,18 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// Chunk — one immutable chunk of a file.  While being written the chunk
-// holds a WriteBuf; once full it is sealed and uploaded to the data engine.
+// Chunk — one logical chunk of a file. Persisted object revisions are
+// immutable; rewriting a flushed chunk hydrates its current contents into a
+// WriteBuf and publishes a new object revision.
 
 #pragma once
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "chunk/WriteBuf.hpp"
 #include "metadata/Types.hpp"
@@ -86,10 +89,15 @@ class Chunk {
   }
   off_t DataEnd() const {
     if (IsFlushed()) {
-      return StartOffset() + static_cast<off_t>(flushed_size_);
+      return StartOffset() + static_cast<off_t>(PublishedChunk().size);
     }
-    return StartOffset() + static_cast<off_t>(wb_ ? wb_->size() : 0);
+    return StartOffset() + static_cast<off_t>(wb_->size());
   }
+
+  /// Object keys that may contain data owned by this chunk and may be
+  /// reclaimed if authoritative metadata drops the chunk. A dirty rewrite
+  /// can own both the old committed key and a newly uploaded pending key.
+  std::vector<std::string> ObjectKeysForCleanup() const;
 
  private:
   bool IsWriting() const {
@@ -99,9 +107,10 @@ class Chunk {
   /// Build a SwordFsChunk snapshot for metadata registration.
   metadata::SwordFsChunk BuildMeta() const;
 
-  std::string ChunkKey() const {
-    return FormatChunkKey(ino_, index_);
-  }
+  const metadata::SwordFsChunk &PublishedChunk() const;
+  utils::Status HydrateForWrite();
+  void CompletePublication(const metadata::SwordFsChunk &chunk);
+  std::string NewRewriteKey() const;
 
  private:
   metadata::InodeID ino_;
@@ -111,7 +120,8 @@ class Chunk {
   metadata::ChunkIndex index_;
   storage::IDataEngine *data_;
   metadata::IMetaEngine *meta_;
-  size_t flushed_size_ = 0;  // valid only when kFlushed
+  std::optional<metadata::SwordFsChunk> published_chunk_;
+  std::string pending_key_;
 };
 
 }  // namespace swordfs::chunk

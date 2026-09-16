@@ -176,6 +176,11 @@ class IMetaEngine {
   /// monotonic and must not invoke truncate semantics.
   virtual Status PublishChunk(InodeID ino, const SwordFsChunk &chunk) = 0;
 
+  /// Atomically replace an already-published chunk descriptor. The current
+  /// descriptor must equal |expected|; replaying |replacement| is idempotent.
+  /// A different current descriptor is a conflict and must not be overwritten.
+  virtual Status ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement) = 0;
+
   /// Find the chunk at |idx|.  Returns OK and fills |*chunk| if a
   /// matching chunk is registered for the given inode.
   virtual Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) = 0;

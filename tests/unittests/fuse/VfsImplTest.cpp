@@ -287,6 +287,10 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status PublishChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
     return Status::OK();
   }
+  Status ReplaceChunk(InodeID, const swordfs::metadata::SwordFsChunk &,
+                      const swordfs::metadata::SwordFsChunk &) override {
+    return Status::OK();
+  }
   Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
     return Status::NotFound("");
   }

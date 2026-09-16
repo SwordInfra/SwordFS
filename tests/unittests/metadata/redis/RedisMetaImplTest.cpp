@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <string>
 #include <thread>
 #include <utility>
@@ -61,11 +62,13 @@ class RedisMetaImplTest : public ::testing::Test {
     // against the same Redis instance does not collide with previous runs.
     volume_name_ = "redis-meta-test-" + std::to_string(::getpid()) + "-" + std::to_string(++sequence);
     impl_ = std::make_unique<RedisMetaImpl>(config_, volume_name_);
-    ASSERT_TRUE(impl_->Initialize().ok());
+    auto status = impl_->Initialize();
+    ASSERT_TRUE(status.ok()) << status.message();
     SwordFsVolume volume;
     volume.name = volume_name_;
     volume.chunk_size = 4096;
-    ASSERT_TRUE(impl_->FormatVolume(volume).ok());
+    status = impl_->FormatVolume(volume);
+    ASSERT_TRUE(status.ok()) << status.message();
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
 
@@ -675,6 +678,151 @@ FIBER_TEST_F(RedisMetaImplTest, PublishChunkIsIdempotentAndGrowsSizeMonotonicall
   SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
   EXPECT_EQ(stored.key, first.key);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, ReplaceChunkUsesCompareAndSwapAndIsIdempotent) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "replace", 0644, &file).ok());
+
+  SwordFsChunk first{.index = 0, .start_offset = 0, .key = "replace/0", .size = 128};
+  ASSERT_TRUE(impl_->PublishChunk(file.ino, first).ok());
+
+  SwordFsAttr mode{};
+  mode.mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, mode, SetAttrField::kMode, nullptr).ok());
+
+  auto replacement = first;
+  replacement.key = "replace/0/version-2";
+  replacement.size = 64;
+  ASSERT_TRUE(impl_->ReplaceChunk(file.ino, first, replacement).ok());
+  ASSERT_TRUE(impl_->ReplaceChunk(file.ino, first, replacement).ok());
+
+  SwordFsChunk stored;
+  ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
+  EXPECT_EQ(stored, replacement);
+
+  ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
+  EXPECT_EQ(file.attr.size, 128U);
+  EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), 0U);
+
+  auto stale_replacement = replacement;
+  stale_replacement.key = "replace/0/stale";
+  EXPECT_TRUE(impl_->ReplaceChunk(file.ino, first, stale_replacement).IsAlreadyExists());
+
+  auto grown = replacement;
+  grown.key = "replace/0/version-3";
+  grown.size = 256;
+  ASSERT_TRUE(impl_->ReplaceChunk(file.ino, replacement, grown).ok());
+  ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
+  EXPECT_EQ(file.attr.size, 256U);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, ReplaceChunkReplayRepairsInodeAfterPartialExec) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "replace-repair", 0644, &file).ok());
+
+  SwordFsChunk first{.index = 0, .start_offset = 0, .key = "replace-repair/0", .size = 64};
+  ASSERT_TRUE(impl_->PublishChunk(file.ino, first).ok());
+
+  SwordFsAttr mode{};
+  mode.mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, mode, SetAttrField::kMode, &file).ok());
+  ASSERT_NE(file.attr.mode & (S_ISUID | S_ISGID), 0U);
+  ASSERT_EQ(file.attr.size, 64U);
+
+  auto replacement = first;
+  replacement.key = "replace-repair/0/version-2";
+  replacement.size = 128;
+  std::string replacement_value;
+  ASSERT_TRUE(replacement.SerializeTo(&replacement_value).ok());
+
+  // Simulate an EXEC where SetChunk succeeded but the later SetInode command
+  // failed. The retry sees replacement metadata already installed and must
+  // still re-apply the inode write side effects instead of returning early.
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
+    redis.hset(key.Chunk(file.ino), std::to_string(first.index), replacement_value);
+  });
+
+  ASSERT_TRUE(impl_->ReplaceChunk(file.ino, first, replacement).ok());
+  ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
+  EXPECT_EQ(file.attr.size, 128U);
+  EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), 0U);
+
+  SwordFsChunk stored;
+  ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
+  EXPECT_EQ(stored, replacement);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, SizePreservingTruncateReconcilesDescriptorAfterPartialReplace) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "replace-truncate-repair", 0644, &file).ok());
+
+  SwordFsChunk first{.index = 0, .start_offset = 0, .key = "replace-truncate-repair/0", .size = 5};
+  ASSERT_TRUE(impl_->PublishChunk(file.ino, first).ok());
+  ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
+  ASSERT_EQ(file.attr.size, 5U);
+
+  auto replacement = first;
+  replacement.key = "replace-truncate-repair/0/version-2";
+  replacement.size = 11;
+  std::string replacement_value;
+  ASSERT_TRUE(replacement.SerializeTo(&replacement_value).ok());
+
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  auto install_partial_replace = [&] {
+    RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
+      redis.hset(key.Chunk(file.ino), std::to_string(first.index), replacement_value);
+    });
+  };
+
+  install_partial_replace();
+  SwordFsAttr requested = file.attr;
+  requested.size = 5;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kSize, nullptr).ok());
+
+  SwordFsChunk stored;
+  ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
+  EXPECT_EQ(stored.key, replacement.key);
+  EXPECT_EQ(stored.size, 5U);
+
+  install_partial_replace();
+  ASSERT_TRUE(impl_->Truncate(file.ino, 5).ok());
+  ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
+  EXPECT_EQ(stored.key, replacement.key);
+  EXPECT_EQ(stored.size, 5U);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, ReplaceChunkRejectsInvalidTargetsAndDescriptors) {
+  SwordFsChunk expected{.index = 0, .start_offset = 0, .key = "replace-invalid/0", .size = 128};
+  auto replacement = expected;
+  replacement.key = "replace-invalid/0/version-2";
+
+  EXPECT_TRUE(impl_->ReplaceChunk(999999, expected, replacement).IsNotFound());
+
+  SwordFsInode dir;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "replace-invalid-dir", 0755, &dir).ok());
+  EXPECT_EQ(impl_->ReplaceChunk(dir.ino, expected, replacement).code(), swordfs::utils::Status::kInvalidArgument);
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "replace-invalid-file", 0644, &file).ok());
+  EXPECT_TRUE(impl_->ReplaceChunk(file.ino, expected, replacement).IsNotFound());
+
+  auto mismatched = replacement;
+  mismatched.index = 1;
+  EXPECT_EQ(impl_->ReplaceChunk(file.ino, expected, mismatched).code(), swordfs::utils::Status::kInvalidArgument);
+
+  mismatched = replacement;
+  mismatched.start_offset = 4096;
+  EXPECT_EQ(impl_->ReplaceChunk(file.ino, expected, mismatched).code(), swordfs::utils::Status::kInvalidArgument);
+
+  auto overflowing = replacement;
+  overflowing.start_offset = std::numeric_limits<uint64_t>::max() - 16;
+  overflowing.size = 32;
+  auto overflowing_expected = overflowing;
+  overflowing_expected.key = "replace-invalid/overflow-old";
+  EXPECT_EQ(impl_->ReplaceChunk(file.ino, overflowing_expected, overflowing).code(),
+            swordfs::utils::Status::kInvalidArgument);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, SymlinkAndLinkValidateLongNamesAndParentTypes) {
