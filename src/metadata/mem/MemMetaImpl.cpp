@@ -418,6 +418,10 @@ Status MemMetaImpl::ReclaimInode(InodeID ino) {
   return store_.Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
 }
 
+Status MemMetaImpl::AllocateChunkRevision(ChunkRevision *revision) {
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.AllocateChunkRevision(revision); });
+}
+
 // ────────────────────────────────────────────────────────────────
 // Directory operations
 // ────────────────────────────────────────────────────────────────
@@ -665,19 +669,10 @@ Status MemMetaImpl::Readlink(InodeID ino, std::string *target) {
 // Chunk metadata
 // ────────────────────────────────────────────────────────────────
 
-Status MemMetaImpl::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
+Status MemMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
+                                const SwordFsChunk &replacement) {
   utils::ExpectInFiberDomain();
-  return store_.Transact([&](MemMetaTxn &txn) { return txn.AddChunk(ino, chunk); });
-}
-
-Status MemMetaImpl::PublishChunk(InodeID ino, const SwordFsChunk &chunk) {
-  utils::ExpectInFiberDomain();
-  return store_.Transact([&](MemMetaTxn &txn) { return txn.PublishChunk(ino, chunk); });
-}
-
-Status MemMetaImpl::ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement) {
-  utils::ExpectInFiberDomain();
-  return store_.Transact([&](MemMetaTxn &txn) { return txn.ReplaceChunk(ino, expected, replacement); });
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(ino, expected, replacement); });
 }
 
 Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {

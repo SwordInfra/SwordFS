@@ -69,6 +69,7 @@ class MemMetaStore {
 
   mutable utils::FiberMutex mutex_;
   std::atomic<InodeID> next_ino_;
+  ChunkRevision next_chunk_revision_ = 1;
 
   folly::F14FastMap<InodeID, std::unique_ptr<SwordFsInode>> inodes_;
   folly::F14FastMap<InodeID, folly::F14FastMap<std::string, SwordFsInode *>> dirs_;

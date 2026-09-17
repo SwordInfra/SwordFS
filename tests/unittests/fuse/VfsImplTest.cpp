@@ -272,6 +272,13 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status ReclaimInode(InodeID) override {
     return call_status_;
   }
+  Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
+    if (revision == nullptr) {
+      return Status::InvalidArgument("chunk revision output is null");
+    }
+    *revision = next_revision_++;
+    return Status::OK();
+  }
   Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
@@ -281,14 +288,8 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return call_status_;
   }
-  Status AddChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
-    return Status::OK();
-  }
-  Status PublishChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
-    return Status::OK();
-  }
-  Status ReplaceChunk(InodeID, const swordfs::metadata::SwordFsChunk &,
-                      const swordfs::metadata::SwordFsChunk &) override {
+  Status CommitChunk(InodeID, const std::optional<swordfs::metadata::SwordFsChunk> &,
+                     const swordfs::metadata::SwordFsChunk &) override {
     return Status::OK();
   }
   Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
@@ -309,6 +310,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
  private:
   Status call_status_{Status::OK()};
   int lookup_calls_ = 0;
+  swordfs::metadata::ChunkRevision next_revision_ = 1;
 };
 
 class VfsImplIntegrationTest : public ::testing::Test {

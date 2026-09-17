@@ -70,6 +70,10 @@ utils::Status RedisMetaOps::FormatVolume(const SwordFsVolume &config) {
       if (!txn_status.ok()) {
         return txn_status;
       }
+      txn_status = txn.Set(key_.NextChunkRevision(), "0");
+      if (!txn_status.ok()) {
+        return txn_status;
+      }
       txn_status = txn.Set(key_.InodeCount(), "1");
       if (!txn_status.ok()) {
         return txn_status;
@@ -173,19 +177,10 @@ utils::Status RedisMetaOps::ReclaimInode(InodeID ino) {
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.ReclaimInode(ino); });
 }
 
-utils::Status RedisMetaOps::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
+utils::Status RedisMetaOps::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
+                                        const SwordFsChunk &replacement) {
   utils::ExpectInFiberDomain();
-  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.AddChunk(ino, chunk); });
-}
-
-utils::Status RedisMetaOps::PublishChunk(InodeID ino, const SwordFsChunk &chunk) {
-  utils::ExpectInFiberDomain();
-  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PublishChunk(ino, chunk); });
-}
-
-utils::Status RedisMetaOps::ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement) {
-  utils::ExpectInFiberDomain();
-  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.ReplaceChunk(ino, expected, replacement); });
+  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.CommitChunk(ino, expected, replacement); });
 }
 
 utils::Status RedisMetaOps::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
@@ -264,6 +259,14 @@ utils::Status RedisMetaOps::AllocateInode(InodeID *ino) {
     return utils::Status::InvalidArgument("inode id output is null");
   }
   return backend_->executor().RunFromFiber([&] { return backend_->client().Incr(key_.NextIno(), ino); });
+}
+
+utils::Status RedisMetaOps::AllocateChunkRevision(ChunkRevision *revision) {
+  utils::ExpectInFiberDomain();
+  if (revision == nullptr) {
+    return utils::Status::InvalidArgument("chunk revision output is null");
+  }
+  return backend_->executor().RunFromFiber([&] { return backend_->client().Incr(key_.NextChunkRevision(), revision); });
 }
 
 utils::Status RedisMetaOps::TransactFromFiber(const std::function<utils::Status(RedisMetaTxn &)> &callback) {

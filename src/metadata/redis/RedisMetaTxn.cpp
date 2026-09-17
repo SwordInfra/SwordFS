@@ -651,67 +651,17 @@ utils::Status RedisMetaTxn::LookupChunk(InodeID ino, ChunkIndex idx, SwordFsChun
   return chunk->ParseFrom(value);
 }
 
-utils::Status RedisMetaTxn::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
-  SwordFsInode inode;
-  auto status = LookupInode(ino, &inode);
-  if (!status.ok()) {
-    return status;
+utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
+                                        const SwordFsChunk &replacement) {
+  if (replacement.revision == kInvalidChunkRevision ||
+      (expected.has_value() && expected->revision == kInvalidChunkRevision)) {
+    return utils::Status::InvalidArgument("chunk revision is invalid");
   }
-  if (!inode.IsRegular()) {
-    return utils::Status::InvalidArgument("not a regular file");
+  if (expected.has_value() && replacement.revision <= expected->revision) {
+    return utils::Status::InvalidArgument("replacement revision must increase");
   }
-
-  SwordFsChunk existing;
-  status = LookupChunk(ino, chunk.index, &existing);
-  if (status.ok()) {
-    return utils::Status::AlreadyExists("chunk already exists at index " + std::to_string(chunk.index));
-  }
-  if (!status.IsNotFound()) {
-    return status;
-  }
-  return SetChunk(ino, chunk);
-}
-
-utils::Status RedisMetaTxn::PublishChunk(InodeID ino, const SwordFsChunk &chunk) {
-  SwordFsInode inode;
-  auto status = LookupInode(ino, &inode);
-  if (!status.ok()) {
-    return status;
-  }
-  if (!inode.IsRegular()) {
-    return utils::Status::InvalidArgument("not a regular file");
-  }
-  if (chunk.size > std::numeric_limits<uint64_t>::max() - chunk.start_offset) {
-    return utils::Status::InvalidArgument("chunk end offset overflows");
-  }
-
-  SwordFsChunk existing;
-  status = LookupChunk(ino, chunk.index, &existing);
-  if (status.ok()) {
-    if (!(existing == chunk)) {
-      return utils::Status::AlreadyExists("conflicting chunk already exists at index " + std::to_string(chunk.index));
-    }
-  } else if (status.IsNotFound()) {
-    status = SetChunk(ino, chunk);
-    if (!status.ok()) {
-      return status;
-    }
-  } else {
-    return status;
-  }
-
-  const uint64_t chunk_end = chunk.start_offset + chunk.size;
-  if (chunk_end > inode.attr.size) {
-    inode.attr.size = chunk_end;
-    inode.attr.KillSUID();
-    inode.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
-    return SetInode(inode);
-  }
-  return utils::Status::OK();
-}
-
-utils::Status RedisMetaTxn::ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement) {
-  if (expected.index != replacement.index || expected.start_offset != replacement.start_offset) {
+  if (expected.has_value() &&
+      (expected->index != replacement.index || expected->start_offset != replacement.start_offset)) {
     return utils::Status::InvalidArgument("replacement must preserve chunk index and start offset");
   }
   if (replacement.size > std::numeric_limits<uint64_t>::max() - replacement.start_offset) {
@@ -728,13 +678,20 @@ utils::Status RedisMetaTxn::ReplaceChunk(InodeID ino, const SwordFsChunk &expect
   }
 
   SwordFsChunk current;
-  status = LookupChunk(ino, expected.index, &current);
-  if (!status.ok()) {
+  status = LookupChunk(ino, replacement.index, &current);
+  bool replacement_already_published = false;
+  if (status.ok()) {
+    replacement_already_published = current == replacement;
+    if (!replacement_already_published && (!expected.has_value() || !(current == *expected))) {
+      return utils::Status::AlreadyExists("chunk changed before publication at index " +
+                                          std::to_string(replacement.index));
+    }
+  } else if (status.IsNotFound()) {
+    if (expected.has_value()) {
+      return status;
+    }
+  } else {
     return status;
-  }
-  const bool replacement_already_published = current == replacement;
-  if (!replacement_already_published && !(current == expected)) {
-    return utils::Status::AlreadyExists("chunk changed before replacement at index " + std::to_string(expected.index));
   }
 
   if (!replacement_already_published) {

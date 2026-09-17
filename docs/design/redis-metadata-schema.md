@@ -23,6 +23,7 @@ All keys are scoped by the volume hash tag.
 |---|---|---|---|
 | `{db:volume}:format` | String | metadata format/version and volume metadata | Confirmed |
 | `{db:volume}:next_ino` | String/integer | inode allocation state | Confirmed |
+| `{db:volume}:next_chunk_revision` | String/integer | globally monotonic immutable chunk-revision allocator | Confirmed |
 | `{db:volume}:inode_count` | String/integer | live inode count maintained with inode lifecycle; `StatFs` exposure remains separate | Confirmed lifecycle |
 | `{db:volume}:inode:<ino>` | String | canonical serialized `SwordFsInode` | Confirmed |
 | `{db:volume}:dir:<parent_ino>` | Hash | `name -> {type, ino}` | Confirmed |
@@ -84,7 +85,30 @@ Use one Redis Hash per inode:
     chunk_index -> SwordFsChunk
 ```
 
-This maps directly to the current SwordFS chunk model. We do not copy JuiceFS's slice-list representation without a demonstrated access-pattern benefit.
+`SwordFsChunk` stores logical chunk identity and the currently authoritative immutable revision, not a physical object-storage key:
+
+```text
+SwordFsChunk {
+    index
+    start_offset
+    revision      // uint64, 0 is invalid
+    size
+}
+```
+
+Object-storage keys are derived by the data path from `(ino, chunk_index, revision)`. A physical object key is therefore not part of the metadata schema. New writes and rewrites use the same publication model:
+
+```text
+revision = INCR {db:volume}:next_chunk_revision
+PUT object(ino, chunk_index, revision)
+CommitChunk(expected?, replacement)
+```
+
+Revision allocation and authoritative publication are deliberately separate. A failed operation may consume a revision ID or leave an unreachable object, but it does not publish pending state into the chunk Hash. Revision IDs are unique and monotonically increasing within the volume; gaps are valid. A rewrite must publish a revision greater than the descriptor it replaces.
+
+`next_chunk_revision` is part of durable metadata state and must have the same persistence and no-eviction guarantees as inode and chunk metadata. Losing or rolling back the counter could reuse a physical object identity and violate immutable-publication semantics. The object-key namespace also assumes a SwordFS volume owns an isolated bucket/prefix namespace (or another equivalent volume discriminator is present outside the derived key).
+
+This maps directly to the current SwordFS whole-chunk model. We do not copy JuiceFS's slice-list representation without a demonstrated access-pattern benefit, but we follow the same useful principle that immutable data identity is separate from metadata publication.
 
 ### Volume locality
 

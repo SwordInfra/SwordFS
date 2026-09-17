@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "chunk/Chunk.hpp"
+#include "chunk/ChunkObjectKey.hpp"
 #include "chunk/WriteBuf.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
@@ -108,24 +109,28 @@ class MissingMetaEngine final : public IMetaEngine {
   Status ReclaimInode(InodeID) override {
     return Status::OK();
   }
+  Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
+    if (revision == nullptr) {
+      return Status::InvalidArgument("chunk revision output is null");
+    }
+    *revision = next_revision_++;
+    return Status::OK();
+  }
   Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
     return Status::OK();
   }
-  Status AddChunk(InodeID, const SwordFsChunk &) override {
-    return Status::OK();
-  }
-  Status PublishChunk(InodeID, const SwordFsChunk &) override {
-    return Status::OK();
-  }
-  Status ReplaceChunk(InodeID, const SwordFsChunk &, const SwordFsChunk &) override {
+  Status CommitChunk(InodeID, const std::optional<SwordFsChunk> &, const SwordFsChunk &) override {
     return Status::OK();
   }
   Status Truncate(InodeID, uint64_t) override {
     return Status::OK();
   }
+
+ private:
+  swordfs::metadata::ChunkRevision next_revision_ = 1;
 };
 
 // Minimal data engine: nothing is actually persisted; the chunk only
@@ -167,6 +172,10 @@ class ChunkTest : public ::testing::Test {
     InstallEngines();
   }
 };
+
+TEST(ChunkObjectKeyTest, IncludesInodeIndexAndRevision) {
+  EXPECT_EQ(swordfs::chunk::FormatChunkObjectKey(/*ino=*/42, /*index=*/3, /*revision=*/7), "42/3/7");
+}
 
 // Regression: an uninitialised max_chunk_size_ used to make chunk
 // indices > 0 write to byte 0 of their write buffer (StartOffset = 0),

@@ -36,6 +36,7 @@ class MemMetaImpl : public IMetaEngine {
   Status Access(InodeID ino, uint32_t mask) override;
   Status Open(InodeID ino) override;
   Status ReclaimInode(InodeID ino) override;
+  Status AllocateChunkRevision(ChunkRevision *revision) override;
 
   // Directory operations
   Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
@@ -48,9 +49,8 @@ class MemMetaImpl : public IMetaEngine {
   Status Readlink(InodeID ino, std::string *target) override;
 
   // Chunk metadata
-  Status AddChunk(InodeID ino, const SwordFsChunk &chunk) override;
-  Status PublishChunk(InodeID ino, const SwordFsChunk &chunk) override;
-  Status ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement) override;
+  Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
+                     const SwordFsChunk &replacement) override;
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
   Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) override;
   Status Truncate(InodeID ino, uint64_t size) override;

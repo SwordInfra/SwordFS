@@ -10,8 +10,6 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <string>
-#include <string_view>
 #include <vector>
 
 #include "chunk/WriteBuf.hpp"
@@ -28,10 +26,6 @@ class IDataEngine;
 }  // namespace swordfs
 
 namespace swordfs::chunk {
-
-inline std::string FormatChunkKey(metadata::InodeID ino, metadata::ChunkIndex idx) {
-  return std::to_string(ino) + "/" + std::to_string(idx);
-}
 
 class Chunk {
  public:
@@ -108,20 +102,20 @@ class Chunk {
   metadata::SwordFsChunk BuildMeta() const;
 
   const metadata::SwordFsChunk &PublishedChunk() const;
+  utils::Status EnsurePendingRevision();
   utils::Status HydrateForWrite();
   void CompletePublication(const metadata::SwordFsChunk &chunk);
-  std::string NewRewriteKey() const;
 
  private:
   metadata::InodeID ino_;
   size_t max_chunk_size_;
   std::unique_ptr<WriteBuf> wb_;
-  State state_;
+  State state_ = State::kWriting;
   metadata::ChunkIndex index_;
   storage::IDataEngine *data_;
   metadata::IMetaEngine *meta_;
   std::optional<metadata::SwordFsChunk> published_chunk_;
-  std::string pending_key_;
+  metadata::ChunkRevision pending_revision_ = metadata::kInvalidChunkRevision;
 };
 
 }  // namespace swordfs::chunk

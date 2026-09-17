@@ -88,7 +88,7 @@ TEST(MetadataTypesTest, EntryRoundTrip) {
 }
 
 TEST(MetadataTypesTest, ChunkRoundTrip) {
-  SwordFsChunk input{.index = 3, .start_offset = 4096, .key = "42/3", .size = 1024};
+  SwordFsChunk input{.index = 3, .start_offset = 4096, .revision = 7, .size = 1024};
   std::string encoded;
   ASSERT_TRUE(input.SerializeTo(&encoded).ok());
 
@@ -96,8 +96,42 @@ TEST(MetadataTypesTest, ChunkRoundTrip) {
   ASSERT_TRUE(output.ParseFrom(encoded).ok());
   EXPECT_EQ(output.index, input.index);
   EXPECT_EQ(output.start_offset, input.start_offset);
-  EXPECT_EQ(output.key, input.key);
+  EXPECT_EQ(output.revision, input.revision);
   EXPECT_EQ(output.size, input.size);
+}
+
+TEST(MetadataTypesTest, ChunkRejectsInvalidRevision) {
+  SwordFsChunk chunk{
+      .index = 3, .start_offset = 4096, .revision = swordfs::metadata::kInvalidChunkRevision, .size = 1024};
+  std::string encoded;
+  EXPECT_EQ(chunk.SerializeTo(&encoded).code(), swordfs::utils::Status::kInvalidArgument);
+
+  swordfs::metadata::BufEncoder enc;
+  enc.Header(swordfs::metadata::RecordType::kChunk);
+  enc.U32(3);
+  enc.U64(4096);
+  enc.U64(swordfs::metadata::kInvalidChunkRevision);
+  enc.U64(1024);
+  enc.Finish(&encoded);
+
+  SwordFsChunk parsed;
+  EXPECT_TRUE(parsed.ParseFrom(encoded).IsMalformed());
+}
+
+TEST(MetadataTypesTest, ChunkRejectsPreviousSchemaVersion) {
+  BufEncoder enc;
+  enc.String("SWFSMETA");
+  enc.U32(1);  // Previous schema version intentionally unsupported.
+  enc.U32(static_cast<uint32_t>(RecordType::kChunk));
+  enc.U32(3);
+  enc.U64(4096);
+  enc.String("legacy/object/key");
+  enc.U64(1024);
+
+  std::string encoded;
+  enc.Finish(&encoded);
+  SwordFsChunk parsed;
+  EXPECT_TRUE(parsed.ParseFrom(encoded).IsMalformed());
 }
 
 TEST(MetadataTypesTest, EncoderFinishOverwritesExistingOutput) {

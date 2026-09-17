@@ -50,6 +50,14 @@ uint64_t MemMetaTxn::InodeCount() {
   return store_->inodes_.size();
 }
 
+Status MemMetaTxn::AllocateChunkRevision(ChunkRevision *revision) {
+  if (revision == nullptr) {
+    return Status::InvalidArgument("chunk revision output is null");
+  }
+  *revision = store_->next_chunk_revision_++;
+  return Status::OK();
+}
+
 Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) {
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
@@ -504,78 +512,46 @@ Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a, In
   return Status::OK();
 }
 
-Status MemMetaTxn::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
-  auto &chunk_map = store_->chunks_[ino];
-  if (chunk_map.count(chunk.index) > 0) {
-    return Status::AlreadyExists("chunk already exists at index " + std::to_string(chunk.index));
+Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
+                               const SwordFsChunk &replacement) {
+  if (replacement.revision == kInvalidChunkRevision ||
+      (expected.has_value() && expected->revision == kInvalidChunkRevision)) {
+    return Status::InvalidArgument("chunk revision is invalid");
   }
-  chunk_map[chunk.index] = chunk;
-  return Status::OK();
-}
-
-Status MemMetaTxn::PublishChunk(InodeID ino, const SwordFsChunk &chunk) {
-  auto *inode = FindInode(ino);
-  if (inode == nullptr) {
-    return Status::NotFound("inode not found: " + std::to_string(ino));
+  if (expected.has_value() && replacement.revision <= expected->revision) {
+    return Status::InvalidArgument("replacement revision must increase");
   }
-  if (!inode->IsRegular()) {
-    return Status::InvalidArgument("not a regular file");
-  }
-  if (chunk.size > std::numeric_limits<uint64_t>::max() - chunk.start_offset) {
-    return Status::InvalidArgument("chunk end offset overflows");
-  }
-
-  auto &chunk_map = store_->chunks_[ino];
-  auto it = chunk_map.find(chunk.index);
-  if (it != chunk_map.end()) {
-    const auto &existing = it->second;
-    if (!(existing == chunk)) {
-      return Status::AlreadyExists("conflicting chunk already exists at index " + std::to_string(chunk.index));
-    }
-  } else {
-    chunk_map.emplace(chunk.index, chunk);
-  }
-
-  const uint64_t chunk_end = chunk.start_offset + chunk.size;
-  if (chunk_end > inode->attr.size) {
-    inode->attr.size = chunk_end;
-    inode->attr.KillSUID();
-    inode->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
-  }
-  return Status::OK();
-}
-
-Status MemMetaTxn::ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement) {
-  auto *inode = FindInode(ino);
-  if (inode == nullptr) {
-    return Status::NotFound("inode not found: " + std::to_string(ino));
-  }
-  if (!inode->IsRegular()) {
-    return Status::InvalidArgument("not a regular file");
-  }
-  if (expected.index != replacement.index || expected.start_offset != replacement.start_offset) {
+  if (expected.has_value() &&
+      (expected->index != replacement.index || expected->start_offset != replacement.start_offset)) {
     return Status::InvalidArgument("replacement must preserve chunk index and start offset");
+  }
+  auto *inode = FindInode(ino);
+  if (inode == nullptr) {
+    return Status::NotFound("inode not found: " + std::to_string(ino));
+  }
+  if (!inode->IsRegular()) {
+    return Status::InvalidArgument("not a regular file");
   }
   if (replacement.size > std::numeric_limits<uint64_t>::max() - replacement.start_offset) {
     return Status::InvalidArgument("chunk end offset overflows");
   }
 
-  auto ino_it = store_->chunks_.find(ino);
-  if (ino_it == store_->chunks_.end()) {
-    return Status::NotFound("no chunks for inode " + std::to_string(ino));
-  }
-  auto chunk_it = ino_it->second.find(expected.index);
-  if (chunk_it == ino_it->second.end()) {
-    return Status::NotFound("chunk not found at index " + std::to_string(expected.index));
-  }
-  const bool replacement_already_published = chunk_it->second == replacement;
-  if (!replacement_already_published && !(chunk_it->second == expected)) {
-    return Status::AlreadyExists("chunk changed before replacement at index " + std::to_string(expected.index));
+  auto &chunk_map = store_->chunks_[ino];
+  auto it = chunk_map.find(replacement.index);
+  bool replacement_already_published = false;
+  if (it != chunk_map.end()) {
+    replacement_already_published = it->second == replacement;
+    if (!replacement_already_published && (!expected.has_value() || !(it->second == *expected))) {
+      return Status::AlreadyExists("chunk changed before publication at index " + std::to_string(replacement.index));
+    }
+  } else if (expected.has_value()) {
+    return Status::NotFound("chunk not found at index " + std::to_string(replacement.index));
   }
 
   if (!replacement_already_published) {
-    chunk_it->second = replacement;
+    chunk_map[replacement.index] = replacement;
   }
+
   const uint64_t chunk_end = replacement.start_offset + replacement.size;
   if (chunk_end > inode->attr.size) {
     inode->attr.size = chunk_end;
