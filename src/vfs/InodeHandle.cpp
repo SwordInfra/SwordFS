@@ -8,6 +8,7 @@
 
 #include <mutex>
 
+#include "chunk/ChunkObjectKey.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Logging.hpp"
@@ -182,9 +183,10 @@ utils::Status InodeHandle::ReclaimData() {
   // 1. Stream every chunk the metadata engine still tracks for this inode
   //    and issue a data-engine delete without materializing the full map.
   status = meta_->VisitChunks(ino_, [&](const metadata::SwordFsChunk &chunk) {
-    auto status = data_->Delete(chunk.key);
+    const auto key = chunk::FormatChunkObjectKey(ino_, chunk.index, chunk.revision);
+    auto status = data_->Delete(key);
     if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << chunk.key << ") failed: " << status.message();
+      SWORDFS_LOG_ERROR << "ReclaimData: data->Delete(" << key << ") failed: " << status.message();
     }
     return utils::Status::OK();
   });

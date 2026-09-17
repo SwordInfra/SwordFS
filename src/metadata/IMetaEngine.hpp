@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -151,6 +152,13 @@ class IMetaEngine {
   /// implementation of the full cleanup.
   virtual Status ReclaimInode(InodeID ino) = 0;
 
+  /// Allocate a globally unique, monotonically increasing chunk revision.
+  /// Revisions are volume-scoped persistent identities: a backend must never
+  /// return zero or reuse an allocated revision while metadata for that volume
+  /// remains authoritative. Allocated-but-unpublished revisions may be skipped
+  /// after failures.
+  virtual Status AllocateChunkRevision(ChunkRevision *revision) = 0;
+
   /// Visit the chunk metadata currently registered for |ino| without
   /// materializing the complete chunk map in the caller. Backends should
   /// stream or batch the enumeration when their storage API supports it.
@@ -165,21 +173,18 @@ class IMetaEngine {
   // Chunk metadata
   // ────────────────────────────────────────────────────────────────
 
-  /// Register a flushed chunk.  The metadata engine stores the chunk
-  /// key, size, and start offset so that subsequent reads can locate
-  /// the data via the data engine.
-  virtual Status AddChunk(InodeID ino, const SwordFsChunk &chunk) = 0;
-
-  /// Atomically publish a flushed chunk and grow the file to include it.
-  /// Re-publishing an identical descriptor is idempotent; a different
-  /// descriptor at the same index is a conflict. File size growth is
-  /// monotonic and must not invoke truncate semantics.
-  virtual Status PublishChunk(InodeID ino, const SwordFsChunk &chunk) = 0;
-
-  /// Atomically replace an already-published chunk descriptor. The current
-  /// descriptor must equal |expected|; replaying |replacement| is idempotent.
-  /// A different current descriptor is a conflict and must not be overwritten.
-  virtual Status ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement) = 0;
+  /// Atomically publish |replacement| as the authoritative descriptor.
+  ///
+  /// When |expected| is empty, the chunk must not already exist (first
+  /// publication). When |expected| is present, the current descriptor must
+  /// match it (rewrite CAS). Replaying an already-published |replacement| is
+  /// idempotent and must also reconcile inode side effects after an ambiguous
+  /// or partially applied backend transaction. A rewrite replacement revision
+  /// must be strictly greater than the expected revision. Publication must
+  /// never shrink inode size. A conflicting descriptor returns AlreadyExists;
+  /// a rewrite whose expected descriptor disappeared returns NotFound.
+  virtual Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
+                             const SwordFsChunk &replacement) = 0;
 
   /// Find the chunk at |idx|.  Returns OK and fills |*chunk| if a
   /// matching chunk is registered for the given inode.

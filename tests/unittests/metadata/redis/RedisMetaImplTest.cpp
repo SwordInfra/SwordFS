@@ -100,6 +100,33 @@ class RedisMetaImplTest : public ::testing::Test {
   std::string volume_name_;
 };
 
+FIBER_TEST_F(RedisMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) {
+  swordfs::metadata::ChunkRevision first = 0;
+  swordfs::metadata::ChunkRevision second = 0;
+  swordfs::metadata::ChunkRevision third = 0;
+  ASSERT_TRUE(impl_->AllocateChunkRevision(&first).ok());
+  ASSERT_TRUE(impl_->AllocateChunkRevision(&second).ok());
+  ASSERT_TRUE(impl_->AllocateChunkRevision(&third).ok());
+  EXPECT_EQ(first, 1U);
+  EXPECT_EQ(second, 2U);
+  EXPECT_EQ(third, 3U);
+  EXPECT_EQ(impl_->AllocateChunkRevision(nullptr).code(), swordfs::utils::Status::kInvalidArgument);
+
+  std::unique_ptr<RedisMetaImpl> peer;
+  swordfs::test::RunInTestThreadFromFiber([&] {
+    peer = std::make_unique<RedisMetaImpl>(config_, volume_name_);
+    ASSERT_TRUE(peer->Initialize().ok());
+    SwordFsVolume volume;
+    volume.name = volume_name_;
+    ASSERT_TRUE(peer->LoadVolume(&volume).ok());
+  });
+
+  swordfs::metadata::ChunkRevision peer_revision = 0;
+  ASSERT_TRUE(peer->AllocateChunkRevision(&peer_revision).ok());
+  EXPECT_EQ(peer_revision, 4U);
+  swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
+}
+
 FIBER_TEST_F(RedisMetaImplTest, OpenDirReturnsIndependentIteratorsAndSupportsSeek) {
   SwordFsInode first;
   SwordFsInode second;
@@ -255,14 +282,16 @@ FIBER_TEST_F(RedisMetaImplTest, SetAttrShrinkRemovesAndClampsChunks) {
   SwordFsChunk chunk0;
   chunk0.index = 0;
   chunk0.start_offset = 0;
+  chunk0.revision = 1;
   chunk0.size = 4096;
-  ASSERT_TRUE(impl_->AddChunk(file.ino, chunk0).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk0).ok());
 
   SwordFsChunk chunk1;
   chunk1.index = 1;
   chunk1.start_offset = 4096;
+  chunk1.revision = 2;
   chunk1.size = 4096;
-  ASSERT_TRUE(impl_->AddChunk(file.ino, chunk1).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk1).ok());
 
   SwordFsAttr requested = file.attr;
   requested.size = 100;
@@ -480,10 +509,10 @@ FIBER_TEST_F(RedisMetaImplTest, ChunkVisitFindAndTruncateCoverSparseMetadata) {
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   ASSERT_TRUE(impl_->Truncate(file.ino, 9000).ok());
 
-  SwordFsChunk chunk0{.index = 0, .start_offset = 0, .size = 4096};
-  SwordFsChunk chunk2{.index = 2, .start_offset = 8192, .size = 808};
-  ASSERT_TRUE(impl_->AddChunk(file.ino, chunk0).ok());
-  ASSERT_TRUE(impl_->AddChunk(file.ino, chunk2).ok());
+  SwordFsChunk chunk0{.index = 0, .start_offset = 0, .revision = 1, .size = 4096};
+  SwordFsChunk chunk2{.index = 2, .start_offset = 8192, .revision = 2, .size = 808};
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk0).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk2).ok());
 
   std::vector<swordfs::metadata::ChunkIndex> seen;
   ASSERT_TRUE(impl_
@@ -511,8 +540,8 @@ FIBER_TEST_F(RedisMetaImplTest, ChunkVisitFindAndTruncateCoverSparseMetadata) {
 FIBER_TEST_F(RedisMetaImplTest, ChunkAndOpenOperationsRejectWrongInodeTypes) {
   SwordFsInode dir;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
-  SwordFsChunk chunk{.index = 0, .start_offset = 0, .size = 1};
-  EXPECT_EQ(impl_->AddChunk(dir.ino, chunk).code(), Status::kInvalidArgument);
+  SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 1, .size = 1};
+  EXPECT_EQ(impl_->CommitChunk(dir.ino, std::nullopt, chunk).code(), Status::kInvalidArgument);
   EXPECT_EQ(impl_->VisitChunks(dir.ino, [](const SwordFsChunk &) { return Status::OK(); }).code(),
             Status::kInvalidArgument);
   EXPECT_TRUE(impl_->Open(dir.ino).IsNotDirectory());
@@ -647,55 +676,55 @@ FIBER_TEST_F(RedisMetaImplTest, SetAttrNowAndGrowPreserveExpectedMetadata) {
 FIBER_TEST_F(RedisMetaImplTest, VisitChunksPropagatesVisitorFailure) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
-  SwordFsChunk chunk{.index = 0, .start_offset = 0, .size = 1};
-  ASSERT_TRUE(impl_->AddChunk(file.ino, chunk).ok());
+  SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 1, .size = 1};
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk).ok());
 
   auto status = impl_->VisitChunks(file.ino, [](const SwordFsChunk &) { return Status::IOError("stop"); });
   EXPECT_EQ(status.code(), Status::kIOError);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, PublishChunkIsIdempotentAndGrowsSizeMonotonically) {
+FIBER_TEST_F(RedisMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSizeMonotonically) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "publish", 0644, &file).ok());
 
-  SwordFsChunk first{.index = 0, .start_offset = 0, .key = "publish/0", .size = 128};
-  ASSERT_TRUE(impl_->PublishChunk(file.ino, first).ok());
-  ASSERT_TRUE(impl_->PublishChunk(file.ino, first).ok());
+  SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 128};
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
 
   ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
   EXPECT_EQ(file.attr.size, 128U);
 
-  SwordFsChunk later{.index = 2, .start_offset = 8192, .key = "publish/2", .size = 64};
-  ASSERT_TRUE(impl_->PublishChunk(file.ino, later).ok());
-  ASSERT_TRUE(impl_->PublishChunk(file.ino, first).ok());
+  SwordFsChunk later{.index = 2, .start_offset = 8192, .revision = 2, .size = 64};
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, later).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
   ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
   EXPECT_EQ(file.attr.size, 8256U);
 
   auto conflicting = first;
-  conflicting.key = "different-object";
-  EXPECT_TRUE(impl_->PublishChunk(file.ino, conflicting).IsAlreadyExists());
+  conflicting.revision = 3;
+  EXPECT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, conflicting).IsAlreadyExists());
 
   SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
-  EXPECT_EQ(stored.key, first.key);
+  EXPECT_EQ(stored.revision, first.revision);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, ReplaceChunkUsesCompareAndSwapAndIsIdempotent) {
+FIBER_TEST_F(RedisMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempotent) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "replace", 0644, &file).ok());
 
-  SwordFsChunk first{.index = 0, .start_offset = 0, .key = "replace/0", .size = 128};
-  ASSERT_TRUE(impl_->PublishChunk(file.ino, first).ok());
+  SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 128};
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
 
   SwordFsAttr mode{};
   mode.mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
   ASSERT_TRUE(impl_->SetAttr(file.ino, mode, SetAttrField::kMode, nullptr).ok());
 
   auto replacement = first;
-  replacement.key = "replace/0/version-2";
+  replacement.revision = 2;
   replacement.size = 64;
-  ASSERT_TRUE(impl_->ReplaceChunk(file.ino, first, replacement).ok());
-  ASSERT_TRUE(impl_->ReplaceChunk(file.ino, first, replacement).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, first, replacement).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, first, replacement).ok());
 
   SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
@@ -706,23 +735,23 @@ FIBER_TEST_F(RedisMetaImplTest, ReplaceChunkUsesCompareAndSwapAndIsIdempotent) {
   EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), 0U);
 
   auto stale_replacement = replacement;
-  stale_replacement.key = "replace/0/stale";
-  EXPECT_TRUE(impl_->ReplaceChunk(file.ino, first, stale_replacement).IsAlreadyExists());
+  stale_replacement.revision = 3;
+  EXPECT_TRUE(impl_->CommitChunk(file.ino, first, stale_replacement).IsAlreadyExists());
 
   auto grown = replacement;
-  grown.key = "replace/0/version-3";
+  grown.revision = 4;
   grown.size = 256;
-  ASSERT_TRUE(impl_->ReplaceChunk(file.ino, replacement, grown).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, replacement, grown).ok());
   ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
   EXPECT_EQ(file.attr.size, 256U);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, ReplaceChunkReplayRepairsInodeAfterPartialExec) {
+FIBER_TEST_F(RedisMetaImplTest, CommitChunkReplayRepairsInodeAfterPartialExec) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "replace-repair", 0644, &file).ok());
 
-  SwordFsChunk first{.index = 0, .start_offset = 0, .key = "replace-repair/0", .size = 64};
-  ASSERT_TRUE(impl_->PublishChunk(file.ino, first).ok());
+  SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
 
   SwordFsAttr mode{};
   mode.mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
@@ -731,7 +760,7 @@ FIBER_TEST_F(RedisMetaImplTest, ReplaceChunkReplayRepairsInodeAfterPartialExec) 
   ASSERT_EQ(file.attr.size, 64U);
 
   auto replacement = first;
-  replacement.key = "replace-repair/0/version-2";
+  replacement.revision = 2;
   replacement.size = 128;
   std::string replacement_value;
   ASSERT_TRUE(replacement.SerializeTo(&replacement_value).ok());
@@ -744,7 +773,7 @@ FIBER_TEST_F(RedisMetaImplTest, ReplaceChunkReplayRepairsInodeAfterPartialExec) 
     redis.hset(key.Chunk(file.ino), std::to_string(first.index), replacement_value);
   });
 
-  ASSERT_TRUE(impl_->ReplaceChunk(file.ino, first, replacement).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, first, replacement).ok());
   ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
   EXPECT_EQ(file.attr.size, 128U);
   EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), 0U);
@@ -758,13 +787,13 @@ FIBER_TEST_F(RedisMetaImplTest, SizePreservingTruncateReconcilesDescriptorAfterP
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "replace-truncate-repair", 0644, &file).ok());
 
-  SwordFsChunk first{.index = 0, .start_offset = 0, .key = "replace-truncate-repair/0", .size = 5};
-  ASSERT_TRUE(impl_->PublishChunk(file.ino, first).ok());
+  SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 5};
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
   ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
   ASSERT_EQ(file.attr.size, 5U);
 
   auto replacement = first;
-  replacement.key = "replace-truncate-repair/0/version-2";
+  replacement.revision = 2;
   replacement.size = 11;
   std::string replacement_value;
   ASSERT_TRUE(replacement.SerializeTo(&replacement_value).ok());
@@ -783,46 +812,63 @@ FIBER_TEST_F(RedisMetaImplTest, SizePreservingTruncateReconcilesDescriptorAfterP
 
   SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
-  EXPECT_EQ(stored.key, replacement.key);
+  EXPECT_EQ(stored.revision, replacement.revision);
   EXPECT_EQ(stored.size, 5U);
 
   install_partial_replace();
   ASSERT_TRUE(impl_->Truncate(file.ino, 5).ok());
   ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
-  EXPECT_EQ(stored.key, replacement.key);
+  EXPECT_EQ(stored.revision, replacement.revision);
   EXPECT_EQ(stored.size, 5U);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, ReplaceChunkRejectsInvalidTargetsAndDescriptors) {
-  SwordFsChunk expected{.index = 0, .start_offset = 0, .key = "replace-invalid/0", .size = 128};
+FIBER_TEST_F(RedisMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) {
+  SwordFsChunk expected{.index = 0, .start_offset = 0, .revision = 1, .size = 128};
   auto replacement = expected;
-  replacement.key = "replace-invalid/0/version-2";
+  replacement.revision = 2;
 
-  EXPECT_TRUE(impl_->ReplaceChunk(999999, expected, replacement).IsNotFound());
+  auto invalid_revision = expected;
+  invalid_revision.revision = swordfs::metadata::kInvalidChunkRevision;
+  EXPECT_EQ(impl_->CommitChunk(999999, invalid_revision, replacement).code(), swordfs::utils::Status::kInvalidArgument);
+
+  auto invalid_replacement = replacement;
+  invalid_replacement.revision = swordfs::metadata::kInvalidChunkRevision;
+  EXPECT_EQ(impl_->CommitChunk(999999, expected, invalid_replacement).code(), swordfs::utils::Status::kInvalidArgument);
+
+  EXPECT_TRUE(impl_->CommitChunk(999999, expected, replacement).IsNotFound());
 
   SwordFsInode dir;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "replace-invalid-dir", 0755, &dir).ok());
-  EXPECT_EQ(impl_->ReplaceChunk(dir.ino, expected, replacement).code(), swordfs::utils::Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(dir.ino, expected, replacement).code(), swordfs::utils::Status::kInvalidArgument);
 
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "replace-invalid-file", 0644, &file).ok());
-  EXPECT_TRUE(impl_->ReplaceChunk(file.ino, expected, replacement).IsNotFound());
+  EXPECT_TRUE(impl_->CommitChunk(file.ino, expected, replacement).IsNotFound());
 
   auto mismatched = replacement;
   mismatched.index = 1;
-  EXPECT_EQ(impl_->ReplaceChunk(file.ino, expected, mismatched).code(), swordfs::utils::Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(file.ino, expected, mismatched).code(), swordfs::utils::Status::kInvalidArgument);
+
+  auto stale_revision = replacement;
+  stale_revision.revision = expected.revision;
+  EXPECT_EQ(impl_->CommitChunk(file.ino, expected, stale_revision).code(), swordfs::utils::Status::kInvalidArgument);
 
   mismatched = replacement;
   mismatched.start_offset = 4096;
-  EXPECT_EQ(impl_->ReplaceChunk(file.ino, expected, mismatched).code(), swordfs::utils::Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(file.ino, expected, mismatched).code(), swordfs::utils::Status::kInvalidArgument);
 
   auto overflowing = replacement;
   overflowing.start_offset = std::numeric_limits<uint64_t>::max() - 16;
   overflowing.size = 32;
   auto overflowing_expected = overflowing;
-  overflowing_expected.key = "replace-invalid/overflow-old";
-  EXPECT_EQ(impl_->ReplaceChunk(file.ino, overflowing_expected, overflowing).code(),
+  overflowing_expected.revision = 3;
+  EXPECT_EQ(impl_->CommitChunk(file.ino, overflowing_expected, overflowing).code(),
             swordfs::utils::Status::kInvalidArgument);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, ChunkMutationsRejectInvalidRevision) {
+  SwordFsChunk invalid{.index = 0, .start_offset = 0, .revision = swordfs::metadata::kInvalidChunkRevision, .size = 64};
+  EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, invalid).code(), swordfs::utils::Status::kInvalidArgument);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, SymlinkAndLinkValidateLongNamesAndParentTypes) {
@@ -903,7 +949,7 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedInodeMetadataIsRejectedAcrossReadAndWri
 
   SwordFsInode out;
   SwordFsAttr attr;
-  SwordFsChunk chunk{.index = 0, .start_offset = 0, .size = 1};
+  SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 1, .size = 1};
   std::string target;
   EXPECT_TRUE(impl_->Lookup(kRootInodeId, "file", &out).IsMalformed());
   EXPECT_TRUE(impl_->GetInode(file.ino, &out).IsMalformed());
@@ -917,7 +963,7 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedInodeMetadataIsRejectedAcrossReadAndWri
   EXPECT_TRUE(impl_->Open(file.ino).IsMalformed());
   EXPECT_TRUE(impl_->ReclaimInode(file.ino).IsMalformed());
   EXPECT_TRUE(impl_->VisitChunks(file.ino, [](const SwordFsChunk &) { return Status::OK(); }).IsMalformed());
-  EXPECT_TRUE(impl_->AddChunk(file.ino, chunk).IsMalformed());
+  EXPECT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk).IsMalformed());
   EXPECT_TRUE(impl_->Truncate(file.ino, 1).IsMalformed());
 }
 
@@ -989,7 +1035,7 @@ FIBER_TEST_F(RedisMetaImplTest, MissingMetadataReturnsNotFoundConsistently) {
   constexpr InodeID kMissingIno = 999999;
   SwordFsInode inode;
   SwordFsAttr attr;
-  SwordFsChunk chunk{.index = 0, .start_offset = 0, .size = 1};
+  SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 1, .size = 1};
   std::string target;
   swordfs::metadata::DirIteratorPtr iterator;
 
@@ -1009,7 +1055,7 @@ FIBER_TEST_F(RedisMetaImplTest, MissingMetadataReturnsNotFoundConsistently) {
   EXPECT_TRUE(impl_->Readlink(kMissingIno, &target).IsNotFound());
   EXPECT_TRUE(impl_->Open(kMissingIno).IsNotFound());
   EXPECT_TRUE(impl_->VisitChunks(kMissingIno, [](const SwordFsChunk &) { return Status::OK(); }).IsNotFound());
-  EXPECT_TRUE(impl_->AddChunk(kMissingIno, chunk).IsNotFound());
+  EXPECT_TRUE(impl_->CommitChunk(kMissingIno, std::nullopt, chunk).IsNotFound());
   EXPECT_TRUE(impl_->Truncate(kMissingIno, 1).IsNotFound());
 }
 

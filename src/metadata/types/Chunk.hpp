@@ -14,10 +14,10 @@ namespace swordfs::metadata {
 
 /// Metadata for one flushed chunk.
 struct SwordFsChunk {
-  ChunkIndex index;
-  uint64_t start_offset;
-  std::string key;
-  uint64_t size;
+  ChunkIndex index = 0;
+  uint64_t start_offset = 0;
+  ChunkRevision revision = kInvalidChunkRevision;
+  uint64_t size = 0;
 
   bool operator==(const SwordFsChunk &) const = default;
 

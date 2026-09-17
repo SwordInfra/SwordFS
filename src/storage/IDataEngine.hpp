@@ -39,9 +39,9 @@ struct DataEngineLimits {
 
 /// Abstract data-plane engine.
 ///
-/// Chunks are addressed by opaque string keys whose format is defined
-/// by the concrete engine (e.g. "chunks/0/1/23_0_4" for object storage).
-/// The engine itself has no knowledge of inodes or file-system concepts.
+/// Chunks are addressed by opaque string keys derived by the chunk/data-layout
+/// layer (currently "<ino>/<chunk-index>/<revision>"). The engine itself has
+/// no knowledge of inodes, revisions, or other file-system concepts.
 ///
 /// Execution-domain contract: construction/destruction and Initialize() are
 /// POSIX-thread lifecycle operations; Head/Put/Get/Delete are fiber-domain

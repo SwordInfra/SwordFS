@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 #include "metadata/redis/RedisKey.hpp"
@@ -65,9 +66,7 @@ class RedisMetaTxn {
   // ────────────────────────────────────────────────────────────────
   // Chunk operations
   // ────────────────────────────────────────────────────────────────
-  utils::Status AddChunk(InodeID ino, const SwordFsChunk &chunk);
-  utils::Status PublishChunk(InodeID ino, const SwordFsChunk &chunk);
-  utils::Status ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement);
+  utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement);
 
  private:
   utils::Status SetInode(const SwordFsInode &inode);

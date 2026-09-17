@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -146,9 +147,8 @@ class MemMetaTxn {
   // Chunk metadata
   // ────────────────────────────────────────────────────────────────
 
-  Status AddChunk(InodeID ino, const SwordFsChunk &chunk);
-  Status PublishChunk(InodeID ino, const SwordFsChunk &chunk);
-  Status ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement);
+  Status AllocateChunkRevision(ChunkRevision *revision);
+  Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement);
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
   Status TruncateChunks(InodeID ino, uint64_t new_size);
 

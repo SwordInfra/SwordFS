@@ -152,6 +152,19 @@ class MemMetaImplTest : public ::testing::Test {
   TestMemMetaImpl *impl_;
 };
 
+FIBER_TEST_F(MemMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) {
+  swordfs::metadata::ChunkRevision first = 0;
+  swordfs::metadata::ChunkRevision second = 0;
+  swordfs::metadata::ChunkRevision third = 0;
+  ASSERT_TRUE(impl_->AllocateChunkRevision(&first).ok());
+  ASSERT_TRUE(impl_->AllocateChunkRevision(&second).ok());
+  ASSERT_TRUE(impl_->AllocateChunkRevision(&third).ok());
+  EXPECT_EQ(first, 1U);
+  EXPECT_EQ(second, 2U);
+  EXPECT_EQ(third, 3U);
+  EXPECT_EQ(impl_->AllocateChunkRevision(nullptr).code(), Status::kInvalidArgument);
+}
+
 // ────────────────────────────────────────────────────────────────
 // Create permission checks
 // ────────────────────────────────────────────────────────────────
@@ -718,17 +731,17 @@ FIBER_TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
   EXPECT_EQ(out.attr.mode & S_ISGID, 0u);
 }
 
-FIBER_TEST_F(MemMetaImplTest, PublishChunkIsIdempotentAndGrowsSizeMonotonically) {
+FIBER_TEST_F(MemMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSizeMonotonically) {
   InodeID f_ino = 0;
   ASSERT_TRUE(CreateFile(kRoot, "publish", 0644, &f_ino).ok());
 
   SwordFsChunk first{};
   first.index = 0;
   first.start_offset = 0;
-  first.key = "publish/0";
+  first.revision = 1;
   first.size = 128;
-  ASSERT_TRUE(impl_->PublishChunk(f_ino, first).ok());
-  ASSERT_TRUE(impl_->PublishChunk(f_ino, first).ok());
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, first).ok());
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, first).ok());
 
   struct stat attr{};
   ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
@@ -737,38 +750,38 @@ FIBER_TEST_F(MemMetaImplTest, PublishChunkIsIdempotentAndGrowsSizeMonotonically)
   SwordFsChunk later{};
   later.index = 2;
   later.start_offset = 512;
-  later.key = "publish/2";
+  later.revision = 2;
   later.size = 64;
-  ASSERT_TRUE(impl_->PublishChunk(f_ino, later).ok());
-  ASSERT_TRUE(impl_->PublishChunk(f_ino, first).ok());
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, later).ok());
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, first).ok());
   ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
   EXPECT_EQ(attr.st_size, 576);
 
   auto conflicting = first;
-  conflicting.key = "different-object";
-  EXPECT_TRUE(impl_->PublishChunk(f_ino, conflicting).IsAlreadyExists());
+  conflicting.revision = 3;
+  EXPECT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, conflicting).IsAlreadyExists());
 
   SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &stored).ok());
-  EXPECT_EQ(stored.key, first.key);
+  EXPECT_EQ(stored.revision, first.revision);
 }
 
-FIBER_TEST_F(MemMetaImplTest, ReplaceChunkUsesCompareAndSwapAndIsIdempotent) {
+FIBER_TEST_F(MemMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempotent) {
   InodeID f_ino = 0;
   ASSERT_TRUE(CreateFile(kRoot, "replace", 0644, &f_ino).ok());
 
-  SwordFsChunk first{.index = 0, .start_offset = 0, .key = "replace/0", .size = 128};
-  ASSERT_TRUE(impl_->PublishChunk(f_ino, first).ok());
+  SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 128};
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, first).ok());
 
   struct stat mode{};
   mode.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
   ASSERT_TRUE(impl_->SetAttr(f_ino, &mode, SetAttrField::kMode, nullptr).ok());
 
   auto replacement = first;
-  replacement.key = "replace/0/version-2";
+  replacement.revision = 2;
   replacement.size = 64;
-  ASSERT_TRUE(impl_->ReplaceChunk(f_ino, first, replacement).ok());
-  ASSERT_TRUE(impl_->ReplaceChunk(f_ino, first, replacement).ok());
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, first, replacement).ok());
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, first, replacement).ok());
 
   SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &stored).ok());
@@ -780,54 +793,71 @@ FIBER_TEST_F(MemMetaImplTest, ReplaceChunkUsesCompareAndSwapAndIsIdempotent) {
   EXPECT_EQ(attr.st_mode & (S_ISUID | S_ISGID), 0U);
 
   auto stale_replacement = replacement;
-  stale_replacement.key = "replace/0/stale";
-  EXPECT_TRUE(impl_->ReplaceChunk(f_ino, first, stale_replacement).IsAlreadyExists());
+  stale_replacement.revision = 3;
+  EXPECT_TRUE(impl_->CommitChunk(f_ino, first, stale_replacement).IsAlreadyExists());
 
   auto grown = replacement;
-  grown.key = "replace/0/version-3";
+  grown.revision = 4;
   grown.size = 256;
-  ASSERT_TRUE(impl_->ReplaceChunk(f_ino, replacement, grown).ok());
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, replacement, grown).ok());
   ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
   EXPECT_EQ(attr.st_size, 256);
 }
 
-FIBER_TEST_F(MemMetaImplTest, ReplaceChunkRejectsInvalidTargetsAndDescriptors) {
-  SwordFsChunk expected{.index = 0, .start_offset = 0, .key = "old", .size = 64};
+FIBER_TEST_F(MemMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) {
+  SwordFsChunk expected{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
   auto replacement = expected;
-  replacement.key = "new";
+  replacement.revision = 2;
 
-  EXPECT_TRUE(impl_->ReplaceChunk(999999, expected, replacement).IsNotFound());
+  auto invalid_revision = expected;
+  invalid_revision.revision = swordfs::metadata::kInvalidChunkRevision;
+  EXPECT_EQ(impl_->CommitChunk(999999, invalid_revision, replacement).code(), Status::kInvalidArgument);
+
+  auto invalid_replacement = replacement;
+  invalid_replacement.revision = swordfs::metadata::kInvalidChunkRevision;
+  EXPECT_EQ(impl_->CommitChunk(999999, expected, invalid_replacement).code(), Status::kInvalidArgument);
+
+  EXPECT_TRUE(impl_->CommitChunk(999999, expected, replacement).IsNotFound());
 
   InodeID dir_ino = 0;
   ASSERT_TRUE(MakeDir(kRoot, "replace-dir", 0755, &dir_ino).ok());
-  EXPECT_EQ(impl_->ReplaceChunk(dir_ino, expected, replacement).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(dir_ino, expected, replacement).code(), Status::kInvalidArgument);
 
   InodeID empty_file_ino = 0;
   ASSERT_TRUE(CreateFile(kRoot, "replace-empty", 0644, &empty_file_ino).ok());
-  EXPECT_TRUE(impl_->ReplaceChunk(empty_file_ino, expected, replacement).IsNotFound());
+  EXPECT_TRUE(impl_->CommitChunk(empty_file_ino, expected, replacement).IsNotFound());
 
   auto mismatched = replacement;
   mismatched.index = 1;
-  EXPECT_EQ(impl_->ReplaceChunk(empty_file_ino, expected, mismatched).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(empty_file_ino, expected, mismatched).code(), Status::kInvalidArgument);
+
+  auto stale_revision = replacement;
+  stale_revision.revision = expected.revision;
+  EXPECT_EQ(impl_->CommitChunk(empty_file_ino, expected, stale_revision).code(), Status::kInvalidArgument);
 
   mismatched = replacement;
   mismatched.start_offset = 1;
-  EXPECT_EQ(impl_->ReplaceChunk(empty_file_ino, expected, mismatched).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(empty_file_ino, expected, mismatched).code(), Status::kInvalidArgument);
 
   auto overflowing_expected = expected;
   overflowing_expected.start_offset = 1;
   auto overflowing = replacement;
   overflowing.start_offset = 1;
   overflowing.size = std::numeric_limits<uint64_t>::max();
-  EXPECT_EQ(impl_->ReplaceChunk(empty_file_ino, overflowing_expected, overflowing).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(empty_file_ino, overflowing_expected, overflowing).code(), Status::kInvalidArgument);
 
   InodeID file_ino = 0;
   ASSERT_TRUE(CreateFile(kRoot, "replace-missing-index", 0644, &file_ino).ok());
-  ASSERT_TRUE(impl_->PublishChunk(file_ino, expected).ok());
-  SwordFsChunk missing{.index = 1, .start_offset = 4096, .key = "old-1", .size = 64};
+  ASSERT_TRUE(impl_->CommitChunk(file_ino, std::nullopt, expected).ok());
+  SwordFsChunk missing{.index = 1, .start_offset = 4096, .revision = 3, .size = 64};
   auto missing_replacement = missing;
-  missing_replacement.key = "new-1";
-  EXPECT_TRUE(impl_->ReplaceChunk(file_ino, missing, missing_replacement).IsNotFound());
+  missing_replacement.revision = 4;
+  EXPECT_TRUE(impl_->CommitChunk(file_ino, missing, missing_replacement).IsNotFound());
+}
+
+FIBER_TEST_F(MemMetaImplTest, ChunkMutationsRejectInvalidRevision) {
+  SwordFsChunk invalid{.index = 0, .start_offset = 0, .revision = swordfs::metadata::kInvalidChunkRevision, .size = 64};
+  EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, invalid).code(), Status::kInvalidArgument);
 }
 
 FIBER_TEST_F(MemMetaImplTest, ReclaimInodeMissingInodeIsNoOp) {

@@ -47,13 +47,13 @@ SwordFS files are expressed as a sequence of **chunks**. The metadata plane maps
 
 #### Object Storage Engine (open-source)
 
-Chunks are stored in object storage as immutable objects. Writes are handled via a **slice-based copy-on-write (COW) mechanism**: an overwrite creates new slices rather than modifying the original object, and metadata pointers are atomically updated to reference the new slices. Old slices are reclaimed by a background garbage collector. All-flash object storage (e.g., S3 Express One Zone) is recommended for AI/ML workloads.
+Chunks are stored in object storage as immutable objects. Each logical chunk has a monotonically allocated **revision ID** in metadata; its physical object key is derived from `(inode, chunk index, revision)`. Rewriting a flushed chunk currently uses **whole-chunk copy-on-write (COW)**: SwordFS hydrates the published chunk, applies the write, uploads a new immutable full-chunk revision, then atomically publishes that revision in metadata. The current open-source engine does not yet implement slice/extent overlays or background compaction. All-flash object storage (e.g., S3 Express One Zone) is recommended for AI/ML workloads.
 
 #### USE Engine (enterprise)
 
-USE persists data by directly accessing remote **JBOF (Just a Bunch of Flash)** via **NVMe over Fabric**, supporting **in-place random overwrite** on chunks. This eliminates the COW slice layer, write fragmentation, and garbage-collection overhead. Combined with RDMA transport and GPUDirect Storage, USE enables the lowest-latency data path from flash to GPU.
+USE persists data by directly accessing remote **JBOF (Just a Bunch of Flash)** via **NVMe over Fabric**, supporting **in-place random overwrite** on chunks. This avoids whole-chunk object-store COW rewrite amplification and its object-reclamation overhead. Combined with RDMA transport and GPUDirect Storage, USE enables the lowest-latency data path from flash to GPU.
 
-The two engines share the same chunk-level metadata representation. The difference — immutable slices vs. in-place overwrites — is encapsulated within each engine's implementation and is invisible to the upper layers.
+The two engines share the same logical chunk-level metadata contract. The object-storage engine publishes immutable chunk revisions, while USE may update its backing data in place; those physical-storage details remain below the VFS layer.
 
 #### Deployment Modes
 

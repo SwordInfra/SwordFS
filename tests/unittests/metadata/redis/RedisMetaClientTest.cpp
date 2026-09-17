@@ -768,8 +768,8 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk first_chunk{0, 0, "first", 4096};
-  SwordFsChunk second_chunk{1, 4096, "second", 4096};
+  SwordFsChunk first_chunk{0, 0, 1, 4096};
+  SwordFsChunk second_chunk{1, 4096, 2, 4096};
   std::string first_data;
   std::string second_data;
   ASSERT_TRUE(first_chunk.SerializeTo(&first_data).ok());
@@ -800,31 +800,31 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
   EXPECT_TRUE(invalid_status.ok()) << invalid_status.message();
 }
 
-TEST(RedisMetaTxnTest, AddChunkRejectsDuplicateIndex) {
+TEST(RedisMetaTxnTest, CommitChunkRejectsConflictingInitialPublication) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("add-chunk"));
+  const redis::RedisKey key(config.db, UniqueVolumeName("commit-chunk"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk chunk{0, 0, "first", 4096};
+  SwordFsChunk chunk{0, 0, 1, 4096};
   const auto first_status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.AddChunk(9, chunk);
+    return txn.CommitChunk(9, std::nullopt, chunk);
   });
   ASSERT_TRUE(first_status.ok()) << first_status.message();
 
-  chunk.key = "replacement";
+  chunk.revision = 2;
   const auto duplicate_status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.AddChunk(9, chunk);
+    return txn.CommitChunk(9, std::nullopt, chunk);
   });
   EXPECT_TRUE(duplicate_status.IsAlreadyExists()) << duplicate_status.message();
 
@@ -832,7 +832,7 @@ TEST(RedisMetaTxnTest, AddChunkRejectsDuplicateIndex) {
   ASSERT_TRUE(value.has_value());
   SwordFsChunk persisted;
   ASSERT_TRUE(persisted.ParseFrom(*value).ok());
-  EXPECT_EQ(persisted.key, "first");
+  EXPECT_EQ(persisted.revision, 1U);
 }
 
 }  // namespace swordfs::metadata

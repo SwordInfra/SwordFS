@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "chunk/ChunkObjectKey.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
@@ -143,19 +144,20 @@ class MockMetaEngine : public IMetaEngine {
     ++reclaim_calls;
     return reclaim_status;
   }
+  Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
+    if (revision == nullptr) {
+      return Status::InvalidArgument("chunk revision output is null");
+    }
+    *revision = next_revision_++;
+    return Status::OK();
+  }
   Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
     return Status::OK();
   }
-  Status AddChunk(InodeID, const SwordFsChunk &) override {
-    return Status::OK();
-  }
-  Status PublishChunk(InodeID, const SwordFsChunk &) override {
-    return Status::OK();
-  }
-  Status ReplaceChunk(InodeID, const SwordFsChunk &, const SwordFsChunk &) override {
+  Status CommitChunk(InodeID, const std::optional<SwordFsChunk> &, const SwordFsChunk &) override {
     return Status::OK();
   }
   Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
@@ -177,6 +179,7 @@ class MockMetaEngine : public IMetaEngine {
 
  private:
   InodeID next_ino_ = 1000;
+  swordfs::metadata::ChunkRevision next_revision_ = 1;
 };
 
 class FileHandleTest : public ::testing::Test {
@@ -669,6 +672,13 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     last_reclaim_ino = ino;
     return Status::OK();
   }
+  Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
+    if (revision == nullptr) {
+      return Status::InvalidArgument("chunk revision output is null");
+    }
+    *revision = next_revision_++;
+    return Status::OK();
+  }
   Status VisitChunks(InodeID ino, const swordfs::metadata::ChunkVisitorFn &visitor) override {
     ++visit_chunks_calls;
     last_visit_ino = ino;
@@ -686,14 +696,8 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
     return Status::OK();
   }
-  Status AddChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
-    return Status::OK();
-  }
-  Status PublishChunk(InodeID, const swordfs::metadata::SwordFsChunk &) override {
-    return Status::OK();
-  }
-  Status ReplaceChunk(InodeID, const swordfs::metadata::SwordFsChunk &,
-                      const swordfs::metadata::SwordFsChunk &) override {
+  Status CommitChunk(InodeID, const std::optional<swordfs::metadata::SwordFsChunk> &,
+                     const swordfs::metadata::SwordFsChunk &) override {
     return Status::OK();
   }
   Status FindChunk(InodeID, swordfs::metadata::ChunkIndex, swordfs::metadata::SwordFsChunk *) override {
@@ -710,6 +714,9 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
   Status visit_chunks_status = Status::OK();
   std::vector<swordfs::metadata::SwordFsChunk> chunks;
   std::unordered_map<InodeID, struct stat> attrs;
+
+ private:
+  swordfs::metadata::ChunkRevision next_revision_ = 1;
 };
 
 }  // namespace
@@ -744,12 +751,12 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
   swordfs::metadata::SwordFsChunk c0{};
   c0.index = 0;
   c0.start_offset = 0;
-  c0.key = "4242/0";
+  c0.revision = 1;
   c0.size = 1024;
   swordfs::metadata::SwordFsChunk c1{};
   c1.index = 1;
   c1.start_offset = 65536;
-  c1.key = "4242/1";
+  c1.revision = 2;
   c1.size = 2048;
   meta->chunks = {c0, c1};
   // Register the inode so ReclaimData's nlink guard sees nlink==0 and
@@ -767,8 +774,8 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
 
   // The mock visits chunks in insertion order.
   EXPECT_EQ(data->delete_calls.size(), 2);
-  EXPECT_EQ(data->delete_calls[0], "4242/0");
-  EXPECT_EQ(data->delete_calls[1], "4242/1");
+  EXPECT_EQ(data->delete_calls[0], chunk::FormatChunkObjectKey(4242, 0, 1));
+  EXPECT_EQ(data->delete_calls[1], chunk::FormatChunkObjectKey(4242, 1, 2));
 
   // Both engines received exactly one call each.
   EXPECT_EQ(meta->visit_chunks_calls, 1);
@@ -792,7 +799,7 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
 
   swordfs::metadata::SwordFsChunk c{};
   c.index = 0;
-  c.key = "99/0";
+  c.revision = 1;
   meta->chunks = {c};
   struct stat attr{};
   attr.st_nlink = 0;
@@ -804,7 +811,7 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
 
   ASSERT_TRUE(ReclaimInode(99).ok());
   EXPECT_EQ(data->delete_calls.size(), 1u);
-  EXPECT_EQ(data->delete_calls[0], "99/0");
+  EXPECT_EQ(data->delete_calls[0], chunk::FormatChunkObjectKey(99, 0, 1));
   EXPECT_EQ(meta->visit_chunks_calls, 1);
   EXPECT_EQ(meta->reclaim_inode_calls, 1);
 }
@@ -846,12 +853,12 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
 
   swordfs::metadata::SwordFsChunk c0{};
   c0.index = 0;
-  c0.key = "1/0";
+  c0.revision = 1;
   swordfs::metadata::SwordFsChunk c1{};
   c1.index = 1;
-  c1.key = "1/1";
+  c1.revision = 2;
   meta->chunks = {c0, c1};
-  data->fail_keys["1/0"] = Status::Internal("forced");
+  data->fail_keys[chunk::FormatChunkObjectKey(1, 0, 1)] = Status::Internal("forced");
   struct stat attr{};
   attr.st_nlink = 0;
   meta->SetAttr(1, attr);
@@ -934,7 +941,7 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataRefusesWhenNlinkStillPositive) {
   // through; the absence of any delete is what we actually verify.
   swordfs::metadata::SwordFsChunk chunk{};
   chunk.index = 0;
-  chunk.key = "7/0";
+  chunk.revision = 1;
   meta->chunks = {chunk};
 
   ASSERT_TRUE(ReclaimInode(7).ok());

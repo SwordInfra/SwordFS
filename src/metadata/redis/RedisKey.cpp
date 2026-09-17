@@ -19,6 +19,10 @@ std::string RedisKey::NextIno() const {
   return prefix_ + "next_ino";
 }
 
+std::string RedisKey::NextChunkRevision() const {
+  return prefix_ + "next_chunk_revision";
+}
+
 std::string RedisKey::Inode(uint64_t ino) const {
   return folly::sformat("{}inode:{}", prefix_, ino);
 }

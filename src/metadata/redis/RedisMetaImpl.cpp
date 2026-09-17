@@ -503,6 +503,10 @@ Status RedisMetaImpl::ReclaimInode(InodeID ino) {
   return ops_.ReclaimInode(ino);
 }
 
+Status RedisMetaImpl::AllocateChunkRevision(ChunkRevision *revision) {
+  return ops_.AllocateChunkRevision(revision);
+}
+
 Status RedisMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
   utils::ExpectInFiberDomain();
   if (!visitor) {
@@ -520,19 +524,10 @@ Status RedisMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
   return ops_.VisitChunks(ino, visitor);
 }
 
-Status RedisMetaImpl::AddChunk(InodeID ino, const SwordFsChunk &chunk) {
+Status RedisMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
+                                  const SwordFsChunk &replacement) {
   utils::ExpectInFiberDomain();
-  return ops_.AddChunk(ino, chunk);
-}
-
-Status RedisMetaImpl::PublishChunk(InodeID ino, const SwordFsChunk &chunk) {
-  utils::ExpectInFiberDomain();
-  return ops_.PublishChunk(ino, chunk);
-}
-
-Status RedisMetaImpl::ReplaceChunk(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement) {
-  utils::ExpectInFiberDomain();
-  return ops_.ReplaceChunk(ino, expected, replacement);
+  return ops_.CommitChunk(ino, expected, replacement);
 }
 
 Status RedisMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {

@@ -339,7 +339,7 @@ FIBER_TEST_F(MemMetaStoreTest, IsDescendantOfSelf) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Chunk metadata: AddChunk / FindChunk
+// Chunk metadata: CommitChunk / FindChunk
 // ────────────────────────────────────────────────────────────────
 
 namespace {
@@ -347,30 +347,38 @@ SwordFsChunk MakeChunk(ChunkIndex index, uint64_t start_offset, size_t size) {
   SwordFsChunk chunk;
   chunk.index = index;
   chunk.start_offset = start_offset;
-  chunk.key = "key";
+  chunk.revision = static_cast<uint64_t>(index) + 1;
   chunk.size = size;
   return chunk;
 }
 }  // namespace
 
-FIBER_TEST_F(MemMetaStoreTest, AddChunkAndFindChunk) {
-  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.AddChunk(42, MakeChunk(0, 0, 100)); });
+FIBER_TEST_F(MemMetaStoreTest, CommitChunkAndFindChunk) {
+  SwordFsInode file;
+  Add(kRoot, "chunk-file", kRegFile, &file);
+
+  Status status =
+      store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(file.ino, std::nullopt, MakeChunk(0, 0, 100)); });
   ASSERT_TRUE(status.ok());
 
   SwordFsChunk out;
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(file.ino, 0, &out); });
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(out.index, 0);
   EXPECT_EQ(out.start_offset, 0);
-  EXPECT_EQ(out.key, "key");
+  EXPECT_EQ(out.revision, 1U);
   EXPECT_EQ(out.size, 100);
 }
 
-FIBER_TEST_F(MemMetaStoreTest, AddChunkDuplicateFails) {
+FIBER_TEST_F(MemMetaStoreTest, CommitChunkConflictingInitialPublicationFails) {
+  SwordFsInode file;
+  Add(kRoot, "conflicting-chunk-file", kRegFile, &file);
+
   SwordFsChunk chunk = MakeChunk(0, 0, 100);
-  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.AddChunk(42, chunk); });
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(file.ino, std::nullopt, chunk); });
   ASSERT_TRUE(status.ok());
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.AddChunk(42, chunk); });
+  chunk.revision++;
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(file.ino, std::nullopt, chunk); });
   EXPECT_TRUE(status.IsAlreadyExists());
 }
 
@@ -392,64 +400,70 @@ FIBER_TEST_F(MemMetaStoreTest, TruncateChunksNoChunksIsNoOp) {
 }
 
 FIBER_TEST_F(MemMetaStoreTest, TruncateChunksToZeroRemovesAllChunks) {
+  SwordFsInode file;
+  Add(kRoot, "truncate-zero", kRegFile, &file);
   Status status = store_->Transact([&](MemMetaTxn &txn) -> Status {
-    Status status = txn.AddChunk(42, MakeChunk(0, 0, 100));
+    Status status = txn.CommitChunk(file.ino, std::nullopt, MakeChunk(0, 0, 100));
     if (!status.ok()) {
       return status;
     }
-    return txn.AddChunk(42, MakeChunk(1, 100, 100));
+    return txn.CommitChunk(file.ino, std::nullopt, MakeChunk(1, 100, 100));
   });
   ASSERT_TRUE(status.ok());
 
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 0); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(file.ino, 0); });
   ASSERT_TRUE(status.ok());
   SwordFsChunk out;
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(file.ino, 0, &out); });
   EXPECT_TRUE(status.IsNotFound());
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 1, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(file.ino, 1, &out); });
   EXPECT_TRUE(status.IsNotFound());
 }
 
 FIBER_TEST_F(MemMetaStoreTest, TruncateChunksDropsChunksBeyondNewSize) {
+  SwordFsInode file;
+  Add(kRoot, "truncate-drop", kRegFile, &file);
   Status status = store_->Transact([&](MemMetaTxn &txn) -> Status {
-    Status status = txn.AddChunk(42, MakeChunk(0, 0, 100));
+    Status status = txn.CommitChunk(file.ino, std::nullopt, MakeChunk(0, 0, 100));
     if (!status.ok()) {
       return status;
     }
-    return txn.AddChunk(42, MakeChunk(1, 100, 100));
+    return txn.CommitChunk(file.ino, std::nullopt, MakeChunk(1, 100, 100));
   });
   ASSERT_TRUE(status.ok());
 
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 100); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(file.ino, 100); });
   ASSERT_TRUE(status.ok());
   SwordFsChunk out;
   // Chunk 0 ends exactly at the new size — kept unchanged.
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(file.ino, 0, &out); });
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(out.size, 100);
   // Chunk 1 starts at the new size — dropped.
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 1, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(file.ino, 1, &out); });
   EXPECT_TRUE(status.IsNotFound());
 }
 
 FIBER_TEST_F(MemMetaStoreTest, TruncateChunksClampsStraddlingChunk) {
+  SwordFsInode file;
+  Add(kRoot, "truncate-clamp", kRegFile, &file);
   Status status = store_->Transact([&](MemMetaTxn &txn) -> Status {
-    Status status = txn.AddChunk(42, MakeChunk(0, 0, 100));
+    Status status = txn.CommitChunk(file.ino, std::nullopt, MakeChunk(0, 0, 100));
     if (!status.ok()) {
       return status;
     }
-    return txn.AddChunk(42, MakeChunk(1, 100, 100));
+    return txn.CommitChunk(file.ino, std::nullopt, MakeChunk(1, 100, 100));
   });
   ASSERT_TRUE(status.ok());
 
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(42, 150); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.TruncateChunks(file.ino, 150); });
   ASSERT_TRUE(status.ok());
   SwordFsChunk out;
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 0, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(file.ino, 0, &out); });
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(out.size, 100);
   // Chunk 1 straddles the new size (covers 100..200) — clamped to 50.
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(42, 1, &out); });
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(file.ino, 1, &out); });
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(out.size, 50);
 }
@@ -532,28 +546,28 @@ FIBER_TEST_F(MemMetaStoreTest, ListChunksReturnsRegisteredChunksInIndexOrder) {
   SwordFsChunk c2{};
   c2.index = 2;
   c2.start_offset = 2 * kChunkSize;
-  c2.key = std::to_string(ino) + "/2";
+  c2.revision = 3;
   c2.size = 100;
   SwordFsChunk c0{};
   c0.index = 0;
   c0.start_offset = 0;
-  c0.key = std::to_string(ino) + "/0";
+  c0.revision = 1;
   c0.size = 100;
   SwordFsChunk c1{};
   c1.index = 1;
   c1.start_offset = kChunkSize;
-  c1.key = std::to_string(ino) + "/1";
+  c1.revision = 2;
   c1.size = 100;
   Status status = store_->Transact([&](MemMetaTxn &txn) -> Status {
-    Status status = txn.AddChunk(ino, c2);
+    Status status = txn.CommitChunk(ino, std::nullopt, c2);
     if (!status.ok()) {
       return status;
     }
-    status = txn.AddChunk(ino, c0);
+    status = txn.CommitChunk(ino, std::nullopt, c0);
     if (!status.ok()) {
       return status;
     }
-    return txn.AddChunk(ino, c1);
+    return txn.CommitChunk(ino, std::nullopt, c1);
   });
   ASSERT_TRUE(status.ok());
 
