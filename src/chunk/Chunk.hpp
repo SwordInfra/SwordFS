@@ -47,8 +47,8 @@ class Chunk {
   /// Returns InvalidArgument if the write would exceed chunk bounds.
   utils::Status Write(off_t write_offset, const folly::IOBuf &data);
 
-  /// Read up to |len| bytes starting at chunk-relative |off| into |out|.
-  /// The number of bytes copied is available via out->length() increase.
+  /// Read exactly |len| bytes starting at chunk-relative |off| into |out|.
+  /// A zero-length read is a no-op. On failure, leaves |out| unchanged.
   utils::Status Read(off_t off, size_t len, folly::IOBuf *out) const;
 
   /// Seal the chunk — no more writes accepted.

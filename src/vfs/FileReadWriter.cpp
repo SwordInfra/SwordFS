@@ -40,7 +40,6 @@ class MultiChunkReadWriter {
     auto &fm = folly::fibers::FiberManager::getFiberManager();
     fm.addTask([c = std::move(c), off, len, raw = p.get()] {
       raw->status = c->Read(off, len, raw->window.get());
-      raw->bytes = raw->window->length();
       raw->baton.post();
     });
     ops_.push_back(std::move(p));
@@ -51,13 +50,12 @@ class MultiChunkReadWriter {
   Status Collect() {
     Drain();
 
-    // All submitted fibers are complete, so it is safe to inspect status /
-    // accumulate bytes.
+    // All submitted fibers are complete, so it is safe to inspect status.
+    // Chunk::Read owns the exact-byte-count contract for each operation.
     for (auto &p : ops_) {
       if (!p->status.ok()) {
         return p->status;
       }
-      total_ += p->bytes;
     }
     return Status::OK();
   }
@@ -77,10 +75,8 @@ class MultiChunkReadWriter {
     folly::fibers::Baton baton;
     std::unique_ptr<folly::IOBuf> window;
     Status status;
-    size_t bytes = 0;
   };
   std::vector<std::unique_ptr<Pending>> ops_;
-  size_t total_ = 0;
 };
 
 }  // namespace

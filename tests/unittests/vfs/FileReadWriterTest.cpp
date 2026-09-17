@@ -18,6 +18,7 @@
 #include <string_view>
 #include <unordered_map>
 
+#include "chunk/Chunk.hpp"
 #include "chunk/ChunkObjectKey.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
@@ -124,6 +125,13 @@ class MockDataEngine : public IDataEngine {
     }
 
     if (!get_status.ok()) {
+      if (!get_error_payload.empty()) {
+        if (out->tailroom() < get_error_payload.size()) {
+          return Status::InvalidArgument("injected error payload exceeds output buffer");
+        }
+        std::memcpy(out->writableTail(), get_error_payload.data(), get_error_payload.size());
+        out->append(get_error_payload.size());
+      }
       return get_status;
     }
 
@@ -170,6 +178,7 @@ class MockDataEngine : public IDataEngine {
   std::vector<std::string> delete_calls;
   Status delete_status = Status::OK();
   Status get_status = Status::OK();
+  std::string get_error_payload;
   Status put_status = Status::OK();
   std::string fail_put_key;
   std::string fail_put_prefix;
@@ -587,6 +596,73 @@ TEST_F(FileReadWriterTest, MissingChunkMetadataReadsAsSparseZeros) {
   });
 }
 
+TEST_F(FileReadWriterTest, PersistedChunkShortReadFailsClosed) {
+  RunInTestFiber([&] {
+    SwordFsChunk chunk{};
+    chunk.index = 0;
+    chunk.start_offset = 0;
+    chunk.revision = 17;
+    chunk.size = 64;
+    ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
+
+    auto persisted = std::make_unique<folly::IOBuf>(Buf(Repeat('S', 32)));
+    ASSERT_TRUE(
+        mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(persisted))
+            .ok());
+
+    auto rw = Make(chunk.size);
+    auto out = folly::IOBuf::create(chunk.size);
+    auto status = rw.Read(chunk.size, 0, out.get());
+
+    EXPECT_EQ(status.code(), Status::kIOError);
+    EXPECT_EQ(out->length(), 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, PersistedChunkReadErrorRollsBackPartialOutput) {
+  RunInTestFiber([&] {
+    SwordFsChunk published{};
+    published.index = 0;
+    published.start_offset = 0;
+    published.revision = 18;
+    published.size = 64;
+    ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, published).ok());
+
+    mock_data_->get_error_payload = "partial";
+    mock_data_->get_status = Status::IOError("injected data read failure");
+
+    swordfs::chunk::Chunk chunk(kIno, 0);
+    ASSERT_TRUE(chunk.Initialize().ok());
+
+    auto out = folly::IOBuf::create(68);
+    std::memcpy(out->writableTail(), "keep", 4);
+    out->append(4);
+    auto status = chunk.Read(0, published.size, out.get());
+
+    EXPECT_EQ(status.code(), Status::kIOError);
+    EXPECT_EQ(status.message(), "injected data read failure");
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "keep");
+  });
+}
+
+TEST_F(FileReadWriterTest, PersistedChunkZeroLengthReadIsNoOp) {
+  RunInTestFiber([&] {
+    SwordFsChunk published{};
+    published.index = 0;
+    published.start_offset = 0;
+    published.revision = 19;
+    published.size = 64;
+    ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, published).ok());
+
+    swordfs::chunk::Chunk chunk(kIno, 0);
+    ASSERT_TRUE(chunk.Initialize().ok());
+
+    auto out = folly::IOBuf::copyBuffer("keep");
+    ASSERT_TRUE(chunk.Read(16, 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "keep");
+  });
+}
+
 TEST_F(FileReadWriterTest, ChunkMetadataIOErrorPropagatesFromRead) {
   RunInTestFiber([&] {
     auto rw = Make();
@@ -700,7 +776,12 @@ TEST_F(FileReadWriterTest, FlushRetriesPutFailureUntilDataIsPublished) {
 
     mock_data_->put_status = Status::IOError("injected put failure");
     EXPECT_FALSE(rw.Flush().ok());
+    SwordFsChunk unpublished;
+    EXPECT_TRUE(mock_meta_->FindChunk(kIno, 0, &unpublished).IsNotFound());
+    EXPECT_TRUE(mock_data_->StoredKeys().empty());
     EXPECT_FALSE(rw.Flush().ok());
+    EXPECT_TRUE(mock_meta_->FindChunk(kIno, 0, &unpublished).IsNotFound());
+    EXPECT_TRUE(mock_data_->StoredKeys().empty());
     EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 1);
 
     mock_data_->put_status = Status::OK();
@@ -774,7 +855,12 @@ TEST_F(FileReadWriterTest, FlushRetriesPublicationFailureUntilMetadataCommits) {
 
     mock_meta_->publish_chunk_status = Status::IOError("injected publication failure");
     EXPECT_FALSE(rw.Flush().ok());
+    SwordFsChunk unpublished;
+    EXPECT_TRUE(mock_meta_->FindChunk(kIno, 0, &unpublished).IsNotFound());
+    EXPECT_EQ(mock_data_->StoredKeys().size(), 1U);
     EXPECT_FALSE(rw.Flush().ok());
+    EXPECT_TRUE(mock_meta_->FindChunk(kIno, 0, &unpublished).IsNotFound());
+    EXPECT_EQ(mock_data_->StoredKeys().size(), 1U);
     EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 1);
 
     mock_meta_->publish_chunk_status = Status::OK();

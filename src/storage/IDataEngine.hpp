@@ -66,11 +66,19 @@ class IDataEngine {
   /// @return true if the chunk exists.
   virtual bool Head(std::string_view key, size_t *size) = 0;
 
-  /// Write a chunk to the storage backend.  Takes ownership of |data|.
+  /// Write a complete immutable chunk object to the storage backend. Takes
+  /// ownership of |data|. An OK result is the data-plane publication barrier:
+  /// the entire object must be atomically readable under |key| before the
+  /// caller may publish metadata that references it. A partial object must
+  /// never be reported as a successful write.
   virtual Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) = 0;
 
-  /// Read all or part of a chunk.  Data is written directly into
-  /// |out|, which must have tailroom() >= expected size.
+  /// Read all or part of a chunk. Data is appended directly to |out|, which
+  /// must have tailroom() >= the expected size. A bounded request (|size| > 0)
+  /// may append fewer bytes when the backing object or range is short, so
+  /// callers that require exact-length semantics must validate the appended
+  /// length before exposing the output. A zero |size| requests the remainder
+  /// of the object.
   virtual Status Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) = 0;
 
   /// Delete a chunk (called by the garbage collector).

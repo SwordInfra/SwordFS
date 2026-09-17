@@ -63,11 +63,29 @@ utils::Status Chunk::Read(off_t off, size_t len, folly::IOBuf *out) const {
   if (out->tailroom() < len) {
     return utils::Status::InvalidArgument("Chunk::Read: output buffer too small");
   }
+  if (len == 0) {
+    return utils::Status::OK();
+  }
+
+  const size_t original_length = out->length();
+  utils::Status status;
   if (IsFlushed()) {
     const auto &published = PublishedChunk();
-    return data_->Get(FormatChunkObjectKey(ino_, index_, published.revision), off, len, out);
+    status = data_->Get(FormatChunkObjectKey(ino_, index_, published.revision), off, len, out);
+  } else {
+    status = wb_->CopyOut(off, len, out);
   }
-  return wb_->CopyOut(off, len, out);
+
+  const size_t bytes_read = out->length() - original_length;
+  if (!status.ok()) {
+    out->trimEnd(bytes_read);
+    return status;
+  }
+  if (bytes_read != len) {
+    out->trimEnd(bytes_read);
+    return utils::Status::IOError("Chunk::Read: backend returned a short read");
+  }
+  return utils::Status::OK();
 }
 
 void Chunk::Seal() {
