@@ -18,7 +18,7 @@ SwordFS uses a **client-heavy architecture**: filesystem semantics and most data
 
 The current open-source implementation separates metadata from file data. Metadata can be backed by Memory or Redis, while file data is stored in S3-compatible object storage. This separation keeps filesystem logic independent from a particular storage service and leaves room for additional backends over time.
 
-For the detailed architecture, including request flow, metadata consistency, data lifecycle, concurrency, recovery, and current limitations, see **[docs/design/architecture.md](docs/design/architecture.md)**.
+For architecture, core data structures, the thread model, and key workflow state machines, start with the **[design documentation](docs/README.md)**.
 
 
 ## Build

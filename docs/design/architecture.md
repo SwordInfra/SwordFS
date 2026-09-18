@@ -8,6 +8,12 @@ The project README intentionally stays at a conceptual level. Internal interface
 
 When implementation changes an architectural contract described here, the same PR should update this document.
 
+Use the [documentation reading path](../README.md) to navigate the design.
+Companion documents explain [data structures and ownership](data-structures.md),
+the [thread model](thread-model.md), [chunk publication](chunk-publication.md),
+and the [Redis storage model](redis-metadata-schema.md). This overview connects
+those mechanisms through the main filesystem workflows.
+
 ## 1. Scope and architectural goals
 
 SwordFS is a client-heavy user-space filesystem built on the libfuse3 low-level API. The client is responsible for POSIX-facing semantics, file/chunk state, metadata transactions, object-data placement, retries, and recovery coordination. The current open-source implementation relies on external systems for durable storage rather than implementing a new distributed metadata database or object store.
@@ -204,6 +210,9 @@ The main logical records are:
 
 Metadata does **not** store mutable object bytes. For the current object-storage data path, it stores the revision necessary to derive the immutable object identity.
 
+For relationships between these records, handles, and write buffers, see
+[Data structures and ownership](data-structures.md).
+
 ### 6.3 Memory transaction model
 
 The in-memory backend uses `MemMetaStore::Transact()` as its only mutation/operation entry point. A transaction holds one fiber mutex across the callback, so the callback is one atomic step relative to other metadata operations.
@@ -386,9 +395,43 @@ The current VFS maps FUSE flush/fsync-style file operations to this userspace fl
 
 On the final descriptor close, the `InodeHandle` keeps the reference alive until flush finishes, then releases the reference. The close path itself does not perform inode garbage collection; it wakes the background reclaimer so any durable orphan can be reconsidered promptly.
 
+### 11.1 Open/close ordering against reclaim
+
+The critical ordering is reference acquisition **before** metadata validation:
+
+1. `Open` checks the local fence and increments the open count under the same
+   lock. If reclaim already owns the fence, open fails.
+2. It checks authoritative metadata and permissions. `O_TRUNC` then truncates
+   through the shared `FileReadWriter`. Failure releases the acquired reference.
+3. Unlink may remove the last name while this reference exists. The inode
+   remains an orphan candidate; reclaim cannot claim the local fence yet.
+4. A non-final close drops its reference. The final close retains its reference
+   during flush, then drops it even if flush returns an error. A close error
+   must not be interpreted as successful persistence.
+5. Once the count is zero, reclaim can claim the fence and attempt preparation.
+   A concurrent open either acquired its reference first or sees the fence;
+   it cannot pass between the fence check and count increment.
+
+This fence covers one mount; it is not a distributed open-file lease. Flush
+publishes chunks individually: if one fails, others may already be published.
+It is not an atomic whole-file commit.
+
 ## 12. Truncate behavior
 
 Truncate first changes authoritative metadata, including inode size and chunk metadata, then updates the local chunk map.
+
+The per-inode exclusive operation lock covers this sequence:
+
+1. Commit the new inode size and prune or clamp metadata chunk descriptors.
+   Failure returns without changing the local chunk map.
+2. Drop cached chunks wholly beyond the new end and shorten the boundary
+   chunk. For a dirty rewrite, also clamp its saved CAS expectation.
+3. On the explicit `Truncate` path, attempt deletion of dropped object keys
+   obtained from the cache. `SetAttr(kSize)` updates metadata and the cache
+   without collecting those keys for immediate deletion.
+
+Serializing size changes with writes and flushes prevents a local pending
+write from racing truncate and republishing the removed range.
 
 For locally known chunk objects that become unreachable because of truncate, SwordFS currently performs best-effort object deletion after the metadata change. Delete failures are logged rather than rolling back the metadata truncate.
 
@@ -402,6 +445,9 @@ SwordFS intentionally defines exactly two execution domains:
 2. **POSIX-thread domain** — normal threads used for lifecycle/control code and blocking external IO.
 
 There is no generic/unknown compatibility domain.
+
+See [Thread model and synchronization](thread-model.md) for execution topology,
+worker handoff, state protection, and the shutdown state machine.
 
 ### 13.1 Fiber runtime
 
@@ -620,4 +666,4 @@ The most useful source entry points are:
 | runtime/concurrency | `src/utils/FiberRuntime.*`, `src/utils/BlockingExecutor.*`, `src/utils/Synchronization.hpp` |
 | reclaim/recovery | `src/vfs/Reclaimer.*`, `src/metadata/types/Reclaim.*` |
 
-For Redis persistence details, see [Redis Metadata Schema and Access-Pattern Review](redis-metadata-schema.md).
+For Redis persistence details, see [Redis metadata: storage and transactions](redis-metadata-schema.md).
