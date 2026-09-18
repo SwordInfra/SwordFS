@@ -183,7 +183,7 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t m
   return Status::OK();
 }
 
-Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result) {
+Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
   utils::ExpectInFiberDomain();
   // Refuse to unlink "." or ".."
   if (name == "." || name == "..") {
@@ -191,7 +191,7 @@ Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, UnlinkResu
   }
 
   const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
-  UnlinkResult unlink_result;
+  InodeID unlinked_ino = 0;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode parent;
     Status status = txn.LookupInode(parent_ino, &parent);
@@ -223,27 +223,21 @@ Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, UnlinkResu
       return Status::InvalidArgument("cannot unlink directory");
     }
 
-    unlink_result.unlinked_ino = target.ino;
-    return txn.Unlink(parent_ino, name, &unlink_result.post_nlink);
+    unlinked_ino = target.ino;
+    return txn.Unlink(parent_ino, name);
   });
 
   if (!status.ok()) {
     SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name << "' failed: " << status.message();
     return status;
   }
-  if (result != nullptr) {
-    *result = unlink_result;
-  }
-  SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name << "' ino=" << unlink_result.unlinked_ino;
+  SWORDFS_LOG_DEBUG << "Unlink: parent=" << parent_ino << " name='" << name << "' ino=" << unlinked_ino;
   return Status::OK();
 }
 
 Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
-                           std::string_view new_name, RenameFlag flags, RenameResult *result) {
+                           std::string_view new_name, RenameFlag flags) {
   utils::ExpectInFiberDomain();
-  if (result) {
-    *result = {};
-  }
   if (new_name.size() > kMemLimits.max_name_length) {
     return Status::NameTooLong("target name exceeds maximum length");
   }
@@ -326,7 +320,7 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, In
     // victim removal are all enforced by MoveEntry; kNoReplace simply
     // withholds overwrite permission.
     return txn.MoveEntry(old_parent_ino, old_name, new_parent_ino, new_name,
-                         !HasRenameFlag(flags, RenameFlag::kNoReplace), result);
+                         !HasRenameFlag(flags, RenameFlag::kNoReplace));
   });
 
   if (!status.ok()) {
@@ -413,21 +407,12 @@ Status MemMetaImpl::Open(InodeID ino) {
   return status;
 }
 
-Status MemMetaImpl::PrepareReclaim(InodeID ino, ReclaimWork *work) {
+Status MemMetaImpl::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) {
   utils::ExpectInFiberDomain();
   if (work == nullptr) {
     return Status::InvalidArgument("reclaim work output is null");
   }
-  ReclaimWork frozen;
-  Status status = store_.Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, &frozen); });
-  if (!status.ok()) {
-    // Nothing was frozen: leave the caller's output in the empty state the
-    // engine's contract describes rather than its previous contents.
-    *work = {};
-    return status;
-  }
-  *work = std::move(frozen);
-  return Status::OK();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, work); });
 }
 
 Status MemMetaImpl::CompleteReclaim(InodeID ino) {
@@ -452,16 +437,16 @@ Status MemMetaImpl::VisitOrphanCandidates(const InodeVisitorFn &visitor) {
   return Status::OK();
 }
 
-Status MemMetaImpl::VisitPendingReclaims(const InodeVisitorFn &visitor) {
+Status MemMetaImpl::VisitPendingReclaims(const ReclaimVisitorFn &visitor) {
   utils::ExpectInFiberDomain();
   if (!visitor) {
     return Status::InvalidArgument("pending reclaim visitor is null");
   }
 
-  std::vector<InodeID> pending;
+  std::vector<ReclaimWork> pending;
   store_.Transact([&](MemMetaTxn &txn) { return txn.ListPendingReclaims(&pending); });
-  for (InodeID ino : pending) {
-    auto status = visitor(ino);
+  for (const auto &work : pending) {
+    auto status = visitor(work);
     if (!status.ok()) {
       return status;
     }
@@ -559,7 +544,7 @@ Status MemMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
 
     // Unlink detaches the entry, drops the parent's nlink (the ".." backlink),
     // and reclaims the now-empty directory inode.
-    return txn.Unlink(parent_ino, name, nullptr);
+    return txn.Unlink(parent_ino, name);
   });
 
   if (!status.ok()) {

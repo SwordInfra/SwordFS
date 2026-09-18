@@ -728,7 +728,7 @@ TEST(RedisMetaTxnTest, MoveEntryPersistsExplicitState) {
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096);
     return txn.MoveEntry(kRootInodeId, "file", kRootInodeId, "moved", &root, &root, &child, nullptr,
-                         /*overwrite=*/true, nullptr);
+                         /*overwrite=*/true);
   });
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_FALSE(redis.hexists(key.Directory(kRootInodeId), "file"));
@@ -923,17 +923,15 @@ TEST(RedisMetaTxnTest, PrepareReclaimRejectsStaleChunkScan) {
   ASSERT_TRUE(chunk.SerializeTo(&chunk_data).ok());
   redis.hset(key.Chunk(file.ino), "0", chunk_data);
 
-  ReclaimWork work;
-  bool frozen = false;
+  std::optional<ReclaimWork> work;
   const std::vector<SwordFsChunk> stale_scan;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.PrepareReclaim(file.ino, stale_scan, work, frozen);
+    return txn.PrepareReclaim(file.ino, stale_scan, work);
   });
 
   EXPECT_TRUE(status.IsBusy()) << status.message();
-  EXPECT_FALSE(frozen);
-  EXPECT_EQ(work.ino, 0U);
+  EXPECT_FALSE(work.has_value());
   EXPECT_TRUE(redis.exists(key.Inode(file.ino)));
   EXPECT_TRUE(redis.exists(key.Chunk(file.ino)));
   EXPECT_FALSE(redis.hexists(key.Reclaims(), std::to_string(file.ino)));

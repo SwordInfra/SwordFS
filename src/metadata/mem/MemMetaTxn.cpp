@@ -250,10 +250,7 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name, uint32_t 
 }
 
 Status MemMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
-                             std::string_view new_name, bool overwrite, RenameResult *result) {
-  if (result) {
-    *result = {};
-  }
+                             std::string_view new_name, bool overwrite) {
   SwordFsInode *old_parent = FindInode(old_parent_ino);
   if (!old_parent) {
     return Status::NotFound("old parent directory not found");
@@ -300,17 +297,11 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view old_name, 
     // Unlink detaches the victim. Empty directories are reclaimed by
     // Unlink itself (which frees the inode record, so the victim pointer must
     // not be dereferenced afterwards); file inodes survive when their last
-    // name disappears so the VFS layer can perform the same open-fd-aware data
-    // cleanup it uses for unlink(2).
-    const InodeID victim_ino = victim->ino;
-    const bool victim_is_dir = victim->IsDir();
-    Status status = Unlink(new_parent_ino, new_name, nullptr);
+    // name disappears so the background Reclaimer can apply the local open-fd
+    // fence before crossing the metadata point of no return.
+    Status status = Unlink(new_parent_ino, new_name);
     if (!status.ok()) {
       return status;
-    }
-    if (result && !victim_is_dir) {
-      result->overwritten_ino = victim_ino;
-      result->overwritten_post_nlink = victim->attr.nlink;
     }
   }
 
@@ -332,7 +323,7 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view old_name, 
   return Status::OK();
 }
 
-Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink) {
+Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name) {
   SwordFsInode *child = FindEntry(parent_ino, name);
   if (!child) {
     return Status::NotFound("entry not found");
@@ -344,10 +335,9 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name, uint64_t *p
 
   SwordFsInode *parent = FindInode(parent_ino);
 
-  // Remove the directory entry. Decrement nlink to track the hard-link
-  // count. The inode (and its chunks) survive here; the caller decides
-  // whether to follow up with `ReclaimData` once it has confirmed no
-  // open file descriptor still references the inode.
+  // Remove the directory entry. Decrement nlink to track the hard-link count.
+  // The inode (and its chunks) survive here; durable orphan state tells the
+  // background Reclaimer when it may later attempt open-fd-aware preparation.
   UnlinkEntry(parent_ino, name);
   parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
@@ -357,17 +347,12 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name, uint64_t *p
     // hard-linked; always reclaim immediately.
     parent->attr.nlink--;
     DeleteInode(child->ino);
-    if (post_nlink) {
-      // Inode is gone — surface 0 so the caller doesn't try to read
-      // further metadata for it.
-      *post_nlink = 0;
-    }
     return Status::OK();
   }
 
-  // File: decrement nlink only. If no names remain, the inode stays
-  // alive until the caller (VfsImpl::Unlink or InodeHandle::Close)
-  // confirms no fd is open and calls ReclaimData.
+  // File: decrement nlink only. If no names remain, the inode stays alive
+  // until the background Reclaimer confirms no local fd is open and prepares
+  // the durable reclaim.
   child->attr.nlink--;
   if (child->attr.nlink == 0) {
     // Last name gone: publish the inode as an orphan candidate in this same
@@ -375,12 +360,6 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name, uint64_t *p
     // before the caller gets to reclaim it. The candidate is what mount-time
     // reconciliation promotes; it carries no claim on the inode's data.
     store_->orphans_.insert(child->ino);
-  }
-  if (post_nlink) {
-    // Read it back inside the same transaction so the caller sees the
-    // exact post-decrement value with no chance of a concurrent Link
-    // racing in between.
-    *post_nlink = child->attr.nlink;
   }
   return Status::OK();
 }
@@ -626,11 +605,11 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
   return Status::OK();
 }
 
-Status MemMetaTxn::PrepareReclaim(InodeID ino, ReclaimWork *work) {
+Status MemMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) {
   if (work == nullptr) {
     return Status::InvalidArgument("reclaim work output is null");
   }
-  *work = {};
+  work->reset();
 
   // Idempotent replay: once the point of no return has been crossed, the
   // frozen record — not the (already removed) live inode — is the authority,
@@ -645,14 +624,14 @@ Status MemMetaTxn::PrepareReclaim(InodeID ino, ReclaimWork *work) {
   if (inode == nullptr) {
     // Already reclaimed. Any marker left behind is stale.
     store_->orphans_.erase(ino);
-    return Status::NotFound("inode is not reclaimable");
+    return Status::OK();
   }
   if (inode->IsDir() || inode->attr.nlink != 0) {
     // A concurrent Link revived the inode before this transaction, or the
     // node is a directory (never reclaimed through an orphan candidate).
     // Drop the marker and leave the inode and its objects untouched.
     store_->orphans_.erase(ino);
-    return Status::NotFound(inode->IsDir() ? "directory is not an orphan candidate" : "inode is still linked");
+    return Status::OK();
   }
 
   ReclaimWork frozen;
@@ -703,17 +682,17 @@ Status MemMetaTxn::ListOrphanCandidates(std::vector<InodeID> *out) {
   return Status::OK();
 }
 
-Status MemMetaTxn::ListPendingReclaims(std::vector<InodeID> *out) {
+Status MemMetaTxn::ListPendingReclaims(std::vector<ReclaimWork> *out) {
   if (out == nullptr) {
     return Status::InvalidArgument("pending reclaim output is null");
   }
   out->clear();
   out->reserve(store_->pending_reclaims_.size());
   for (const auto &[ino, work] : store_->pending_reclaims_) {
-    (void)work;
-    out->push_back(ino);
+    (void)ino;
+    out->push_back(work);
   }
-  std::sort(out->begin(), out->end());
+  std::sort(out->begin(), out->end(), [](const ReclaimWork &a, const ReclaimWork &b) { return a.ino < b.ino; });
   return Status::OK();
 }
 

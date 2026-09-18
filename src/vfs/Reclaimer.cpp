@@ -26,8 +26,8 @@ namespace swordfs::vfs {
 
 namespace {
 
-// How often the periodic thread retries crash-left reclaim work.
-constexpr auto kRetryInterval = std::chrono::seconds(5);
+// Safety-scan interval when no explicit wakeup arrives.
+constexpr auto kSafetyScanInterval = std::chrono::seconds(5);
 
 }  // namespace
 
@@ -36,36 +36,32 @@ Reclaimer &Reclaimer::Instance() {
   return instance;
 }
 
-utils::Status Reclaimer::Reclaim(metadata::InodeID ino, bool *prepared) {
+utils::Status Reclaimer::PrepareOrphan(metadata::InodeID ino) {
   utils::ExpectInFiberDomain();
-  if (prepared != nullptr) {
-    *prepared = false;
-  }
-
   auto *meta = volume::VolumeImpl::Instance().meta_engine();
-  auto *data = volume::VolumeImpl::Instance().data_engine();
-  if (meta == nullptr || data == nullptr) {
-    // Without both planes nothing can be reclaimed; refusing keeps a frozen
-    // record (if any) intact for a later mount instead of stranding objects.
-    return utils::Status::Internal("reclaim requires a metadata and a data engine");
+  if (meta == nullptr) {
+    return utils::Status::Internal("reclaim requires a metadata engine");
   }
 
-  metadata::ReclaimWork work;
-  auto status = meta->PrepareReclaim(ino, &work);
-  if (status.IsNotFound()) {
-    // The ordinary "nothing to reclaim" outcome: the inode was already
-    // reclaimed, or a Link revived it. Nothing was changed, so it is not an
-    // error — the caller only needs to know the point of no return was not
-    // crossed.
+  auto handle = InodeHandleManager::Instance().Get(ino, /*create_if_missing=*/true);
+  if (!handle->TryStartReclaim()) {
+    // A live/opening descriptor or another preparation attempt owns the local
+    // inode. Durable orphan metadata remains authoritative for a later pass.
     return utils::Status::OK();
   }
+  auto fence_guard = folly::makeGuard([&] { handle->FinishReclaim(); });
+
+  std::optional<metadata::ReclaimWork> work;
+  auto status = meta->PrepareReclaim(ino, &work);
   if (!status.ok()) {
     return status;
   }
-  if (prepared != nullptr) {
-    *prepared = true;
+  handle->FinishReclaim();
+  fence_guard.dismiss();
+  if (!work.has_value()) {
+    return utils::Status::OK();
   }
-  return DeleteFrozenObjects(work);
+  return DeleteFrozenObjects(*work);
 }
 
 utils::Status Reclaimer::DeleteFrozenObjects(const metadata::ReclaimWork &work) {
@@ -102,43 +98,34 @@ utils::Status Reclaimer::Reconcile() {
 
   size_t failures = 0;
 
-  // Orphan candidates: an inode whose last name is gone but whose reclaim was
-  // never prepared (crash, or a failed attempt). Claiming it through its
-  // InodeHandle keeps a reopen of the unlinked inode working.
-  std::vector<metadata::InodeID> orphans;
-  auto status = meta->VisitOrphanCandidates([&orphans](metadata::InodeID ino) {
-    orphans.push_back(ino);
+  // Already-prepared work crossed the point of no return: the live inode no
+  // longer exists, so no local open-fd fence is needed. Replay the frozen work
+  // directly rather than going back through PrepareReclaim.
+  auto status = meta->VisitPendingReclaims([this, &failures](const metadata::ReclaimWork &work) {
+    auto status = DeleteFrozenObjects(work);
+    if (!status.ok()) {
+      ++failures;
+      SWORDFS_LOG_WARN << "Reconcile: pending reclaim of ino " << work.ino << " failed: " << status.message();
+    }
     return utils::Status::OK();
   });
   if (!status.ok()) {
     return status;
   }
 
-  // Snapshot the pending queue as well before reclaiming anything: promoting
-  // an orphan below can freeze it into a pending record, and processing that
-  // record in this same pass would retry — and count — work this pass already
-  // did.
-  std::vector<metadata::InodeID> pending;
-  status = meta->VisitPendingReclaims([&pending](metadata::InodeID ino) {
-    pending.push_back(ino);
+  // Orphan candidates still have a live inode and may have local descriptors.
+  // The InodeHandle fence is acquired only around preparation; object deletion
+  // uses the durable frozen record afterwards.
+  status = meta->VisitOrphanCandidates([this, &failures](metadata::InodeID ino) {
+    auto status = PrepareOrphan(ino);
+    if (!status.ok()) {
+      ++failures;
+      SWORDFS_LOG_WARN << "Reconcile: orphan preparation of ino " << ino << " failed: " << status.message();
+    }
     return utils::Status::OK();
   });
   if (!status.ok()) {
     return status;
-  }
-
-  for (metadata::InodeID ino : orphans) {
-    if (!AttemptReclaim(ino).ok()) {
-      ++failures;
-    }
-  }
-
-  // Pending reclaims: the point of no return already passed, so only the
-  // idempotent object deletes (and the completion) remain.
-  for (metadata::InodeID ino : pending) {
-    if (!AttemptReclaim(ino).ok()) {
-      ++failures;
-    }
   }
 
   if (failures != 0) {
@@ -147,62 +134,60 @@ utils::Status Reclaimer::Reconcile() {
   return utils::Status::OK();
 }
 
-utils::Status Reclaimer::AttemptReclaim(metadata::InodeID ino) {
-  auto handle = InodeHandleManager::Instance().Get(ino, /*create_if_missing=*/true);
-  auto status = handle->ReclaimData();
-  if (!status.ok()) {
-    SWORDFS_LOG_WARN << "Reconcile: reclaim of ino " << ino << " failed: " << status.message();
-  }
-  return status;
-}
-
-void Reclaimer::StartPeriodicRetry() {
+void Reclaimer::Start() {
   utils::ExpectInThreadDomain();
-  if (retry_thread_.joinable()) {
+  if (worker_thread_.joinable()) {
     return;
   }
   stop_requested_.store(false, std::memory_order_relaxed);
-  stop_waiter_.reset();
-  retry_thread_ = std::thread([this] { RetryLoop(); });
-  SWORDFS_LOG_INFO << "reclaim retry thread started";
+  wake_pending_.store(false, std::memory_order_relaxed);
+  while (wake_sem_.try_wait()) {
+  }
+  worker_thread_ = std::thread([this] { WorkerLoop(); });
+  SWORDFS_LOG_INFO << "reclaim worker started";
 }
 
-void Reclaimer::StopPeriodicRetry() {
+void Reclaimer::Stop() {
   utils::ExpectInThreadDomain();
   stop_requested_.store(true, std::memory_order_relaxed);
-  if (retry_thread_.joinable()) {
-    stop_waiter_.post();
-    retry_thread_.join();
-    SWORDFS_LOG_INFO << "reclaim retry thread stopped";
+  if (worker_thread_.joinable()) {
+    wake_sem_.post();
+    worker_thread_.join();
+    while (wake_sem_.try_wait()) {
+    }
+    wake_pending_.store(false, std::memory_order_relaxed);
+    SWORDFS_LOG_INFO << "reclaim worker stopped";
   }
 }
 
-void Reclaimer::RetryLoop() {
+void Reclaimer::Wake() {
+  if (!wake_pending_.exchange(true, std::memory_order_acq_rel)) {
+    wake_sem_.post();
+  }
+}
+
+void Reclaimer::WorkerLoop() {
   utils::ExpectInThreadDomain();
   while (!stop_requested_.load(std::memory_order_relaxed)) {
-    // On a POSIX thread FiberBaton uses its blocking-thread timed wait. Stop
-    // posts the baton and wakes this immediately; timeout preserves the retry
-    // cadence without adding shutdown latency.
-    if (stop_waiter_.try_wait_for(kRetryInterval)) {
-      return;
+    // Run once immediately at startup, then on an explicit Wake() or the
+    // periodic safety interval. A wake that arrives while a pass is running is
+    // retained by the semaphore for the next iteration.
+    try {
+      RunWorkerPass();
+    } catch (const std::exception &error) {
+      // Never let one pass kill the worker; the next pass retries.
+      SWORDFS_LOG_ERROR << "reclaim worker pass threw: " << error.what();
     }
-    // A timed thread wait leaves the Baton in its consumed wait state. Reset
-    // it before the next interval, then re-check the atomic stop flag so a
-    // StopPeriodicRetry racing this timeout cannot be lost by the reset.
-    stop_waiter_.reset();
     if (stop_requested_.load(std::memory_order_relaxed)) {
       return;
     }
-    try {
-      RunRetryPass();
-    } catch (const std::exception &error) {
-      // Never let one pass kill the retry thread; the next pass retries.
-      SWORDFS_LOG_ERROR << "periodic reclaim retry pass threw: " << error.what();
+    if (wake_sem_.try_wait_for(kSafetyScanInterval)) {
+      wake_pending_.store(false, std::memory_order_release);
     }
   }
 }
 
-void Reclaimer::RunRetryPass() {
+void Reclaimer::RunWorkerPass() {
   // The deletes are data-engine calls and therefore fiber-domain work: hand
   // the pass to this thread's fiber runtime and wait for it to finish. The
   // rejection path posts the baton too, so this can never block forever.
@@ -212,16 +197,16 @@ void Reclaimer::RunRetryPass() {
         auto post = folly::makeGuard([&] { done->post(); });
         // No exception may escape: it would unwind the fiber runtime's driver
         // loop, and the next pass would then enqueue a task nobody runs while
-        // StopPeriodicRetry waits for this thread to join.
+        // Stop() waits for this thread to join.
         try {
           auto status = Reconcile();
           if (!status.ok()) {
-            SWORDFS_LOG_WARN << "periodic reclaim retry: " << status.message();
+            SWORDFS_LOG_WARN << "reclaim worker pass: " << status.message();
           }
         } catch (const std::exception &error) {
-          SWORDFS_LOG_ERROR << "periodic reclaim retry threw: " << error.what();
+          SWORDFS_LOG_ERROR << "reclaim worker pass threw: " << error.what();
         } catch (...) {
-          SWORDFS_LOG_ERROR << "periodic reclaim retry threw an unknown exception";
+          SWORDFS_LOG_ERROR << "reclaim worker pass threw an unknown exception";
         }
       },
       [done] { done->post(); });

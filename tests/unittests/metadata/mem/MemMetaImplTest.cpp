@@ -25,11 +25,9 @@ using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
 using swordfs::metadata::ReclaimWork;
 using swordfs::metadata::RenameFlag;
-using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
-using swordfs::metadata::UnlinkResult;
 using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
@@ -171,8 +169,8 @@ class MemMetaImplTest : public ::testing::Test {
   // The inodes with a frozen pending reclaim.
   std::vector<InodeID> PendingReclaims() {
     std::vector<InodeID> out;
-    auto status = impl_->VisitPendingReclaims([&out](InodeID ino) {
-      out.push_back(ino);
+    auto status = impl_->VisitPendingReclaims([&out](const ReclaimWork &work) {
+      out.push_back(work.ino);
       return Status::OK();
     });
     EXPECT_TRUE(status.ok()) << status.message();
@@ -890,10 +888,10 @@ FIBER_TEST_F(MemMetaImplTest, ChunkMutationsRejectInvalidRevision) {
   EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, invalid).code(), Status::kInvalidArgument);
 }
 
-FIBER_TEST_F(MemMetaImplTest, PrepareReclaimMissingInodeIsNotFound) {
-  ReclaimWork work;
-  EXPECT_TRUE(impl_->PrepareReclaim(999, &work).IsNotFound());
-  EXPECT_EQ(work.ino, 0U);
+FIBER_TEST_F(MemMetaImplTest, PrepareReclaimMissingInodeIsNoOp) {
+  std::optional<ReclaimWork> work;
+  EXPECT_TRUE(impl_->PrepareReclaim(999, &work).ok());
+  EXPECT_FALSE(work.has_value());
   // Completing a reclaim nobody prepared is a no-op.
   EXPECT_TRUE(impl_->CompleteReclaim(999).ok());
 }
@@ -913,22 +911,21 @@ FIBER_TEST_F(MemMetaImplTest, UnlinkOnHardlinkedInodeKeepsInodeAlive) {
   ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
   ASSERT_EQ(attr.st_nlink, 2);
 
-  UnlinkResult unlink_result;
-  ASSERT_TRUE(impl_->Unlink(kRoot, "orig", &unlink_result).ok());
-  EXPECT_EQ(unlink_result.unlinked_ino, f_ino);
-  EXPECT_EQ(unlink_result.post_nlink, 1U);
+  ASSERT_TRUE(impl_->Unlink(kRoot, "orig").ok());
 
   // nlink must drop to 1, not zero, and the inode must still exist.
   ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
   EXPECT_EQ(attr.st_nlink, 1);
+  EXPECT_TRUE(OrphanCandidates().empty());
 
   // Unlinking the surviving name brings nlink to 0, which publishes the
   // inode as an orphan candidate; preparing and completing the reclaim then
   // drops the inode.
   ASSERT_TRUE(impl_->Unlink(kRoot, "link").ok());
   EXPECT_EQ(OrphanCandidates(), std::vector<InodeID>{f_ino});
-  ReclaimWork work;
+  std::optional<ReclaimWork> work;
   ASSERT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
+  ASSERT_TRUE(work.has_value());
   ASSERT_TRUE(impl_->CompleteReclaim(f_ino).ok());
   EXPECT_TRUE(impl_->GetAttr(f_ino, nullptr).IsNotFound());
 }
@@ -1110,8 +1107,9 @@ FIBER_TEST_F(MemMetaImplTest, UnlinkPublishesOrphanCandidateForLastLink) {
   EXPECT_EQ(found, chunk);
   EXPECT_TRUE(PendingReclaims().empty());
 
-  ReclaimWork work;
+  std::optional<ReclaimWork> work;
   ASSERT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
+  ASSERT_TRUE(work.has_value());
   ASSERT_TRUE(impl_->CompleteReclaim(f_ino).ok());
   EXPECT_TRUE(OrphanCandidates().empty());
   EXPECT_TRUE(PendingReclaims().empty());
@@ -1144,10 +1142,7 @@ FIBER_TEST_F(MemMetaImplTest, RenameOverwritePublishesOrphanCandidate) {
           .ok());
 
   // Renaming src onto dst overwrites dst exactly like unlink(2) would.
-  RenameResult result;
-  ASSERT_TRUE(impl_->Rename(kRoot, "src", kRoot, "dst", RenameFlag::kNone, &result).ok());
-  EXPECT_EQ(result.overwritten_ino, dst_ino);
-  EXPECT_EQ(result.overwritten_post_nlink, 0U);
+  ASSERT_TRUE(impl_->Rename(kRoot, "src", kRoot, "dst", RenameFlag::kNone).ok());
 
   EXPECT_EQ(OrphanCandidates(), std::vector<InodeID>{dst_ino});
   // The overwritten inode keeps its chunk metadata until the reclaim is
@@ -1178,10 +1173,9 @@ FIBER_TEST_F(MemMetaImplTest, LinkCancelsOrphanCandidate) {
   ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
   EXPECT_EQ(attr.st_nlink, 1);
 
-  ReclaimWork work;
-  EXPECT_TRUE(impl_->PrepareReclaim(f_ino, &work).IsNotFound());
-  EXPECT_EQ(work.ino, 0U);
-  EXPECT_EQ(work.chunks.size(), 0U);
+  std::optional<ReclaimWork> work;
+  EXPECT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
+  EXPECT_FALSE(work.has_value());
   // Untouched: the revived name still owns the inode and its data.
   SwordFsChunk found;
   ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &found).ok());
@@ -1205,14 +1199,15 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFence
           .ok());
   ASSERT_TRUE(impl_->Unlink(kRoot, "f").ok());
 
-  ReclaimWork work;
+  std::optional<ReclaimWork> work;
   ASSERT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
-  EXPECT_EQ(work.ino, f_ino);
-  ASSERT_EQ(work.chunks.size(), 2U);
-  EXPECT_EQ(work.chunks[0].descriptor.index, 0U);
-  EXPECT_EQ(work.chunks[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, 1));
-  EXPECT_EQ(work.chunks[1].descriptor.index, 1U);
-  EXPECT_EQ(work.chunks[1].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 1, 2));
+  ASSERT_TRUE(work.has_value());
+  EXPECT_EQ(work->ino, f_ino);
+  ASSERT_EQ(work->chunks.size(), 2U);
+  EXPECT_EQ(work->chunks[0].descriptor.index, 0U);
+  EXPECT_EQ(work->chunks[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, 1));
+  EXPECT_EQ(work->chunks[1].descriptor.index, 1U);
+  EXPECT_EQ(work->chunks[1].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 1, 2));
 
   // The live inode and its chunk metadata are gone, so no name and no
   // inode-by-number reference can reach the data again...
@@ -1226,7 +1221,7 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFence
   // preparation returns the same work.
   EXPECT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
   EXPECT_TRUE(OrphanCandidates().empty());
-  ReclaimWork replay;
+  std::optional<ReclaimWork> replay;
   ASSERT_TRUE(impl_->PrepareReclaim(f_ino, &replay).ok());
   EXPECT_EQ(replay, work);
 
@@ -1252,12 +1247,13 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimUsesCurrentRevisionAfterRewrite) {
   ASSERT_TRUE(impl_->CommitChunk(f_ino, first, replacement).ok());
 
   ASSERT_TRUE(impl_->Unlink(kRoot, "f").ok());
-  ReclaimWork work;
+  std::optional<ReclaimWork> work;
   ASSERT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
-  ASSERT_EQ(work.chunks.size(), 1U);
+  ASSERT_TRUE(work.has_value());
+  ASSERT_EQ(work->chunks.size(), 1U);
   // The frozen identity is the current revisioned key, never the retired one.
-  EXPECT_EQ(work.chunks[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, replacement.revision));
-  EXPECT_NE(work.chunks[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, first.revision));
+  EXPECT_EQ(work->chunks[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, replacement.revision));
+  EXPECT_NE(work->chunks[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, first.revision));
 }
 
 FIBER_TEST_F(MemMetaImplTest, PrepareReclaimRejectsLinkedInode) {
@@ -1268,9 +1264,9 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimRejectsLinkedInode) {
       impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 8})
           .ok());
 
-  ReclaimWork work;
-  EXPECT_TRUE(impl_->PrepareReclaim(f_ino, &work).IsNotFound());
-  EXPECT_EQ(work.ino, 0U);
+  std::optional<ReclaimWork> work;
+  EXPECT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
+  EXPECT_FALSE(work.has_value());
   // Nothing was removed: the file still resolves and its chunk is intact.
   SwordFsChunk found;
   ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &found).ok());
@@ -1317,14 +1313,14 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentReclaimAndLinkAreAtomic) {
     });
     auto reclaimer = swordfs::test::StartFiberTestThread([&] {
       gate.arrive_and_wait();
-      ReclaimWork work;
+      std::optional<ReclaimWork> work;
       const auto status = impl_->PrepareReclaim(f_ino, &work);
-      if (status.ok()) {
+      if (status.ok() && work.has_value()) {
         reclaim_won.store(true);
         if (!impl_->CompleteReclaim(f_ino).ok()) {
           failures.fetch_add(1, std::memory_order_relaxed);
         }
-      } else if (!status.IsNotFound()) {
+      } else if (!status.ok()) {
         failures.fetch_add(1, std::memory_order_relaxed);
       }
     });
@@ -1368,7 +1364,7 @@ FIBER_TEST_F(MemMetaImplTest, VisitorAndOutputArgumentsAreValidated) {
   SetContext(0, 0);
 
   EXPECT_EQ(impl_->VisitOrphanCandidates(swordfs::metadata::InodeVisitorFn{}).code(), Status::kInvalidArgument);
-  EXPECT_EQ(impl_->VisitPendingReclaims(swordfs::metadata::InodeVisitorFn{}).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->VisitPendingReclaims(swordfs::metadata::ReclaimVisitorFn{}).code(), Status::kInvalidArgument);
 
   // A null frozen-work output is refused before anything is mutated.
   InodeID f_ino = 0;
@@ -1405,13 +1401,14 @@ FIBER_TEST_F(MemMetaImplTest, VisitorAbortStopsTheScanAndIsPropagated) {
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{first, second}));
 
   // The same contract holds for the pending-reclaim scan.
-  ReclaimWork work;
+  std::optional<ReclaimWork> work;
   ASSERT_TRUE(impl_->PrepareReclaim(second, &work).ok());
+  ASSERT_TRUE(work.has_value());
   ASSERT_EQ(PendingReclaims(), (std::vector<InodeID>{second}));
 
   visited.clear();
-  const auto pending_status = impl_->VisitPendingReclaims([&](InodeID ino) {
-    visited.push_back(ino);
+  const auto pending_status = impl_->VisitPendingReclaims([&](const ReclaimWork &work) {
+    visited.push_back(work.ino);
     return Status::Busy("abort the pending scan");
   });
   EXPECT_EQ(pending_status.code(), Status::kBusy);

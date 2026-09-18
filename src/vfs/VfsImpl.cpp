@@ -18,6 +18,7 @@
 #include "vfs/FileReadWriter.hpp"
 #include "vfs/Handle.hpp"
 #include "vfs/InodeHandle.hpp"
+#include "vfs/Reclaimer.hpp"
 #include "volume/VolumeImpl.hpp"
 
 #define FUSE_USE_VERSION 312
@@ -119,50 +120,14 @@ utils::Status VfsImpl::MkDir(fuse_ino_t parent, const char *name, mode_t mode, f
 }
 
 utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
-  // POSIX unlink decision lives here, not in the metadata engine. The
-  // metadata mutation publishes the inode as an orphan candidate as soon as
-  // its last name is gone, so the cleanup below can never lose track of it.
-  // Two states the inode can be in after `Unlink`:
-  //   - nlink > 0: at least one directory entry still references the
-  //     inode (hard-link). Do nothing — the chunk objects and inode
-  //     stay alive for the other names.
-  //   - nlink == 0: hand the inode to `ReclaimData`, which decides atomically
-  //     between reclaiming now (no descriptor open) and recording local
-  //     open-handle deferral so the last `Close` reclaims (a descriptor is
-  //     still open). The durable orphan candidate is already in metadata.
-  //
-  // Permission and sticky-bit checks are enforced atomically by the
-  // metadata engine, so we don't repeat them here.
-  auto *meta = VolumeImpl::Instance().meta_engine();
-
-  metadata::UnlinkResult result;
-  auto status = meta->Unlink(parent, name, &result);
+  // The metadata mutation owns last-link detection and publishes durable
+  // orphan work atomically. Foreground unlink never performs object-store
+  // deletion; it only nudges the background reclaimer after commit.
+  auto status = VolumeImpl::Instance().meta_engine()->Unlink(parent, name);
   if (!status.ok()) {
     return status;
   }
-
-  // Hardlink still alive? Then the inode (and its chunks) belong to
-  // another name; leave them alone.
-  if (result.post_nlink > 0) {
-    return utils::Status::OK();
-  }
-
-  auto handle = vfs::InodeHandleManager::Instance().Get(result.unlinked_ino, /*create_if_missing=*/true);
-  if (!handle) {
-    return utils::Status::Internal("failed to get InodeHandle");
-  }
-  // ReclaimData removes both the chunk objects (via the data engine) and the
-  // inode (via the metadata engine) — or, when a descriptor still holds the
-  // inode, defers that to the last `Close`. The decision is taken under the
-  // handle's state mutex, so it cannot race an open that is being set up.
-  status = handle->ReclaimData();
-  if (!status.ok()) {
-    // The name is gone, so the unlink itself committed. The orphan candidate
-    // (and, once prepared, its frozen pending record) is durable, so
-    // reconciliation retries the cleanup; failing the syscall here would
-    // misreport a committed unlink.
-    SWORDFS_LOG_ERROR << "Unlink: reclaim of inode " << result.unlinked_ino << " failed: " << status.message();
-  }
+  Reclaimer::Instance().Wake();
   return utils::Status::OK();
 }
 
@@ -187,39 +152,13 @@ utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent, const char *
 utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name, fuse_ino_t newparent, const char *newname,
                               unsigned int flags) {
   RenameFlag rename_flags = FromFuseRenameFlags(flags);
-  auto meta = VolumeImpl::Instance().meta_engine();
-  metadata::RenameResult result;
-  auto status = meta->Rename(parent, name, newparent, newname, rename_flags, &result);
+  auto status = VolumeImpl::Instance().meta_engine()->Rename(parent, name, newparent, newname, rename_flags);
   if (!status.ok()) {
     return status;
   }
-
-  // A rename-overwrite can orphan the replaced file just like unlink(2).
-  // The metadata transaction deliberately does not reclaim it because it
-  // cannot know whether an open file descriptor still references it, but it
-  // does publish the overwritten inode as an orphan candidate once its nlink
-  // reaches zero. Let InodeHandle perform the same data/inode cleanup used by
-  // unlink: reconciliation retries it if it fails, and it can never race a
-  // Link because preparation rechecks nlink under the metadata transaction.
-  if (result.overwritten_ino != 0 && result.overwritten_post_nlink == 0) {
-    auto handle = vfs::InodeHandleManager::Instance().Get(result.overwritten_ino, /*create_if_missing=*/true);
-    if (!handle) {
-      // The metadata rename has already committed, so returning an error
-      // here would report a failed rename for a state that is already
-      // visible. Cleanup is best-effort after the metadata transaction;
-      // reconciliation retries it.
-      SWORDFS_LOG_ERROR << "Rename: failed to get InodeHandle for overwritten "
-                        << "inode " << result.overwritten_ino << "; rename has already committed";
-    } else {
-      // ReclaimData reclaims the replaced inode now, or defers the cleanup to
-      // the last `Close` when a descriptor still holds it.
-      auto reclaim_status = handle->ReclaimData();
-      if (!reclaim_status.ok()) {
-        SWORDFS_LOG_ERROR << "Rename: cleanup of overwritten inode " << result.overwritten_ino
-                          << " failed: " << reclaim_status.message();
-      }
-    }
-  }
+  // A non-overwriting rename creates no orphan, but Wake() is deliberately
+  // cheap/coalesced and keeps VFS independent of metadata link-count details.
+  Reclaimer::Instance().Wake();
   return utils::Status::OK();
 }
 
@@ -291,7 +230,12 @@ utils::Status VfsImpl::Release(fuse_ino_t ino, uint64_t fh) {
   if (!handle) {
     return Status::InvalidArgument("unknown file fh=" + std::to_string(fh));
   }
-  return handle->Release();
+  auto status = handle->Release();
+  // A close may have released the last local reference of a durable orphan.
+  // Wake is cheap/coalesced and deliberately does not ask InodeHandle whether
+  // this inode is orphaned; durable metadata remains the sole work authority.
+  Reclaimer::Instance().Wake();
+  return status;
 }
 
 utils::Status VfsImpl::FSync(fuse_ino_t ino, int datasync, uint64_t fh) {

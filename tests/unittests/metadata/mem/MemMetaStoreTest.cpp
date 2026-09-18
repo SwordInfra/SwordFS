@@ -217,8 +217,8 @@ FIBER_TEST_F(MemMetaStoreTest, MoveEntryOverwriteWorksWithoutResultOutput) {
   ASSERT_TRUE(Add(src_dir.ino, "f", kRegFile, &source).ok());
   ASSERT_TRUE(Add(dst_dir.ino, "f", kRegFile, &victim).ok());
 
-  const auto status = store_->Transact(
-      [&](MemMetaTxn &txn) { return txn.MoveEntry(src_dir.ino, "f", dst_dir.ino, "f", true, nullptr); });
+  const auto status =
+      store_->Transact([&](MemMetaTxn &txn) { return txn.MoveEntry(src_dir.ino, "f", dst_dir.ino, "f", true); });
   ASSERT_TRUE(status.ok()) << status.message();
 
   SwordFsInode moved;
@@ -237,9 +237,8 @@ FIBER_TEST_F(MemMetaStoreTest, MoveEntryOverwriteWorksWithoutResultOutput) {
 
 FIBER_TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   // Unlink only detaches the directory entry and decrements nlink.
-  // The inode survives until the caller (VfsImpl::Unlink or
-  // InodeHandle::Close) calls ReclaimData. Callers that want immediate
-  // cleanup of a single-name unlink invoke ReclaimData themselves.
+  // The inode survives until the background reclaimer crosses the metadata
+  // point of no return. Foreground unlink and last-close no longer execute GC.
   SwordFsInode f;
   Add(kRoot, "f", kRegFile, &f);
   InodeID ino = f.ino;
@@ -258,11 +257,12 @@ FIBER_TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
 
   // Caller follows up with the reclaim protocol: preparation freezes the
   // (empty) work and drops the live inode, completion removes the record.
-  ReclaimWork work;
+  std::optional<ReclaimWork> work;
   status = store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, &work); });
   ASSERT_TRUE(status.ok());
-  EXPECT_EQ(work.ino, ino);
-  EXPECT_TRUE(work.chunks.empty());
+  ASSERT_TRUE(work.has_value());
+  EXPECT_EQ(work->ino, ino);
+  EXPECT_TRUE(work->chunks.empty());
   EXPECT_EQ(count(), 1);
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 
@@ -507,11 +507,11 @@ FIBER_TEST_F(MemMetaStoreTest, TruncateChunksClampsStraddlingChunk) {
 // Reclaim (open-unlink)
 // ────────────────────────────────────────────────────────────────
 
-FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimMissingInodeIsNotFound) {
-  ReclaimWork work;
+FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimMissingInodeIsNoOp) {
+  std::optional<ReclaimWork> work;
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(999, &work); });
-  EXPECT_TRUE(status.IsNotFound());
-  EXPECT_EQ(work.ino, 0U);
+  EXPECT_TRUE(status.ok());
+  EXPECT_FALSE(work.has_value());
 
   // Completing a reclaim that was never prepared is a no-op, not an error.
   status = store_->Transact([&](MemMetaTxn &txn) { return txn.CompleteReclaim(999); });
@@ -528,10 +528,10 @@ FIBER_TEST_F(MemMetaStoreTest, ReclaimPrimitivesValidateOutputsAndRejectDirector
 
   // Directories are never candidates for this file-data reclaim lifecycle.
   // Exercise that branch independently from the regular-file nlink>0 case.
-  ReclaimWork work;
+  std::optional<ReclaimWork> work;
   const auto status = store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(kRoot, &work); });
-  EXPECT_TRUE(status.IsNotFound()) << status.message();
-  EXPECT_EQ(work.ino, 0U);
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_FALSE(work.has_value());
 }
 
 FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimFreezesWorkAndDropsOrphanedInode) {
@@ -559,26 +559,28 @@ FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimFreezesWorkAndDropsOrphanedInode) {
 
   // Preparation freezes the authoritative object identity and drops the live
   // inode in one transaction.
-  ReclaimWork work;
+  std::optional<ReclaimWork> work;
   status = store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, &work); });
   ASSERT_TRUE(status.ok());
-  EXPECT_EQ(work.ino, ino);
-  ASSERT_EQ(work.chunks.size(), 1U);
-  EXPECT_EQ(work.chunks[0].descriptor, MakeChunk(0, 0, 100));
-  EXPECT_EQ(work.chunks[0].key, swordfs::chunk::FormatChunkObjectKey(ino, 0, 1));
+  ASSERT_TRUE(work.has_value());
+  EXPECT_EQ(work->ino, ino);
+  ASSERT_EQ(work->chunks.size(), 1U);
+  EXPECT_EQ(work->chunks[0].descriptor, MakeChunk(0, 0, 100));
+  EXPECT_EQ(work->chunks[0].key, swordfs::chunk::FormatChunkObjectKey(ino, 0, 1));
   EXPECT_EQ(count(), 1);
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 
-  std::vector<InodeID> pending;
+  std::vector<ReclaimWork> pending;
   ASSERT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.ListPendingReclaims(&pending); }).ok());
-  EXPECT_EQ(pending, std::vector<InodeID>{ino});
+  ASSERT_EQ(pending.size(), 1U);
+  EXPECT_EQ(pending[0], *work);
   // The orphan marker is gone too: the candidate list and the frozen record
   // are never both live for the same inode.
   ASSERT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.ListOrphanCandidates(&candidates); }).ok());
   EXPECT_TRUE(candidates.empty());
 
   // Replaying preparation returns the same frozen work without changing it.
-  ReclaimWork replay;
+  std::optional<ReclaimWork> replay;
   ASSERT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, &replay); }).ok());
   EXPECT_EQ(replay, work);
 
@@ -594,10 +596,10 @@ FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimKeepsLinkedInode) {
   Add(kRoot, "f", kRegFile, &f);
   InodeID ino = f.ino;  // nlink == 1 — not orphaned
 
-  ReclaimWork work;
+  std::optional<ReclaimWork> work;
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, &work); });
-  EXPECT_TRUE(status.IsNotFound());
-  EXPECT_EQ(work.ino, 0U);
+  EXPECT_TRUE(status.ok());
+  EXPECT_FALSE(work.has_value());
   size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(count, 2);
   SwordFsInode out;

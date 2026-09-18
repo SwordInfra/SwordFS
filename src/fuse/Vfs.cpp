@@ -95,21 +95,10 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
     SWORDFS_LOG_ERROR << "Failed to reset inode-handle registry during mount initialization";
   }
 
-  // Mount-time reconciliation of crash-left reclaim work: the orphan
-  // candidates and frozen pending records persisted by a previous mount (or
-  // by an earlier failure of this one) are promoted/retried as soon as the
-  // fiber runtime exists. The metadata state is durable, so this is where a
-  // crash between "last name gone" and "objects deleted" is recovered. The
-  // periodic retry thread then covers failures that happen from here on.
-  ::swordfs::utils::RunInFiber(
-      [] {
-        auto status = ::swordfs::vfs::Reclaimer::Instance().Reconcile();
-        if (!status.ok()) {
-          SWORDFS_LOG_WARN << "startup reclaim reconciliation: " << status.message();
-        }
-      },
-      [] { SWORDFS_LOG_ERROR << "Failed to admit startup reclaim reconciliation into the fiber runtime"; });
-  ::swordfs::vfs::Reclaimer::Instance().StartPeriodicRetry();
+  // The reclaim worker runs one pass immediately, then on foreground wakeups
+  // and periodic safety scans. Durable metadata remains the restart authority;
+  // there is no separate startup-reconciliation path racing the worker.
+  ::swordfs::vfs::Reclaimer::Instance().Start();
 
   // Writeback cache is intentionally disabled: with it enabled the kernel
   // answers writes from its own page cache, which masks daemon-side
@@ -137,9 +126,9 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
 void VfsHookFactory::SwordFsDestroy(void *userdata) {
   (void)userdata;
   SWORDFS_LOG_INFO << "SwordFS filesystem unmounted";
-  // Stop the reclaim retry thread before the fiber runtime it borrows is torn
+  // Stop the reclaim worker before the fiber runtime it borrows is torn
   // down (and before the engines go away in VolumeImpl::Shutdown).
-  ::swordfs::vfs::Reclaimer::Instance().StopPeriodicRetry();
+  ::swordfs::vfs::Reclaimer::Instance().Stop();
   ::swordfs::utils::ShutdownFiberRuntime();
 }
 

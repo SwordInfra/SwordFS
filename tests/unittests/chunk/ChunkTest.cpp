@@ -30,14 +30,12 @@ using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
-using swordfs::metadata::RenameResult;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsAttr;
 using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
-using swordfs::metadata::UnlinkResult;
 using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
 using swordfs::utils::Status;
@@ -76,13 +74,13 @@ class MissingMetaEngine final : public IMetaEngine {
   Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view, UnlinkResult *) override {
+  Status Unlink(InodeID, std::string_view) override {
     return Status::OK();
   }
   Status RmDir(InodeID, std::string_view) override {
     return Status::OK();
   }
-  Status Rename(InodeID, std::string_view, InodeID, std::string_view, RenameFlag, RenameResult *) override {
+  Status Rename(InodeID, std::string_view, InodeID, std::string_view, RenameFlag) override {
     return Status::OK();
   }
   Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField, SwordFsInode *) override {
@@ -106,8 +104,9 @@ class MissingMetaEngine final : public IMetaEngine {
   Status Open(InodeID) override {
     return Status::OK();
   }
-  Status PrepareReclaim(InodeID, swordfs::metadata::ReclaimWork *) override {
-    return Status::NotFound("no reclaimable inode");
+  Status PrepareReclaim(InodeID, std::optional<swordfs::metadata::ReclaimWork> *work) override {
+    work->reset();
+    return Status::OK();
   }
   Status CompleteReclaim(InodeID) override {
     return Status::OK();
@@ -115,7 +114,7 @@ class MissingMetaEngine final : public IMetaEngine {
   Status VisitOrphanCandidates(const swordfs::metadata::InodeVisitorFn &) override {
     return Status::OK();
   }
-  Status VisitPendingReclaims(const swordfs::metadata::InodeVisitorFn &) override {
+  Status VisitPendingReclaims(const swordfs::metadata::ReclaimVisitorFn &) override {
     return Status::OK();
   }
   Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {

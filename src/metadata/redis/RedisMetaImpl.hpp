@@ -36,10 +36,10 @@ class RedisMetaImpl : public IMetaEngine {
   Status GetInode(InodeID ino, SwordFsInode *out) override;
   Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
-  Status Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result) override;
+  Status Unlink(InodeID parent_ino, std::string_view name) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
   Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
-                RenameFlag flags, RenameResult *result) override;
+                RenameFlag flags) override;
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override;
   Status StatFs(SwordFsStatFs *stbuf) override;
   Status Access(InodeID ino, uint32_t mask) override;
@@ -47,10 +47,10 @@ class RedisMetaImpl : public IMetaEngine {
   Status Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) override;
   Status Readlink(InodeID ino, std::string *target) override;
   Status Open(InodeID ino) override;
-  Status PrepareReclaim(InodeID ino, ReclaimWork *work) override;
+  Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) override;
   Status CompleteReclaim(InodeID ino) override;
   Status VisitOrphanCandidates(const InodeVisitorFn &visitor) override;
-  Status VisitPendingReclaims(const InodeVisitorFn &visitor) override;
+  Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) override;
   Status AllocateChunkRevision(ChunkRevision *revision) override;
   Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) override;
   Status OpenDir(InodeID ino, DirIteratorPtr *iterator) override;

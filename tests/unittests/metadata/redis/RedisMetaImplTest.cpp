@@ -39,7 +39,6 @@ using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsVolume;
-using swordfs::metadata::UnlinkResult;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -193,8 +192,7 @@ FIBER_TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesSamePare
   ASSERT_TRUE(impl_->GetInode(kRootInodeId, &root).ok());
   ASSERT_EQ(root.attr.nlink, 4U);
 
-  ASSERT_TRUE(
-      impl_->Rename(kRootInodeId, "src", kRootInodeId, "dst", swordfs::metadata::RenameFlag::kNone, nullptr).ok());
+  ASSERT_TRUE(impl_->Rename(kRootInodeId, "src", kRootInodeId, "dst", swordfs::metadata::RenameFlag::kNone).ok());
 
   ASSERT_TRUE(impl_->GetInode(kRootInodeId, &root).ok());
   EXPECT_EQ(root.attr.nlink, 3U);
@@ -210,7 +208,7 @@ FIBER_TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesCrossPar
   ASSERT_TRUE(impl_->MkDir(dir_a.ino, "src", 0777, &src).ok());
   ASSERT_TRUE(impl_->MkDir(dir_b.ino, "dst", 0777, &dst).ok());
 
-  ASSERT_TRUE(impl_->Rename(dir_a.ino, "src", dir_b.ino, "dst", swordfs::metadata::RenameFlag::kNone, nullptr).ok());
+  ASSERT_TRUE(impl_->Rename(dir_a.ino, "src", dir_b.ino, "dst", swordfs::metadata::RenameFlag::kNone).ok());
 
   SwordFsInode old_parent;
   SwordFsInode new_parent;
@@ -355,27 +353,33 @@ FIBER_TEST_F(RedisMetaImplTest, UnlinkAndRmdirCoverSuccessAndTypeChecks) {
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
 
-  EXPECT_EQ(impl_->Unlink(kRootInodeId, ".", nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->Unlink(kRootInodeId, ".").code(), Status::kInvalidArgument);
   EXPECT_EQ(impl_->RmDir(kRootInodeId, "..").code(), Status::kInvalidArgument);
-  EXPECT_EQ(impl_->Unlink(kRootInodeId, "dir", nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->Unlink(kRootInodeId, "dir").code(), Status::kInvalidArgument);
   EXPECT_TRUE(impl_->RmDir(kRootInodeId, "file").IsNotDirectory());
 
-  UnlinkResult unlink_result;
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", &unlink_result).ok());
-  EXPECT_EQ(unlink_result.unlinked_ino, file.ino);
-  EXPECT_EQ(unlink_result.post_nlink, 0U);
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
   EXPECT_TRUE(impl_->Lookup(kRootInodeId, "file", &file).IsNotFound());
-  ReclaimWork work;
+  std::vector<InodeID> orphans;
+  ASSERT_TRUE(impl_
+                  ->VisitOrphanCandidates([&](InodeID ino) {
+                    orphans.push_back(ino);
+                    return Status::OK();
+                  })
+                  .ok());
+  EXPECT_EQ(orphans, std::vector<InodeID>{file.ino});
+  std::optional<ReclaimWork> work;
   ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
-  EXPECT_EQ(work.ino, file.ino);
-  EXPECT_TRUE(work.chunks.empty());
+  ASSERT_TRUE(work.has_value());
+  EXPECT_EQ(work->ino, file.ino);
+  EXPECT_TRUE(work->chunks.empty());
   ASSERT_TRUE(impl_->CompleteReclaim(file.ino).ok());
   EXPECT_TRUE(impl_->GetInode(file.ino, &file).IsNotFound());
 
   SwordFsInode child;
   ASSERT_TRUE(impl_->Create(dir.ino, "child", 0644, &child).ok());
   EXPECT_TRUE(impl_->RmDir(kRootInodeId, "dir").IsNotEmpty());
-  ASSERT_TRUE(impl_->Unlink(dir.ino, "child", nullptr).ok());
+  ASSERT_TRUE(impl_->Unlink(dir.ino, "child").ok());
   ASSERT_TRUE(impl_->RmDir(kRootInodeId, "dir").ok());
 }
 
@@ -385,46 +389,44 @@ FIBER_TEST_F(RedisMetaImplTest, RenameCoversMoveOverwriteNoReplaceAndExchange) {
   ASSERT_TRUE(impl_->Create(kRootInodeId, "first", 0644, &first).ok());
   ASSERT_TRUE(impl_->Create(kRootInodeId, "second", 0644, &second).ok());
 
-  EXPECT_TRUE(
-      impl_->Rename(kRootInodeId, ".", kRootInodeId, "x", swordfs::metadata::RenameFlag::kNone, nullptr).IsBusy());
+  EXPECT_TRUE(impl_->Rename(kRootInodeId, ".", kRootInodeId, "x", swordfs::metadata::RenameFlag::kNone).IsBusy());
   const std::string long_name(256, 'x');
-  EXPECT_TRUE(
-      impl_->Rename(kRootInodeId, "first", kRootInodeId, long_name, swordfs::metadata::RenameFlag::kNone, nullptr)
-          .IsNameTooLong());
-  EXPECT_TRUE(
-      impl_->Rename(kRootInodeId, "first", kRootInodeId, "second", swordfs::metadata::RenameFlag::kNoReplace, nullptr)
-          .IsAlreadyExists());
+  EXPECT_TRUE(impl_->Rename(kRootInodeId, "first", kRootInodeId, long_name, swordfs::metadata::RenameFlag::kNone)
+                  .IsNameTooLong());
+  EXPECT_TRUE(impl_->Rename(kRootInodeId, "first", kRootInodeId, "second", swordfs::metadata::RenameFlag::kNoReplace)
+                  .IsAlreadyExists());
   EXPECT_EQ(impl_
                 ->Rename(kRootInodeId, "first", kRootInodeId, "second",
-                         swordfs::metadata::RenameFlag::kNoReplace | swordfs::metadata::RenameFlag::kExchange, nullptr)
+                         swordfs::metadata::RenameFlag::kNoReplace | swordfs::metadata::RenameFlag::kExchange)
                 .code(),
             Status::kInvalidArgument);
-  EXPECT_EQ(impl_
-                ->Rename(kRootInodeId, "first", kRootInodeId, "second",
-                         static_cast<swordfs::metadata::RenameFlag>(1u << 7), nullptr)
-                .code(),
-            Status::kInvalidArgument);
+  EXPECT_EQ(
+      impl_->Rename(kRootInodeId, "first", kRootInodeId, "second", static_cast<swordfs::metadata::RenameFlag>(1u << 7))
+          .code(),
+      Status::kInvalidArgument);
 
-  swordfs::metadata::RenameResult result;
-  ASSERT_TRUE(
-      impl_->Rename(kRootInodeId, "first", kRootInodeId, "second", swordfs::metadata::RenameFlag::kNone, &result).ok());
-  EXPECT_EQ(result.overwritten_ino, second.ino);
-  EXPECT_EQ(result.overwritten_post_nlink, 0U);
+  ASSERT_TRUE(impl_->Rename(kRootInodeId, "first", kRootInodeId, "second", swordfs::metadata::RenameFlag::kNone).ok());
+  std::vector<InodeID> overwrite_orphans;
+  ASSERT_TRUE(impl_
+                  ->VisitOrphanCandidates([&](InodeID ino) {
+                    overwrite_orphans.push_back(ino);
+                    return Status::OK();
+                  })
+                  .ok());
+  EXPECT_EQ(overwrite_orphans, std::vector<InodeID>{second.ino});
 
   SwordFsInode third;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "third", 0644, &third).ok());
   ASSERT_TRUE(
-      impl_->Rename(kRootInodeId, "second", kRootInodeId, "third", swordfs::metadata::RenameFlag::kExchange, nullptr)
-          .ok());
+      impl_->Rename(kRootInodeId, "second", kRootInodeId, "third", swordfs::metadata::RenameFlag::kExchange).ok());
   SwordFsInode found;
   ASSERT_TRUE(impl_->Lookup(kRootInodeId, "second", &found).ok());
   EXPECT_EQ(found.ino, third.ino);
   ASSERT_TRUE(impl_->Lookup(kRootInodeId, "third", &found).ok());
   EXPECT_EQ(found.ino, first.ino);
 
-  EXPECT_TRUE(
-      impl_->Rename(kRootInodeId, "third", kRootInodeId, "missing", swordfs::metadata::RenameFlag::kExchange, nullptr)
-          .IsNotFound());
+  EXPECT_TRUE(impl_->Rename(kRootInodeId, "third", kRootInodeId, "missing", swordfs::metadata::RenameFlag::kExchange)
+                  .IsNotFound());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, RenameRejectsTypeMismatchAndDirectoryCycles) {
@@ -433,19 +435,17 @@ FIBER_TEST_F(RedisMetaImplTest, RenameRejectsTypeMismatchAndDirectoryCycles) {
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
 
-  EXPECT_TRUE(impl_->Rename(kRootInodeId, "file", kRootInodeId, "dir", swordfs::metadata::RenameFlag::kNone, nullptr)
-                  .IsDirectory());
-  EXPECT_TRUE(impl_->Rename(kRootInodeId, "dir", kRootInodeId, "file", swordfs::metadata::RenameFlag::kNone, nullptr)
-                  .IsNotDirectory());
-  EXPECT_EQ(impl_->Rename(kRootInodeId, "dir", kRootInodeId, "file", swordfs::metadata::RenameFlag::kExchange, nullptr)
-                .code(),
+  EXPECT_TRUE(
+      impl_->Rename(kRootInodeId, "file", kRootInodeId, "dir", swordfs::metadata::RenameFlag::kNone).IsDirectory());
+  EXPECT_TRUE(
+      impl_->Rename(kRootInodeId, "dir", kRootInodeId, "file", swordfs::metadata::RenameFlag::kNone).IsNotDirectory());
+  EXPECT_EQ(impl_->Rename(kRootInodeId, "dir", kRootInodeId, "file", swordfs::metadata::RenameFlag::kExchange).code(),
             Status::kInvalidArgument);
 
   SwordFsInode child;
   ASSERT_TRUE(impl_->MkDir(dir.ino, "child", 0755, &child).ok());
-  EXPECT_EQ(
-      impl_->Rename(kRootInodeId, "dir", child.ino, "moved", swordfs::metadata::RenameFlag::kNone, nullptr).code(),
-      Status::kInvalidArgument);
+  EXPECT_EQ(impl_->Rename(kRootInodeId, "dir", child.ino, "moved", swordfs::metadata::RenameFlag::kNone).code(),
+            Status::kInvalidArgument);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, SetAttrAccessAndStatFsCoverCommonFields) {
@@ -564,16 +564,19 @@ FIBER_TEST_F(RedisMetaImplTest, ReclaimKeepsLinkedInodesAndRemovesOrphans) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   // A linked inode is never reclaimable: preparation must change nothing.
-  ReclaimWork work;
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).IsNotFound());
+  std::optional<ReclaimWork> work;
+  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
+  EXPECT_FALSE(work.has_value());
   ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
 
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
   ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
+  ASSERT_TRUE(work.has_value());
   ASSERT_TRUE(impl_->CompleteReclaim(file.ino).ok());
   EXPECT_TRUE(impl_->GetInode(file.ino, &file).IsNotFound());
   // Both steps are idempotent: repeating them is a no-op, not an error.
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).IsNotFound());
+  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
+  EXPECT_FALSE(work.has_value());
   EXPECT_TRUE(impl_->CompleteReclaim(file.ino).ok());
 }
 
@@ -601,10 +604,10 @@ FIBER_TEST_F(RedisMetaImplTest, PermissionChecksRejectMutationsForUnprivilegedCa
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
 
   folly::fibers::local<SwordFsContext>() = ctx;
-  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).IsPermission());
+  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file").IsPermission());
   EXPECT_TRUE(impl_->RmDir(kRootInodeId, "dir").IsPermission());
-  EXPECT_TRUE(impl_->Rename(kRootInodeId, "file", kRootInodeId, "moved", swordfs::metadata::RenameFlag::kNone, nullptr)
-                  .IsPermission());
+  EXPECT_TRUE(
+      impl_->Rename(kRootInodeId, "file", kRootInodeId, "moved", swordfs::metadata::RenameFlag::kNone).IsPermission());
   EXPECT_TRUE(impl_->Link(file.ino, kRootInodeId, "hard", nullptr).IsPermission());
 }
 
@@ -628,10 +631,10 @@ FIBER_TEST_F(RedisMetaImplTest, StickyDirectoryProtectsEntriesOwnedByOtherUsers)
   other.uid = 1002;
   other.gid = 1002;
   folly::fibers::local<SwordFsContext>() = other;
-  EXPECT_TRUE(impl_->Unlink(sticky.ino, "file", nullptr).IsPermission());
+  EXPECT_TRUE(impl_->Unlink(sticky.ino, "file").IsPermission());
   EXPECT_TRUE(impl_->RmDir(sticky.ino, "dir").IsPermission());
-  EXPECT_TRUE(impl_->Rename(sticky.ino, "file", sticky.ino, "other", swordfs::metadata::RenameFlag::kNone, nullptr)
-                  .IsPermission());
+  EXPECT_TRUE(
+      impl_->Rename(sticky.ino, "file", sticky.ino, "other", swordfs::metadata::RenameFlag::kNone).IsPermission());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, RenameExchangeDirectoriesAcrossParentsUpdatesParents) {
@@ -644,7 +647,7 @@ FIBER_TEST_F(RedisMetaImplTest, RenameExchangeDirectoriesAcrossParentsUpdatesPar
   ASSERT_TRUE(impl_->MkDir(left.ino, "a", 0755, &left_dir).ok());
   ASSERT_TRUE(impl_->MkDir(right.ino, "b", 0755, &right_dir).ok());
 
-  ASSERT_TRUE(impl_->Rename(left.ino, "a", right.ino, "b", swordfs::metadata::RenameFlag::kExchange, nullptr).ok());
+  ASSERT_TRUE(impl_->Rename(left.ino, "a", right.ino, "b", swordfs::metadata::RenameFlag::kExchange).ok());
 
   SwordFsInode found;
   ASSERT_TRUE(impl_->Lookup(left.ino, "a", &found).ok());
@@ -660,11 +663,9 @@ FIBER_TEST_F(RedisMetaImplTest, RenameSameInodeThroughHardLinkIsNoOp) {
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   ASSERT_TRUE(impl_->Link(file.ino, kRootInodeId, "alias", nullptr).ok());
 
+  ASSERT_TRUE(impl_->Rename(kRootInodeId, "file", kRootInodeId, "alias", swordfs::metadata::RenameFlag::kNone).ok());
   ASSERT_TRUE(
-      impl_->Rename(kRootInodeId, "file", kRootInodeId, "alias", swordfs::metadata::RenameFlag::kNone, nullptr).ok());
-  ASSERT_TRUE(
-      impl_->Rename(kRootInodeId, "file", kRootInodeId, "alias", swordfs::metadata::RenameFlag::kExchange, nullptr)
-          .ok());
+      impl_->Rename(kRootInodeId, "file", kRootInodeId, "alias", swordfs::metadata::RenameFlag::kExchange).ok());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, SetAttrNowAndGrowPreserveExpectedMetadata) {
@@ -909,8 +910,7 @@ FIBER_TEST_F(RedisMetaImplTest, UnlinkRejectsLinkCountUnderflowWithoutRemovingEn
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.Inode(file.ino), value); });
 
-  UnlinkResult result;
-  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file", &result).IsMalformed());
+  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file").IsMalformed());
   EXPECT_TRUE(RunWithRawRedisFromFiber(
       [&](sw::redis::Redis &redis) { return redis.hexists(key.Directory(kRootInodeId), "file"); }));
 }
@@ -944,10 +944,9 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedParentMetadataIsRejectedAcrossMutatingO
   EXPECT_TRUE(impl_->Lookup(kRootInodeId, "x", &out).IsMalformed());
   EXPECT_TRUE(impl_->Create(kRootInodeId, "x", 0644, nullptr).IsMalformed());
   EXPECT_TRUE(impl_->MkDir(kRootInodeId, "x", 0755, nullptr).IsMalformed());
-  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "x", nullptr).IsMalformed());
+  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "x").IsMalformed());
   EXPECT_TRUE(impl_->RmDir(kRootInodeId, "x").IsMalformed());
-  EXPECT_TRUE(
-      impl_->Rename(kRootInodeId, "x", kRootInodeId, "y", swordfs::metadata::RenameFlag::kNone, nullptr).IsMalformed());
+  EXPECT_TRUE(impl_->Rename(kRootInodeId, "x", kRootInodeId, "y", swordfs::metadata::RenameFlag::kNone).IsMalformed());
   EXPECT_TRUE(impl_->Symlink(kRootInodeId, "x", "target", nullptr).IsMalformed());
   EXPECT_TRUE(impl_->Access(kRootInodeId, R_OK).IsMalformed());
 }
@@ -962,19 +961,20 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedInodeMetadataIsRejectedAcrossReadAndWri
   SwordFsInode out;
   SwordFsAttr attr;
   SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 1, .size = 1};
-  ReclaimWork reclaim_work;
+  std::optional<ReclaimWork> reclaim_work;
   std::string target;
   EXPECT_TRUE(impl_->Lookup(kRootInodeId, "file", &out).IsMalformed());
   EXPECT_TRUE(impl_->GetInode(file.ino, &out).IsMalformed());
-  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).IsMalformed());
-  EXPECT_TRUE(impl_->Rename(kRootInodeId, "file", kRootInodeId, "moved", swordfs::metadata::RenameFlag::kNone, nullptr)
-                  .IsMalformed());
+  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file").IsMalformed());
+  EXPECT_TRUE(
+      impl_->Rename(kRootInodeId, "file", kRootInodeId, "moved", swordfs::metadata::RenameFlag::kNone).IsMalformed());
   EXPECT_TRUE(impl_->SetAttr(file.ino, attr, SetAttrField::kMode, nullptr).IsMalformed());
   EXPECT_TRUE(impl_->Access(file.ino, R_OK).IsMalformed());
   EXPECT_TRUE(impl_->Link(file.ino, kRootInodeId, "hard", nullptr).IsMalformed());
   EXPECT_TRUE(impl_->Readlink(file.ino, &target).IsMalformed());
   EXPECT_TRUE(impl_->Open(file.ino).IsMalformed());
   EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &reclaim_work).IsMalformed());
+  EXPECT_FALSE(reclaim_work.has_value());
   EXPECT_TRUE(impl_->VisitChunks(file.ino, [](const SwordFsChunk &) { return Status::OK(); }).IsMalformed());
   EXPECT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk).IsMalformed());
   EXPECT_TRUE(impl_->Truncate(file.ino, 1).IsMalformed());
@@ -994,10 +994,10 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedDirectoryEntryIsRejectedByEntryConsumer
   EXPECT_TRUE(impl_->MkDir(kRootInodeId, "file", 0755, nullptr).IsMalformed());
   EXPECT_TRUE(impl_->Symlink(kRootInodeId, "file", "target", nullptr).IsMalformed());
   EXPECT_TRUE(impl_->Link(file.ino, kRootInodeId, "file", nullptr).IsMalformed());
-  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).IsMalformed());
+  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file").IsMalformed());
   EXPECT_TRUE(impl_->RmDir(kRootInodeId, "file").IsMalformed());
-  EXPECT_TRUE(impl_->Rename(kRootInodeId, "file", kRootInodeId, "moved", swordfs::metadata::RenameFlag::kNone, nullptr)
-                  .IsMalformed());
+  EXPECT_TRUE(
+      impl_->Rename(kRootInodeId, "file", kRootInodeId, "moved", swordfs::metadata::RenameFlag::kNone).IsMalformed());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, MalformedRenameTargetInodeIsRejected) {
@@ -1009,12 +1009,10 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedRenameTargetInodeIsRejected) {
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.Inode(target.ino), "malformed"); });
 
-  EXPECT_TRUE(
-      impl_->Rename(kRootInodeId, "source", kRootInodeId, "target", swordfs::metadata::RenameFlag::kNone, nullptr)
-          .IsMalformed());
-  EXPECT_TRUE(
-      impl_->Rename(kRootInodeId, "source", kRootInodeId, "target", swordfs::metadata::RenameFlag::kExchange, nullptr)
-          .IsMalformed());
+  EXPECT_TRUE(impl_->Rename(kRootInodeId, "source", kRootInodeId, "target", swordfs::metadata::RenameFlag::kNone)
+                  .IsMalformed());
+  EXPECT_TRUE(impl_->Rename(kRootInodeId, "source", kRootInodeId, "target", swordfs::metadata::RenameFlag::kExchange)
+                  .IsMalformed());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, MalformedChunkMetadataIsRejectedByVisitorsAndTruncate) {
@@ -1055,12 +1053,11 @@ FIBER_TEST_F(RedisMetaImplTest, MissingMetadataReturnsNotFoundConsistently) {
   EXPECT_TRUE(impl_->Lookup(kMissingIno, "x", &inode).IsNotFound());
   EXPECT_TRUE(impl_->GetInode(kMissingIno, &inode).IsNotFound());
   EXPECT_TRUE(impl_->OpenDir(kMissingIno, &iterator).IsNotFound());
-  EXPECT_TRUE(impl_->Unlink(kMissingIno, "x", nullptr).IsNotFound());
+  EXPECT_TRUE(impl_->Unlink(kMissingIno, "x").IsNotFound());
   EXPECT_TRUE(impl_->RmDir(kMissingIno, "x").IsNotFound());
+  EXPECT_TRUE(impl_->Rename(kMissingIno, "x", kRootInodeId, "y", swordfs::metadata::RenameFlag::kNone).IsNotFound());
   EXPECT_TRUE(
-      impl_->Rename(kMissingIno, "x", kRootInodeId, "y", swordfs::metadata::RenameFlag::kNone, nullptr).IsNotFound());
-  EXPECT_TRUE(impl_->Rename(kRootInodeId, "missing", kRootInodeId, "y", swordfs::metadata::RenameFlag::kNone, nullptr)
-                  .IsNotFound());
+      impl_->Rename(kRootInodeId, "missing", kRootInodeId, "y", swordfs::metadata::RenameFlag::kNone).IsNotFound());
   EXPECT_TRUE(impl_->SetAttr(kMissingIno, attr, SetAttrField::kMode, nullptr).IsNotFound());
   EXPECT_TRUE(impl_->Access(kMissingIno, R_OK).IsNotFound());
   EXPECT_TRUE(impl_->Symlink(kMissingIno, "x", "target", nullptr).IsNotFound());
@@ -1084,10 +1081,9 @@ FIBER_TEST_F(RedisMetaImplTest, RenameChecksNewParentAndNonEmptyTargetDirectory)
   SwordFsInode child;
   ASSERT_TRUE(impl_->Create(target.ino, "child", 0644, &child).ok());
 
-  EXPECT_TRUE(impl_
-                  ->Rename(source_parent.ino, "source", target_parent.ino, "target",
-                           swordfs::metadata::RenameFlag::kNone, nullptr)
-                  .IsNotEmpty());
+  EXPECT_TRUE(
+      impl_->Rename(source_parent.ino, "source", target_parent.ino, "target", swordfs::metadata::RenameFlag::kNone)
+          .IsNotEmpty());
 
   SwordFsAttr attr = target_parent.attr;
   attr.mode = S_IFDIR | 0555;
@@ -1096,10 +1092,9 @@ FIBER_TEST_F(RedisMetaImplTest, RenameChecksNewParentAndNonEmptyTargetDirectory)
   ctx.uid = 2000;
   ctx.gid = 2000;
   folly::fibers::local<SwordFsContext>() = ctx;
-  EXPECT_TRUE(impl_
-                  ->Rename(source_parent.ino, "source", target_parent.ino, "moved",
-                           swordfs::metadata::RenameFlag::kNone, nullptr)
-                  .IsPermission());
+  EXPECT_TRUE(
+      impl_->Rename(source_parent.ino, "source", target_parent.ino, "moved", swordfs::metadata::RenameFlag::kNone)
+          .IsPermission());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, CreatePreservesRequestUidAcrossRedisWorker) {
@@ -1173,7 +1168,7 @@ FIBER_TEST_F(RedisMetaImplTest, UnlinkPublishesDurableOrphanCandidate) {
       impl_->CommitChunk(file.ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
           .ok());
 
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
 
   std::vector<InodeID> orphans;
   ASSERT_TRUE(impl_
@@ -1202,13 +1197,14 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimFreezesRecordAndRemovesLiveMetadat
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
   ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk).ok());
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
 
-  ReclaimWork work;
+  std::optional<ReclaimWork> work;
   ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
-  ASSERT_EQ(work.chunks.size(), 1U);
-  EXPECT_EQ(work.chunks[0].descriptor, chunk);
-  EXPECT_EQ(work.chunks[0].key, swordfs::chunk::FormatChunkObjectKey(file.ino, 0, 1));
+  ASSERT_TRUE(work.has_value());
+  ASSERT_EQ(work->chunks.size(), 1U);
+  EXPECT_EQ(work->chunks[0].descriptor, chunk);
+  EXPECT_EQ(work->chunks[0].key, swordfs::chunk::FormatChunkObjectKey(file.ino, 0, 1));
 
   // The live metadata is gone and only the frozen record remains: the point
   // of no return has been crossed.
@@ -1224,14 +1220,14 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimFreezesRecordAndRemovesLiveMetadat
 
   // Replaying preparation returns the same frozen work without changing it:
   // that is exactly the crash-recovery path a later mount takes.
-  ReclaimWork replay;
+  std::optional<ReclaimWork> replay;
   ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &replay).ok());
   EXPECT_EQ(replay, work);
 
   std::vector<InodeID> pending;
   ASSERT_TRUE(impl_
-                  ->VisitPendingReclaims([&pending](InodeID ino) {
-                    pending.push_back(ino);
+                  ->VisitPendingReclaims([&pending](const ReclaimWork &pending_work) {
+                    pending.push_back(pending_work.ino);
                     return Status::OK();
                   })
                   .ok());
@@ -1252,10 +1248,11 @@ FIBER_TEST_F(RedisMetaImplTest, CrashLeftPendingReclaimIsRetriedFromPersistedSta
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 3, .size = 128};
   ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk).ok());
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
 
-  ReclaimWork prepared;
+  std::optional<ReclaimWork> prepared;
   ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &prepared).ok());
+  ASSERT_TRUE(prepared.has_value());
   // (crash here — the deletes never run)
 
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
@@ -1264,20 +1261,21 @@ FIBER_TEST_F(RedisMetaImplTest, CrashLeftPendingReclaimIsRetriedFromPersistedSta
 
   std::vector<InodeID> pending;
   ASSERT_TRUE(impl_
-                  ->VisitPendingReclaims([&pending](InodeID ino) {
-                    pending.push_back(ino);
+                  ->VisitPendingReclaims([&pending](const ReclaimWork &pending_work) {
+                    pending.push_back(pending_work.ino);
                     return Status::OK();
                   })
                   .ok());
   EXPECT_EQ(pending, std::vector<InodeID>{file.ino});
 
-  ReclaimWork retried;
+  std::optional<ReclaimWork> retried;
   ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &retried).ok());
   EXPECT_EQ(retried, prepared);
-  EXPECT_EQ(retried.chunks[0].key, swordfs::chunk::FormatChunkObjectKey(file.ino, 0, 3));
+  ASSERT_TRUE(retried.has_value());
+  EXPECT_EQ(retried->chunks[0].key, swordfs::chunk::FormatChunkObjectKey(file.ino, 0, 3));
 
   ASSERT_TRUE(impl_->CompleteReclaim(file.ino).ok());
-  ASSERT_TRUE(impl_->VisitPendingReclaims([](InodeID) { return Status::OK(); }).ok());
+  ASSERT_TRUE(impl_->VisitPendingReclaims([](const ReclaimWork &) { return Status::OK(); }).ok());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimConvergesAfterPartialExec) {
@@ -1290,7 +1288,7 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimConvergesAfterPartialExec) {
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 7, .size = 128};
   ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk).ok());
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
 
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
   uint64_t original_inode_count = 0;
@@ -1302,7 +1300,7 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimConvergesAfterPartialExec) {
     redis.set(key.InodeCount(), "not-an-integer");
   });
 
-  ReclaimWork first;
+  std::optional<ReclaimWork> first;
   const auto first_status = impl_->PrepareReclaim(file.ino, &first);
   EXPECT_EQ(first_status.code(), Status::kIOError);
   EXPECT_NE(first_status.message().find("commit may be partial"), std::string::npos);
@@ -1321,11 +1319,12 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimConvergesAfterPartialExec) {
     redis.set(key.InodeCount(), std::to_string(original_inode_count - 1));
   });
 
-  ReclaimWork retried;
+  std::optional<ReclaimWork> retried;
   ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &retried).ok());
-  ASSERT_EQ(retried.chunks.size(), 1U);
-  EXPECT_EQ(retried.chunks[0].descriptor, chunk);
-  EXPECT_EQ(retried.chunks[0].key, swordfs::chunk::FormatChunkObjectKey(file.ino, 0, 7));
+  ASSERT_TRUE(retried.has_value());
+  ASSERT_EQ(retried->chunks.size(), 1U);
+  EXPECT_EQ(retried->chunks[0].descriptor, chunk);
+  EXPECT_EQ(retried->chunks[0].key, swordfs::chunk::FormatChunkObjectKey(file.ino, 0, 7));
 
   ASSERT_TRUE(impl_->CompleteReclaim(file.ino).ok());
   RunWithRawRedisFromFiber(
@@ -1335,7 +1334,7 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimConvergesAfterPartialExec) {
 FIBER_TEST_F(RedisMetaImplTest, LinkRevivesOrphanCandidateAndClearsMarker) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
 
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
   RunWithRawRedisFromFiber(
@@ -1347,8 +1346,9 @@ FIBER_TEST_F(RedisMetaImplTest, LinkRevivesOrphanCandidateAndClearsMarker) {
   RunWithRawRedisFromFiber(
       [&](sw::redis::Redis &redis) { EXPECT_FALSE(redis.hexists(key.Orphans(), std::to_string(file.ino))); });
 
-  ReclaimWork work;
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).IsNotFound());
+  std::optional<ReclaimWork> work;
+  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
+  EXPECT_FALSE(work.has_value());
   SwordFsInode stored;
   ASSERT_TRUE(impl_->GetInode(file.ino, &stored).ok());
   EXPECT_EQ(stored.attr.nlink, 1U);
@@ -1359,8 +1359,8 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedPendingReclaimRecordIsRejected) {
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.hset(key.Reclaims(), "4242", "malformed"); });
   std::vector<InodeID> pending;
   EXPECT_TRUE(impl_
-                  ->VisitPendingReclaims([&pending](InodeID ino) {
-                    pending.push_back(ino);
+                  ->VisitPendingReclaims([&pending](const ReclaimWork &work) {
+                    pending.push_back(work.ino);
                     return Status::OK();
                   })
                   .IsMalformed());
@@ -1368,9 +1368,9 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedPendingReclaimRecordIsRejected) {
   // PrepareReclaim replays an existing frozen record before consulting live
   // inode state. A corrupt pending record must therefore fail closed here too
   // rather than being treated as a fresh reclaim.
-  ReclaimWork replay;
+  std::optional<ReclaimWork> replay;
   EXPECT_TRUE(impl_->PrepareReclaim(4242, &replay).IsMalformed());
-  EXPECT_EQ(replay.ino, 0U);
+  EXPECT_FALSE(replay.has_value());
 
   // A decodable record whose serialized inode disagrees with its hash field
   // is corrupt too: acting on it could delete another inode's objects.
@@ -1379,7 +1379,7 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedPendingReclaimRecordIsRejected) {
   std::string serialized;
   ASSERT_TRUE(record.SerializeTo(&serialized).ok());
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.hset(key.Reclaims(), "4242", serialized); });
-  EXPECT_TRUE(impl_->VisitPendingReclaims([](InodeID) { return Status::OK(); }).IsMalformed());
+  EXPECT_TRUE(impl_->VisitPendingReclaims([](const ReclaimWork &) { return Status::OK(); }).IsMalformed());
 
   // A key that is not an inode id at all is not a candidate either.
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
@@ -1405,7 +1405,7 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedPendingReclaimRecordIsRejected) {
 FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimRejectsPendingRecordForAnotherInode) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
 
   ReclaimWork wrong;
   wrong.ino = file.ino + 1;
@@ -1416,9 +1416,9 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimRejectsPendingRecordForAnotherInod
   RunWithRawRedisFromFiber(
       [&](sw::redis::Redis &redis) { redis.hset(key.Reclaims(), std::to_string(file.ino), serialized); });
 
-  ReclaimWork work;
+  std::optional<ReclaimWork> work;
   EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).IsMalformed());
-  EXPECT_EQ(work.ino, 0U);
+  EXPECT_FALSE(work.has_value());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, MalformedChunkMetadataIsRejectedByPrepareReclaim) {
@@ -1428,10 +1428,13 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedChunkMetadataIsRejectedByPrepareReclaim
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.hset(key.Chunk(file.ino), "0", "malformed"); });
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file", nullptr).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
 
-  ReclaimWork work;
+  ReclaimWork stale_output;
+  stale_output.ino = 9999;
+  std::optional<ReclaimWork> work = stale_output;
   EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).IsMalformed());
+  EXPECT_FALSE(work.has_value()) << "failed preparation must not leave stale caller-visible work";
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
     EXPECT_FALSE(redis.hexists(key.Reclaims(), std::to_string(file.ino)));
     EXPECT_TRUE(redis.exists(key.Inode(file.ino)));
@@ -1445,12 +1448,12 @@ FIBER_TEST_F(RedisMetaImplTest, VisitorArgumentsAreValidated) {
   // visitor is a caller bug and must be refused before any Redis round-trip,
   // never read as "nothing to reclaim".
   EXPECT_EQ(impl_->VisitOrphanCandidates(swordfs::metadata::InodeVisitorFn{}).code(), Status::kInvalidArgument);
-  EXPECT_EQ(impl_->VisitPendingReclaims(swordfs::metadata::InodeVisitorFn{}).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->VisitPendingReclaims(swordfs::metadata::ReclaimVisitorFn{}).code(), Status::kInvalidArgument);
   EXPECT_EQ(impl_->PrepareReclaim(kRootInodeId, nullptr).code(), Status::kInvalidArgument);
 
-  ReclaimWork work;
-  EXPECT_TRUE(impl_->PrepareReclaim(kRootInodeId, &work).IsNotFound());
-  EXPECT_EQ(work.ino, 0U);
+  std::optional<ReclaimWork> work;
+  EXPECT_TRUE(impl_->PrepareReclaim(kRootInodeId, &work).ok());
+  EXPECT_FALSE(work.has_value());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, ReclaimVisitorsReturnSnapshotsAndPropagateAbort) {
@@ -1458,8 +1461,8 @@ FIBER_TEST_F(RedisMetaImplTest, ReclaimVisitorsReturnSnapshotsAndPropagateAbort)
   SwordFsInode second;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "first", 0644, &first).ok());
   ASSERT_TRUE(impl_->Create(kRootInodeId, "second", 0644, &second).ok());
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "first", nullptr).ok());
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "second", nullptr).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "first").ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "second").ok());
 
   std::vector<InodeID> visited;
   ASSERT_TRUE(impl_
@@ -1478,21 +1481,22 @@ FIBER_TEST_F(RedisMetaImplTest, ReclaimVisitorsReturnSnapshotsAndPropagateAbort)
   EXPECT_EQ(orphan_abort.code(), Status::kBusy);
   EXPECT_EQ(visited, (std::vector<InodeID>{first.ino}));
 
-  ReclaimWork frozen;
+  std::optional<ReclaimWork> frozen;
   ASSERT_TRUE(impl_->PrepareReclaim(second.ino, &frozen).ok());
+  ASSERT_TRUE(frozen.has_value());
 
   visited.clear();
   ASSERT_TRUE(impl_
-                  ->VisitPendingReclaims([&](InodeID ino) {
-                    visited.push_back(ino);
+                  ->VisitPendingReclaims([&](const ReclaimWork &work) {
+                    visited.push_back(work.ino);
                     return Status::OK();
                   })
                   .ok());
   EXPECT_EQ(visited, (std::vector<InodeID>{second.ino}));
 
   visited.clear();
-  const auto pending_abort = impl_->VisitPendingReclaims([&](InodeID ino) {
-    visited.push_back(ino);
+  const auto pending_abort = impl_->VisitPendingReclaims([&](const ReclaimWork &work) {
+    visited.push_back(work.ino);
     return Status::IOError("stop pending scan");
   });
   EXPECT_EQ(pending_abort.code(), Status::kIOError);
