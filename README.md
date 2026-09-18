@@ -14,16 +14,11 @@ The major differences between SwordFS and other distributed file systems are as 
 - AI/ML-oriented: SwordFS prioritizes high-throughput client-side data paths and an architecture that can evolve toward direct GPU/DPU and other accelerator-oriented integrations as those capabilities are implemented.
 
 ## Architecture
-SwordFS is a client-heavy user-space filesystem built on the **libfuse3 low-level API**. The client owns filesystem semantics, file/chunk runtime state, metadata transactions, object-data publication, and background recovery coordination.
+SwordFS uses a **client-heavy architecture**: filesystem semantics and most data-path logic live in the client, while durable metadata and file data are stored in external systems.
 
-The current open-source implementation has two storage planes:
+The current open-source implementation separates metadata from file data. Metadata can be backed by Memory or Redis, while file data is stored in S3-compatible object storage. This separation keeps filesystem logic independent from a particular storage service and leaves room for additional backends over time.
 
-- **Metadata** through `IMetaEngine`, with Memory and Redis backends implemented today.
-- **File data** through `IDataEngine`, with an S3-compatible object-storage backend implemented today.
-
-Files are divided into fixed-size logical chunks. Published object-storage chunks use immutable revisioned identities derived from `(inode, chunk index, revision)`. Writes upload the immutable object first and then atomically publish the authoritative chunk descriptor in metadata. Blocking Redis/S3 calls are offloaded from filesystem fibers to POSIX worker threads.
-
-The detailed and authoritative architecture description is maintained in **[docs/design/architecture.md](docs/design/architecture.md)**. It covers the FUSE/VFS request path, metadata transaction model, chunk publication/read/write lifecycle, execution-domain model, open-handle ownership, reclaim/recovery state machine, performance-sensitive boundaries, and current capability limitations.
+For the detailed architecture, including request flow, metadata consistency, data lifecycle, concurrency, recovery, and current limitations, see **[docs/design/architecture.md](docs/design/architecture.md)**.
 
 
 ## Build
