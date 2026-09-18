@@ -155,7 +155,7 @@ utils::Status RedisKvTxn::ReleaseConnection() {
     transaction_->exec();
     return utils::Status::OK();
   } catch (const sw::redis::WatchError &) {
-    return utils::Status::Busy("Redis watched key changed");
+    throw WatchConflict{};
   } catch (const sw::redis::TimeoutError &error) {
     return utils::Status::IOError("Redis read-only transaction timed out: " + std::string(error.what()));
   } catch (const sw::redis::ClosedError &error) {
@@ -186,7 +186,7 @@ utils::Status RedisKvTxn::Commit() {
     return ValidateWriteExecReplies(transaction_->exec());
   } catch (const sw::redis::WatchError &) {
     (void)ReleaseConnection();
-    return utils::Status::Busy("Redis watched key changed");
+    throw WatchConflict{};
   } catch (const sw::redis::TimeoutError &error) {
     SWORDFS_LOG_WARN << "Redis transaction EXEC timed out; commit result is ambiguous: " << error.what();
     return utils::Status::IOError("Redis transaction commit is ambiguous after EXEC: " + std::string(error.what()));

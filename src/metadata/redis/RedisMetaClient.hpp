@@ -36,6 +36,8 @@ class RedisMetaClient {
 
   // Runs one optimistic transaction entirely on the calling POSIX thread.
   // WATCH, reads, MULTI, queued writes and EXEC share one Redis connection.
+  // Only Redis WATCH conflicts and pre-commit connection failures are
+  // retried; callback statuses, including filesystem Busy, are returned.
   utils::Status Transact(const std::function<utils::Status(RedisKvTxn &)> &callback);
 
  private:

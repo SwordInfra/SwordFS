@@ -32,9 +32,15 @@ class RedisKvTxn {
 
  private:
   friend class RedisMetaClient;
+  struct WatchConflict {};
+
   explicit RedisKvTxn(sw::redis::Redis &redis);
 
   void Discard() noexcept;
+  // Returns terminal commit failures as Status. A WATCH conflict remains
+  // private Redis control flow and is translated to WatchConflict so
+  // RedisMetaClient can retry it without conflating it with Status::Busy or
+  // with exceptions escaping from callback code.
   utils::Status Commit();
   utils::Status ReleaseConnection();
 
