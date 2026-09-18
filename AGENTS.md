@@ -48,4 +48,4 @@
 
 ## Editing Rules
 
-- **NEVER use `sed`, `python`, `awk`, or any external command for direct file editing.** All file modifications MUST go through the `replace_string_in_file` tool so every change is visible and reviewable. This includes bulk find-and-replace operations — use `multi_replace_string_in_file` instead.
+- Use available editing tools such as `apply_patch` or `replace_string_in_file` to make focused, reviewable changes. No specific editing tool is required. Review the resulting diff, including for bulk replacements, to ensure unrelated content is unchanged.
