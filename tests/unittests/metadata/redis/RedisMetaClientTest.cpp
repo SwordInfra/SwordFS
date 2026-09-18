@@ -303,7 +303,7 @@ TEST(RedisMetaClientTest, RetriesReadOnlyWatchConflict) {
   other.del(key);
 }
 
-TEST(RedisMetaClientTest, RetriesExplicitPreCommitFailure) {
+TEST(RedisMetaClientTest, ReturnsCallbackBusyWithoutRetry) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
@@ -311,15 +311,30 @@ TEST(RedisMetaClientTest, RetriesExplicitPreCommitFailure) {
 
   RedisMetaClient store(config);
   int attempts = 0;
-  const auto status = store.Transact([&](RedisKvTxn &transaction) {
+  const auto status = store.Transact([&](RedisKvTxn &) {
     ++attempts;
-    if (attempts == 1) {
-      return utils::Status::Busy("retry");
-    }
-    return transaction.Set("swordfs:phase0:retry", "ok");
+    return utils::Status::Busy("filesystem operation is busy");
   });
-  ASSERT_TRUE(status.ok()) << status.message();
-  EXPECT_EQ(attempts, 2);
+  EXPECT_TRUE(status.IsBusy());
+  EXPECT_EQ(status.message(), "filesystem operation is busy");
+  EXPECT_EQ(attempts, 1);
+}
+
+TEST(RedisMetaClientTest, DoesNotRetryWatchErrorEscapingFromCallback) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  int attempts = 0;
+  const auto status = store.Transact([&](RedisKvTxn &) -> utils::Status {
+    ++attempts;
+    throw sw::redis::WatchError();
+  });
+
+  EXPECT_EQ(status.code(), utils::Status::kIOError);
+  EXPECT_EQ(attempts, 1);
 }
 
 TEST(RedisMetaClientTest, RejectsNonPositiveRetryAttemptsDuringConstruction) {
@@ -331,18 +346,71 @@ TEST(RedisMetaClientTest, RejectsNonPositiveRetryAttemptsDuringConstruction) {
   }
 }
 
-TEST(RedisMetaClientTest, RetriesUntilLimitIsExceeded) {
+TEST(RedisMetaClientTest, WatchConflictRetryLimitReturnsIOError) {
   RedisMetaConfig config;
-  config.host = "127.0.0.1";
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
   config.retry_attempts = 3;
+  config.retry_backoff = std::chrono::milliseconds(0);
+
+  const std::string key = UniqueVolumeName("watch-retry-limit");
+  sw::redis::Redis other(ConnectionOptions(config));
+  other.set(key, "0");
+
   RedisMetaClient store(config);
   int attempts = 0;
-  const auto status = store.Transact([&](RedisKvTxn &) {
+  const auto status = store.Transact([&](RedisKvTxn &transaction) {
     ++attempts;
-    return utils::Status::Busy("retry");
+    std::string value;
+    auto status = transaction.Get(key, &value);
+    if (!status.ok()) {
+      return status;
+    }
+    other.incr(key);
+    return transaction.Set(key, "committed");
   });
-  EXPECT_TRUE(status.IsBusy());
+
+  EXPECT_EQ(status.code(), utils::Status::kIOError);
+  EXPECT_EQ(status.message(), "Redis transaction retry limit exceeded");
   EXPECT_EQ(attempts, 3);
+  other.del(key);
+}
+
+TEST(RedisMetaClientTest, DoesNotRetryAmbiguousExecTimeout) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  sw::redis::Redis control(ConnectionOptions(config));
+  const std::string key = UniqueVolumeName("ambiguous-exec-timeout");
+  control.del(key);
+
+  config.socket_timeout = std::chrono::milliseconds(50);
+  config.retry_attempts = 3;
+  config.retry_backoff = std::chrono::milliseconds(0);
+  RedisMetaClient store(config);
+  int attempts = 0;
+  const auto status = store.Transact([&](RedisKvTxn &transaction) {
+    ++attempts;
+    auto status = transaction.Set(key, "possibly-committed");
+    if (!status.ok()) {
+      return status;
+    }
+
+    // Pause after the write has been queued in Redis but before EXEC. The
+    // client times out waiting for EXEC, whose commit result is therefore
+    // ambiguous and must never be replayed.
+    control.command<void>("CLIENT", "PAUSE", 1000, "ALL");
+    return utils::Status::OK();
+  });
+  control.command<void>("CLIENT", "UNPAUSE");
+
+  EXPECT_EQ(status.code(), utils::Status::kIOError);
+  EXPECT_NE(status.message().find("ambiguous after EXEC"), std::string::npos);
+  EXPECT_EQ(attempts, 1);
+  control.del(key);
 }
 
 TEST(RedisMetaClientTest, ReadOnlyTransactionCommitsAsNoOp) {

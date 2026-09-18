@@ -145,29 +145,30 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisK
       auto status = callback(transaction);
       if (!status.ok()) {
         transaction.Discard();
-        if (status.IsBusy()) {
-          Backoff(attempt, retry_backoff_);
-          continue;
-        }
         return status;
       }
 
       status = transaction.Commit();
-      if (status.IsBusy()) {
-        Backoff(attempt, retry_backoff_);
-        continue;
-      }
       return status;
-    } catch (const sw::redis::TimeoutError &) {
-      Backoff(attempt, retry_backoff_);
-    } catch (const sw::redis::ClosedError &) {
-      Backoff(attempt, retry_backoff_);
+    } catch (const RedisKvTxn::WatchConflict &) {  // NOLINT(bugprone-empty-catch)
+      // Retry policy is shared below so every retryable failure observes the
+      // same attempt limit and backoff rule.
+    } catch (const sw::redis::TimeoutError &) {  // NOLINT(bugprone-empty-catch)
+      // A timeout before EXEC is retryable; Commit converts timeouts after
+      // EXEC into a terminal ambiguous-commit Status before reaching here.
+    } catch (const sw::redis::ClosedError &) {  // NOLINT(bugprone-empty-catch)
+      // A close before EXEC is retryable; Commit similarly contains closes
+      // after EXEC because their commit result is ambiguous.
     } catch (const sw::redis::Error &error) {
       return RedisError("transaction", error);
     }
+
+    if (attempt + 1 < retry_attempts_) {
+      Backoff(attempt, retry_backoff_);
+    }
   }
 
-  return utils::Status::Busy("Redis transaction retry limit exceeded");
+  return utils::Status::IOError("Redis transaction retry limit exceeded");
 }
 
 }  // namespace swordfs::metadata
