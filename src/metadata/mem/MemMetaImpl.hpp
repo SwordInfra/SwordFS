@@ -35,7 +35,10 @@ class MemMetaImpl : public IMetaEngine {
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override;
   Status Access(InodeID ino, uint32_t mask) override;
   Status Open(InodeID ino) override;
-  Status ReclaimInode(InodeID ino) override;
+  Status PrepareReclaim(InodeID ino, ReclaimWork *work) override;
+  Status CompleteReclaim(InodeID ino) override;
+  Status VisitOrphanCandidates(const InodeVisitorFn &visitor) override;
+  Status VisitPendingReclaims(const InodeVisitorFn &visitor) override;
   Status AllocateChunkRevision(ChunkRevision *revision) override;
 
   // Directory operations

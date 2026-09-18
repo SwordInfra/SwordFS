@@ -108,39 +108,43 @@ jobs:
       - name: Generate coverage report
         if: matrix.build_type == 'Debug'
         run: |
-          # Run the entire coverage pipeline with relaxed error handling.
-          # lcov 2.x (Ubuntu 24.04) is stricter than 1.x and may exit non-zero
-          # for gcov version mismatches, empty .gcda files, or missing source
-          # references — all of which are harmless for our report.
-          set +e
+          set -euo pipefail
 
           # Step 1: capture raw coverage data
           lcov --capture --directory build --output-file coverage.info \
-               --ignore-errors inconsistent,gcov,source,mismatch,negative,empty,unused,corrupt
-          LCOV_EXIT=$?
-          if [ $LCOV_EXIT -ne 0 ]; then
-            echo "::warning::lcov --capture exited with $LCOV_EXIT (ignored)"
+               --branch-coverage \
+               --filter branch,exception,brace,blank,range \
+               --ignore-errors inconsistent,gcov,source,mismatch,negative,empty,unused,corrupt,range
+          if [ ! -s coverage.info ]; then
+            echo "ERROR: lcov capture produced no coverage data"
+            exit 1
           fi
 
           # Step 2: remove system / third-party paths
-          if [ -f coverage.info ] && [ -s coverage.info ]; then
-            lcov --remove coverage.info \
-                 '/usr/*' '*/_deps/*' '*/googletest-src/*' '*/build/*' \
-                 --output-file coverage_filtered.info \
-                 --ignore-errors unused,empty,source,mismatch,corrupt,inconsistent || true
-            if [ -f coverage_filtered.info ] && [ -s coverage_filtered.info ]; then
-              mv coverage_filtered.info coverage.info
-            else
-              echo "::warning::coverage_filtered.info empty — keeping original coverage.info"
-            fi
-          else
-            echo "::warning::coverage.info is empty or missing after capture"
+          lcov --remove coverage.info \
+               '/usr/*' '*/_deps/*' '*/googletest-src/*' '*/build/*' \
+               --output-file coverage_filtered.info \
+               --branch-coverage \
+               --filter branch,exception,brace,blank,range \
+               --ignore-errors unused,empty,source,mismatch,corrupt,inconsistent,range
+          if [ ! -s coverage_filtered.info ]; then
+            echo "ERROR: filtering removed all coverage data"
+            exit 1
           fi
+          mv coverage_filtered.info coverage.info
 
           # Step 3: print summary
-          if [ -f coverage.info ] && [ -s coverage.info ]; then
-            lcov --list coverage.info --ignore-errors unused,empty,source || true
+          lcov --list coverage.info --branch-coverage --ignore-errors unused,empty,source || true
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE=$(git rev-parse HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
           fi
+          python3 scripts/check-diff-coverage.py \
+            --base "$BASE" \
+            --tracefile coverage.info \
+            --line-threshold 90
 
       - name: Upload coverage to Codecov
         if: matrix.build_type == 'Debug'
@@ -148,6 +152,8 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.info
+          disable_search: true
+          plugins: noop
           fail_ci_if_error: false
 
   e2e-test:

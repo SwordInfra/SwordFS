@@ -100,7 +100,9 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameOverwriteFileReportsVictim) {
   // the VFS layer needs to decide whether an open handle still references it.
   struct stat attr;
   EXPECT_TRUE(impl_->GetAttr(f2_ino, &attr).ok());
-  EXPECT_TRUE(impl_->ReclaimInode(f2_ino).ok());
+  swordfs::metadata::ReclaimWork reclaim_work;
+  ASSERT_TRUE(impl_->PrepareReclaim(f2_ino, &reclaim_work).ok());
+  ASSERT_TRUE(impl_->CompleteReclaim(f2_ino).ok());
   EXPECT_TRUE(impl_->GetAttr(f2_ino, &attr).IsNotFound());
 }
 

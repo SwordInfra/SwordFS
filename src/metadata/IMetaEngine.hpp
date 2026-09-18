@@ -19,6 +19,7 @@
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
 #include "metadata/types/Inode.hpp"
+#include "metadata/types/Reclaim.hpp"
 #include "metadata/types/Volume.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
@@ -47,6 +48,7 @@ class DirIterator {
 
 using DirIteratorPtr = std::shared_ptr<DirIterator>;
 using ChunkVisitorFn = std::function<Status(const SwordFsChunk &)>;
+using InodeVisitorFn = std::function<Status(InodeID)>;
 
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
@@ -139,18 +141,52 @@ class IMetaEngine {
   /// validation + read permission) and updates atime.
   virtual Status Open(InodeID ino) = 0;
 
-  /// Delete an inode that was previously unlinked. Called by the VFS layer
-  /// once it has verified no open file descriptor still references the
-  /// inode (e.g. from the last `Close` after an open-unlink). The metadata
-  /// engine removes the inode and its chunk-metadata map when nlink has
-  /// dropped to zero; otherwise this is a no-op.
+  /// Prepare the reclaim of |ino| and return the frozen object identities
+  /// that must be deleted from the data engine.
   ///
-  /// @important  This does NOT delete the chunk objects from the data
-  /// engine. The caller is responsible for invoking
-  /// `IDataEngine::Delete` on each chunk key first (use `VisitChunks` to
-  /// enumerate). See `vfs::InodeHandle::ReclaimData` for the canonical
-  /// implementation of the full cleanup.
-  virtual Status ReclaimInode(InodeID ino) = 0;
+  /// This is the inode's reclaim point of no return. In one atomic mutation
+  /// the engine must:
+  ///   - recheck that |ino| is still orphaned (nlink == 0);
+  ///   - freeze the authoritative chunk descriptors and their immutable
+  ///     object keys into a durable pending-reclaim record;
+  ///   - drop the live inode (and its orphan marker) so a concurrent Link
+  ///     can no longer revive an inode whose objects are about to go away.
+  ///
+  /// On success |*work| holds the frozen work (possibly no chunks at all for
+  /// an empty file or a symlink) and the caller must delete every identity
+  /// in it and then call CompleteReclaim. Replaying PrepareReclaim while the
+  /// pending record still exists returns the same frozen work without
+  /// changing any state, so crash recovery and retries are idempotent.
+  ///
+  /// NotFound means the point of no return was NOT crossed: the inode was
+  /// already reclaimed, or a concurrent Link revived it (any stale orphan
+  /// marker is dropped as part of the same mutation). Nothing was changed
+  /// and no object may be deleted.
+  ///
+  /// The memory backend mirrors these semantics for the lifetime of the
+  /// process; persistent backends must persist the pending record so that
+  /// mount-time reconciliation can finish the job after a crash.
+  virtual Status PrepareReclaim(InodeID ino, ReclaimWork *work) = 0;
+
+  /// Remove the durable pending-reclaim record for |ino| together with its
+  /// frozen chunk metadata. Called only after every object identity returned
+  /// by PrepareReclaim has been deleted. Idempotent: a missing record is not
+  /// an error.
+  virtual Status CompleteReclaim(InodeID ino) = 0;
+
+  /// Visit every inode currently published as an orphan candidate — that is,
+  /// every inode whose nlink dropped to zero and which has not been reclaimed
+  /// or revived since. The candidate is published atomically by the mutation
+  /// that reached nlink == 0 (unlink, rename-overwrite), so a crash before
+  /// the caller reclaims it cannot lose the inode. Persisted by persistent
+  /// backends; process-lifetime for the memory backend.
+  virtual Status VisitOrphanCandidates(const InodeVisitorFn &visitor) = 0;
+
+  /// Visit every inode with a durable pending reclaim — frozen work whose
+  /// objects have not yet all been deleted. Used by mount-time reconciliation
+  /// and periodic retry, which re-run PrepareReclaim for each visited inode
+  /// and finish the deletes.
+  virtual Status VisitPendingReclaims(const InodeVisitorFn &visitor) = 0;
 
   /// Allocate a globally unique, monotonically increasing chunk revision.
   /// Revisions are volume-scoped persistent identities: a backend must never

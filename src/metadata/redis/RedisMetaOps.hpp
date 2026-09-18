@@ -17,6 +17,7 @@
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
 #include "metadata/types/Inode.hpp"
+#include "metadata/types/Reclaim.hpp"
 #include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
 
@@ -57,7 +58,10 @@ class RedisMetaOps {
   utils::Status SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out = nullptr);
   utils::Status Truncate(InodeID ino, uint64_t size);
   utils::Status TouchInode(InodeID ino, SetAttrField fields);
-  utils::Status ReclaimInode(InodeID ino);
+  utils::Status PrepareReclaim(InodeID ino, ReclaimWork *work);
+  utils::Status CompleteReclaim(InodeID ino);
+  utils::Status VisitOrphanCandidates(const std::function<utils::Status(InodeID)> &visitor);
+  utils::Status VisitPendingReclaims(const std::function<utils::Status(InodeID)> &visitor);
   utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement);
   utils::Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
   utils::Status VisitChunks(InodeID ino, const std::function<utils::Status(const SwordFsChunk &)> &visitor);
@@ -72,6 +76,23 @@ class RedisMetaOps {
   // The caller is fiber-domain, but the callback itself executes on the Redis
   // POSIX worker because it directly drives RedisMetaTxn/RedisKvTxn.
   utils::Status TransactFromFiber(const std::function<utils::Status(RedisMetaTxn &)> &callback);
+
+ private:
+  using ChunkFieldVisitorFn = std::function<utils::Status(const std::string &field, const std::string &value)>;
+
+  // Stream every field of the inode's chunk hash in HSCAN batches.
+  utils::Status ScanChunkFields(InodeID ino, const ChunkFieldVisitorFn &visitor);
+
+  // Materialize the inode's complete chunk descriptor map. Reclaim
+  // preparation sorts the frozen work before persisting it.
+  utils::Status CollectChunks(InodeID ino, std::vector<SwordFsChunk> &out);
+
+  // Snapshot the inode ids published as orphan candidates.
+  utils::Status CollectOrphanCandidates(std::vector<InodeID> &out);
+
+  // Snapshot the inode ids with a frozen pending-reclaim record, validating
+  // the persisted record on the way out.
+  utils::Status CollectPendingReclaims(std::vector<InodeID> &out);
 
  private:
   std::shared_ptr<RedisBackendContext> backend_;

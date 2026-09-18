@@ -154,8 +154,9 @@ utils::Status SwordFsInode::ParseFrom(std::string_view data) {
   if (!dec.Done()) {
     return utils::Status::Malformed("Malformed inode record: trailing data size=" + std::to_string(data.size()));
   }
-  // nlink == 0 is a valid orphan-inode state. The inode remains in
-  // metadata until the runtime/open-reference lifecycle calls ReclaimInode.
+  // nlink == 0 is a valid orphan-inode state: the inode remains in metadata
+  // until the reclaim lifecycle freezes it (IMetaEngine::PrepareReclaim),
+  // and a hard link revives it (nlink back above zero) until then.
   if (attr.ino != ino) {
     return utils::Status::Malformed("Malformed inode record: inode number mismatch");
   }

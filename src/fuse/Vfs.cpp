@@ -6,8 +6,10 @@
 #include "fuse/Vfs.hpp"
 
 #include <dirent.h>
+#include <folly/ScopeGuard.h>
 #include <folly/logging/xlog.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdlib>
@@ -21,6 +23,8 @@
 #include "utils/ExecutionDomain.hpp"
 #include "utils/FiberRuntime.hpp"
 #include "utils/Logging.hpp"
+#include "vfs/InodeHandle.hpp"
+#include "vfs/Reclaimer.hpp"
 #include "vfs/VfsImpl.hpp"
 
 using swordfs::vfs::VfsImpl;
@@ -40,6 +44,23 @@ void RunFuseInFiber(fuse_req_t req, Fn &&fn) {
         SWORDFS_LOG_ERROR << "Failed to admit FUSE request into the fiber runtime";
         fuse_reply_err(req, EIO);
       });
+}
+
+bool ResetInodeHandleRegistryForMount() {
+  ::swordfs::utils::FiberBaton done;
+  std::atomic<bool> initialized{false};
+  const bool submitted = ::swordfs::utils::RunInFiber(
+      [&] {
+        auto post = folly::makeGuard([&] { done.post(); });
+        ::swordfs::vfs::InodeHandleManager::Instance().Initialize();
+        initialized.store(true, std::memory_order_release);
+      },
+      [&] { done.post(); });
+  if (!submitted) {
+    return false;
+  }
+  done.wait();
+  return initialized.load(std::memory_order_acquire);
 }
 
 }  // namespace
@@ -65,6 +86,30 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   conn->max_write = kMaxWriteSize;
   conn->max_readahead = kMaxReadAheadSize;
   conn->time_gran = kTimeGran;
+
+  // Reset per-inode runtime state before FUSE can dispatch any request for
+  // this mount. The registry is fiber-domain state, so submit the reset to the
+  // runtime and wait only for this short operation. Reconciliation itself can
+  // remain asynchronous once the registry starts from a known-empty state.
+  if (!ResetInodeHandleRegistryForMount()) {
+    SWORDFS_LOG_ERROR << "Failed to reset inode-handle registry during mount initialization";
+  }
+
+  // Mount-time reconciliation of crash-left reclaim work: the orphan
+  // candidates and frozen pending records persisted by a previous mount (or
+  // by an earlier failure of this one) are promoted/retried as soon as the
+  // fiber runtime exists. The metadata state is durable, so this is where a
+  // crash between "last name gone" and "objects deleted" is recovered. The
+  // periodic retry thread then covers failures that happen from here on.
+  ::swordfs::utils::RunInFiber(
+      [] {
+        auto status = ::swordfs::vfs::Reclaimer::Instance().Reconcile();
+        if (!status.ok()) {
+          SWORDFS_LOG_WARN << "startup reclaim reconciliation: " << status.message();
+        }
+      },
+      [] { SWORDFS_LOG_ERROR << "Failed to admit startup reclaim reconciliation into the fiber runtime"; });
+  ::swordfs::vfs::Reclaimer::Instance().StartPeriodicRetry();
 
   // Writeback cache is intentionally disabled: with it enabled the kernel
   // answers writes from its own page cache, which masks daemon-side
@@ -92,6 +137,9 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
 void VfsHookFactory::SwordFsDestroy(void *userdata) {
   (void)userdata;
   SWORDFS_LOG_INFO << "SwordFS filesystem unmounted";
+  // Stop the reclaim retry thread before the fiber runtime it borrows is torn
+  // down (and before the engines go away in VolumeImpl::Shutdown).
+  ::swordfs::vfs::Reclaimer::Instance().StopPeriodicRetry();
   ::swordfs::utils::ShutdownFiberRuntime();
 }
 

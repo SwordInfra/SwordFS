@@ -36,6 +36,7 @@
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
 #include "metadata/types/Inode.hpp"
+#include "metadata/types/Reclaim.hpp"
 #include "utils/Status.hpp"
 
 using Status = swordfs::utils::Status;
@@ -120,11 +121,17 @@ class MemMetaTxn {
   // reclaimed immediately (and the parent loses the ".." backlink);
   // a non-empty directory returns NotEmpty.  Missing entries return
   // NotFound. Any successful removal bumps the parent's mtime/ctime.
+  //
+  // A file whose nlink reaches zero is published as an orphan candidate in
+  // this same transaction, so the "no names left" fact survives a crash
+  // before the caller gets to reclaim it.
   Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink = nullptr);
 
   // Link an existing inode (by ino) into a directory (hard link).
   // Increments the inode's nlink; bumps the inode's ctime and the
-  // parent's mtime/ctime.
+  // parent's mtime/ctime. Reviving an orphan candidate (nlink 0 -> 1)
+  // drops its orphan marker in the same transaction, so the candidate
+  // is never reclaimed while a name references it again.
   Status LinkExistingEntry(InodeID parent_ino, std::string_view name, InodeID ino, SwordFsInode *out = nullptr);
 
   // List all entries in a directory, including the synthetic "."
@@ -153,12 +160,30 @@ class MemMetaTxn {
   Status TruncateChunks(InodeID ino, uint64_t new_size);
 
   // ────────────────────────────────────────────────────────────────
-  // Open-unlink reclaim
+  // Reclaim
   // ────────────────────────────────────────────────────────────────
 
-  // Delete |ino| and its chunk-metadata map if the inode is orphaned
-  // (nlink==0).  No-op otherwise.
-  Status ReclaimInode(InodeID ino);
+  // Freeze the reclaim of |ino| and remove its live metadata.
+  //
+  // Idempotent: when a pending-reclaim record already exists for |ino| the
+  // frozen work is returned unchanged. Otherwise the inode must be an orphan
+  // (nlink==0) regular/symlink inode; its authoritative chunk descriptors and
+  // derived object keys are captured into a pending-reclaim record, the live
+  // inode and its chunk metadata are dropped and the orphan marker is
+  // cleared — all in this transaction, which is the point of no return.
+  // NotFound means the inode was already reclaimed or is still linked; the
+  // orphan marker (if any) is dropped either way and nothing else changes.
+  Status PrepareReclaim(InodeID ino, ReclaimWork *work);
+
+  // Drop the pending-reclaim record for |ino| after every frozen object has
+  // been deleted.  No-op when no record exists.
+  Status CompleteReclaim(InodeID ino);
+
+  // Snapshot every orphan candidate inode id.
+  Status ListOrphanCandidates(std::vector<InodeID> *out);
+
+  // Snapshot every inode id with a pending reclaim.
+  Status ListPendingReclaims(std::vector<InodeID> *out);
 
   // Snapshot every chunk registered for |ino|, ascending chunk index.
   Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out);
