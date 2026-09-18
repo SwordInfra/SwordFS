@@ -3,7 +3,7 @@
 Issue: #109
 Scope: Redis Metadata V1, Phase 1
 
-This document is the working design baseline for Redis Metadata V1. It captures decisions made during review and records items that still need validation. Follow-up implementation PRs should use this document as the starting point and update it when implementation reveals a necessary design change.
+This document is the detailed Redis persistence/access-pattern reference. For the overall SwordFS architecture and cross-subsystem lifecycle, start with [SwordFS Architecture](architecture.md). This document captures Redis-specific representation and transaction decisions and should stay aligned with the current `IMetaEngine` contract.
 
 ## 1. Design principles
 
@@ -12,7 +12,7 @@ This document is the working design baseline for Redis Metadata V1. It captures 
 - Keys belonging to one volume use the same Redis Cluster hash tag so a metadata transaction stays in one slot.
 - Inode metadata is canonical in the inode record.
 - A directory maps a name to the child's inode ID and file type. This is the namespace representation needed by `ReadDir`.
-- Redis mode must not use `volume.json` as a metadata source.
+- Redis mode persists volume configuration in Redis rather than using the local `volume.fmt` file used by the Memory backend.
 - Correctness comes before caching, Lua dependencies, batching, and other optimizations.
 
 ## 2. Current schema baseline
@@ -27,11 +27,13 @@ All keys are scoped by the volume hash tag.
 | `{db:volume}:inode_count` | String/integer | live inode count maintained with inode lifecycle; `StatFs` exposure remains separate | Confirmed lifecycle |
 | `{db:volume}:inode:<ino>` | String | canonical serialized `SwordFsInode` | Confirmed |
 | `{db:volume}:dir:<parent_ino>` | Hash | `name -> {type, ino}` | Confirmed |
-| `{db:volume}:chunk:<ino>` | Hash | `index -> SwordFsChunk` | Current proposal |
+| `{db:volume}:chunk:<ino>` | Hash | `index -> SwordFsChunk` | Confirmed |
+| `{db:volume}:orphans` | Hash | `ino -> marker` for durable last-link orphan candidates | Confirmed |
+| `{db:volume}:reclaims` | Hash | `ino -> serialized ReclaimWork` after reclaim point of no return | Confirmed |
 
 `kEntry` remains the single directory-entry record type. Its logical content is `{name, type, ino}`. In a Redis directory Hash, `name` is already the Hash field, so the stored value only needs `{type, ino}`. This is a storage representation of `kEntry`, not a second `kDirEntry` record type.
 
-## 3. Access-pattern matrix — working baseline
+## 3. Access-pattern matrix
 
 | Operation | Reads | Writes | Transaction | Status |
 |---|---|---|---|---|
@@ -40,24 +42,25 @@ All keys are scoped by the volume hash tag.
 | `ReadDir(ino, offset, max_entries, iterator)` | `dir:ino`, directory inode on first call | — / best-effort atime on first call | iterator state is owned by the caller and reused across calls | Confirmed |
 | `Readlink(ino)` | `inode:ino` | — | no | Confirmed pattern |
 | `FindChunk(ino,idx)` | `chunk:ino` | — | no | Confirmed pattern |
-| `ListChunks(ino)` | `chunk:ino` | — | no | Current proposal: incremental hash enumeration |
+| `VisitChunks(ino,visitor)` | `chunk:ino` | — | no | Confirmed incremental enumeration |
 | `StatFs()` | volume counters | — | no | Counter requirements need validation |
 | `Create(parent,name)` | parent inode, `dir:parent`, allocator | inode, dir, parent inode, counters | yes | Confirmed |
 | `MkDir(parent,name)` | parent inode, `dir:parent` | inode, new dir, parent inode, counters | yes | Confirmed |
 | `Symlink(parent,name)` | parent inode, `dir:parent` | inode, dir, parent inode, counters | yes | Confirmed |
 | `Link(ino,parent,name)` | source inode, parent inode, `dir:parent` | inode nlink, dir, parent inode | yes | Confirmed |
 | `SetAttr(ino,...)` | inode, chunk Hash when size changes | inode, affected chunk Hash | yes | Confirmed |
-| `AddChunk(ino,chunk)` | inode/chunk key as required | chunk Hash | yes | Confirmed |
+| `CommitChunk(ino,expected,replacement)` | inode, `chunk:ino` | inode/chunk Hash | yes | Confirmed CAS/idempotent publication |
 | `Truncate(ino,size)` | inode, chunk Hash | inode, chunk Hash | yes | Confirmed |
 | `Unlink(parent,name)` | parent inode, dentry, child inode | dentry, child inode, parent inode, possibly counters | yes | Confirmed |
 
 | `RmDir(parent,name)` | parent inode, dentry, target dir | dentry, target inode, parent inode, counters | yes | Confirmed |
 
 | `Rename(...)` | source/destination parents, source dentry, optional target dentry/inodes | source/destination dirs, moved inode, optional victim, parent state | yes | Confirmed |
-| `ReclaimInode(ino)` | inode, chunk Hash | inode, chunk Hash, counters | yes | Confirmed |
+| `PrepareReclaim(ino)` | pending reclaim, inode, chunk Hash | pending reclaim, orphan marker, inode, chunk Hash, counters | yes | Confirmed point-of-no-return transition |
+| `CompleteReclaim(ino)` | pending reclaim | pending reclaim | yes | Confirmed idempotent completion |
 
 
-This matrix is a working baseline, not a claim that all transaction details are finalized.
+This matrix summarizes the current Redis access pattern. Transaction mechanics may continue to evolve as long as the `IMetaEngine` semantics remain unchanged.
 
 Access-time updates are best-effort metadata side effects. An access operation must not fail because its atime update conflicts with another metadata mutation or otherwise cannot be persisted. Redis may use a separate optimistic transaction for the atime update, but failure of that transaction is logged and does not change the result of the enclosing filesystem operation. Read-only metadata access itself must not be placed inside a WATCH/MULTI/EXEC transaction merely because atime is updated as a side effect.
 
@@ -165,15 +168,16 @@ The source inode, target parent inode, and target parent directory are part of t
 
 ### Unlink
 
-`Unlink` removes one namespace link. It never deletes the inode. The child inode's `nlink` is decremented and its `ctime` is updated; when `nlink` reaches zero, the inode becomes an orphan and remains available until its last open reference is released. The parent directory's `mtime` and `ctime` are updated.
+`Unlink` removes one namespace link. It never deletes object data. The child inode's `nlink` is decremented and its `ctime` is updated; when `nlink` reaches zero, the same transaction publishes the inode into the durable `orphans` Hash. The parent directory's `mtime` and `ctime` are updated.
 
 ```text
 dir:<parent>           HDEL name
 inode:<parent>         mtime/ctime updated
 inode:<child>          nlink -= 1, ctime = now
+orphans                HSET child_ino marker  (when nlink reaches 0)
 ```
 
-When `nlink == 1` before unlink, `inode:<child>` is retained with `nlink == 0` until VFS confirms there are no open references and performs reclamation. `Unlink` does not perform that deletion.
+When `nlink == 1` before unlink, `inode:<child>` is retained with `nlink == 0` and the orphan marker becomes the durable cleanup authority. The background reclaimer later checks the local open-reference fence and attempts `PrepareReclaim`; foreground unlink does not delete the inode or its data objects.
 
 ### RmDir
 
@@ -204,7 +208,7 @@ inode:<dst_parent>     mtime/ctime updated
 inode:<src_ino>        ctime updated
 ```
 
-For replacement of an existing regular file, the destination inode loses one namespace link. If this makes `nlink == 0`, the inode remains in metadata until VFS performs open-fd-aware reclamation; otherwise its `nlink` is decremented and its `ctime` is updated. The source entry is replaced atomically by the destination entry. The overwritten inode and post-operation `nlink` are returned to VFS so it can use the same reclamation path as `Unlink`.
+For replacement of an existing regular file, the destination inode loses one namespace link. If this makes `nlink == 0`, the same transaction publishes a durable orphan marker; otherwise its `nlink` is decremented and its `ctime` is updated. The source entry is replaced atomically by the destination entry. VFS does not need a post-rename link-count result for reclamation; metadata owns publication of the durable orphan candidate.
 
 For replacement of an existing directory, the destination must be empty. The source directory replaces the destination entry, the destination directory inode is deleted, and parent-directory link counts are adjusted according to POSIX semantics. In particular, when source and destination parents differ, the source parent loses one child-directory link while the destination parent's child-directory count is unchanged because one directory is replaced by another.
 
@@ -230,41 +234,49 @@ FUSE fh
 
 The Redis `HSCAN` cursor is private state of the directory handle. Each `HSCAN` returns the cursor for the next scan, and the same open directory handle retains it for subsequent reads. The FUSE `off` is a logical directory position and is **not** the Redis cursor and is not directly converted into one. If a caller seeks to a non-sequential logical offset, the iterator may restart from cursor zero and scan forward until that logical position.
 
-The VFS directory handle owns a backend-neutral `IDirIterator`; Redis stores an `HSCAN` cursor behind that interface, while Memory stores its own iteration state. This keeps backend-specific cursors out of `IMetaEngine` callers. The VFS directory handle serializes `Peek` + `Read` for a given FUSE `fh`, while the Redis iterator also protects its backend state. V1 does not promise a snapshot across concurrent directory mutations; iteration remains best-effort, consistent with the underlying backend's enumeration semantics. Redis directory iterators retain shared ownership of the metadata client so an outstanding handle cannot outlive the Redis client it uses.
+The VFS directory handle owns a backend-neutral `DirIterator`; Redis stores an `HSCAN` cursor behind that interface, while Memory stores its own iteration state. This keeps backend-specific cursors out of `IMetaEngine` callers. The VFS directory handle serializes `Peek` + `Advance` for a given FUSE `fh`, while the Redis iterator also protects its backend state. V1 does not promise a snapshot across concurrent directory mutations; iteration remains best-effort, consistent with the underlying backend's enumeration semantics. Redis directory iterators retain shared ownership of the metadata backend context so an outstanding handle cannot outlive the Redis client/executor resources it uses.
 
 ### Inode reclamation and chunk lifecycle
 
-`nlink == 0` is a namespace state, not permission for the metadata engine to immediately destroy a regular-file inode. POSIX open-unlink semantics require an unlinked file to remain accessible through an existing file descriptor until the last reference is closed.
+`nlink == 0` is a namespace state, not permission to immediately destroy a regular-file inode or its data. POSIX open-unlink semantics require an unlinked file to remain accessible through an existing file descriptor until the local open-reference fence is clear.
 
-The V1 lifecycle is:
+The current durable lifecycle is:
 
 ```text
 namespace link removed
         |
         v
-nlink == 0
+nlink == 0 + durable orphan marker
         |
-        +---- open fd exists ----> orphaned inode
-        |                              |
-        |                              v
-        |                         last Close()
-        |                              |
-        +---- no open fd --------------+
-                                       |
-                                       v
-                              ReclaimData()
-                               /          \
-                              v            v
-                     delete data chunks   ReclaimInode()
-                                           |
-                                           v
-                                      delete inode
-                                      delete chunk metadata
+        +---- local open reference exists ----> keep orphan marker; retry later
+        |
+        v
+PrepareReclaim()
+        |
+        | atomically freeze authoritative object identities,
+        | write reclaims[ino], remove orphan marker/live inode/chunk map
+        v
+durable pending reclaim
+        |
+        +---- object delete fails ----> keep pending record; retry/restart safe
+        |
+        v
+delete all frozen object identities
+        |
+        v
+CompleteReclaim()
+        |
+        v
+remove pending record
 ```
 
-`ReclaimData` is a VFS-level coordinator because data objects and metadata live in different engines. It enumerates the inode's metadata chunks, deletes the corresponding data-engine objects, and then calls metadata `ReclaimInode`. `ReclaimInode` must be idempotent and must only remove an inode whose `nlink == 0`; if a concurrent `Link` restores a positive link count, reclamation must not delete live data or metadata.
+The VFS foreground path does not execute this deletion sequence. The background `Reclaimer` is the cross-engine coordinator. Before `PrepareReclaim`, it acquires the local `InodeHandle` reclaim fence so an open/opening descriptor cannot race the metadata point of no return.
 
-Redis cannot make the Redis metadata mutation and object-store deletion one atomic transaction. Cleanup therefore needs explicit retry/idempotency behavior. A failed data-object deletion must not cause the metadata inode to be deleted prematurely.
+`PrepareReclaim` rechecks `nlink == 0`, freezes the authoritative chunk descriptors and their immutable object keys into `reclaims[ino]`, removes the orphan marker, and removes live inode/chunk metadata atomically. A concurrent `Link` that wins first makes preparation a no-op and clears stale orphan state; once preparation succeeds, the live inode no longer exists and object deletion can proceed without the local fence.
+
+The reclaimer deletes every frozen object idempotently and calls `CompleteReclaim` only after all deletes succeed. `CompleteReclaim` removes the pending record idempotently. This makes crash/restart and object-delete failure recoverable without reconstructing delete targets from mutable metadata.
+
+Redis cannot make the Redis metadata mutation and object-store deletion one atomic transaction. The durable pending-reclaim record is therefore the handoff between those systems: live metadata is removed only together with publication of the frozen work, and the frozen record is retained until object deletion completes.
 
 For directories, `RmDir` is different: the target must be empty and directories have no data chunks, so target directory metadata can be removed as part of the atomic namespace mutation.
 
@@ -286,7 +298,7 @@ A persistent `inode_count` is used by the current Redis implementation as the li
 
 ### Lookup
 
-The directory entry contains `type` and `ino`, which is sufficient to identify the entry. `Lookup` may still need `inode:<ino>` because the API returns the complete `SwordFsInode`. Confirm this against the actual interface and FUSE call path before optimizing away the read.
+The directory entry contains `type` and `ino`, which is sufficient to identify the entry. `Lookup` still reads `inode:<ino>` because the current API returns the complete `SwordFsInode`, not only the directory-entry tuple.
 
 ### ReadDir validation notes
 
@@ -296,9 +308,9 @@ Pagination/streaming is implemented through a backend-neutral iterator associate
 
 ```text
 FUSE fh
-  -> FileHandleManager directory handle
+  -> HandleManager / DirHandle
        -> logical FUSE directory offset
-       -> IDirIterator
+       -> DirIterator
             ├── Memory: backend-neutral in-memory state
             └── Redis: private HSCAN cursor + prefetched entries
 ```
@@ -329,20 +341,24 @@ namespace link removed
         ↓
       nlink--
         ↓
- nlink == 0 ? orphan inode : normal inode
+ nlink == 0 ? publish durable orphan : normal inode
         ↓
-last open reference released
+background worker + local reclaim fence
         ↓
-   ReclaimInode
+  PrepareReclaim
         ↓
-remove inode/chunk metadata
+freeze immutable object identities and remove live inode/chunk metadata
+        ↓
+delete frozen data objects
+        ↓
+CompleteReclaim
 ```
 
-`ReclaimInode` must therefore verify the final reclamation condition before deleting metadata. The Redis implementation must preserve this lifecycle for `Unlink` and Rename-over-file.
+`PrepareReclaim` is the metadata point of no return and must verify the final reclamation condition before removing live metadata. The Redis implementation must preserve this lifecycle for `Unlink` and rename-over-file, and `Link` must atomically revive/clear an orphan candidate when it wins before preparation.
 
 ### Chunk enumeration
 
-Validate whether Hash field ordering is sufficient for every caller. If `ListChunks` requires ordered output, enumeration can collect entries and sort by chunk index without introducing a second index.
+`VisitChunks` incrementally enumerates the per-inode chunk Hash and does not expose Redis cursor state through `IMetaEngine`. The interface does not promise sorted output; callers that require ordering must establish it explicitly rather than depending on Redis Hash field order.
 
 ## 7. JuiceFS comparison
 
@@ -369,7 +385,7 @@ The POSIX semantics for the core namespace mutations and the VFS directory itera
 
 1. Validate `ReadDir` behavior under concurrent directory mutation and arbitrary FUSE seek/restart workloads.
 2. Resolve whether `StatFs` should expose the already-confirmed `inode_count` lifecycle counter.
-3. Validate `ListChunks` ordering requirements against actual callers.
+3. Revisit chunk-enumeration ordering only if a future caller requires a stable sorted contract rather than the current visitor semantics.
 4. Keep Memory and Redis semantic tests aligned as new operations are added.
 
 These access-pattern decisions are now the baseline for the current Redis implementation; future changes should update this document when implementation or measurements require a semantic change.
