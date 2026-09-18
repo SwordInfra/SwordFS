@@ -19,6 +19,7 @@ enum class RecordType : uint32_t {
   kInode = 2,
   kEntry = 3,
   kChunk = 4,
+  kReclaim = 5,
 };
 
 class BufEncoder {

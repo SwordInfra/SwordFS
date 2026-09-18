@@ -19,6 +19,7 @@
 #pragma once
 
 #include <folly/container/F14Map.h>
+#include <folly/container/F14Set.h>
 #include <sys/stat.h>
 
 #include <atomic>
@@ -33,6 +34,7 @@
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
 #include "metadata/types/Inode.hpp"
+#include "metadata/types/Reclaim.hpp"
 #include "utils/Synchronization.hpp"
 
 namespace swordfs::metadata {
@@ -76,6 +78,18 @@ class MemMetaStore {
 
   // Chunk metadata: inode → (index → SwordFsChunk).
   folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, SwordFsChunk>> chunks_;
+
+  // Orphan candidates: inodes whose nlink dropped to zero. Published by the
+  // mutation that dropped it (unlink, rename-overwrite) and dropped again by
+  // Link revival, reclaim preparation, or as soon as the inode is found
+  // unreclaimable. Mirrors the persistent backends' durable orphan marker
+  // within the process lifetime.
+  folly::F14FastSet<InodeID> orphans_;
+
+  // Pending reclaims: frozen work of inodes that passed the reclaim point of
+  // no return and whose objects have not all been deleted yet. This record —
+  // not the live inode — is the authority for the delayed deletes.
+  folly::F14FastMap<InodeID, ReclaimWork> pending_reclaims_;
 };
 
 }  // namespace swordfs::metadata

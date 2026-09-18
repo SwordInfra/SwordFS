@@ -10,4 +10,5 @@
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
 #include "metadata/types/Inode.hpp"
+#include "metadata/types/Reclaim.hpp"
 #include "metadata/types/Volume.hpp"

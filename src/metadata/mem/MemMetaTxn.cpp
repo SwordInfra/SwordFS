@@ -9,7 +9,9 @@
 
 #include <algorithm>
 #include <limits>
+#include <utility>
 
+#include "chunk/ChunkObjectKey.hpp"
 #include "metadata/Types.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
@@ -296,15 +298,17 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view old_name, 
       return Status::NotDirectory("target is not a directory");
     }
     // Unlink detaches the victim. Empty directories are reclaimed by
-    // Unlink itself; file inodes survive when their last name disappears
-    // so the VFS layer can perform the same open-fd-aware data cleanup it
-    // uses for unlink(2).
+    // Unlink itself (which frees the inode record, so the victim pointer must
+    // not be dereferenced afterwards); file inodes survive when their last
+    // name disappears so the VFS layer can perform the same open-fd-aware data
+    // cleanup it uses for unlink(2).
     const InodeID victim_ino = victim->ino;
+    const bool victim_is_dir = victim->IsDir();
     Status status = Unlink(new_parent_ino, new_name, nullptr);
     if (!status.ok()) {
       return status;
     }
-    if (result && !victim->IsDir()) {
+    if (result && !victim_is_dir) {
       result->overwritten_ino = victim_ino;
       result->overwritten_post_nlink = victim->attr.nlink;
     }
@@ -365,6 +369,13 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name, uint64_t *p
   // alive until the caller (VfsImpl::Unlink or InodeHandle::Close)
   // confirms no fd is open and calls ReclaimData.
   child->attr.nlink--;
+  if (child->attr.nlink == 0) {
+    // Last name gone: publish the inode as an orphan candidate in this same
+    // transaction, so the fact that it is unreachable survives a crash
+    // before the caller gets to reclaim it. The candidate is what mount-time
+    // reconciliation promotes; it carries no claim on the inode's data.
+    store_->orphans_.insert(child->ino);
+  }
   if (post_nlink) {
     // Read it back inside the same transaction so the caller sees the
     // exact post-decrement value with no chance of a concurrent Link
@@ -388,6 +399,13 @@ Status MemMetaTxn::LinkExistingEntry(InodeID parent_ino, std::string_view name, 
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
     return Status::NotFound("inode not found");
+  }
+
+  // A revived orphan candidate (nlink 0 -> 1) is no longer an orphan; drop
+  // the marker in the same transaction that re-links it so reconciliation
+  // can never reclaim an inode that has a name again.
+  if (inode->attr.nlink == 0) {
+    store_->orphans_.erase(ino);
   }
 
   inode->attr.nlink++;
@@ -608,14 +626,94 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
   return Status::OK();
 }
 
-Status MemMetaTxn::ReclaimInode(InodeID ino) {
+Status MemMetaTxn::PrepareReclaim(InodeID ino, ReclaimWork *work) {
+  if (work == nullptr) {
+    return Status::InvalidArgument("reclaim work output is null");
+  }
+  *work = {};
+
+  // Idempotent replay: once the point of no return has been crossed, the
+  // frozen record — not the (already removed) live inode — is the authority,
+  // so crash recovery and retries get the same work back unchanged.
+  auto pending_it = store_->pending_reclaims_.find(ino);
+  if (pending_it != store_->pending_reclaims_.end()) {
+    *work = pending_it->second;
+    return Status::OK();
+  }
+
   SwordFsInode *inode = FindInode(ino);
-  if (!inode) {
-    return Status::OK();  // already reclaimed
+  if (inode == nullptr) {
+    // Already reclaimed. Any marker left behind is stale.
+    store_->orphans_.erase(ino);
+    return Status::NotFound("inode is not reclaimable");
   }
-  if (inode->attr.nlink == 0) {
-    DeleteInode(ino);
+  if (inode->IsDir() || inode->attr.nlink != 0) {
+    // A concurrent Link revived the inode before this transaction, or the
+    // node is a directory (never reclaimed through an orphan candidate).
+    // Drop the marker and leave the inode and its objects untouched.
+    store_->orphans_.erase(ino);
+    return Status::NotFound(inode->IsDir() ? "directory is not an orphan candidate" : "inode is still linked");
   }
+
+  ReclaimWork frozen;
+  frozen.ino = ino;
+  auto chunks_it = store_->chunks_.find(ino);
+  if (chunks_it != store_->chunks_.end()) {
+    frozen.chunks.reserve(chunks_it->second.size());
+    for (const auto &[index, chunk] : chunks_it->second) {
+      (void)index;
+      // Freeze the object identity that the authoritative descriptor derives
+      // right now. Later deletions replay this frozen key, never a key
+      // rebuilt from live state.
+      frozen.chunks.push_back(ReclaimChunk{chunk, chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision)});
+    }
+    std::sort(frozen.chunks.begin(), frozen.chunks.end(),
+              [](const ReclaimChunk &a, const ReclaimChunk &b) { return a.descriptor.index < b.descriptor.index; });
+  }
+
+  // Retain the frozen work durably, then drop the live inode (and with it the
+  // only other copy of the descriptors) and the orphan marker. This is the
+  // point of no return: from here on no Link can revive the inode and every
+  // remaining step is idempotent.
+  store_->pending_reclaims_[ino] = frozen;
+  store_->orphans_.erase(ino);
+  DeleteInode(ino);
+
+  *work = std::move(frozen);
+  return Status::OK();
+}
+
+Status MemMetaTxn::CompleteReclaim(InodeID ino) {
+  store_->pending_reclaims_.erase(ino);
+  return Status::OK();
+}
+
+Status MemMetaTxn::ListOrphanCandidates(std::vector<InodeID> *out) {
+  if (out == nullptr) {
+    return Status::InvalidArgument("orphan candidate output is null");
+  }
+  out->clear();
+  out->reserve(store_->orphans_.size());
+  for (InodeID ino : store_->orphans_) {
+    out->push_back(ino);
+  }
+  // F14 set iteration order is unspecified; sort so a reconciliation pass is
+  // deterministic and its logs read in a stable order.
+  std::sort(out->begin(), out->end());
+  return Status::OK();
+}
+
+Status MemMetaTxn::ListPendingReclaims(std::vector<InodeID> *out) {
+  if (out == nullptr) {
+    return Status::InvalidArgument("pending reclaim output is null");
+  }
+  out->clear();
+  out->reserve(store_->pending_reclaims_.size());
+  for (const auto &[ino, work] : store_->pending_reclaims_) {
+    (void)work;
+    out->push_back(ino);
+  }
+  std::sort(out->begin(), out->end());
   return Status::OK();
 }
 

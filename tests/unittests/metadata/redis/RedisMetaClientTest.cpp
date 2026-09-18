@@ -835,4 +835,40 @@ TEST(RedisMetaTxnTest, CommitChunkRejectsConflictingInitialPublication) {
   EXPECT_EQ(persisted.revision, 1U);
 }
 
+TEST(RedisMetaTxnTest, PrepareReclaimRejectsStaleChunkScan) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueVolumeName("reclaim-stale-scan"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  SwordFsAttr file_attr(9, S_IFREG | 0644);
+  file_attr.nlink = 0;
+  SwordFsInode file(9, file_attr, kRootInodeId);
+  ASSERT_TRUE(SeedInode(redis, key, file).ok());
+
+  SwordFsChunk chunk{0, 0, 1, 4096};
+  std::string chunk_data;
+  ASSERT_TRUE(chunk.SerializeTo(&chunk_data).ok());
+  redis.hset(key.Chunk(file.ino), "0", chunk_data);
+
+  ReclaimWork work;
+  bool frozen = false;
+  const std::vector<SwordFsChunk> stale_scan;
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.PrepareReclaim(file.ino, stale_scan, work, frozen);
+  });
+
+  EXPECT_TRUE(status.IsBusy()) << status.message();
+  EXPECT_FALSE(frozen);
+  EXPECT_EQ(work.ino, 0U);
+  EXPECT_TRUE(redis.exists(key.Inode(file.ino)));
+  EXPECT_TRUE(redis.exists(key.Chunk(file.ino)));
+  EXPECT_FALSE(redis.hexists(key.Reclaims(), std::to_string(file.ino)));
+}
+
 }  // namespace swordfs::metadata

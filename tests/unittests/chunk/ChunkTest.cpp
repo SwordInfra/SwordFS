@@ -106,7 +106,16 @@ class MissingMetaEngine final : public IMetaEngine {
   Status Open(InodeID) override {
     return Status::OK();
   }
-  Status ReclaimInode(InodeID) override {
+  Status PrepareReclaim(InodeID, swordfs::metadata::ReclaimWork *) override {
+    return Status::NotFound("no reclaimable inode");
+  }
+  Status CompleteReclaim(InodeID) override {
+    return Status::OK();
+  }
+  Status VisitOrphanCandidates(const swordfs::metadata::InodeVisitorFn &) override {
+    return Status::OK();
+  }
+  Status VisitPendingReclaims(const swordfs::metadata::InodeVisitorFn &) override {
     return Status::OK();
   }
   Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {

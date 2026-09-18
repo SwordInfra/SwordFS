@@ -3,6 +3,7 @@
 
 #include "metadata/redis/RedisMetaOps.hpp"
 
+#include <folly/logging/xlog.h>
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -19,8 +20,25 @@
 #include "metadata/redis/RedisMetaTxn.hpp"
 #include "utils/BlockingExecutor.hpp"
 #include "utils/ExecutionDomain.hpp"
+#include "utils/Logging.hpp"
 
 namespace swordfs::metadata {
+namespace {
+
+// Decode a hash field that holds an inode id. Persisted queue state is
+// durable data that can be corrupted or tampered with, so anything that is
+// not exactly one inode id is reported as malformed rather than coerced.
+utils::Status ParseInodeField(const std::string &field, std::string_view what, InodeID &ino) {
+  uint64_t parsed = 0;
+  const auto [end, error] = std::from_chars(field.data(), field.data() + field.size(), parsed);
+  if (error != std::errc{} || end != field.data() + field.size() || parsed == 0) {
+    return utils::Status::Malformed("invalid " + std::string(what) + " record: field is not an inode id");
+  }
+  ino = parsed;
+  return utils::Status::OK();
+}
+
+}  // namespace
 
 RedisMetaOps::RedisMetaOps(const RedisMetaConfig &config, std::string_view volume_name)
     : backend_(std::make_shared<RedisBackendContext>(
@@ -172,9 +190,101 @@ utils::Status RedisMetaOps::TouchInode(InodeID ino, SetAttrField fields) {
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.TouchInode(ino, fields); });
 }
 
-utils::Status RedisMetaOps::ReclaimInode(InodeID ino) {
+utils::Status RedisMetaOps::PrepareReclaim(InodeID ino, ReclaimWork *work) {
   utils::ExpectInFiberDomain();
-  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.ReclaimInode(ino); });
+  if (work == nullptr) {
+    return utils::Status::InvalidArgument("reclaim work output is null");
+  }
+
+  // The inode's chunk map cannot be enumerated inside a Redis transaction
+  // with the primitives RedisKvTxn exposes, so it is scanned first and the
+  // transaction re-validates that scan (chunk count plus the WATCH on the
+  // chunk hash that HLEN installs). A change in between surfaces as Busy and
+  // the attempt restarts with a fresh scan.
+  //
+  // Under the single-active-mount contract the re-validation is sufficient:
+  // a reclaimable inode has no open descriptor (the caller's fence) and no
+  // directory entry, so nothing can publish a new revision for it — the only
+  // remaining chunk-map mutations are truncate's drop/clamp, which either
+  // changes the count (Busy) or keeps the frozen key identical. A writer that
+  // bypassed the fence could only make this freeze a superseded revision,
+  // which leaks that object; it can never name a live one, because revisions
+  // are never reused.
+  constexpr int kMaxAttempts = 3;
+  utils::Status status;
+  for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+    std::vector<SwordFsChunk> scanned;
+    status = CollectChunks(ino, scanned);
+    if (!status.ok()) {
+      return status;
+    }
+
+    ReclaimWork pending;
+    bool frozen = false;
+    status = TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PrepareReclaim(ino, scanned, pending, frozen); });
+    if (status.ok()) {
+      if (!frozen) {
+        // Not reclaimable: already reclaimed, still linked, or a directory.
+        // The transaction dropped any stale orphan marker as part of the very
+        // mutation that read the inode, so no separate cleanup can race a
+        // concurrent unlink's marker publication.
+        return utils::Status::NotFound("inode is not reclaimable");
+      }
+      *work = std::move(pending);
+      return utils::Status::OK();
+    }
+    if (!status.IsBusy()) {
+      break;
+    }
+  }
+  return status;
+}
+
+utils::Status RedisMetaOps::CompleteReclaim(InodeID ino) {
+  utils::ExpectInFiberDomain();
+  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.CompleteReclaim(ino); });
+}
+
+utils::Status RedisMetaOps::VisitOrphanCandidates(const std::function<utils::Status(InodeID)> &visitor) {
+  utils::ExpectInFiberDomain();
+  if (!visitor) {
+    return utils::Status::InvalidArgument("orphan candidate visitor is null");
+  }
+
+  // Snapshot before visiting: the visitor typically reclaims the visited
+  // inode, which mutates the hash a cursor-based scan is walking.
+  std::vector<InodeID> candidates;
+  auto status = CollectOrphanCandidates(candidates);
+  if (!status.ok()) {
+    return status;
+  }
+  for (InodeID ino : candidates) {
+    status = visitor(ino);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaOps::VisitPendingReclaims(const std::function<utils::Status(InodeID)> &visitor) {
+  utils::ExpectInFiberDomain();
+  if (!visitor) {
+    return utils::Status::InvalidArgument("pending reclaim visitor is null");
+  }
+
+  std::vector<InodeID> pending;
+  auto status = CollectPendingReclaims(pending);
+  if (!status.ok()) {
+    return status;
+  }
+  for (InodeID ino : pending) {
+    status = visitor(ino);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return utils::Status::OK();
 }
 
 utils::Status RedisMetaOps::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
@@ -205,6 +315,24 @@ utils::Status RedisMetaOps::VisitChunks(InodeID ino,
     return utils::Status::InvalidArgument("chunk visitor is null");
   }
 
+  return ScanChunkFields(ino, [&visitor](const std::string &field, const std::string &value) {
+    (void)field;
+    SwordFsChunk chunk;
+    auto status = chunk.ParseFrom(value);
+    if (!status.ok()) {
+      return status;
+    }
+    return visitor(chunk);
+  });
+}
+
+// ────────────────────────────────────────────────────────────────
+// Private scan helpers
+// ────────────────────────────────────────────────────────────────
+
+utils::Status RedisMetaOps::ScanChunkFields(InodeID ino, const ChunkFieldVisitorFn &visitor) {
+  utils::ExpectInFiberDomain();
+
   constexpr size_t kScanBatchSize = 128;
   uint64_t cursor = 0;
   do {
@@ -215,20 +343,95 @@ utils::Status RedisMetaOps::VisitChunks(InodeID ino,
     if (!status.ok()) {
       return status;
     }
-    for (const auto &[field, chunk_value] : values) {
-      (void)field;
-      SwordFsChunk chunk;
-      status = chunk.ParseFrom(chunk_value);
-      if (!status.ok()) {
-        return status;
-      }
-      status = visitor(chunk);
+    for (const auto &[field, value] : values) {
+      status = visitor(field, value);
       if (!status.ok()) {
         return status;
       }
     }
     cursor = next_cursor;
   } while (cursor != 0);
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaOps::CollectChunks(InodeID ino, std::vector<SwordFsChunk> &out) {
+  out.clear();
+  return ScanChunkFields(ino, [&out](const std::string &field, const std::string &value) {
+    (void)field;
+    SwordFsChunk chunk;
+    auto status = chunk.ParseFrom(value);
+    if (!status.ok()) {
+      return status;
+    }
+    out.push_back(chunk);
+    return utils::Status::OK();
+  });
+}
+
+utils::Status RedisMetaOps::CollectOrphanCandidates(std::vector<InodeID> &out) {
+  utils::ExpectInFiberDomain();
+  out.clear();
+
+  constexpr size_t kScanBatchSize = 128;
+  uint64_t cursor = 0;
+  do {
+    std::vector<std::pair<std::string, std::string>> values;
+    uint64_t next_cursor = 0;
+    auto status = backend_->executor().RunFromFiber(
+        [&] { return backend_->client().HScan(key_.Orphans(), cursor, kScanBatchSize, &values, &next_cursor); });
+    if (!status.ok()) {
+      return status;
+    }
+    for (const auto &[field, value] : values) {
+      (void)value;
+      InodeID ino = 0;
+      status = ParseInodeField(field, "orphan candidate", ino);
+      if (!status.ok()) {
+        return status;
+      }
+      out.push_back(ino);
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+
+  std::sort(out.begin(), out.end());
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaOps::CollectPendingReclaims(std::vector<InodeID> &out) {
+  utils::ExpectInFiberDomain();
+  out.clear();
+
+  constexpr size_t kScanBatchSize = 128;
+  uint64_t cursor = 0;
+  do {
+    std::vector<std::pair<std::string, std::string>> values;
+    uint64_t next_cursor = 0;
+    auto status = backend_->executor().RunFromFiber(
+        [&] { return backend_->client().HScan(key_.Reclaims(), cursor, kScanBatchSize, &values, &next_cursor); });
+    if (!status.ok()) {
+      return status;
+    }
+    for (const auto &[field, value] : values) {
+      InodeID ino = 0;
+      status = ParseInodeField(field, "pending reclaim", ino);
+      if (!status.ok()) {
+        return status;
+      }
+      ReclaimWork work;
+      status = work.ParseFrom(value);
+      if (!status.ok()) {
+        return status;
+      }
+      if (work.ino != ino) {
+        return utils::Status::Malformed("pending reclaim record inode mismatch");
+      }
+      out.push_back(ino);
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+
+  std::sort(out.begin(), out.end());
   return utils::Status::OK();
 }
 

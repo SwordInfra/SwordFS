@@ -8,6 +8,7 @@
 #include <folly/logging/xlog.h>
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <thread>
@@ -91,8 +92,8 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
   Status GetInode(InodeID, SwordFsInode *out) override {
-    // Default to nlink==0 so ReclaimData's final guard proceeds unless a
-    // test installs an engine with specific inode metadata.
+    // The reclaim path no longer consults inode metadata; this remains for
+    // tests that model an inode's attributes (ownership, nlink).
     if (out) {
       *out = {};
     }
@@ -140,9 +141,33 @@ class MockMetaEngine : public IMetaEngine {
   Status Open(InodeID) override {
     return open_status;
   }
-  Status ReclaimInode(InodeID) override {
+  Status PrepareReclaim(InodeID ino, swordfs::metadata::ReclaimWork *work) override {
+    ++prepare_reclaim_calls;
+    last_reclaim_ino = ino;
+    if (!prepare_reclaim_status.ok()) {
+      return prepare_reclaim_status;
+    }
+    if (work != nullptr) {
+      work->ino = ino;
+      for (const auto &chunk : reclaim_chunks) {
+        // Mirror the real engines: the frozen identity is derived once, at
+        // freeze time, from the authoritative descriptor.
+        work->chunks.push_back(
+            swordfs::metadata::ReclaimChunk{chunk, chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision)});
+      }
+    }
+    return Status::OK();
+  }
+  Status CompleteReclaim(InodeID ino) override {
     ++reclaim_calls;
+    last_reclaim_ino = ino;
     return reclaim_status;
+  }
+  Status VisitOrphanCandidates(const swordfs::metadata::InodeVisitorFn &) override {
+    return Status::OK();
+  }
+  Status VisitPendingReclaims(const swordfs::metadata::InodeVisitorFn &) override {
+    return Status::OK();
   }
   Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
     if (revision == nullptr) {
@@ -172,10 +197,16 @@ class MockMetaEngine : public IMetaEngine {
   // Observable state / injectable statuses for tests.
   int truncate_calls = 0;
   size_t last_truncate_size = 0;
+  // Number of completed reclaims (CompleteReclaim calls).
   int reclaim_calls = 0;
+  int prepare_reclaim_calls = 0;
+  InodeID last_reclaim_ino = 0;
   Status open_status = Status::OK();
   Status truncate_status = Status::OK();
   Status reclaim_status = Status::OK();
+  Status prepare_reclaim_status = Status::OK();
+  // Frozen descriptors the mock hands out from PrepareReclaim.
+  std::vector<swordfs::metadata::SwordFsChunk> reclaim_chunks;
 
  private:
   InodeID next_ino_ = 1000;
@@ -482,10 +513,32 @@ FIBER_TEST_F(FileHandleTest, CloseReclaimsOrphanedInode) {
   ASSERT_TRUE(FileHandle::Open(9004, 0, &handle).ok());
   auto inode_handle = InodeHandleManager::Instance().Get(9004, false);
   ASSERT_NE(inode_handle, nullptr);
-  EXPECT_TRUE(inode_handle->MarkOrphanedIfOpen());
+  // ReclaimData sees the open descriptor and records local deferral; durable
+  // orphan authority belongs to metadata, while cleanup is deferred to the
+  // close below.
+  ASSERT_TRUE(inode_handle->ReclaimData().ok());
+  EXPECT_EQ(mock_meta_->reclaim_calls, 0) << "an open descriptor must defer the reclaim";
 
   ASSERT_TRUE(handle->Release().ok());
   EXPECT_EQ(mock_meta_->reclaim_calls, 1);
+}
+
+FIBER_TEST_F(FileHandleTest, CloseToleratesDeferredReclaimFailureAndLeavesFenceRetryable) {
+  std::shared_ptr<FileHandle> handle;
+  ASSERT_TRUE(FileHandle::Open(9007, 0, &handle).ok());
+  auto inode_handle = InodeHandleManager::Instance().Get(9007, false);
+  ASSERT_NE(inode_handle, nullptr);
+  ASSERT_TRUE(inode_handle->ReclaimData().ok());
+
+  mock_meta_->reclaim_status = Status::IOError("injected deferred reclaim failure");
+  EXPECT_TRUE(handle->Release().ok()) << "close reports flush status, not deferred reclaim status";
+  EXPECT_EQ(mock_meta_->reclaim_calls, 1);
+
+  // ReclaimWithFence must release the local fence even when completion fails,
+  // otherwise durable reconciliation could never retry this inode.
+  mock_meta_->reclaim_status = Status::OK();
+  EXPECT_TRUE(inode_handle->ReclaimData().ok());
+  EXPECT_EQ(mock_meta_->reclaim_calls, 2);
 }
 
 FIBER_TEST_F(FileHandleTest, CloseOnlyReclaimsOnLastReference) {
@@ -494,7 +547,8 @@ FIBER_TEST_F(FileHandleTest, CloseOnlyReclaimsOnLastReference) {
   ASSERT_TRUE(FileHandle::Open(9005, 0, &h2).ok());
   auto inode_handle = InodeHandleManager::Instance().Get(9005, false);
   ASSERT_NE(inode_handle, nullptr);
-  EXPECT_TRUE(inode_handle->MarkOrphanedIfOpen());
+  ASSERT_TRUE(inode_handle->ReclaimData().ok());
+  EXPECT_EQ(mock_meta_->reclaim_calls, 0) << "two descriptors still hold the inode";
 
   // First close: open count 2 → 1 — no reclaim yet.
   ASSERT_TRUE(h1->Release().ok());
@@ -507,11 +561,15 @@ FIBER_TEST_F(FileHandleTest, CloseOnlyReclaimsOnLastReference) {
   EXPECT_EQ(inode_handle->open_count(), 0);
 }
 
-FIBER_TEST_F(FileHandleTest, MarkOrphanedIfOpenFalseWhenNoOpenFds) {
+FIBER_TEST_F(FileHandleTest, ReclaimDataReclaimsImmediatelyWhenNoFdIsOpen) {
+  // The complement of the deferral: with no descriptor open there is no later
+  // Close to defer to, so ReclaimData reclaims on the spot.
   auto inode_handle = InodeHandleManager::Instance().Get(9006, true);
   ASSERT_NE(inode_handle, nullptr);
-  EXPECT_FALSE(inode_handle->MarkOrphanedIfOpen());
   EXPECT_EQ(inode_handle->open_count(), 0);
+
+  ASSERT_TRUE(inode_handle->ReclaimData().ok());
+  EXPECT_EQ(mock_meta_->reclaim_calls, 1);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -544,11 +602,13 @@ FIBER_TEST_F(FileHandleTest, InodeHandleOpenFdTracking) {
 // InodeHandle::ReclaimData — coordinator contract
 // ────────────────────────────────────────────────────────────────
 //
-// ReclaimData fans a single call out to both the metadata engine
-// (VisitChunks + ReclaimInode) and the data engine (Delete per chunk
-// key). These tests assert that the call sequence matches the
-// documented contract; the per-engine behaviour is exercised by the
-// metadata- and data-engine unit tests.
+// ReclaimData claims the per-inode reclaim fence and then fans a single call
+// out to both engines: the metadata engine freezes the inode's object
+// identities (PrepareReclaim) and drops the live inode, the data engine
+// deletes exactly those frozen keys, and only then does the metadata engine
+// drop the frozen record (CompleteReclaim). These tests assert that the call
+// sequence matches the documented contract; the per-engine behaviour is
+// exercised by the metadata- and data-engine unit tests.
 
 namespace {
 
@@ -566,7 +626,15 @@ class FakeDataEngine : public swordfs::storage::IDataEngine {
     return false;
   }
   Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
-    return Status::OK();
+    if (put_entered_ != nullptr) {
+      auto *entered = put_entered_;
+      auto *release = put_release_;
+      put_entered_ = nullptr;
+      put_release_ = nullptr;
+      entered->post();
+      release->wait();
+    }
+    return put_status;
   }
   Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
     return Status::OK();
@@ -579,8 +647,19 @@ class FakeDataEngine : public swordfs::storage::IDataEngine {
     }
     return Status::OK();
   }
+
+  void BlockNextPut(folly::fibers::Baton *entered, folly::fibers::Baton *release) {
+    put_entered_ = entered;
+    put_release_ = release;
+  }
+
   std::vector<std::string> delete_calls;
   std::unordered_map<std::string, Status> fail_keys;
+  Status put_status = Status::OK();
+
+ private:
+  folly::fibers::Baton *put_entered_{nullptr};
+  folly::fibers::Baton *put_release_{nullptr};
 };
 
 // Mock metadata engine: records VisitChunks / ReclaimInode invocations
@@ -665,11 +744,51 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status Open(InodeID) override {
+    if (open_entered_ != nullptr) {
+      auto *entered = open_entered_;
+      auto *release = open_release_;
+      open_entered_ = nullptr;
+      open_release_ = nullptr;
+      entered->post();
+      release->wait();
+    }
+    return open_status;
+  }
+  Status PrepareReclaim(InodeID ino, swordfs::metadata::ReclaimWork *work) override {
+    ++prepare_reclaim_calls;
+    last_reclaim_ino = ino;
+    if (!prepare_reclaim_status.ok()) {
+      return prepare_reclaim_status;
+    }
+    if (prepare_entered_ != nullptr) {
+      // Park inside the engine. By the time a caller is here the inode's
+      // reclaim fence is already claimed, which is exactly the window the
+      // fence has to protect.
+      auto *entered = prepare_entered_;
+      auto *release = prepare_release_;
+      prepare_entered_ = nullptr;
+      prepare_release_ = nullptr;
+      entered->post();
+      release->wait();
+    }
+    if (work != nullptr) {
+      work->ino = ino;
+      for (const auto &chunk : chunks) {
+        work->chunks.push_back(
+            swordfs::metadata::ReclaimChunk{chunk, chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision)});
+      }
+    }
     return Status::OK();
   }
-  Status ReclaimInode(InodeID ino) override {
-    ++reclaim_inode_calls;
+  Status CompleteReclaim(InodeID ino) override {
+    ++complete_reclaim_calls;
     last_reclaim_ino = ino;
+    return reclaim_status;
+  }
+  Status VisitOrphanCandidates(const swordfs::metadata::InodeVisitorFn &) override {
+    return Status::OK();
+  }
+  Status VisitPendingReclaims(const swordfs::metadata::InodeVisitorFn &) override {
     return Status::OK();
   }
   Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
@@ -708,18 +827,36 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
   }
 
   int visit_chunks_calls = 0;
-  int reclaim_inode_calls = 0;
+  int prepare_reclaim_calls = 0;
+  int complete_reclaim_calls = 0;
   InodeID last_visit_ino = 0;
   InodeID last_reclaim_ino = 0;
   Status visit_chunks_status = Status::OK();
+  Status prepare_reclaim_status = Status::OK();
+  Status reclaim_status = Status::OK();
+  Status open_status = Status::OK();
   std::vector<swordfs::metadata::SwordFsChunk> chunks;
   std::unordered_map<InodeID, struct stat> attrs;
 
+  // Park the next PrepareReclaim call inside the engine so a test can
+  // observe the reclaim window (the fence is claimed by then).
+  void BlockNextPrepare(folly::fibers::Baton *entered, folly::fibers::Baton *release) {
+    prepare_entered_ = entered;
+    prepare_release_ = release;
+  }
+
+  void BlockNextOpen(folly::fibers::Baton *entered, folly::fibers::Baton *release) {
+    open_entered_ = entered;
+    open_release_ = release;
+  }
+
  private:
   swordfs::metadata::ChunkRevision next_revision_ = 1;
+  folly::fibers::Baton *open_entered_{nullptr};
+  folly::fibers::Baton *open_release_{nullptr};
+  folly::fibers::Baton *prepare_entered_{nullptr};
+  folly::fibers::Baton *prepare_release_{nullptr};
 };
-
-}  // namespace
 
 // Reclaim an inode through the InodeHandle API. The manager is now only
 // a registry, so callers fetch (or lazily create) the per-inode handle
@@ -737,7 +874,7 @@ void ResetVolumeFromFiberForTest() {
   swordfs::test::RunInTestThreadFromFiber([] { swordfs::volume::VolumeImpl::Initialize(); });
 }
 
-FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
+FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesEveryFrozenChunkAndCompletes) {
   // Reset lifecycle state on the POSIX test worker, not on this fiber.
   ResetVolumeFromFiberForTest();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
@@ -747,7 +884,8 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
   auto *meta = meta_up.get();
   auto *data = data_up.get();
 
-  // Seed two chunk records.
+  // Seed two chunk records. ReclaimData must delete exactly the identities
+  // the metadata engine freezes from these descriptors.
   swordfs::metadata::SwordFsChunk c0{};
   c0.index = 0;
   c0.start_offset = 0;
@@ -759,11 +897,6 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
   c1.revision = 2;
   c1.size = 2048;
   meta->chunks = {c0, c1};
-  // Register the inode so ReclaimData's nlink guard sees nlink==0 and
-  // proceeds with the chunk enumeration.
-  struct stat attr{};
-  attr.st_nlink = 0;
-  meta->SetAttr(4242, attr);
 
   // Install engines in the volume singleton so ReclaimData can find them.
   auto &vol = swordfs::volume::VolumeImpl::Instance();
@@ -772,25 +905,21 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesEveryChunkAndCallsReclaimInode) {
 
   ASSERT_TRUE(ReclaimInode(4242).ok());
 
-  // The mock visits chunks in insertion order.
+  // The mock freezes chunks in insertion order.
   EXPECT_EQ(data->delete_calls.size(), 2);
   EXPECT_EQ(data->delete_calls[0], chunk::FormatChunkObjectKey(4242, 0, 1));
   EXPECT_EQ(data->delete_calls[1], chunk::FormatChunkObjectKey(4242, 1, 2));
 
-  // Both engines received exactly one call each.
-  EXPECT_EQ(meta->visit_chunks_calls, 1);
-  EXPECT_EQ(meta->reclaim_inode_calls, 1);
-  EXPECT_EQ(meta->last_visit_ino, 4242);
+  // Preparation and completion happen exactly once each, for this inode.
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1);
+  EXPECT_EQ(meta->complete_reclaim_calls, 1);
   EXPECT_EQ(meta->last_reclaim_ino, 4242);
 }
 
-FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
-  // Counterpart of ReclaimDataWithNoDataEngineStillDropsInode from the
-  // pre-CHECK() era. The data engine is now a hard requirement on the
-  // ReclaimData path (the production mount always installs one via
-  // `--bucket`); exercising the chunk-delete loop with a real (fake)
-  // data engine covers the same "delete every chunk + drop inode"
-  // contract that test used to assert.
+FIBER_TEST_F(FileHandleTest, ReclaimDataRetriesIdempotentDeletesUntilComplete) {
+  // A failed object delete must keep the frozen record (CompleteReclaim is
+  // NOT called), and a later attempt must replay the same frozen identities
+  // and complete once every delete succeeds.
   ResetVolumeFromFiberForTest();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
@@ -801,50 +930,50 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataDeletesChunkObjectsViaDataEngine) {
   c.index = 0;
   c.revision = 1;
   meta->chunks = {c};
-  struct stat attr{};
-  attr.st_nlink = 0;
-  meta->SetAttr(99, attr);
+  data->fail_keys[chunk::FormatChunkObjectKey(99, 0, 1)] = Status::IOError("injected delete failure");
 
   auto &vol = swordfs::volume::VolumeImpl::Instance();
   vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(meta_up.release()));
   vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
-  ASSERT_TRUE(ReclaimInode(99).ok());
+  const auto first = ReclaimInode(99);
+  EXPECT_FALSE(first.ok());
   EXPECT_EQ(data->delete_calls.size(), 1u);
-  EXPECT_EQ(data->delete_calls[0], chunk::FormatChunkObjectKey(99, 0, 1));
-  EXPECT_EQ(meta->visit_chunks_calls, 1);
-  EXPECT_EQ(meta->reclaim_inode_calls, 1);
+  EXPECT_EQ(meta->complete_reclaim_calls, 0) << "the frozen record must survive a failed delete";
+
+  data->fail_keys.clear();
+  ASSERT_TRUE(ReclaimInode(99).ok());
+  EXPECT_EQ(data->delete_calls.size(), 2u);
+  EXPECT_EQ(data->delete_calls[1], chunk::FormatChunkObjectKey(99, 0, 1));
+  EXPECT_EQ(meta->prepare_reclaim_calls, 2);
+  EXPECT_EQ(meta->complete_reclaim_calls, 1);
 }
 
-FIBER_TEST_F(FileHandleTest, ReclaimDataCallsReclaimInodeEvenWhenChunkEmpty) {
-  // Inode with zero registered chunks: the manager must still invoke
-  // ReclaimInode so the inode is dropped from the metadata engine.
-  // A data engine is still required (see CHECK in ReclaimData) — even
-  // though no Delete call will be issued, the engine must be installed.
+FIBER_TEST_F(FileHandleTest, ReclaimDataCompletesWithoutDeletesWhenNoChunksFrozen) {
+  // An inode with zero registered chunks (empty file, symlink) still has to
+  // be dropped from the metadata engine: preparation freezes an empty work
+  // list and completion removes the record. A data engine is still required
+  // (see the CHECK in InodeHandle) even though no Delete is issued.
   ResetVolumeFromFiberForTest();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
   auto *data = data_up.get();
 
-  struct stat attr{};
-  attr.st_nlink = 0;
-  meta->SetAttr(123, attr);
-
   auto &vol = swordfs::volume::VolumeImpl::Instance();
   vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(meta_up.release()));
   vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
   ASSERT_TRUE(ReclaimInode(123).ok());
-  EXPECT_EQ(meta->visit_chunks_calls, 1);
-  EXPECT_EQ(meta->reclaim_inode_calls, 1);
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1);
+  EXPECT_EQ(meta->complete_reclaim_calls, 1);
   EXPECT_TRUE(data->delete_calls.empty());
 }
 
-FIBER_TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
-  // A failing per-chunk Delete must not stop the cleanup: every chunk
-  // gets attempted and ReclaimInode still runs. A stranded object is
-  // GC's job; the metadata view must converge regardless.
+FIBER_TEST_F(FileHandleTest, ReclaimDataAttemptsEveryChunkThenKeepsRecordOnFailure) {
+  // A failing per-chunk Delete must not stop the sweep: every frozen object
+  // gets attempted, and because one failed the frozen record survives so the
+  // retry can finish the (idempotent) deletes.
   ResetVolumeFromFiberForTest();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
@@ -859,44 +988,41 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataContinuesAfterPerChunkFailure) {
   c1.revision = 2;
   meta->chunks = {c0, c1};
   data->fail_keys[chunk::FormatChunkObjectKey(1, 0, 1)] = Status::Internal("forced");
-  struct stat attr{};
-  attr.st_nlink = 0;
-  meta->SetAttr(1, attr);
 
   auto &vol = swordfs::volume::VolumeImpl::Instance();
   vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(meta_up.release()));
   vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
-  ASSERT_TRUE(ReclaimInode(1).ok());
-  // Both chunks were attempted despite the failure on "1/0".
+  const auto st = ReclaimInode(1);
+  EXPECT_FALSE(st.ok());
+  // Both chunks were attempted despite the failure on "1/0/1".
   EXPECT_EQ(data->delete_calls.size(), 2);
-  EXPECT_EQ(meta->reclaim_inode_calls, 1);
+  EXPECT_EQ(meta->complete_reclaim_calls, 0) << "a failed delete must keep the frozen record";
 }
 
-FIBER_TEST_F(FileHandleTest, ReclaimDataPropagatesVisitChunksFailure) {
-  // If the metadata engine refuses to enumerate, the manager must
-  // surface that error and NOT invoke ReclaimInode (we don't know
-  // whether the inode exists from the manager's perspective).
+FIBER_TEST_F(FileHandleTest, ReclaimDataPropagatesPrepareFailure) {
+  // If the metadata engine refuses to prepare the reclaim (I/O error, a
+  // corrupt frozen record), nothing may be deleted and nothing may complete:
+  // the inode is still live metadata and its objects are still referenced.
   ResetVolumeFromFiberForTest();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
   auto *data = data_up.get();
-  meta->visit_chunks_status = Status::Internal("nope");
-  struct stat attr{};
-  attr.st_nlink = 0;
-  meta->SetAttr(42, attr);
+  meta->prepare_reclaim_status = Status::Internal("nope");
 
   auto &vol = swordfs::volume::VolumeImpl::Instance();
   vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(meta_up.release()));
   vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
-  auto st = ReclaimInode(42);
+  const auto st = ReclaimInode(42);
   EXPECT_FALSE(st.ok());
-  EXPECT_EQ(meta->visit_chunks_calls, 1);
-  EXPECT_EQ(meta->reclaim_inode_calls, 0);
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1);
+  EXPECT_EQ(meta->complete_reclaim_calls, 0);
   EXPECT_TRUE(data->delete_calls.empty());
 }
+
+}  // namespace
 
 // ────────────────────────────────────────────────────────────────
 // ReclaimData guards — last-line-of-defence against stale-state callers.
@@ -925,16 +1051,17 @@ Engines InstallEnginesForInode(InodeID ino, nlink_t nlink) {
   auto &vol = swordfs::volume::VolumeImpl::Instance();
   vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(meta_up.release()));
   vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
+  vol.set_chunk_size_for_test(4096);
   return {meta, data};
 }
 
 }  // namespace
 
-FIBER_TEST_F(FileHandleTest, ReclaimDataRefusesWhenNlinkStillPositive) {
-  // A caller (VfsImpl::Unlink racing a Link) decided nlink==0 and
-  // called ReclaimData, but a Link landed between its check and
-  // ours. The point of no return is here — refuse to drop the chunk
-  // objects from under the surviving hardlink name.
+FIBER_TEST_F(FileHandleTest, ReclaimDataReleasesFenceWhenInodeIsNotReclaimable) {
+  // A Link that lands before the reclaim's metadata transaction turns
+  // preparation into "not reclaimable": the engine changes nothing, so
+  // ReclaimData must delete nothing and complete nothing — and it must
+  // release its fence so the revived inode stays openable.
   ResetVolumeFromFiberForTest();
   auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/2);
   // Add a chunk so we'd have something to delete if the guard fell
@@ -943,22 +1070,250 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataRefusesWhenNlinkStillPositive) {
   chunk.index = 0;
   chunk.revision = 1;
   meta->chunks = {chunk};
+  meta->prepare_reclaim_status = Status::NotFound("inode is still linked");
+
+  // Hold the handle across the reclaim: the registry only keeps weak
+  // references, so the reclaimed inode's handle must stay alive to be
+  // inspected afterwards.
+  auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/true);
+  ASSERT_NE(inode_handle, nullptr);
 
   ASSERT_TRUE(ReclaimInode(7).ok());
-  EXPECT_TRUE(data->delete_calls.empty()) << "ReclaimData must NOT delete chunk objects when a hardlink "
-                                             "still references the inode";
-  EXPECT_EQ(meta->reclaim_inode_calls, 0) << "ReclaimData must NOT drop the inode while nlink > 0";
+  EXPECT_TRUE(data->delete_calls.empty()) << "ReclaimData must NOT delete chunk objects when the reclaim was "
+                                             "not prepared";
+  EXPECT_EQ(meta->complete_reclaim_calls, 0);
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1);
+
+  ASSERT_TRUE(inode_handle->Open(O_RDONLY).ok()) << "the fence must be released after a declined reclaim";
+  ASSERT_TRUE(inode_handle->Close().ok());
 }
 
-FIBER_TEST_F(FileHandleTest, ReclaimDataRefusesWhileAnOpenHandleHoldsTheInode) {
-  // Caller forgot to route through MarkOrphaned — refuse so the
-  // open fd's reads continue to work. The data engine must see no
-  // Delete calls.
+FIBER_TEST_F(FileHandleTest, ReclaimDataFencesOpensUntilTheInodeIsFrozen) {
+  // While a reclaim owns the inode — between claiming the fence and the
+  // metadata point of no return — an open must fail rather than gain a
+  // descriptor on an inode whose objects are about to be deleted.
+  ResetVolumeFromFiberForTest();
+  auto engines = InstallEnginesForInode(7, /*nlink=*/0);
+  auto *meta = engines.meta;
+
+  folly::fibers::Baton prepare_entered;
+  folly::fibers::Baton prepare_release;
+  meta->BlockNextPrepare(&prepare_entered, &prepare_release);
+
+  std::atomic<bool> reclaim_ok{false};
+  auto reclaiming_thread = swordfs::test::StartFiberTestThread([&] { reclaim_ok.store(ReclaimInode(7).ok()); });
+
+  // Wait until the reclaim is parked inside PrepareReclaim, holding the fence.
+  prepare_entered.wait();
+
+  std::shared_ptr<FileHandle> handle;
+  const auto open_status = FileHandle::Open(7, O_RDONLY, &handle);
+  EXPECT_TRUE(open_status.IsNotFound()) << "an open must not slip in while the inode is being reclaimed";
+
+  prepare_release.post();
+  reclaiming_thread.join();
+  EXPECT_TRUE(reclaim_ok.load());
+  EXPECT_EQ(meta->complete_reclaim_calls, 1);
+}
+
+FIBER_TEST_F(FileHandleTest, ConcurrentOpenSucceedsWhileLastCloseFlushesLinkedInode) {
+  // A normal linked inode must remain openable while its last descriptor is
+  // closing. The closing descriptor is still a live reference until Flush
+  // finishes; using the reclaim fence for this window would incorrectly turn
+  // an ordinary concurrent Open into NotFound.
+  ResetVolumeFromFiberForTest();
+  auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/1);
+  (void)meta;
+
+  std::shared_ptr<FileHandle> closing_handle;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDWR, &closing_handle).ok());
+  auto payload = folly::IOBuf::copyBuffer("x");
+  ASSERT_TRUE(closing_handle->Write(*payload, 0).ok());
+
+  folly::fibers::Baton put_entered;
+  folly::fibers::Baton put_release;
+  data->BlockNextPut(&put_entered, &put_release);
+
+  std::atomic<bool> close_ok{false};
+  auto closing_thread = swordfs::test::StartFiberTestThread([&] { close_ok.store(closing_handle->Release().ok()); });
+  put_entered.wait();  // the last close is now blocked inside Flush/Put
+
+  std::shared_ptr<FileHandle> reopened;
+  const auto open_status = FileHandle::Open(7, O_RDONLY, &reopened);
+  EXPECT_TRUE(open_status.ok()) << open_status.message();
+  ASSERT_NE(reopened, nullptr);
+
+  put_release.post();
+  closing_thread.join();
+  EXPECT_TRUE(close_ok.load());
+
+  auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/false);
+  ASSERT_NE(inode_handle, nullptr);
+  EXPECT_EQ(inode_handle->open_count(), 1U);
+  ASSERT_TRUE(reopened->Release().ok());
+}
+
+FIBER_TEST_F(FileHandleTest, FailedLastCloseFlushLeavesOrphanForRetry) {
   ResetVolumeFromFiberForTest();
   auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/0);
 
-  // Open a file handle on this inode. The fixture's MockMetaEngine
-  // lets everything through, so this just installs a tracked fh.
+  std::shared_ptr<FileHandle> handle;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDWR, &handle).ok());
+  auto payload = folly::IOBuf::copyBuffer("x");
+  ASSERT_TRUE(handle->Write(*payload, 0).ok());
+
+  // Reconciliation/unlink observes the live descriptor and records local
+  // deferral instead of reclaiming under the writer.
+  ASSERT_TRUE(ReclaimInode(7).ok());
+  EXPECT_EQ(meta->prepare_reclaim_calls, 0);
+
+  data->put_status = Status::IOError("injected flush failure");
+  const auto close_status = handle->Release();
+  EXPECT_EQ(close_status.code(), Status::kIOError);
+  EXPECT_EQ(meta->prepare_reclaim_calls, 0) << "failed flush must not reclaim potentially unpublished data";
+
+  auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/false);
+  ASSERT_NE(inode_handle, nullptr);
+  EXPECT_EQ(inode_handle->open_count(), 0U) << "the descriptor is closed even when its flush fails";
+
+  // Durable orphan metadata is the recovery authority after a failed close.
+  // Model the next reconciliation pass after the data plane recovers.
+  data->put_status = Status::OK();
+  ASSERT_TRUE(ReclaimInode(7).ok());
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1);
+  EXPECT_EQ(meta->complete_reclaim_calls, 1);
+}
+
+FIBER_TEST_F(FileHandleTest, FailedOpenReleasesItsReferenceWithoutReclaimingLinkedInode) {
+  ResetVolumeFromFiberForTest();
+  auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/1);
+  (void)data;
+  meta->open_status = Status::Permission("denied");
+
+  // Hold the shared per-inode object explicitly. The manager registry owns
+  // only a weak_ptr, so after a failed FileHandle::Open there is otherwise no
+  // requirement that an expired registry entry remain observable.
+  auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/true);
+  ASSERT_NE(inode_handle, nullptr);
+  EXPECT_EQ(inode_handle->open_count(), 0U);
+
+  std::shared_ptr<FileHandle> handle;
+  const auto status = FileHandle::Open(7, O_RDONLY, &handle);
+  EXPECT_EQ(status.code(), Status::kPermission);
+  EXPECT_EQ(handle, nullptr);
+
+  EXPECT_EQ(inode_handle->open_count(), 0U);
+  EXPECT_EQ(meta->prepare_reclaim_calls, 0);
+}
+
+FIBER_TEST_F(FileHandleTest, FailedSecondOpenReleasesOnlyItsOwnReference) {
+  ResetVolumeFromFiberForTest();
+  auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/1);
+  (void)data;
+
+  std::shared_ptr<FileHandle> first;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDONLY, &first).ok());
+  auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/false);
+  ASSERT_NE(inode_handle, nullptr);
+  ASSERT_EQ(inode_handle->open_count(), 1U);
+
+  meta->open_status = Status::Permission("denied");
+  std::shared_ptr<FileHandle> second;
+  const auto status = FileHandle::Open(7, O_RDONLY, &second);
+  EXPECT_EQ(status.code(), Status::kPermission);
+  EXPECT_EQ(second, nullptr);
+  EXPECT_EQ(inode_handle->open_count(), 1U) << "failed open must release only the reference it acquired";
+  EXPECT_EQ(meta->prepare_reclaim_calls, 0);
+
+  ASSERT_TRUE(first->Release().ok());
+}
+
+FIBER_TEST_F(FileHandleTest, FailedOpenAfterOrphaningAttemptsReclaimAndReleasesFenceOnFailure) {
+  ResetVolumeFromFiberForTest();
+  auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/0);
+  (void)data;
+
+  folly::fibers::Baton open_entered;
+  folly::fibers::Baton open_release;
+  meta->open_status = Status::Permission("denied");
+  meta->BlockNextOpen(&open_entered, &open_release);
+
+  std::atomic<int> open_code{Status::kOk};
+  auto opening_thread = swordfs::test::StartFiberTestThread([&] {
+    std::shared_ptr<FileHandle> handle;
+    const auto status = FileHandle::Open(7, O_RDONLY, &handle);
+    open_code.store(status.code());
+  });
+
+  // The failed open already owns a temporary descriptor reference but is
+  // still parked inside the metadata check. Reconciliation must defer and
+  // mark that handle orphaned rather than reclaiming under it.
+  open_entered.wait();
+  ASSERT_TRUE(ReclaimInode(7).ok());
+  EXPECT_EQ(meta->prepare_reclaim_calls, 0);
+
+  // When the metadata check finally fails, releasing the last temporary
+  // reference must inherit the orphan cleanup. Inject a reclaim failure to
+  // prove the local fence is still released for the durable retry path.
+  meta->prepare_reclaim_status = Status::IOError("injected reclaim failure after failed open");
+  open_release.post();
+  opening_thread.join();
+  EXPECT_EQ(open_code.load(), Status::kPermission);
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1);
+  EXPECT_EQ(meta->complete_reclaim_calls, 0);
+
+  meta->prepare_reclaim_status = Status::OK();
+  ASSERT_TRUE(ReclaimInode(7).ok()) << "failed-open cleanup must not leak the reclaim fence";
+  EXPECT_EQ(meta->prepare_reclaim_calls, 2);
+  EXPECT_EQ(meta->complete_reclaim_calls, 1);
+}
+
+FIBER_TEST_F(FileHandleTest, ReclaimDataDefersToAFenceOwnedByAnotherReclaim) {
+  // A reclaim already owns the inode's fence — here it is parked inside
+  // PrepareReclaim, i.e. past the point where the fence was claimed, with the
+  // inode not yet frozen. A second ReclaimData must not start a competing
+  // prepare/delete sequence: it returns OK and leaves cleanup to the reclaim
+  // that owns the fence; durable retry state remains in metadata.
+  ResetVolumeFromFiberForTest();
+  auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/0);
+  swordfs::metadata::SwordFsChunk chunk{};
+  chunk.index = 0;
+  chunk.revision = 1;
+  meta->chunks = {chunk};
+
+  folly::fibers::Baton prepare_entered;
+  folly::fibers::Baton prepare_release;
+  meta->BlockNextPrepare(&prepare_entered, &prepare_release);
+
+  std::atomic<bool> first_ok{false};
+  auto first = swordfs::test::StartFiberTestThread([&] { first_ok.store(ReclaimInode(7).ok()); });
+  prepare_entered.wait();  // the first reclaim owns the fence from here on
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1);
+
+  auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/true);
+  ASSERT_NE(inode_handle, nullptr);
+  ASSERT_TRUE(inode_handle->ReclaimData().ok());
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1) << "a fenced inode must not be prepared twice";
+  EXPECT_EQ(meta->complete_reclaim_calls, 0);
+  EXPECT_TRUE(data->delete_calls.empty());
+
+  prepare_release.post();
+  first.join();
+  EXPECT_TRUE(first_ok.load());
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1);
+  EXPECT_EQ(meta->complete_reclaim_calls, 1);
+  EXPECT_EQ(data->delete_calls.size(), 1U);
+}
+
+FIBER_TEST_F(FileHandleTest, ReclaimDataRefusesWhileAnOpenHandleHoldsTheInode) {
+  // A descriptor still holds the inode, so ReclaimData must defer: the open
+  // fd's reads keep working, and until the last Close the engines see no
+  // reclaim activity at all.
+  ResetVolumeFromFiberForTest();
+  auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/0);
+
+  // Open a file handle on this inode. The tracking engine lets
+  // everything through, so this just installs a tracked fh.
   std::shared_ptr<FileHandle> fh;
   ASSERT_TRUE(FileHandle::Open(7, O_RDONLY, &fh).ok());
   auto inode_handle = InodeHandleManager::Instance().Get(7, false);
@@ -966,34 +1321,62 @@ FIBER_TEST_F(FileHandleTest, ReclaimDataRefusesWhileAnOpenHandleHoldsTheInode) {
   ASSERT_GT(inode_handle->open_count(), 0u);
 
   ASSERT_TRUE(ReclaimInode(7).ok());
+  EXPECT_EQ(meta->prepare_reclaim_calls, 0);
+  EXPECT_EQ(meta->complete_reclaim_calls, 0);
   EXPECT_TRUE(data->delete_calls.empty()) << "ReclaimData must NOT delete chunk objects while a fd is open";
-  EXPECT_EQ(meta->reclaim_inode_calls, 0);
 
-  // Cleanup
+  // Cleanup: releasing the last descriptor runs the deferred reclaim, so the
+  // engines must now see exactly one prepare/complete pair.
   ASSERT_TRUE(fh->Release().ok());
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1);
+  EXPECT_EQ(meta->complete_reclaim_calls, 1);
+}
+
+FIBER_TEST_F(FileHandleTest, RevivedInodeDoesNotKeepLocalOrphanDeferralAfterLastClose) {
+  // An unlink can mark the local handle orphaned while a descriptor is open,
+  // but a concurrent Link may revive the inode before the last Close reaches
+  // PrepareReclaim. Once metadata declines that reclaim, the per-handle
+  // deferral must be consumed: later ordinary closes of the revived inode
+  // must not repeatedly enter the reclaim path or transiently fence opens.
+  ResetVolumeFromFiberForTest();
+  auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/0);
+  (void)data;
+
+  std::shared_ptr<FileHandle> orphaned;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDONLY, &orphaned).ok());
+  ASSERT_TRUE(ReclaimInode(7).ok());
+  EXPECT_EQ(meta->prepare_reclaim_calls, 0);
+
+  // Model the metadata race result after a hard Link revived the inode.
+  meta->prepare_reclaim_status = Status::NotFound("inode is still linked");
+  ASSERT_TRUE(orphaned->Release().ok());
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1);
+
+  std::shared_ptr<FileHandle> revived;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDONLY, &revived).ok());
+  ASSERT_TRUE(revived->Release().ok());
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1) << "local orphan deferral must not stick after the last reference";
 }
 
 FIBER_TEST_F(FileHandleTest, ReclaimDataIsIdempotentWhenInodeAlreadyGone) {
-  // The metadata engine reports the inode as gone (NotFound on GetAttr).
-  // The InodeHandle::ReclaimData guard treats that as a no-op success:
-  // a concurrent reclaim has already finalised the cleanup on another
-  // thread. Without this guard, the manager would still call VisitChunks
-  // and surface a NotFound to the caller as if it were a real failure.
+  // The metadata engine reports the inode as no longer reclaimable (a
+  // concurrent reclaim already finalized it). The coordinator treats that as
+  // a no-op success: nothing to prepare, nothing to delete, nothing to
+  // complete.
   ResetVolumeFromFiberForTest();
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
   auto *data = data_up.get();
-  // Deliberately do NOT register any attrs for ino 42 — GetAttr
-  // returns NotFound.
+  meta->prepare_reclaim_status = Status::NotFound("inode is not reclaimable");
 
   auto &vol = swordfs::volume::VolumeImpl::Instance();
   vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(meta_up.release()));
   vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
 
   ASSERT_TRUE(ReclaimInode(42).ok());
-  EXPECT_EQ(meta->visit_chunks_calls, 0);
-  EXPECT_EQ(meta->reclaim_inode_calls, 0);
+  EXPECT_EQ(meta->prepare_reclaim_calls, 1);
+  EXPECT_EQ(meta->complete_reclaim_calls, 0);
   EXPECT_TRUE(data->delete_calls.empty());
 }
 

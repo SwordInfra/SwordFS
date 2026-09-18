@@ -39,4 +39,12 @@ std::string RedisKey::InodeCount() const {
   return prefix_ + "inode_count";
 }
 
+std::string RedisKey::Orphans() const {
+  return prefix_ + "orphans";
+}
+
+std::string RedisKey::Reclaims() const {
+  return prefix_ + "reclaims";
+}
+
 }  // namespace swordfs::metadata::redis

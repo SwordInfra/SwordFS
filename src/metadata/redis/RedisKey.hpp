@@ -25,6 +25,16 @@ class RedisKey {
   std::string Chunk(uint64_t ino) const;
   std::string InodeCount() const;
 
+  // Orphan candidates: hash of inode id -> marker. Written in the same
+  // transaction that drops an inode's nlink to zero; removed again when the
+  // inode is revived, reclaimed, or found unreclaimable.
+  std::string Orphans() const;
+
+  // Pending reclaims: hash of inode id -> serialized ReclaimWork. Written by
+  // reclaim preparation (the inode's point of no return) and removed once
+  // every frozen object has been deleted.
+  std::string Reclaims() const;
+
  private:
   std::string prefix_;
 };

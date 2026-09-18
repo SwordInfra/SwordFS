@@ -11,13 +11,16 @@
 #include <sys/stat.h>
 
 #include "FiberTest.hpp"
+#include "chunk/ChunkObjectKey.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
+#include "metadata/types/Reclaim.hpp"
 #include "utils/Status.hpp"
 
 using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaStore;
 using swordfs::metadata::MemMetaTxn;
+using swordfs::metadata::ReclaimWork;
 using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
@@ -203,6 +206,31 @@ FIBER_TEST_F(MemMetaStoreTest, MoveEntryTargetExists) {
   EXPECT_TRUE(status.IsAlreadyExists());
 }
 
+FIBER_TEST_F(MemMetaStoreTest, MoveEntryOverwriteWorksWithoutResultOutput) {
+  SwordFsInode src_dir;
+  SwordFsInode dst_dir;
+  ASSERT_TRUE(Add(kRoot, "src", kDir, &src_dir).ok());
+  ASSERT_TRUE(Add(kRoot, "dst", kDir, &dst_dir).ok());
+
+  SwordFsInode source;
+  SwordFsInode victim;
+  ASSERT_TRUE(Add(src_dir.ino, "f", kRegFile, &source).ok());
+  ASSERT_TRUE(Add(dst_dir.ino, "f", kRegFile, &victim).ok());
+
+  const auto status = store_->Transact(
+      [&](MemMetaTxn &txn) { return txn.MoveEntry(src_dir.ino, "f", dst_dir.ino, "f", true, nullptr); });
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  SwordFsInode moved;
+  ASSERT_TRUE(LookupChild(dst_dir.ino, "f", &moved).ok());
+  EXPECT_EQ(moved.ino, source.ino);
+  EXPECT_TRUE(LookupChild(src_dir.ino, "f").IsNotFound());
+
+  SwordFsInode orphaned_victim;
+  ASSERT_TRUE(Lookup(victim.ino, &orphaned_victim).ok());
+  EXPECT_EQ(orphaned_victim.attr.nlink, 0U);
+}
+
 // ────────────────────────────────────────────────────────────────
 // Unlink
 // ────────────────────────────────────────────────────────────────
@@ -228,11 +256,18 @@ FIBER_TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   EXPECT_EQ(count(), 2);
   EXPECT_TRUE(Lookup(ino).ok());
 
-  // Caller follows up with ReclaimInode to free the orphaned inode.
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
-  EXPECT_TRUE(status.ok());
+  // Caller follows up with the reclaim protocol: preparation freezes the
+  // (empty) work and drops the live inode, completion removes the record.
+  ReclaimWork work;
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, &work); });
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(work.ino, ino);
+  EXPECT_TRUE(work.chunks.empty());
   EXPECT_EQ(count(), 1);
   EXPECT_TRUE(Lookup(ino).IsNotFound());
+
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.CompleteReclaim(ino); });
+  EXPECT_TRUE(status.ok());
 }
 
 FIBER_TEST_F(MemMetaStoreTest, UnlinkMissingEntryReturnsNotFound) {
@@ -469,39 +504,100 @@ FIBER_TEST_F(MemMetaStoreTest, TruncateChunksClampsStraddlingChunk) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// ReclaimInode (open-unlink)
+// Reclaim (open-unlink)
 // ────────────────────────────────────────────────────────────────
 
-FIBER_TEST_F(MemMetaStoreTest, ReclaimInodeMissingInodeIsNoOp) {
-  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(999); });
+FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimMissingInodeIsNotFound) {
+  ReclaimWork work;
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(999, &work); });
+  EXPECT_TRUE(status.IsNotFound());
+  EXPECT_EQ(work.ino, 0U);
+
+  // Completing a reclaim that was never prepared is a no-op, not an error.
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.CompleteReclaim(999); });
   EXPECT_TRUE(status.ok());
 }
 
-FIBER_TEST_F(MemMetaStoreTest, ReclaimInodeDeletesOrphanedInode) {
+FIBER_TEST_F(MemMetaStoreTest, ReclaimPrimitivesValidateOutputsAndRejectDirectories) {
+  EXPECT_EQ(store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(kRoot, nullptr); }).code(),
+            Status::kInvalidArgument);
+  EXPECT_EQ(store_->Transact([&](MemMetaTxn &txn) { return txn.ListOrphanCandidates(nullptr); }).code(),
+            Status::kInvalidArgument);
+  EXPECT_EQ(store_->Transact([&](MemMetaTxn &txn) { return txn.ListPendingReclaims(nullptr); }).code(),
+            Status::kInvalidArgument);
+
+  // Directories are never candidates for this file-data reclaim lifecycle.
+  // Exercise that branch independently from the regular-file nlink>0 case.
+  ReclaimWork work;
+  const auto status = store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(kRoot, &work); });
+  EXPECT_TRUE(status.IsNotFound()) << status.message();
+  EXPECT_EQ(work.ino, 0U);
+}
+
+FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimFreezesWorkAndDropsOrphanedInode) {
   SwordFsInode f;
   Add(kRoot, "f", kRegFile, &f);
   InodeID ino = f.ino;
 
+  Status status =
+      store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(ino, std::nullopt, MakeChunk(0, 0, 100)); });
+  ASSERT_TRUE(status.ok());
+
   auto count = [&] { return store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); }); };
+  ASSERT_EQ(count(), 2);
 
-  // Unlink detaches the entry and drops nlink to 0; the inode survives.
-  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "f"); });
+  // Unlink detaches the entry, drops nlink to 0 and publishes the inode as an
+  // orphan candidate; the inode (and its chunk metadata) survives for now.
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "f"); });
   ASSERT_TRUE(status.ok());
-
   EXPECT_EQ(count(), 2);
-  status = store_->Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
+  EXPECT_TRUE(Lookup(ino).ok());
+
+  std::vector<InodeID> candidates;
+  ASSERT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.ListOrphanCandidates(&candidates); }).ok());
+  EXPECT_EQ(candidates, std::vector<InodeID>{ino});
+
+  // Preparation freezes the authoritative object identity and drops the live
+  // inode in one transaction.
+  ReclaimWork work;
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, &work); });
   ASSERT_TRUE(status.ok());
+  EXPECT_EQ(work.ino, ino);
+  ASSERT_EQ(work.chunks.size(), 1U);
+  EXPECT_EQ(work.chunks[0].descriptor, MakeChunk(0, 0, 100));
+  EXPECT_EQ(work.chunks[0].key, swordfs::chunk::FormatChunkObjectKey(ino, 0, 1));
   EXPECT_EQ(count(), 1);
   EXPECT_TRUE(Lookup(ino).IsNotFound());
+
+  std::vector<InodeID> pending;
+  ASSERT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.ListPendingReclaims(&pending); }).ok());
+  EXPECT_EQ(pending, std::vector<InodeID>{ino});
+  // The orphan marker is gone too: the candidate list and the frozen record
+  // are never both live for the same inode.
+  ASSERT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.ListOrphanCandidates(&candidates); }).ok());
+  EXPECT_TRUE(candidates.empty());
+
+  // Replaying preparation returns the same frozen work without changing it.
+  ReclaimWork replay;
+  ASSERT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, &replay); }).ok());
+  EXPECT_EQ(replay, work);
+
+  // Completion drops the frozen record; it is idempotent.
+  ASSERT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.CompleteReclaim(ino); }).ok());
+  ASSERT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.ListPendingReclaims(&pending); }).ok());
+  EXPECT_TRUE(pending.empty());
+  EXPECT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.CompleteReclaim(ino); }).ok());
 }
 
-FIBER_TEST_F(MemMetaStoreTest, ReclaimInodeKeepsLinkedInode) {
+FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimKeepsLinkedInode) {
   SwordFsInode f;
   Add(kRoot, "f", kRegFile, &f);
   InodeID ino = f.ino;  // nlink == 1 — not orphaned
 
-  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
-  ASSERT_TRUE(status.ok());
+  ReclaimWork work;
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, &work); });
+  EXPECT_TRUE(status.IsNotFound());
+  EXPECT_EQ(work.ino, 0U);
   size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(count, 2);
   SwordFsInode out;

@@ -413,9 +413,60 @@ Status MemMetaImpl::Open(InodeID ino) {
   return status;
 }
 
-Status MemMetaImpl::ReclaimInode(InodeID ino) {
+Status MemMetaImpl::PrepareReclaim(InodeID ino, ReclaimWork *work) {
   utils::ExpectInFiberDomain();
-  return store_.Transact([&](MemMetaTxn &txn) { return txn.ReclaimInode(ino); });
+  if (work == nullptr) {
+    return Status::InvalidArgument("reclaim work output is null");
+  }
+  ReclaimWork frozen;
+  Status status = store_.Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, &frozen); });
+  if (!status.ok()) {
+    // Nothing was frozen: leave the caller's output in the empty state the
+    // engine's contract describes rather than its previous contents.
+    *work = {};
+    return status;
+  }
+  *work = std::move(frozen);
+  return Status::OK();
+}
+
+Status MemMetaImpl::CompleteReclaim(InodeID ino) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.CompleteReclaim(ino); });
+}
+
+Status MemMetaImpl::VisitOrphanCandidates(const InodeVisitorFn &visitor) {
+  utils::ExpectInFiberDomain();
+  if (!visitor) {
+    return Status::InvalidArgument("orphan candidate visitor is null");
+  }
+
+  std::vector<InodeID> candidates;
+  store_.Transact([&](MemMetaTxn &txn) { return txn.ListOrphanCandidates(&candidates); });
+  for (InodeID ino : candidates) {
+    auto status = visitor(ino);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return Status::OK();
+}
+
+Status MemMetaImpl::VisitPendingReclaims(const InodeVisitorFn &visitor) {
+  utils::ExpectInFiberDomain();
+  if (!visitor) {
+    return Status::InvalidArgument("pending reclaim visitor is null");
+  }
+
+  std::vector<InodeID> pending;
+  store_.Transact([&](MemMetaTxn &txn) { return txn.ListPendingReclaims(&pending); });
+  for (InodeID ino : pending) {
+    auto status = visitor(ino);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return Status::OK();
 }
 
 Status MemMetaImpl::AllocateChunkRevision(ChunkRevision *revision) {

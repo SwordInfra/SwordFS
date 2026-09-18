@@ -498,9 +498,27 @@ Status RedisMetaImpl::Open(InodeID ino) {
   return Status::OK();
 }
 
-Status RedisMetaImpl::ReclaimInode(InodeID ino) {
+Status RedisMetaImpl::PrepareReclaim(InodeID ino, ReclaimWork *work) {
   utils::ExpectInFiberDomain();
-  return ops_.ReclaimInode(ino);
+  if (work == nullptr) {
+    return Status::InvalidArgument("reclaim work output is null");
+  }
+  return ops_.PrepareReclaim(ino, work);
+}
+
+Status RedisMetaImpl::CompleteReclaim(InodeID ino) {
+  utils::ExpectInFiberDomain();
+  return ops_.CompleteReclaim(ino);
+}
+
+Status RedisMetaImpl::VisitOrphanCandidates(const InodeVisitorFn &visitor) {
+  utils::ExpectInFiberDomain();
+  return ops_.VisitOrphanCandidates(visitor);
+}
+
+Status RedisMetaImpl::VisitPendingReclaims(const InodeVisitorFn &visitor) {
+  utils::ExpectInFiberDomain();
+  return ops_.VisitPendingReclaims(visitor);
 }
 
 Status RedisMetaImpl::AllocateChunkRevision(ChunkRevision *revision) {
