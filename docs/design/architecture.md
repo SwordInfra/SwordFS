@@ -4,6 +4,8 @@ This document is the canonical architecture description for the current open-sou
 
 It is intentionally more detailed than the project README, but it is not a class-by-class or function-by-function reference. The goal is to explain the major subsystem boundaries, state ownership, request and data flow, correctness invariants, concurrency model, recovery model, and the most important current limitations in one continuous document.
 
+The project README intentionally stays at a conceptual level. Internal interfaces, record layouts, publication protocols, concurrency mechanics, and recovery state machines belong here rather than being duplicated in README.
+
 When implementation changes an architectural contract described here, the same PR should update this document.
 
 ## 1. Scope and architectural goals
