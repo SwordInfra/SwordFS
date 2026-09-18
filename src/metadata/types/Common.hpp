@@ -57,16 +57,6 @@ inline RenameFlag FromFuseRenameFlags(unsigned int flags) {
   return static_cast<RenameFlag>(flags);
 }
 
-struct UnlinkResult {
-  InodeID unlinked_ino = 0;
-  uint64_t post_nlink = 0;
-};
-
-struct RenameResult {
-  InodeID overwritten_ino = 0;
-  uint64_t overwritten_post_nlink = 0;
-};
-
 inline bool HasSetAttrField(SetAttrField fields, SetAttrField field) {
   return (static_cast<uint32_t>(fields) & static_cast<uint32_t>(field)) != 0;
 }

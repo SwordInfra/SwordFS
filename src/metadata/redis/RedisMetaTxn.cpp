@@ -251,10 +251,9 @@ utils::Status RedisMetaTxn::TouchInode(InodeID ino, SetAttrField fields) {
   return SetInode(inode);
 }
 
-utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, const std::vector<SwordFsChunk> &scanned, ReclaimWork &work,
-                                           bool &frozen) {
-  work = {};
-  frozen = false;
+utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, const std::vector<SwordFsChunk> &scanned,
+                                           std::optional<ReclaimWork> &work) {
+  work.reset();
 
   // Idempotent replay: once the point of no return has been crossed the
   // frozen record — not the (already removed) live inode — is the authority,
@@ -271,7 +270,6 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, const std::vector<SwordF
       return utils::Status::Malformed("pending reclaim record inode mismatch");
     }
     work = std::move(pending);
-    frozen = true;
     return utils::Status::OK();
   }
   if (!status.IsNotFound()) {
@@ -352,7 +350,6 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, const std::vector<SwordF
   }
 
   work = std::move(pending);
-  frozen = true;
   return utils::Status::OK();
 }
 
@@ -411,7 +408,7 @@ utils::Status RedisMetaTxn::AddEntry(InodeID parent_ino, std::string_view name, 
 }
 
 utils::Status RedisMetaTxn::UnlinkFile(InodeID parent_ino, std::string_view name, SwordFsInode *parent,
-                                       SwordFsInode *child, UnlinkResult *result) {
+                                       SwordFsInode *child) {
   if (parent == nullptr || child == nullptr) {
     return utils::Status::InvalidArgument("unlink inode is null");
   }
@@ -422,7 +419,7 @@ utils::Status RedisMetaTxn::UnlinkFile(InodeID parent_ino, std::string_view name
     return utils::Status::InvalidArgument("cannot unlink directory");
   }
 
-  auto status = AdjustNlink(child, -1, result != nullptr ? &result->post_nlink : nullptr);
+  auto status = AdjustNlink(child, -1);
   if (!status.ok()) {
     return status;
   }
@@ -447,9 +444,6 @@ utils::Status RedisMetaTxn::UnlinkFile(InodeID parent_ino, std::string_view name
     if (!status.ok()) {
       return status;
     }
-  }
-  if (result != nullptr) {
-    result->unlinked_ino = child->ino;
   }
   return utils::Status::OK();
 }
@@ -487,11 +481,7 @@ utils::Status RedisMetaTxn::RemoveDirectory(InodeID parent_ino, std::string_view
 
 utils::Status RedisMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
                                       std::string_view new_name, SwordFsInode *old_parent, SwordFsInode *new_parent,
-                                      SwordFsInode *source, SwordFsInode *target, bool overwrite,
-                                      RenameResult *result) {
-  if (result != nullptr) {
-    *result = {};
-  }
+                                      SwordFsInode *source, SwordFsInode *target, bool overwrite) {
   if (old_parent == nullptr || new_parent == nullptr || source == nullptr) {
     return utils::Status::InvalidArgument("rename inode is null");
   }
@@ -534,14 +524,9 @@ utils::Status RedisMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view o
         return status;
       }
     } else {
-      UnlinkResult unlink_result;
-      auto status = UnlinkFile(new_parent_ino, new_name, new_parent, target, &unlink_result);
+      auto status = UnlinkFile(new_parent_ino, new_name, new_parent, target);
       if (!status.ok()) {
         return status;
-      }
-      if (result != nullptr) {
-        result->overwritten_ino = unlink_result.unlinked_ino;
-        result->overwritten_post_nlink = unlink_result.post_nlink;
       }
     }
   }

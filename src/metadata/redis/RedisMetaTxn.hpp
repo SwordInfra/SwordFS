@@ -53,13 +53,10 @@ class RedisMetaTxn {
   // returns Busy when the chunk map changed in between so the caller can
   // re-scan. See IMetaEngine::PrepareReclaim for the full contract.
   //
-  // On OK, |*frozen| reports whether the point of no return was crossed and
-  // |*work| holds the frozen identities (possibly none). When |*frozen| is
-  // false the inode was not reclaimable — already reclaimed, still linked, or
-  // a directory — and any stale orphan marker was dropped by this same
-  // transaction, so a concurrent unlink cannot publish a marker that this
-  // call then deletes.
-  utils::Status PrepareReclaim(InodeID ino, const std::vector<SwordFsChunk> &scanned, ReclaimWork &work, bool &frozen);
+  // On OK, |work| contains the frozen identities when the point of no return
+  // was crossed/replayed. An empty optional is the normal non-reclaimable
+  // outcome after stale orphan cleanup.
+  utils::Status PrepareReclaim(InodeID ino, const std::vector<SwordFsChunk> &scanned, std::optional<ReclaimWork> &work);
 
   // Drop the frozen record of |ino|. Called only once every object of the
   // record has been deleted; missing records are not an error.
@@ -76,13 +73,12 @@ class RedisMetaTxn {
   // metadata invariants: dentry uniqueness, inode persistence, parent metadata
   // persistence and the global inode count.
   utils::Status AddEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &child, SwordFsInode *parent);
-  utils::Status UnlinkFile(InodeID parent_ino, std::string_view name, SwordFsInode *parent, SwordFsInode *child,
-                           UnlinkResult *result);
+  utils::Status UnlinkFile(InodeID parent_ino, std::string_view name, SwordFsInode *parent, SwordFsInode *child);
   utils::Status RemoveDirectory(InodeID parent_ino, std::string_view name, SwordFsInode *parent,
                                 const SwordFsInode &child);
   utils::Status MoveEntry(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
                           std::string_view new_name, SwordFsInode *old_parent, SwordFsInode *new_parent,
-                          SwordFsInode *source, SwordFsInode *target, bool overwrite, RenameResult *result);
+                          SwordFsInode *source, SwordFsInode *target, bool overwrite);
   utils::Status ExchangeEntries(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
                                 std::string_view new_name, SwordFsInode *old_parent, SwordFsInode *new_parent,
                                 SwordFsInode *source, SwordFsInode *target);

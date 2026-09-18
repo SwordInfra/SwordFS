@@ -181,13 +181,12 @@ Status RedisMetaImpl::CreateNode(InodeID parent_ino, std::string_view name, uint
   return status;
 }
 
-Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result) {
+Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
   utils::ExpectInFiberDomain();
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot unlink . or ..");
   }
   const auto ctx = folly::fibers::local<SwordFsContext>();
-  UnlinkResult unlink_result;
   auto status = ops_.TransactFromFiber([&](RedisMetaTxn &txn) {
     SwordFsInode parent;
     auto status = txn.LookupInode(parent_ino, &parent);
@@ -211,11 +210,8 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, UnlinkRe
     if (!parent.CheckStickyDelete(ctx.uid, child)) {
       return Status::Permission("sticky bit denied");
     }
-    return txn.UnlinkFile(parent_ino, name, &parent, &child, &unlink_result);
+    return txn.UnlinkFile(parent_ino, name, &parent, &child);
   });
-  if (status.ok() && result != nullptr) {
-    *result = unlink_result;
-  }
   return status;
 }
 
@@ -253,11 +249,8 @@ Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
 }
 
 Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
-                             std::string_view new_name, RenameFlag flags, RenameResult *result) {
+                             std::string_view new_name, RenameFlag flags) {
   utils::ExpectInFiberDomain();
-  if (result != nullptr) {
-    *result = {};
-  }
   if (old_name.size() > kRedisLimits.max_name_length || new_name.size() > kRedisLimits.max_name_length) {
     return Status::NameTooLong("file name exceeds maximum length");
   }
@@ -278,7 +271,6 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
   }
 
   const auto ctx = folly::fibers::local<SwordFsContext>();
-  RenameResult rename_result;
   auto status = ops_.TransactFromFiber([&](RedisMetaTxn &txn) {
     SwordFsInode old_parent;
     auto status = txn.LookupInode(old_parent_ino, &old_parent);
@@ -342,11 +334,8 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     }
 
     return txn.MoveEntry(old_parent_ino, old_name, new_parent_ino, new_name, &old_parent, new_parent_ptr, &source,
-                         target_exists ? &target : nullptr, !no_replace, result != nullptr ? &rename_result : nullptr);
+                         target_exists ? &target : nullptr, !no_replace);
   });
-  if (status.ok() && result != nullptr) {
-    *result = rename_result;
-  }
   return status;
 }
 
@@ -498,7 +487,7 @@ Status RedisMetaImpl::Open(InodeID ino) {
   return Status::OK();
 }
 
-Status RedisMetaImpl::PrepareReclaim(InodeID ino, ReclaimWork *work) {
+Status RedisMetaImpl::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) {
   utils::ExpectInFiberDomain();
   if (work == nullptr) {
     return Status::InvalidArgument("reclaim work output is null");
@@ -516,7 +505,7 @@ Status RedisMetaImpl::VisitOrphanCandidates(const InodeVisitorFn &visitor) {
   return ops_.VisitOrphanCandidates(visitor);
 }
 
-Status RedisMetaImpl::VisitPendingReclaims(const InodeVisitorFn &visitor) {
+Status RedisMetaImpl::VisitPendingReclaims(const ReclaimVisitorFn &visitor) {
   utils::ExpectInFiberDomain();
   return ops_.VisitPendingReclaims(visitor);
 }

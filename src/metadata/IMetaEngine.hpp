@@ -49,6 +49,7 @@ class DirIterator {
 using DirIteratorPtr = std::shared_ptr<DirIterator>;
 using ChunkVisitorFn = std::function<Status(const SwordFsChunk &)>;
 using InodeVisitorFn = std::function<Status(InodeID)>;
+using ReclaimVisitorFn = std::function<Status(const ReclaimWork &)>;
 
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
@@ -96,26 +97,19 @@ class IMetaEngine {
   /// Create a directory. Increments parent nlink to account for "..".
   virtual Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) = 0;
 
-  /// POSIX unlink(2): detach the directory entry and decrement nlink.
-  /// When |result| is non-null, the implementation returns both the inode
-  /// actually detached from |parent_ino/name| and its authoritative
-  /// post-decrement nlink as part of the same atomic metadata mutation.
-  /// This lets callers make orphan/reclaim decisions without a separate
-  /// pre-unlink lookup that could race with rename or replacement.
-  virtual Status Unlink(InodeID parent_ino, std::string_view name, UnlinkResult *result = nullptr) = 0;
+  /// POSIX unlink(2): detach the directory entry and decrement nlink. When the
+  /// last name of a file disappears, the same atomic metadata mutation
+  /// publishes the durable orphan candidate consumed by the reclaim worker.
+  virtual Status Unlink(InodeID parent_ino, std::string_view name) = 0;
 
   /// Remove an empty directory. Decrements parent nlink.
   virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;
 
-  /// Rename (move) an entry between directories.  |flags| is a bitwise
-  /// OR of RenameFlag values.  When |result| is non-null and the rename
-  /// replaced an existing non-directory entry, the implementation fills
-  /// |*result| as part of the same atomic mutation so the caller can
-  /// reclaim the overwritten inode's data without a second lookup.
-  /// Engines that cannot report the overwritten inode may leave
-  /// |*result| untouched.
+  /// Rename (move) an entry between directories. |flags| is a bitwise OR of
+  /// RenameFlag values. If an overwritten file loses its last name, the same
+  /// atomic metadata mutation publishes its durable orphan candidate.
   virtual Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
-                        std::string_view new_name, RenameFlag flags, RenameResult *result = nullptr) = 0;
+                        std::string_view new_name, RenameFlag flags) = 0;
 
   /// Set attributes for an inode.  |fields| is a bitwise OR of
   /// SetAttrField values; only the bits set in |fields| are read from
@@ -152,21 +146,17 @@ class IMetaEngine {
   ///   - drop the live inode (and its orphan marker) so a concurrent Link
   ///     can no longer revive an inode whose objects are about to go away.
   ///
-  /// On success |*work| holds the frozen work (possibly no chunks at all for
-  /// an empty file or a symlink) and the caller must delete every identity
-  /// in it and then call CompleteReclaim. Replaying PrepareReclaim while the
-  /// pending record still exists returns the same frozen work without
-  /// changing any state, so crash recovery and retries are idempotent.
-  ///
-  /// NotFound means the point of no return was NOT crossed: the inode was
-  /// already reclaimed, or a concurrent Link revived it (any stale orphan
-  /// marker is dropped as part of the same mutation). Nothing was changed
-  /// and no object may be deleted.
+  /// On success, |*work| contains the frozen work when the point of no return
+  /// was crossed (or was crossed by an earlier replay). An empty optional is
+  /// the ordinary no-op outcome: the inode was already reclaimed, is not a
+  /// reclaimable file, or a concurrent Link revived it. In that case no
+  /// object may be deleted. Backend failures remain Status errors rather than
+  /// being overloaded into the no-op outcome.
   ///
   /// The memory backend mirrors these semantics for the lifetime of the
   /// process; persistent backends must persist the pending record so that
   /// mount-time reconciliation can finish the job after a crash.
-  virtual Status PrepareReclaim(InodeID ino, ReclaimWork *work) = 0;
+  virtual Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) = 0;
 
   /// Remove the durable pending-reclaim record for |ino| together with its
   /// frozen chunk metadata. Called only after every object identity returned
@@ -182,11 +172,10 @@ class IMetaEngine {
   /// backends; process-lifetime for the memory backend.
   virtual Status VisitOrphanCandidates(const InodeVisitorFn &visitor) = 0;
 
-  /// Visit every inode with a durable pending reclaim — frozen work whose
-  /// objects have not yet all been deleted. Used by mount-time reconciliation
-  /// and periodic retry, which re-run PrepareReclaim for each visited inode
-  /// and finish the deletes.
-  virtual Status VisitPendingReclaims(const InodeVisitorFn &visitor) = 0;
+  /// Visit every durable pending reclaim. The visitor receives the frozen work
+  /// itself so replay can continue object deletion directly without another
+  /// metadata lookup or PrepareReclaim call.
+  virtual Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) = 0;
 
   /// Allocate a globally unique, monotonically increasing chunk revision.
   /// Revisions are volume-scoped persistent identities: a backend must never

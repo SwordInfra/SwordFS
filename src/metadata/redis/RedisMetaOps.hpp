@@ -58,10 +58,10 @@ class RedisMetaOps {
   utils::Status SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out = nullptr);
   utils::Status Truncate(InodeID ino, uint64_t size);
   utils::Status TouchInode(InodeID ino, SetAttrField fields);
-  utils::Status PrepareReclaim(InodeID ino, ReclaimWork *work);
+  utils::Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work);
   utils::Status CompleteReclaim(InodeID ino);
   utils::Status VisitOrphanCandidates(const std::function<utils::Status(InodeID)> &visitor);
-  utils::Status VisitPendingReclaims(const std::function<utils::Status(InodeID)> &visitor);
+  utils::Status VisitPendingReclaims(const std::function<utils::Status(const ReclaimWork &)> &visitor);
   utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement);
   utils::Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
   utils::Status VisitChunks(InodeID ino, const std::function<utils::Status(const SwordFsChunk &)> &visitor);
@@ -90,9 +90,9 @@ class RedisMetaOps {
   // Snapshot the inode ids published as orphan candidates.
   utils::Status CollectOrphanCandidates(std::vector<InodeID> &out);
 
-  // Snapshot the inode ids with a frozen pending-reclaim record, validating
-  // the persisted record on the way out.
-  utils::Status CollectPendingReclaims(std::vector<InodeID> &out);
+  // Snapshot the frozen pending-reclaim records, validating persisted state
+  // before exposing it to the replay worker.
+  utils::Status CollectPendingReclaims(std::vector<ReclaimWork> &out);
 
  private:
   std::shared_ptr<RedisBackendContext> backend_;

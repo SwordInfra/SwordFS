@@ -190,11 +190,12 @@ utils::Status RedisMetaOps::TouchInode(InodeID ino, SetAttrField fields) {
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.TouchInode(ino, fields); });
 }
 
-utils::Status RedisMetaOps::PrepareReclaim(InodeID ino, ReclaimWork *work) {
+utils::Status RedisMetaOps::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) {
   utils::ExpectInFiberDomain();
   if (work == nullptr) {
     return utils::Status::InvalidArgument("reclaim work output is null");
   }
+  work->reset();
 
   // The inode's chunk map cannot be enumerated inside a Redis transaction
   // with the primitives RedisKvTxn exposes, so it is scanned first and the
@@ -219,17 +220,9 @@ utils::Status RedisMetaOps::PrepareReclaim(InodeID ino, ReclaimWork *work) {
       return status;
     }
 
-    ReclaimWork pending;
-    bool frozen = false;
-    status = TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PrepareReclaim(ino, scanned, pending, frozen); });
+    std::optional<ReclaimWork> pending;
+    status = TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PrepareReclaim(ino, scanned, pending); });
     if (status.ok()) {
-      if (!frozen) {
-        // Not reclaimable: already reclaimed, still linked, or a directory.
-        // The transaction dropped any stale orphan marker as part of the very
-        // mutation that read the inode, so no separate cleanup can race a
-        // concurrent unlink's marker publication.
-        return utils::Status::NotFound("inode is not reclaimable");
-      }
       *work = std::move(pending);
       return utils::Status::OK();
     }
@@ -267,19 +260,19 @@ utils::Status RedisMetaOps::VisitOrphanCandidates(const std::function<utils::Sta
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaOps::VisitPendingReclaims(const std::function<utils::Status(InodeID)> &visitor) {
+utils::Status RedisMetaOps::VisitPendingReclaims(const std::function<utils::Status(const ReclaimWork &)> &visitor) {
   utils::ExpectInFiberDomain();
   if (!visitor) {
     return utils::Status::InvalidArgument("pending reclaim visitor is null");
   }
 
-  std::vector<InodeID> pending;
+  std::vector<ReclaimWork> pending;
   auto status = CollectPendingReclaims(pending);
   if (!status.ok()) {
     return status;
   }
-  for (InodeID ino : pending) {
-    status = visitor(ino);
+  for (const auto &work : pending) {
+    status = visitor(work);
     if (!status.ok()) {
       return status;
     }
@@ -398,7 +391,7 @@ utils::Status RedisMetaOps::CollectOrphanCandidates(std::vector<InodeID> &out) {
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaOps::CollectPendingReclaims(std::vector<InodeID> &out) {
+utils::Status RedisMetaOps::CollectPendingReclaims(std::vector<ReclaimWork> &out) {
   utils::ExpectInFiberDomain();
   out.clear();
 
@@ -426,12 +419,12 @@ utils::Status RedisMetaOps::CollectPendingReclaims(std::vector<InodeID> &out) {
       if (work.ino != ino) {
         return utils::Status::Malformed("pending reclaim record inode mismatch");
       }
-      out.push_back(ino);
+      out.push_back(std::move(work));
     }
     cursor = next_cursor;
   } while (cursor != 0);
 
-  std::sort(out.begin(), out.end());
+  std::sort(out.begin(), out.end(), [](const ReclaimWork &a, const ReclaimWork &b) { return a.ino < b.ino; });
   return utils::Status::OK();
 }
 

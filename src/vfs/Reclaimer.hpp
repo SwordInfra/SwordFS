@@ -15,9 +15,11 @@
 //
 // A failure between 1 and 3 therefore never loses data: the inode is already
 // unreachable, and Reconcile() re-runs the remaining (idempotent) deletes at
-// mount time and from a periodic retry thread.
+// mount start, on foreground wakeups, and from periodic safety scans.
 
 #pragma once
+
+#include <folly/synchronization/LifoSem.h>
 
 #include <atomic>
 #include <cstdint>
@@ -41,60 +43,51 @@ class Reclaimer {
   // Reclaim (fiber domain)
   // ────────────────────────────────────────────────────────────────
 
-  /// Prepare, delete and complete the reclaim of |ino|.
-  ///
-  /// |*prepared| reports whether the metadata engine crossed the point of no
-  /// return. When it is false nothing was changed — the inode was already
-  /// reclaimed, or a concurrent Link revived it. When it is true the live
-  /// inode is already gone, so the caller may release any local fencing on
-  /// return; a failed delete leaves a frozen pending record that
-  /// reconciliation retries, and an open on the (now unlinked) inode fails at
-  /// the metadata engine rather than reading deleted objects.
-  utils::Status Reclaim(metadata::InodeID ino, bool *prepared);
-
   /// One reconciliation pass over crash-left state: promote orphan candidates
   /// whose nlink is still zero, and retry every frozen pending reclaim.
-  /// Idempotent and safe to run concurrently with runtime reclaims.
+  /// Idempotent; production execution is serialized by the worker.
   utils::Status Reconcile();
 
-  // ────────────────────────────────────────────────────────────────
-  // Periodic retry (thread domain, production mount only)
-  // ────────────────────────────────────────────────────────────────
+  /// Start the background worker. Its first reconciliation pass runs
+  /// immediately; subsequent passes run on Wake() or the periodic safety
+  /// interval. Idempotent.
+  void Start();
 
-  /// Start the periodic retry thread. Idempotent.
-  void StartPeriodicRetry();
+  /// Stop and join the worker. Idempotent and safe when never started.
+  void Stop();
 
-  /// Stop and join the periodic retry thread. Idempotent, safe when no thread
-  /// was ever started, and must run before the engines are torn down.
-  void StopPeriodicRetry();
+  /// Request an early reconciliation pass. Safe from both thread and fiber
+  /// domains; duplicate wakeups are coalesced.
+  void Wake();
 
  private:
   Reclaimer() = default;
   ~Reclaimer() = default;
+
+  // Prepare an orphan after acquiring its local fence, then delete the frozen
+  // work when preparation succeeds. A busy/open inode is left durable for a
+  // later pass rather than treated as a failure.
+  utils::Status PrepareOrphan(metadata::InodeID ino);
 
   // Delete every frozen object of |work| and complete the reclaim. Failures
   // are collected so every object is attempted; the record survives as long
   // as any delete failed.
   utils::Status DeleteFrozenObjects(const metadata::ReclaimWork &work);
 
-  // Reclaim |ino| through its InodeHandle, so an open descriptor still defers
-  // the cleanup to the last Close instead of losing the data under it.
-  utils::Status AttemptReclaim(metadata::InodeID ino);
-
-  // Sleep/retry loop of the periodic thread, and one pass handed to the fiber
-  // runtime of that thread.
-  void RetryLoop();
-  void RunRetryPass();
+  // Event/timeout loop of the POSIX worker, and one pass handed to the global
+  // fiber runtime.
+  void WorkerLoop();
+  void RunWorkerPass();
 
  private:
   std::atomic<bool> stop_requested_{false};
-  // Cross-domain wake-up for the POSIX retry thread. The timed wait provides
-  // the retry interval; StopPeriodicRetry posts it so shutdown never waits
-  // for a polling sleep to expire.
-  utils::FiberBaton stop_waiter_;
-  // Thread-domain only: written by Start/StopPeriodicRetry, which are called
+  std::atomic<bool> wake_pending_{false};
+  // Multi-post timed semaphore: foreground fibers only signal it, while the
+  // POSIX worker consumes wakeups and also uses timeout as the safety scan.
+  folly::LifoSem wake_sem_;
+  // Thread-domain only: written by Start/Stop, which are called
   // from POSIX-thread lifecycle hooks (mount init/destroy and mount teardown).
-  std::thread retry_thread_;
+  std::thread worker_thread_;
 };
 
 }  // namespace swordfs::vfs

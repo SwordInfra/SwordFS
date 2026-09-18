@@ -209,8 +209,9 @@ FIBER_TEST_F(MemMetaStoreConcurrencyTest, ConcurrentRemoveAndAdd) {
 
   auto remover = [&](int tid) {
     for (int i = tid * 25; i < (tid + 1) * 25 && i < kFiles; ++i) {
-      // Unlink + reclaim (prepare/complete) in one transaction — this
-      // mirrors what VfsImpl::Unlink does for a no-fd case.
+      // Exercise the metadata state transition directly under concurrency.
+      // Foreground VfsImpl::Unlink no longer performs reclaim synchronously,
+      // but the prepare/complete transaction semantics remain identical.
       InodeID target_ino = inodes[i];
       std::string name = "file_" + std::to_string(i);
       Status status = store_->Transact([&](MemMetaTxn &txn) {
@@ -218,10 +219,13 @@ FIBER_TEST_F(MemMetaStoreConcurrencyTest, ConcurrentRemoveAndAdd) {
         if (!status.ok()) {
           return status;
         }
-        swordfs::metadata::ReclaimWork reclaim_work;
+        std::optional<swordfs::metadata::ReclaimWork> reclaim_work;
         auto reclaim_status = txn.PrepareReclaim(target_ino, &reclaim_work);
         if (!reclaim_status.ok()) {
           return reclaim_status;
+        }
+        if (!reclaim_work.has_value()) {
+          return Status::Internal("unlinked inode was not prepared for reclaim");
         }
         return txn.CompleteReclaim(target_ino);
       });

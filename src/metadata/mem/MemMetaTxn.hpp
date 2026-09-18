@@ -105,15 +105,15 @@ class MemMetaTxn {
   //
   // When |overwrite| is false an existing target yields AlreadyExists.
   // When true, the target is atomically replaced: a directory target
-  // must be empty (NotEmpty) and is reclaimed by the unlink; a file
-  // target is detached and reported through |result| when its nlink
-  // drops to zero so the VFS layer can perform open-fd-aware cleanup.
+  // must be empty (NotEmpty) and is reclaimed by the unlink; a file target
+  // whose nlink drops to zero becomes a durable orphan candidate for the
+  // background Reclaimer.
   // A directory/non-directory mismatch yields IsDirectory / NotDirectory.
   //
   // Moving a directory across parents adjusts both parents' nlink;
   // bumps both parents' mtime/ctime and the moved inode's ctime.
   Status MoveEntry(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
-                   bool overwrite, RenameResult *result = nullptr);
+                   bool overwrite);
 
   // POSIX unlink(2): remove the child entry from its parent and
   // decrement nlink.  Does NOT delete file inodes or their data; that
@@ -125,7 +125,7 @@ class MemMetaTxn {
   // A file whose nlink reaches zero is published as an orphan candidate in
   // this same transaction, so the "no names left" fact survives a crash
   // before the caller gets to reclaim it.
-  Status Unlink(InodeID parent_ino, std::string_view name, uint64_t *post_nlink = nullptr);
+  Status Unlink(InodeID parent_ino, std::string_view name);
 
   // Link an existing inode (by ino) into a directory (hard link).
   // Increments the inode's nlink; bumps the inode's ctime and the
@@ -173,7 +173,7 @@ class MemMetaTxn {
   // cleared — all in this transaction, which is the point of no return.
   // NotFound means the inode was already reclaimed or is still linked; the
   // orphan marker (if any) is dropped either way and nothing else changes.
-  Status PrepareReclaim(InodeID ino, ReclaimWork *work);
+  Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work);
 
   // Drop the pending-reclaim record for |ino| after every frozen object has
   // been deleted.  No-op when no record exists.
@@ -182,8 +182,8 @@ class MemMetaTxn {
   // Snapshot every orphan candidate inode id.
   Status ListOrphanCandidates(std::vector<InodeID> *out);
 
-  // Snapshot every inode id with a pending reclaim.
-  Status ListPendingReclaims(std::vector<InodeID> *out);
+  // Snapshot every frozen pending reclaim.
+  Status ListPendingReclaims(std::vector<ReclaimWork> *out);
 
   // Snapshot every chunk registered for |ino|, ascending chunk index.
   Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out);

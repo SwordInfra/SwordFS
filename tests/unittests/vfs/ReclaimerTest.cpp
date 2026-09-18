@@ -116,10 +116,9 @@ class ReclaimerTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    // A test that started the periodic retry thread must never let it outlive
-    // the engines it walks; StopPeriodicRetry() is idempotent and safe when no
-    // thread was ever started.
-    Reclaimer::Instance().StopPeriodicRetry();
+    // A test that started the reclaim worker must never let it outlive the
+    // engines it walks; Stop() is idempotent and safe when never started.
+    Reclaimer::Instance().Stop();
     // Drop per-inode runtime state and the injected engines on the threads
     // that own them.
     swordfs::test::RunInTestFiber([&] { InodeHandleManager::Instance().Initialize(); });
@@ -151,8 +150,8 @@ class ReclaimerTest : public ::testing::Test {
 
   std::vector<InodeID> PendingReclaims() {
     std::vector<InodeID> out;
-    auto status = meta_->VisitPendingReclaims([&out](InodeID ino) {
-      out.push_back(ino);
+    auto status = meta_->VisitPendingReclaims([&out](const metadata::ReclaimWork &work) {
+      out.push_back(work.ino);
       return Status::OK();
     });
     EXPECT_TRUE(status.ok()) << status.message();
@@ -163,13 +162,10 @@ class ReclaimerTest : public ::testing::Test {
   RecordingDataEngine *data_ = nullptr;
 };
 
-FIBER_TEST_F(ReclaimerTest, ReclaimDeletesFrozenObjectsAndCompletes) {
+FIBER_TEST_F(ReclaimerTest, ReconcileDeletesFrozenObjectsAndCompletes) {
   const InodeID f_ino = CreateChunkedFile("f");
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f", nullptr).ok());
-
-  bool prepared = false;
-  ASSERT_TRUE(Reclaimer::Instance().Reclaim(f_ino, &prepared).ok());
-  EXPECT_TRUE(prepared);
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
+  ASSERT_TRUE(Reclaimer::Instance().Reconcile().ok());
 
   const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
   EXPECT_EQ(data_->delete_calls, std::vector<std::string>{key});
@@ -178,33 +174,29 @@ FIBER_TEST_F(ReclaimerTest, ReclaimDeletesFrozenObjectsAndCompletes) {
   EXPECT_TRUE(PendingReclaims().empty());
   EXPECT_TRUE(OrphanCandidates().empty());
 
-  // Nothing left to do: a second reclaim is a no-op.
-  bool replayed = true;
-  ASSERT_TRUE(Reclaimer::Instance().Reclaim(f_ino, &replayed).ok());
-  EXPECT_FALSE(replayed);
+  // Nothing left to do: a second pass is a no-op.
+  ASSERT_TRUE(Reclaimer::Instance().Reconcile().ok());
   EXPECT_EQ(data_->delete_calls.size(), 1U);
 
   // The prepared output is optional; omitting it must not change the reclaim
   // sequence or leave the frozen record behind.
   const InodeID second = CreateChunkedFile("second", 2);
   const auto second_key = chunk::FormatChunkObjectKey(second, 0, 2);
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "second", nullptr).ok());
-  ASSERT_TRUE(Reclaimer::Instance().Reclaim(second, nullptr).ok());
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "second").ok());
+  ASSERT_TRUE(Reclaimer::Instance().Reconcile().ok());
   EXPECT_FALSE(data_->Contains(second_key));
   EXPECT_TRUE(meta_->GetInode(second, nullptr).IsNotFound());
   EXPECT_TRUE(PendingReclaims().empty());
 }
 
-FIBER_TEST_F(ReclaimerTest, ReclaimRetriesFailedObjectDeletes) {
+FIBER_TEST_F(ReclaimerTest, ReconcileRetriesFailedObjectDeletes) {
   const InodeID f_ino = CreateChunkedFile("f");
   const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f", nullptr).ok());
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
   data_->fail_keys[key] = Status::IOError("injected delete failure");
 
-  bool prepared = false;
-  const auto first = Reclaimer::Instance().Reclaim(f_ino, &prepared);
+  const auto first = Reclaimer::Instance().Reconcile();
   EXPECT_FALSE(first.ok());
-  EXPECT_TRUE(prepared) << "the point of no return was already crossed";
   EXPECT_EQ(data_->delete_calls.size(), 1U);
   // The frozen record survives the failed delete...
   EXPECT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
@@ -225,7 +217,7 @@ FIBER_TEST_F(ReclaimerTest, ReconcileRecoversCrashLeftOrphan) {
   // died before any reclaim ran. A fresh mount has no descriptors and no
   // handle state, so mount-time reconciliation is exactly what runs here.
   const InodeID f_ino = CreateChunkedFile("f");
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f", nullptr).ok());
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
   ASSERT_EQ(OrphanCandidates(), std::vector<InodeID>{f_ino});
 
   const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
@@ -241,7 +233,7 @@ FIBER_TEST_F(ReclaimerTest, ReconcileRecoversCrashLeftOrphan) {
 
 FIBER_TEST_F(ReclaimerTest, ReconcileLeavesRevivedInodeAlone) {
   const InodeID f_ino = CreateChunkedFile("f");
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f", nullptr).ok());
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
 
   // A hard link revives the inode before reconciliation runs (the marker is
   // dropped by the link transaction itself).
@@ -258,27 +250,24 @@ FIBER_TEST_F(ReclaimerTest, ReconcileLeavesRevivedInodeAlone) {
   EXPECT_EQ(revived.attr.nlink, 1U);
 }
 
-FIBER_TEST_F(ReclaimerTest, ReclaimDefersToTheLastDescriptorAndFencesLaterOpens) {
+FIBER_TEST_F(ReclaimerTest, ReconcileDefersUntilAfterTheLastDescriptorCloses) {
   const InodeID f_ino = CreateChunkedFile("f");
 
   // Open a descriptor, then unlink: the reclaim must be deferred while the
   // descriptor lives, and the inode must survive for it.
   std::shared_ptr<FileHandle> handle;
   ASSERT_TRUE(FileHandle::Open(f_ino, O_RDONLY, &handle).ok());
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f", nullptr).ok());
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
 
-  // ReclaimData takes the whole decision itself: the descriptor is visible to
-  // it under the handle's state mutex, so it records local open-handle
-  // deferral instead of reclaiming under the reader. The durable orphan
-  // candidate is already in metadata.
-  auto inode_handle = InodeHandleManager::Instance().Get(f_ino, true);
-  ASSERT_NE(inode_handle, nullptr);
-  ASSERT_TRUE(inode_handle->ReclaimData().ok());
+  ASSERT_TRUE(Reclaimer::Instance().Reconcile().ok());
   EXPECT_TRUE(data_->delete_calls.empty()) << "an open descriptor must defer the cleanup";
   ASSERT_TRUE(meta_->GetInode(f_ino, nullptr).ok());
 
-  // The last close reclaims the inode and its objects.
+  // Close only releases the local reference; background reclaim remains the
+  // sole executor and completes on the next pass.
   ASSERT_TRUE(handle->Release().ok());
+  EXPECT_TRUE(data_->delete_calls.empty());
+  ASSERT_TRUE(Reclaimer::Instance().Reconcile().ok());
   const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
   EXPECT_FALSE(data_->Contains(key));
   EXPECT_TRUE(meta_->GetInode(f_ino, nullptr).IsNotFound());
@@ -292,13 +281,13 @@ FIBER_TEST_F(ReclaimerTest, ReconcileDefersAnUnlinkedInodeWithAnOpenDescriptor) 
   // #143: the background reconciliation is a reclaim caller like any other, so
   // it must go through the same per-inode decision. While a descriptor holds
   // the unlinked inode open, a full Reconcile pass may not delete the inode or
-  // its objects — the cleanup belongs to the last Close.
+  // its objects.
   const InodeID f_ino = CreateChunkedFile("f");
   const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
 
   std::shared_ptr<FileHandle> handle;
   ASSERT_TRUE(FileHandle::Open(f_ino, O_RDONLY, &handle).ok());
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f", nullptr).ok());
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
   ASSERT_EQ(OrphanCandidates(), std::vector<InodeID>{f_ino});
 
   ASSERT_TRUE(Reclaimer::Instance().Reconcile().ok());
@@ -307,12 +296,15 @@ FIBER_TEST_F(ReclaimerTest, ReconcileDefersAnUnlinkedInodeWithAnOpenDescriptor) 
   // resolves, and the object the open descriptor can still read is untouched.
   EXPECT_TRUE(data_->delete_calls.empty()) << "reconciliation must not reclaim an inode a descriptor still holds";
   EXPECT_TRUE(data_->Contains(key));
-  ASSERT_TRUE(meta_->GetInode(f_ino, nullptr).ok()) << "the inode must survive until the last Close";
+  ASSERT_TRUE(meta_->GetInode(f_ino, nullptr).ok()) << "the inode must survive while the descriptor is open";
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{f_ino}));
   EXPECT_TRUE(PendingReclaims().empty());
 
-  // The last close reclaims the inode and its objects — once, and completely.
+  // Last close only releases the local reference. The next worker pass owns
+  // preparation/deletion/completion.
   ASSERT_TRUE(handle->Release().ok());
+  EXPECT_TRUE(data_->delete_calls.empty());
+  ASSERT_TRUE(Reclaimer::Instance().Reconcile().ok());
   EXPECT_EQ(data_->delete_calls, (std::vector<std::string>{key}));
   EXPECT_FALSE(data_->Contains(key));
   EXPECT_TRUE(meta_->GetInode(f_ino, nullptr).IsNotFound());
@@ -339,7 +331,7 @@ FIBER_TEST_F(ReclaimerTest, ConcurrentReclaimAndLinkNeverDeleteLiveData) {
   for (int round = 0; round < kRounds; ++round) {
     const InodeID f_ino = CreateChunkedFile("race");
     const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
-    ASSERT_TRUE(meta_->Unlink(kRootInodeId, "race", nullptr).ok());
+    ASSERT_TRUE(meta_->Unlink(kRootInodeId, "race").ok());
 
     std::barrier gate(3);
     std::atomic<bool> link_won{false};
@@ -353,8 +345,7 @@ FIBER_TEST_F(ReclaimerTest, ConcurrentReclaimAndLinkNeverDeleteLiveData) {
     });
     auto reclaimer = swordfs::test::StartFiberTestThread([&] {
       gate.arrive_and_wait();
-      auto handle = InodeHandleManager::Instance().Get(f_ino, true);
-      if (!handle || !handle->ReclaimData().ok()) {
+      if (!Reclaimer::Instance().Reconcile().ok()) {
         failures.fetch_add(1, std::memory_order_relaxed);
       }
     });
@@ -371,7 +362,7 @@ FIBER_TEST_F(ReclaimerTest, ConcurrentReclaimAndLinkNeverDeleteLiveData) {
       EXPECT_TRUE(data_->Contains(key)) << "round " << round << ": revived inode lost its object";
       revived.fetch_add(1, std::memory_order_relaxed);
       // Clean up the fresh orphan before the next round.
-      ASSERT_TRUE(meta_->Unlink(kRootInodeId, "revived", nullptr).ok());
+      ASSERT_TRUE(meta_->Unlink(kRootInodeId, "revived").ok());
       ASSERT_TRUE(Reclaimer::Instance().Reconcile().ok());
     } else {
       // The reclaim won: the inode is gone and so is its object.
@@ -401,24 +392,11 @@ class ReclaimerNoEngineTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    Reclaimer::Instance().StopPeriodicRetry();
+    Reclaimer::Instance().Stop();
     swordfs::test::RunInTestFiber([&] { InodeHandleManager::Instance().Initialize(); });
     volume::VolumeImpl::Initialize();
   }
 };
-
-FIBER_TEST_F(ReclaimerNoEngineTest, ReclaimWithoutEnginesFailsClosed) {
-  ASSERT_EQ(volume::VolumeImpl::Instance().meta_engine(), nullptr);
-  ASSERT_EQ(volume::VolumeImpl::Instance().data_engine(), nullptr);
-
-  bool prepared = true;
-  const auto status = Reclaimer::Instance().Reclaim(42, &prepared);
-  EXPECT_EQ(status.code(), Status::kInternal) << status.message();
-  EXPECT_FALSE(prepared) << "nothing may be reported as prepared without both engines";
-
-  // The out-parameter is optional: the refusal does not depend on it.
-  EXPECT_EQ(Reclaimer::Instance().Reclaim(42, nullptr).code(), Status::kInternal);
-}
 
 FIBER_TEST_F(ReclaimerNoEngineTest, ReconcileWithoutEnginesIsANoOp) {
   EXPECT_TRUE(Reclaimer::Instance().Reconcile().ok());
@@ -431,10 +409,6 @@ FIBER_TEST_F(ReclaimerNoEngineTest, MissingDataEngineFailsClosedAndReconcileStay
   ASSERT_NE(volume::VolumeImpl::Instance().meta_engine(), nullptr);
   ASSERT_EQ(volume::VolumeImpl::Instance().data_engine(), nullptr);
 
-  bool prepared = true;
-  const auto status = Reclaimer::Instance().Reclaim(42, &prepared);
-  EXPECT_EQ(status.code(), Status::kInternal) << status.message();
-  EXPECT_FALSE(prepared);
   EXPECT_TRUE(Reclaimer::Instance().Reconcile().ok());
 }
 
@@ -450,15 +424,15 @@ FIBER_TEST_F(ReclaimerTest, ReconcileCountsEveryUnreclaimedInode) {
   const InodeID frozen = CreateChunkedFile("frozen");
   const auto orphan_key = chunk::FormatChunkObjectKey(orphan, 0, 1);
   const auto frozen_key = chunk::FormatChunkObjectKey(frozen, 0, 1);
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "orphan", nullptr).ok());
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "frozen", nullptr).ok());
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "orphan").ok());
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "frozen").ok());
 
-  // Freeze one of them through a reclaim whose deletes fail: that inode is
-  // past its point of no return and its record is durable.
+  // Freeze one directly through metadata to model a crash-left pending record
+  // without involving the worker path under test.
+  std::optional<metadata::ReclaimWork> frozen_work;
+  ASSERT_TRUE(meta_->PrepareReclaim(frozen, &frozen_work).ok());
+  ASSERT_TRUE(frozen_work.has_value());
   data_->fail_keys[frozen_key] = Status::IOError("injected delete failure");
-  bool prepared = false;
-  ASSERT_FALSE(Reclaimer::Instance().Reclaim(frozen, &prepared).ok());
-  ASSERT_TRUE(prepared);
   ASSERT_EQ(PendingReclaims(), std::vector<InodeID>{frozen});
 
   data_->fail_keys[orphan_key] = Status::IOError("injected delete failure");
@@ -500,7 +474,7 @@ class FailingScanMetaEngine : public MemMetaImpl {
     return MemMetaImpl::VisitOrphanCandidates(visitor);
   }
 
-  Status VisitPendingReclaims(const swordfs::metadata::InodeVisitorFn &visitor) override {
+  Status VisitPendingReclaims(const swordfs::metadata::ReclaimVisitorFn &visitor) override {
     if (!pending_scan_status.ok()) {
       return pending_scan_status;
     }
@@ -549,60 +523,56 @@ FIBER_TEST_F(ReclaimerScanFailureTest, ReconcileSurfacesPendingScanFailure) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// #143: the periodic retry thread
+// #143: the reclaim worker
 // ────────────────────────────────────────────────────────────────
 // Production starts it at mount init and joins it at teardown — both
 // POSIX-thread hooks — while each pass is fiber-domain work handed to that
 // thread's own fiber runtime. The thread's effect is the only observable, so
 // these tests watch the durable record rather than the thread.
 
-FIBER_TEST_F(ReclaimerTest, PeriodicRetryCompletesAPendingReclaim) {
+FIBER_TEST_F(ReclaimerTest, WorkerCompletesAPendingReclaimImmediatelyAtStartup) {
   const InodeID f_ino = CreateChunkedFile("f");
   const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f", nullptr).ok());
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
 
-  // Freeze the work through a reclaim whose delete fails, then let the backend
-  // recover: only a retry pass can finish it now.
-  data_->fail_keys[key] = Status::IOError("injected delete failure");
-  bool prepared = false;
-  ASSERT_FALSE(Reclaimer::Instance().Reclaim(f_ino, &prepared).ok());
-  ASSERT_TRUE(prepared);
+  std::optional<metadata::ReclaimWork> frozen_work;
+  ASSERT_TRUE(meta_->PrepareReclaim(f_ino, &frozen_work).ok());
+  ASSERT_TRUE(frozen_work.has_value());
   ASSERT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
-  data_->fail_keys.clear();
 
-  swordfs::test::RunInTestThreadFromFiber([&] { Reclaimer::Instance().StartPeriodicRetry(); });
+  swordfs::test::RunInTestThreadFromFiber([&] { Reclaimer::Instance().Start(); });
 
-  // The first pass only runs after the retry interval, so give it room. The
-  // predicate reads the metadata engine, which serializes both callers.
+  // Start() runs the first pass immediately; give the worker room to hand the
+  // pass to its fiber runtime and complete it.
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   while (std::chrono::steady_clock::now() < deadline && !PendingReclaims().empty()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
   const bool completed = PendingReclaims().empty();
 
-  swordfs::test::RunInTestThreadFromFiber([&] { Reclaimer::Instance().StopPeriodicRetry(); });
+  swordfs::test::RunInTestThreadFromFiber([&] { Reclaimer::Instance().Stop(); });
 
-  EXPECT_TRUE(completed) << "the periodic retry pass must finish crash-left reclaim work";
+  EXPECT_TRUE(completed) << "the startup worker pass must finish crash-left reclaim work";
   EXPECT_FALSE(data_->Contains(key));
   EXPECT_TRUE(meta_->GetInode(f_ino, nullptr).IsNotFound());
   EXPECT_TRUE(OrphanCandidates().empty());
 }
 
-FIBER_TEST_F(ReclaimerTest, PeriodicRetrySurvivesAFailedPassAndRecoversLater) {
+FIBER_TEST_F(ReclaimerTest, WorkerSurvivesAFailedPassAndRecoversOnWake) {
   const InodeID f_ino = CreateChunkedFile("retry-failure");
   const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "retry-failure", nullptr).ok());
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "retry-failure").ok());
 
-  // Freeze the reclaim first, and keep the backend failing so the first
-  // periodic pass reports an error instead of completing the record.
+  // Freeze the reclaim first, and keep the backend failing so the first worker
+  // pass reports an error instead of completing the record.
+  std::optional<metadata::ReclaimWork> frozen_work;
+  ASSERT_TRUE(meta_->PrepareReclaim(f_ino, &frozen_work).ok());
+  ASSERT_TRUE(frozen_work.has_value());
   data_->fail_keys[key] = Status::IOError("injected persistent delete failure");
-  bool prepared = false;
-  ASSERT_FALSE(Reclaimer::Instance().Reclaim(f_ino, &prepared).ok());
-  ASSERT_TRUE(prepared);
   ASSERT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
   const auto initial_delete_calls = data_->delete_calls.size();
 
-  swordfs::test::RunInTestThreadFromFiber([&] { Reclaimer::Instance().StartPeriodicRetry(); });
+  swordfs::test::RunInTestThreadFromFiber([&] { Reclaimer::Instance().Start(); });
 
   const auto failed_pass_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
   while (std::chrono::steady_clock::now() < failed_pass_deadline &&
@@ -610,42 +580,43 @@ FIBER_TEST_F(ReclaimerTest, PeriodicRetrySurvivesAFailedPassAndRecoversLater) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
   const bool failed_pass_ran = data_->delete_calls.size() > initial_delete_calls;
-  EXPECT_TRUE(failed_pass_ran) << "the first periodic pass must retry the still-failing delete";
+  EXPECT_TRUE(failed_pass_ran) << "the first worker pass must retry the still-failing delete";
   EXPECT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
 
-  // Recover the backend. The same retry thread must survive the failed pass
-  // and complete the durable record on a later interval.
+  // Recover the backend and explicitly wake the same worker; the failed pass
+  // must not terminate it and wakeup must not wait for the safety interval.
   data_->fail_keys.clear();
+  Reclaimer::Instance().Wake();
   const auto recovery_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
   while (std::chrono::steady_clock::now() < recovery_deadline && !PendingReclaims().empty()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
   const bool recovered = PendingReclaims().empty();
 
-  swordfs::test::RunInTestThreadFromFiber([&] { Reclaimer::Instance().StopPeriodicRetry(); });
+  swordfs::test::RunInTestThreadFromFiber([&] { Reclaimer::Instance().Stop(); });
 
-  EXPECT_TRUE(recovered) << "a failed periodic pass must not terminate the retry thread";
+  EXPECT_TRUE(recovered) << "a failed worker pass must not terminate the reclaim worker";
   EXPECT_FALSE(data_->Contains(key));
 }
 
-FIBER_TEST_F(ReclaimerTest, PeriodicRetryLifecycleIsIdempotent) {
+FIBER_TEST_F(ReclaimerTest, WorkerLifecycleIsIdempotent) {
   // Stopping before any start is a no-op, a second start must not leave a
   // second thread behind, and a stop must return promptly instead of waiting
   // out the retry interval.
   const auto started = std::chrono::steady_clock::now();
   swordfs::test::RunInTestThreadFromFiber([&] {
-    Reclaimer::Instance().StopPeriodicRetry();  // no thread was ever started
-    Reclaimer::Instance().StartPeriodicRetry();
-    Reclaimer::Instance().StartPeriodicRetry();  // idempotent
-    Reclaimer::Instance().StopPeriodicRetry();
-    Reclaimer::Instance().StopPeriodicRetry();  // already joined
+    Reclaimer::Instance().Stop();  // no thread was ever started
+    Reclaimer::Instance().Start();
+    Reclaimer::Instance().Start();  // idempotent
+    Reclaimer::Instance().Stop();
+    Reclaimer::Instance().Stop();  // already joined
   });
   const auto elapsed = std::chrono::steady_clock::now() - started;
 
   // Stop posts the cross-domain waiter, so teardown should not pay either the
   // five-second retry interval or a polling-slice delay. Keep a generous CI
   // bound while still pinning the prompt-shutdown contract.
-  EXPECT_LT(elapsed, std::chrono::milliseconds(500)) << "StopPeriodicRetry must wake the retry thread promptly";
+  EXPECT_LT(elapsed, std::chrono::milliseconds(500)) << "Stop must wake the reclaim worker promptly";
 }
 
 }  // namespace
