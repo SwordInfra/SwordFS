@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -184,6 +185,10 @@ class MemMetaTxn {
 
   // Snapshot every frozen pending reclaim.
   Status ListPendingReclaims(std::vector<ReclaimWork> *out);
+
+  // Snapshot / complete immutable object deletes published by truncate.
+  Status ListPendingDeletes(std::vector<PendingDelete> &out);
+  Status CompletePendingDelete(std::string_view key);
 
   // Snapshot every chunk registered for |ino|, ascending chunk index.
   Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out);

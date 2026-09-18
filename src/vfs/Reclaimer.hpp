@@ -1,11 +1,12 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// Reclaimer — drives last-link data cleanup for the VFS layer.
+// Reclaimer — drives durable metadata-to-data cleanup for the VFS layer.
 //
 // The metadata engine owns the durable state (orphan candidates published by
-// unlink/rename-overwrite, plus frozen pending-reclaim records); this
-// component owns the cross-engine sequence for one inode:
+// unlink/rename-overwrite, frozen pending-reclaim records, and immutable
+// object keys detached by truncate); this component owns the cross-engine
+// cleanup sequence:
 //
 //   1. PrepareReclaim — the metadata point of no return: recheck nlink == 0,
 //      freeze the authoritative object identities, drop the live inode;
@@ -73,6 +74,11 @@ class Reclaimer {
   // are collected so every object is attempted; the record survives as long
   // as any delete failed.
   utils::Status DeleteFrozenObjects(const metadata::ReclaimWork &work);
+
+  // Process one truncate delete intent. If its immutable object is still the
+  // authoritative live chunk, leave the intent untouched; otherwise delete
+  // the object and acknowledge the persistent pending-delete entry.
+  utils::Status DeletePendingObject(const metadata::PendingDelete &work);
 
   // Event/timeout loop of the POSIX worker, and one pass handed to the global
   // fiber runtime.

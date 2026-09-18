@@ -11,6 +11,7 @@
 #include <folly/io/IOBuf.h>
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -117,6 +118,12 @@ class MissingMetaEngine final : public IMetaEngine {
   Status VisitPendingReclaims(const swordfs::metadata::ReclaimVisitorFn &) override {
     return Status::OK();
   }
+  Status VisitPendingDeletes(const swordfs::metadata::PendingDeleteVisitorFn &) override {
+    return Status::OK();
+  }
+  Status CompletePendingDelete(std::string_view) override {
+    return Status::OK();
+  }
   Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
     if (revision == nullptr) {
       return Status::InvalidArgument("chunk revision output is null");
@@ -183,6 +190,34 @@ class ChunkTest : public ::testing::Test {
 
 TEST(ChunkObjectKeyTest, IncludesInodeIndexAndRevision) {
   EXPECT_EQ(swordfs::chunk::FormatChunkObjectKey(/*ino=*/42, /*index=*/3, /*revision=*/7), "42/3/7");
+}
+
+TEST(SwordFsChunkDescriptorTest, ValidatesCanonicalFixedSizeIdentity) {
+  constexpr uint64_t kChunkSize = 64;
+  const SwordFsChunk valid{.index = 1, .start_offset = kChunkSize, .revision = 1, .size = kChunkSize};
+  EXPECT_TRUE(valid.IsValidForChunkSize(kChunkSize));
+
+  auto invalid = valid;
+  EXPECT_FALSE(invalid.IsValidForChunkSize(0));
+
+  invalid = valid;
+  invalid.revision = swordfs::metadata::kInvalidChunkRevision;
+  EXPECT_FALSE(invalid.IsValidForChunkSize(kChunkSize));
+
+  invalid = valid;
+  invalid.size = kChunkSize + 1;
+  EXPECT_FALSE(invalid.IsValidForChunkSize(kChunkSize));
+
+  invalid = valid;
+  invalid.index = 2;
+  EXPECT_FALSE(invalid.IsValidForChunkSize(std::numeric_limits<uint64_t>::max()));
+
+  invalid = valid;
+  invalid.start_offset = 0;
+  EXPECT_FALSE(invalid.IsValidForChunkSize(kChunkSize));
+
+  invalid = SwordFsChunk{.index = 1, .start_offset = std::numeric_limits<uint64_t>::max(), .revision = 1, .size = 1};
+  EXPECT_FALSE(invalid.IsValidForChunkSize(std::numeric_limits<uint64_t>::max()));
 }
 
 // Regression: an uninitialised max_chunk_size_ used to make chunk

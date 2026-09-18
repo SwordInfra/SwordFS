@@ -82,6 +82,12 @@ class IDataEngine {
   virtual Status Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) = 0;
 
   /// Delete a chunk (called by the garbage collector).
+  ///
+  /// Deletion MUST be idempotent from the caller's perspective: deleting an
+  /// already-absent key returns OK. Durable metadata cleanup may replay the
+  /// same immutable object identity after a timeout, process restart, or
+  /// ambiguous acknowledgement, and must never need a separate existence
+  /// check to make retry safe.
   virtual Status Delete(std::string_view key) = 0;
 };
 

@@ -287,6 +287,12 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status VisitPendingReclaims(const swordfs::metadata::ReclaimVisitorFn &) override {
     return Status::OK();
   }
+  Status VisitPendingDeletes(const swordfs::metadata::PendingDeleteVisitorFn &) override {
+    return Status::OK();
+  }
+  Status CompletePendingDelete(std::string_view) override {
+    return Status::OK();
+  }
   Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
     if (revision == nullptr) {
       return Status::InvalidArgument("chunk revision output is null");

@@ -37,6 +37,7 @@ static constexpr uid_t kOwner = 1000;
 static constexpr uid_t kOther = 2000;
 static constexpr gid_t kGroup = 100;
 static constexpr gid_t kOtherGroup = 200;
+static constexpr uint64_t kChunkSize = 64ULL * 1024 * 1024;
 
 #ifndef NDEBUG
 TEST(MemMetaImplDomainTest, RuntimeApiRejectsThreadCaller) {
@@ -777,13 +778,13 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSizeM
 
   SwordFsChunk later{};
   later.index = 2;
-  later.start_offset = 512;
+  later.start_offset = 2 * kChunkSize;
   later.revision = 2;
   later.size = 64;
   ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, later).ok());
   ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, first).ok());
   ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
-  EXPECT_EQ(attr.st_size, 576);
+  EXPECT_EQ(attr.st_size, static_cast<off_t>(2 * kChunkSize + 64));
 
   auto conflicting = first;
   conflicting.revision = 3;
@@ -845,6 +846,14 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) {
   invalid_replacement.revision = swordfs::metadata::kInvalidChunkRevision;
   EXPECT_EQ(impl_->CommitChunk(999999, expected, invalid_replacement).code(), Status::kInvalidArgument);
 
+  auto non_canonical_replacement = replacement;
+  non_canonical_replacement.start_offset = 1;
+  EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, non_canonical_replacement).code(), Status::kInvalidArgument);
+
+  auto oversized_replacement = replacement;
+  oversized_replacement.size = kChunkSize + 1;
+  EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, oversized_replacement).code(), Status::kInvalidArgument);
+
   EXPECT_TRUE(impl_->CommitChunk(999999, expected, replacement).IsNotFound());
 
   InodeID dir_ino = 0;
@@ -877,7 +886,7 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) {
   InodeID file_ino = 0;
   ASSERT_TRUE(CreateFile(kRoot, "replace-missing-index", 0644, &file_ino).ok());
   ASSERT_TRUE(impl_->CommitChunk(file_ino, std::nullopt, expected).ok());
-  SwordFsChunk missing{.index = 1, .start_offset = 4096, .revision = 3, .size = 64};
+  SwordFsChunk missing{.index = 1, .start_offset = kChunkSize, .revision = 3, .size = 64};
   auto missing_replacement = missing;
   missing_replacement.revision = 4;
   EXPECT_TRUE(impl_->CommitChunk(file_ino, missing, missing_replacement).IsNotFound());
@@ -1190,10 +1199,10 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFence
   // Publish two chunks out of index order: the frozen work must be complete
   // and ordered, and every key must be the revisioned identity of the
   // authoritative descriptor.
-  ASSERT_TRUE(
-      impl_
-          ->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 1, .start_offset = 4096, .revision = 2, .size = 128})
-          .ok());
+  ASSERT_TRUE(impl_
+                  ->CommitChunk(f_ino, std::nullopt,
+                                SwordFsChunk{.index = 1, .start_offset = kChunkSize, .revision = 2, .size = 128})
+                  .ok());
   ASSERT_TRUE(
       impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 4096})
           .ok());
@@ -1365,6 +1374,7 @@ FIBER_TEST_F(MemMetaImplTest, VisitorAndOutputArgumentsAreValidated) {
 
   EXPECT_EQ(impl_->VisitOrphanCandidates(swordfs::metadata::InodeVisitorFn{}).code(), Status::kInvalidArgument);
   EXPECT_EQ(impl_->VisitPendingReclaims(swordfs::metadata::ReclaimVisitorFn{}).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->VisitPendingDeletes(swordfs::metadata::PendingDeleteVisitorFn{}).code(), Status::kInvalidArgument);
 
   // A null frozen-work output is refused before anything is mutated.
   InodeID f_ino = 0;
@@ -1414,4 +1424,24 @@ FIBER_TEST_F(MemMetaImplTest, VisitorAbortStopsTheScanAndIsPropagated) {
   EXPECT_EQ(pending_status.code(), Status::kBusy);
   EXPECT_EQ(pending_status.message(), "abort the pending scan");
   EXPECT_EQ(visited, (std::vector<InodeID>{second}));
+}
+
+FIBER_TEST_F(MemMetaImplTest, PendingDeleteVisitorAbortIsPropagated) {
+  SetContext(0, 0);
+
+  InodeID ino = 0;
+  ASSERT_TRUE(CreateFile(kRoot, "truncate-pending", 0644, &ino).ok());
+  ASSERT_TRUE(
+      impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
+          .ok());
+  ASSERT_TRUE(impl_->Truncate(ino, 0).ok());
+
+  size_t visits = 0;
+  const auto status = impl_->VisitPendingDeletes([&](const swordfs::metadata::PendingDelete &) {
+    ++visits;
+    return Status::Busy("abort the pending delete scan");
+  });
+  EXPECT_EQ(status.code(), Status::kBusy);
+  EXPECT_EQ(status.message(), "abort the pending delete scan");
+  EXPECT_EQ(visits, 1U);
 }

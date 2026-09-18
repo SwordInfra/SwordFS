@@ -39,6 +39,8 @@ class MemMetaImpl : public IMetaEngine {
   Status CompleteReclaim(InodeID ino) override;
   Status VisitOrphanCandidates(const InodeVisitorFn &visitor) override;
   Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) override;
+  Status VisitPendingDeletes(const PendingDeleteVisitorFn &visitor) override;
+  Status CompletePendingDelete(std::string_view key) override;
   Status AllocateChunkRevision(ChunkRevision *revision) override;
 
   // Directory operations
@@ -68,6 +70,7 @@ class MemMetaImpl : public IMetaEngine {
 
  private:
   MemMetaStore store_;
+  uint64_t chunk_size_ = SwordFsVolume{}.chunk_size;
 };
 
 }  // namespace swordfs::metadata

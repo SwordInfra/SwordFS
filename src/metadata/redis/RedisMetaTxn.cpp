@@ -251,8 +251,64 @@ utils::Status RedisMetaTxn::TouchInode(InodeID ino, SetAttrField fields) {
   return SetInode(inode);
 }
 
-utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, const std::vector<SwordFsChunk> &scanned,
-                                           std::optional<ReclaimWork> &work) {
+utils::Status RedisMetaTxn::PrepareTruncateDeletes(InodeID ino, uint64_t size) {
+  if (chunk_size_ == 0) {
+    return utils::Status::Internal("volume chunk size is not initialized");
+  }
+
+  SwordFsInode inode;
+  auto status = LookupInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  if (size > inode.attr.size) {
+    return utils::Status::OK();
+  }
+
+  std::vector<std::pair<std::string, SwordFsChunk>> chunks;
+  status = ScanChunks(ino, chunks);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<std::pair<std::string, std::string>> intents;
+  intents.reserve(chunks.size());
+  for (const auto &[field, chunk] : chunks) {
+    (void)field;
+    if (chunk.start_offset < size) {
+      continue;
+    }
+    const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
+    PendingDelete pending{.ino = ino, .chunk = ReclaimChunk{.descriptor = chunk, .key = object_key}};
+    std::string encoded;
+    status = pending.SerializeTo(&encoded);
+    if (!status.ok()) {
+      return status;
+    }
+    intents.emplace_back(object_key, std::move(encoded));
+  }
+  if (intents.empty()) {
+    return utils::Status::OK();
+  }
+
+  // Preflight and WATCH the destination Hash before the first write. This
+  // phase is additive-only, so even a partial EXEC cannot make live data
+  // unreachable; retrying simply fills in any missing idempotent intents.
+  uint64_t ignored_pending_delete_count = 0;
+  status = txn_.HLen(key_.PendingDeletes(), &ignored_pending_delete_count);
+  if (!status.ok()) {
+    return status;
+  }
+  for (const auto &[object_key, encoded] : intents) {
+    status = txn_.HSet(key_.PendingDeletes(), object_key, encoded);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> &work) {
   work.reset();
 
   // Idempotent replay: once the point of no return has been crossed the
@@ -276,19 +332,14 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, const std::vector<SwordF
     return status;
   }
 
-  // All remaining reads happen before the first write: the live inode (if
-  // any) and the current chunk count. HLEN also WATCHes the chunk hash, so a
-  // concurrent chunk-map change aborts the commit below.
+  // All remaining reads happen before the first write. The live inode and the
+  // complete chunk hash are WATCHed on the same Redis connection, so a
+  // concurrent metadata mutation aborts EXEC and RedisMetaClient retries the
+  // whole attempt from a fresh snapshot.
   SwordFsInode inode;
   status = LookupInode(ino, &inode);
   const bool has_inode = status.ok();
   if (!has_inode && !status.IsNotFound()) {
-    return status;
-  }
-
-  uint64_t chunk_count = 0;
-  status = txn_.HLen(key_.Chunk(ino), &chunk_count);
-  if (!status.ok()) {
     return status;
   }
 
@@ -305,16 +356,18 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, const std::vector<SwordF
     }
     return utils::Status::OK();
   }
-  if (chunk_count != scanned.size()) {
-    // The chunk map changed between the scan that produced |scanned| and this
-    // transaction. Freezing now would capture the wrong object identities.
-    return utils::Status::Busy("chunk metadata changed during reclaim preparation");
+
+  std::vector<std::pair<std::string, SwordFsChunk>> scanned;
+  status = ScanChunks(ino, scanned);
+  if (!status.ok()) {
+    return status;
   }
 
   ReclaimWork pending;
   pending.ino = ino;
   pending.chunks.reserve(scanned.size());
-  for (const auto &descriptor : scanned) {
+  for (const auto &[field, descriptor] : scanned) {
+    (void)field;
     // Freeze the object identity the authoritative descriptor derives right
     // now; deletions replay these keys verbatim from the frozen record.
     pending.chunks.push_back(
@@ -355,6 +408,10 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, const std::vector<SwordF
 
 utils::Status RedisMetaTxn::CompleteReclaim(InodeID ino) {
   return txn_.HDel(key_.Reclaims(), std::to_string(ino));
+}
+
+utils::Status RedisMetaTxn::CompletePendingDelete(std::string_view object_key) {
+  return txn_.HDel(key_.PendingDeletes(), object_key);
 }
 
 utils::Status RedisMetaTxn::ClearOrphanMarker(InodeID ino) {
@@ -751,11 +808,45 @@ utils::Status RedisMetaTxn::LookupChunk(InodeID ino, ChunkIndex idx, SwordFsChun
   return chunk->ParseFrom(value);
 }
 
+utils::Status RedisMetaTxn::ScanChunks(InodeID ino, std::vector<std::pair<std::string, SwordFsChunk>> &chunks) {
+  chunks.clear();
+
+  constexpr size_t kScanBatchSize = 128;
+  uint64_t cursor = 0;
+  do {
+    std::vector<std::pair<std::string, std::string>> values;
+    uint64_t next_cursor = 0;
+    auto status = txn_.HScan(key_.Chunk(ino), cursor, kScanBatchSize, &values, &next_cursor);
+    if (!status.ok()) {
+      return status;
+    }
+    for (auto &[field, value] : values) {
+      SwordFsChunk chunk;
+      status = chunk.ParseFrom(value);
+      if (!status.ok()) {
+        return status;
+      }
+      if (field != std::to_string(chunk.index)) {
+        return utils::Status::Malformed("persisted chunk descriptor does not match its canonical identity");
+      }
+      if (!chunk.IsValidForChunkSize(chunk_size_)) {
+        return utils::Status::Malformed("persisted chunk descriptor does not match its canonical identity");
+      }
+      chunks.emplace_back(std::move(field), chunk);
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+
+  return utils::Status::OK();
+}
+
 utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                                         const SwordFsChunk &replacement) {
-  if (replacement.revision == kInvalidChunkRevision ||
-      (expected.has_value() && expected->revision == kInvalidChunkRevision)) {
-    return utils::Status::InvalidArgument("chunk revision is invalid");
+  if (!replacement.IsValidForChunkSize(chunk_size_)) {
+    return utils::Status::InvalidArgument("replacement chunk descriptor is invalid");
+  }
+  if (expected.has_value() && !expected->IsValidForChunkSize(chunk_size_)) {
+    return utils::Status::InvalidArgument("expected chunk descriptor is invalid");
   }
   if (expected.has_value() && replacement.revision <= expected->revision) {
     return utils::Status::InvalidArgument("replacement revision must increase");
@@ -781,6 +872,9 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
   status = LookupChunk(ino, replacement.index, &current);
   bool replacement_already_published = false;
   if (status.ok()) {
+    if (!current.IsValidForChunkSize(chunk_size_)) {
+      return utils::Status::Malformed("persisted chunk descriptor is invalid");
+    }
     replacement_already_published = current == replacement;
     if (!replacement_already_published && (!expected.has_value() || !(current == *expected))) {
       return utils::Status::AlreadyExists("chunk changed before publication at index " +
@@ -834,36 +928,66 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
   if (chunk_size_ == 0) {
     return utils::Status::Internal("volume chunk size is not initialized");
   }
-  if (new_size == 0) {
-    return DeleteChunks(ino);
+
+  // Drive truncate work from materialized metadata, never from logical file
+  // length. ScanChunks WATCHes the chunk hash before any write is queued; a
+  // concurrent chunk-map mutation therefore aborts EXEC and retries the whole
+  // operation.
+  std::vector<std::pair<std::string, SwordFsChunk>> chunks;
+  auto status = ScanChunks(ino, chunks);
+  if (!status.ok()) {
+    return status;
   }
 
-  const ChunkIndex boundary_idx = static_cast<ChunkIndex>(new_size / chunk_size_);
-  const uint64_t boundary_offset = new_size % chunk_size_;
-  const ChunkIndex first_removed_idx = boundary_idx + (boundary_offset != 0 ? 1 : 0);
-  const ChunkIndex old_chunk_count = static_cast<ChunkIndex>((old_size + chunk_size_ - 1) / chunk_size_);
+  // Every destructive HDEL below requires a matching durable intent from the
+  // earlier additive-only preparation transaction. Read and WATCH all of
+  // those intents before the first write so the reclaimer cannot acknowledge
+  // one between validation and EXEC.
+  for (const auto &[field, chunk] : chunks) {
+    (void)field;
+    if (chunk.start_offset < new_size) {
+      continue;
+    }
 
-  if (boundary_offset != 0) {
-    SwordFsChunk chunk;
-    auto status = LookupChunk(ino, boundary_idx, &chunk);
-    if (status.ok()) {
-      const uint64_t new_chunk_size = new_size - chunk.start_offset;
-      if (chunk.size > new_chunk_size) {
-        chunk.size = new_chunk_size;
-        status = SetChunk(ino, chunk);
-        if (!status.ok()) {
-          return status;
-        }
-      }
-    } else if (!status.IsNotFound()) {
+    const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
+    std::string encoded;
+    status = txn_.HGet(key_.PendingDeletes(), object_key, &encoded);
+    if (status.IsNotFound()) {
+      return utils::Status::Internal("truncate delete intent is missing for " + object_key);
+    }
+    if (!status.ok()) {
       return status;
+    }
+
+    PendingDelete pending;
+    status = pending.ParseFrom(encoded);
+    if (!status.ok()) {
+      return status;
+    }
+    if (pending.ino != ino || !(pending.chunk.descriptor == chunk) || pending.chunk.key != object_key) {
+      return utils::Status::Malformed("truncate delete intent does not match the authoritative chunk");
     }
   }
 
-  for (ChunkIndex idx = first_removed_idx; idx < old_chunk_count; ++idx) {
-    auto status = txn_.HDel(key_.Chunk(ino), std::to_string(idx));
-    if (!status.ok()) {
-      return status;
+  for (auto &[field, chunk] : chunks) {
+    if (chunk.start_offset >= new_size) {
+      // The durable intent already owns this immutable identity. This
+      // transaction only detaches the live descriptor; a partial EXEC cannot
+      // lose the deletion target because it was committed beforehand.
+      status = txn_.HDel(key_.Chunk(ino), field);
+      if (!status.ok()) {
+        return status;
+      }
+      continue;
+    }
+
+    const uint64_t surviving_size = new_size - chunk.start_offset;
+    if (chunk.size > surviving_size) {
+      chunk.size = surviving_size;
+      auto status = SetChunk(ino, chunk);
+      if (!status.ok()) {
+        return status;
+      }
     }
   }
   return utils::Status::OK();

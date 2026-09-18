@@ -15,6 +15,7 @@
 #include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Logging.hpp"
+#include "vfs/Reclaimer.hpp"
 #include "volume/VolumeImpl.hpp"
 
 namespace swordfs::vfs {
@@ -284,23 +285,8 @@ utils::Status FileReadWriter::Truncate(size_t size) {
   }
   std::vector<std::string> dropped_keys;
   chunks_.TruncateToSize(size, chunk_size_, &dropped_keys);
-
-  // Drop the now-orphaned chunk objects from the data engine. The
-  // metadata side already pruned its chunk map via meta_->Truncate(),
-  // but the actual S3 / object-storage objects would otherwise leak
-  // until a future GC pass picks them up. Failures are logged but not
-  // propagated — a missing chunk object is recoverable on next access
-  // (read of that chunk index returns NotFound), whereas a partial
-  // metadata truncate would corrupt the file size view.
-  if (data_ && !dropped_keys.empty()) {
-    for (const auto &key : dropped_keys) {
-      auto status = data_->Delete(key);
-      if (!status.ok()) {
-        SWORDFS_LOG_ERROR << "FileReadWriter::Truncate: data->Delete(" << key << ") failed: " << status.message();
-      }
-    }
-  }
-
+  DeleteDroppedKeys(dropped_keys);
+  Reclaimer::Instance().Wake();
   return utils::Status::OK();
 }
 
@@ -312,9 +298,28 @@ utils::Status FileReadWriter::SetAttr(const metadata::SwordFsAttr &attr, metadat
     return status;
   }
   if (metadata::HasSetAttrField(fields, metadata::SetAttrField::kSize)) {
-    chunks_.TruncateToSize(attr.size, chunk_size_, nullptr);
+    std::vector<std::string> dropped_keys;
+    chunks_.TruncateToSize(attr.size, chunk_size_, &dropped_keys);
+    DeleteDroppedKeys(dropped_keys);
+    Reclaimer::Instance().Wake();
   }
   return utils::Status::OK();
+}
+
+void FileReadWriter::DeleteDroppedKeys(const std::vector<std::string> &keys) {
+  for (const auto &key : keys) {
+    auto status = data_->Delete(key);
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "FileReadWriter: data->Delete(" << key << ") failed: " << status.message();
+      continue;
+    }
+    status = meta_->CompletePendingDelete(key);
+    if (!status.ok()) {
+      // The object is already gone, so retaining the durable key is safe: the
+      // background worker will retry the idempotent delete and acknowledgement.
+      SWORDFS_LOG_ERROR << "FileReadWriter: CompletePendingDelete(" << key << ") failed: " << status.message();
+    }
+  }
 }
 
 }  // namespace swordfs::vfs

@@ -21,6 +21,12 @@ struct SwordFsChunk {
 
   bool operator==(const SwordFsChunk &) const = default;
 
+  /// Return whether this descriptor matches SwordFS's fixed-size logical
+  /// chunk layout for |chunk_size|. Persisted object revisions are immutable,
+  /// so a descriptor may be reclaimed safely only when its logical identity
+  /// is canonical.
+  bool IsValidForChunkSize(uint64_t chunk_size) const;
+
   utils::Status SerializeTo(std::string *out) const;
   utils::Status ParseFrom(std::string_view data);
 };

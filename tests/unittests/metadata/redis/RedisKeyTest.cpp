@@ -17,6 +17,7 @@ TEST(RedisKeyTest, UsesDatabaseScopedPrefix) {
   EXPECT_EQ(key.Directory(7), "{3:volume}:dir:7");
   EXPECT_EQ(key.Chunk(42), "{3:volume}:chunk:42");
   EXPECT_EQ(key.InodeCount(), "{3:volume}:inode_count");
+  EXPECT_EQ(key.PendingDeletes(), "{3:volume}:pending_deletes");
 }
 
 TEST(RedisKeyTest, DirectoryKeyDoesNotContainEntryName) {

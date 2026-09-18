@@ -169,7 +169,7 @@ The S3 engine supports:
 
 - object `Put`;
 - ranged `Get`;
-- `Delete`;
+- idempotent `Delete` (deleting an already-absent immutable key is successful);
 - `Head`;
 - optional bucket prefixing;
 - MinIO/path-style access and virtual-hosted access configuration.
@@ -418,24 +418,55 @@ It is not an atomic whole-file commit.
 
 ## 12. Truncate behavior
 
-Truncate first changes authoritative metadata, including inode size and chunk metadata, then updates the local chunk map.
+Truncate changes authoritative file metadata before it updates the local chunk
+map. Redis additionally stages durable, non-destructive delete intent before
+the metadata transaction is allowed to detach a published whole-chunk
+descriptor.
 
 The per-inode exclusive operation lock covers this sequence:
 
-1. Commit the new inode size and prune or clamp metadata chunk descriptors.
-   Failure returns without changing the local chunk map.
-2. Drop cached chunks wholly beyond the new end and shorten the boundary
+1. For Redis shrink, first persist a durable pending-delete intent for every
+   fully removable published descriptor. This preparation is additive-only:
+   it does not change inode size or live chunk metadata.
+2. Commit the new inode size and prune or clamp authoritative chunk
+   descriptors. A whole descriptor may be detached only after the transaction
+   has verified that its exact frozen pending-delete intent is already
+   durable. Failure returns without changing the local chunk map.
+3. Drop cached chunks wholly beyond the new end and shorten the boundary
    chunk. For a dirty rewrite, also clamp its saved CAS expectation.
-3. On the explicit `Truncate` path, attempt deletion of dropped object keys
-   obtained from the cache. `SetAttr(kSize)` updates metadata and the cache
-   without collecting those keys for immediate deletion.
+4. Attempt eager deletion of dropped local object keys. This is only an
+   optimization and also covers uploaded-but-unpublished local revisions,
+   which authoritative metadata cannot discover.
+5. Wake the background reclaimer so durable pending-delete work is retried
+   without waiting for the periodic scan.
 
 Serializing size changes with writes and flushes prevents a local pending
 write from racing truncate and republishing the removed range.
 
-For locally known chunk objects that become unreachable because of truncate, SwordFS currently performs best-effort object deletion after the metadata change. Delete failures are logged rather than rolling back the metadata truncate.
+Pending-delete state is keyed by immutable object identity rather than by a
+mutable inode-level batch. Repeated truncates therefore cannot overwrite an
+earlier cleanup generation. Recovery validates that the persisted Hash field,
+frozen object key, descriptor-derived key, and canonical chunk layout all
+agree before deleting data; malformed cleanup metadata fails closed. A staged
+intent is not itself permission to delete: the reclaimer first checks the
+current authoritative chunk descriptor and skips the intent while that same
+immutable object key is still live. This makes a crash between intent
+publication and descriptor detachment safe.
 
-This differs from the last-link reclaim protocol described below: truncate cleanup is not yet backed by the same durable pending-reclaim state machine. It should therefore be treated as a current architectural limitation/evolution area, not assumed to have identical crash-recovery guarantees.
+Whole chunks at or beyond the new EOF are detached and queued. A partial
+boundary chunk is not queued for deletion because its immutable object remains
+the backing object for the surviving prefix; only its authoritative descriptor
+size is clamped.
+
+Persistent backends drive truncate from **materialized chunk metadata**, not
+from logical file length. Redis scans the actual `chunk:<ino>` Hash under the
+optimistic transaction, so a huge sparse file costs O(materialized chunks)
+rather than O(logical chunk positions).
+
+If eager object deletion succeeds, `FileReadWriter` immediately acknowledges
+the durable pending-delete entry. If acknowledgement fails, retaining the entry
+is safe because `IDataEngine::Delete` is idempotent and the background worker
+can replay the same delete/ack sequence after restart.
 
 ## 13. Runtime and concurrency model
 
@@ -533,12 +564,14 @@ Once metadata preparation removes the live inode, the local fence can be release
 
 The `Reclaimer` is the sole production component that executes the cross-engine GC sequence:
 
-1. replay already-pending reclaim work;
-2. scan orphan candidates;
-3. acquire the local fence when applicable;
-4. call `PrepareReclaim`;
-5. delete every frozen object idempotently;
-6. call `CompleteReclaim` only when all deletes succeed.
+1. replay truncate pending-delete records, deleting each frozen immutable
+   object idempotently and acknowledging the record only after success;
+2. replay already-pending last-link reclaim work;
+3. scan orphan candidates;
+4. acquire the local fence when applicable;
+5. call `PrepareReclaim`;
+6. delete every frozen object idempotently;
+7. call `CompleteReclaim` only when all deletes succeed.
 
 Its worker runs:
 
@@ -569,6 +602,12 @@ After Redis EXEC, a timeout or connection close does not prove whether the serve
 ### 15.3 Reclaim
 
 After `PrepareReclaim`, failure is recoverable because the durable pending record contains the exact immutable object identities still to delete. `CompleteReclaim` is delayed until deletion succeeds.
+
+Truncate uses the same durable-deletion principle at object granularity:
+before a published descriptor can be detached, its frozen pending-delete
+identity must already be durable and must be revalidated by the destructive
+metadata transaction. Physical deletion may happen later and is replay-safe
+across process restart or an ambiguous acknowledgement.
 
 The architecture generally prefers **leaking unreachable data over deleting reachable data** when a failure leaves uncertainty.
 
@@ -629,8 +668,10 @@ Future changes should preserve or explicitly revise the following contracts:
 6. **Open-handle runtime state does not replace durable metadata.** Local fences protect transitions; they are not persistent lifecycle records.
 7. **Last-link deletion is recoverable.** The metadata mutation that removes the last name must durably publish cleanup work before the foreground request can forget the inode.
 8. **Object deletion after reclaim uses frozen identities.** It must not reconstruct targets from mutable/live metadata after the point of no return.
-9. **Ambiguous external commits are not assumed to have rolled back.** Retry/reconciliation semantics must be safe under either outcome.
-10. **Shutdown ordering respects borrowed lifetimes.** Background work stops before the fiber runtime and engines it uses are destroyed.
+9. **Truncate cleanup handoff is durable.** A published chunk descriptor may be detached only after its exact frozen immutable object identity is already durable in pending-delete state; replay must not delete that object while the same immutable key is still authoritative.
+10. **Data-engine deletion is idempotent.** Durable cleanup may replay the same immutable key after restart, timeout, or acknowledgement failure.
+11. **Ambiguous external commits are not assumed to have rolled back.** Retry/reconciliation semantics must be safe under either outcome.
+12. **Shutdown ordering respects borrowed lifetimes.** Background work stops before the fiber runtime and engines it uses are destroyed.
 
 Any PR that changes one of these invariants should update this document as part of the same change.
 
@@ -638,7 +679,6 @@ Any PR that changes one of these invariants should update this document as part 
 
 The following areas are intentionally not presented as solved architecture:
 
-- durable/async object cleanup for truncate currently has weaker recovery semantics than last-link reclaim;
 - whole-chunk object-store rewrite amplification remains until a different data representation is introduced;
 - multi-mount/session ownership semantics are not represented by a distributed lease/session layer in the current architecture;
 - reclaim pending-work representation and progress tracking can be made more storage-native/compact over time;

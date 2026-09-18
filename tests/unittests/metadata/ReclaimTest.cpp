@@ -70,6 +70,20 @@ std::string SerializeOrDie(const ReclaimWork &work) {
   return blob;
 }
 
+PendingDelete MakePendingDelete(InodeID ino = 42, ChunkIndex index = 3, ChunkRevision revision = 7) {
+  PendingDelete pending;
+  pending.ino = ino;
+  pending.chunk = FrozenChunk(ino, index, revision);
+  return pending;
+}
+
+std::string SerializeOrDie(const PendingDelete &pending) {
+  std::string blob;
+  const auto status = pending.SerializeTo(&blob);
+  EXPECT_TRUE(status.ok()) << status.message();
+  return blob;
+}
+
 // ────────────────────────────────────────────────────────────────
 // Round-trip
 // ────────────────────────────────────────────────────────────────
@@ -286,6 +300,98 @@ TEST(ReclaimWorkTest, FailedParseLeavesTheRecordUntouched) {
 
   EXPECT_TRUE(parsed.ParseFrom(blob).IsMalformed());
   EXPECT_EQ(parsed, before);
+}
+
+// ────────────────────────────────────────────────────────────────
+// Pending truncate delete identity
+// ────────────────────────────────────────────────────────────────
+
+TEST(PendingDeleteTest, RoundTripsFrozenIdentity) {
+  const PendingDelete pending = MakePendingDelete();
+  PendingDelete parsed;
+
+  ASSERT_TRUE(parsed.ParseFrom(SerializeOrDie(pending)).ok());
+  EXPECT_EQ(parsed.ino, pending.ino);
+  EXPECT_EQ(parsed.chunk, pending.chunk);
+  EXPECT_EQ(parsed.chunk.key, chunk::FormatChunkObjectKey(42, 3, 7));
+}
+
+TEST(PendingDeleteTest, RejectsInvalidWriteIdentity) {
+  PendingDelete pending = MakePendingDelete();
+  EXPECT_EQ(pending.SerializeTo(nullptr).code(), Status::kInvalidArgument);
+
+  pending.ino = 0;
+  std::string blob;
+  EXPECT_EQ(pending.SerializeTo(&blob).code(), Status::kInvalidArgument);
+
+  pending = MakePendingDelete();
+  pending.chunk.descriptor.revision = kInvalidChunkRevision;
+  pending.chunk.key =
+      chunk::FormatChunkObjectKey(pending.ino, pending.chunk.descriptor.index, pending.chunk.descriptor.revision);
+  EXPECT_EQ(pending.SerializeTo(&blob).code(), Status::kInvalidArgument);
+
+  pending = MakePendingDelete();
+  pending.chunk.key =
+      chunk::FormatChunkObjectKey(43, pending.chunk.descriptor.index, pending.chunk.descriptor.revision);
+  EXPECT_EQ(pending.SerializeTo(&blob).code(), Status::kInvalidArgument);
+}
+
+TEST(PendingDeleteTest, RejectsMalformedPersistedFields) {
+  const PendingDelete pending = MakePendingDelete();
+  auto encode = [&](InodeID ino, ChunkRevision revision, std::string key, bool trailing) {
+    std::string blob;
+    BufEncoder enc;
+    enc.Header(RecordType::kPendingDelete);
+    enc.U64(ino);
+    enc.U32(pending.chunk.descriptor.index);
+    enc.U64(pending.chunk.descriptor.start_offset);
+    enc.U64(revision);
+    enc.U64(pending.chunk.descriptor.size);
+    enc.String(key);
+    if (trailing) {
+      enc.U64(123);
+    }
+    enc.Finish(&blob);
+    return blob;
+  };
+
+  PendingDelete parsed;
+  EXPECT_TRUE(parsed.ParseFrom(encode(0, pending.chunk.descriptor.revision, pending.chunk.key, false)).IsMalformed());
+  EXPECT_TRUE(
+      parsed
+          .ParseFrom(encode(
+              pending.ino, kInvalidChunkRevision,
+              chunk::FormatChunkObjectKey(pending.ino, pending.chunk.descriptor.index, kInvalidChunkRevision), false))
+          .IsMalformed());
+  EXPECT_TRUE(
+      parsed.ParseFrom(encode(pending.ino, pending.chunk.descriptor.revision, pending.chunk.key, true)).IsMalformed());
+}
+
+TEST(PendingDeleteTest, RejectsTamperedPersistedIdentity) {
+  const PendingDelete pending = MakePendingDelete();
+  std::string blob;
+  BufEncoder enc;
+  enc.Header(RecordType::kPendingDelete);
+  enc.U64(pending.ino);
+  enc.U32(pending.chunk.descriptor.index);
+  enc.U64(pending.chunk.descriptor.start_offset);
+  enc.U64(pending.chunk.descriptor.revision);
+  enc.U64(pending.chunk.descriptor.size);
+  enc.String(
+      chunk::FormatChunkObjectKey(pending.ino + 1, pending.chunk.descriptor.index, pending.chunk.descriptor.revision));
+  enc.Finish(&blob);
+
+  PendingDelete parsed;
+  EXPECT_TRUE(parsed.ParseFrom(blob).IsMalformed());
+}
+
+TEST(PendingDeleteTest, FailedParseLeavesRecordUntouched) {
+  PendingDelete parsed = MakePendingDelete();
+  const PendingDelete before = parsed;
+
+  EXPECT_TRUE(parsed.ParseFrom("broken").IsMalformed());
+  EXPECT_EQ(parsed.ino, before.ino);
+  EXPECT_EQ(parsed.chunk, before.chunk);
 }
 
 }  // namespace

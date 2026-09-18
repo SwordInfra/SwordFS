@@ -510,6 +510,16 @@ Status RedisMetaImpl::VisitPendingReclaims(const ReclaimVisitorFn &visitor) {
   return ops_.VisitPendingReclaims(visitor);
 }
 
+Status RedisMetaImpl::VisitPendingDeletes(const PendingDeleteVisitorFn &visitor) {
+  utils::ExpectInFiberDomain();
+  return ops_.VisitPendingDeletes(visitor);
+}
+
+Status RedisMetaImpl::CompletePendingDelete(std::string_view key) {
+  utils::ExpectInFiberDomain();
+  return ops_.CompletePendingDelete(key);
+}
+
 Status RedisMetaImpl::AllocateChunkRevision(ChunkRevision *revision) {
   return ops_.AllocateChunkRevision(revision);
 }

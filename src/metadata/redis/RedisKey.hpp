@@ -35,6 +35,13 @@ class RedisKey {
   // every frozen object has been deleted.
   std::string Reclaims() const;
 
+  // Pending immutable-object deletes: hash of object key -> serialized
+  // PendingDelete. Redis truncate persists these intents in an additive-only
+  // preparation transaction before a later transaction may detach the
+  // matching chunk descriptor. The Reclaimer removes a field only after
+  // validating the frozen identity and deleting the object.
+  std::string PendingDeletes() const;
+
  private:
   std::string prefix_;
 };

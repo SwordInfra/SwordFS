@@ -5,7 +5,9 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "metadata/redis/RedisKey.hpp"
@@ -24,8 +26,8 @@ class RedisKvTxn;
 //
 // Public methods express complete metadata semantics that must stay atomic;
 // low-level Redis metadata primitives remain private. RedisMetaImpl owns POSIX
-// policy and passes any already-read transaction snapshots explicitly so
-// semantic operations do not repeat Redis reads.
+// policy; transaction-scoped reads stay here when their WATCH snapshot is part
+// of the mutation's correctness contract.
 class RedisMetaTxn {
  public:
   RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size);
@@ -44,23 +46,32 @@ class RedisMetaTxn {
   utils::Status Truncate(InodeID ino, uint64_t size);
   utils::Status TouchInode(InodeID ino, SetAttrField fields);
 
+  // Persist immutable delete intents for every whole chunk that would be
+  // detached by shrinking |ino| to |size|. This phase is intentionally
+  // non-destructive: Redis MULTI/EXEC can partially apply runtime-failing
+  // commands, so live chunk metadata is removed only by a later transaction
+  // after every required intent is already durable.
+  utils::Status PrepareTruncateDeletes(InodeID ino, uint64_t size);
+
   // ────────────────────────────────────────────────────────────────
   // Reclaim operations
   // ────────────────────────────────────────────────────────────────
-  // Freeze the reclaim of |ino|, using the chunk descriptors the caller
-  // scanned from the inode's chunk hash. The transaction re-validates that
-  // scan (chunk count and a WATCH on the chunk hash) before it freezes, and
-  // returns Busy when the chunk map changed in between so the caller can
-  // re-scan. See IMetaEngine::PrepareReclaim for the full contract.
+  // Freeze the reclaim of |ino|. The transaction scans and WATCHes the
+  // authoritative chunk hash itself before queuing any writes so the frozen
+  // identities and live-metadata removal use one optimistic snapshot.
   //
   // On OK, |work| contains the frozen identities when the point of no return
   // was crossed/replayed. An empty optional is the normal non-reclaimable
   // outcome after stale orphan cleanup.
-  utils::Status PrepareReclaim(InodeID ino, const std::vector<SwordFsChunk> &scanned, std::optional<ReclaimWork> &work);
+  utils::Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> &work);
 
   // Drop the frozen record of |ino|. Called only once every object of the
   // record has been deleted; missing records are not an error.
   utils::Status CompleteReclaim(InodeID ino);
+
+  // Drop one immutable object from the truncate cleanup queue after physical
+  // deletion. Missing entries are already complete.
+  utils::Status CompletePendingDelete(std::string_view object_key);
 
   // Drop |ino|'s orphan candidate marker, if any.
   utils::Status ClearOrphanMarker(InodeID ino);
@@ -104,6 +115,7 @@ class RedisMetaTxn {
                              SwordFsInode *parent);
   utils::Status AdjustInodeCount(int64_t delta);
   utils::Status LookupChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
+  utils::Status ScanChunks(InodeID ino, std::vector<std::pair<std::string, SwordFsChunk>> &chunks);
 
  private:
   RedisKvTxn &txn_;

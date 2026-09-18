@@ -47,4 +47,8 @@ std::string RedisKey::Reclaims() const {
   return prefix_ + "reclaims";
 }
 
+std::string RedisKey::PendingDeletes() const {
+  return prefix_ + "pending_deletes";
+}
+
 }  // namespace swordfs::metadata::redis

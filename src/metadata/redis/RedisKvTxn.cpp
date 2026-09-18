@@ -108,6 +108,24 @@ utils::Status RedisKvTxn::HLen(std::string_view key, uint64_t *length) {
   });
 }
 
+utils::Status RedisKvTxn::HScan(std::string_view key, uint64_t cursor, size_t count,
+                                std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor) {
+  if (values == nullptr || next_cursor == nullptr) {
+    return utils::Status::InvalidArgument("Redis HSCAN output is null");
+  }
+  if (has_writes_) {
+    return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
+  }
+  return RunRedisCommand("HSCAN", [&] {
+    redis_->watch(key);
+    values->clear();
+    *next_cursor = cursor;
+    *next_cursor =
+        redis_->hscan(std::string(key), *next_cursor, static_cast<long long>(count), std::back_inserter(*values));
+    return utils::Status::OK();
+  });
+}
+
 utils::Status RedisKvTxn::Set(std::string_view key, std::string_view value) {
   return RunRedisCommand("SET", [&] {
     transaction_->set(std::string(key), std::string(value));

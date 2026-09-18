@@ -92,7 +92,11 @@ Status MemMetaImpl::FormatVolume(const SwordFsVolume &config) {
   if (file.Exists()) {
     return Status::AlreadyExists("volume already exists: " + config.name);
   }
-  return file.Write(config);
+  auto status = file.Write(config);
+  if (status.ok()) {
+    chunk_size_ = config.chunk_size;
+  }
+  return status;
 }
 
 Status MemMetaImpl::LoadVolume(SwordFsVolume *config) {
@@ -100,7 +104,11 @@ Status MemMetaImpl::LoadVolume(SwordFsVolume *config) {
   if (config == nullptr) {
     return Status::InvalidArgument("memory volume config output is null");
   }
-  return mem::VolumeFile(config->name).Read(config);
+  auto status = mem::VolumeFile(config->name).Read(config);
+  if (status.ok()) {
+    chunk_size_ = config->chunk_size;
+  }
+  return status;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -454,6 +462,28 @@ Status MemMetaImpl::VisitPendingReclaims(const ReclaimVisitorFn &visitor) {
   return Status::OK();
 }
 
+Status MemMetaImpl::VisitPendingDeletes(const PendingDeleteVisitorFn &visitor) {
+  utils::ExpectInFiberDomain();
+  if (!visitor) {
+    return Status::InvalidArgument("pending delete visitor is null");
+  }
+
+  std::vector<PendingDelete> pending;
+  store_.Transact([&](MemMetaTxn &txn) { return txn.ListPendingDeletes(pending); });
+  for (const auto &work : pending) {
+    auto status = visitor(work);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return Status::OK();
+}
+
+Status MemMetaImpl::CompletePendingDelete(std::string_view key) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.CompletePendingDelete(key); });
+}
+
 Status MemMetaImpl::AllocateChunkRevision(ChunkRevision *revision) {
   return store_.Transact([&](MemMetaTxn &txn) { return txn.AllocateChunkRevision(revision); });
 }
@@ -708,6 +738,12 @@ Status MemMetaImpl::Readlink(InodeID ino, std::string *target) {
 Status MemMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                                 const SwordFsChunk &replacement) {
   utils::ExpectInFiberDomain();
+  if (!replacement.IsValidForChunkSize(chunk_size_)) {
+    return Status::InvalidArgument("replacement chunk descriptor is invalid");
+  }
+  if (expected.has_value() && !expected->IsValidForChunkSize(chunk_size_)) {
+    return Status::InvalidArgument("expected chunk descriptor is invalid");
+  }
   return store_.Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(ino, expected, replacement); });
 }
 

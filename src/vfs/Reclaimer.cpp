@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "chunk/ChunkObjectKey.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/ExecutionDomain.hpp"
@@ -87,6 +88,35 @@ utils::Status Reclaimer::DeleteFrozenObjects(const metadata::ReclaimWork &work) 
   return meta->CompleteReclaim(work.ino);
 }
 
+utils::Status Reclaimer::DeletePendingObject(const metadata::PendingDelete &work) {
+  auto *meta = volume::VolumeImpl::Instance().meta_engine();
+  auto *data = volume::VolumeImpl::Instance().data_engine();
+
+  // Redis truncate publishes durable delete intent before the transaction
+  // that detaches the live chunk descriptor. A crash or partial failure may
+  // therefore leave a valid intent whose object is still authoritative. Do
+  // not delete until the current descriptor no longer names the same immutable
+  // object key. Stale intents are harmless and remain available for a later
+  // pass if the detach eventually succeeds.
+  metadata::SwordFsChunk current;
+  auto status = meta->FindChunk(work.ino, work.chunk.descriptor.index, &current);
+  if (status.ok()) {
+    const auto current_key = chunk::FormatChunkObjectKey(work.ino, current.index, current.revision);
+    if (current_key == work.chunk.key) {
+      return utils::Status::OK();
+    }
+  } else if (!status.IsNotFound()) {
+    return status;
+  }
+
+  status = data->Delete(work.chunk.key);
+  if (!status.ok()) {
+    SWORDFS_LOG_ERROR << "Pending delete: data->Delete(" << work.chunk.key << ") failed: " << status.message();
+    return status;
+  }
+  return meta->CompletePendingDelete(work.chunk.key);
+}
+
 utils::Status Reclaimer::Reconcile() {
   utils::ExpectInFiberDomain();
 
@@ -98,10 +128,26 @@ utils::Status Reclaimer::Reconcile() {
 
   size_t failures = 0;
 
+  // Redis may publish truncate delete intent before the descriptor-detach
+  // transaction. DeletePendingObject therefore rechecks whether that exact
+  // immutable key is still authoritative and treats a live intent as a safe
+  // no-op for this pass.
+  auto status = meta->VisitPendingDeletes([this, &failures](const metadata::PendingDelete &work) {
+    auto status = DeletePendingObject(work);
+    if (!status.ok()) {
+      ++failures;
+      SWORDFS_LOG_WARN << "Reconcile: pending object delete " << work.chunk.key << " failed: " << status.message();
+    }
+    return utils::Status::OK();
+  });
+  if (!status.ok()) {
+    return status;
+  }
+
   // Already-prepared work crossed the point of no return: the live inode no
   // longer exists, so no local open-fd fence is needed. Replay the frozen work
   // directly rather than going back through PrepareReclaim.
-  auto status = meta->VisitPendingReclaims([this, &failures](const metadata::ReclaimWork &work) {
+  status = meta->VisitPendingReclaims([this, &failures](const metadata::ReclaimWork &work) {
     auto status = DeleteFrozenObjects(work);
     if (!status.ok()) {
       ++failures;
@@ -129,7 +175,8 @@ utils::Status Reclaimer::Reconcile() {
   }
 
   if (failures != 0) {
-    return utils::Status::IOError("reclaim reconciliation left " + std::to_string(failures) + " inode(s) unreclaimed");
+    return utils::Status::IOError("reclaim reconciliation left " + std::to_string(failures) +
+                                  " cleanup item(s) pending");
   }
   return utils::Status::OK();
 }
