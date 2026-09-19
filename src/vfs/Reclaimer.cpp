@@ -29,6 +29,7 @@ namespace {
 
 // Safety-scan interval when no explicit wakeup arrives.
 constexpr auto kSafetyScanInterval = std::chrono::seconds(5);
+constexpr size_t kPendingDeleteBatchSize = 128;
 
 }  // namespace
 
@@ -132,16 +133,26 @@ utils::Status Reclaimer::Reconcile() {
   // rewrite replacement. DeletePendingObject therefore rechecks whether that
   // exact immutable key is still authoritative and treats a live intent as a
   // safe no-op for this pass.
-  auto status = meta->VisitPendingDeletes([this, &failures](const metadata::PendingDelete &work) {
-    auto status = DeletePendingObject(work);
-    if (!status.ok()) {
-      ++failures;
-      SWORDFS_LOG_WARN << "Reconcile: pending object delete " << work.chunk.key << " failed: " << status.message();
-    }
-    return utils::Status::OK();
-  });
+  bool has_more_pending_deletes = false;
+  auto status = meta->VisitPendingDeletesBatch(
+      kPendingDeleteBatchSize,
+      [this, &failures](const metadata::PendingDelete &work) {
+        auto status = DeletePendingObject(work);
+        if (!status.ok()) {
+          ++failures;
+          SWORDFS_LOG_WARN << "Reconcile: pending object delete " << work.chunk.key << " failed: " << status.message();
+        }
+        return utils::Status::OK();
+      },
+      &has_more_pending_deletes);
   if (!status.ok()) {
     return status;
+  }
+  if (has_more_pending_deletes) {
+    // Finish the rest of this pass first so pending inode reclaims and orphan
+    // candidates are not starved, then let the worker consume this wakeup as
+    // another bounded pass immediately afterwards.
+    Wake();
   }
 
   // Already-prepared work crossed the point of no return: the live inode no

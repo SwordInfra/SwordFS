@@ -788,6 +788,47 @@ FIBER_TEST_F(ReclaimerTest, WorkerCompletesAPendingReclaimImmediatelyAtStartup) 
   EXPECT_TRUE(OrphanCandidates().empty());
 }
 
+FIBER_TEST_F(ReclaimerTest, WorkerSelfWakesUntilLargePendingDeleteBacklogIsDrained) {
+  constexpr size_t kBatchSize = 128;
+  constexpr size_t kChunkCount = kBatchSize + 2;
+  const uint64_t chunk_size = metadata::SwordFsVolume{}.chunk_size;
+  SwordFsInode file;
+  ASSERT_TRUE(meta_->Create(kRootInodeId, "pending-delete-backlog", 0644, &file).ok());
+  for (size_t i = 0; i < kChunkCount; ++i) {
+    SwordFsChunk chunk{.index = static_cast<metadata::ChunkIndex>(i),
+                       .start_offset = static_cast<uint64_t>(i) * chunk_size,
+                       .revision = i + 1,
+                       .size = 64};
+    ASSERT_TRUE(meta_->CommitChunk(file.ino, std::nullopt, chunk).ok());
+    data_->Seed(chunk::FormatChunkObjectKey(file.ino, chunk.index, chunk.revision));
+  }
+  ASSERT_TRUE(meta_->Truncate(file.ino, 0).ok());
+  ASSERT_EQ(PendingDeletes().size(), kChunkCount);
+
+  const InodeID orphan_ino = CreateChunkedFile("backlog-orphan", 1000);
+  const auto orphan_key = chunk::FormatChunkObjectKey(orphan_ino, 0, 1000);
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "backlog-orphan").ok());
+
+  swordfs::test::RunInTestThreadFromFiber([&] { Reclaimer::Instance().Start(); });
+
+  // The safety scan is five seconds. Finishing strictly before that interval
+  // proves the second pending-delete batch came from has_more -> Wake(), not
+  // from the periodic fallback.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+  while (std::chrono::steady_clock::now() < deadline &&
+         (!PendingDeletes().empty() || !meta_->GetInode(orphan_ino, nullptr).IsNotFound())) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  const bool completed = PendingDeletes().empty() && meta_->GetInode(orphan_ino, nullptr).IsNotFound();
+
+  swordfs::test::RunInTestThreadFromFiber([&] { Reclaimer::Instance().Stop(); });
+
+  EXPECT_TRUE(completed) << "worker must self-wake for the second bounded pending-delete pass";
+  ASSERT_EQ(data_->delete_calls.size(), kChunkCount + 1);
+  EXPECT_EQ(data_->delete_calls[kBatchSize], orphan_key)
+      << "orphan work must run after the first 128-item pending-delete batch and before its continuation";
+}
+
 FIBER_TEST_F(ReclaimerTest, WorkerSurvivesAFailedPassAndRecoversOnWake) {
   const InodeID f_ino = CreateChunkedFile("retry-failure");
   const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);

@@ -52,6 +52,7 @@ class RedisMetaImpl : public IMetaEngine {
   Status VisitOrphanCandidates(const InodeVisitorFn &visitor) override;
   Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) override;
   Status VisitPendingDeletes(const PendingDeleteVisitorFn &visitor) override;
+  Status VisitPendingDeletesBatch(size_t max_items, const PendingDeleteVisitorFn &visitor, bool *has_more) override;
   Status CompletePendingDelete(std::string_view key) override;
   Status AllocateChunkRevision(ChunkRevision *revision) override;
   Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) override;

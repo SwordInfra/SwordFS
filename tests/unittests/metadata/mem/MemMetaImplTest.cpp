@@ -1463,3 +1463,54 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteVisitorAbortIsPropagated) {
   EXPECT_EQ(status.message(), "abort the pending delete scan");
   EXPECT_EQ(visits, 1U);
 }
+
+FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchBoundsVisitsAndValidatesArguments) {
+  SetContext(0, 0);
+
+  InodeID ino = 0;
+  ASSERT_TRUE(CreateFile(kRoot, "truncate-pending-batch", 0644, &ino).ok());
+  ASSERT_TRUE(
+      impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
+          .ok());
+  ASSERT_TRUE(impl_
+                  ->CommitChunk(ino, std::nullopt,
+                                SwordFsChunk{.index = 1, .start_offset = kChunkSize, .revision = 2, .size = 64})
+                  .ok());
+  ASSERT_TRUE(impl_->Truncate(ino, 0).ok());
+
+  bool has_more = false;
+  size_t visits = 0;
+  auto status = impl_->VisitPendingDeletesBatch(
+      1,
+      [&](const swordfs::metadata::PendingDelete &) {
+        ++visits;
+        return Status::OK();
+      },
+      &has_more);
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(visits, 1U);
+  EXPECT_TRUE(has_more);
+
+  visits = 0;
+  status = impl_->VisitPendingDeletesBatch(
+      1,
+      [&](const swordfs::metadata::PendingDelete &) {
+        ++visits;
+        return Status::Busy("abort bounded pending delete scan");
+      },
+      &has_more);
+  EXPECT_TRUE(status.IsBusy()) << status.message();
+  EXPECT_EQ(status.message(), "abort bounded pending delete scan");
+  EXPECT_EQ(visits, 1U);
+
+  EXPECT_EQ(impl_->VisitPendingDeletesBatch(
+                     0, [](const auto &) { return Status::OK(); }, &has_more)
+                .code(),
+            Status::kInvalidArgument);
+  EXPECT_EQ(impl_->VisitPendingDeletesBatch(1, swordfs::metadata::PendingDeleteVisitorFn{}, &has_more).code(),
+            Status::kInvalidArgument);
+  EXPECT_EQ(impl_->VisitPendingDeletesBatch(
+                     1, [](const auto &) { return Status::OK(); }, nullptr)
+                .code(),
+            Status::kInvalidArgument);
+}

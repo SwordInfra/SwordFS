@@ -515,6 +515,12 @@ Status RedisMetaImpl::VisitPendingDeletes(const PendingDeleteVisitorFn &visitor)
   return ops_.VisitPendingDeletes(visitor);
 }
 
+Status RedisMetaImpl::VisitPendingDeletesBatch(size_t max_items, const PendingDeleteVisitorFn &visitor,
+                                               bool *has_more) {
+  utils::ExpectInFiberDomain();
+  return ops_.VisitPendingDeletesBatch(max_items, visitor, has_more);
+}
+
 Status RedisMetaImpl::CompletePendingDelete(std::string_view key) {
   utils::ExpectInFiberDomain();
   return ops_.CompletePendingDelete(key);

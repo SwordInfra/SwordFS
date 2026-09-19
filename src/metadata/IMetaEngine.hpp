@@ -185,6 +185,48 @@ class IMetaEngine {
   /// restart and corrupted identities fail closed before data deletion.
   virtual Status VisitPendingDeletes(const PendingDeleteVisitorFn &visitor) = 0;
 
+  /// Visit a bounded batch of durable pending deletes. |max_items| is a hard
+  /// bound on visitor invocations for this call. |has_more| reports that the
+  /// backend already knows additional work remains in the current scan cycle;
+  /// it is not a snapshot guarantee against concurrently added records.
+  ///
+  /// Backends with incremental traversal should override this method so they
+  /// do not materialize the full pending-delete set merely to enforce the
+  /// visitor bound. The default keeps existing backends/mocks correct by
+  /// stopping an exhaustive VisitPendingDeletes() after |max_items| callbacks.
+  virtual Status VisitPendingDeletesBatch(size_t max_items, const PendingDeleteVisitorFn &visitor, bool *has_more) {
+    if (max_items == 0) {
+      return Status::InvalidArgument("pending delete batch size must be positive");
+    }
+    if (!visitor) {
+      return Status::InvalidArgument("pending delete visitor is null");
+    }
+    if (has_more == nullptr) {
+      return Status::InvalidArgument("pending delete has-more output is null");
+    }
+
+    *has_more = false;
+    size_t visited = 0;
+    bool stopped_at_limit = false;
+    auto status = VisitPendingDeletes([&](const PendingDelete &work) {
+      if (visited >= max_items) {
+        stopped_at_limit = true;
+        return Status::Busy("pending delete batch limit reached");
+      }
+      auto status = visitor(work);
+      if (!status.ok()) {
+        return status;
+      }
+      ++visited;
+      return Status::OK();
+    });
+    if (stopped_at_limit) {
+      *has_more = true;
+      return Status::OK();
+    }
+    return status;
+  }
+
   /// Remove one pending-delete key after its object has been deleted.
   /// Idempotent: a missing key is not an error.
   virtual Status CompletePendingDelete(std::string_view key) = 0;

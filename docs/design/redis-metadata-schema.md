@@ -205,6 +205,28 @@ left untouched. Otherwise the reclaimer deletes the object idempotently and
 removes the field only after success. Retries therefore use frozen identities,
 never keys reconstructed from a newer live descriptor.
 
+Reconciliation does not snapshot the complete Hash. Redis metadata keeps a
+process-local HSCAN cursor plus at most one decoded HSCAN response and exposes
+only a bounded number of pending-delete visitor callbacks per Reclaimer pass.
+If the response or cursor has more work, the worker finishes the other reclaim
+queues in that pass and then self-wakes for the next batch. This continuation
+also prevents a long-lived staged intent from repeatedly occupying the front
+of every scan.
+
+Redis `COUNT` is only a scan hint, not a strict result-size bound. The hard
+SwordFS bound is therefore on visitor/object-delete work per reconciliation
+pass; transient metadata buffering is limited to one HSCAN response rather
+than the whole pending-delete Hash. The cursor/page buffer are not persisted:
+after restart HSCAN starts at zero and rediscovery is safe because the Hash is
+durable and cleanup operations are idempotent.
+
+As with Redis SCAN generally, records added while a cursor cycle is already in
+progress are not guaranteed to appear in that same cycle. Producers still wake
+the Reclaimer, but that wake may be coalesced with an in-progress self-wake; a
+missed concurrent addition is therefore picked up by a later explicit wake or
+the periodic safety scan. This affects cleanup latency only: the durable Hash
+record is never treated as completed merely because one cursor cycle ended.
+
 See the [reclaim state machine](architecture.md#141-reclaim-state-machine)
 and [chunk publication protocol](chunk-publication.md) for cross-engine
 ordering and failure windows.

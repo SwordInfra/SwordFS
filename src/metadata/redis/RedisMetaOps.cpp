@@ -277,6 +277,66 @@ utils::Status RedisMetaOps::VisitPendingDeletes(const std::function<utils::Statu
   return utils::Status::OK();
 }
 
+utils::Status RedisMetaOps::VisitPendingDeletesBatch(size_t max_items,
+                                                     const std::function<utils::Status(const PendingDelete &)> &visitor,
+                                                     bool *has_more) {
+  utils::ExpectInFiberDomain();
+  if (max_items == 0) {
+    return utils::Status::InvalidArgument("pending delete batch size must be positive");
+  }
+  if (!visitor) {
+    return utils::Status::InvalidArgument("pending delete visitor is null");
+  }
+  if (has_more == nullptr) {
+    return utils::Status::InvalidArgument("pending delete has-more output is null");
+  }
+
+  std::lock_guard<utils::FiberMutex> lock(pending_delete_scan_mutex_);
+  *has_more = false;
+  if (pending_delete_page_offset_ >= pending_delete_page_.size()) {
+    std::vector<std::pair<std::string, std::string>> values;
+    uint64_t next_cursor = 0;
+    auto status = backend_->executor().RunFromFiber([&] {
+      return backend_->client().HScan(key_.PendingDeletes(), pending_delete_cursor_, max_items, &values, &next_cursor);
+    });
+    if (!status.ok()) {
+      return status;
+    }
+
+    std::vector<PendingDelete> page;
+    page.reserve(values.size());
+    for (auto &[object_key, encoded] : values) {
+      PendingDelete pending;
+      status = ParsePendingDelete(object_key, encoded, pending);
+      if (!status.ok()) {
+        return status;
+      }
+      page.push_back(std::move(pending));
+    }
+
+    pending_delete_page_ = std::move(page);
+    pending_delete_page_offset_ = 0;
+    pending_delete_cursor_ = next_cursor;
+  }
+
+  size_t visited = 0;
+  while (pending_delete_page_offset_ < pending_delete_page_.size() && visited < max_items) {
+    auto status = visitor(pending_delete_page_[pending_delete_page_offset_]);
+    if (!status.ok()) {
+      return status;
+    }
+    ++pending_delete_page_offset_;
+    ++visited;
+  }
+
+  if (pending_delete_page_offset_ >= pending_delete_page_.size()) {
+    pending_delete_page_.clear();
+    pending_delete_page_offset_ = 0;
+  }
+  *has_more = !pending_delete_page_.empty() || pending_delete_cursor_ != 0;
+  return utils::Status::OK();
+}
+
 utils::Status RedisMetaOps::CompletePendingDelete(std::string_view object_key) {
   utils::ExpectInFiberDomain();
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.CompletePendingDelete(object_key); });
@@ -467,6 +527,20 @@ utils::Status RedisMetaOps::CollectPendingReclaims(std::vector<ReclaimWork> &out
   return utils::Status::OK();
 }
 
+utils::Status RedisMetaOps::ParsePendingDelete(std::string_view object_key, std::string_view encoded,
+                                               PendingDelete &out) const {
+  PendingDelete pending;
+  auto status = pending.ParseFrom(encoded);
+  if (!status.ok()) {
+    return status;
+  }
+  if (object_key != pending.chunk.key || !pending.chunk.descriptor.IsValidForChunkSize(chunk_size_)) {
+    return utils::Status::Malformed("pending delete identity does not match persisted chunk layout");
+  }
+  out = std::move(pending);
+  return utils::Status::OK();
+}
+
 utils::Status RedisMetaOps::CollectPendingDeletes(std::vector<PendingDelete> &out) {
   utils::ExpectInFiberDomain();
   out.clear();
@@ -483,12 +557,9 @@ utils::Status RedisMetaOps::CollectPendingDeletes(std::vector<PendingDelete> &ou
     }
     for (auto &[object_key, encoded] : values) {
       PendingDelete pending;
-      status = pending.ParseFrom(encoded);
+      status = ParsePendingDelete(object_key, encoded, pending);
       if (!status.ok()) {
         return status;
-      }
-      if (object_key != pending.chunk.key || !pending.chunk.descriptor.IsValidForChunkSize(chunk_size_)) {
-        return utils::Status::Malformed("pending delete identity does not match persisted chunk layout");
       }
       out.push_back(std::move(pending));
     }
