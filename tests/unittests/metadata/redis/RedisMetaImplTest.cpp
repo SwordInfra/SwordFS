@@ -7,7 +7,6 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cstdlib>
 #include <functional>
 #include <limits>
@@ -21,6 +20,7 @@
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/redis/RedisMetaImpl.hpp"
+#include "metadata/redis/RedisTestUtils.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Reclaim.hpp"
@@ -59,11 +59,7 @@ class RedisMetaImplTest : public ::testing::Test {
     if (!LoadConfig(&config_)) {
       GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
     }
-    static std::atomic<uint64_t> sequence{0};
-    // FormatVolume refuses an already-formatted volume, and Redis state
-    // outlives this process. Include the pid so rerunning the test binary
-    // against the same Redis instance does not collide with previous runs.
-    volume_name_ = "redis-meta-test-" + std::to_string(::getpid()) + "-" + std::to_string(++sequence);
+    volume_name_ = swordfs::test::UniqueRedisTestNamespace("redis-meta-test");
     impl_ = std::make_unique<RedisMetaImpl>(config_, volume_name_);
     auto status = impl_->Initialize();
     ASSERT_TRUE(status.ok()) << status.message();

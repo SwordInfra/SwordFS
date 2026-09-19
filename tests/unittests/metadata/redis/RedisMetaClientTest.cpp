@@ -22,6 +22,7 @@
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/redis/RedisMetaOps.hpp"
 #include "metadata/redis/RedisMetaTxn.hpp"
+#include "metadata/redis/RedisTestUtils.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Inode.hpp"
 #include "utils/ExecutionDomain.hpp"
@@ -79,9 +80,8 @@ sw::redis::ConnectionOptions ConnectionOptions(const RedisMetaConfig &config) {
   return options;
 }
 
-std::string UniqueVolumeName(std::string_view suffix) {
-  static std::atomic<uint64_t> sequence{0};
-  return "redis-meta-txn-" + std::string(suffix) + "-" + std::to_string(++sequence);
+std::string UniqueRedisName(std::string_view suffix) {
+  return swordfs::test::UniqueRedisTestNamespace("redis-meta-txn", suffix);
 }
 
 utils::Status SeedInode(sw::redis::Redis &redis, const redis::RedisKey &key, const SwordFsInode &inode) {
@@ -137,7 +137,7 @@ TEST(RedisMetaClientTest, BinaryValueRoundTrip) {
   }
 
   RedisMetaClient store(config);
-  const std::string key = "swordfs:binary-roundtrip";
+  const std::string key = UniqueRedisName("binary-roundtrip");
   const std::string value(172, '\0');
   sw::redis::Redis cleanup(ConnectionOptions(config));
   cleanup.set(key, value);
@@ -157,8 +157,8 @@ TEST(RedisMetaClientTest, BinaryValueSurvivesWriteTransaction) {
   }
 
   RedisMetaClient store(config);
-  const std::string parent_key = "swordfs:txn:parent";
-  const std::string child_key = "swordfs:txn:child";
+  const std::string parent_key = UniqueRedisName("txn-parent");
+  const std::string child_key = UniqueRedisName("txn-child");
   const std::string child_value(172, '\0');
   std::atomic<bool> callback_in_thread_domain{false};
 
@@ -198,8 +198,8 @@ TEST(RedisMetaClientTest, DetectsExecCommandErrorAndReportsPossiblePartialCommit
 
   RedisMetaClient store(config);
   sw::redis::Redis redis(ConnectionOptions(config));
-  const std::string wrong_type_key = UniqueVolumeName("exec-wrongtype");
-  const std::string later_key = UniqueVolumeName("exec-later-write");
+  const std::string wrong_type_key = UniqueRedisName("exec-wrongtype");
+  const std::string later_key = UniqueRedisName("exec-later-write");
   redis.del(wrong_type_key);
   redis.del(later_key);
   redis.set(wrong_type_key, "string-value");
@@ -232,7 +232,7 @@ TEST(RedisMetaClientTest, StandalonePingAndWatchReadMultiExec) {
   auto status = store.Ping();
   ASSERT_TRUE(status.ok()) << status.message();
 
-  const std::string key = "swordfs:phase0:watch-read-write";
+  const std::string key = UniqueRedisName("watch-read-write");
   sw::redis::Redis cleanup(ConnectionOptions(config));
   cleanup.set(key, "before");
 
@@ -268,7 +268,7 @@ TEST(RedisMetaClientTest, RetriesWatchConflict) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  const std::string key = "swordfs:phase0:watch-conflict";
+  const std::string key = UniqueRedisName("watch-conflict");
   sw::redis::Redis other(ConnectionOptions(config));
   other.set(key, "before");
 
@@ -302,7 +302,7 @@ TEST(RedisMetaClientTest, RetriesReadOnlyWatchConflict) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  const std::string key = "swordfs:phase0:read-only-watch-conflict";
+  const std::string key = UniqueRedisName("read-only-watch-conflict");
   sw::redis::Redis other(ConnectionOptions(config));
   other.set(key, "before");
 
@@ -378,7 +378,7 @@ TEST(RedisMetaClientTest, WatchConflictRetryLimitReturnsIOError) {
   config.retry_attempts = 3;
   config.retry_backoff = std::chrono::milliseconds(0);
 
-  const std::string key = UniqueVolumeName("watch-retry-limit");
+  const std::string key = UniqueRedisName("watch-retry-limit");
   sw::redis::Redis other(ConnectionOptions(config));
   other.set(key, "0");
 
@@ -408,7 +408,7 @@ TEST(RedisMetaClientTest, DoesNotRetryAmbiguousExecTimeout) {
   }
 
   sw::redis::Redis control(ConnectionOptions(config));
-  const std::string key = UniqueVolumeName("ambiguous-exec-timeout");
+  const std::string key = UniqueRedisName("ambiguous-exec-timeout");
   control.del(key);
 
   config.socket_timeout = std::chrono::milliseconds(50);
@@ -444,7 +444,7 @@ TEST(RedisMetaClientTest, ReadOnlyTransactionCommitsAsNoOp) {
   }
 
   RedisMetaClient store(config);
-  const std::string key = "swordfs:phase0:read-only";
+  const std::string key = UniqueRedisName("read-only");
   sw::redis::Redis cleanup(ConnectionOptions(config));
   cleanup.set(key, "value");
 
@@ -463,7 +463,7 @@ TEST(RedisMetaClientTest, KvTransactionValidatesOutputsAndRejectsReadAfterWrite)
   }
 
   RedisMetaClient store(config);
-  const std::string key = "swordfs:kv-validation";
+  const std::string key = UniqueRedisName("kv-validation");
   const auto status = store.Transact([&](RedisKvTxn &txn) {
     EXPECT_EQ(txn.Get(key, nullptr).code(), utils::Status::kInvalidArgument);
     EXPECT_EQ(txn.HGet(key, "field", nullptr).code(), utils::Status::kInvalidArgument);
@@ -498,9 +498,9 @@ TEST(RedisMetaClientTest, KvTransactionCommitsHashCounterAndDeleteMutations) {
   }
 
   RedisMetaClient store(config);
-  const std::string hash_key = "swordfs:kv-hash";
-  const std::string counter_key = "swordfs:kv-counter";
-  const std::string deleted_key = "swordfs:kv-delete";
+  const std::string hash_key = UniqueRedisName("kv-hash");
+  const std::string counter_key = UniqueRedisName("kv-counter");
+  const std::string deleted_key = UniqueRedisName("kv-delete");
   sw::redis::Redis redis(ConnectionOptions(config));
   redis.del(hash_key);
   redis.set(counter_key, "10");
@@ -552,9 +552,10 @@ TEST(RedisMetaClientTest, PreservesCallbackErrorWithoutQueuedWrite) {
   }
 
   RedisMetaClient store(config);
-  const auto status = store.Transact([](RedisKvTxn &transaction) {
+  const std::string key = UniqueRedisName("callback-missing");
+  const auto status = store.Transact([&](RedisKvTxn &transaction) {
     std::string value;
-    const auto get_status = transaction.Get("swordfs:phase0:missing", &value);
+    const auto get_status = transaction.Get(key, &value);
     if (!get_status.ok()) {
       return get_status;
     }
@@ -568,7 +569,7 @@ TEST(RedisMetaOpsTest, BackendContextMayBeReleasedByFiberAfterThreadShutdown) {
   config.host = "127.0.0.1";
   config.retry_attempts = 1;
 
-  auto ops = std::make_unique<RedisMetaOps>(config, UniqueVolumeName("lifecycle"));
+  auto ops = std::make_unique<RedisMetaOps>(config, UniqueRedisName("lifecycle"));
   std::shared_ptr<DirIterator> iterator;
   RunInFiber([&] {
     ASSERT_TRUE(ops->CreateDirIterator(kRootInodeId, {}, &iterator).ok());
@@ -588,12 +589,13 @@ TEST(RedisMetaClientTest, RejectsFiberDomainCalls) {
   RedisMetaConfig config;
   config.host = "127.0.0.1";
   RedisMetaClient store(config);
+  const std::string key = UniqueRedisName("wrong-domain");
 
   EXPECT_DEATH(
       {
         RunInFiber([&] {
           std::string value;
-          (void)store.Get("swordfs:wrong-domain", &value);
+          (void)store.Get(key, &value);
         });
       },
       "execution-domain violation at .*expected=POSIX-thread, actual=fiber");
@@ -606,7 +608,7 @@ TEST(RedisMetaOpsTest, TransactionCallbackRunsInThreadDomain) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  RedisMetaOps ops(config, UniqueVolumeName("callback-domain"));
+  RedisMetaOps ops(config, UniqueRedisName("callback-domain"));
   utils::ExecutionDomain callback_domain = utils::ExecutionDomain::kFiber;
   const auto status = RunInFiber([&] {
     return ops.TransactFromFiber([&](RedisMetaTxn &) {
@@ -625,7 +627,7 @@ TEST(RedisMetaOpsTest, GetInodeUsesDirectMetadataReadPath) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  const std::string volume_name = UniqueVolumeName("ops-get-inode");
+  const std::string volume_name = UniqueRedisName("ops-get-inode");
   RedisMetaOps ops(config, volume_name);
   const redis::RedisKey key(config.db, volume_name);
   sw::redis::Redis redis(ConnectionOptions(config));
@@ -651,7 +653,7 @@ TEST(RedisMetaOpsTest, LookupEntryOwnsReadOnlyTransaction) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
-  const std::string volume_name = UniqueVolumeName("ops-lookup-entry");
+  const std::string volume_name = UniqueRedisName("ops-lookup-entry");
   RedisMetaOps ops(config, volume_name);
   const redis::RedisKey key(config.db, volume_name);
   sw::redis::Redis redis(ConnectionOptions(config));
@@ -680,7 +682,7 @@ TEST(RedisMetaTxnTest, EntryMutationsCarryStateThroughParameters) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("entries"));
+  const redis::RedisKey key(config.db, UniqueRedisName("entries"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
@@ -713,7 +715,7 @@ TEST(RedisMetaTxnTest, AddEntryRejectsExistingNameWithoutPersistingChild) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("add-entry-duplicate"));
+  const redis::RedisKey key(config.db, UniqueRedisName("add-entry-duplicate"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
@@ -743,7 +745,7 @@ TEST(RedisMetaTxnTest, MoveEntryPersistsExplicitState) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("move-entry"));
+  const redis::RedisKey key(config.db, UniqueRedisName("move-entry"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
@@ -771,7 +773,7 @@ TEST(RedisMetaTxnTest, RemoveDirectoryPersistsLifecycleState) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("remove-directory"));
+  const redis::RedisKey key(config.db, UniqueRedisName("remove-directory"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
@@ -806,7 +808,7 @@ TEST(RedisMetaTxnTest, ReadPrimitivesValidateOutputs) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("read-primitives"));
+  const redis::RedisKey key(config.db, UniqueRedisName("read-primitives"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(2, S_IFREG | 0644);
@@ -834,7 +836,7 @@ TEST(RedisMetaTxnTest, LookupEntryRejectsDanglingDirectoryEntry) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("dangling-entry"));
+  const redis::RedisKey key(config.db, UniqueRedisName("dangling-entry"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
@@ -857,7 +859,7 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("truncate-staged"));
+  const redis::RedisKey key(config.db, UniqueRedisName("truncate-staged"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -917,7 +919,7 @@ TEST(RedisMetaTxnTest, TruncateRequiresDurableDeleteIntentBeforeDetachingWholeCh
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("truncate-requires-intent"));
+  const redis::RedisKey key(config.db, UniqueRedisName("truncate-requires-intent"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -948,7 +950,7 @@ TEST(RedisMetaTxnTest, TruncateRejectsDurableIntentForDifferentDescriptor) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("truncate-mismatched-intent"));
+  const redis::RedisKey key(config.db, UniqueRedisName("truncate-mismatched-intent"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -986,7 +988,7 @@ TEST(RedisMetaTxnTest, TruncateRejectsMalformedOrWrongTypeDurableIntentState) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("truncate-corrupt-intent"));
+  const redis::RedisKey key(config.db, UniqueRedisName("truncate-corrupt-intent"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -1024,7 +1026,7 @@ TEST(RedisMetaTxnTest, TruncatePropagatesWrongTypeChunkMapFromDestructivePhase) 
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("truncate-wrongtype-chunks"));
+  const redis::RedisKey key(config.db, UniqueRedisName("truncate-wrongtype-chunks"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -1051,7 +1053,7 @@ TEST(RedisMetaTxnTest, PrepareTruncateDeletesScansMultipleChunkHashPages) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("truncate-multipage-chunks"));
+  const redis::RedisKey key(config.db, UniqueRedisName("truncate-multipage-chunks"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   constexpr uint64_t kChunkSize = 4096;
@@ -1088,7 +1090,7 @@ TEST(RedisMetaTxnTest, PrepareTruncateDeletesRejectsInvalidChunkIdentity) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("truncate-noncanonical-chunk"));
+  const redis::RedisKey key(config.db, UniqueRedisName("truncate-noncanonical-chunk"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -1130,7 +1132,7 @@ TEST(RedisMetaTxnTest, CommitChunkRejectsCorruptPersistedDescriptor) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("commit-corrupt-current"));
+  const redis::RedisKey key(config.db, UniqueRedisName("commit-corrupt-current"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -1154,7 +1156,7 @@ TEST(RedisMetaTxnTest, PrepareChunkRewriteDeleteRejectsInvalidRewriteRelationWit
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("rewrite-invalid-relation"));
+  const redis::RedisKey key(config.db, UniqueRedisName("rewrite-invalid-relation"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -1238,7 +1240,7 @@ TEST(RedisMetaTxnTest, CommitChunkRewriteFailsClosedOnInvalidPreparedDeleteState
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("rewrite-intent-validation"));
+  const redis::RedisKey key(config.db, UniqueRedisName("rewrite-intent-validation"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -1295,7 +1297,7 @@ TEST(RedisMetaTxnTest, CommitChunkDefiniteLoserFailsClosedOnInvalidQueueSchema) 
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("commit-result-validation"));
+  const redis::RedisKey key(config.db, UniqueRedisName("commit-result-validation"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -1327,7 +1329,7 @@ TEST(RedisMetaTxnTest, CommitChunkRejectsConflictingInitialPublication) {
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("commit-chunk"));
+  const redis::RedisKey key(config.db, UniqueRedisName("commit-chunk"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -1356,7 +1358,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimScansAuthoritativeChunksInsideTransaction) 
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueVolumeName("reclaim-authoritative-scan"));
+  const redis::RedisKey key(config.db, UniqueRedisName("reclaim-authoritative-scan"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
