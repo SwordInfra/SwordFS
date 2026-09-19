@@ -91,8 +91,12 @@ For Redis metadata, volume configuration is persisted in Redis. For the in-memor
 
 The persisted data-engine identity is authoritative for backend selection.
 The bucket/location string is backend-specific configuration rather than a
-second source of engine identity. Persistent metadata uses schema version 1;
-decoders require an exact match as part of current-format validation.
+second source of engine identity. A persisted volume either has both fields
+populated or neither; volume decoding rejects a one-sided record. Mount then
+selects the data engine solely from the validated persisted identity instead of
+inferring it from the location or silently omitting the data plane. Persistent
+metadata uses schema version 1; decoders require an exact match as part of
+current-format validation.
 
 ### 3.2 Mount
 
@@ -177,11 +181,10 @@ The S3 engine supports:
 - object `Put`;
 - ranged `Get`;
 - idempotent `Delete` (deleting an already-absent immutable key is successful);
-- `Head`;
 - optional bucket prefixing;
 - MinIO/path-style access and virtual-hosted access configuration.
 
-It currently reports no multipart-upload support. New data engines can be added through the registry without changing the VFS contract.
+New data engines can be added through the registry without changing the VFS contract.
 
 ## 6. Metadata architecture
 
@@ -611,13 +614,15 @@ Its worker runs:
 Wakeups are coalesced. Failed object deletion leaves the pending record intact, so the next pass or a later mount can retry.
 
 Pending-delete replay is deliberately bounded so a large object-cleanup
-backlog cannot monopolize one reconciliation pass or allocate one vector for
-the entire pending set. The metadata backend reports whether its current
-scan cycle has more work; the Reclaimer still processes pending inode reclaims
-and orphan candidates in the current pass, then self-wakes for another
-pending-delete batch. A still-authoritative stale candidate therefore
-consumes only its current scan position and cannot permanently pin later
-obsolete candidates behind it.
+backlog cannot monopolize one reconciliation pass. The bound applies to visitor
+work, while buffering is backend-specific: Redis pages through the durable set
+with `HSCAN`; the Memory backend snapshots its in-process pending set once per
+scan cycle so it can preserve progress across calls. The metadata backend
+reports whether its current scan cycle has more work; the Reclaimer still
+processes pending inode reclaims and orphan candidates in the current pass,
+then self-wakes for another pending-delete batch. A still-authoritative stale
+candidate therefore consumes only its current scan position and cannot
+permanently pin later obsolete candidates behind it.
 
 The Redis continuation cursor is process-local scheduling state, not durable
 metadata. Restart begins a new scan at cursor zero; successfully registered

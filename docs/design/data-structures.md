@@ -41,8 +41,11 @@ bucket/prefix because the derived key does not include a volume name.
 `SwordFsVolume` persists data-engine identity separately from the engine-specific
 bucket/location string. Format derives the identity from the current CLI input;
 mount uses the persisted identity to select the engine and then gives that
-engine its persisted location/configuration. Persistent metadata records use
-schema version 1 and require an exact match as a current-format integrity rule.
+engine its persisted location/configuration. The two fields are a persisted
+record invariant: both must be present for a configured data plane, or both
+absent when no data engine is configured; decoding rejects one-sided records.
+Persistent metadata records use schema version 1 and require an
+exact match as a current-format integrity rule.
 
 ## Runtime ownership
 

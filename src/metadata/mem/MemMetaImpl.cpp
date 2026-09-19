@@ -475,6 +475,7 @@ Status MemMetaImpl::VisitPendingDeletesBatch(size_t max_items, const PendingDele
   }
 
   std::lock_guard<utils::FiberMutex> lock(pending_delete_scan_mutex_);
+  *has_more = false;
   if (pending_delete_snapshot_offset_ >= pending_delete_snapshot_.size()) {
     pending_delete_snapshot_.clear();
     pending_delete_snapshot_offset_ = 0;

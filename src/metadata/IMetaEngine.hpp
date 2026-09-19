@@ -181,8 +181,9 @@ class IMetaEngine {
   /// best-effort cleanup candidates after rewrite/truncate publication.
   /// A candidate is not delete authority: consumers must revalidate current
   /// authoritative metadata before physical deletion. |max_items| is a hard
-  /// bound on visitor invocations; |has_more| reports that additional work is
-  /// already known to remain in the current scan cycle.
+  /// bound on visitor invocations. After arguments are validated, implementations
+  /// reset |has_more| to false before scanning; on OK it reports whether additional
+  /// work is already known to remain in the current scan cycle.
   virtual Status VisitPendingDeletesBatch(size_t max_items, const PendingDeleteVisitorFn &visitor, bool *has_more) = 0;
 
   /// Remove one pending-delete key after its object has been deleted.

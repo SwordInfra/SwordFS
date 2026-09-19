@@ -35,6 +35,11 @@ utils::Status SwordFsVolume::ParseFrom(std::string_view data) {
   if (!dec || volume.name.empty() || volume.chunk_size == 0 || !dec.Done()) {
     return utils::Status::Malformed("Malformed volume metadata record");
   }
+  const bool has_data_engine = !volume.storage.empty();
+  const bool has_data_location = !volume.bucket.empty();
+  if (has_data_engine != has_data_location) {
+    return utils::Status::Malformed("Malformed volume metadata record");
+  }
   *this = std::move(volume);
   return utils::Status::OK();
 }

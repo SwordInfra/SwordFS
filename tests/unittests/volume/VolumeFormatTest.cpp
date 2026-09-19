@@ -80,21 +80,36 @@ TEST(SwordFsVolumeTest, ParseFromRejectsMalformedData) {
   EXPECT_EQ(st.code(), Status::kMalformed);
 }
 
-TEST(SwordFsVolumeTest, ParseFromRejectsUnexpectedSchemaVersion) {
-  swordfs::metadata::BufEncoder enc;
-  enc.String("SWFSMETA");
-  enc.U32(999);
-  enc.U32(static_cast<uint32_t>(swordfs::metadata::RecordType::kVolume));
-  enc.String("invalid-schema-volume");
-  enc.String("s3");
-  enc.String("s3://endpoint/mybucket/prefix");
-  enc.String("auto");
-  enc.U64(64ULL * 1024 * 1024);
+TEST(SwordFsVolumeTest, ParseFromRejectsOneSidedDataEngineConfig) {
+  SwordFsVolume missing_identity = MakeVolume();
+  missing_identity.storage.clear();
+  SwordFsVolume parsed;
+  Status status = parsed.ParseFrom(missing_identity.SerializeTo());
+  EXPECT_TRUE(status.IsMalformed()) << status.message();
 
-  std::string encoded;
-  enc.Finish(&encoded);
-  SwordFsVolume volume;
-  EXPECT_TRUE(volume.ParseFrom(encoded).IsMalformed());
+  SwordFsVolume missing_location = MakeVolume();
+  missing_location.bucket.clear();
+  status = parsed.ParseFrom(missing_location.SerializeTo());
+  EXPECT_TRUE(status.IsMalformed()) << status.message();
+}
+
+TEST(SwordFsVolumeTest, ParseFromRejectsNonCurrentSchemaVersion) {
+  for (uint32_t schema_version : {0U, 2U}) {
+    swordfs::metadata::BufEncoder enc;
+    enc.String("SWFSMETA");
+    enc.U32(schema_version);
+    enc.U32(static_cast<uint32_t>(swordfs::metadata::RecordType::kVolume));
+    enc.String("invalid-schema-volume");
+    enc.String("s3");
+    enc.String("s3://endpoint/mybucket/prefix");
+    enc.String("auto");
+    enc.U64(64ULL * 1024 * 1024);
+
+    std::string encoded;
+    enc.Finish(&encoded);
+    SwordFsVolume volume;
+    EXPECT_TRUE(volume.ParseFrom(encoded).IsMalformed()) << "schema=" << schema_version;
+  }
 }
 
 TEST_F(VolumeFileTest, WriteAndReadRoundTrip) {

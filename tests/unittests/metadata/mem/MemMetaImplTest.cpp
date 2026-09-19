@@ -1427,7 +1427,7 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchVisitorAbortIsPropagated) {
   ASSERT_TRUE(impl_->Truncate(ino, 0).ok());
 
   size_t visits = 0;
-  bool has_more = false;
+  bool has_more = true;
   const auto status = impl_->VisitPendingDeletesBatch(
       1,
       [&](const swordfs::metadata::PendingDelete &) {
@@ -1438,6 +1438,7 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchVisitorAbortIsPropagated) {
   EXPECT_EQ(status.code(), Status::kBusy);
   EXPECT_EQ(status.message(), "abort the pending delete scan");
   EXPECT_EQ(visits, 1U);
+  EXPECT_FALSE(has_more);
 }
 
 FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchBoundsVisitsAndValidatesArguments) {
@@ -1479,6 +1480,7 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchBoundsVisitsAndValidatesArgument
   EXPECT_TRUE(status.IsBusy()) << status.message();
   EXPECT_EQ(status.message(), "abort bounded pending delete scan");
   EXPECT_EQ(visits, 1U);
+  EXPECT_FALSE(has_more);
 
   EXPECT_EQ(impl_->VisitPendingDeletesBatch(
                      0, [](const auto &) { return Status::OK(); }, &has_more)

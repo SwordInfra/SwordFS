@@ -118,20 +118,22 @@ TEST(MetadataTypesTest, ChunkRejectsInvalidRevision) {
   EXPECT_TRUE(parsed.ParseFrom(encoded).IsMalformed());
 }
 
-TEST(MetadataTypesTest, ChunkRejectsUnexpectedSchemaVersion) {
-  BufEncoder enc;
-  enc.String("SWFSMETA");
-  enc.U32(999);
-  enc.U32(static_cast<uint32_t>(RecordType::kChunk));
-  enc.U32(3);
-  enc.U64(4096);
-  enc.String("invalid/object/key");
-  enc.U64(1024);
+TEST(MetadataTypesTest, ChunkRejectsNonCurrentSchemaVersion) {
+  for (uint32_t schema_version : {0U, 2U}) {
+    BufEncoder enc;
+    enc.String("SWFSMETA");
+    enc.U32(schema_version);
+    enc.U32(static_cast<uint32_t>(RecordType::kChunk));
+    enc.U32(3);
+    enc.U64(4096);
+    enc.U64(7);
+    enc.U64(1024);
 
-  std::string encoded;
-  enc.Finish(&encoded);
-  SwordFsChunk parsed;
-  EXPECT_TRUE(parsed.ParseFrom(encoded).IsMalformed());
+    std::string encoded;
+    enc.Finish(&encoded);
+    SwordFsChunk parsed;
+    EXPECT_TRUE(parsed.ParseFrom(encoded).IsMalformed()) << "schema=" << schema_version;
+  }
 }
 
 TEST(MetadataTypesTest, EncoderFinishOverwritesExistingOutput) {
