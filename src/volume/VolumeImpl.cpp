@@ -117,7 +117,7 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
     return status;
   }
 
-  if (!config_.bucket.empty()) {
+  if (!config_.storage.empty()) {
     status = CreateDataEngine(config_.storage, &data_engine_);
     if (!status.ok()) {
       return status;

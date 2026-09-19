@@ -152,6 +152,18 @@ TEST_F(VolumeImplTest, LoadFromRejectsMissingDataEngineIdentity) {
   EXPECT_TRUE(st.IsMalformed()) << st.message();
 }
 
+TEST_F(VolumeImplTest, LoadFromRejectsMissingDataEngineLocation) {
+  auto cfg = makeConfig("memory://local", "testvol");
+  SwordFsVolume stored;
+  stored.name = cfg.volume();
+  stored.storage = "s3";
+  ASSERT_TRUE(VolumeFile{cfg.volume()}.Write(stored).ok());
+
+  VolumeImpl vol;
+  Status status = vol.LoadFrom(cfg);
+  EXPECT_TRUE(status.IsMalformed()) << status.message();
+}
+
 TEST_F(VolumeImplTest, LoadFromS3UrlMissingBucketName) {
   auto cfg = makeConfig("memory://local", "testvol", "s3://endpoint.example.com");
 
