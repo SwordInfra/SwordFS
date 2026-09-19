@@ -21,7 +21,7 @@ not by itself establish support for every Cluster deployment configuration.
 | `chunk:<ino>` | Hash | Chunk index → published `SwordFsChunk` |
 | `orphans` | Hash | Inode ID → orphan marker |
 | `reclaims` | Hash | Inode ID → serialized frozen `ReclaimWork` |
-| `pending_deletes` | Hash | Immutable object key → serialized frozen `PendingDelete` |
+| `pending_deletes` | Hash | Immutable obsolete/losing object key → serialized frozen `PendingDelete` |
 
 ### Why these structures
 
@@ -34,10 +34,10 @@ A chunk Hash represents one authoritative descriptor per logical index. It
 contains neither mutable write buffers nor uploading records. Object keys are
 derived from inode, index, and revision; the descriptor stores that revision
 rather than a physical key. Frozen reclaim records retain the exact object
-keys needed for delayed deletion. Truncate uses `pending_deletes` to freeze
-one detached immutable object identity per Hash field; its value redundantly
-stores the inode, descriptor, and exact key so recovery can validate the
-deletion target before touching object storage.
+keys needed for delayed deletion. Truncate and rewrite publication use
+`pending_deletes` to freeze one immutable object identity per Hash field; its
+value redundantly stores the inode, descriptor, and exact key so recovery can
+validate the deletion target before touching object storage.
 
 There is no inode-to-parents reverse index or slice/extent overlay. Hard links
 use forward directory mappings and the inode link count. The current data path
@@ -109,11 +109,11 @@ together, rather than one subsection for every API.
 | Namespace creation | Child inode, parent name mapping, parent attributes, inode count | No visible name without its newly created inode |
 | Hard-link addition | Name mapping, inode link count, parent attributes, orphan cleanup when applicable | A revived inode cannot remain eligible for reclaim preparation |
 | Namespace removal or replacement | Directory mappings, affected inode/link counts and parent attributes, orphan marker when last link disappears | Cleanup work is recorded with the namespace change |
-| Chunk publication | Expected descriptor validation, replacement descriptor, inode size | Only the CAS winner becomes authoritative; publication does not shrink size |
+| Chunk publication | Expected descriptor validation, replacement descriptor, inode size, pending-delete records for superseded/definite-loser revisions | Only the CAS winner becomes authoritative; obsolete immutable revisions remain durably reclaimable |
 | Size change | Inode size, pruned/clamped chunk descriptors, pending-delete records for fully removed published chunks | Metadata does not retain readable ranges beyond the new size, and every detached published object has durable cleanup work |
 | Reclaim preparation | Frozen work, removal of orphan marker, live inode/chunks, inode count | Live state is removed together with durable deletion targets |
 | Reclaim completion | Pending reclaim record | Work disappears only after all frozen objects have been deleted |
-| Truncate delete completion | Pending-delete field | Work disappears only after that frozen immutable object has been deleted |
+| Pending object-delete completion | Pending-delete field | Work disappears only after that frozen immutable object has been deleted |
 
 Empty directory removal is an atomic namespace mutation. It watches directory
 contents to exclude concurrent child creation, adjusts parent link counts,
@@ -167,6 +167,23 @@ and retry merely fills in missing idempotent intents. If the destructive
 transaction partially commits, every detached whole chunk already has a
 durable immutable deletion target.
 
+Chunk rewrite uses the same two-phase principle for the superseded published
+revision. An additive-only transaction first persists the old `expected`
+descriptor as pending-delete work while it is still authoritative (so
+Reclaimer skips it). The publication transaction then re-reads and validates
+that exact intent before replacing the descriptor. A runtime failure therefore
+cannot make the old revision unreachable before its deletion identity is
+durable.
+
+A definite publication loser is handled differently: before returning a
+logical `AlreadyExists` / `NotFound`, the watched publication transaction
+commits the uploaded replacement itself as pending-delete work. The logical
+publication status is returned only after that queue write commits, so a
+foreground delete failure or process exit cannot lose the cleanup target.
+That handoff is terminal for the losing revision: the writer must not reuse
+the same revision on a later publication retry, because the background
+reclaimer is now allowed to delete that immutable key.
+
 Redis truncate scans only materialized fields in `chunk:<ino>` with HSCAN
 before queueing writes. It validates that each field matches the descriptor's
 index and canonical fixed-size chunk layout. A concurrent chunk-map mutation
@@ -206,8 +223,9 @@ and does not promise sorted output.
 - Redis durability and no-eviction configuration must protect authoritative
   records and allocators together.
 - Local open-reference fences are not distributed leases between mounts.
-- Last-link reclaim and truncate both have durable pending work. Cleanup of
-  superseded rewrite/conflict objects is still a separate evolution area.
+- Last-link reclaim, truncate, and known rewrite publication outcomes all have
+  durable pending work. The earlier object-only crash window after a successful
+  Put but before any metadata publication handoff remains tracked by #186.
 - `StatFs` exposes `inode_count` as its file count. Its block-capacity fields
   are fixed values, not measurements of object-store capacity or usage.
 - Directory scan behavior under concurrent mutation does not provide snapshot

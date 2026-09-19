@@ -282,10 +282,47 @@ utils::Status RedisMetaOps::CompletePendingDelete(std::string_view object_key) {
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.CompletePendingDelete(object_key); });
 }
 
+utils::Status RedisMetaOps::PrepareChunkRewriteDelete(InodeID ino, const SwordFsChunk &expected,
+                                                      const SwordFsChunk &replacement) {
+  utils::ExpectInFiberDomain();
+  return TransactFromFiber(
+      [&](RedisMetaTxn &txn) { return txn.PrepareChunkRewriteDelete(ino, expected, replacement); });
+}
+
 utils::Status RedisMetaOps::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                                         const SwordFsChunk &replacement) {
   utils::ExpectInFiberDomain();
-  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.CommitChunk(ino, expected, replacement); });
+  // Validate the full publication request before the rewrite preparation
+  // transaction is allowed to create durable cleanup state. RedisMetaTxn
+  // repeats these checks at the transaction boundary as defense in depth.
+  if (!replacement.IsValidForChunkSize(chunk_size_)) {
+    return utils::Status::InvalidArgument("replacement chunk descriptor is invalid");
+  }
+  if (expected.has_value() && !expected->IsValidForChunkSize(chunk_size_)) {
+    return utils::Status::InvalidArgument("expected chunk descriptor is invalid");
+  }
+  if (expected.has_value() && replacement.revision <= expected->revision) {
+    return utils::Status::InvalidArgument("replacement revision must increase");
+  }
+  if (expected.has_value() &&
+      (expected->index != replacement.index || expected->start_offset != replacement.start_offset)) {
+    return utils::Status::InvalidArgument("replacement must preserve chunk index and start offset");
+  }
+
+  if (expected.has_value()) {
+    auto status = PrepareChunkRewriteDelete(ino, *expected, replacement);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+
+  utils::Status publication_result;
+  auto status = TransactFromFiber(
+      [&](RedisMetaTxn &txn) { return txn.CommitChunk(ino, expected, replacement, publication_result); });
+  if (!status.ok()) {
+    return status;
+  }
+  return publication_result;
 }
 
 utils::Status RedisMetaOps::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {

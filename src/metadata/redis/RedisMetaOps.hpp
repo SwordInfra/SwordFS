@@ -89,6 +89,10 @@ class RedisMetaOps {
   // shrink is allowed to detach chunk metadata.
   utils::Status PrepareTruncateDeletes(InodeID ino, uint64_t size);
 
+  // Before a rewrite may replace the authoritative descriptor, persist the
+  // superseded immutable revision as durable pending-delete work.
+  utils::Status PrepareChunkRewriteDelete(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement);
+
   // Snapshot the inode ids published as orphan candidates.
   utils::Status CollectOrphanCandidates(std::vector<InodeID> &out);
 
@@ -96,7 +100,8 @@ class RedisMetaOps {
   // before exposing it to the replay worker.
   utils::Status CollectPendingReclaims(std::vector<ReclaimWork> &out);
 
-  // Snapshot immutable object keys detached by truncate.
+  // Snapshot immutable object-delete intents produced by truncate or chunk
+  // publication cleanup.
   utils::Status CollectPendingDeletes(std::vector<PendingDelete> &out);
 
  private:

@@ -6,6 +6,7 @@
 #include <sw/redis++/redis++.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <functional>
@@ -95,6 +96,18 @@ class RedisMetaImplTest : public ::testing::Test {
   decltype(auto) RunWithRawRedisFromFiber(Fn &&fn) const {
     return swordfs::test::RunInTestThreadFromFiber(
         [this, fn = std::forward<Fn>(fn)]() mutable -> decltype(auto) { return WithRawRedisOnThread(std::move(fn)); });
+  }
+
+  std::vector<std::string> PendingDeleteKeys(RedisMetaImpl *impl = nullptr) const {
+    std::vector<std::string> out;
+    auto *target = impl != nullptr ? impl : impl_.get();
+    auto status = target->VisitPendingDeletes([&out](const swordfs::metadata::PendingDelete &work) {
+      out.push_back(work.chunk.key);
+      return Status::OK();
+    });
+    EXPECT_TRUE(status.ok()) << status.message();
+    std::sort(out.begin(), out.end());
+    return out;
   }
 
   std::unique_ptr<RedisMetaImpl> impl_;
@@ -775,6 +788,8 @@ FIBER_TEST_F(RedisMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSiz
   auto conflicting = first;
   conflicting.revision = 3;
   EXPECT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, conflicting).IsAlreadyExists());
+  EXPECT_EQ(PendingDeleteKeys(), std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(
+                                     file.ino, conflicting.index, conflicting.revision)});
 
   SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
@@ -796,6 +811,8 @@ FIBER_TEST_F(RedisMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempot
   replacement.revision = 2;
   replacement.size = 64;
   ASSERT_TRUE(impl_->CommitChunk(file.ino, first, replacement).ok());
+  EXPECT_EQ(PendingDeleteKeys(),
+            std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(file.ino, first.index, first.revision)});
   ASSERT_TRUE(impl_->CommitChunk(file.ino, first, replacement).ok());
 
   SwordFsChunk stored;
@@ -809,6 +826,10 @@ FIBER_TEST_F(RedisMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempot
   auto stale_replacement = replacement;
   stale_replacement.revision = 3;
   EXPECT_TRUE(impl_->CommitChunk(file.ino, first, stale_replacement).IsAlreadyExists());
+  EXPECT_EQ(PendingDeleteKeys(),
+            (std::vector<std::string>{
+                swordfs::chunk::FormatChunkObjectKey(file.ino, first.index, first.revision),
+                swordfs::chunk::FormatChunkObjectKey(file.ino, stale_replacement.index, stale_replacement.revision)}));
 
   auto grown = replacement;
   grown.revision = 4;
@@ -816,6 +837,51 @@ FIBER_TEST_F(RedisMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempot
   ASSERT_TRUE(impl_->CommitChunk(file.ino, replacement, grown).ok());
   ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
   EXPECT_EQ(file.attr.size, 256U);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, RewritePendingDeleteSurvivesMetadataRemount) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "rewrite-remount", 0644, &file).ok());
+
+  SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
+  auto replacement = first;
+  replacement.revision = 2;
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, first, replacement).ok());
+
+  const auto old_key = swordfs::chunk::FormatChunkObjectKey(file.ino, first.index, first.revision);
+  EXPECT_EQ(PendingDeleteKeys(), std::vector<std::string>{old_key});
+
+  std::unique_ptr<RedisMetaImpl> peer;
+  swordfs::test::RunInTestThreadFromFiber([&] {
+    peer = std::make_unique<RedisMetaImpl>(config_, volume_name_);
+    ASSERT_TRUE(peer->Initialize().ok());
+    SwordFsVolume volume;
+    volume.name = volume_name_;
+    ASSERT_TRUE(peer->LoadVolume(&volume).ok());
+  });
+
+  EXPECT_EQ(PendingDeleteKeys(peer.get()), std::vector<std::string>{old_key});
+  swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
+}
+
+FIBER_TEST_F(RedisMetaImplTest, RewritePreparationFailureLeavesAuthoritativeDescriptorUntouched) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "rewrite-preflight", 0644, &file).ok());
+  SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
+
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.PendingDeletes(), "wrong-type"); });
+
+  auto replacement = first;
+  replacement.revision = 2;
+  const auto status = impl_->CommitChunk(file.ino, first, replacement);
+  EXPECT_FALSE(status.ok());
+
+  SwordFsChunk stored;
+  ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
+  EXPECT_EQ(stored, first);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, CommitChunkReplayRepairsInodeAfterPartialExec) {
@@ -846,6 +912,8 @@ FIBER_TEST_F(RedisMetaImplTest, CommitChunkReplayRepairsInodeAfterPartialExec) {
   });
 
   ASSERT_TRUE(impl_->CommitChunk(file.ino, first, replacement).ok());
+  EXPECT_EQ(PendingDeleteKeys(),
+            std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(file.ino, first.index, first.revision)});
   ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
   EXPECT_EQ(file.attr.size, 128U);
   EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), 0U);
@@ -926,9 +994,15 @@ FIBER_TEST_F(RedisMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) 
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "replace-invalid-file", 0644, &file).ok());
   EXPECT_TRUE(impl_->CommitChunk(file.ino, expected, replacement).IsNotFound());
+  std::vector<std::string> expected_pending{
+      swordfs::chunk::FormatChunkObjectKey(999999, replacement.index, replacement.revision),
+      swordfs::chunk::FormatChunkObjectKey(file.ino, replacement.index, replacement.revision)};
+  std::sort(expected_pending.begin(), expected_pending.end());
+  EXPECT_EQ(PendingDeleteKeys(), expected_pending);
 
   auto mismatched = replacement;
   mismatched.index = 1;
+  mismatched.start_offset = 4096;
   EXPECT_EQ(impl_->CommitChunk(file.ino, expected, mismatched).code(), swordfs::utils::Status::kInvalidArgument);
 
   auto stale_revision = replacement;

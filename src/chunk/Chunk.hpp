@@ -116,6 +116,11 @@ class Chunk {
   metadata::IMetaEngine *meta_;
   std::optional<metadata::SwordFsChunk> published_chunk_;
   metadata::ChunkRevision pending_revision_ = metadata::kInvalidChunkRevision;
+  // True once the current pending revision has completed at least one
+  // successful Put. It lets retry-side conflict resolution ask metadata to
+  // durably hand off that losing object before eager deletion without ever
+  // publishing a revision whose object was never known durable.
+  bool pending_object_uploaded_ = false;
 };
 
 }  // namespace swordfs::chunk
