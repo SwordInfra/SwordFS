@@ -48,9 +48,9 @@ struct ReclaimWork {
 
 /// One immutable object registered for best-effort background cleanup. Queue
 /// membership is not delete authority: Reclaimer must re-check live metadata
-/// before physical deletion. Legacy records may have been staged while the
-/// same object was still authoritative, and current producers may register
-/// superseded or definitely rejected immutable revisions.
+/// before physical deletion. Producers may register superseded or definitely
+/// rejected immutable revisions, and a queued candidate may still name the
+/// currently authoritative object until revalidation proves otherwise.
 ///
 /// The Redis Hash field is also |chunk.key|; persisting the full immutable
 /// identity lets replay validate the field/key/descriptor relationship before

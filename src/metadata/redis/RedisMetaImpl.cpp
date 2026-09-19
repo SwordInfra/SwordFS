@@ -510,11 +510,6 @@ Status RedisMetaImpl::VisitPendingReclaims(const ReclaimVisitorFn &visitor) {
   return ops_.VisitPendingReclaims(visitor);
 }
 
-Status RedisMetaImpl::VisitPendingDeletes(const PendingDeleteVisitorFn &visitor) {
-  utils::ExpectInFiberDomain();
-  return ops_.VisitPendingDeletes(visitor);
-}
-
 Status RedisMetaImpl::VisitPendingDeletesBatch(size_t max_items, const PendingDeleteVisitorFn &visitor,
                                                bool *has_more) {
   utils::ExpectInFiberDomain();
@@ -528,23 +523,6 @@ Status RedisMetaImpl::CompletePendingDelete(std::string_view key) {
 
 Status RedisMetaImpl::AllocateChunkRevision(ChunkRevision *revision) {
   return ops_.AllocateChunkRevision(revision);
-}
-
-Status RedisMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
-  utils::ExpectInFiberDomain();
-  if (!visitor) {
-    return Status::InvalidArgument("chunk visitor is null");
-  }
-  SwordFsInode inode;
-  auto status = ops_.GetInode(ino, &inode);
-  if (!status.ok()) {
-    return status;
-  }
-  if (!inode.IsRegular()) {
-    return Status::InvalidArgument("not a regular file");
-  }
-
-  return ops_.VisitChunks(ino, visitor);
 }
 
 Status RedisMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,

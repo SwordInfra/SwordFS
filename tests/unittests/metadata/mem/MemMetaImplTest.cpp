@@ -15,7 +15,6 @@
 #include <thread>
 
 #include "FiberTest.hpp"
-#include "TestMemMetaImpl.hpp"
 #include "chunk/ChunkObjectKey.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "metadata/types/Reclaim.hpp"
@@ -27,9 +26,9 @@ using swordfs::metadata::MemMetaImpl;
 using swordfs::metadata::ReclaimWork;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
+using swordfs::metadata::SwordFsAttr;
 using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
-using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -42,7 +41,7 @@ static constexpr uint64_t kChunkSize = 64ULL * 1024 * 1024;
 
 #ifndef NDEBUG
 TEST(MemMetaImplDomainTest, RuntimeApiRejectsThreadCaller) {
-  TestMemMetaImpl impl;
+  MemMetaImpl impl;
   SwordFsInode inode;
   EXPECT_DEATH(
       { (void)impl.GetInode(kRoot, &inode); }, "execution-domain violation at .*expected=fiber, actual=POSIX-thread");
@@ -52,7 +51,7 @@ TEST(MemMetaImplDomainTest, RuntimeApiRejectsThreadCaller) {
 class MemMetaImplTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    impl_ = new TestMemMetaImpl();
+    impl_ = new MemMetaImpl();
     // Default context is root (uid=0, gid=0).
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
@@ -79,78 +78,29 @@ class MemMetaImplTest : public ::testing::Test {
     impl_->MkDir(parent_ino, name, mode, &inode);
     InodeID ino = inode.ino;
     // Change ownership to kOwner:kGroup
-    struct stat st{};
-    st.st_uid = kOwner;
-    st.st_gid = kGroup;
-    st.st_mode = S_IFDIR | mode;
-    impl_->SetAttr(ino, &st, SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kMode, nullptr);
+    SwordFsAttr attr;
+    attr.uid = kOwner;
+    attr.gid = kGroup;
+    attr.mode = S_IFDIR | mode;
+    impl_->SetAttr(ino, attr, SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kMode, nullptr);
     return ino;
   }
 
   // Change only the mode of an existing directory.
   void SetDirMode(InodeID ino, mode_t mode) {
     SetContext(0, 0);
-    struct stat st{};
-    st.st_mode = S_IFDIR | mode;
-    impl_->SetAttr(ino, &st, SetAttrField::kMode, nullptr);
-  }
-
-  Status CreateFile(InodeID parent_ino, std::string_view name, mode_t mode, InodeID *ino = nullptr) {
-    SwordFsInode inode;
-    Status status = impl_->Create(parent_ino, name, mode, ino ? &inode : nullptr);
-    if (status.ok() && ino) {
-      *ino = inode.ino;
-    }
-    return status;
-  }
-
-  Status MakeDir(InodeID parent_ino, std::string_view name, mode_t mode, InodeID *ino = nullptr) {
-    SwordFsInode inode;
-    Status status = impl_->MkDir(parent_ino, name, mode, ino ? &inode : nullptr);
-    if (status.ok() && ino) {
-      *ino = inode.ino;
-    }
-    return status;
-  }
-
-  Status LookupInode(InodeID parent_ino, std::string_view name, InodeID *ino) {
-    SwordFsInode inode;
-    Status status = impl_->Lookup(parent_ino, name, &inode);
-    if (status.ok() && ino) {
-      *ino = inode.ino;
-    }
-    return status;
-  }
-
-  Status GetInodeAttr(InodeID ino, struct stat *attr) {
-    SwordFsInode inode;
-    Status status = impl_->GetInode(ino, &inode);
-    if (status.ok() && attr) {
-      attr->st_ino = static_cast<ino_t>(inode.attr.ino);
-      attr->st_mode = static_cast<mode_t>(inode.attr.mode);
-      attr->st_nlink = static_cast<nlink_t>(inode.attr.nlink);
-      attr->st_uid = static_cast<uid_t>(inode.attr.uid);
-      attr->st_gid = static_cast<gid_t>(inode.attr.gid);
-      attr->st_size = static_cast<off_t>(inode.attr.size);
-      attr->st_blksize = static_cast<blksize_t>(inode.attr.blksize);
-      attr->st_blocks = static_cast<blkcnt_t>(inode.attr.blocks);
-      attr->st_atime = static_cast<time_t>(inode.attr.atime);
-      attr->st_atim.tv_nsec = static_cast<long>(inode.attr.atime_nsec);
-      attr->st_mtime = static_cast<time_t>(inode.attr.mtime);
-      attr->st_mtim.tv_nsec = static_cast<long>(inode.attr.mtime_nsec);
-      attr->st_ctime = static_cast<time_t>(inode.attr.ctime);
-      attr->st_ctim.tv_nsec = static_cast<long>(inode.attr.ctime_nsec);
-    }
-    return status;
+    SwordFsAttr attr;
+    attr.mode = S_IFDIR | mode;
+    impl_->SetAttr(ino, attr, SetAttrField::kMode, nullptr);
   }
 
   // Change ownership of an existing directory.
   void SetDirOwner(InodeID ino, uid_t uid, gid_t gid) {
     SetContext(0, 0);
-    struct stat st{};
-    st.st_uid = uid;
-    st.st_gid = gid;
-    impl_->SetAttr(ino, &st, SetAttrField::kUid | SetAttrField::kGid, nullptr);
+    SwordFsAttr attr;
+    attr.uid = uid;
+    attr.gid = gid;
+    impl_->SetAttr(ino, attr, SetAttrField::kUid | SetAttrField::kGid, nullptr);
   }
 
   // ────────────────────────────────────────────────────────────────
@@ -181,16 +131,21 @@ class MemMetaImplTest : public ::testing::Test {
 
   std::vector<std::string> PendingDeletes() {
     std::vector<std::string> out;
-    auto status = impl_->VisitPendingDeletes([&out](const swordfs::metadata::PendingDelete &work) {
-      out.push_back(work.chunk.key);
-      return Status::OK();
-    });
+    bool has_more = false;
+    auto status = impl_->VisitPendingDeletesBatch(
+        1024,
+        [&out](const swordfs::metadata::PendingDelete &work) {
+          out.push_back(work.chunk.key);
+          return Status::OK();
+        },
+        &has_more);
     EXPECT_TRUE(status.ok()) << status.message();
+    EXPECT_FALSE(has_more);
     std::sort(out.begin(), out.end());
     return out;
   }
 
-  TestMemMetaImpl *impl_;
+  MemMetaImpl *impl_;
 };
 
 FIBER_TEST_F(MemMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) {
@@ -459,8 +414,7 @@ FIBER_TEST_F(MemMetaImplTest, RmDirStickyBitOwnerCanDelete) {
 
   // kOwner creates a subdirectory inside (so kOwner owns the entry).
   SetContext(kOwner, kOtherGroup);
-  InodeID sub_ino = 0;
-  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, &sub_ino, nullptr).ok());
+  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, nullptr).ok());
 
   // The entry's owner can remove it from someone else's sticky dir.
   EXPECT_TRUE(impl_->RmDir(dir_ino, "sub").ok());
@@ -473,8 +427,7 @@ FIBER_TEST_F(MemMetaImplTest, RmDirStickyBitNonOwnerCannotDelete) {
 
   // kOwner creates a subdirectory inside.
   SetContext(kOwner, kOtherGroup);
-  InodeID sub_ino = 0;
-  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, &sub_ino, nullptr).ok());
+  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, nullptr).ok());
 
   // A third user cannot remove kOwner's subdirectory.
   SetContext(3000, kOtherGroup);
@@ -569,61 +522,63 @@ FIBER_TEST_F(MemMetaImplTest, RenameNoReplaceSucceedsWhenTargetFree) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
-  InodeID f_ino = 0;
-  CreateFile(src_ino, "f", 0644, &f_ino);
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(src_ino, "f", 0644, &file).ok());
 
   // RenameFlag::kNoReplace: target "f" under dst does not exist → succeed.
   Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNoReplace);
   EXPECT_TRUE(st.ok()) << st.message();
 
   // Verify the file moved.
-  struct stat attr;
-  EXPECT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
+  SwordFsInode inode;
+  EXPECT_TRUE(impl_->GetInode(file.ino, &inode).ok());
 }
 
 FIBER_TEST_F(MemMetaImplTest, RenameNoReplaceFailsWhenTargetExists) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
-  InodeID f1_ino = 0, f2_ino = 0;
-  CreateFile(src_ino, "f", 0644, &f1_ino);
-  CreateFile(dst_ino, "f", 0644, &f2_ino);
+  SwordFsInode src_file;
+  SwordFsInode dst_file;
+  ASSERT_TRUE(impl_->Create(src_ino, "f", 0644, &src_file).ok());
+  ASSERT_TRUE(impl_->Create(dst_ino, "f", 0644, &dst_file).ok());
 
   // RenameFlag::kNoReplace: target "f" under dst EXISTS → EEXIST.
   Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNoReplace);
   EXPECT_TRUE(st.IsAlreadyExists()) << st.message();
 
   // Verify source file was NOT moved (still under src).
-  InodeID found = 0;
-  EXPECT_TRUE(LookupInode(src_ino, "f", &found).ok());
-  EXPECT_EQ(f1_ino, found);
+  SwordFsInode found;
+  EXPECT_TRUE(impl_->Lookup(src_ino, "f", &found).ok());
+  EXPECT_EQ(src_file.ino, found.ino);
 }
 
 FIBER_TEST_F(MemMetaImplTest, RenameExchangeSucceeds) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
-  InodeID f1_ino = 0, f2_ino = 0;
-  CreateFile(src_ino, "a", 0644, &f1_ino);
-  CreateFile(dst_ino, "b", 0644, &f2_ino);
+  SwordFsInode src_file;
+  SwordFsInode dst_file;
+  ASSERT_TRUE(impl_->Create(src_ino, "a", 0644, &src_file).ok());
+  ASSERT_TRUE(impl_->Create(dst_ino, "b", 0644, &dst_file).ok());
 
   // RenameFlag::kExchange: atomically swap "a" and "b".
   Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
   EXPECT_TRUE(st.ok()) << st.message();
 
   // Verify: src/a now has inode f2_ino, dst/b now has inode f1_ino.
-  InodeID found = 0;
-  EXPECT_TRUE(LookupInode(src_ino, "a", &found).ok());
-  EXPECT_EQ(f2_ino, found);
-  EXPECT_TRUE(LookupInode(dst_ino, "b", &found).ok());
-  EXPECT_EQ(f1_ino, found);
+  SwordFsInode found;
+  EXPECT_TRUE(impl_->Lookup(src_ino, "a", &found).ok());
+  EXPECT_EQ(dst_file.ino, found.ino);
+  EXPECT_TRUE(impl_->Lookup(dst_ino, "b", &found).ok());
+  EXPECT_EQ(src_file.ino, found.ino);
 }
 
 FIBER_TEST_F(MemMetaImplTest, RenameExchangeFailsWhenTargetMissing) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
-  CreateFile(src_ino, "a", 0644);
+  ASSERT_TRUE(impl_->Create(src_ino, "a", 0644, nullptr).ok());
 
   // RenameFlag::kExchange: target "b" under dst does NOT exist → ENOENT.
   Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
@@ -634,10 +589,10 @@ FIBER_TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
-  CreateFile(src_ino, "a", 0644);
+  ASSERT_TRUE(impl_->Create(src_ino, "a", 0644, nullptr).ok());
 
   // Create a directory under dst with same name.
-  MakeDir(dst_ino, "b", 0755);
+  ASSERT_TRUE(impl_->MkDir(dst_ino, "b", 0755, nullptr).ok());
 
   // RenameFlag::kExchange: file ↔ dir → EINVAL.
   Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
@@ -651,7 +606,7 @@ FIBER_TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
 FIBER_TEST_F(MemMetaImplTest, RmDirRequiresWriteExecOnParent) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "parent", 0700);
   SetContext(kOwner, kOtherGroup);
-  MakeDir(dir_ino, "sub", 0755);
+  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, nullptr).ok());
 
   // Remove write from parent
   SetDirMode(dir_ino, 0500);
@@ -663,7 +618,7 @@ FIBER_TEST_F(MemMetaImplTest, RmDirRequiresWriteExecOnParent) {
 FIBER_TEST_F(MemMetaImplTest, RmDirRootAlwaysSucceeds) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "parent", 0000);
   SetContext(0, 0);
-  MakeDir(dir_ino, "sub", 0755);
+  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, nullptr).ok());
 
   SetDirMode(dir_ino, 0000);
   SetContext(0, 0);
@@ -677,35 +632,35 @@ FIBER_TEST_F(MemMetaImplTest, RmDirRootAlwaysSucceeds) {
 FIBER_TEST_F(MemMetaImplTest, OpenRequiresReadPermission) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(dir_ino, "f", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(dir_ino, "f", 0644, &file).ok());
 
   // Remove read from the file owner
-  struct stat st{};
-  st.st_uid = kOwner;
-  st.st_gid = kOtherGroup;
-  st.st_mode = S_IFREG | 0200;  // -w-------
-  impl_->SetAttr(f_ino, &st, SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kMode, nullptr);
+  SwordFsAttr attr;
+  attr.uid = kOwner;
+  attr.gid = kOtherGroup;
+  attr.mode = S_IFREG | 0200;  // -w-------
+  impl_->SetAttr(file.ino, attr, SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kMode, nullptr);
 
-  Status s = impl_->Open(f_ino);
-  EXPECT_TRUE(s.IsPermission()) << s.message();
+  Status status = impl_->Open(file.ino);
+  EXPECT_TRUE(status.IsPermission()) << status.message();
 }
 
 FIBER_TEST_F(MemMetaImplTest, OpenRootSucceedsWithoutReadPerm) {
   InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
   SetContext(kOwner, kOtherGroup);
-  InodeID f_ino = 0;
-  CreateFile(dir_ino, "f", 0644, &f_ino);
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(dir_ino, "f", 0644, &file).ok());
 
   // Remove all perms
-  struct stat st{};
-  st.st_mode = S_IFREG | 0000;
+  SwordFsAttr attr;
+  attr.mode = S_IFREG | 0000;
   SetContext(0, 0);
-  impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr);
+  impl_->SetAttr(file.ino, attr, SetAttrField::kMode, nullptr);
 
   SetContext(0, 0);
-  Status s = impl_->Open(f_ino);
-  EXPECT_TRUE(s.ok()) << s.message();
+  Status status = impl_->Open(file.ino);
+  EXPECT_TRUE(status.ok()) << status.message();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -718,37 +673,37 @@ FIBER_TEST_F(MemMetaImplTest, TruncateNotFound) {
 }
 
 FIBER_TEST_F(MemMetaImplTest, TruncateUpdatesSizeAndClearsSuidSgid) {
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
 
   // Give the file SUID/SGID without touching its size.
-  struct stat st{};
-  st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
-  ASSERT_TRUE(impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr).ok());
+  SwordFsAttr attr;
+  attr.mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, attr, SetAttrField::kMode, nullptr).ok());
 
-  ASSERT_TRUE(impl_->Truncate(f_ino, 1024).ok());
+  ASSERT_TRUE(impl_->Truncate(file.ino, 1024).ok());
 
-  struct stat out{};
-  ASSERT_TRUE(impl_->GetAttr(f_ino, &out).ok());
-  EXPECT_EQ(out.st_size, 1024);
-  EXPECT_EQ(out.st_mode & S_ISUID, 0u);
-  EXPECT_EQ(out.st_mode & S_ISGID, 0u);
+  SwordFsInode inode;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &inode).ok());
+  EXPECT_EQ(inode.attr.size, 1024U);
+  EXPECT_EQ(inode.attr.mode & S_ISUID, 0u);
+  EXPECT_EQ(inode.attr.mode & S_ISGID, 0u);
 }
 
 FIBER_TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
 
-  struct stat st{};
-  st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
-  ASSERT_TRUE(impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr).ok());
-  ASSERT_TRUE(impl_->Truncate(f_ino, 0).ok());  // size was already 0
+  SwordFsAttr attr;
+  attr.mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, attr, SetAttrField::kMode, nullptr).ok());
+  ASSERT_TRUE(impl_->Truncate(file.ino, 0).ok());  // size was already 0
 
-  struct stat out{};
-  ASSERT_TRUE(impl_->GetAttr(f_ino, &out).ok());
-  EXPECT_EQ(out.st_size, 0);
-  EXPECT_NE(out.st_mode & S_ISUID, 0u);
-  EXPECT_NE(out.st_mode & S_ISGID, 0u);
+  SwordFsInode inode;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &inode).ok());
+  EXPECT_EQ(inode.attr.size, 0U);
+  EXPECT_NE(inode.attr.mode & S_ISUID, 0u);
+  EXPECT_NE(inode.attr.mode & S_ISGID, 0u);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -756,99 +711,99 @@ FIBER_TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
 // ────────────────────────────────────────────────────────────────
 
 FIBER_TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
 
-  struct stat st{};
-  st.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
-  ASSERT_TRUE(impl_->SetAttr(f_ino, &st, SetAttrField::kMode, nullptr).ok());
+  SwordFsAttr mode;
+  mode.mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, mode, SetAttrField::kMode, nullptr).ok());
 
-  struct stat attr{};
-  attr.st_size = 2048;
-  swordfs::metadata::SwordFsInode out{};
-  ASSERT_TRUE(impl_->SetAttr(f_ino, &attr, SetAttrField::kSize, &out).ok());
+  SwordFsAttr attr;
+  attr.size = 2048;
+  SwordFsInode out;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, attr, SetAttrField::kSize, &out).ok());
   EXPECT_EQ(out.attr.size, 2048);
   EXPECT_EQ(out.attr.mode & S_ISUID, 0u);
   EXPECT_EQ(out.attr.mode & S_ISGID, 0u);
 }
 
 FIBER_TEST_F(MemMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSizeMonotonically) {
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "publish", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "publish", 0644, &file).ok());
 
   SwordFsChunk first{};
   first.index = 0;
   first.start_offset = 0;
   first.revision = 1;
   first.size = 128;
-  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, first).ok());
-  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, first).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
 
-  struct stat attr{};
-  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
-  EXPECT_EQ(attr.st_size, 128);
+  SwordFsInode inode;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &inode).ok());
+  EXPECT_EQ(inode.attr.size, 128U);
 
   SwordFsChunk later{};
   later.index = 2;
   later.start_offset = 2 * kChunkSize;
   later.revision = 2;
   later.size = 64;
-  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, later).ok());
-  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, first).ok());
-  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
-  EXPECT_EQ(attr.st_size, static_cast<off_t>(2 * kChunkSize + 64));
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, later).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
+  ASSERT_TRUE(impl_->GetInode(file.ino, &inode).ok());
+  EXPECT_EQ(inode.attr.size, 2 * kChunkSize + 64);
 
   auto conflicting = first;
   conflicting.revision = 3;
-  EXPECT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, conflicting).IsAlreadyExists());
+  EXPECT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, conflicting).IsAlreadyExists());
 
   SwordFsChunk stored;
-  ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &stored).ok());
+  ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
   EXPECT_EQ(stored.revision, first.revision);
 }
 
 FIBER_TEST_F(MemMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempotent) {
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "replace", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "replace", 0644, &file).ok());
 
   SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 128};
-  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, first).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
 
-  struct stat mode{};
-  mode.st_mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
-  ASSERT_TRUE(impl_->SetAttr(f_ino, &mode, SetAttrField::kMode, nullptr).ok());
+  SwordFsAttr mode;
+  mode.mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, mode, SetAttrField::kMode, nullptr).ok());
 
   auto replacement = first;
   replacement.revision = 2;
   replacement.size = 64;
-  ASSERT_TRUE(impl_->CommitChunk(f_ino, first, replacement).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, first, replacement).ok());
   EXPECT_EQ(PendingDeletes(),
-            std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(f_ino, first.index, first.revision)});
-  ASSERT_TRUE(impl_->CommitChunk(f_ino, first, replacement).ok());
+            std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(file.ino, first.index, first.revision)});
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, first, replacement).ok());
 
   SwordFsChunk stored;
-  ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &stored).ok());
+  ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
   EXPECT_EQ(stored, replacement);
 
-  struct stat attr{};
-  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
-  EXPECT_EQ(attr.st_size, 128);
-  EXPECT_EQ(attr.st_mode & (S_ISUID | S_ISGID), 0U);
+  SwordFsInode inode;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &inode).ok());
+  EXPECT_EQ(inode.attr.size, 128U);
+  EXPECT_EQ(inode.attr.mode & (S_ISUID | S_ISGID), 0U);
 
   auto stale_replacement = replacement;
   stale_replacement.revision = 3;
-  EXPECT_TRUE(impl_->CommitChunk(f_ino, first, stale_replacement).IsAlreadyExists());
+  EXPECT_TRUE(impl_->CommitChunk(file.ino, first, stale_replacement).IsAlreadyExists());
   EXPECT_EQ(PendingDeletes(),
             (std::vector<std::string>{
-                swordfs::chunk::FormatChunkObjectKey(f_ino, first.index, first.revision),
-                swordfs::chunk::FormatChunkObjectKey(f_ino, stale_replacement.index, stale_replacement.revision)}));
+                swordfs::chunk::FormatChunkObjectKey(file.ino, first.index, first.revision),
+                swordfs::chunk::FormatChunkObjectKey(file.ino, stale_replacement.index, stale_replacement.revision)}));
 
   auto grown = replacement;
   grown.revision = 4;
   grown.size = 256;
-  ASSERT_TRUE(impl_->CommitChunk(f_ino, replacement, grown).ok());
-  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
-  EXPECT_EQ(attr.st_size, 256);
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, replacement, grown).ok());
+  ASSERT_TRUE(impl_->GetInode(file.ino, &inode).ok());
+  EXPECT_EQ(inode.attr.size, 256U);
 }
 
 FIBER_TEST_F(MemMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) {
@@ -874,40 +829,40 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) {
 
   EXPECT_TRUE(impl_->CommitChunk(999999, expected, replacement).IsNotFound());
 
-  InodeID dir_ino = 0;
-  ASSERT_TRUE(MakeDir(kRoot, "replace-dir", 0755, &dir_ino).ok());
-  EXPECT_EQ(impl_->CommitChunk(dir_ino, expected, replacement).code(), Status::kInvalidArgument);
+  SwordFsInode dir;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "replace-dir", 0755, &dir).ok());
+  EXPECT_EQ(impl_->CommitChunk(dir.ino, expected, replacement).code(), Status::kInvalidArgument);
 
-  InodeID empty_file_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "replace-empty", 0644, &empty_file_ino).ok());
-  EXPECT_TRUE(impl_->CommitChunk(empty_file_ino, expected, replacement).IsNotFound());
+  SwordFsInode empty_file;
+  ASSERT_TRUE(impl_->Create(kRoot, "replace-empty", 0644, &empty_file).ok());
+  EXPECT_TRUE(impl_->CommitChunk(empty_file.ino, expected, replacement).IsNotFound());
 
   auto mismatched = replacement;
   mismatched.index = 1;
-  EXPECT_EQ(impl_->CommitChunk(empty_file_ino, expected, mismatched).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, expected, mismatched).code(), Status::kInvalidArgument);
 
   auto stale_revision = replacement;
   stale_revision.revision = expected.revision;
-  EXPECT_EQ(impl_->CommitChunk(empty_file_ino, expected, stale_revision).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, expected, stale_revision).code(), Status::kInvalidArgument);
 
   mismatched = replacement;
   mismatched.start_offset = 1;
-  EXPECT_EQ(impl_->CommitChunk(empty_file_ino, expected, mismatched).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, expected, mismatched).code(), Status::kInvalidArgument);
 
   auto overflowing_expected = expected;
   overflowing_expected.start_offset = 1;
   auto overflowing = replacement;
   overflowing.start_offset = 1;
   overflowing.size = std::numeric_limits<uint64_t>::max();
-  EXPECT_EQ(impl_->CommitChunk(empty_file_ino, overflowing_expected, overflowing).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, overflowing_expected, overflowing).code(), Status::kInvalidArgument);
 
-  InodeID file_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "replace-missing-index", 0644, &file_ino).ok());
-  ASSERT_TRUE(impl_->CommitChunk(file_ino, std::nullopt, expected).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "replace-missing-index", 0644, &file).ok());
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, expected).ok());
   SwordFsChunk missing{.index = 1, .start_offset = kChunkSize, .revision = 3, .size = 64};
   auto missing_replacement = missing;
   missing_replacement.revision = 4;
-  EXPECT_TRUE(impl_->CommitChunk(file_ino, missing, missing_replacement).IsNotFound());
+  EXPECT_TRUE(impl_->CommitChunk(file.ino, missing, missing_replacement).IsNotFound());
 }
 
 FIBER_TEST_F(MemMetaImplTest, ChunkMutationsRejectInvalidRevision) {
@@ -928,33 +883,33 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimMissingInodeIsNoOp) {
 // e2e tests FileOpsTest.Hardlink* cover the POSIX contract end-to-end;
 // this single-engine test pins the metadata-only invariant.
 FIBER_TEST_F(MemMetaImplTest, UnlinkOnHardlinkedInodeKeepsInodeAlive) {
-  InodeID f_ino = 0;
   SetContext(0, 0);
-  ASSERT_TRUE(impl_->Create(kRoot, "orig", 0644, &f_ino, nullptr).ok());
-  ASSERT_TRUE(impl_->Link(f_ino, kRoot, "link", nullptr).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "orig", 0644, &file).ok());
+  ASSERT_TRUE(impl_->Link(file.ino, kRoot, "link", nullptr).ok());
 
   // Sanity: both names now point to the same inode, nlink=2.
-  struct stat attr{};
-  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
-  ASSERT_EQ(attr.st_nlink, 2);
+  ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
+  ASSERT_EQ(file.attr.nlink, 2U);
 
   ASSERT_TRUE(impl_->Unlink(kRoot, "orig").ok());
 
   // nlink must drop to 1, not zero, and the inode must still exist.
-  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
-  EXPECT_EQ(attr.st_nlink, 1);
+  ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
+  EXPECT_EQ(file.attr.nlink, 1U);
   EXPECT_TRUE(OrphanCandidates().empty());
 
   // Unlinking the surviving name brings nlink to 0, which publishes the
   // inode as an orphan candidate; preparing and completing the reclaim then
   // drops the inode.
   ASSERT_TRUE(impl_->Unlink(kRoot, "link").ok());
-  EXPECT_EQ(OrphanCandidates(), std::vector<InodeID>{f_ino});
+  EXPECT_EQ(OrphanCandidates(), std::vector<InodeID>{file.ino});
   std::optional<ReclaimWork> work;
-  ASSERT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
   ASSERT_TRUE(work.has_value());
-  ASSERT_TRUE(impl_->CompleteReclaim(f_ino).ok());
-  EXPECT_TRUE(impl_->GetAttr(f_ino, nullptr).IsNotFound());
+  ASSERT_TRUE(impl_->CompleteReclaim(file.ino).ok());
+  SwordFsInode missing;
+  EXPECT_TRUE(impl_->GetInode(file.ino, &missing).IsNotFound());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -967,25 +922,24 @@ FIBER_TEST_F(MemMetaImplTest, UnlinkOnHardlinkedInodeKeepsInodeAlive) {
 FIBER_TEST_F(MemMetaImplTest, OpenAcceptsUnlinkedButLiveInode) {
   // POSIX open-unlink: the directory entry is gone, but the inode
   // stays alive because some fd is still referencing it. Subsequent
-  // meta-engine calls on the ino (Open/GetAttr/Access/...) must
+  // meta-engine calls on the ino (Open/GetInode/Access/...) must
   // succeed so the VFS layer can re-open or continue to operate on
   // the fd.
-  InodeID f_ino = 0;
   SetContext(0, 0);
-  impl_->Create(kRoot, "f", 0644, &f_ino, nullptr);
+  SwordFsInode file;
+  impl_->Create(kRoot, "f", 0644, &file);
 
   // Detach the directory entry (nlink -> 0). The inode survives.
   ASSERT_TRUE(impl_->Unlink(kRoot, "f").ok());
 
   // Re-open via the inode number. This is the path /proc, dup-like
   // syscalls, or any "already-have-an-fd" re-bind take. Must succeed.
-  EXPECT_TRUE(impl_->Open(f_ino).ok());
+  EXPECT_TRUE(impl_->Open(file.ino).ok());
 
-  // GetAttr/Access must also succeed so existing fds keep working.
-  struct stat attr;
-  EXPECT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
-  EXPECT_TRUE(impl_->Access(f_ino, R_OK).ok());
-  EXPECT_TRUE(impl_->Access(f_ino, W_OK).ok());
+  // GetInode/Access must also succeed so existing fds keep working.
+  EXPECT_TRUE(impl_->GetInode(file.ino, &file).ok());
+  EXPECT_TRUE(impl_->Access(file.ino, R_OK).ok());
+  EXPECT_TRUE(impl_->Access(file.ino, W_OK).ok());
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1008,7 +962,7 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentRenameOverwriteHasNoObservableGap) {
   constexpr int kRounds = 500;
 
   SetContext(0, 0);
-  ASSERT_TRUE(impl_->Create(kRoot, "dst", 0644, nullptr, nullptr).ok());
+  ASSERT_TRUE(impl_->Create(kRoot, "dst", 0644, nullptr).ok());
 
   std::atomic<int> create_succeeded{0};
   std::atomic<int> rename_failed{0};
@@ -1019,7 +973,7 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentRenameOverwriteHasNoObservableGap) {
   auto creator = swordfs::test::StartFiberTestThread([&]() {
     gate.arrive_and_wait();
     while (!stop.load(std::memory_order_relaxed)) {
-      Status status = impl_->Create(kRoot, "dst", 0644, nullptr, nullptr);
+      Status status = impl_->Create(kRoot, "dst", 0644, nullptr);
       if (status.ok()) {
         create_succeeded.fetch_add(1, std::memory_order_relaxed);
       }
@@ -1030,7 +984,7 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentRenameOverwriteHasNoObservableGap) {
   auto renamer = swordfs::test::StartFiberTestThread([&]() {
     gate.arrive_and_wait();
     for (int i = 0; i < kRounds; ++i) {
-      Status status = impl_->Create(kRoot, "src", 0644, nullptr, nullptr);
+      Status status = impl_->Create(kRoot, "src", 0644, nullptr);
       if (!status.ok()) {
         rename_failed.fetch_add(1, std::memory_order_relaxed);
         continue;
@@ -1051,8 +1005,8 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentRenameOverwriteHasNoObservableGap) {
   EXPECT_EQ(rename_failed.load(), 0);
 
   // "dst" must still resolve to a live inode.
-  InodeID found = 0;
-  EXPECT_TRUE(impl_->Lookup(kRoot, "dst", &found, nullptr).ok());
+  SwordFsInode found;
+  EXPECT_TRUE(impl_->Lookup(kRoot, "dst", &found).ok());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1066,9 +1020,10 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentExchangeKeepsBothInodes) {
   constexpr int kRounds = 500;
 
   SetContext(0, 0);
-  InodeID a_ino = 0, b_ino = 0;
-  ASSERT_TRUE(impl_->Create(kRoot, "a", 0644, &a_ino, nullptr).ok());
-  ASSERT_TRUE(impl_->Create(kRoot, "b", 0644, &b_ino, nullptr).ok());
+  SwordFsInode a;
+  SwordFsInode b;
+  ASSERT_TRUE(impl_->Create(kRoot, "a", 0644, &a).ok());
+  ASSERT_TRUE(impl_->Create(kRoot, "b", 0644, &b).ok());
 
   std::atomic<int> failures{0};
   std::barrier gate(3);
@@ -1091,16 +1046,16 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentExchangeKeepsBothInodes) {
 
   EXPECT_EQ(failures.load(), 0);
 
-  InodeID found_a = 0, found_b = 0;
-  ASSERT_TRUE(impl_->Lookup(kRoot, "a", &found_a, nullptr).ok());
-  ASSERT_TRUE(impl_->Lookup(kRoot, "b", &found_b, nullptr).ok());
-  EXPECT_NE(found_a, found_b);
-  EXPECT_TRUE((found_a == a_ino && found_b == b_ino) || (found_a == b_ino && found_b == a_ino));
+  SwordFsInode found_a;
+  SwordFsInode found_b;
+  ASSERT_TRUE(impl_->Lookup(kRoot, "a", &found_a).ok());
+  ASSERT_TRUE(impl_->Lookup(kRoot, "b", &found_b).ok());
+  EXPECT_NE(found_a.ino, found_b.ino);
+  EXPECT_TRUE((found_a.ino == a.ino && found_b.ino == b.ino) || (found_a.ino == b.ino && found_b.ino == a.ino));
 
   // Both inodes must still have readable attributes (no dangling state).
-  struct stat attr;
-  EXPECT_TRUE(impl_->GetAttr(found_a, &attr).ok());
-  EXPECT_TRUE(impl_->GetAttr(found_b, &attr).ok());
+  EXPECT_TRUE(impl_->GetInode(found_a.ino, &found_a).ok());
+  EXPECT_TRUE(impl_->GetInode(found_b.ino, &found_b).ok());
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -1115,8 +1070,9 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentExchangeKeepsBothInodes) {
 
 FIBER_TEST_F(MemMetaImplTest, UnlinkPublishesOrphanCandidateForLastLink) {
   SetContext(0, 0);
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
+  const InodeID f_ino = file.ino;
   SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
   ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, chunk).ok());
 
@@ -1126,9 +1082,9 @@ FIBER_TEST_F(MemMetaImplTest, UnlinkPublishesOrphanCandidateForLastLink) {
   // decrement, and the inode with its chunk metadata is still alive: the
   // candidate is a promise to reclaim, not a claim on the data.
   EXPECT_EQ(OrphanCandidates(), std::vector<InodeID>{f_ino});
-  struct stat attr{};
-  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
-  EXPECT_EQ(attr.st_nlink, 0);
+  SwordFsInode inode;
+  ASSERT_TRUE(impl_->GetInode(f_ino, &inode).ok());
+  EXPECT_EQ(inode.attr.nlink, 0U);
   SwordFsChunk found;
   ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &found).ok());
   EXPECT_EQ(found, chunk);
@@ -1140,13 +1096,14 @@ FIBER_TEST_F(MemMetaImplTest, UnlinkPublishesOrphanCandidateForLastLink) {
   ASSERT_TRUE(impl_->CompleteReclaim(f_ino).ok());
   EXPECT_TRUE(OrphanCandidates().empty());
   EXPECT_TRUE(PendingReclaims().empty());
-  EXPECT_TRUE(impl_->GetAttr(f_ino, nullptr).IsNotFound());
+  EXPECT_TRUE(impl_->GetInode(f_ino, &inode).IsNotFound());
 }
 
 FIBER_TEST_F(MemMetaImplTest, HardlinkUnlinkKeepsInodeOffTheOrphanList) {
   SetContext(0, 0);
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "a", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "a", 0644, &file).ok());
+  const InodeID f_ino = file.ino;
   ASSERT_TRUE(impl_->Link(f_ino, kRoot, "b", nullptr).ok());
 
   // One name gone, one left: the inode is not an orphan candidate.
@@ -1160,10 +1117,12 @@ FIBER_TEST_F(MemMetaImplTest, HardlinkUnlinkKeepsInodeOffTheOrphanList) {
 
 FIBER_TEST_F(MemMetaImplTest, RenameOverwritePublishesOrphanCandidate) {
   SetContext(0, 0);
-  InodeID dst_ino = 0;
-  InodeID src_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "dst", 0644, &dst_ino).ok());
-  ASSERT_TRUE(CreateFile(kRoot, "src", 0644, &src_ino).ok());
+  SwordFsInode dst;
+  SwordFsInode src;
+  ASSERT_TRUE(impl_->Create(kRoot, "dst", 0644, &dst).ok());
+  ASSERT_TRUE(impl_->Create(kRoot, "src", 0644, &src).ok());
+  const InodeID dst_ino = dst.ino;
+  const InodeID src_ino = src.ino;
   ASSERT_TRUE(
       impl_->CommitChunk(dst_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 32})
           .ok());
@@ -1176,17 +1135,18 @@ FIBER_TEST_F(MemMetaImplTest, RenameOverwritePublishesOrphanCandidate) {
   // prepared, so a racing Link (or an open fd) cannot observe lost data.
   SwordFsChunk found;
   EXPECT_TRUE(impl_->FindChunk(dst_ino, 0, &found).ok());
-  InodeID resolved = 0;
-  ASSERT_TRUE(impl_->Lookup(kRoot, "dst", &resolved, nullptr).ok());
-  EXPECT_EQ(resolved, src_ino);
+  SwordFsInode resolved;
+  ASSERT_TRUE(impl_->Lookup(kRoot, "dst", &resolved).ok());
+  EXPECT_EQ(resolved.ino, src_ino);
 }
 
 FIBER_TEST_F(MemMetaImplTest, LinkCancelsOrphanCandidate) {
   // A hard link that lands before the reclaim's transaction revives the
   // inode: preparation must not freeze anything, and the marker must be gone.
   SetContext(0, 0);
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
+  const InodeID f_ino = file.ino;
   ASSERT_TRUE(
       impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 16})
           .ok());
@@ -1196,9 +1156,9 @@ FIBER_TEST_F(MemMetaImplTest, LinkCancelsOrphanCandidate) {
   ASSERT_TRUE(impl_->Link(f_ino, kRoot, "revived", nullptr).ok());
 
   EXPECT_TRUE(OrphanCandidates().empty());
-  struct stat attr{};
-  ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
-  EXPECT_EQ(attr.st_nlink, 1);
+  SwordFsInode inode;
+  ASSERT_TRUE(impl_->GetInode(f_ino, &inode).ok());
+  EXPECT_EQ(inode.attr.nlink, 1U);
 
   std::optional<ReclaimWork> work;
   EXPECT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
@@ -1211,8 +1171,9 @@ FIBER_TEST_F(MemMetaImplTest, LinkCancelsOrphanCandidate) {
 
 FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFencesLink) {
   SetContext(0, 0);
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
+  const InodeID f_ino = file.ino;
 
   // Publish two chunks out of index order: the frozen work must be complete
   // and ordered, and every key must be the revisioned identity of the
@@ -1238,7 +1199,8 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFence
 
   // The live inode and its chunk metadata are gone, so no name and no
   // inode-by-number reference can reach the data again...
-  EXPECT_TRUE(impl_->GetAttr(f_ino, nullptr).IsNotFound());
+  SwordFsInode missing;
+  EXPECT_TRUE(impl_->GetInode(f_ino, &missing).IsNotFound());
   SwordFsChunk found;
   EXPECT_TRUE(impl_->FindChunk(f_ino, 0, &found).IsNotFound());
   // ... and a Link can no longer revive an inode whose objects are frozen.
@@ -1260,8 +1222,9 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFence
 
 FIBER_TEST_F(MemMetaImplTest, PrepareReclaimUsesCurrentRevisionAfterRewrite) {
   SetContext(0, 0);
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
+  const InodeID f_ino = file.ino;
   ASSERT_TRUE(
       impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
           .ok());
@@ -1285,8 +1248,9 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimUsesCurrentRevisionAfterRewrite) {
 
 FIBER_TEST_F(MemMetaImplTest, PrepareReclaimRejectsLinkedInode) {
   SetContext(0, 0);
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
+  const InodeID f_ino = file.ino;
   ASSERT_TRUE(
       impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 8})
           .ok());
@@ -1320,8 +1284,9 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentReclaimAndLinkAreAtomic) {
   std::atomic<int> failures{0};
 
   for (int round = 0; round < kRounds; ++round) {
-    InodeID f_ino = 0;
-    ASSERT_TRUE(CreateFile(kRoot, "race", 0644, &f_ino).ok());
+    SwordFsInode file;
+    ASSERT_TRUE(impl_->Create(kRoot, "race", 0644, &file).ok());
+    const InodeID f_ino = file.ino;
     ASSERT_TRUE(
         impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
             .ok());
@@ -1362,16 +1327,17 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentReclaimAndLinkAreAtomic) {
 
     if (linked) {
       // The revived inode must still own its data.
-      struct stat attr{};
-      ASSERT_TRUE(impl_->GetAttr(f_ino, &attr).ok());
-      EXPECT_EQ(attr.st_nlink, 1);
+      SwordFsInode inode;
+      ASSERT_TRUE(impl_->GetInode(f_ino, &inode).ok());
+      EXPECT_EQ(inode.attr.nlink, 1U);
       SwordFsChunk found;
       EXPECT_TRUE(impl_->FindChunk(f_ino, 0, &found).ok()) << "a revived inode must never lose its chunk metadata";
       revived.fetch_add(1, std::memory_order_relaxed);
       // Reset for the next round.
       EXPECT_TRUE(impl_->Unlink(kRoot, "revived").ok());
     } else {
-      EXPECT_TRUE(impl_->GetAttr(f_ino, nullptr).IsNotFound());
+      SwordFsInode missing;
+      EXPECT_TRUE(impl_->GetInode(f_ino, &missing).IsNotFound());
       reclaimed.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -1392,11 +1358,14 @@ FIBER_TEST_F(MemMetaImplTest, VisitorAndOutputArgumentsAreValidated) {
 
   EXPECT_EQ(impl_->VisitOrphanCandidates(swordfs::metadata::InodeVisitorFn{}).code(), Status::kInvalidArgument);
   EXPECT_EQ(impl_->VisitPendingReclaims(swordfs::metadata::ReclaimVisitorFn{}).code(), Status::kInvalidArgument);
-  EXPECT_EQ(impl_->VisitPendingDeletes(swordfs::metadata::PendingDeleteVisitorFn{}).code(), Status::kInvalidArgument);
+  bool has_more = false;
+  EXPECT_EQ(impl_->VisitPendingDeletesBatch(1, swordfs::metadata::PendingDeleteVisitorFn{}, &has_more).code(),
+            Status::kInvalidArgument);
 
   // A null frozen-work output is refused before anything is mutated.
-  InodeID f_ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "f", 0644, &f_ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
+  const InodeID f_ino = file.ino;
   ASSERT_TRUE(impl_->Unlink(kRoot, "f").ok());
   EXPECT_EQ(impl_->PrepareReclaim(f_ino, nullptr).code(), Status::kInvalidArgument);
   EXPECT_EQ(OrphanCandidates(), std::vector<InodeID>{f_ino});
@@ -1410,10 +1379,12 @@ FIBER_TEST_F(MemMetaImplTest, VisitorAbortStopsTheScanAndIsPropagated) {
   // walk and the caller sees the visitor's own status. The remaining candidate
   // stays published for the next reconciliation pass — an aborted scan must
   // never consume state.
-  InodeID first = 0;
-  InodeID second = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "a", 0644, &first).ok());
-  ASSERT_TRUE(CreateFile(kRoot, "b", 0644, &second).ok());
+  SwordFsInode first_file;
+  SwordFsInode second_file;
+  ASSERT_TRUE(impl_->Create(kRoot, "a", 0644, &first_file).ok());
+  ASSERT_TRUE(impl_->Create(kRoot, "b", 0644, &second_file).ok());
+  const InodeID first = first_file.ino;
+  const InodeID second = second_file.ino;
   ASSERT_TRUE(impl_->Unlink(kRoot, "a").ok());
   ASSERT_TRUE(impl_->Unlink(kRoot, "b").ok());
   ASSERT_EQ(OrphanCandidates(), (std::vector<InodeID>{first, second}));
@@ -1444,21 +1415,26 @@ FIBER_TEST_F(MemMetaImplTest, VisitorAbortStopsTheScanAndIsPropagated) {
   EXPECT_EQ(visited, (std::vector<InodeID>{second}));
 }
 
-FIBER_TEST_F(MemMetaImplTest, PendingDeleteVisitorAbortIsPropagated) {
+FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchVisitorAbortIsPropagated) {
   SetContext(0, 0);
 
-  InodeID ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "truncate-pending", 0644, &ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "truncate-pending", 0644, &file).ok());
+  const InodeID ino = file.ino;
   ASSERT_TRUE(
       impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
           .ok());
   ASSERT_TRUE(impl_->Truncate(ino, 0).ok());
 
   size_t visits = 0;
-  const auto status = impl_->VisitPendingDeletes([&](const swordfs::metadata::PendingDelete &) {
-    ++visits;
-    return Status::Busy("abort the pending delete scan");
-  });
+  bool has_more = false;
+  const auto status = impl_->VisitPendingDeletesBatch(
+      1,
+      [&](const swordfs::metadata::PendingDelete &) {
+        ++visits;
+        return Status::Busy("abort the pending delete scan");
+      },
+      &has_more);
   EXPECT_EQ(status.code(), Status::kBusy);
   EXPECT_EQ(status.message(), "abort the pending delete scan");
   EXPECT_EQ(visits, 1U);
@@ -1467,8 +1443,9 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteVisitorAbortIsPropagated) {
 FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchBoundsVisitsAndValidatesArguments) {
   SetContext(0, 0);
 
-  InodeID ino = 0;
-  ASSERT_TRUE(CreateFile(kRoot, "truncate-pending-batch", 0644, &ino).ok());
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "truncate-pending-batch", 0644, &file).ok());
+  const InodeID ino = file.ino;
   ASSERT_TRUE(
       impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
           .ok());
@@ -1513,4 +1490,36 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchBoundsVisitsAndValidatesArgument
                      1, [](const auto &) { return Status::OK(); }, nullptr)
                 .code(),
             Status::kInvalidArgument);
+}
+
+FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchMakesProgressWithoutQueueMutation) {
+  SetContext(0, 0);
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "truncate-pending-progress", 0644, &file).ok());
+  const InodeID ino = file.ino;
+  ASSERT_TRUE(
+      impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
+          .ok());
+  ASSERT_TRUE(impl_
+                  ->CommitChunk(ino, std::nullopt,
+                                SwordFsChunk{.index = 1, .start_offset = kChunkSize, .revision = 2, .size = 64})
+                  .ok());
+  ASSERT_TRUE(impl_->Truncate(ino, 0).ok());
+
+  std::vector<std::string> visited;
+  bool has_more = false;
+  auto visit_one = [&](const swordfs::metadata::PendingDelete &work) {
+    visited.push_back(work.chunk.key);
+    return Status::OK();
+  };
+
+  ASSERT_TRUE(impl_->VisitPendingDeletesBatch(1, visit_one, &has_more).ok());
+  ASSERT_TRUE(has_more);
+  ASSERT_EQ(visited.size(), 1U);
+
+  ASSERT_TRUE(impl_->VisitPendingDeletesBatch(1, visit_one, &has_more).ok());
+  EXPECT_FALSE(has_more);
+  ASSERT_EQ(visited.size(), 2U);
+  EXPECT_NE(visited[0], visited[1]);
 }

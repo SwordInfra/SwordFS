@@ -9,7 +9,6 @@
 #include <aws/s3/S3ClientConfiguration.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
 #include <aws/s3/model/GetObjectRequest.h>
-#include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/PutObjectRequest.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/io/IOBuf.h>
@@ -147,30 +146,6 @@ Status S3DataEngine::ParseBucketUrl() {
   }
   SWORDFS_LOG_INFO << "S3DataEngine: endpoint=" << endpoint_ << " bucket=" << bucket_;
   return Status::OK();
-}
-
-DataEngineLimits S3DataEngine::Limits() const {
-  DataEngineLimits limits;
-  limits.supports_multipart = false;
-  return limits;
-}
-
-bool S3DataEngine::Head(std::string_view key, size_t *size) {
-  return executor_->RunFromFiber([this, key, size] {
-    utils::ExpectInThreadDomain();
-    Aws::S3::Model::HeadObjectRequest req;
-    req.SetBucket(bucket_);
-    req.SetKey(ObjectKey(key));
-
-    auto outcome = client_->HeadObject(req);
-    if (!outcome.IsSuccess()) {
-      return false;
-    }
-    if (size) {
-      *size = static_cast<size_t>(outcome.GetResult().GetContentLength());
-    }
-    return true;
-  });
 }
 
 Status S3DataEngine::Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) {

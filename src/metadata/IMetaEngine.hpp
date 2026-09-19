@@ -47,7 +47,6 @@ class DirIterator {
 };
 
 using DirIteratorPtr = std::shared_ptr<DirIterator>;
-using ChunkVisitorFn = std::function<Status(const SwordFsChunk &)>;
 using InodeVisitorFn = std::function<Status(InodeID)>;
 using ReclaimVisitorFn = std::function<Status(const ReclaimWork &)>;
 using PendingDeleteVisitorFn = std::function<Status(const PendingDelete &)>;
@@ -178,55 +177,13 @@ class IMetaEngine {
   /// metadata lookup or PrepareReclaim call.
   virtual Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) = 0;
 
-  /// Visit immutable object identities registered as best-effort cleanup
-  /// candidates after rewrite/truncate publication. A candidate is not delete
-  /// authority: consumers must revalidate current authoritative metadata
-  /// before physical deletion. Persistent backends retain successfully
-  /// registered records until CompletePendingDelete() succeeds, but failure to
-  /// register every obsolete object is not part of file-data durability.
-  virtual Status VisitPendingDeletes(const PendingDeleteVisitorFn &visitor) = 0;
-
-  /// Visit a bounded batch of pending deletes. |max_items| is a hard
-  /// bound on visitor invocations for this call. |has_more| reports that the
-  /// backend already knows additional work remains in the current scan cycle;
-  /// it is not a snapshot guarantee against concurrently added records.
-  ///
-  /// Backends with incremental traversal should override this method so they
-  /// do not materialize the full pending-delete set merely to enforce the
-  /// visitor bound. The default keeps existing backends/mocks correct by
-  /// stopping an exhaustive VisitPendingDeletes() after |max_items| callbacks.
-  virtual Status VisitPendingDeletesBatch(size_t max_items, const PendingDeleteVisitorFn &visitor, bool *has_more) {
-    if (max_items == 0) {
-      return Status::InvalidArgument("pending delete batch size must be positive");
-    }
-    if (!visitor) {
-      return Status::InvalidArgument("pending delete visitor is null");
-    }
-    if (has_more == nullptr) {
-      return Status::InvalidArgument("pending delete has-more output is null");
-    }
-
-    *has_more = false;
-    size_t visited = 0;
-    bool stopped_at_limit = false;
-    auto status = VisitPendingDeletes([&](const PendingDelete &work) {
-      if (visited >= max_items) {
-        stopped_at_limit = true;
-        return Status::Busy("pending delete batch limit reached");
-      }
-      auto status = visitor(work);
-      if (!status.ok()) {
-        return status;
-      }
-      ++visited;
-      return Status::OK();
-    });
-    if (stopped_at_limit) {
-      *has_more = true;
-      return Status::OK();
-    }
-    return status;
-  }
+  /// Visit a bounded batch of immutable object identities registered as
+  /// best-effort cleanup candidates after rewrite/truncate publication.
+  /// A candidate is not delete authority: consumers must revalidate current
+  /// authoritative metadata before physical deletion. |max_items| is a hard
+  /// bound on visitor invocations; |has_more| reports that additional work is
+  /// already known to remain in the current scan cycle.
+  virtual Status VisitPendingDeletesBatch(size_t max_items, const PendingDeleteVisitorFn &visitor, bool *has_more) = 0;
 
   /// Remove one pending-delete key after its object has been deleted.
   /// Idempotent: a missing key is not an error.
@@ -238,12 +195,6 @@ class IMetaEngine {
   /// remains authoritative. Allocated-but-unpublished revisions may be skipped
   /// after failures.
   virtual Status AllocateChunkRevision(ChunkRevision *revision) = 0;
-
-  /// Visit the chunk metadata currently registered for |ino| without
-  /// materializing the complete chunk map in the caller. Backends should
-  /// stream or batch the enumeration when their storage API supports it.
-  /// Returns immediately if |visitor| returns an error.
-  virtual Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) = 0;
 
   /// Open a directory and create its per-open iterator. Implementations may
   /// share backend directory-entry prefetch/cache state between iterators.

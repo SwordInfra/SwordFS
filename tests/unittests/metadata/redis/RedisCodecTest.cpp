@@ -118,14 +118,14 @@ TEST(MetadataTypesTest, ChunkRejectsInvalidRevision) {
   EXPECT_TRUE(parsed.ParseFrom(encoded).IsMalformed());
 }
 
-TEST(MetadataTypesTest, ChunkRejectsPreviousSchemaVersion) {
+TEST(MetadataTypesTest, ChunkRejectsUnexpectedSchemaVersion) {
   BufEncoder enc;
   enc.String("SWFSMETA");
-  enc.U32(1);  // Previous schema version intentionally unsupported.
+  enc.U32(999);
   enc.U32(static_cast<uint32_t>(RecordType::kChunk));
   enc.U32(3);
   enc.U64(4096);
-  enc.String("legacy/object/key");
+  enc.String("invalid/object/key");
   enc.U64(1024);
 
   std::string encoded;

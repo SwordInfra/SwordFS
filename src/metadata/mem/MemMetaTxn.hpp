@@ -190,9 +190,6 @@ class MemMetaTxn {
   Status ListPendingDeletes(std::vector<PendingDelete> &out);
   Status CompletePendingDelete(std::string_view key);
 
-  // Snapshot every chunk registered for |ino|, ascending chunk index.
-  Status ListChunks(InodeID ino, std::vector<SwordFsChunk> *out);
-
  private:
   friend class MemMetaStore;
 

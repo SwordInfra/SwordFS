@@ -141,8 +141,8 @@ changing this publication protocol.
 `pending_deletes` stores maintenance candidates, not permission to delete.
 `Reclaimer` always reads current authoritative chunk metadata before physical
 deletion. If the same immutable key is still live, it skips that candidate.
-This rule protects both current post-outcome registrations and legacy records
-that may have been staged before a metadata transition.
+This rule prevents stale maintenance state from deleting an object that is
+currently authoritative; queue membership alone never grants delete authority.
 
 ## Why there is no post-upload `HEAD`
 

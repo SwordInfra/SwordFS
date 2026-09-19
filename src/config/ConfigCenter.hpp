@@ -84,13 +84,6 @@ class ConfigCenter {
   void set_meta_url(const std::string &url) {
     meta_url_ = url;
   }
-  /// Returns the data storage type (e.g. "s3", empty = none).
-  const std::string &storage_backend() const {
-    return storage_backend_;
-  }
-  void set_storage_backend(const std::string &b) {
-    storage_backend_ = b;
-  }
   /// Returns the bucket URL (e.g. "s3://endpoint/bucket/prefix").
   const std::string &bucket_url() const {
     return bucket_url_;
@@ -153,10 +146,9 @@ class ConfigCenter {
   std::string mountpoint_;
 
   // Storage engine configuration (URL format)
-  std::string meta_url_;         // --meta
-  std::string storage_backend_;  // derived from --bucket scheme
-  std::string bucket_url_;       // --bucket
-  std::string storage_region_;   // --storage-region
+  std::string meta_url_;        // --meta
+  std::string bucket_url_;      // --bucket
+  std::string storage_region_;  // --storage-region
 
   // Volume configuration (format subcommand)
   std::string volume_;                       // --volume (required for format)

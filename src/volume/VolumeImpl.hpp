@@ -4,7 +4,7 @@
 // VolumeImpl — volume lifecycle logic (format, mount).
 //
 // Owns a SwordFsVolume, the metadata engine, and the data engine.
-// VfsImpl binds to a VolumeImpl to access all volume-level resources.
+// Runtime components access the mounted volume through the singleton.
 
 #pragma once
 

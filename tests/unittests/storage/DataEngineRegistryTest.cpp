@@ -16,14 +16,6 @@ class TestDataEngine : public swordfs::storage::IDataEngine {
   swordfs::utils::Status Initialize() override {
     return swordfs::utils::Status::OK();
   }
-  swordfs::storage::DataEngineLimits Limits() const override {
-    return {};
-  }
-
-  bool Head(std::string_view, size_t *) override {
-    return false;
-  }
-
   swordfs::utils::Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
     return swordfs::utils::Status::OK();
   }

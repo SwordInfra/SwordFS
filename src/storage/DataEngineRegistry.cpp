@@ -26,7 +26,7 @@ utils::Status DataEngineRegistry::CreateInstance(std::string_view name, std::uni
   }
   const auto it = factories_.find(std::string(name));
   if (it == factories_.end()) {
-    return utils::Status::NotSupported("unknown data storage scheme: " + std::string(name));
+    return utils::Status::NotSupported("unknown data storage engine: " + std::string(name));
   }
   return it->second(out);
 }

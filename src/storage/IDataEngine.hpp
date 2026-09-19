@@ -31,12 +31,6 @@ using Status = swordfs::utils::Status;
 
 namespace swordfs::storage {
 
-/// Engine capability flags.
-struct DataEngineLimits {
-  /// Whether the engine supports multipart uploads.
-  bool supports_multipart = false;
-};
-
 /// Abstract data-plane engine.
 ///
 /// Chunks are addressed by opaque string keys derived by the chunk/data-layout
@@ -44,7 +38,7 @@ struct DataEngineLimits {
 /// no knowledge of inodes, revisions, or other file-system concepts.
 ///
 /// Execution-domain contract: construction/destruction and Initialize() are
-/// POSIX-thread lifecycle operations; Head/Put/Get/Delete are fiber-domain
+/// POSIX-thread lifecycle operations; Put/Get/Delete are fiber-domain
 /// runtime operations. Implementations MUST dispatch blocking I/O (e.g. SDK
 /// calls to object storage) to a background thread pool and suspend the
 /// calling fiber rather than blocking the EventBase thread. See S3DataEngine
@@ -56,15 +50,6 @@ class IDataEngine {
 
   /// Initialize the data backend and its runtime resources.
   virtual Status Initialize() = 0;
-
-  /// Return the engine's capability limits.
-  virtual DataEngineLimits Limits() const = 0;
-
-  /// Check whether a chunk exists and return its size.
-  /// @param key  chunk key.
-  /// @param size receives the object size if it exists (may be null).
-  /// @return true if the chunk exists.
-  virtual bool Head(std::string_view key, size_t *size) = 0;
 
   /// Write a complete immutable chunk object to the storage backend. Takes
   /// ownership of |data|. An OK result is the data-plane publication barrier:

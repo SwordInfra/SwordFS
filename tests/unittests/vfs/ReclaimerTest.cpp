@@ -53,19 +53,6 @@ class RecordingDataEngine : public swordfs::storage::IDataEngine {
   Status Initialize() override {
     return Status::OK();
   }
-  swordfs::storage::DataEngineLimits Limits() const override {
-    return {};
-  }
-  bool Head(std::string_view key, size_t *size) override {
-    auto it = objects_.find(std::string(key));
-    if (it == objects_.end()) {
-      return false;
-    }
-    if (size != nullptr) {
-      *size = it->second.size();
-    }
-    return true;
-  }
   Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) override {
     objects_[std::string(key)] = std::string(reinterpret_cast<const char *>(data->data()), data->length());
     return Status::OK();
@@ -105,7 +92,12 @@ class StagedIntentMetaEngine : public MemMetaImpl {
     current_ = pending_->chunk.descriptor;
   }
 
-  Status VisitPendingDeletes(const metadata::PendingDeleteVisitorFn &visitor) override {
+  Status VisitPendingDeletesBatch(size_t max_items, const metadata::PendingDeleteVisitorFn &visitor,
+                                  bool *has_more) override {
+    if (max_items == 0 || !visitor || has_more == nullptr) {
+      return Status::InvalidArgument("invalid pending delete batch request");
+    }
+    *has_more = false;
     if (!pending_.has_value()) {
       return Status::OK();
     }
@@ -222,11 +214,16 @@ class ReclaimerTest : public ::testing::Test {
 
   std::vector<std::string> PendingDeletes() {
     std::vector<std::string> out;
-    auto status = meta_->VisitPendingDeletes([&out](const metadata::PendingDelete &work) {
-      out.push_back(work.chunk.key);
-      return Status::OK();
-    });
+    bool has_more = false;
+    auto status = meta_->VisitPendingDeletesBatch(
+        1024,
+        [&out](const metadata::PendingDelete &work) {
+          out.push_back(work.chunk.key);
+          return Status::OK();
+        },
+        &has_more);
     EXPECT_TRUE(status.ok()) << status.message();
+    EXPECT_FALSE(has_more);
     return out;
   }
 
@@ -681,11 +678,12 @@ FIBER_TEST_F(ReclaimerTest, ReconcileCountsEveryFailedCleanupItem) {
 
 class FailingScanMetaEngine : public MemMetaImpl {
  public:
-  Status VisitPendingDeletes(const swordfs::metadata::PendingDeleteVisitorFn &visitor) override {
+  Status VisitPendingDeletesBatch(size_t max_items, const swordfs::metadata::PendingDeleteVisitorFn &visitor,
+                                  bool *has_more) override {
     if (!pending_delete_scan_status.ok()) {
       return pending_delete_scan_status;
     }
-    return MemMetaImpl::VisitPendingDeletes(visitor);
+    return MemMetaImpl::VisitPendingDeletesBatch(max_items, visitor, has_more);
   }
 
   Status VisitOrphanCandidates(const swordfs::metadata::InodeVisitorFn &visitor) override {

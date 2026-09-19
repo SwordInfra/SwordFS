@@ -3,6 +3,8 @@
 
 #include "storage/StorageUrl.hpp"
 
+#include <cctype>
+
 namespace swordfs::utils {
 
 bool StorageUrl::Parse(std::string_view url, StorageUrl *out) {
@@ -17,6 +19,9 @@ bool StorageUrl::Parse(std::string_view url, StorageUrl *out) {
   }
 
   out->scheme = url.substr(0, scheme_end);
+  for (char &c : out->scheme) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
   auto rest = url.substr(scheme_end + 3);
 
   // Find path separator
@@ -35,14 +40,6 @@ bool StorageUrl::Parse(std::string_view url, StorageUrl *out) {
   }
 
   return true;
-}
-
-std::string StorageUrl::ToString() const {
-  std::string result = scheme + "://" + host;
-  if (!path.empty()) {
-    result += path;
-  }
-  return result;
 }
 
 }  // namespace swordfs::utils

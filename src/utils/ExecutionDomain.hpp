@@ -19,8 +19,8 @@ enum class ExecutionDomain {
 // SwordFS intentionally has only two synchronization domains. Code actively
 // running as a Folly fiber belongs to kFiber; every other execution context is
 // a normal POSIX-thread context and belongs to kThread. Tests for fiber-only
-// code must therefore execute inside a real FiberManager rather than relying on
-// an unclassified compatibility path.
+// code must therefore execute inside a real FiberManager rather than an
+// unclassified third execution mode.
 inline ExecutionDomain CurrentExecutionDomain() {
   return folly::fibers::onFiber() ? ExecutionDomain::kFiber : ExecutionDomain::kThread;
 }

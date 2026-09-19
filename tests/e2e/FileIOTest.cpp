@@ -247,10 +247,9 @@ TEST_F(FileIOTest, TruncateShrinkThenExtendClearsStaleChunkData) {
 //
 // POSIX guarantees that a file that has been unlinked can still be
 // read/written through a pre-existing fd, and that its data only goes
-// away once the last fd is closed. After this refactor the metadata
-// engine defers inode deletion via the runtime `OpenHandleTracker`
-// (see `OpenHandleTracker.hpp`); this end-to-end test verifies the
-// contract from the filesystem-client perspective.
+// away once the last fd is closed. SwordFS records the orphan durably while
+// the per-inode runtime handle fences reclaim until local opens are gone; this
+// test verifies that contract from the filesystem-client perspective.
 
 TEST_F(FileIOTest, UnlinkWhileOpenKeepsFileReadable) {
   const std::string name = "open_unlink.txt";

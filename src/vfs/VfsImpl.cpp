@@ -45,10 +45,6 @@ using swordfs::volume::VolumeImpl;
 
 namespace swordfs::vfs {
 
-volume::VolumeImpl *VfsImpl::Volume() {
-  return &volume::VolumeImpl::Instance();
-}
-
 utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name, fuse_entry_param *entry) {
   SwordFsInode child;
   Status status = VolumeImpl::Instance().meta_engine()->Lookup(parent, name, &child);

@@ -16,7 +16,7 @@ namespace {
 
 constexpr size_t kInitialBufferSize = 1024;
 constexpr std::string_view kMagic = "SWFSMETA";
-constexpr uint32_t kSchemaVersion = 2;
+constexpr uint32_t kSchemaVersion = 1;
 
 }  // namespace
 

@@ -205,8 +205,8 @@ identity, then checks current authoritative chunk metadata. If the same
 immutable object key is still live, the candidate is left untouched. Otherwise
 the reclaimer deletes the object idempotently and removes the field only after
 success. Retries therefore use frozen identities, never keys reconstructed
-from a newer live descriptor. This authoritative revalidation also keeps
-legacy pre-staged records safe after upgrade.
+from a newer live descriptor. This authoritative revalidation prevents stale
+maintenance candidates from deleting an object that is currently live.
 
 Reconciliation does not snapshot the complete Hash. Redis metadata keeps a
 process-local HSCAN cursor plus at most one decoded HSCAN response and exposes
@@ -249,8 +249,7 @@ position, not a Redis cursor.
 
 Enumeration is not a snapshot across concurrent mutations. The iterator
 retains shared ownership of backend context so its client/executor resources
-remain available for its lifetime. Chunk enumeration also hides scan cursors
-and does not promise sorted output.
+remain available for its lifetime.
 
 ## Current boundaries
 
