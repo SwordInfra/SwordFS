@@ -552,9 +552,9 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
     }
     if (current_matches_expected || (replacement_already_published && expected.has_value())) {
       // Memory transactions are one critical section, so publishing this
-      // immutable cleanup identity and replacing/replaying the descriptor are
-      // atomic. Redis mirrors the same ownership rule with an additive
-      // preparation transaction before its destructive publication transaction.
+      // cleanup candidate and replacing/replaying the descriptor are atomic.
+      // Persistent backends may register the candidate after a known metadata
+      // outcome because cleanup completeness is not publication correctness.
       queue_pending_delete(*expected);
     }
   } else if (expected.has_value()) {
@@ -603,9 +603,9 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
   for (auto cit = cmap.begin(); cit != cmap.end();) {
     auto &chunk = cit->second;
     if (chunk.start_offset >= new_size) {
-      // Publish the immutable object identity before dropping the descriptor.
-      // The memory backend's transaction lock makes the two state changes
-      // atomic, mirroring the persistent backend's durable handoff.
+      // The memory backend can record cleanup and drop the descriptor in the
+      // same critical section. Persistent backends may register cleanup after
+      // the authoritative truncate transaction has a known successful result.
       const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
       store_->pending_deletes_.insert_or_assign(
           object_key, PendingDelete{.ino = ino, .chunk = ReclaimChunk{.descriptor = chunk, .key = object_key}});

@@ -110,19 +110,6 @@ void Chunk::Truncate(size_t size) {
   }
 }
 
-std::vector<std::string> Chunk::ObjectKeysForCleanup() const {
-  std::vector<std::string> keys;
-  if (published_chunk_) {
-    keys.push_back(FormatChunkObjectKey(ino_, index_, published_chunk_->revision));
-  }
-  if (pending_revision_ != metadata::kInvalidChunkRevision) {
-    // Allocated revisions are globally unique within the volume, so a pending
-    // revision can never name the same object as the published revision.
-    keys.push_back(FormatChunkObjectKey(ino_, index_, pending_revision_));
-  }
-  return keys;
-}
-
 utils::Status Chunk::Flush() {
   if (IsFlushed() || !wb_ || wb_->size() == 0) {
     return utils::Status::OK();
@@ -142,25 +129,13 @@ utils::Status Chunk::Flush() {
   const auto chunk_key = FormatChunkObjectKey(ino_, index_, chunk_meta.revision);
   const auto expected = published_chunk_;
 
-  auto cleanup_pending_object = [&] {
-    // CommitChunk has already durably classified this revision as a definite
-    // loser before this helper is called. Relinquish it locally before any
-    // eager delete attempt: a failed Delete/ack leaves metadata-owned cleanup
-    // behind, and a later Flush must allocate a fresh revision rather than
-    // republishing an object that Reclaimer is now allowed to delete.
+  auto relinquish_rejected_revision = [&] {
+    // A known publication rejection makes this uploaded immutable revision
+    // terminal. Metadata may have registered it for best-effort cleanup, so a
+    // later Flush must allocate a fresh revision rather than republishing a key
+    // that the background Reclaimer may delete.
     pending_revision_ = metadata::kInvalidChunkRevision;
     pending_object_uploaded_ = false;
-    auto delete_status = data_->Delete(chunk_key);
-    if (!delete_status.ok()) {
-      SWORDFS_LOG_ERROR << "Chunk::Flush conflict cleanup FAILED: key=" << chunk_key << " — "
-                        << delete_status.message();
-      return;
-    }
-    delete_status = meta_->CompletePendingDelete(chunk_key);
-    if (!delete_status.ok()) {
-      SWORDFS_LOG_ERROR << "Chunk::Flush conflict cleanup ack FAILED: key=" << chunk_key << " — "
-                        << delete_status.message();
-    }
   };
 
   if (retrying) {
@@ -183,10 +158,10 @@ utils::Status Chunk::Flush() {
       const bool current_matches_expected = expected.has_value() && current == *expected;
       if (!current_matches_expected) {
         if (pending_object_uploaded_) {
-          // Re-enter CommitChunk only to establish metadata-owned cleanup of
-          // this already-uploaded loser. If the authoritative state changed
-          // again and the CAS can now complete, the object is known durable so
-          // publication is still safe.
+          // Re-enter CommitChunk so metadata can classify the already-uploaded
+          // revision against the current authoritative state. If the CAS can
+          // still complete, the object is known durable so publication remains
+          // safe; a known rejection makes the revision terminal locally.
           status = meta_->CommitChunk(ino_, expected, chunk_meta);
           if (status.ok()) {
             CompletePublication(chunk_meta);
@@ -198,21 +173,21 @@ utils::Status Chunk::Flush() {
         }
         if ((status.IsAlreadyExists() || status.IsNotFound()) && current.revision != chunk_meta.revision &&
             pending_object_uploaded_) {
-          cleanup_pending_object();
+          relinquish_rejected_revision();
         }
         return status;
       }
     } else if (status.IsNotFound() && expected.has_value() && pending_object_uploaded_) {
       // The expected descriptor disappeared after an earlier successful Put.
-      // Route the definite rejection through CommitChunk so metadata durably
-      // owns cleanup before this process tries the eager delete.
+      // Route the definite rejection through CommitChunk so the backend can
+      // best-effort register cleanup after it confirms the publication result.
       status = meta_->CommitChunk(ino_, expected, chunk_meta);
       if (status.ok()) {
         CompletePublication(chunk_meta);
         return utils::Status::OK();
       }
       if (status.IsAlreadyExists() || status.IsNotFound()) {
-        cleanup_pending_object();
+        relinquish_rejected_revision();
       }
       return status;
     } else if (!status.IsNotFound() || expected.has_value()) {
@@ -232,7 +207,7 @@ utils::Status Chunk::Flush() {
   status = meta_->CommitChunk(ino_, expected, chunk_meta);
   if (!status.ok()) {
     if (status.IsAlreadyExists() || status.IsNotFound()) {
-      cleanup_pending_object();
+      relinquish_rejected_revision();
     }
     SWORDFS_LOG_ERROR << "Chunk::Flush CommitChunk FAILED: ino=" << ino_ << " chunk=" << index_
                       << " size=" << chunk_meta.size << " — " << status.message();
@@ -301,30 +276,11 @@ utils::Status Chunk::HydrateForWrite() {
 }
 
 void Chunk::CompletePublication(const metadata::SwordFsChunk &chunk) {
-  std::optional<std::string> old_key;
-  if (published_chunk_) {
-    old_key = FormatChunkObjectKey(ino_, index_, published_chunk_->revision);
-  }
-
   published_chunk_ = chunk;
   pending_revision_ = metadata::kInvalidChunkRevision;
   pending_object_uploaded_ = false;
   state_ = State::kFlushed;
   wb_.reset();
-
-  if (old_key) {
-    auto status = data_->Delete(*old_key);
-    if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "Chunk::CompletePublication old-object cleanup FAILED: key=" << *old_key << " — "
-                        << status.message();
-      return;
-    }
-    status = meta_->CompletePendingDelete(*old_key);
-    if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "Chunk::CompletePublication old-object cleanup ack FAILED: key=" << *old_key << " — "
-                        << status.message();
-    }
-  }
 }
 
 }  // namespace swordfs::chunk

@@ -89,13 +89,10 @@ class RedisMetaOps {
   // Stream every field of the inode's chunk hash in HSCAN batches.
   utils::Status ScanChunkFields(InodeID ino, const ChunkFieldVisitorFn &visitor);
 
-  // Stage durable, non-destructive object-delete intents before a Redis size
-  // shrink is allowed to detach chunk metadata.
-  utils::Status PrepareTruncateDeletes(InodeID ino, uint64_t size);
-
-  // Before a rewrite may replace the authoritative descriptor, persist the
-  // superseded immutable revision as durable pending-delete work.
-  utils::Status PrepareChunkRewriteDelete(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement);
+  // Register cleanup candidates after a metadata mutation has a known
+  // outcome. Failure is intentionally non-fatal: it may leak obsolete data,
+  // but it must not invalidate an otherwise successful metadata operation.
+  void RegisterPendingDeletesBestEffort(InodeID ino, const std::vector<SwordFsChunk> &chunks, std::string_view reason);
 
   // Snapshot the inode ids published as orphan candidates.
   utils::Status CollectOrphanCandidates(std::vector<InodeID> &out);
@@ -104,7 +101,7 @@ class RedisMetaOps {
   // before exposing it to the replay worker.
   utils::Status CollectPendingReclaims(std::vector<ReclaimWork> &out);
 
-  // Snapshot immutable object-delete intents produced by truncate or chunk
+  // Snapshot immutable object-delete candidates produced by truncate or chunk
   // publication cleanup.
   utils::Status CollectPendingDeletes(std::vector<PendingDelete> &out);
 

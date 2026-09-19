@@ -12,11 +12,11 @@ the publication protocol.
    leaves the old published descriptor authoritative until replacement commits.
 2. `IDataEngine::Put()` returning `OK` means the complete immutable object is
    atomically readable under its revision-qualified key.
-3. `IMetaEngine::CommitChunk()` is both the reader-visibility barrier and the
-   durable cleanup handoff for known rewrite outcomes. A descriptor may be
-   committed only after its object upload succeeds; before a rewrite makes the
-   old descriptor obsolete, metadata must durably retain that old immutable
-   identity for background deletion.
+3. `IMetaEngine::CommitChunk()` is the reader-visibility barrier. A descriptor
+   may be committed only after its object upload succeeds. Cleanup of an old
+   or definitely rejected immutable revision is a separate best-effort
+   maintenance action after a **known** publication outcome; cleanup
+   completeness is not part of publication correctness.
 4. A bounded successful `Chunk::Read()` returns exactly the requested bytes.
    It validates the bytes appended by `IDataEngine::Get()`; short data is an
    I/O error, never a successful chunk read.
@@ -69,6 +69,20 @@ the chunk flushed with its previous descriptor. A definite publication
 conflict leaves the local chunk sealed and returns an error; there is no
 automatic merge or transition back to writing.
 
+## Persistence acknowledgement
+
+An ordinary successful `write(2)` only copies bytes into the local `WriteBuf`.
+It does not acknowledge persistence. The implemented persistence boundary is a
+successful flush/fsync/final-close flush: each relevant dirty chunk has a
+successful object `Put` and a known-success `CommitChunk` result. `O_SYNC` and
+`O_DSYNC` write-through are not currently implemented.
+
+This is an application-level ordering contract between SwordFS and its
+external engines, not an extra storage barrier. Redis/object-store
+acknowledgements are only as durable as those services are configured to be.
+Pending-delete registration and physical garbage collection are outside this
+acknowledgement.
+
 ## Flush and retry steps
 
 `FileReadWriter` holds its exclusive operation lock while flushing a snapshot
@@ -80,32 +94,30 @@ tries the remaining chunks after a failure and returns its first error.
 3. On retry, read the authoritative descriptor before uploading again:
    - If it equals the replacement, replay `CommitChunk` idempotently and finish.
    - If it still equals the old expectation, continue the upload/publication.
-   - If a different descriptor won, establish durable pending-delete ownership
-     for the already-uploaded losing revision, then return conflict; foreground
-     deletion is only an eager optimization.
+   - If a different descriptor won and the pending object was already uploaded,
+     replay `CommitChunk` so metadata can establish a **known** outcome. A
+     known rejection makes that revision terminal locally and may best-effort
+     register it for background cleanup.
    - A missing descriptor is valid for first publication; it is an error when
      a rewrite expected an existing descriptor. Other lookup errors propagate.
 4. Upload the complete buffer under the pending revision's object key.
 5. CAS-publish the replacement using the old descriptor, or absence for a new
-   chunk, as the expectation. Redis rewrite publication first commits the old
-   immutable identity in an additive-only pending-delete transaction, then the
-   destructive publication transaction revalidates that intent before
-   replacing the descriptor. An ambiguous failure retains sealed state.
+   chunk, as the expectation. An ambiguous failure retains the sealed state,
+   pending revision, and knowledge that the object upload succeeded.
 6. On success, retain the new descriptor, clear the pending revision, release
-   the write buffer, and enter `kFlushed`. Eagerly delete the old object when
-   possible and acknowledge its pending-delete record only after deletion
-   succeeds.
+   the write buffer, and enter `kFlushed`. Metadata best-effort registers the
+   superseded old revision for `Reclaimer` cleanup and the VFS wakes the
+   background worker. The producer performs no physical object delete.
 
-Once metadata has durably classified an uploaded revision as a definite loser,
-that revision is terminal for the local `Chunk`: it must be relinquished even
-when eager object deletion fails. A later retry allocates a fresh revision.
-Otherwise an initial-publication retry could republish an immutable key that is
-already present in `pending_deletes` and is therefore concurrently eligible for
-background deletion.
+Once metadata has **definitely rejected** an uploaded revision, that revision
+is terminal for the local `Chunk`: it is relinquished and a later retry
+allocates a fresh revision. Cleanup registration is best effort, but if it did
+succeed the background Reclaimer may already be eligible to delete that key;
+reusing the revision would therefore violate immutable-key safety.
 
-`CommitChunk` is the visibility boundary. Cleanup failure after successful
-publication does not revert that publication because the obsolete immutable
-identity is already durable metadata-owned work. Local runtime state provides
+`CommitChunk` is the visibility boundary. Cleanup registration/deletion failure
+after successful publication does not revert that publication; at worst the
+obsolete immutable object leaks. Local runtime state provides ambiguous-outcome
 retry information only while the process retains the chunk.
 
 ## Failure and crash windows
@@ -113,15 +125,24 @@ retry information only while the process retains the chunk.
 | Failure point | Persistent result | Reader-visible result |
 | --- | --- | --- |
 | Before/during failed `Put` | No object is guaranteed; no metadata commit is attempted | The new chunk is not visible |
-| After successful `Put`, before the first `CommitChunk` metadata handoff | A complete but unreachable object may remain | The new chunk is not visible |
-| `CommitChunk` returns a definite conflict / missing expected descriptor | The losing revision is durably queued for deletion before the logical error is exposed | The winning descriptor remains authoritative |
+| After successful `Put`, before a known `CommitChunk` result | A complete object may be live or unreachable; a crash can leave garbage | Only an actually committed descriptor is visible |
+| `CommitChunk` returns a definite conflict / missing expected descriptor | The losing revision is terminal locally and best-effort registered for cleanup; registration failure may leak it | The winning descriptor remains authoritative |
 | `CommitChunk` result is ambiguous | Retry resolves the authoritative descriptor before another publication attempt | A committed matching descriptor can be completed idempotently |
-| After successful rewrite `CommitChunk` | Replacement is authoritative; superseded revision is durable pending-delete work | The replacement chunk is readable |
+| After successful rewrite `CommitChunk` | Replacement is authoritative; superseded revision is best-effort registered for cleanup | The replacement chunk is readable |
 
-The remaining object-only crash window before any `CommitChunk` metadata
-handoff requires a publication-intent/fencing lifecycle and is tracked by
-GitHub issue #186. It does not weaken the visibility invariant because no
-metadata descriptor references that object.
+The object-only crash windows are accepted under the current product contract:
+they may leak storage but do not weaken the visibility invariant because
+authoritative metadata never points to an object whose `Put` was not known to
+have succeeded. A future inventory/sweeper may reclaim such residue without
+changing this publication protocol.
+
+## Cleanup authority
+
+`pending_deletes` stores maintenance candidates, not permission to delete.
+`Reclaimer` always reads current authoritative chunk metadata before physical
+deletion. If the same immutable key is still live, it skips that candidate.
+This rule protects both current post-outcome registrations and legacy records
+that may have been staged before a metadata transition.
 
 ## Why there is no post-upload `HEAD`
 

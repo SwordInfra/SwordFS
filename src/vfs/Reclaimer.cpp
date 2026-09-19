@@ -93,12 +93,10 @@ utils::Status Reclaimer::DeletePendingObject(const metadata::PendingDelete &work
   auto *meta = volume::VolumeImpl::Instance().meta_engine();
   auto *data = volume::VolumeImpl::Instance().data_engine();
 
-  // Truncate and rewrite publication can publish durable delete intent before
-  // the transaction that makes an immutable object obsolete. A crash or
-  // partial failure may therefore leave a valid intent whose object is still
-  // authoritative. Do not delete until the current descriptor no longer names
-  // the same immutable object key. Stale intents are harmless and remain
-  // available for a later pass if the metadata transition eventually succeeds.
+  // PendingDelete is only a cleanup candidate, never delete authority. Legacy
+  // versions may also have staged candidates before the metadata transition.
+  // Do not delete until current authoritative metadata no longer names the
+  // exact immutable object key. Stale/live candidates are harmless.
   metadata::SwordFsChunk current;
   auto status = meta->FindChunk(work.ino, work.chunk.descriptor.index, &current);
   if (status.ok()) {
@@ -129,10 +127,9 @@ utils::Status Reclaimer::Reconcile() {
 
   size_t failures = 0;
 
-  // Redis may publish delete intent before truncate descriptor detach or
-  // rewrite replacement. DeletePendingObject therefore rechecks whether that
-  // exact immutable key is still authoritative and treats a live intent as a
-  // safe no-op for this pass.
+  // DeletePendingObject always rechecks whether the exact immutable key is
+  // still authoritative. This is the deletion safety boundary regardless of
+  // when or by which backend version the cleanup candidate was registered.
   bool has_more_pending_deletes = false;
   auto status = meta->VisitPendingDeletesBatch(
       kPendingDeleteBatchSize,

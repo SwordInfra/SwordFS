@@ -21,8 +21,8 @@ namespace swordfs::metadata {
 /// published for the inode, plus the immutable object key derived from it.
 ///
 /// Delayed deletion must use |key| (equivalently the descriptor's revision)
-/// verbatim. Rebuilding a key from live inode/index state at delete time is
-/// exactly the race these durable cleanup records exist to close.
+/// verbatim. Rebuilding a key from live inode/index state at delete time would
+/// make cleanup vulnerable to deleting a newer immutable revision.
 struct ReclaimChunk {
   SwordFsChunk descriptor;
   std::string key;
@@ -46,15 +46,15 @@ struct ReclaimWork {
   utils::Status ParseFrom(std::string_view data);
 };
 
-/// One immutable object with durable cleanup intent. The intent may be staged
-/// while the same object is still authoritative (for example, before truncate
-/// detach or rewrite replacement); Reclaimer must re-check live metadata before
-/// physical deletion. Producers also include definite publication rejection,
-/// where the losing uploaded revision is already known to be unreachable.
+/// One immutable object registered for best-effort background cleanup. Queue
+/// membership is not delete authority: Reclaimer must re-check live metadata
+/// before physical deletion. Legacy records may have been staged while the
+/// same object was still authoritative, and current producers may register
+/// superseded or definitely rejected immutable revisions.
 ///
-/// The Redis Hash field is also |chunk.key|; persisting the full frozen
-/// identity as the value lets recovery validate the field/key/descriptor
-/// relationship before it is allowed to delete anything.
+/// The Redis Hash field is also |chunk.key|; persisting the full immutable
+/// identity lets replay validate the field/key/descriptor relationship before
+/// it is allowed to delete anything.
 struct PendingDelete {
   InodeID ino = 0;
   ReclaimChunk chunk;

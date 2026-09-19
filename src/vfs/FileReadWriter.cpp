@@ -13,7 +13,6 @@
 
 #include "chunk/Chunk.hpp"
 #include "metadata/IMetaEngine.hpp"
-#include "storage/IDataEngine.hpp"
 #include "utils/Logging.hpp"
 #include "vfs/Reclaimer.hpp"
 #include "volume/VolumeImpl.hpp"
@@ -121,16 +120,12 @@ std::vector<std::shared_ptr<chunk::Chunk>> FileChunkManager::GetFlushable() {
   return flushable;
 }
 
-void FileChunkManager::TruncateToSize(size_t size, size_t chunk_size, std::vector<std::string> *dropped_keys) {
+void FileChunkManager::TruncateToSize(size_t size, size_t chunk_size) {
   std::lock_guard<utils::FiberMutex> lock(mutex_);
   const auto boundary_idx = static_cast<metadata::ChunkIndex>(size / chunk_size);
   const size_t boundary_size = size % chunk_size;
   for (auto it = chunks_.begin(); it != chunks_.end();) {
     if (it->first > boundary_idx || (it->first == boundary_idx && boundary_size == 0)) {
-      if (dropped_keys) {
-        auto keys = it->second->ObjectKeysForCleanup();
-        dropped_keys->insert(dropped_keys->end(), keys.begin(), keys.end());
-      }
       it = chunks_.erase(it);
     } else if (it->first == boundary_idx) {
       it->second->Truncate(boundary_size);
@@ -149,7 +144,6 @@ FileReadWriter::FileReadWriter(InodeID ino)
     : ino_(ino),
       chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
       meta_(volume::VolumeImpl::Instance().meta_engine()),
-      data_(volume::VolumeImpl::Instance().data_engine()),
       chunks_(ino) {
 }
 
@@ -259,7 +253,8 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
 utils::Status FileReadWriter::Flush() {
   std::lock_guard<utils::FiberRWMutex> operation_lock(operation_mutex_);
   utils::Status first_error;
-  for (const auto &c : chunks_.GetFlushable()) {
+  auto flushable = chunks_.GetFlushable();
+  for (const auto &c : flushable) {
     auto idx = c->index();
     auto status = c->Flush();
     if (!status.ok()) {
@@ -274,6 +269,13 @@ utils::Status FileReadWriter::Flush() {
     // will route through Chunk::Read() → data_->Get().
   }
 
+  if (!flushable.empty()) {
+    // Rewrite success or a definite rejection may have registered best-effort
+    // cleanup. Physical deletion is centralized in the Reclaimer, whose
+    // authoritative metadata check is the delete-safety boundary.
+    Reclaimer::Instance().Wake();
+  }
+
   return first_error;
 }
 
@@ -283,9 +285,7 @@ utils::Status FileReadWriter::Truncate(size_t size) {
   if (!status.ok()) {
     return status;
   }
-  std::vector<std::string> dropped_keys;
-  chunks_.TruncateToSize(size, chunk_size_, &dropped_keys);
-  DeleteDroppedKeys(dropped_keys);
+  chunks_.TruncateToSize(size, chunk_size_);
   Reclaimer::Instance().Wake();
   return utils::Status::OK();
 }
@@ -298,28 +298,10 @@ utils::Status FileReadWriter::SetAttr(const metadata::SwordFsAttr &attr, metadat
     return status;
   }
   if (metadata::HasSetAttrField(fields, metadata::SetAttrField::kSize)) {
-    std::vector<std::string> dropped_keys;
-    chunks_.TruncateToSize(attr.size, chunk_size_, &dropped_keys);
-    DeleteDroppedKeys(dropped_keys);
+    chunks_.TruncateToSize(attr.size, chunk_size_);
     Reclaimer::Instance().Wake();
   }
   return utils::Status::OK();
-}
-
-void FileReadWriter::DeleteDroppedKeys(const std::vector<std::string> &keys) {
-  for (const auto &key : keys) {
-    auto status = data_->Delete(key);
-    if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "FileReadWriter: data->Delete(" << key << ") failed: " << status.message();
-      continue;
-    }
-    status = meta_->CompletePendingDelete(key);
-    if (!status.ok()) {
-      // The object is already gone, so retaining the durable key is safe: the
-      // background worker will retry the idempotent delete and acknowledgement.
-      SWORDFS_LOG_ERROR << "FileReadWriter: CompletePendingDelete(" << key << ") failed: " << status.message();
-    }
-  }
 }
 
 }  // namespace swordfs::vfs

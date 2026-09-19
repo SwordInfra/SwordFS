@@ -35,9 +35,10 @@ contains neither mutable write buffers nor uploading records. Object keys are
 derived from inode, index, and revision; the descriptor stores that revision
 rather than a physical key. Frozen reclaim records retain the exact object
 keys needed for delayed deletion. Truncate and rewrite publication use
-`pending_deletes` to freeze one immutable object identity per Hash field; its
-value redundantly stores the inode, descriptor, and exact key so recovery can
-validate the deletion target before touching object storage.
+`pending_deletes` as best-effort maintenance state for immutable objects that
+became obsolete after a known metadata outcome. Its value redundantly stores
+the inode, descriptor, and exact key so replay can validate the deletion target
+before touching object storage. Queue membership is not delete authority.
 
 There is no inode-to-parents reverse index or slice/extent overlay. Hard links
 use forward directory mappings and the inode link count. The current data path
@@ -103,6 +104,13 @@ the wrapper checks replies and reports this as potentially partial. The
 filesystem atomicity contract therefore depends on valid record types and
 successful transaction commands, not on a general rollback facility.
 
+SwordFS treats an acknowledged Redis transaction as the metadata-service
+completion boundary. It does not issue an additional Redis disk or replica
+barrier after `EXEC`. Deployments that require power-loss durability must
+configure Redis persistence, replication/HA, and no-eviction policy so the
+authoritative records and allocators meet that requirement. The client cannot
+strengthen a weaker backend durability policy after the fact.
+
 Ordinary metadata reads do not become WATCH transactions merely to update
 atime. Atime updates are separate, best-effort mutations; their failure does
 not invalidate a successful access.
@@ -117,8 +125,8 @@ together, rather than one subsection for every API.
 | Namespace creation | Child inode, parent name mapping, parent attributes, inode count | No visible name without its newly created inode |
 | Hard-link addition | Name mapping, inode link count, parent attributes, orphan cleanup when applicable | A revived inode cannot remain eligible for reclaim preparation |
 | Namespace removal or replacement | Directory mappings, affected inode/link counts and parent attributes, orphan marker when last link disappears | Cleanup work is recorded with the namespace change |
-| Chunk publication | Expected descriptor validation, replacement descriptor, inode size, pending-delete records for superseded/definite-loser revisions | Only the CAS winner becomes authoritative; obsolete immutable revisions remain durably reclaimable |
-| Size change | Inode size, pruned/clamped chunk descriptors, pending-delete records for fully removed published chunks | Metadata does not retain readable ranges beyond the new size, and every detached published object has durable cleanup work |
+| Chunk publication | Expected descriptor validation, replacement descriptor, inode size | Only the CAS winner becomes authoritative; cleanup registration happens separately after a known outcome |
+| Size change | Inode size, pruned/clamped chunk descriptors | Metadata does not retain readable ranges beyond the new size; detached whole chunks are returned for later best-effort cleanup registration |
 | Reclaim preparation | Frozen work, removal of orphan marker, live inode/chunks, inode count | Live state is removed together with durable deletion targets |
 | Reclaim completion | Pending reclaim record | Work disappears only after all frozen objects have been deleted |
 | Pending object-delete completion | Pending-delete field | Work disappears only after that frozen immutable object has been deleted |
@@ -150,47 +158,41 @@ No-replace and exchange change validation and the write set, while preserving
 the same atomic boundary. An ambiguous result is returned as an error rather
 than being treated as a definite rollback.
 
-### Durable handoff to object deletion
+### Object cleanup registration and delete authority
 
 Redis and the object store do not share a transaction. The handoff is
 `orphans → reclaims → completion` for last-link reclaim: preparation freezes
 deletion targets while removing live metadata, and completion removes the
 frozen work only after deletion succeeds.
 
-Truncate has a second durable handoff at immutable-object granularity, split
-into two Redis transactions because `MULTI/EXEC` does not roll back earlier
-successful commands when a later command returns a runtime error:
+Rewrite/truncate cleanup intentionally uses a weaker contract. The
+authoritative metadata transaction does **not** depend on `pending_deletes`:
 
-1. an additive-only preparation transaction scans the authoritative chunk
-   Hash and persists
-   `pending_deletes[object_key] = PendingDelete{ino, descriptor, object_key}`
-   for every whole chunk that would be removed;
-2. the destructive truncate transaction rescans the authoritative chunk Hash,
-   reads and validates the exact pending-delete record for every descriptor it
-   will detach, and only then queues chunk removal / boundary clamp / inode
-   update.
+1. a truncate transaction scans the authoritative `chunk:<ino>` Hash, validates
+   canonical descriptor identity, applies whole-chunk removal / boundary clamp
+   / inode-size updates, and returns the exact whole descriptors it detached;
+2. a rewrite publication transaction performs only its CAS publication/inode
+   side effects and returns an immutable cleanup candidate when the outcome is
+   known: the old `expected` descriptor after success/replay, or the uploaded
+   replacement after a definite logical rejection;
+3. after the authoritative transaction reports a **known** outcome,
+   `RedisMetaOps` attempts a separate transaction that writes
+   `pending_deletes[object_key] = PendingDelete{ino, descriptor, object_key}`;
+4. cleanup-registration failure is logged and ignored by the logical operation.
+   It may leak an obsolete object, but it cannot invalidate a metadata mutation
+   whose result is already known.
 
-If the preparation transaction partially commits, live metadata is unchanged
-and retry merely fills in missing idempotent intents. If the destructive
-transaction partially commits, every detached whole chunk already has a
-durable immutable deletion target.
+An ambiguous/possibly partial authoritative transaction does not produce a
+cleanup decision merely because its API returned an error. Chunk publication
+retains the uploaded candidate and resolves current authoritative metadata on
+retry. Truncate may leave an unreachable object if a partial/ambiguous result
+detached metadata before cleanup registration; this is an accepted space leak,
+not permission to guess and delete data.
 
-Chunk rewrite uses the same two-phase principle for the superseded published
-revision. An additive-only transaction first persists the old `expected`
-descriptor as pending-delete work while it is still authoritative (so
-Reclaimer skips it). The publication transaction then re-reads and validates
-that exact intent before replacing the descriptor. A runtime failure therefore
-cannot make the old revision unreachable before its deletion identity is
-durable.
-
-A definite publication loser is handled differently: before returning a
-logical `AlreadyExists` / `NotFound`, the watched publication transaction
-commits the uploaded replacement itself as pending-delete work. The logical
-publication status is returned only after that queue write commits, so a
-foreground delete failure or process exit cannot lose the cleanup target.
-That handoff is terminal for the losing revision: the writer must not reuse
-the same revision on a later publication retry, because the background
-reclaimer is now allowed to delete that immutable key.
+A definitely rejected uploaded revision is terminal for the local writer even
+if best-effort registration fails. If registration did succeed, the background
+reclaimer may later delete that immutable key, so a later retry must allocate a
+fresh revision rather than reusing the rejected one.
 
 Redis truncate scans only materialized fields in `chunk:<ino>` with HSCAN
 before queueing writes. It validates that each field matches the descriptor's
@@ -200,18 +202,19 @@ changes the watched Hash and forces the optimistic transaction to retry.
 The background reclaimer scans `pending_deletes`, validates that the Hash
 field equals the frozen key and that the descriptor derives the same immutable
 identity, then checks current authoritative chunk metadata. If the same
-immutable object key is still live, the record is only a staged intent and is
-left untouched. Otherwise the reclaimer deletes the object idempotently and
-removes the field only after success. Retries therefore use frozen identities,
-never keys reconstructed from a newer live descriptor.
+immutable object key is still live, the candidate is left untouched. Otherwise
+the reclaimer deletes the object idempotently and removes the field only after
+success. Retries therefore use frozen identities, never keys reconstructed
+from a newer live descriptor. This authoritative revalidation also keeps
+legacy pre-staged records safe after upgrade.
 
 Reconciliation does not snapshot the complete Hash. Redis metadata keeps a
 process-local HSCAN cursor plus at most one decoded HSCAN response and exposes
 only a bounded number of pending-delete visitor callbacks per Reclaimer pass.
 If the response or cursor has more work, the worker finishes the other reclaim
 queues in that pass and then self-wakes for the next batch. This continuation
-also prevents a long-lived staged intent from repeatedly occupying the front
-of every scan.
+also prevents a long-lived stale/live candidate from repeatedly occupying the
+front of every scan.
 
 Redis `COUNT` is only a scan hint, not a strict result-size bound. The hard
 SwordFS bound is therefore on visitor/object-delete work per reconciliation
@@ -225,7 +228,8 @@ progress are not guaranteed to appear in that same cycle. Producers still wake
 the Reclaimer, but that wake may be coalesced with an in-progress self-wake; a
 missed concurrent addition is therefore picked up by a later explicit wake or
 the periodic safety scan. This affects cleanup latency only: the durable Hash
-record is never treated as completed merely because one cursor cycle ended.
+record, when registration succeeded, is never treated as completed merely
+because one cursor cycle ended.
 
 See the [reclaim state machine](architecture.md#141-reclaim-state-machine)
 and [chunk publication protocol](chunk-publication.md) for cross-engine
@@ -253,9 +257,10 @@ and does not promise sorted output.
 - Redis durability and no-eviction configuration must protect authoritative
   records and allocators together.
 - Local open-reference fences are not distributed leases between mounts.
-- Last-link reclaim, truncate, and known rewrite publication outcomes all have
-  durable pending work. The earlier object-only crash window after a successful
-  Put but before any metadata publication handoff remains tracked by #186.
+- Last-link reclaim requires durable pending work because the live inode is
+  removed at its point of no return. Rewrite/truncate object cleanup is
+  best-effort maintenance: failures may leave unreachable objects, while
+  Reclaimer's authoritative-key check remains mandatory before deletion.
 - `StatFs` exposes `inode_count` as its file count. Its block-capacity fields
   are fixed values, not measurements of object-store capacity or usage.
 - Directory scan behavior under concurrent mutation does not provide snapshot
