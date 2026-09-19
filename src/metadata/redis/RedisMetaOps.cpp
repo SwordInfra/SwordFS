@@ -171,6 +171,13 @@ utils::Status RedisMetaOps::LookupEntry(InodeID parent_ino, std::string_view nam
 
 utils::Status RedisMetaOps::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
+  if (HasSetAttrField(fields, SetAttrField::kSize)) {
+    auto status = PrepareTruncateDeletes(ino, requested.size);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+
   SwordFsInode result;
   auto status = TransactFromFiber(
       [&](RedisMetaTxn &txn) { return txn.SetAttr(ino, requested, fields, out != nullptr ? &result : nullptr); });
@@ -182,6 +189,10 @@ utils::Status RedisMetaOps::SetAttr(InodeID ino, const SwordFsAttr &requested, S
 
 utils::Status RedisMetaOps::Truncate(InodeID ino, uint64_t size) {
   utils::ExpectInFiberDomain();
+  auto status = PrepareTruncateDeletes(ino, size);
+  if (!status.ok()) {
+    return status;
+  }
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.Truncate(ino, size); });
 }
 
@@ -196,41 +207,7 @@ utils::Status RedisMetaOps::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     return utils::Status::InvalidArgument("reclaim work output is null");
   }
   work->reset();
-
-  // The inode's chunk map cannot be enumerated inside a Redis transaction
-  // with the primitives RedisKvTxn exposes, so it is scanned first and the
-  // transaction re-validates that scan (chunk count plus the WATCH on the
-  // chunk hash that HLEN installs). A change in between surfaces as Busy and
-  // the attempt restarts with a fresh scan.
-  //
-  // Under the single-active-mount contract the re-validation is sufficient:
-  // a reclaimable inode has no open descriptor (the caller's fence) and no
-  // directory entry, so nothing can publish a new revision for it — the only
-  // remaining chunk-map mutations are truncate's drop/clamp, which either
-  // changes the count (Busy) or keeps the frozen key identical. A writer that
-  // bypassed the fence could only make this freeze a superseded revision,
-  // which leaks that object; it can never name a live one, because revisions
-  // are never reused.
-  constexpr int kMaxAttempts = 3;
-  utils::Status status;
-  for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-    std::vector<SwordFsChunk> scanned;
-    status = CollectChunks(ino, scanned);
-    if (!status.ok()) {
-      return status;
-    }
-
-    std::optional<ReclaimWork> pending;
-    status = TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PrepareReclaim(ino, scanned, pending); });
-    if (status.ok()) {
-      *work = std::move(pending);
-      return utils::Status::OK();
-    }
-    if (!status.IsBusy()) {
-      break;
-    }
-  }
-  return status;
+  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PrepareReclaim(ino, *work); });
 }
 
 utils::Status RedisMetaOps::CompleteReclaim(InodeID ino) {
@@ -280,6 +257,31 @@ utils::Status RedisMetaOps::VisitPendingReclaims(const std::function<utils::Stat
   return utils::Status::OK();
 }
 
+utils::Status RedisMetaOps::VisitPendingDeletes(const std::function<utils::Status(const PendingDelete &)> &visitor) {
+  utils::ExpectInFiberDomain();
+  if (!visitor) {
+    return utils::Status::InvalidArgument("pending delete visitor is null");
+  }
+
+  std::vector<PendingDelete> pending;
+  auto status = CollectPendingDeletes(pending);
+  if (!status.ok()) {
+    return status;
+  }
+  for (const auto &work : pending) {
+    status = visitor(work);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaOps::CompletePendingDelete(std::string_view object_key) {
+  utils::ExpectInFiberDomain();
+  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.CompletePendingDelete(object_key); });
+}
+
 utils::Status RedisMetaOps::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                                         const SwordFsChunk &replacement) {
   utils::ExpectInFiberDomain();
@@ -298,7 +300,14 @@ utils::Status RedisMetaOps::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk 
   if (!status.ok()) {
     return status;
   }
-  return chunk->ParseFrom(value);
+  status = chunk->ParseFrom(value);
+  if (!status.ok()) {
+    return status;
+  }
+  if (chunk->index != idx || !chunk->IsValidForChunkSize(chunk_size_)) {
+    return utils::Status::Malformed("persisted chunk descriptor does not match its canonical identity");
+  }
+  return utils::Status::OK();
 }
 
 utils::Status RedisMetaOps::VisitChunks(InodeID ino,
@@ -308,12 +317,14 @@ utils::Status RedisMetaOps::VisitChunks(InodeID ino,
     return utils::Status::InvalidArgument("chunk visitor is null");
   }
 
-  return ScanChunkFields(ino, [&visitor](const std::string &field, const std::string &value) {
-    (void)field;
+  return ScanChunkFields(ino, [this, &visitor](const std::string &field, const std::string &value) {
     SwordFsChunk chunk;
     auto status = chunk.ParseFrom(value);
     if (!status.ok()) {
       return status;
+    }
+    if (field != std::to_string(chunk.index) || !chunk.IsValidForChunkSize(chunk_size_)) {
+      return utils::Status::Malformed("persisted chunk descriptor does not match its canonical identity");
     }
     return visitor(chunk);
   });
@@ -347,18 +358,9 @@ utils::Status RedisMetaOps::ScanChunkFields(InodeID ino, const ChunkFieldVisitor
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaOps::CollectChunks(InodeID ino, std::vector<SwordFsChunk> &out) {
-  out.clear();
-  return ScanChunkFields(ino, [&out](const std::string &field, const std::string &value) {
-    (void)field;
-    SwordFsChunk chunk;
-    auto status = chunk.ParseFrom(value);
-    if (!status.ok()) {
-      return status;
-    }
-    out.push_back(chunk);
-    return utils::Status::OK();
-  });
+utils::Status RedisMetaOps::PrepareTruncateDeletes(InodeID ino, uint64_t size) {
+  utils::ExpectInFiberDomain();
+  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PrepareTruncateDeletes(ino, size); });
 }
 
 utils::Status RedisMetaOps::CollectOrphanCandidates(std::vector<InodeID> &out) {
@@ -425,6 +427,37 @@ utils::Status RedisMetaOps::CollectPendingReclaims(std::vector<ReclaimWork> &out
   } while (cursor != 0);
 
   std::sort(out.begin(), out.end(), [](const ReclaimWork &a, const ReclaimWork &b) { return a.ino < b.ino; });
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaOps::CollectPendingDeletes(std::vector<PendingDelete> &out) {
+  utils::ExpectInFiberDomain();
+  out.clear();
+
+  constexpr size_t kScanBatchSize = 128;
+  uint64_t cursor = 0;
+  do {
+    std::vector<std::pair<std::string, std::string>> values;
+    uint64_t next_cursor = 0;
+    auto status = backend_->executor().RunFromFiber(
+        [&] { return backend_->client().HScan(key_.PendingDeletes(), cursor, kScanBatchSize, &values, &next_cursor); });
+    if (!status.ok()) {
+      return status;
+    }
+    for (auto &[object_key, encoded] : values) {
+      PendingDelete pending;
+      status = pending.ParseFrom(encoded);
+      if (!status.ok()) {
+        return status;
+      }
+      if (object_key != pending.chunk.key || !pending.chunk.descriptor.IsValidForChunkSize(chunk_size_)) {
+        return utils::Status::Malformed("pending delete identity does not match persisted chunk layout");
+      }
+      out.push_back(std::move(pending));
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+
   return utils::Status::OK();
 }
 

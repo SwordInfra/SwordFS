@@ -582,16 +582,16 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
   if (ino_it == store_->chunks_.end()) {
     return Status::OK();
   }
-  if (new_size == 0) {
-    store_->chunks_.erase(ino_it);
-    return Status::OK();
-  }
-
   auto &cmap = ino_it->second;
   for (auto cit = cmap.begin(); cit != cmap.end();) {
     auto &chunk = cit->second;
     if (chunk.start_offset >= new_size) {
-      // Chunk lies entirely beyond the new size — drop it.
+      // Publish the immutable object identity before dropping the descriptor.
+      // The memory backend's transaction lock makes the two state changes
+      // atomic, mirroring the persistent backend's durable handoff.
+      const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
+      store_->pending_deletes_.insert_or_assign(
+          object_key, PendingDelete{.ino = ino, .chunk = ReclaimChunk{.descriptor = chunk, .key = object_key}});
       cit = cmap.erase(cit);
       continue;
     }
@@ -664,6 +664,21 @@ Status MemMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work)
 
 Status MemMetaTxn::CompleteReclaim(InodeID ino) {
   store_->pending_reclaims_.erase(ino);
+  return Status::OK();
+}
+
+Status MemMetaTxn::ListPendingDeletes(std::vector<PendingDelete> &out) {
+  out.clear();
+  out.reserve(store_->pending_deletes_.size());
+  for (const auto &[key, pending] : store_->pending_deletes_) {
+    (void)key;
+    out.push_back(pending);
+  }
+  return Status::OK();
+}
+
+Status MemMetaTxn::CompletePendingDelete(std::string_view key) {
+  store_->pending_deletes_.erase(std::string(key));
   return Status::OK();
 }
 

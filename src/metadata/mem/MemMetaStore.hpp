@@ -90,6 +90,12 @@ class MemMetaStore {
   // no return and whose objects have not all been deleted yet. This record —
   // not the live inode — is the authority for the delayed deletes.
   folly::F14FastMap<InodeID, ReclaimWork> pending_reclaims_;
+
+  // Immutable object identities detached by metadata operations such as
+  // truncate. The background Reclaimer removes a key only after the data
+  // engine confirms deletion, so process-lifetime memory semantics mirror the
+  // persistent backend's retry contract.
+  folly::F14FastMap<std::string, PendingDelete> pending_deletes_;
 };
 
 }  // namespace swordfs::metadata

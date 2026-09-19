@@ -62,6 +62,8 @@ class RedisMetaOps {
   utils::Status CompleteReclaim(InodeID ino);
   utils::Status VisitOrphanCandidates(const std::function<utils::Status(InodeID)> &visitor);
   utils::Status VisitPendingReclaims(const std::function<utils::Status(const ReclaimWork &)> &visitor);
+  utils::Status VisitPendingDeletes(const std::function<utils::Status(const PendingDelete &)> &visitor);
+  utils::Status CompletePendingDelete(std::string_view object_key);
   utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement);
   utils::Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
   utils::Status VisitChunks(InodeID ino, const std::function<utils::Status(const SwordFsChunk &)> &visitor);
@@ -83,9 +85,9 @@ class RedisMetaOps {
   // Stream every field of the inode's chunk hash in HSCAN batches.
   utils::Status ScanChunkFields(InodeID ino, const ChunkFieldVisitorFn &visitor);
 
-  // Materialize the inode's complete chunk descriptor map. Reclaim
-  // preparation sorts the frozen work before persisting it.
-  utils::Status CollectChunks(InodeID ino, std::vector<SwordFsChunk> &out);
+  // Stage durable, non-destructive object-delete intents before a Redis size
+  // shrink is allowed to detach chunk metadata.
+  utils::Status PrepareTruncateDeletes(InodeID ino, uint64_t size);
 
   // Snapshot the inode ids published as orphan candidates.
   utils::Status CollectOrphanCandidates(std::vector<InodeID> &out);
@@ -93,6 +95,9 @@ class RedisMetaOps {
   // Snapshot the frozen pending-reclaim records, validating persisted state
   // before exposing it to the replay worker.
   utils::Status CollectPendingReclaims(std::vector<ReclaimWork> &out);
+
+  // Snapshot immutable object keys detached by truncate.
+  utils::Status CollectPendingDeletes(std::vector<PendingDelete> &out);
 
  private:
   std::shared_ptr<RedisBackendContext> backend_;

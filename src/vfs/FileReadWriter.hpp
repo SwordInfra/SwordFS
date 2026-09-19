@@ -107,6 +107,11 @@ class FileReadWriter {
   utils::Status SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields, metadata::SwordFsInode *out);
 
  private:
+  // Best-effort fast-path cleanup for objects owned by local chunk state. The
+  // authoritative metadata path separately persists deletes for published
+  // objects, while this also covers locally uploaded-but-unpublished objects.
+  void DeleteDroppedKeys(const std::vector<std::string> &keys);
+
   InodeID ino_;
   size_t chunk_size_;
   metadata::IMetaEngine *meta_;

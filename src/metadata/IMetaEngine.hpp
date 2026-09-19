@@ -50,6 +50,7 @@ using DirIteratorPtr = std::shared_ptr<DirIterator>;
 using ChunkVisitorFn = std::function<Status(const SwordFsChunk &)>;
 using InodeVisitorFn = std::function<Status(InodeID)>;
 using ReclaimVisitorFn = std::function<Status(const ReclaimWork &)>;
+using PendingDeleteVisitorFn = std::function<Status(const PendingDelete &)>;
 
 /// Well-known metadata engine URLs.
 constexpr std::string_view kMemoryMetaUrl = "memory://local";
@@ -176,6 +177,17 @@ class IMetaEngine {
   /// itself so replay can continue object deletion directly without another
   /// metadata lookup or PrepareReclaim call.
   virtual Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) = 0;
+
+  /// Visit frozen immutable object identities that authoritative metadata has
+  /// already detached from a live file (for example, by truncate) and that
+  /// still need physical deletion. Persistent backends must retain these
+  /// records until CompletePendingDelete() succeeds so cleanup survives
+  /// restart and corrupted identities fail closed before data deletion.
+  virtual Status VisitPendingDeletes(const PendingDeleteVisitorFn &visitor) = 0;
+
+  /// Remove one pending-delete key after its object has been deleted.
+  /// Idempotent: a missing key is not an error.
+  virtual Status CompletePendingDelete(std::string_view key) = 0;
 
   /// Allocate a globally unique, monotonically increasing chunk revision.
   /// Revisions are volume-scoped persistent identities: a backend must never

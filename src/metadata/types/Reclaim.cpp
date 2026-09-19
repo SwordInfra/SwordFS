@@ -81,4 +81,46 @@ utils::Status ReclaimWork::ParseFrom(std::string_view data) {
   return utils::Status::OK();
 }
 
+utils::Status PendingDelete::SerializeTo(std::string *out) const {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("Invalid pending delete record");
+  }
+  if (ino == 0 || chunk.descriptor.revision == kInvalidChunkRevision ||
+      chunk.key != chunk::FormatChunkObjectKey(ino, chunk.descriptor.index, chunk.descriptor.revision)) {
+    return utils::Status::InvalidArgument("Invalid pending delete object identity");
+  }
+
+  BufEncoder enc;
+  enc.Header(RecordType::kPendingDelete);
+  enc.U64(ino);
+  enc.U32(chunk.descriptor.index);
+  enc.U64(chunk.descriptor.start_offset);
+  enc.U64(chunk.descriptor.revision);
+  enc.U64(chunk.descriptor.size);
+  enc.String(chunk.key);
+  enc.Finish(out);
+  return utils::Status::OK();
+}
+
+utils::Status PendingDelete::ParseFrom(std::string_view data) {
+  BufDecoder dec(data);
+  dec.Header(RecordType::kPendingDelete);
+
+  PendingDelete parsed;
+  dec.U64(&parsed.ino);
+  dec.U32(&parsed.chunk.descriptor.index);
+  dec.U64(&parsed.chunk.descriptor.start_offset);
+  dec.U64(&parsed.chunk.descriptor.revision);
+  dec.U64(&parsed.chunk.descriptor.size);
+  if (!dec.String(&parsed.chunk.key) || !dec.Done() || parsed.ino == 0 ||
+      parsed.chunk.descriptor.revision == kInvalidChunkRevision ||
+      parsed.chunk.key !=
+          chunk::FormatChunkObjectKey(parsed.ino, parsed.chunk.descriptor.index, parsed.chunk.descriptor.revision)) {
+    return utils::Status::Malformed("Malformed pending delete record");
+  }
+
+  *this = std::move(parsed);
+  return utils::Status::OK();
+}
+
 }  // namespace swordfs::metadata

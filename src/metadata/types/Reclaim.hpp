@@ -17,13 +17,12 @@
 
 namespace swordfs::metadata {
 
-/// One frozen chunk of a pending reclaim: the authoritative descriptor that
-/// was published for the inode, plus the immutable object identity derived
-/// from it when the reclaim was prepared.
+/// One frozen chunk object identity: the authoritative descriptor that was
+/// published for the inode, plus the immutable object key derived from it.
 ///
 /// Delayed deletion must use |key| (equivalently the descriptor's revision)
 /// verbatim. Rebuilding a key from live inode/index state at delete time is
-/// exactly the race this record exists to close.
+/// exactly the race these durable cleanup records exist to close.
 struct ReclaimChunk {
   SwordFsChunk descriptor;
   std::string key;
@@ -42,6 +41,20 @@ struct ReclaimWork {
   std::vector<ReclaimChunk> chunks;
 
   bool operator==(const ReclaimWork &) const = default;
+
+  utils::Status SerializeTo(std::string *out) const;
+  utils::Status ParseFrom(std::string_view data);
+};
+
+/// One immutable object detached from live chunk metadata and awaiting
+/// physical deletion (currently produced by truncate).
+///
+/// The Redis Hash field is also |chunk.key|; persisting the full frozen
+/// identity as the value lets recovery validate the field/key/descriptor
+/// relationship before it is allowed to delete anything.
+struct PendingDelete {
+  InodeID ino = 0;
+  ReclaimChunk chunk;
 
   utils::Status SerializeTo(std::string *out) const;
   utils::Status ParseFrom(std::string_view data);

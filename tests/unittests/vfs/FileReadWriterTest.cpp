@@ -277,6 +277,13 @@ class MockMetaEngine : public IMetaEngine {
   Status VisitPendingReclaims(const swordfs::metadata::ReclaimVisitorFn &) override {
     return Status::OK();
   }
+  Status VisitPendingDeletes(const swordfs::metadata::PendingDeleteVisitorFn &) override {
+    return Status::OK();
+  }
+  Status CompletePendingDelete(std::string_view key) override {
+    complete_pending_delete_calls.emplace_back(key);
+    return complete_pending_delete_status;
+  }
   Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
     ++allocate_chunk_revision_calls;
     if (!allocate_chunk_revision_status.ok()) {
@@ -384,6 +391,8 @@ class MockMetaEngine : public IMetaEngine {
   int truncate_calls = 0;
   int replace_chunk_calls = 0;
   int allocate_chunk_revision_calls = 0;
+  std::vector<std::string> complete_pending_delete_calls;
+  Status complete_pending_delete_status = Status::OK();
   Status allocate_chunk_revision_status = Status::OK();
   Status publish_chunk_status = Status::OK();
   bool publish_chunk_commit_on_error = false;
@@ -1603,6 +1612,8 @@ TEST_F(FileReadWriterTest, TruncateDeletesDroppedChunkObjects) {
     EXPECT_EQ(mock_data_->delete_calls.size(), 2);
     EXPECT_EQ(mock_data_->delete_calls[0], swordfs::chunk::FormatChunkObjectKey(kIno, 1, 2));
     EXPECT_EQ(mock_data_->delete_calls[1], swordfs::chunk::FormatChunkObjectKey(kIno, 2, 3));
+    std::sort(mock_meta_->complete_pending_delete_calls.begin(), mock_meta_->complete_pending_delete_calls.end());
+    EXPECT_EQ(mock_meta_->complete_pending_delete_calls, mock_data_->delete_calls);
     EXPECT_EQ(mock_data_->StoredKeys().size(), 1);
     EXPECT_EQ(mock_data_->StoredKeys()[0], swordfs::chunk::FormatChunkObjectKey(kIno, 0, 1));
 
@@ -1613,8 +1624,8 @@ TEST_F(FileReadWriterTest, TruncateDeletesDroppedChunkObjects) {
 }
 
 TEST_F(FileReadWriterTest, TruncateToleratesDataDeleteFailure) {
-  // A failing per-chunk Delete must not poison the Truncate result;
-  // the metadata side already committed the new size.
+  // A failing eager Delete must not poison the Truncate result. Production
+  // metadata retains the durable pending-delete work for the Reclaimer.
   RunInTestFiber([&] {
     auto rw = Make();
     ASSERT_TRUE(rw.Write(Buf(Repeat('B', kChunkSize * 2)), 0).ok());
@@ -1622,10 +1633,30 @@ TEST_F(FileReadWriterTest, TruncateToleratesDataDeleteFailure) {
     mock_data_->delete_status = Status::Internal("forced");
 
     EXPECT_TRUE(rw.Truncate(0).ok());
-    // The metadata side dropped the chunks even though the data engine
-    // refused: that's the documented best-effort contract.
+    // The metadata side dropped the chunks even though the eager data-engine
+    // delete refused; the fast path must not acknowledge failed deletion.
     EXPECT_EQ(mock_meta_->truncate_calls, 1);
     EXPECT_EQ(mock_meta_->file_size(), 0);
+    EXPECT_TRUE(mock_meta_->complete_pending_delete_calls.empty());
+  });
+}
+
+TEST_F(FileReadWriterTest, TruncateToleratesPendingDeleteAckFailure) {
+  // Eager object deletion may succeed while durable metadata acknowledgement
+  // fails. The logical truncate must still succeed: production Reclaimer will
+  // retry the idempotent delete/ack sequence from the retained pending record.
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf(Repeat('B', kChunkSize * 2)), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    mock_meta_->complete_pending_delete_status = Status::IOError("forced ack failure");
+
+    EXPECT_TRUE(rw.Truncate(0).ok());
+    EXPECT_EQ(mock_meta_->truncate_calls, 1);
+    EXPECT_EQ(mock_meta_->file_size(), 0);
+    EXPECT_TRUE(mock_data_->StoredKeys().empty());
+    EXPECT_FALSE(mock_data_->delete_calls.empty());
+    EXPECT_EQ(mock_meta_->complete_pending_delete_calls, mock_data_->delete_calls);
   });
 }
 
