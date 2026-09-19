@@ -25,6 +25,91 @@ jobs:
       - name: Check formatting
         run: pre-commit run --all-files
 
+  static-analysis:
+    name: static-analysis
+    needs: clang-format
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Restore native dependency cache
+        uses: actions/cache@v4
+        with:
+          path: .deps/install
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native-deps-cache.env') }}
+
+      - name: Install dependencies
+        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
+
+      - name: Install static-analysis tools
+        run: |
+          sudo apt-get install -y -qq clang-tidy python3-clang
+          pipx install --force --python /usr/bin/python3 'coverage==7.13.5'
+          COVERAGE_SITE=$(pipx runpip coverage show coverage | sed -n 's/^Location: //p')
+          if [ -z "$COVERAGE_SITE" ]; then
+            echo "ERROR: failed to locate pipx coverage site-packages" >&2
+            exit 1
+          fi
+          echo "COVERAGE_SITE=$COVERAGE_SITE" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: |
+          cmake --preset default \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install"
+
+      - name: Configure semantic-audit fixture
+        run: |
+          cmake -S tests/static_analysis/fixture \
+            -B build/static-audit-fixture \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Verify semantic-audit fixture
+        env:
+          PYTHONPATH: ${{ env.COVERAGE_SITE }}:/usr/lib/python3/dist-packages
+        run: |
+          /usr/bin/python3 -m coverage erase
+          /usr/bin/python3 -m coverage run \
+            --branch \
+            --include="${{ github.workspace }}/scripts/symbol_audit.py" \
+            tests/static_analysis/test_symbol_audit.py \
+            --build-dir build/static-audit-fixture
+
+      - name: Run static audit
+        env:
+          PYTHONPATH: ${{ env.COVERAGE_SITE }}:/usr/lib/python3/dist-packages
+          STATIC_AUDIT_COVERAGE: '1'
+        run: |
+          scripts/run-static-audit.sh \
+            --build-dir build \
+            --output build/static-audit.json
+          /usr/bin/python3 -m coverage report -m
+          /usr/bin/python3 -m coverage xml -o build/static-audit-coverage.xml
+
+      - name: Upload static-audit coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: build/static-audit-coverage.xml
+          disable_search: true
+          plugins: noop
+          fail_ci_if_error: false
+
+      - name: Upload static-audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-audit-report
+          path: build/static-audit.json
+          if-no-files-found: warn
+
   build-and-test:
     name: build-and-test (${{ matrix.build_type }})
     needs: clang-format

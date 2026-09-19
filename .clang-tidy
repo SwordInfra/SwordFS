@@ -5,6 +5,8 @@
 Checks: >
   -*,
   bugprone-*,
+  clang-analyzer-deadcode.DeadStores,
+  misc-unused-using-decls,
   performance-*,
   modernize-use-override,
   -bugprone-easily-swappable-parameters,
