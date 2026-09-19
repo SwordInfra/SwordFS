@@ -570,9 +570,9 @@ Once metadata preparation removes the live inode, the local fence can be release
 
 The `Reclaimer` is the sole production component that executes the cross-engine GC sequence:
 
-1. replay immutable-object pending-delete records from truncate and chunk
-   publication cleanup, deleting each frozen object idempotently and
-   acknowledging the record only after success;
+1. replay one bounded batch of immutable-object pending-delete records from
+   truncate and chunk publication cleanup, deleting each frozen object
+   idempotently and acknowledging the record only after success;
 2. replay already-pending last-link reclaim work;
 3. scan orphan candidates;
 4. acquire the local fence when applicable;
@@ -587,6 +587,26 @@ Its worker runs:
 - periodically as a safety scan.
 
 Wakeups are coalesced. Failed object deletion leaves the pending record intact, so the next pass or a later mount can retry.
+
+Pending-delete replay is deliberately bounded so a large object-cleanup
+backlog cannot monopolize one reconciliation pass or allocate one vector for
+the entire durable queue. The metadata backend reports whether its current
+scan cycle has more work; the Reclaimer still processes pending inode reclaims
+and orphan candidates in the current pass, then self-wakes for another
+pending-delete batch. A still-authoritative staged delete intent therefore
+consumes only its current scan position and cannot permanently pin later
+obsolete objects behind it.
+
+The Redis continuation cursor is process-local scheduling state, not durable
+metadata. Restart begins a new scan at cursor zero; the durable pending-delete
+Hash remains the source of truth, and idempotent deletion/acknowledgement makes
+revisiting an item safe.
+
+One completed Redis cursor cycle is not a claim that no new cleanup record
+exists: SCAN does not promise to return entries added during the iteration.
+Concurrent producers still wake the worker, and the periodic safety scan
+provides a bounded fallback when that wake is coalesced with continuation of
+the current cycle.
 
 ## 15. Crash, retry, and ambiguous-result principles
 

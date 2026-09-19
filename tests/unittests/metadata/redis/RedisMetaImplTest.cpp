@@ -43,6 +43,18 @@ using swordfs::metadata::SwordFsVolume;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
+constexpr uint64_t kTestChunkSize = 4096;
+
+swordfs::metadata::PendingDelete MakePendingDelete(InodeID ino, swordfs::metadata::ChunkIndex index,
+                                                   swordfs::metadata::ChunkRevision revision) {
+  SwordFsChunk descriptor{
+      .index = index, .start_offset = static_cast<uint64_t>(index) * kTestChunkSize, .revision = revision, .size = 64};
+  return swordfs::metadata::PendingDelete{
+      .ino = ino,
+      .chunk = swordfs::metadata::ReclaimChunk{.descriptor = descriptor,
+                                               .key = swordfs::chunk::FormatChunkObjectKey(ino, index, revision)}};
+}
+
 bool LoadConfig(RedisMetaConfig *config) {
   const char *url = std::getenv("SWORDFS_REDIS_TEST_URL");
   if (url == nullptr) {
@@ -104,6 +116,14 @@ class RedisMetaImplTest : public ::testing::Test {
     EXPECT_TRUE(status.ok()) << status.message();
     std::sort(out.begin(), out.end());
     return out;
+  }
+
+  void SeedPendingDelete(const swordfs::metadata::PendingDelete &pending) const {
+    const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+    std::string encoded;
+    ASSERT_TRUE(pending.SerializeTo(&encoded).ok());
+    RunWithRawRedisFromFiber(
+        [&](sw::redis::Redis &redis) { redis.hset(key.PendingDeletes(), pending.chunk.key, encoded); });
   }
 
   std::unique_ptr<RedisMetaImpl> impl_;
@@ -1747,6 +1767,17 @@ FIBER_TEST_F(RedisMetaImplTest, VisitorArgumentsAreValidated) {
   EXPECT_EQ(impl_->VisitOrphanCandidates(swordfs::metadata::InodeVisitorFn{}).code(), Status::kInvalidArgument);
   EXPECT_EQ(impl_->VisitPendingReclaims(swordfs::metadata::ReclaimVisitorFn{}).code(), Status::kInvalidArgument);
   EXPECT_EQ(impl_->VisitPendingDeletes(swordfs::metadata::PendingDeleteVisitorFn{}).code(), Status::kInvalidArgument);
+  bool has_more = false;
+  EXPECT_EQ(impl_->VisitPendingDeletesBatch(
+                     0, [](const auto &) { return Status::OK(); }, &has_more)
+                .code(),
+            Status::kInvalidArgument);
+  EXPECT_EQ(impl_->VisitPendingDeletesBatch(1, swordfs::metadata::PendingDeleteVisitorFn{}, &has_more).code(),
+            Status::kInvalidArgument);
+  EXPECT_EQ(impl_->VisitPendingDeletesBatch(
+                     1, [](const auto &) { return Status::OK(); }, nullptr)
+                .code(),
+            Status::kInvalidArgument);
   EXPECT_EQ(impl_->PrepareReclaim(kRootInodeId, nullptr).code(), Status::kInvalidArgument);
 
   std::optional<ReclaimWork> work;
@@ -1817,6 +1848,163 @@ FIBER_TEST_F(RedisMetaImplTest, PendingDeleteVisitorPropagatesAbort) {
   EXPECT_EQ(status.code(), Status::kBusy);
   EXPECT_EQ(status.message(), "stop pending delete scan");
   EXPECT_EQ(visits, 1U);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, PendingDeleteBatchBoundsVisitsAndContinuesWhileQueueMutates) {
+  constexpr size_t kRecordCount = 7;
+  std::vector<std::string> expected;
+  for (size_t i = 0; i < kRecordCount; ++i) {
+    auto pending = MakePendingDelete(42, static_cast<swordfs::metadata::ChunkIndex>(i), i + 1);
+    expected.push_back(pending.chunk.key);
+    SeedPendingDelete(pending);
+  }
+  std::sort(expected.begin(), expected.end());
+
+  std::vector<std::string> visited;
+  bool has_more = true;
+  size_t calls = 0;
+  while (has_more && calls++ < 32) {
+    size_t visits_this_call = 0;
+    auto status = impl_->VisitPendingDeletesBatch(
+        2,
+        [&](const swordfs::metadata::PendingDelete &work) {
+          ++visits_this_call;
+          visited.push_back(work.chunk.key);
+          return impl_->CompletePendingDelete(work.chunk.key);
+        },
+        &has_more);
+    ASSERT_TRUE(status.ok()) << status.message();
+    EXPECT_LE(visits_this_call, 2U);
+  }
+  EXPECT_LT(calls, 32U);
+  EXPECT_FALSE(has_more);
+  std::sort(visited.begin(), visited.end());
+  visited.erase(std::unique(visited.begin(), visited.end()), visited.end());
+  EXPECT_EQ(visited, expected);
+  EXPECT_TRUE(PendingDeleteKeys().empty());
+}
+
+FIBER_TEST_F(RedisMetaImplTest, PendingDeleteBatchUncompletedIntentDoesNotStarveLaterRecords) {
+  constexpr size_t kRecordCount = 7;
+  auto live = MakePendingDelete(42, 0, 1);
+  SeedPendingDelete(live);
+  for (size_t i = 1; i < kRecordCount; ++i) {
+    SeedPendingDelete(MakePendingDelete(42, static_cast<swordfs::metadata::ChunkIndex>(i), i + 1));
+  }
+
+  bool has_more = true;
+  size_t calls = 0;
+  while (has_more && calls++ < 64) {
+    auto status = impl_->VisitPendingDeletesBatch(
+        1,
+        [&](const swordfs::metadata::PendingDelete &work) {
+          if (work.chunk.key == live.chunk.key) {
+            return Status::OK();
+          }
+          return impl_->CompletePendingDelete(work.chunk.key);
+        },
+        &has_more);
+    ASSERT_TRUE(status.ok()) << status.message();
+  }
+  EXPECT_LT(calls, 64U);
+  EXPECT_FALSE(has_more);
+  EXPECT_EQ(PendingDeleteKeys(), std::vector<std::string>{live.chunk.key});
+}
+
+FIBER_TEST_F(RedisMetaImplTest, PendingDeleteBatchVisitorAbortRetriesCurrentBufferedRecord) {
+  auto pending = MakePendingDelete(42, 0, 1);
+  SeedPendingDelete(pending);
+
+  bool has_more = false;
+  std::string first_key;
+  auto status = impl_->VisitPendingDeletesBatch(
+      1,
+      [&](const swordfs::metadata::PendingDelete &work) {
+        first_key = work.chunk.key;
+        return Status::Busy("stop bounded pending delete scan");
+      },
+      &has_more);
+  EXPECT_TRUE(status.IsBusy()) << status.message();
+  EXPECT_EQ(first_key, pending.chunk.key);
+
+  std::string retried_key;
+  status = impl_->VisitPendingDeletesBatch(
+      1,
+      [&](const swordfs::metadata::PendingDelete &work) {
+        retried_key = work.chunk.key;
+        return Status::OK();
+      },
+      &has_more);
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(retried_key, first_key);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, PendingDeleteBatchMalformedRecordFailsBeforeVisitor) {
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  RunWithRawRedisFromFiber(
+      [&](sw::redis::Redis &redis) { redis.hset(key.PendingDeletes(), "broken", "not-a-pending-delete"); });
+
+  bool has_more = false;
+  size_t visits = 0;
+  const auto status = impl_->VisitPendingDeletesBatch(
+      1,
+      [&](const swordfs::metadata::PendingDelete &) {
+        ++visits;
+        return Status::OK();
+      },
+      &has_more);
+  EXPECT_TRUE(status.IsMalformed()) << status.message();
+  EXPECT_EQ(visits, 0U);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, PendingDeleteBatchRestartRediscoversDurableRemainder) {
+  auto first = MakePendingDelete(42, 0, 1);
+  auto second = MakePendingDelete(42, 1, 2);
+  SeedPendingDelete(first);
+  SeedPendingDelete(second);
+
+  bool has_more = false;
+  size_t visits = 0;
+  ASSERT_TRUE(impl_
+                  ->VisitPendingDeletesBatch(
+                      1,
+                      [&](const swordfs::metadata::PendingDelete &) {
+                        ++visits;
+                        return Status::OK();
+                      },
+                      &has_more)
+                  .ok());
+  EXPECT_EQ(visits, 1U);
+  EXPECT_TRUE(has_more);
+
+  std::unique_ptr<RedisMetaImpl> peer;
+  swordfs::test::RunInTestThreadFromFiber([&] {
+    peer = std::make_unique<RedisMetaImpl>(config_, volume_name_);
+    ASSERT_TRUE(peer->Initialize().ok());
+    SwordFsVolume volume;
+    volume.name = volume_name_;
+    ASSERT_TRUE(peer->LoadVolume(&volume).ok());
+  });
+
+  std::vector<std::string> rediscovered;
+  has_more = true;
+  size_t calls = 0;
+  while (has_more && calls++ < 16) {
+    auto status = peer->VisitPendingDeletesBatch(
+        1,
+        [&](const swordfs::metadata::PendingDelete &work) {
+          rediscovered.push_back(work.chunk.key);
+          return peer->CompletePendingDelete(work.chunk.key);
+        },
+        &has_more);
+    ASSERT_TRUE(status.ok()) << status.message();
+  }
+  EXPECT_LT(calls, 16U);
+  std::sort(rediscovered.begin(), rediscovered.end());
+  rediscovered.erase(std::unique(rediscovered.begin(), rediscovered.end()), rediscovered.end());
+  EXPECT_EQ(rediscovered.size(), 2U);
+  EXPECT_TRUE(PendingDeleteKeys(peer.get()).empty());
+  swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
 }
 
 }  // namespace

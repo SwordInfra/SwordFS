@@ -20,6 +20,7 @@
 #include "metadata/types/Reclaim.hpp"
 #include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
+#include "utils/Synchronization.hpp"
 
 namespace swordfs::metadata {
 
@@ -63,6 +64,9 @@ class RedisMetaOps {
   utils::Status VisitOrphanCandidates(const std::function<utils::Status(InodeID)> &visitor);
   utils::Status VisitPendingReclaims(const std::function<utils::Status(const ReclaimWork &)> &visitor);
   utils::Status VisitPendingDeletes(const std::function<utils::Status(const PendingDelete &)> &visitor);
+  utils::Status VisitPendingDeletesBatch(size_t max_items,
+                                         const std::function<utils::Status(const PendingDelete &)> &visitor,
+                                         bool *has_more);
   utils::Status CompletePendingDelete(std::string_view object_key);
   utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement);
   utils::Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
@@ -104,10 +108,16 @@ class RedisMetaOps {
   // publication cleanup.
   utils::Status CollectPendingDeletes(std::vector<PendingDelete> &out);
 
+  utils::Status ParsePendingDelete(std::string_view object_key, std::string_view encoded, PendingDelete &out) const;
+
  private:
   std::shared_ptr<RedisBackendContext> backend_;
   redis::RedisKey key_;
   uint64_t chunk_size_ = 0;
+  utils::FiberMutex pending_delete_scan_mutex_;
+  uint64_t pending_delete_cursor_ = 0;
+  std::vector<PendingDelete> pending_delete_page_;
+  size_t pending_delete_page_offset_ = 0;
 };
 
 }  // namespace swordfs::metadata
