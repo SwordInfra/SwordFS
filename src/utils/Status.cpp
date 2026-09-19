@@ -27,8 +27,6 @@ int Status::ToErrno() const {
       return EBUSY;
     case kNotEmpty:
       return ENOTEMPTY;
-    case kNoSpace:
-      return ENOSPC;
     case kNotPermitted:
       return EPERM;
     case kPermission:
@@ -37,8 +35,6 @@ int Status::ToErrno() const {
       return ENOMEM;
     case kNameTooLong:
       return ENAMETOOLONG;
-    case kIOError:
-      return EIO;
     default:
       return EIO;
   }

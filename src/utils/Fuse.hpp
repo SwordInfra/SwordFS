@@ -59,9 +59,6 @@ class FuseSessionGuard {
   fuse_session *get() {
     return se_;
   }
-  fuse_session **ptr() {
-    return &se_;
-  }
   explicit operator bool() const {
     return se_ != nullptr;
   }

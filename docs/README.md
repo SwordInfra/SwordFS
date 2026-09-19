@@ -12,6 +12,7 @@ API signatures and routine implementation details belong in source comments.
 | [Thread model](design/thread-model.md) | Which threads run which work? Where do fibers suspend, and what protects shared state? |
 | [Chunk publication](design/chunk-publication.md) | How does a buffered write become authoritative? What happens on failure or conflict? |
 | [Redis metadata](design/redis-metadata-schema.md) | How are logical records stored, and where are the transaction boundaries? |
+| [Static analysis](design/static-analysis.md) | Which automated code-quality gates run, what is considered high confidence, and how are exceptions handled? |
 
 ## Documentation scope
 

@@ -65,22 +65,12 @@ inline SetAttrField operator|(SetAttrField a, SetAttrField b) {
   return static_cast<SetAttrField>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
 }
 
-inline SetAttrField &operator|=(SetAttrField &a, SetAttrField b) {
-  a = a | b;
-  return a;
-}
-
 inline bool HasRenameFlag(RenameFlag flags, RenameFlag flag) {
   return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(flag)) != 0;
 }
 
 inline RenameFlag operator|(RenameFlag a, RenameFlag b) {
   return static_cast<RenameFlag>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
-}
-
-inline RenameFlag &operator|=(RenameFlag &a, RenameFlag b) {
-  a = a | b;
-  return a;
 }
 
 }  // namespace swordfs::metadata

@@ -16,10 +16,6 @@ PreallocatedOutputStreamBuf::PreallocatedOutputStreamBuf(char *buffer, size_t ca
   setp(buffer, buffer + capacity);
 }
 
-size_t PreallocatedOutputStreamBuf::Written() const {
-  return static_cast<size_t>(pptr() - pbase());
-}
-
 std::streamsize PreallocatedOutputStreamBuf::xsputn(const char *s, std::streamsize n) {
   auto avail = static_cast<std::streamsize>(epptr() - pptr());
   auto actual = std::min(n, avail);
@@ -48,10 +44,6 @@ int PreallocatedOutputStreamBuf::sync() {
 
 PreallocatedResponseStream::PreallocatedResponseStream(char *buffer, size_t capacity)
     : Aws::IOStream(&buf_), buf_(buffer, capacity) {
-}
-
-size_t PreallocatedResponseStream::Written() const {
-  return buf_.Written();
 }
 
 }  // namespace swordfs::storage
