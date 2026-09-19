@@ -48,6 +48,14 @@ publication transaction. Gaps after failure are harmless. Revision reuse is
 not: metadata recovery must preserve allocator state consistently with
 published descriptors. Volume object namespaces must also remain isolated.
 
+### Persistent-backend test isolation
+
+Redis-backed unit tests must not assume that the test Redis instance was
+flushed between process invocations. Every test namespace therefore includes
+both a process-run identity and an in-process sequence so stale keys from a
+previous run cannot collide with a later run, while concurrently executing
+test processes also remain isolated.
+
 ## Transaction mechanism
 
 The implementation separates policy in `RedisMetaImpl`, operation
