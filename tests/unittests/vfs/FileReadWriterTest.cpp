@@ -277,12 +277,23 @@ class MockMetaEngine : public IMetaEngine {
   Status VisitPendingReclaims(const swordfs::metadata::ReclaimVisitorFn &) override {
     return Status::OK();
   }
-  Status VisitPendingDeletes(const swordfs::metadata::PendingDeleteVisitorFn &) override {
+  Status VisitPendingDeletes(const swordfs::metadata::PendingDeleteVisitorFn &visitor) override {
+    for (const auto &[key, pending] : pending_deletes_) {
+      (void)key;
+      auto status = visitor(pending);
+      if (!status.ok()) {
+        return status;
+      }
+    }
     return Status::OK();
   }
   Status CompletePendingDelete(std::string_view key) override {
     complete_pending_delete_calls.emplace_back(key);
-    return complete_pending_delete_status;
+    if (!complete_pending_delete_status.ok()) {
+      return complete_pending_delete_status;
+    }
+    pending_deletes_.erase(std::string(key));
+    return Status::OK();
   }
   Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
     ++allocate_chunk_revision_calls;
@@ -307,10 +318,34 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
 
+  void SetNextFindChunkResult(const SwordFsChunk &chunk) {
+    next_find_chunk_result_ = chunk;
+    next_find_chunk_status_.reset();
+  }
+
+  void SetNextFindChunkStatus(Status status) {
+    next_find_chunk_status_ = std::move(status);
+    next_find_chunk_result_.reset();
+  }
+
+  void EraseChunkForTest(InodeID ino, ChunkIndex index) {
+    auto ino_it = chunks_.find(ino);
+    if (ino_it == chunks_.end()) {
+      return;
+    }
+    ino_it->second.erase(index);
+    if (ino_it->second.empty()) {
+      chunks_.erase(ino_it);
+    }
+  }
+
   Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                      const SwordFsChunk &replacement) override {
     if (!expected.has_value()) {
       if (!publish_chunk_status.ok() && !publish_chunk_commit_on_error) {
+        if (publish_chunk_status.IsAlreadyExists() || publish_chunk_status.IsNotFound()) {
+          QueuePendingDelete(ino, replacement);
+        }
         return publish_chunk_status;
       }
 
@@ -318,6 +353,7 @@ class MockMetaEngine : public IMetaEngine {
       auto it = chunk_map.find(replacement.index);
       if (it != chunk_map.end()) {
         if (!(it->second == replacement)) {
+          QueuePendingDelete(ino, replacement);
           return Status::AlreadyExists("conflicting chunk");
         }
       } else {
@@ -329,20 +365,27 @@ class MockMetaEngine : public IMetaEngine {
 
     ++replace_chunk_calls;
     if (!replace_chunk_status.ok() && !replace_chunk_commit_on_error && !replace_chunk_descriptor_only_on_error) {
+      if (replace_chunk_status.IsAlreadyExists() || replace_chunk_status.IsNotFound()) {
+        QueuePendingDelete(ino, replacement);
+      }
       return replace_chunk_status;
     }
     auto &chunk_map = chunks_[ino];
     auto it = chunk_map.find(expected->index);
     if (it == chunk_map.end()) {
+      QueuePendingDelete(ino, replacement);
       return Status::NotFound("chunk not found");
     }
     if (it->second == replacement) {
+      QueuePendingDelete(ino, *expected);
       file_size_ = std::max(file_size_, static_cast<off_t>(replacement.start_offset + replacement.size));
       return replace_chunk_status;
     }
     if (!(it->second == *expected)) {
+      QueuePendingDelete(ino, replacement);
       return Status::AlreadyExists("chunk changed before replacement");
     }
+    QueuePendingDelete(ino, *expected);
     it->second = replacement;
     if (!replace_chunk_descriptor_only_on_error) {
       file_size_ = std::max(file_size_, static_cast<off_t>(replacement.start_offset + replacement.size));
@@ -351,6 +394,18 @@ class MockMetaEngine : public IMetaEngine {
   }
 
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override {
+    if (next_find_chunk_status_.has_value()) {
+      auto status = std::move(*next_find_chunk_status_);
+      next_find_chunk_status_.reset();
+      return status;
+    }
+    if (next_find_chunk_result_.has_value()) {
+      if (chunk) {
+        *chunk = *next_find_chunk_result_;
+      }
+      next_find_chunk_result_.reset();
+      return Status::OK();
+    }
     if (!find_chunk_status.ok() && (!find_chunk_error_idx.has_value() || *find_chunk_error_idx == idx)) {
       return find_chunk_status;
     }
@@ -388,6 +443,17 @@ class MockMetaEngine : public IMetaEngine {
     return file_size_;
   }
 
+  std::vector<std::string> PendingDeleteKeys() const {
+    std::vector<std::string> out;
+    out.reserve(pending_deletes_.size());
+    for (const auto &[key, pending] : pending_deletes_) {
+      (void)pending;
+      out.push_back(key);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+  }
+
   int truncate_calls = 0;
   int replace_chunk_calls = 0;
   int allocate_chunk_revision_calls = 0;
@@ -403,6 +469,13 @@ class MockMetaEngine : public IMetaEngine {
   std::optional<ChunkIndex> find_chunk_error_idx;
 
  private:
+  void QueuePendingDelete(InodeID ino, const SwordFsChunk &chunk) {
+    const auto key = swordfs::chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
+    pending_deletes_.insert_or_assign(
+        key, swordfs::metadata::PendingDelete{
+                 .ino = ino, .chunk = swordfs::metadata::ReclaimChunk{.descriptor = chunk, .key = key}});
+  }
+
   void TruncateChunks(InodeID ino, uint64_t size) {
     auto ino_it = chunks_.find(ino);
     if (ino_it == chunks_.end()) {
@@ -427,6 +500,9 @@ class MockMetaEngine : public IMetaEngine {
   Status truncate_status_ = Status::OK();
   swordfs::metadata::ChunkRevision next_revision_ = 1;
   std::unordered_map<InodeID, std::unordered_map<ChunkIndex, SwordFsChunk>> chunks_;
+  std::unordered_map<std::string, swordfs::metadata::PendingDelete> pending_deletes_;
+  std::optional<SwordFsChunk> next_find_chunk_result_;
+  std::optional<Status> next_find_chunk_status_;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -974,6 +1050,39 @@ TEST_F(FileReadWriterTest, InitialPublishConflictReportsConflictWhenCleanupFails
   });
 }
 
+TEST_F(FileReadWriterTest, InitialPublishRetryNeverReusesDurableLosingRevision) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello"), 0).ok());
+
+    mock_meta_->publish_chunk_status = Status::AlreadyExists("winner already published");
+    mock_data_->delete_status = Status::IOError("cleanup failed");
+    ASSERT_TRUE(rw.Flush().IsAlreadyExists());
+
+    const auto losing_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 1);
+    ASSERT_EQ(mock_meta_->PendingDeleteKeys(), std::vector<std::string>{losing_key});
+    ASSERT_EQ(mock_meta_->allocate_chunk_revision_calls, 1);
+
+    // A later retry may become publishable again (for example, the conflicting
+    // initial descriptor was truncated away). The revision already handed to
+    // pending-deletes is terminal: reuse would race Reclaimer deleting the
+    // newly published object under that same immutable key.
+    mock_meta_->publish_chunk_status = Status::OK();
+    mock_data_->delete_status = Status::OK();
+    ASSERT_TRUE(rw.Flush().ok());
+
+    SwordFsChunk current;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &current).ok());
+    EXPECT_EQ(current.revision, 2U);
+    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 2);
+    EXPECT_EQ(mock_meta_->PendingDeleteKeys(), std::vector<std::string>{losing_key});
+
+    const auto current_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, current.revision);
+    const auto stored_keys = mock_data_->StoredKeys();
+    EXPECT_NE(std::find(stored_keys.begin(), stored_keys.end(), current_key), stored_keys.end());
+  });
+}
+
 TEST_F(FileReadWriterTest, FlushNeverShrinksExistingFileSize) {
   RunInTestFiber([&] {
     auto rw = Make(4096);
@@ -1461,6 +1570,216 @@ TEST_F(FileReadWriterTest, RewriteRetryRejectsChangedDescriptorAndCleansPendingO
     EXPECT_TRUE(status.IsAlreadyExists());
     EXPECT_NE(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), pending),
               mock_data_->delete_calls.end());
+    EXPECT_EQ(mock_meta_->PendingDeleteKeys(), std::vector<std::string>{pending});
+    EXPECT_TRUE(mock_meta_->complete_pending_delete_calls.empty());
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteRetryChangedDescriptorThenCommitReportsNotFoundCleansPendingObject) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    SwordFsChunk first;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &first).ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+    mock_meta_->replace_chunk_status = Status::IOError("publication outcome unavailable");
+    ASSERT_EQ(rw.Flush().code(), Status::kIOError);
+
+    const auto pending_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 2);
+    auto winner = first;
+    winner.revision = 999;
+    ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, winner).ok());
+    mock_meta_->replace_chunk_status = Status::NotFound("expected disappeared before CAS");
+
+    const auto status = rw.Flush();
+    EXPECT_TRUE(status.IsNotFound());
+    EXPECT_NE(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), pending_key),
+              mock_data_->delete_calls.end());
+    EXPECT_TRUE(mock_meta_->PendingDeleteKeys().empty());
+
+    SwordFsChunk stored;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &stored).ok());
+    EXPECT_EQ(stored, winner);
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteRetryLookupMissThenConcurrentWinnerCleansPendingObject) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    SwordFsChunk first;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &first).ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+    mock_meta_->replace_chunk_status = Status::IOError("publication outcome unavailable");
+    ASSERT_EQ(rw.Flush().code(), Status::kIOError);
+
+    const auto pending_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 2);
+    auto winner = first;
+    winner.revision = 999;
+    ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, winner).ok());
+
+    // Model a winner being published after the retry's authoritative lookup:
+    // the lookup observes absence, while CommitChunk sees the winner already
+    // installed and must durably reject/queue the losing uploaded revision.
+    mock_meta_->find_chunk_status = Status::NotFound("stale retry lookup");
+    mock_meta_->replace_chunk_status = Status::OK();
+    const auto status = rw.Flush();
+    EXPECT_TRUE(status.IsAlreadyExists());
+    EXPECT_NE(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), pending_key),
+              mock_data_->delete_calls.end());
+    EXPECT_TRUE(mock_meta_->PendingDeleteKeys().empty());
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteRetryAfterFailedPutDoesNotDeleteUnuploadedRevision) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    SwordFsChunk first;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &first).ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+
+    mock_data_->put_status = Status::IOError("rewrite put failed");
+    ASSERT_EQ(rw.Flush().code(), Status::kIOError);
+    ASSERT_EQ(mock_data_->put_calls, 2);
+
+    auto winner = first;
+    winner.revision = 999;
+    ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, winner).ok());
+    mock_data_->put_status = Status::OK();
+
+    const auto status = rw.Flush();
+    EXPECT_TRUE(status.IsAlreadyExists());
+    EXPECT_EQ(mock_data_->put_calls, 2);
+    const auto unuploaded_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 2);
+    EXPECT_EQ(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), unuploaded_key),
+              mock_data_->delete_calls.end());
+    EXPECT_TRUE(mock_meta_->PendingDeleteKeys().empty());
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteDefiniteNotFoundCleansLosingObjectAfterDurableHandoff) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+
+    mock_meta_->replace_chunk_status = Status::NotFound("expected removed before publication");
+    const auto status = rw.Flush();
+    EXPECT_TRUE(status.IsNotFound());
+
+    const auto losing_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 2);
+    EXPECT_NE(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), losing_key),
+              mock_data_->delete_calls.end());
+    EXPECT_NE(std::find(mock_meta_->complete_pending_delete_calls.begin(),
+                        mock_meta_->complete_pending_delete_calls.end(), losing_key),
+              mock_meta_->complete_pending_delete_calls.end());
+    EXPECT_TRUE(mock_meta_->PendingDeleteKeys().empty());
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteRetryMissingExpectedRetainsCleanupWhenAckFails) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    SwordFsChunk first;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &first).ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+
+    mock_meta_->replace_chunk_status = Status::IOError("publication outcome unavailable");
+    ASSERT_EQ(rw.Flush().code(), Status::kIOError);
+    const auto pending_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 2);
+    const auto stored_keys = mock_data_->StoredKeys();
+    ASSERT_NE(std::find(stored_keys.begin(), stored_keys.end(), pending_key), stored_keys.end());
+
+    mock_meta_->EraseChunkForTest(kIno, 0);
+    mock_meta_->replace_chunk_status = Status::OK();
+    mock_meta_->complete_pending_delete_status = Status::IOError("ack failed");
+
+    const auto status = rw.Flush();
+    EXPECT_TRUE(status.IsNotFound());
+    EXPECT_NE(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), pending_key),
+              mock_data_->delete_calls.end());
+    EXPECT_NE(std::find(mock_meta_->complete_pending_delete_calls.begin(),
+                        mock_meta_->complete_pending_delete_calls.end(), pending_key),
+              mock_meta_->complete_pending_delete_calls.end());
+    EXPECT_EQ(mock_meta_->PendingDeleteKeys(), std::vector<std::string>{pending_key});
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteRetryConvergesWhenReplacementWinsAfterDifferentDescriptorObservation) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    SwordFsChunk first;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &first).ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+
+    mock_meta_->replace_chunk_status = Status::IOError("publication result ambiguous");
+    ASSERT_EQ(rw.Flush().code(), Status::kIOError);
+    ASSERT_EQ(mock_data_->put_calls, 2);
+
+    auto replacement = first;
+    replacement.revision = 2;
+    replacement.size = 11;
+    ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, replacement).ok());
+
+    auto observed_winner = first;
+    observed_winner.revision = 999;
+    mock_meta_->SetNextFindChunkResult(observed_winner);
+    mock_meta_->replace_chunk_status = Status::OK();
+
+    ASSERT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_data_->put_calls, 2);
+    // Flush success must mean the local chunk completed publication rather
+    // than remaining sealed after the retry race converged.
+    EXPECT_TRUE(rw.Write(Buf("h"), 0).ok());
+    SwordFsChunk current;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &current).ok());
+    EXPECT_EQ(current, replacement);
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteRetryConvergesWhenReplacementAppearsAfterMissingObservation) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    SwordFsChunk first;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &first).ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+
+    mock_meta_->replace_chunk_status = Status::IOError("publication result ambiguous");
+    ASSERT_EQ(rw.Flush().code(), Status::kIOError);
+    ASSERT_EQ(mock_data_->put_calls, 2);
+
+    auto replacement = first;
+    replacement.revision = 2;
+    replacement.size = 11;
+    ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, replacement).ok());
+    mock_meta_->SetNextFindChunkStatus(Status::NotFound("transiently missing"));
+    mock_meta_->replace_chunk_status = Status::OK();
+
+    ASSERT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_data_->put_calls, 2);
+    // The replacement becoming authoritative between lookup and CommitChunk
+    // is a successful convergence path; local state must be writable again.
+    EXPECT_TRUE(rw.Write(Buf("h"), 0).ok());
+    SwordFsChunk current;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &current).ok());
+    EXPECT_EQ(current, replacement);
   });
 }
 
@@ -1477,6 +1796,9 @@ TEST_F(FileReadWriterTest, RewriteConflictCleansNewObjectEvenWhenDeleteReportsFa
     EXPECT_TRUE(status.IsAlreadyExists());
     EXPECT_EQ(mock_meta_->replace_chunk_calls, 1);
     EXPECT_EQ(mock_data_->delete_calls.size(), 1U);
+    EXPECT_EQ(mock_meta_->PendingDeleteKeys(),
+              std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(kIno, 0, 2)});
+    EXPECT_TRUE(mock_meta_->complete_pending_delete_calls.empty());
   });
 }
 
@@ -1489,11 +1811,52 @@ TEST_F(FileReadWriterTest, RewriteSuccessToleratesOldObjectDeleteFailure) {
 
     ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
     ASSERT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_meta_->PendingDeleteKeys(),
+              std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(kIno, 0, 1)});
+    EXPECT_TRUE(mock_meta_->complete_pending_delete_calls.empty());
 
     FileReadWriter reader(kIno);
     auto out = folly::IOBuf::create(11);
     ASSERT_TRUE(reader.Read(11, 0, out.get()).ok());
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "HELLO world");
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteSuccessAcknowledgesDurableOldObjectCleanup) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    const auto old_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 1);
+    EXPECT_TRUE(mock_meta_->PendingDeleteKeys().empty());
+    EXPECT_NE(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), old_key),
+              mock_data_->delete_calls.end());
+    EXPECT_NE(std::find(mock_meta_->complete_pending_delete_calls.begin(),
+                        mock_meta_->complete_pending_delete_calls.end(), old_key),
+              mock_meta_->complete_pending_delete_calls.end());
+  });
+}
+
+TEST_F(FileReadWriterTest, RewriteSuccessToleratesPendingDeleteAckFailure) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    mock_meta_->complete_pending_delete_status = Status::IOError("forced ack failure");
+
+    ASSERT_TRUE(rw.Write(Buf("HELLO"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+
+    const auto old_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 1);
+    EXPECT_EQ(mock_meta_->PendingDeleteKeys(), std::vector<std::string>{old_key});
+    EXPECT_NE(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), old_key),
+              mock_data_->delete_calls.end());
+    EXPECT_NE(std::find(mock_meta_->complete_pending_delete_calls.begin(),
+                        mock_meta_->complete_pending_delete_calls.end(), old_key),
+              mock_meta_->complete_pending_delete_calls.end());
   });
 }
 

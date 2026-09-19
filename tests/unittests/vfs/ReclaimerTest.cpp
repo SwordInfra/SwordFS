@@ -315,6 +315,32 @@ FIBER_TEST_F(ReclaimerTest, TruncateCleanupRetriesFailedDelete) {
   EXPECT_FALSE(data_->Contains(key));
 }
 
+FIBER_TEST_F(ReclaimerTest, RewriteCleanupDeletesOnlySupersededRevision) {
+  const InodeID f_ino = CreateChunkedFile("rewrite");
+  SwordFsChunk first;
+  ASSERT_TRUE(meta_->FindChunk(f_ino, 0, &first).ok());
+
+  auto replacement = first;
+  replacement.revision = first.revision + 1;
+  const auto old_key = chunk::FormatChunkObjectKey(f_ino, first.index, first.revision);
+  const auto new_key = chunk::FormatChunkObjectKey(f_ino, replacement.index, replacement.revision);
+  data_->Seed(new_key);
+
+  ASSERT_TRUE(meta_->CommitChunk(f_ino, first, replacement).ok());
+  EXPECT_EQ(PendingDeletes(), std::vector<std::string>{old_key});
+  EXPECT_TRUE(data_->Contains(old_key));
+  EXPECT_TRUE(data_->Contains(new_key));
+
+  ASSERT_TRUE(Reclaimer::Instance().Reconcile().ok());
+  EXPECT_FALSE(data_->Contains(old_key));
+  EXPECT_TRUE(data_->Contains(new_key));
+  EXPECT_TRUE(PendingDeletes().empty());
+
+  SwordFsChunk authoritative;
+  ASSERT_TRUE(meta_->FindChunk(f_ino, 0, &authoritative).ok());
+  EXPECT_EQ(authoritative, replacement);
+}
+
 FIBER_TEST_F(ReclaimerTest, PreparedTruncateIntentDoesNotDeleteStillAuthoritativeObject) {
   constexpr InodeID kIno = 42;
   SwordFsChunk descriptor{.index = 0, .start_offset = 0, .revision = 7, .size = 64};

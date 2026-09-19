@@ -46,8 +46,11 @@ struct ReclaimWork {
   utils::Status ParseFrom(std::string_view data);
 };
 
-/// One immutable object detached from live chunk metadata and awaiting
-/// physical deletion (currently produced by truncate).
+/// One immutable object with durable cleanup intent. The intent may be staged
+/// while the same object is still authoritative (for example, before truncate
+/// detach or rewrite replacement); Reclaimer must re-check live metadata before
+/// physical deletion. Producers also include definite publication rejection,
+/// where the losing uploaded revision is already known to be unreachable.
 ///
 /// The Redis Hash field is also |chunk.key|; persisting the full frozen
 /// identity as the value lets recovery validate the field/key/descriptor

@@ -840,8 +840,95 @@ utils::Status RedisMetaTxn::ScanChunks(InodeID ino, std::vector<std::pair<std::s
   return utils::Status::OK();
 }
 
+utils::Status RedisMetaTxn::QueuePendingDelete(InodeID ino, const SwordFsChunk &chunk) {
+  const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
+  PendingDelete pending{.ino = ino, .chunk = ReclaimChunk{.descriptor = chunk, .key = object_key}};
+  std::string encoded;
+  auto status = pending.SerializeTo(&encoded);
+  if (!status.ok()) {
+    return status;
+  }
+  return txn_.HSet(key_.PendingDeletes(), object_key, encoded);
+}
+
+utils::Status RedisMetaTxn::ValidatePendingDelete(InodeID ino, const SwordFsChunk &chunk) {
+  const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
+  std::string encoded;
+  auto status = txn_.HGet(key_.PendingDeletes(), object_key, &encoded);
+  if (status.IsNotFound()) {
+    return utils::Status::Internal("chunk rewrite delete intent is missing for " + object_key);
+  }
+  if (!status.ok()) {
+    return status;
+  }
+
+  PendingDelete pending;
+  status = pending.ParseFrom(encoded);
+  if (!status.ok()) {
+    return status;
+  }
+  if (pending.ino != ino || !(pending.chunk.descriptor == chunk) || pending.chunk.key != object_key) {
+    return utils::Status::Malformed("chunk rewrite delete intent does not match the frozen object identity");
+  }
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaTxn::PrepareChunkRewriteDelete(InodeID ino, const SwordFsChunk &expected,
+                                                      const SwordFsChunk &replacement) {
+  if (!expected.IsValidForChunkSize(chunk_size_)) {
+    return utils::Status::InvalidArgument("expected chunk descriptor is invalid");
+  }
+  if (!replacement.IsValidForChunkSize(chunk_size_)) {
+    return utils::Status::InvalidArgument("replacement chunk descriptor is invalid");
+  }
+  if (replacement.revision <= expected.revision) {
+    return utils::Status::InvalidArgument("replacement revision must increase");
+  }
+  if (expected.index != replacement.index || expected.start_offset != replacement.start_offset) {
+    return utils::Status::InvalidArgument("replacement must preserve chunk index and start offset");
+  }
+
+  SwordFsInode inode;
+  auto status = LookupInode(ino, &inode);
+  if (status.IsNotFound()) {
+    // Phase two will durably queue the uploaded replacement as a definite
+    // loser. There is no live old descriptor to prepare.
+    return utils::Status::OK();
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  if (!inode.IsRegular()) {
+    return utils::Status::InvalidArgument("not a regular file");
+  }
+
+  SwordFsChunk current;
+  status = LookupChunk(ino, expected.index, &current);
+  if (status.IsNotFound()) {
+    return utils::Status::OK();
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  if (!(current == expected) && !(current == replacement)) {
+    // A different immutable revision already won. The publication transaction
+    // will queue |replacement| as the definite loser; |expected| is no longer
+    // part of this publication transition.
+    return utils::Status::OK();
+  }
+
+  // This transaction is deliberately additive-only. Queue the old immutable
+  // identity here; the later destructive publication transaction validates
+  // the exact record before it may replace the authoritative descriptor.
+  // A runtime HSET failure is safe to surface directly because this phase has
+  // no destructive writes to roll back.
+  return QueuePendingDelete(ino, expected);
+}
+
 utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
-                                        const SwordFsChunk &replacement) {
+                                        const SwordFsChunk &replacement, utils::Status &publication_result) {
+  publication_result = utils::Status::OK();
+
   if (!replacement.IsValidForChunkSize(chunk_size_)) {
     return utils::Status::InvalidArgument("replacement chunk descriptor is invalid");
   }
@@ -859,8 +946,23 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
     return utils::Status::InvalidArgument("chunk end offset overflows");
   }
 
+  auto reject_publication = [&](utils::Status rejection) -> utils::Status {
+    // A definite loser is safe to delete, but the caller may crash before its
+    // eager delete. Commit the frozen replacement identity in this transaction
+    // and expose the logical rejection only after EXEC succeeds.
+    auto status = QueuePendingDelete(ino, replacement);
+    if (!status.ok()) {
+      return status;
+    }
+    publication_result = std::move(rejection);
+    return utils::Status::OK();
+  };
+
   SwordFsInode inode;
   auto status = LookupInode(ino, &inode);
+  if (status.IsNotFound()) {
+    return reject_publication(status);
+  }
   if (!status.ok()) {
     return status;
   }
@@ -876,13 +978,20 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
       return utils::Status::Malformed("persisted chunk descriptor is invalid");
     }
     replacement_already_published = current == replacement;
-    if (!replacement_already_published && (!expected.has_value() || !(current == *expected))) {
-      return utils::Status::AlreadyExists("chunk changed before publication at index " +
-                                          std::to_string(replacement.index));
+    const bool current_matches_expected = expected.has_value() && current == *expected;
+    if (!replacement_already_published && !current_matches_expected) {
+      return reject_publication(utils::Status::AlreadyExists("chunk changed before publication at index " +
+                                                             std::to_string(replacement.index)));
+    }
+    if (current_matches_expected) {
+      status = ValidatePendingDelete(ino, *expected);
+      if (!status.ok()) {
+        return status;
+      }
     }
   } else if (status.IsNotFound()) {
     if (expected.has_value()) {
-      return status;
+      return reject_publication(status);
     }
   } else {
     return status;

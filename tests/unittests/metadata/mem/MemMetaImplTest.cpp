@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <atomic>
 #include <barrier>
 #include <limits>
@@ -175,6 +176,17 @@ class MemMetaImplTest : public ::testing::Test {
       return Status::OK();
     });
     EXPECT_TRUE(status.ok()) << status.message();
+    return out;
+  }
+
+  std::vector<std::string> PendingDeletes() {
+    std::vector<std::string> out;
+    auto status = impl_->VisitPendingDeletes([&out](const swordfs::metadata::PendingDelete &work) {
+      out.push_back(work.chunk.key);
+      return Status::OK();
+    });
+    EXPECT_TRUE(status.ok()) << status.message();
+    std::sort(out.begin(), out.end());
     return out;
   }
 
@@ -810,6 +822,8 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempoten
   replacement.revision = 2;
   replacement.size = 64;
   ASSERT_TRUE(impl_->CommitChunk(f_ino, first, replacement).ok());
+  EXPECT_EQ(PendingDeletes(),
+            std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(f_ino, first.index, first.revision)});
   ASSERT_TRUE(impl_->CommitChunk(f_ino, first, replacement).ok());
 
   SwordFsChunk stored;
@@ -824,6 +838,10 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempoten
   auto stale_replacement = replacement;
   stale_replacement.revision = 3;
   EXPECT_TRUE(impl_->CommitChunk(f_ino, first, stale_replacement).IsAlreadyExists());
+  EXPECT_EQ(PendingDeletes(),
+            (std::vector<std::string>{
+                swordfs::chunk::FormatChunkObjectKey(f_ino, first.index, first.revision),
+                swordfs::chunk::FormatChunkObjectKey(f_ino, stale_replacement.index, stale_replacement.revision)}));
 
   auto grown = replacement;
   grown.revision = 4;

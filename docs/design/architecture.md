@@ -355,7 +355,11 @@ sequenceDiagram
 - first publication expects no existing descriptor;
 - rewrite publication carries the previously authoritative descriptor as `expected`;
 - replaying an already-published replacement is idempotent;
-- a conflicting publication is rejected rather than silently overwriting the winner.
+- a conflicting publication is rejected rather than silently overwriting the winner;
+- successful rewrite publication durably hands the superseded immutable
+  revision to `pending_deletes` before replacement is allowed;
+- a definite losing uploaded revision is durably queued before
+  `AlreadyExists` / `NotFound` is exposed to the caller.
 
 The inode size side effect is reconciled as part of metadata publication and publication must not shrink inode size.
 
@@ -367,8 +371,10 @@ The current object-storage path uses **whole-chunk copy-on-write** for overwrite
 2. apply the modification locally;
 3. allocate a new revision;
 4. upload a new full immutable object;
-5. CAS-publish the new descriptor;
-6. best-effort delete the previous object's key after successful publication.
+5. durably stage cleanup ownership for the old immutable revision;
+6. CAS-publish the new descriptor only after validating that durable intent;
+7. eagerly delete the previous object's key when possible and acknowledge the
+   durable pending-delete record only after successful deletion.
 
 There is currently no slice/extent overlay or compaction layer in the open-source data path. Random overwrites can therefore incur whole-chunk read/write amplification.
 
@@ -564,8 +570,9 @@ Once metadata preparation removes the live inode, the local fence can be release
 
 The `Reclaimer` is the sole production component that executes the cross-engine GC sequence:
 
-1. replay truncate pending-delete records, deleting each frozen immutable
-   object idempotently and acknowledging the record only after success;
+1. replay immutable-object pending-delete records from truncate and chunk
+   publication cleanup, deleting each frozen object idempotently and
+   acknowledging the record only after success;
 2. replay already-pending last-link reclaim work;
 3. scan orphan candidates;
 4. acquire the local fence when applicable;
@@ -592,8 +599,21 @@ Writing the object before metadata publication means a failure can leave an **un
 Retry logic first checks authoritative metadata:
 
 - if the same replacement descriptor was already published, the operation can complete idempotently;
-- if another revision won, the local pending object can be cleaned up without deleting the winner;
-- if metadata did not publish, retry may upload/publish the same pending revision safely.
+- if another revision won, metadata first makes the losing uploaded revision
+  durable pending-delete work, then foreground cleanup may delete it without
+  touching the winner;
+- if publication failed without a definite loser handoff, retry may
+  upload/publish the same pending revision safely;
+- once a revision is durably recorded as a definite loser, the local writer
+  relinquishes that revision and any later retry allocates a fresh one, so
+  Reclaimer can never race deletion of a key that the writer may republish.
+
+For rewrites, the superseded old revision is persisted as pending-delete work
+before Redis is allowed to replace its authoritative descriptor. A crash after
+publication can therefore lose only eager cleanup progress, not the cleanup
+identity itself. The earlier crash window after a successful object `Put` but
+before any metadata handoff remains #186 because metadata has no durable record
+of that candidate yet.
 
 ### 15.2 Redis transaction ambiguity
 
@@ -668,7 +688,12 @@ Future changes should preserve or explicitly revise the following contracts:
 6. **Open-handle runtime state does not replace durable metadata.** Local fences protect transitions; they are not persistent lifecycle records.
 7. **Last-link deletion is recoverable.** The metadata mutation that removes the last name must durably publish cleanup work before the foreground request can forget the inode.
 8. **Object deletion after reclaim uses frozen identities.** It must not reconstruct targets from mutable/live metadata after the point of no return.
-9. **Truncate cleanup handoff is durable.** A published chunk descriptor may be detached only after its exact frozen immutable object identity is already durable in pending-delete state; replay must not delete that object while the same immutable key is still authoritative.
+9. **Immutable-object cleanup handoff is durable.** Truncate may detach a
+   published chunk descriptor, and rewrite publication may supersede one, only
+   after the obsolete immutable identity is durable in pending-delete state;
+   definite losing uploaded revisions are also queued before the logical
+   rejection is exposed. Replay must not delete an object while the same
+   immutable key is still authoritative.
 10. **Data-engine deletion is idempotent.** Durable cleanup may replay the same immutable key after restart, timeout, or acknowledgement failure.
 11. **Ambiguous external commits are not assumed to have rolled back.** Retry/reconciliation semantics must be safe under either outcome.
 12. **Shutdown ordering respects borrowed lifetimes.** Background work stops before the fiber runtime and engines it uses are destroyed.

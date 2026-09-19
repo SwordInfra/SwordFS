@@ -220,6 +220,14 @@ class IMetaEngine {
   /// must be strictly greater than the expected revision. Publication must
   /// never shrink inode size. A conflicting descriptor returns AlreadyExists;
   /// a rewrite whose expected descriptor disappeared returns NotFound.
+  ///
+  /// Cleanup ownership is part of the publication contract. Before a
+  /// successful rewrite can make |expected| obsolete, metadata must durably
+  /// publish its immutable object identity as pending-delete work. Likewise,
+  /// a definite rejection after the replacement object was uploaded must make
+  /// that losing replacement retryable cleanup work before the logical
+  /// AlreadyExists/NotFound result is exposed to the caller. Foreground object
+  /// deletion is only an eager optimization after this durable handoff.
   virtual Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                              const SwordFsChunk &replacement) = 0;
 

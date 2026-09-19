@@ -522,8 +522,15 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
       (expected->index != replacement.index || expected->start_offset != replacement.start_offset)) {
     return Status::InvalidArgument("replacement must preserve chunk index and start offset");
   }
+  auto queue_pending_delete = [&](const SwordFsChunk &chunk) {
+    const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
+    store_->pending_deletes_.insert_or_assign(
+        object_key, PendingDelete{.ino = ino, .chunk = ReclaimChunk{.descriptor = chunk, .key = object_key}});
+  };
+
   auto *inode = FindInode(ino);
   if (inode == nullptr) {
+    queue_pending_delete(replacement);
     return Status::NotFound("inode not found: " + std::to_string(ino));
   }
   if (!inode->IsRegular()) {
@@ -538,10 +545,20 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
   bool replacement_already_published = false;
   if (it != chunk_map.end()) {
     replacement_already_published = it->second == replacement;
-    if (!replacement_already_published && (!expected.has_value() || !(it->second == *expected))) {
+    const bool current_matches_expected = expected.has_value() && it->second == *expected;
+    if (!replacement_already_published && !current_matches_expected) {
+      queue_pending_delete(replacement);
       return Status::AlreadyExists("chunk changed before publication at index " + std::to_string(replacement.index));
     }
+    if (current_matches_expected || (replacement_already_published && expected.has_value())) {
+      // Memory transactions are one critical section, so publishing this
+      // immutable cleanup identity and replacing/replaying the descriptor are
+      // atomic. Redis mirrors the same ownership rule with an additive
+      // preparation transaction before its destructive publication transaction.
+      queue_pending_delete(*expected);
+    }
   } else if (expected.has_value()) {
+    queue_pending_delete(replacement);
     return Status::NotFound("chunk not found at index " + std::to_string(replacement.index));
   }
 

@@ -98,7 +98,9 @@ class RedisMetaTxn {
   // ────────────────────────────────────────────────────────────────
   // Chunk operations
   // ────────────────────────────────────────────────────────────────
-  utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement);
+  utils::Status PrepareChunkRewriteDelete(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement);
+  utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
+                            utils::Status &publication_result);
 
  private:
   utils::Status SetInode(const SwordFsInode &inode);
@@ -116,6 +118,8 @@ class RedisMetaTxn {
   utils::Status AdjustInodeCount(int64_t delta);
   utils::Status LookupChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
   utils::Status ScanChunks(InodeID ino, std::vector<std::pair<std::string, SwordFsChunk>> &chunks);
+  utils::Status QueuePendingDelete(InodeID ino, const SwordFsChunk &chunk);
+  utils::Status ValidatePendingDelete(InodeID ino, const SwordFsChunk &chunk);
 
  private:
   RedisKvTxn &txn_;

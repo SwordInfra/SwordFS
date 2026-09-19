@@ -92,12 +92,12 @@ utils::Status Reclaimer::DeletePendingObject(const metadata::PendingDelete &work
   auto *meta = volume::VolumeImpl::Instance().meta_engine();
   auto *data = volume::VolumeImpl::Instance().data_engine();
 
-  // Redis truncate publishes durable delete intent before the transaction
-  // that detaches the live chunk descriptor. A crash or partial failure may
-  // therefore leave a valid intent whose object is still authoritative. Do
-  // not delete until the current descriptor no longer names the same immutable
-  // object key. Stale intents are harmless and remain available for a later
-  // pass if the detach eventually succeeds.
+  // Truncate and rewrite publication can publish durable delete intent before
+  // the transaction that makes an immutable object obsolete. A crash or
+  // partial failure may therefore leave a valid intent whose object is still
+  // authoritative. Do not delete until the current descriptor no longer names
+  // the same immutable object key. Stale intents are harmless and remain
+  // available for a later pass if the metadata transition eventually succeeds.
   metadata::SwordFsChunk current;
   auto status = meta->FindChunk(work.ino, work.chunk.descriptor.index, &current);
   if (status.ok()) {
@@ -128,10 +128,10 @@ utils::Status Reclaimer::Reconcile() {
 
   size_t failures = 0;
 
-  // Redis may publish truncate delete intent before the descriptor-detach
-  // transaction. DeletePendingObject therefore rechecks whether that exact
-  // immutable key is still authoritative and treats a live intent as a safe
-  // no-op for this pass.
+  // Redis may publish delete intent before truncate descriptor detach or
+  // rewrite replacement. DeletePendingObject therefore rechecks whether that
+  // exact immutable key is still authoritative and treats a live intent as a
+  // safe no-op for this pass.
   auto status = meta->VisitPendingDeletes([this, &failures](const metadata::PendingDelete &work) {
     auto status = DeletePendingObject(work);
     if (!status.ok()) {
