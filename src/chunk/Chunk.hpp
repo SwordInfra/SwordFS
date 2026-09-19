@@ -88,11 +88,6 @@ class Chunk {
     return StartOffset() + static_cast<off_t>(wb_->size());
   }
 
-  /// Object keys that may contain data owned by this chunk and may be
-  /// reclaimed if authoritative metadata drops the chunk. A dirty rewrite
-  /// can own both the old committed key and a newly uploaded pending key.
-  std::vector<std::string> ObjectKeysForCleanup() const;
-
  private:
   bool IsWriting() const {
     return state_ == State::kWriting;
@@ -118,8 +113,8 @@ class Chunk {
   metadata::ChunkRevision pending_revision_ = metadata::kInvalidChunkRevision;
   // True once the current pending revision has completed at least one
   // successful Put. It lets retry-side conflict resolution ask metadata to
-  // durably hand off that losing object before eager deletion without ever
-  // publishing a revision whose object was never known durable.
+  // classify an already-uploaded candidate without ever treating a revision
+  // whose object was never known durable as publishable cleanup work.
   bool pending_object_uploaded_ = false;
 };
 

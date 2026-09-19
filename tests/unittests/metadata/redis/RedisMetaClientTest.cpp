@@ -107,20 +107,11 @@ utils::Status SeedEntry(sw::redis::Redis &redis, const redis::RedisKey &key, Ino
 
 utils::Status CommitChunkTxn(RedisMetaClient &store, const redis::RedisKey &key, uint64_t chunk_size, InodeID ino,
                              const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement) {
-  if (expected.has_value()) {
-    auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, chunk_size);
-      return txn.PrepareChunkRewriteDelete(ino, *expected, replacement);
-    });
-    if (!status.ok()) {
-      return status;
-    }
-  }
-
   utils::Status publication_result;
+  std::optional<SwordFsChunk> cleanup_candidate;
   auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, chunk_size);
-    return txn.CommitChunk(ino, expected, replacement, publication_result);
+    return txn.CommitChunk(ino, expected, replacement, publication_result, cleanup_candidate);
   });
   if (!status.ok()) {
     return status;
@@ -876,23 +867,14 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
   redis.hset(key.Chunk(9), "0", first_data);
   redis.hset(key.Chunk(9), "1", second_data);
 
-  const auto prepare_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.PrepareTruncateDeletes(9, 1024);
-  });
-  ASSERT_TRUE(prepare_status.ok()) << prepare_status.message();
-
-  // Intent publication is deliberately non-destructive. If the process dies
-  // here, the live descriptor still protects the object from the Reclaimer.
-  EXPECT_TRUE(redis.hexists(key.Chunk(9), "1"));
-  const auto second_key = chunk::FormatChunkObjectKey(9, second_chunk.index, second_chunk.revision);
-  EXPECT_TRUE(redis.hexists(key.PendingDeletes(), second_key));
-
+  std::vector<SwordFsChunk> detached;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.Truncate(9, 1024);
+    return txn.Truncate(9, 1024, &detached);
   });
   ASSERT_TRUE(status.ok()) << status.message();
+  ASSERT_EQ(detached.size(), 1U);
+  EXPECT_EQ(detached.front(), second_chunk);
 
   const auto first_value = redis.hget(key.Chunk(9), "0");
   ASSERT_TRUE(first_value.has_value());
@@ -905,21 +887,20 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
   const auto invalid_status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 0);
-    EXPECT_EQ(txn.PrepareTruncateDeletes(9, 1024).code(), utils::Status::kInternal);
     EXPECT_EQ(txn.Truncate(9, 1024).code(), utils::Status::kInternal);
     return utils::Status::OK();
   });
   EXPECT_TRUE(invalid_status.ok()) << invalid_status.message();
 }
 
-TEST(RedisMetaTxnTest, TruncateRequiresDurableDeleteIntentBeforeDetachingWholeChunk) {
+TEST(RedisMetaTxnTest, SetAttrShrinkWorksWithoutDetachedChunkOutput) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueRedisName("truncate-requires-intent"));
+  const redis::RedisKey key(config.db, UniqueRedisName("setattr-no-cleanup-output"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -927,30 +908,52 @@ TEST(RedisMetaTxnTest, TruncateRequiresDurableDeleteIntentBeforeDetachingWholeCh
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk chunk{0, 0, 1, 4096};
-  std::string chunk_data;
-  ASSERT_TRUE(chunk.SerializeTo(&chunk_data).ok());
-  redis.hset(key.Chunk(file.ino), "0", chunk_data);
+  SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 1, .size = 4096};
+  std::string encoded;
+  ASSERT_TRUE(chunk.SerializeTo(&encoded).ok());
+  redis.hset(key.Chunk(file.ino), "0", encoded);
+
+  SwordFsAttr requested = file.attr;
+  requested.size = 0;
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.SetAttr(file.ino, requested, SetAttrField::kSize);
+  });
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_FALSE(redis.hexists(key.Chunk(file.ino), "0"));
+
+  SwordFsInode stored;
+  ASSERT_TRUE(stored.ParseFrom(redis.get(key.Inode(file.ino)).value_or("")).ok());
+  EXPECT_EQ(stored.attr.size, 0U);
+}
+
+TEST(RedisMetaTxnTest, RegisterPendingDeletesRejectsInvalidInode) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("register-invalid-cleanup"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+  const std::vector<SwordFsChunk> chunks{SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64}};
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.Truncate(file.ino, 0);
+    return txn.RegisterPendingDeletes(0, chunks);
   });
-
-  EXPECT_EQ(status.code(), utils::Status::kInternal);
-  EXPECT_TRUE(redis.exists(key.Inode(file.ino)));
-  EXPECT_TRUE(redis.hexists(key.Chunk(file.ino), "0"));
-  EXPECT_FALSE(redis.hexists(key.PendingDeletes(), chunk::FormatChunkObjectKey(file.ino, 0, 1)));
+  EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
+  EXPECT_EQ(redis.hlen(key.PendingDeletes()), 0);
 }
 
-TEST(RedisMetaTxnTest, TruncateRejectsDurableIntentForDifferentDescriptor) {
+TEST(RedisMetaTxnTest, TruncateDoesNotDependOnPendingDeleteState) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueRedisName("truncate-mismatched-intent"));
+  const redis::RedisKey key(config.db, UniqueRedisName("truncate-independent-cleanup"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -959,64 +962,96 @@ TEST(RedisMetaTxnTest, TruncateRejectsDurableIntentForDifferentDescriptor) {
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
   SwordFsChunk chunk{0, 0, 1, 4096};
-  std::string chunk_data;
-  ASSERT_TRUE(chunk.SerializeTo(&chunk_data).ok());
-  redis.hset(key.Chunk(file.ino), "0", chunk_data);
+  std::string encoded;
+  ASSERT_TRUE(chunk.SerializeTo(&encoded).ok());
+  redis.hset(key.Chunk(file.ino), "0", encoded);
+  redis.set(key.PendingDeletes(), "wrong-type");
 
-  const auto object_key = chunk::FormatChunkObjectKey(file.ino, chunk.index, chunk.revision);
-  swordfs::metadata::PendingDelete wrong{
-      .ino = file.ino,
-      .chunk = swordfs::metadata::ReclaimChunk{
-          .descriptor = SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 2048}, .key = object_key}};
+  std::vector<SwordFsChunk> detached;
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.Truncate(file.ino, 0, &detached);
+  });
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  ASSERT_EQ(detached.size(), 1U);
+  EXPECT_EQ(detached.front(), chunk);
+  EXPECT_FALSE(redis.hexists(key.Chunk(file.ino), "0"));
+}
+
+TEST(RedisMetaTxnTest, TruncateScansMultipleChunkHashPagesAndCollectsDetachedChunks) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("truncate-multipage-chunks"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  constexpr uint64_t kChunkSize = 4096;
+  constexpr uint32_t kChunkCount = 600;
+  SwordFsAttr file_attr(9, S_IFREG | 0644);
+  file_attr.size = kChunkCount * kChunkSize;
+  SwordFsInode file(9, file_attr, kRootInodeId);
+  ASSERT_TRUE(SeedInode(redis, key, file).ok());
+
+  for (uint32_t index = 0; index < kChunkCount; ++index) {
+    SwordFsChunk chunk{.index = index,
+                       .start_offset = static_cast<uint64_t>(index) * kChunkSize,
+                       .revision = static_cast<uint64_t>(index) + 1,
+                       .size = kChunkSize};
+    std::string encoded;
+    ASSERT_TRUE(chunk.SerializeTo(&encoded).ok());
+    redis.hset(key.Chunk(file.ino), std::to_string(index), encoded);
+  }
+
+  std::vector<SwordFsChunk> detached;
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, kChunkSize);
+    return txn.Truncate(file.ino, 0, &detached);
+  });
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(detached.size(), kChunkCount);
+  EXPECT_EQ(redis.hlen(key.Chunk(file.ino)), 0);
+}
+
+TEST(RedisMetaTxnTest, TruncateRejectsInvalidChunkIdentity) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("truncate-noncanonical-chunk"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  SwordFsAttr file_attr(9, S_IFREG | 0644);
+  file_attr.size = 4096;
+  SwordFsInode file(9, file_attr, kRootInodeId);
+  ASSERT_TRUE(SeedInode(redis, key, file).ok());
+
+  SwordFsChunk wrong{.index = 0, .start_offset = 1, .revision = 1, .size = 64};
   std::string encoded;
   ASSERT_TRUE(wrong.SerializeTo(&encoded).ok());
-  redis.hset(key.PendingDeletes(), object_key, encoded);
+  redis.hset(key.Chunk(file.ino), "0", encoded);
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096);
     return txn.Truncate(file.ino, 0);
   });
-
   EXPECT_TRUE(status.IsMalformed()) << status.message();
   EXPECT_TRUE(redis.hexists(key.Chunk(file.ino), "0"));
-}
 
-TEST(RedisMetaTxnTest, TruncateRejectsMalformedOrWrongTypeDurableIntentState) {
-  RedisMetaConfig config;
-  if (!ParseTestConfig(&config)) {
-    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
-  }
-
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueRedisName("truncate-corrupt-intent"));
-  sw::redis::Redis redis(ConnectionOptions(config));
-
-  SwordFsAttr file_attr(9, S_IFREG | 0644);
-  file_attr.size = 4096;
-  SwordFsInode file(9, file_attr, kRootInodeId);
-  ASSERT_TRUE(SeedInode(redis, key, file).ok());
-  SwordFsChunk chunk{0, 0, 1, 4096};
-  std::string chunk_data;
-  ASSERT_TRUE(chunk.SerializeTo(&chunk_data).ok());
-  redis.hset(key.Chunk(file.ino), "0", chunk_data);
-  const auto object_key = chunk::FormatChunkObjectKey(file.ino, 0, 1);
-
-  redis.hset(key.PendingDeletes(), object_key, "malformed");
-  const auto malformed_status = store.Transact([&](RedisKvTxn &kv_txn) {
+  redis.del(key.Chunk(file.ino));
+  SwordFsChunk canonical{.index = 0, .start_offset = 0, .revision = 2, .size = 64};
+  ASSERT_TRUE(canonical.SerializeTo(&encoded).ok());
+  redis.hset(key.Chunk(file.ino), "1", encoded);
+  const auto field_mismatch_status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096);
     return txn.Truncate(file.ino, 0);
   });
-  EXPECT_TRUE(malformed_status.IsMalformed()) << malformed_status.message();
-  EXPECT_TRUE(redis.hexists(key.Chunk(file.ino), "0"));
-
-  redis.del(key.PendingDeletes());
-  redis.set(key.PendingDeletes(), "wrong-type");
-  const auto wrong_type_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.Truncate(file.ino, 0);
-  });
-  EXPECT_FALSE(wrong_type_status.ok());
-  EXPECT_TRUE(redis.hexists(key.Chunk(file.ino), "0"));
+  EXPECT_TRUE(field_mismatch_status.IsMalformed()) << field_mismatch_status.message();
 }
 
 TEST(RedisMetaTxnTest, TruncatePropagatesWrongTypeChunkMapFromDestructivePhase) {
@@ -1046,85 +1081,6 @@ TEST(RedisMetaTxnTest, TruncatePropagatesWrongTypeChunkMapFromDestructivePhase) 
   EXPECT_EQ(after.attr.size, file.attr.size);
 }
 
-TEST(RedisMetaTxnTest, PrepareTruncateDeletesScansMultipleChunkHashPages) {
-  RedisMetaConfig config;
-  if (!ParseTestConfig(&config)) {
-    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
-  }
-
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueRedisName("truncate-multipage-chunks"));
-  sw::redis::Redis redis(ConnectionOptions(config));
-
-  constexpr uint64_t kChunkSize = 4096;
-  constexpr uint32_t kChunkCount = 600;
-  SwordFsAttr file_attr(9, S_IFREG | 0644);
-  file_attr.size = kChunkCount * kChunkSize;
-  SwordFsInode file(9, file_attr, kRootInodeId);
-  ASSERT_TRUE(SeedInode(redis, key, file).ok());
-
-  for (uint32_t index = 0; index < kChunkCount; ++index) {
-    SwordFsChunk chunk{.index = index,
-                       .start_offset = static_cast<uint64_t>(index) * kChunkSize,
-                       .revision = static_cast<uint64_t>(index) + 1,
-                       .size = kChunkSize};
-    std::string encoded;
-    ASSERT_TRUE(chunk.SerializeTo(&encoded).ok());
-    redis.hset(key.Chunk(file.ino), std::to_string(index), encoded);
-  }
-
-  // Target EOF is after every materialized chunk, so this exercises the full
-  // multi-page HSCAN without publishing any delete intent.
-  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, kChunkSize);
-    return txn.PrepareTruncateDeletes(file.ino, file.attr.size);
-  });
-  EXPECT_TRUE(status.ok()) << status.message();
-  EXPECT_EQ(redis.hlen(key.PendingDeletes()), 0);
-}
-
-TEST(RedisMetaTxnTest, PrepareTruncateDeletesRejectsInvalidChunkIdentity) {
-  RedisMetaConfig config;
-  if (!ParseTestConfig(&config)) {
-    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
-  }
-
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueRedisName("truncate-noncanonical-chunk"));
-  sw::redis::Redis redis(ConnectionOptions(config));
-
-  SwordFsAttr file_attr(9, S_IFREG | 0644);
-  file_attr.size = 4096;
-  SwordFsInode file(9, file_attr, kRootInodeId);
-  ASSERT_TRUE(SeedInode(redis, key, file).ok());
-
-  SwordFsChunk wrong{.index = 0, .start_offset = 1, .revision = 1, .size = 64};
-  std::string encoded;
-  ASSERT_TRUE(wrong.SerializeTo(&encoded).ok());
-  redis.hset(key.Chunk(file.ino), "0", encoded);
-
-  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.PrepareTruncateDeletes(file.ino, 0);
-  });
-  EXPECT_TRUE(status.IsMalformed()) << status.message();
-  EXPECT_FALSE(redis.hexists(key.PendingDeletes(), chunk::FormatChunkObjectKey(file.ino, 0, 1)));
-
-  // The descriptor itself is canonical here, but it is stored under the wrong
-  // Hash field. This exercises the other half of the authoritative identity
-  // check rather than relying only on layout validation.
-  redis.del(key.Chunk(file.ino));
-  SwordFsChunk canonical{.index = 0, .start_offset = 0, .revision = 2, .size = 64};
-  ASSERT_TRUE(canonical.SerializeTo(&encoded).ok());
-  redis.hset(key.Chunk(file.ino), "1", encoded);
-
-  const auto field_mismatch_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.PrepareTruncateDeletes(file.ino, 0);
-  });
-  EXPECT_TRUE(field_mismatch_status.IsMalformed()) << field_mismatch_status.message();
-}
-
 TEST(RedisMetaTxnTest, CommitChunkRejectsCorruptPersistedDescriptor) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
@@ -1149,98 +1105,14 @@ TEST(RedisMetaTxnTest, CommitChunkRejectsCorruptPersistedDescriptor) {
   EXPECT_TRUE(status.IsMalformed()) << status.message();
 }
 
-TEST(RedisMetaTxnTest, PrepareChunkRewriteDeleteRejectsInvalidRewriteRelationWithoutQueueing) {
+TEST(RedisMetaTxnTest, CommitChunkReturnsCleanupCandidateWithoutPendingDeleteDependency) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueRedisName("rewrite-invalid-relation"));
-  sw::redis::Redis redis(ConnectionOptions(config));
-
-  SwordFsAttr file_attr(9, S_IFREG | 0644);
-  SwordFsInode file(9, file_attr, kRootInodeId);
-  ASSERT_TRUE(SeedInode(redis, key, file).ok());
-
-  SwordFsChunk expected{.index = 0, .start_offset = 0, .revision = 2, .size = 64};
-  std::string encoded;
-  ASSERT_TRUE(expected.SerializeTo(&encoded).ok());
-  redis.hset(key.Chunk(file.ino), "0", encoded);
-
-  auto non_increasing = expected;
-  non_increasing.revision = expected.revision;
-  auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.PrepareChunkRewriteDelete(file.ino, expected, non_increasing);
-  });
-  EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
-  EXPECT_EQ(redis.hlen(key.PendingDeletes()), 0);
-
-  auto wrong_index = expected;
-  wrong_index.index = 1;
-  wrong_index.start_offset = 4096;
-  wrong_index.revision = expected.revision + 1;
-  status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.PrepareChunkRewriteDelete(file.ino, expected, wrong_index);
-  });
-  EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
-  EXPECT_EQ(redis.hlen(key.PendingDeletes()), 0);
-
-  auto replacement = expected;
-  replacement.revision = expected.revision + 1;
-  auto invalid_expected = expected;
-  invalid_expected.revision = kInvalidChunkRevision;
-  status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.PrepareChunkRewriteDelete(file.ino, invalid_expected, replacement);
-  });
-  EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
-  EXPECT_EQ(redis.hlen(key.PendingDeletes()), 0);
-
-  auto invalid_replacement = replacement;
-  invalid_replacement.revision = kInvalidChunkRevision;
-  status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.PrepareChunkRewriteDelete(file.ino, expected, invalid_replacement);
-  });
-  EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
-  EXPECT_EQ(redis.hlen(key.PendingDeletes()), 0);
-
-  status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.PrepareChunkRewriteDelete(999999, expected, replacement);
-  });
-  EXPECT_TRUE(status.ok()) << status.message();
-  EXPECT_EQ(redis.hlen(key.PendingDeletes()), 0);
-
-  redis.set(key.Inode(file.ino), "malformed");
-  status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.PrepareChunkRewriteDelete(file.ino, expected, replacement);
-  });
-  EXPECT_TRUE(status.IsMalformed()) << status.message();
-  ASSERT_TRUE(SeedInode(redis, key, file).ok());
-
-  redis.del(key.Chunk(file.ino));
-  redis.set(key.Chunk(file.ino), "wrong-type");
-  status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.PrepareChunkRewriteDelete(file.ino, expected, replacement);
-  });
-  EXPECT_FALSE(status.ok());
-  EXPECT_EQ(redis.hlen(key.PendingDeletes()), 0);
-}
-
-TEST(RedisMetaTxnTest, CommitChunkRewriteFailsClosedOnInvalidPreparedDeleteState) {
-  RedisMetaConfig config;
-  if (!ParseTestConfig(&config)) {
-    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
-  }
-
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueRedisName("rewrite-intent-validation"));
+  const redis::RedisKey key(config.db, UniqueRedisName("rewrite-cleanup-candidate"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -1249,55 +1121,39 @@ TEST(RedisMetaTxnTest, CommitChunkRewriteFailsClosedOnInvalidPreparedDeleteState
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
   SwordFsChunk expected{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
-  std::string encoded_chunk;
-  ASSERT_TRUE(expected.SerializeTo(&encoded_chunk).ok());
-  redis.hset(key.Chunk(file.ino), "0", encoded_chunk);
+  std::string encoded;
+  ASSERT_TRUE(expected.SerializeTo(&encoded).ok());
+  redis.hset(key.Chunk(file.ino), "0", encoded);
+  redis.set(key.PendingDeletes(), "wrong-type");
+
   auto replacement = expected;
   replacement.revision = 2;
-  const auto expected_key = chunk::FormatChunkObjectKey(file.ino, expected.index, expected.revision);
+  utils::Status publication_result;
+  std::optional<SwordFsChunk> cleanup_candidate;
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.CommitChunk(file.ino, expected, replacement, publication_result, cleanup_candidate);
+  });
 
-  auto commit = [&] {
-    utils::Status publication_result;
-    auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096);
-      return txn.CommitChunk(file.ino, expected, replacement, publication_result);
-    });
-    return status.ok() ? publication_result : status;
-  };
-
-  auto status = commit();
-  EXPECT_EQ(status.code(), utils::Status::kInternal);
-  EXPECT_TRUE(redis.hexists(key.Chunk(file.ino), "0"));
-
-  redis.hset(key.PendingDeletes(), expected_key, "malformed");
-  status = commit();
-  EXPECT_TRUE(status.IsMalformed()) << status.message();
-
-  PendingDelete wrong{
-      .ino = file.ino,
-      .chunk = ReclaimChunk{.descriptor = SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 32},
-                            .key = expected_key}};
-  std::string encoded_pending;
-  ASSERT_TRUE(wrong.SerializeTo(&encoded_pending).ok());
-  redis.hset(key.PendingDeletes(), expected_key, encoded_pending);
-  status = commit();
-  EXPECT_TRUE(status.IsMalformed()) << status.message();
-
-  redis.del(key.PendingDeletes());
-  redis.set(key.PendingDeletes(), "wrong-type");
-  status = commit();
-  EXPECT_FALSE(status.ok());
-  EXPECT_TRUE(redis.hexists(key.Chunk(file.ino), "0"));
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_TRUE(publication_result.ok()) << publication_result.message();
+  ASSERT_TRUE(cleanup_candidate.has_value());
+  EXPECT_EQ(*cleanup_candidate, expected);
+  const auto stored = redis.hget(key.Chunk(file.ino), "0");
+  ASSERT_TRUE(stored.has_value());
+  SwordFsChunk current;
+  ASSERT_TRUE(current.ParseFrom(*stored).ok());
+  EXPECT_EQ(current, replacement);
 }
 
-TEST(RedisMetaTxnTest, CommitChunkDefiniteLoserFailsClosedOnInvalidQueueSchema) {
+TEST(RedisMetaTxnTest, CommitChunkDefiniteRejectionReturnsReplacementAsCleanupCandidate) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
 
   RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueRedisName("commit-result-validation"));
+  const redis::RedisKey key(config.db, UniqueRedisName("reject-cleanup-candidate"));
   sw::redis::Redis redis(ConnectionOptions(config));
 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
@@ -1309,17 +1165,21 @@ TEST(RedisMetaTxnTest, CommitChunkDefiniteLoserFailsClosedOnInvalidQueueSchema) 
   std::string encoded;
   ASSERT_TRUE(current.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(file.ino), "0", encoded);
+  redis.set(key.PendingDeletes(), "wrong-type");
 
   auto replacement = current;
   replacement.revision = 2;
-  redis.set(key.PendingDeletes(), "wrong-type");
   utils::Status publication_result;
+  std::optional<SwordFsChunk> cleanup_candidate;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.CommitChunk(file.ino, std::nullopt, replacement, publication_result);
+    return txn.CommitChunk(file.ino, std::nullopt, replacement, publication_result, cleanup_candidate);
   });
-  EXPECT_FALSE(status.ok());
-  EXPECT_TRUE(redis.hexists(key.Chunk(file.ino), "0"));
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_TRUE(publication_result.IsAlreadyExists()) << publication_result.message();
+  ASSERT_TRUE(cleanup_candidate.has_value());
+  EXPECT_EQ(*cleanup_candidate, replacement);
 }
 
 TEST(RedisMetaTxnTest, CommitChunkRejectsConflictingInitialPublication) {

@@ -178,14 +178,15 @@ class IMetaEngine {
   /// metadata lookup or PrepareReclaim call.
   virtual Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) = 0;
 
-  /// Visit frozen immutable object identities that authoritative metadata has
-  /// already detached from a live file (for example, by truncate) and that
-  /// still need physical deletion. Persistent backends must retain these
-  /// records until CompletePendingDelete() succeeds so cleanup survives
-  /// restart and corrupted identities fail closed before data deletion.
+  /// Visit immutable object identities registered as best-effort cleanup
+  /// candidates after rewrite/truncate publication. A candidate is not delete
+  /// authority: consumers must revalidate current authoritative metadata
+  /// before physical deletion. Persistent backends retain successfully
+  /// registered records until CompletePendingDelete() succeeds, but failure to
+  /// register every obsolete object is not part of file-data durability.
   virtual Status VisitPendingDeletes(const PendingDeleteVisitorFn &visitor) = 0;
 
-  /// Visit a bounded batch of durable pending deletes. |max_items| is a hard
+  /// Visit a bounded batch of pending deletes. |max_items| is a hard
   /// bound on visitor invocations for this call. |has_more| reports that the
   /// backend already knows additional work remains in the current scan cycle;
   /// it is not a snapshot guarantee against concurrently added records.
@@ -263,13 +264,14 @@ class IMetaEngine {
   /// never shrink inode size. A conflicting descriptor returns AlreadyExists;
   /// a rewrite whose expected descriptor disappeared returns NotFound.
   ///
-  /// Cleanup ownership is part of the publication contract. Before a
-  /// successful rewrite can make |expected| obsolete, metadata must durably
-  /// publish its immutable object identity as pending-delete work. Likewise,
-  /// a definite rejection after the replacement object was uploaded must make
-  /// that losing replacement retryable cleanup work before the logical
-  /// AlreadyExists/NotFound result is exposed to the caller. Foreground object
-  /// deletion is only an eager optimization after this durable handoff.
+  /// Cleanup completeness is deliberately outside the publication contract.
+  /// Backends should best-effort register an obsolete |expected| revision, or
+  /// a definitely rejected uploaded |replacement|, for background cleanup.
+  /// Failure to register cleanup may leak an object but must not invalidate an
+  /// otherwise known publication result. Conversely, an ambiguous backend
+  /// error does not prove publication failed; callers must retain the uploaded
+  /// candidate and reconcile authoritative metadata before treating it as
+  /// obsolete.
   virtual Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                              const SwordFsChunk &replacement) = 0;
 
@@ -277,8 +279,10 @@ class IMetaEngine {
   /// matching chunk is registered for the given inode.
   virtual Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) = 0;
 
-  /// Truncate |ino| to |size| bytes.  Updates the inode size and drops
-  /// chunk metadata for data beyond the new size.
+  /// Truncate |ino| to |size| bytes. Updates the inode size and drops chunk
+  /// metadata beyond the new size. Backends should best-effort register the
+  /// detached immutable objects for background cleanup; registration failure
+  /// may leak garbage but does not invalidate a known-success truncate.
   virtual Status Truncate(InodeID ino, uint64_t size) = 0;
 };
 

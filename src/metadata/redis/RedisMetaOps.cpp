@@ -171,29 +171,28 @@ utils::Status RedisMetaOps::LookupEntry(InodeID parent_ino, std::string_view nam
 
 utils::Status RedisMetaOps::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
-  if (HasSetAttrField(fields, SetAttrField::kSize)) {
-    auto status = PrepareTruncateDeletes(ino, requested.size);
-    if (!status.ok()) {
-      return status;
-    }
-  }
-
   SwordFsInode result;
-  auto status = TransactFromFiber(
-      [&](RedisMetaTxn &txn) { return txn.SetAttr(ino, requested, fields, out != nullptr ? &result : nullptr); });
+  std::vector<SwordFsChunk> detached_chunks;
+  auto status = TransactFromFiber([&](RedisMetaTxn &txn) {
+    return txn.SetAttr(ino, requested, fields, out != nullptr ? &result : nullptr, &detached_chunks);
+  });
   if (status.ok() && out != nullptr) {
     *out = result;
+  }
+  if (status.ok()) {
+    RegisterPendingDeletesBestEffort(ino, detached_chunks, "setattr shrink");
   }
   return status;
 }
 
 utils::Status RedisMetaOps::Truncate(InodeID ino, uint64_t size) {
   utils::ExpectInFiberDomain();
-  auto status = PrepareTruncateDeletes(ino, size);
-  if (!status.ok()) {
-    return status;
+  std::vector<SwordFsChunk> detached_chunks;
+  auto status = TransactFromFiber([&](RedisMetaTxn &txn) { return txn.Truncate(ino, size, &detached_chunks); });
+  if (status.ok()) {
+    RegisterPendingDeletesBestEffort(ino, detached_chunks, "truncate");
   }
-  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.Truncate(ino, size); });
+  return status;
 }
 
 utils::Status RedisMetaOps::TouchInode(InodeID ino, SetAttrField fields) {
@@ -342,19 +341,11 @@ utils::Status RedisMetaOps::CompletePendingDelete(std::string_view object_key) {
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.CompletePendingDelete(object_key); });
 }
 
-utils::Status RedisMetaOps::PrepareChunkRewriteDelete(InodeID ino, const SwordFsChunk &expected,
-                                                      const SwordFsChunk &replacement) {
-  utils::ExpectInFiberDomain();
-  return TransactFromFiber(
-      [&](RedisMetaTxn &txn) { return txn.PrepareChunkRewriteDelete(ino, expected, replacement); });
-}
-
 utils::Status RedisMetaOps::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                                         const SwordFsChunk &replacement) {
   utils::ExpectInFiberDomain();
-  // Validate the full publication request before the rewrite preparation
-  // transaction is allowed to create durable cleanup state. RedisMetaTxn
-  // repeats these checks at the transaction boundary as defense in depth.
+  // Validate before opening the publication transaction. RedisMetaTxn repeats
+  // these checks at the transaction boundary as defense in depth.
   if (!replacement.IsValidForChunkSize(chunk_size_)) {
     return utils::Status::InvalidArgument("replacement chunk descriptor is invalid");
   }
@@ -369,18 +360,16 @@ utils::Status RedisMetaOps::CommitChunk(InodeID ino, const std::optional<SwordFs
     return utils::Status::InvalidArgument("replacement must preserve chunk index and start offset");
   }
 
-  if (expected.has_value()) {
-    auto status = PrepareChunkRewriteDelete(ino, *expected, replacement);
-    if (!status.ok()) {
-      return status;
-    }
-  }
-
   utils::Status publication_result;
-  auto status = TransactFromFiber(
-      [&](RedisMetaTxn &txn) { return txn.CommitChunk(ino, expected, replacement, publication_result); });
+  std::optional<SwordFsChunk> cleanup_candidate;
+  auto status = TransactFromFiber([&](RedisMetaTxn &txn) {
+    return txn.CommitChunk(ino, expected, replacement, publication_result, cleanup_candidate);
+  });
   if (!status.ok()) {
     return status;
+  }
+  if (cleanup_candidate.has_value()) {
+    RegisterPendingDeletesBestEffort(ino, std::vector<SwordFsChunk>{*cleanup_candidate}, "chunk publication");
   }
   return publication_result;
 }
@@ -455,9 +444,17 @@ utils::Status RedisMetaOps::ScanChunkFields(InodeID ino, const ChunkFieldVisitor
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaOps::PrepareTruncateDeletes(InodeID ino, uint64_t size) {
+void RedisMetaOps::RegisterPendingDeletesBestEffort(InodeID ino, const std::vector<SwordFsChunk> &chunks,
+                                                    std::string_view reason) {
   utils::ExpectInFiberDomain();
-  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PrepareTruncateDeletes(ino, size); });
+  if (chunks.empty()) {
+    return;
+  }
+  auto status = TransactFromFiber([&](RedisMetaTxn &txn) { return txn.RegisterPendingDeletes(ino, chunks); });
+  if (!status.ok()) {
+    SWORDFS_LOG_WARN << "Best-effort pending-delete registration failed after " << reason << ": ino=" << ino
+                     << " objects=" << chunks.size() << " — " << status.message();
+  }
 }
 
 utils::Status RedisMetaOps::CollectOrphanCandidates(std::vector<InodeID> &out) {

@@ -140,7 +140,11 @@ utils::Status RedisMetaTxn::AdjustNlink(SwordFsInode *inode, int delta, uint64_t
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out) {
+utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out,
+                                    std::vector<SwordFsChunk> *detached_chunks) {
+  if (detached_chunks != nullptr) {
+    detached_chunks->clear();
+  }
   SwordFsInode inode;
   auto status = LookupInode(ino, &inode);
   if (!status.ok()) {
@@ -158,7 +162,7 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
     // leaving inode.size unchanged. Even a size-preserving setattr must
     // reconcile chunk metadata so a later retry does not observe a descriptor
     // beyond the requested EOF.
-    status = TruncateChunks(ino, old_size, requested.size);
+    status = TruncateChunks(ino, old_size, requested.size, detached_chunks);
     if (!status.ok()) {
       return status;
     }
@@ -222,13 +226,16 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaTxn::Truncate(InodeID ino, uint64_t size) {
+utils::Status RedisMetaTxn::Truncate(InodeID ino, uint64_t size, std::vector<SwordFsChunk> *detached_chunks) {
+  if (detached_chunks != nullptr) {
+    detached_chunks->clear();
+  }
   SwordFsInode inode;
   auto status = LookupInode(ino, &inode);
   if (!status.ok()) {
     return status;
   }
-  status = TruncateChunks(ino, inode.attr.size, size);
+  status = TruncateChunks(ino, inode.attr.size, size, detached_chunks);
   if (!status.ok()) {
     return status;
   }
@@ -249,63 +256,6 @@ utils::Status RedisMetaTxn::TouchInode(InodeID ino, SetAttrField fields) {
   }
   inode.Touch(fields);
   return SetInode(inode);
-}
-
-utils::Status RedisMetaTxn::PrepareTruncateDeletes(InodeID ino, uint64_t size) {
-  if (chunk_size_ == 0) {
-    return utils::Status::Internal("volume chunk size is not initialized");
-  }
-
-  SwordFsInode inode;
-  auto status = LookupInode(ino, &inode);
-  if (!status.ok()) {
-    return status;
-  }
-  if (size > inode.attr.size) {
-    return utils::Status::OK();
-  }
-
-  std::vector<std::pair<std::string, SwordFsChunk>> chunks;
-  status = ScanChunks(ino, chunks);
-  if (!status.ok()) {
-    return status;
-  }
-
-  std::vector<std::pair<std::string, std::string>> intents;
-  intents.reserve(chunks.size());
-  for (const auto &[field, chunk] : chunks) {
-    (void)field;
-    if (chunk.start_offset < size) {
-      continue;
-    }
-    const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
-    PendingDelete pending{.ino = ino, .chunk = ReclaimChunk{.descriptor = chunk, .key = object_key}};
-    std::string encoded;
-    status = pending.SerializeTo(&encoded);
-    if (!status.ok()) {
-      return status;
-    }
-    intents.emplace_back(object_key, std::move(encoded));
-  }
-  if (intents.empty()) {
-    return utils::Status::OK();
-  }
-
-  // Preflight and WATCH the destination Hash before the first write. This
-  // phase is additive-only, so even a partial EXEC cannot make live data
-  // unreachable; retrying simply fills in any missing idempotent intents.
-  uint64_t ignored_pending_delete_count = 0;
-  status = txn_.HLen(key_.PendingDeletes(), &ignored_pending_delete_count);
-  if (!status.ok()) {
-    return status;
-  }
-  for (const auto &[object_key, encoded] : intents) {
-    status = txn_.HSet(key_.PendingDeletes(), object_key, encoded);
-    if (!status.ok()) {
-      return status;
-    }
-  }
-  return utils::Status::OK();
 }
 
 utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> &work) {
@@ -851,83 +801,21 @@ utils::Status RedisMetaTxn::QueuePendingDelete(InodeID ino, const SwordFsChunk &
   return txn_.HSet(key_.PendingDeletes(), object_key, encoded);
 }
 
-utils::Status RedisMetaTxn::ValidatePendingDelete(InodeID ino, const SwordFsChunk &chunk) {
-  const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
-  std::string encoded;
-  auto status = txn_.HGet(key_.PendingDeletes(), object_key, &encoded);
-  if (status.IsNotFound()) {
-    return utils::Status::Internal("chunk rewrite delete intent is missing for " + object_key);
-  }
-  if (!status.ok()) {
-    return status;
-  }
-
-  PendingDelete pending;
-  status = pending.ParseFrom(encoded);
-  if (!status.ok()) {
-    return status;
-  }
-  if (pending.ino != ino || !(pending.chunk.descriptor == chunk) || pending.chunk.key != object_key) {
-    return utils::Status::Malformed("chunk rewrite delete intent does not match the frozen object identity");
+utils::Status RedisMetaTxn::RegisterPendingDeletes(InodeID ino, const std::vector<SwordFsChunk> &chunks) {
+  for (const auto &chunk : chunks) {
+    auto status = QueuePendingDelete(ino, chunk);
+    if (!status.ok()) {
+      return status;
+    }
   }
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaTxn::PrepareChunkRewriteDelete(InodeID ino, const SwordFsChunk &expected,
-                                                      const SwordFsChunk &replacement) {
-  if (!expected.IsValidForChunkSize(chunk_size_)) {
-    return utils::Status::InvalidArgument("expected chunk descriptor is invalid");
-  }
-  if (!replacement.IsValidForChunkSize(chunk_size_)) {
-    return utils::Status::InvalidArgument("replacement chunk descriptor is invalid");
-  }
-  if (replacement.revision <= expected.revision) {
-    return utils::Status::InvalidArgument("replacement revision must increase");
-  }
-  if (expected.index != replacement.index || expected.start_offset != replacement.start_offset) {
-    return utils::Status::InvalidArgument("replacement must preserve chunk index and start offset");
-  }
-
-  SwordFsInode inode;
-  auto status = LookupInode(ino, &inode);
-  if (status.IsNotFound()) {
-    // Phase two will durably queue the uploaded replacement as a definite
-    // loser. There is no live old descriptor to prepare.
-    return utils::Status::OK();
-  }
-  if (!status.ok()) {
-    return status;
-  }
-  if (!inode.IsRegular()) {
-    return utils::Status::InvalidArgument("not a regular file");
-  }
-
-  SwordFsChunk current;
-  status = LookupChunk(ino, expected.index, &current);
-  if (status.IsNotFound()) {
-    return utils::Status::OK();
-  }
-  if (!status.ok()) {
-    return status;
-  }
-  if (!(current == expected) && !(current == replacement)) {
-    // A different immutable revision already won. The publication transaction
-    // will queue |replacement| as the definite loser; |expected| is no longer
-    // part of this publication transition.
-    return utils::Status::OK();
-  }
-
-  // This transaction is deliberately additive-only. Queue the old immutable
-  // identity here; the later destructive publication transaction validates
-  // the exact record before it may replace the authoritative descriptor.
-  // A runtime HSET failure is safe to surface directly because this phase has
-  // no destructive writes to roll back.
-  return QueuePendingDelete(ino, expected);
-}
-
 utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
-                                        const SwordFsChunk &replacement, utils::Status &publication_result) {
+                                        const SwordFsChunk &replacement, utils::Status &publication_result,
+                                        std::optional<SwordFsChunk> &cleanup_candidate) {
   publication_result = utils::Status::OK();
+  cleanup_candidate.reset();
 
   if (!replacement.IsValidForChunkSize(chunk_size_)) {
     return utils::Status::InvalidArgument("replacement chunk descriptor is invalid");
@@ -947,13 +835,10 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
   }
 
   auto reject_publication = [&](utils::Status rejection) -> utils::Status {
-    // A definite loser is safe to delete, but the caller may crash before its
-    // eager delete. Commit the frozen replacement identity in this transaction
-    // and expose the logical rejection only after EXEC succeeds.
-    auto status = QueuePendingDelete(ino, replacement);
-    if (!status.ok()) {
-      return status;
-    }
+    // A known logical rejection proves this uploaded replacement is not the
+    // authoritative descriptor. Cleanup registration happens after this
+    // transaction has a known outcome and is intentionally best effort.
+    cleanup_candidate = replacement;
     publication_result = std::move(rejection);
     return utils::Status::OK();
   };
@@ -983,11 +868,8 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
       return reject_publication(utils::Status::AlreadyExists("chunk changed before publication at index " +
                                                              std::to_string(replacement.index)));
     }
-    if (current_matches_expected) {
-      status = ValidatePendingDelete(ino, *expected);
-      if (!status.ok()) {
-        return status;
-      }
+    if (expected.has_value()) {
+      cleanup_candidate = *expected;
     }
   } else if (status.IsNotFound()) {
     if (expected.has_value()) {
@@ -1030,7 +912,8 @@ utils::Status RedisMetaTxn::DeleteChunks(InodeID ino) {
   return txn_.Del(key_.Chunk(ino));
 }
 
-utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size) {
+utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size,
+                                           std::vector<SwordFsChunk> *detached_chunks) {
   if (new_size > old_size) {
     return utils::Status::OK();
   }
@@ -1048,41 +931,11 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
     return status;
   }
 
-  // Every destructive HDEL below requires a matching durable intent from the
-  // earlier additive-only preparation transaction. Read and WATCH all of
-  // those intents before the first write so the reclaimer cannot acknowledge
-  // one between validation and EXEC.
-  for (const auto &[field, chunk] : chunks) {
-    (void)field;
-    if (chunk.start_offset < new_size) {
-      continue;
-    }
-
-    const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
-    std::string encoded;
-    status = txn_.HGet(key_.PendingDeletes(), object_key, &encoded);
-    if (status.IsNotFound()) {
-      return utils::Status::Internal("truncate delete intent is missing for " + object_key);
-    }
-    if (!status.ok()) {
-      return status;
-    }
-
-    PendingDelete pending;
-    status = pending.ParseFrom(encoded);
-    if (!status.ok()) {
-      return status;
-    }
-    if (pending.ino != ino || !(pending.chunk.descriptor == chunk) || pending.chunk.key != object_key) {
-      return utils::Status::Malformed("truncate delete intent does not match the authoritative chunk");
-    }
-  }
-
   for (auto &[field, chunk] : chunks) {
     if (chunk.start_offset >= new_size) {
-      // The durable intent already owns this immutable identity. This
-      // transaction only detaches the live descriptor; a partial EXEC cannot
-      // lose the deletion target because it was committed beforehand.
+      if (detached_chunks != nullptr) {
+        detached_chunks->push_back(chunk);
+      }
       status = txn_.HDel(key_.Chunk(ino), field);
       if (!status.ok()) {
         return status;

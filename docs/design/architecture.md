@@ -356,10 +356,12 @@ sequenceDiagram
 - rewrite publication carries the previously authoritative descriptor as `expected`;
 - replaying an already-published replacement is idempotent;
 - a conflicting publication is rejected rather than silently overwriting the winner;
-- successful rewrite publication durably hands the superseded immutable
-  revision to `pending_deletes` before replacement is allowed;
-- a definite losing uploaded revision is durably queued before
-  `AlreadyExists` / `NotFound` is exposed to the caller.
+- after a **known** rewrite success, the superseded immutable revision is a
+  best-effort cleanup candidate;
+- after a **known** `AlreadyExists` / `NotFound`, the definitely losing
+  uploaded revision is a best-effort cleanup candidate;
+- cleanup registration failure may leak an obsolete object, but it does not
+  change the known publication result.
 
 The inode size side effect is reconciled as part of metadata publication and publication must not shrink inode size.
 
@@ -371,10 +373,13 @@ The current object-storage path uses **whole-chunk copy-on-write** for overwrite
 2. apply the modification locally;
 3. allocate a new revision;
 4. upload a new full immutable object;
-5. durably stage cleanup ownership for the old immutable revision;
-6. CAS-publish the new descriptor only after validating that durable intent;
-7. eagerly delete the previous object's key when possible and acknowledge the
-   durable pending-delete record only after successful deletion.
+5. CAS-publish the new descriptor;
+6. after a known successful publication, best-effort register the old
+   immutable revision in `pending_deletes` and wake the background reclaimer.
+
+The foreground rewrite path does not physically delete the previous object.
+Physical deletion is centralized in `Reclaimer`, which rechecks authoritative
+metadata before deleting any pending-delete candidate.
 
 There is currently no slice/extent overlay or compaction layer in the open-source data path. Random overwrites can therefore incur whole-chunk read/write amplification.
 
@@ -397,7 +402,27 @@ S3 ranged reads write response data directly into the caller-provided buffer thr
 
 `FileReadWriter::Flush` walks locally cached flushable chunks and flushes each one. A successfully flushed chunk remains cached in `kFlushed` state so later reads use the published object identity.
 
-The current VFS maps FUSE flush/fsync-style file operations to this userspace flush path. Because writeback cache is disabled, SwordFS keeps direct control over dirty chunk publication rather than depending on kernel writeback behavior to define visibility.
+An ordinary successful `write(2)` only means the bytes were accepted into this
+mount's userspace `WriteBuf`; it is **not** a persistence acknowledgement. The
+current VFS maps FUSE flush/fsync-style file operations to the userspace flush
+path. A successful implemented flush/fsync means each flushed dirty chunk has
+completed its object `Put` and received a known-success metadata publication.
+The final descriptor close performs the same flush before releasing its last
+open reference. `O_SYNC` / `O_DSYNC` write-through semantics are not currently
+implemented.
+
+SwordFS does not add an independent disk/replica barrier after the external
+data/metadata engines acknowledge their operations. End-to-end power-loss
+durability is therefore bounded by the durability configuration and completion
+contract of those services (for example, Redis persistence/HA policy and the
+object store's `Put` contract).
+
+Cleanup of superseded or rejected immutable objects is deliberately outside
+this persistence acknowledgement. Failure to register or execute cleanup may
+leave garbage, but does not turn a known-success publication into failure.
+Because writeback cache is disabled, SwordFS keeps direct control over dirty
+chunk publication rather than depending on kernel writeback behavior to define
+visibility.
 
 On the final descriptor close, the `InodeHandle` keeps the reference alive until flush finishes, then releases the reference. The close path itself does not perform inode garbage collection; it wakes the background reclaimer so any durable orphan can be reconsidered promptly.
 
@@ -425,25 +450,20 @@ It is not an atomic whole-file commit.
 ## 12. Truncate behavior
 
 Truncate changes authoritative file metadata before it updates the local chunk
-map. Redis additionally stages durable, non-destructive delete intent before
-the metadata transaction is allowed to detach a published whole-chunk
-descriptor.
+map. Cleanup completeness is not a precondition for the metadata mutation.
 
 The per-inode exclusive operation lock covers this sequence:
 
-1. For Redis shrink, first persist a durable pending-delete intent for every
-   fully removable published descriptor. This preparation is additive-only:
-   it does not change inode size or live chunk metadata.
-2. Commit the new inode size and prune or clamp authoritative chunk
-   descriptors. A whole descriptor may be detached only after the transaction
-   has verified that its exact frozen pending-delete intent is already
-   durable. Failure returns without changing the local chunk map.
+1. Commit the new inode size and prune or clamp authoritative chunk
+   descriptors. While doing so, the metadata backend records the exact
+   descriptors detached by a **known-success** transaction as cleanup
+   candidates for the caller.
+2. Best-effort register those detached immutable identities in
+   `pending_deletes`. Registration failure is logged and may leak garbage, but
+   does not invalidate the already-known truncate result.
 3. Drop cached chunks wholly beyond the new end and shorten the boundary
    chunk. For a dirty rewrite, also clamp its saved CAS expectation.
-4. Attempt eager deletion of dropped local object keys. This is only an
-   optimization and also covers uploaded-but-unpublished local revisions,
-   which authoritative metadata cannot discover.
-5. Wake the background reclaimer so durable pending-delete work is retried
+4. Wake the background reclaimer so pending-delete work is retried
    without waiting for the periodic scan.
 
 Serializing size changes with writes and flushes prevents a local pending
@@ -451,13 +471,13 @@ write from racing truncate and republishing the removed range.
 
 Pending-delete state is keyed by immutable object identity rather than by a
 mutable inode-level batch. Repeated truncates therefore cannot overwrite an
-earlier cleanup generation. Recovery validates that the persisted Hash field,
+earlier cleanup generation. Replay validates that the persisted Hash field,
 frozen object key, descriptor-derived key, and canonical chunk layout all
-agree before deleting data; malformed cleanup metadata fails closed. A staged
-intent is not itself permission to delete: the reclaimer first checks the
-current authoritative chunk descriptor and skips the intent while that same
-immutable object key is still live. This makes a crash between intent
-publication and descriptor detachment safe.
+agree before deleting data; malformed cleanup metadata fails closed. Queue
+membership is never itself permission to delete: the reclaimer first checks
+the current authoritative chunk descriptor and skips a candidate while that
+same immutable object key is still live. This also makes legacy staged records
+from older implementations safe.
 
 Whole chunks at or beyond the new EOF are detached and queued. A partial
 boundary chunk is not queued for deletion because its immutable object remains
@@ -468,11 +488,6 @@ Persistent backends drive truncate from **materialized chunk metadata**, not
 from logical file length. Redis scans the actual `chunk:<ino>` Hash under the
 optimistic transaction, so a huge sparse file costs O(materialized chunks)
 rather than O(logical chunk positions).
-
-If eager object deletion succeeds, `FileReadWriter` immediately acknowledges
-the durable pending-delete entry. If acknowledgement fails, retaining the entry
-is safe because `IDataEngine::Delete` is idempotent and the background worker
-can replay the same delete/ack sequence after restart.
 
 ## 13. Runtime and concurrency model
 
@@ -590,17 +605,18 @@ Wakeups are coalesced. Failed object deletion leaves the pending record intact, 
 
 Pending-delete replay is deliberately bounded so a large object-cleanup
 backlog cannot monopolize one reconciliation pass or allocate one vector for
-the entire durable queue. The metadata backend reports whether its current
+the entire pending set. The metadata backend reports whether its current
 scan cycle has more work; the Reclaimer still processes pending inode reclaims
 and orphan candidates in the current pass, then self-wakes for another
-pending-delete batch. A still-authoritative staged delete intent therefore
+pending-delete batch. A still-authoritative stale/legacy candidate therefore
 consumes only its current scan position and cannot permanently pin later
-obsolete objects behind it.
+obsolete candidates behind it.
 
 The Redis continuation cursor is process-local scheduling state, not durable
-metadata. Restart begins a new scan at cursor zero; the durable pending-delete
-Hash remains the source of truth, and idempotent deletion/acknowledgement makes
-revisiting an item safe.
+metadata. Restart begins a new scan at cursor zero; successfully registered
+pending-delete records remain in Redis, and idempotent deletion/acknowledgement
+makes revisiting an item safe. Registration itself is best effort: a missing
+record may leak an obsolete object but cannot authorize deletion of live data.
 
 One completed Redis cursor cycle is not a claim that no new cleanup record
 exists: SCAN does not promise to return entries added during the iteration.
@@ -619,21 +635,23 @@ Writing the object before metadata publication means a failure can leave an **un
 Retry logic first checks authoritative metadata:
 
 - if the same replacement descriptor was already published, the operation can complete idempotently;
-- if another revision won, metadata first makes the losing uploaded revision
-  durable pending-delete work, then foreground cleanup may delete it without
-  touching the winner;
-- if publication failed without a definite loser handoff, retry may
-  upload/publish the same pending revision safely;
-- once a revision is durably recorded as a definite loser, the local writer
-  relinquishes that revision and any later retry allocates a fresh one, so
-  Reclaimer can never race deletion of a key that the writer may republish.
+- if another revision won and publication returns a known logical rejection,
+  the losing uploaded revision is terminal locally and is best-effort
+  registered for background cleanup;
+- if publication outcome is ambiguous, retry retains the same uploaded
+  candidate and resolves authoritative metadata before deciding whether the
+  object is live or obsolete;
+- once a revision receives a definite rejection, the local writer relinquishes
+  it and any later retry allocates a fresh revision, because background cleanup
+  may already have been registered for the rejected immutable key.
 
-For rewrites, the superseded old revision is persisted as pending-delete work
-before Redis is allowed to replace its authoritative descriptor. A crash after
-publication can therefore lose only eager cleanup progress, not the cleanup
-identity itself. The earlier crash window after a successful object `Put` but
-before any metadata handoff remains #186 because metadata has no durable record
-of that candidate yet.
+For rewrites, a known successful publication makes the superseded old revision
+a cleanup candidate; registration happens afterward and is best effort. A crash
+or cleanup-registration failure may therefore leave an unreachable object. The
+same is true for a successful object `Put` whose later publication outcome is
+never resolved. These are accepted garbage/space leaks, not reader-visible
+corruption: no physical delete occurs without authoritative metadata proving
+the exact immutable key is no longer live.
 
 ### 15.2 Redis transaction ambiguity
 
@@ -643,11 +661,12 @@ After Redis EXEC, a timeout or connection close does not prove whether the serve
 
 After `PrepareReclaim`, failure is recoverable because the durable pending record contains the exact immutable object identities still to delete. `CompleteReclaim` is delayed until deletion succeeds.
 
-Truncate uses the same durable-deletion principle at object granularity:
-before a published descriptor can be detached, its frozen pending-delete
-identity must already be durable and must be revalidated by the destructive
-metadata transaction. Physical deletion may happen later and is replay-safe
-across process restart or an ambiguous acknowledgement.
+Rewrite/truncate cleanup deliberately uses a weaker contract than last-link
+reclaim. After a known metadata outcome, obsolete immutable identities are
+best-effort registered in `pending_deletes`; registration or later deletion
+failure may leave garbage. The safety rule is stronger and simpler: every
+physical pending-delete operation re-reads authoritative chunk metadata and
+must not delete an object whose exact immutable key is still live.
 
 The architecture generally prefers **leaking unreachable data over deleting reachable data** when a failure leaves uncertainty.
 
@@ -708,13 +727,12 @@ Future changes should preserve or explicitly revise the following contracts:
 6. **Open-handle runtime state does not replace durable metadata.** Local fences protect transitions; they are not persistent lifecycle records.
 7. **Last-link deletion is recoverable.** The metadata mutation that removes the last name must durably publish cleanup work before the foreground request can forget the inode.
 8. **Object deletion after reclaim uses frozen identities.** It must not reconstruct targets from mutable/live metadata after the point of no return.
-9. **Immutable-object cleanup handoff is durable.** Truncate may detach a
-   published chunk descriptor, and rewrite publication may supersede one, only
-   after the obsolete immutable identity is durable in pending-delete state;
-   definite losing uploaded revisions are also queued before the logical
-   rejection is exposed. Replay must not delete an object while the same
-   immutable key is still authoritative.
-10. **Data-engine deletion is idempotent.** Durable cleanup may replay the same immutable key after restart, timeout, or acknowledgement failure.
+9. **Immutable-object cleanup is best effort, but deletion safety is strict.**
+   Rewrite/truncate may leave unreachable objects if cleanup registration or
+   execution fails. A pending-delete record is only a candidate; Reclaimer
+   must revalidate authoritative metadata and never delete the same immutable
+   key while it is still live.
+10. **Data-engine deletion is idempotent.** Registered cleanup may replay the same immutable key after restart, timeout, or acknowledgement failure.
 11. **Ambiguous external commits are not assumed to have rolled back.** Retry/reconciliation semantics must be safe under either outcome.
 12. **Shutdown ordering respects borrowed lifetimes.** Background work stops before the fiber runtime and engines it uses are destroyed.
 

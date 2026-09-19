@@ -341,7 +341,7 @@ FIBER_TEST_F(ReclaimerTest, RewriteCleanupDeletesOnlySupersededRevision) {
   EXPECT_EQ(authoritative, replacement);
 }
 
-FIBER_TEST_F(ReclaimerTest, PreparedTruncateIntentDoesNotDeleteStillAuthoritativeObject) {
+FIBER_TEST_F(ReclaimerTest, PendingDeleteCandidateDoesNotDeleteStillAuthoritativeObject) {
   constexpr InodeID kIno = 42;
   SwordFsChunk descriptor{.index = 0, .start_offset = 0, .revision = 7, .size = 64};
   const auto key = chunk::FormatChunkObjectKey(kIno, descriptor.index, descriptor.revision);
@@ -358,16 +358,16 @@ FIBER_TEST_F(ReclaimerTest, PreparedTruncateIntentDoesNotDeleteStillAuthoritativ
   });
   data_->Seed(key);
 
-  // Preparation has made the intent durable, but the chunk descriptor is
-  // still authoritative. Reconciliation must leave both object and intent
-  // untouched rather than racing the later detach transaction.
+  // Queue membership alone is never delete authority. Reconciliation must
+  // leave both object and candidate untouched while the exact immutable key
+  // is still authoritative.
   ASSERT_TRUE(Reclaimer::Instance().Reconcile().ok());
   EXPECT_TRUE(data_->Contains(key));
   EXPECT_TRUE(data_->delete_calls.empty());
   EXPECT_TRUE(staged->completed_keys.empty());
 
   // Once authoritative metadata no longer names that immutable object, the
-  // same intent becomes executable and is acknowledged only after deletion.
+  // same candidate becomes executable and is acknowledged only after deletion.
   staged->SetCurrent(std::nullopt);
   ASSERT_TRUE(Reclaimer::Instance().Reconcile().ok());
   EXPECT_FALSE(data_->Contains(key));

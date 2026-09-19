@@ -32,10 +32,6 @@ namespace metadata {
 class IMetaEngine;
 }
 
-namespace storage {
-class IDataEngine;
-}
-
 namespace vfs {
 
 // ────────────────────────────────────────────────────────────────
@@ -63,11 +59,10 @@ class FileChunkManager {
   /// without repeatedly selecting the same failed chunk.
   std::vector<std::shared_ptr<chunk::Chunk>> GetFlushable();
 
-  /// Apply a file-size change to cached chunks. A partial boundary chunk
-  /// keeps only its surviving prefix; chunks wholly beyond EOF are dropped
-  /// and their authoritative persisted object keys are reported through
-  /// |dropped_keys| when non-null.
-  void TruncateToSize(size_t size, size_t chunk_size, std::vector<std::string> *dropped_keys);
+  /// Apply a file-size change to cached chunks. A partial boundary chunk keeps
+  /// only its surviving prefix; chunks wholly beyond EOF are dropped locally.
+  /// Authoritative metadata owns best-effort object cleanup registration.
+  void TruncateToSize(size_t size, size_t chunk_size);
 
  private:
   metadata::InodeID ino_;
@@ -107,15 +102,9 @@ class FileReadWriter {
   utils::Status SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields, metadata::SwordFsInode *out);
 
  private:
-  // Best-effort fast-path cleanup for objects owned by local chunk state. The
-  // authoritative metadata path separately persists deletes for published
-  // objects, while this also covers locally uploaded-but-unpublished objects.
-  void DeleteDroppedKeys(const std::vector<std::string> &keys);
-
   InodeID ino_;
   size_t chunk_size_;
   metadata::IMetaEngine *meta_;
-  storage::IDataEngine *data_;
   // Coordinate operations for one inode. Reads may proceed concurrently;
   // writes, flushes, and truncates take exclusive ownership so they cannot
   // race chunk state transitions. Fiber-aware waiting never blocks the

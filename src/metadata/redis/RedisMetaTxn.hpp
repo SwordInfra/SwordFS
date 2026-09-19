@@ -42,16 +42,10 @@ class RedisMetaTxn {
   // ────────────────────────────────────────────────────────────────
   // Inode operations
   // ────────────────────────────────────────────────────────────────
-  utils::Status SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out = nullptr);
-  utils::Status Truncate(InodeID ino, uint64_t size);
+  utils::Status SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out = nullptr,
+                        std::vector<SwordFsChunk> *detached_chunks = nullptr);
+  utils::Status Truncate(InodeID ino, uint64_t size, std::vector<SwordFsChunk> *detached_chunks = nullptr);
   utils::Status TouchInode(InodeID ino, SetAttrField fields);
-
-  // Persist immutable delete intents for every whole chunk that would be
-  // detached by shrinking |ino| to |size|. This phase is intentionally
-  // non-destructive: Redis MULTI/EXEC can partially apply runtime-failing
-  // commands, so live chunk metadata is removed only by a later transaction
-  // after every required intent is already durable.
-  utils::Status PrepareTruncateDeletes(InodeID ino, uint64_t size);
 
   // ────────────────────────────────────────────────────────────────
   // Reclaim operations
@@ -72,6 +66,11 @@ class RedisMetaTxn {
   // Drop one immutable object from the truncate cleanup queue after physical
   // deletion. Missing entries are already complete.
   utils::Status CompletePendingDelete(std::string_view object_key);
+
+  // Register immutable object identities as best-effort background cleanup
+  // candidates. Queue membership is never delete authority: Reclaimer must
+  // revalidate authoritative metadata before physical deletion.
+  utils::Status RegisterPendingDeletes(InodeID ino, const std::vector<SwordFsChunk> &chunks);
 
   // Drop |ino|'s orphan candidate marker, if any.
   utils::Status ClearOrphanMarker(InodeID ino);
@@ -98,9 +97,8 @@ class RedisMetaTxn {
   // ────────────────────────────────────────────────────────────────
   // Chunk operations
   // ────────────────────────────────────────────────────────────────
-  utils::Status PrepareChunkRewriteDelete(InodeID ino, const SwordFsChunk &expected, const SwordFsChunk &replacement);
   utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
-                            utils::Status &publication_result);
+                            utils::Status &publication_result, std::optional<SwordFsChunk> &cleanup_candidate);
 
  private:
   utils::Status SetInode(const SwordFsInode &inode);
@@ -108,7 +106,8 @@ class RedisMetaTxn {
   utils::Status AdjustNlink(SwordFsInode *inode, int delta, uint64_t *nlink = nullptr);
   utils::Status LinkEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &child, SwordFsInode *parent);
   utils::Status SetChunk(InodeID ino, const SwordFsChunk &chunk);
-  utils::Status TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size);
+  utils::Status TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size,
+                               std::vector<SwordFsChunk> *detached_chunks);
   utils::Status DeleteChunks(InodeID ino);
   utils::Status IsDescendantOf(InodeID ancestor_ino, InodeID child_ino, bool *result);
   utils::Status DetachEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &target,
@@ -119,7 +118,6 @@ class RedisMetaTxn {
   utils::Status LookupChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
   utils::Status ScanChunks(InodeID ino, std::vector<std::pair<std::string, SwordFsChunk>> &chunks);
   utils::Status QueuePendingDelete(InodeID ino, const SwordFsChunk &chunk);
-  utils::Status ValidatePendingDelete(InodeID ino, const SwordFsChunk &chunk);
 
  private:
   RedisKvTxn &txn_;

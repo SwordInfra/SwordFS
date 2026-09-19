@@ -573,7 +573,7 @@ FIBER_TEST_F(RedisMetaImplTest, ChunkVisitFindAndTruncateCoverSparseMetadata) {
   ASSERT_TRUE(impl_->Truncate(file.ino, 0).ok());
 }
 
-FIBER_TEST_F(RedisMetaImplTest, SetAttrShrinkQueuesOnlyMaterializedSparseObjectsForDurableDelete) {
+FIBER_TEST_F(RedisMetaImplTest, SetAttrShrinkQueuesOnlyMaterializedSparseObjectsForCleanup) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "sparse-cleanup", 0644, &file).ok());
 
@@ -881,7 +881,7 @@ FIBER_TEST_F(RedisMetaImplTest, RewritePendingDeleteSurvivesMetadataRemount) {
   swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
 }
 
-FIBER_TEST_F(RedisMetaImplTest, RewritePreparationFailureLeavesAuthoritativeDescriptorUntouched) {
+FIBER_TEST_F(RedisMetaImplTest, RewriteCleanupRegistrationFailureDoesNotInvalidatePublication) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "rewrite-preflight", 0644, &file).ok());
   SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
@@ -893,11 +893,11 @@ FIBER_TEST_F(RedisMetaImplTest, RewritePreparationFailureLeavesAuthoritativeDesc
   auto replacement = first;
   replacement.revision = 2;
   const auto status = impl_->CommitChunk(file.ino, first, replacement);
-  EXPECT_FALSE(status.ok());
+  EXPECT_TRUE(status.ok()) << status.message();
 
   SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
-  EXPECT_EQ(stored, first);
+  EXPECT_EQ(stored, replacement);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, CommitChunkReplayRepairsInodeAfterPartialExec) {
@@ -1209,7 +1209,7 @@ FIBER_TEST_F(RedisMetaImplTest, TruncateRejectsNonCanonicalPersistedChunkIdentit
   }));
 }
 
-FIBER_TEST_F(RedisMetaImplTest, TruncatePreflightsPendingDeleteSchemaBeforeRemovingChunkMetadata) {
+FIBER_TEST_F(RedisMetaImplTest, TruncateCleanupRegistrationFailureDoesNotInvalidateMutation) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "pending-delete-wrongtype", 0644, &file).ok());
   SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 9, .size = 64};
@@ -1219,20 +1219,16 @@ FIBER_TEST_F(RedisMetaImplTest, TruncatePreflightsPendingDeleteSchemaBeforeRemov
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.PendingDeletes(), "wrong-type"); });
 
   const auto status = impl_->Truncate(file.ino, 0);
-  EXPECT_FALSE(status.ok());
+  EXPECT_TRUE(status.ok()) << status.message();
 
-  // The preflight read fails before any writes are queued, so the authoritative
-  // chunk descriptor and inode size remain intact rather than creating an
-  // untracked object leak through a partial EXEC.
   SwordFsChunk stored;
-  ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
-  EXPECT_EQ(stored, chunk);
+  EXPECT_TRUE(impl_->FindChunk(file.ino, 0, &stored).IsNotFound());
   SwordFsInode after;
   ASSERT_TRUE(impl_->GetInode(file.ino, &after).ok());
-  EXPECT_EQ(after.attr.size, 64U);
+  EXPECT_EQ(after.attr.size, 0U);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, SetAttrShrinkStopsWhenPendingDeletePreparationFails) {
+FIBER_TEST_F(RedisMetaImplTest, SetAttrShrinkCleanupRegistrationFailureDoesNotInvalidateMutation) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "setattr-pending-delete-wrongtype", 0644, &file).ok());
   SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 10, .size = 64};
@@ -1248,14 +1244,13 @@ FIBER_TEST_F(RedisMetaImplTest, SetAttrShrinkStopsWhenPendingDeletePreparationFa
   SwordFsAttr requested = before.attr;
   requested.size = 0;
   const auto status = impl_->SetAttr(file.ino, requested, SetAttrField::kSize, nullptr);
-  EXPECT_FALSE(status.ok());
+  EXPECT_TRUE(status.ok()) << status.message();
 
   SwordFsChunk stored;
-  ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
-  EXPECT_EQ(stored, chunk);
+  EXPECT_TRUE(impl_->FindChunk(file.ino, 0, &stored).IsNotFound());
   SwordFsInode after;
   ASSERT_TRUE(impl_->GetInode(file.ino, &after).ok());
-  EXPECT_EQ(after.attr.size, before.attr.size);
+  EXPECT_EQ(after.attr.size, 0U);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, PendingDeleteScanRejectsFieldValueIdentityMismatch) {
