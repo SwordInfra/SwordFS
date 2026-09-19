@@ -13,7 +13,6 @@
 #include <set>
 
 #include "FiberTest.hpp"
-#include "TestMemMetaImpl.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
@@ -24,7 +23,6 @@ using swordfs::metadata::MemMetaImpl;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
-using swordfs::metadata::test::TestMemMetaImpl;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -33,7 +31,7 @@ static constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
 class MemMetaImplReadDirTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    impl_ = new TestMemMetaImpl();
+    impl_ = new MemMetaImpl();
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
   void TearDown() override {
@@ -61,7 +59,7 @@ class MemMetaImplReadDirTest : public ::testing::Test {
     }
   }
 
-  TestMemMetaImpl *impl_;
+  MemMetaImpl *impl_;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -87,9 +85,8 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirEmpty) {
 FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirWithEntries) {
   constexpr int kFiles = 10;
   for (int i = 0; i < kFiles; ++i) {
-    InodeID ino = 0;
     std::string name = "file_" + std::to_string(i);
-    impl_->Create(kRoot, name, 0644, &ino, nullptr);
+    impl_->Create(kRoot, name, 0644, nullptr);
   }
 
   std::vector<SwordFsEntry> entries;
@@ -113,9 +110,8 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirWithEntries) {
 // ────────────────────────────────────────────────────────────────
 
 FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirIteratorSupportsPeekAdvanceAndSeek) {
-  InodeID first_ino = 0, second_ino = 0;
-  impl_->Create(kRoot, "first", 0644, &first_ino, nullptr);
-  impl_->Create(kRoot, "second", 0644, &second_ino, nullptr);
+  impl_->Create(kRoot, "first", 0644, nullptr);
+  impl_->Create(kRoot, "second", 0644, nullptr);
 
   DirIteratorPtr iterator;
   ASSERT_TRUE(impl_->OpenDir(kRoot, &iterator).ok());
@@ -147,9 +143,8 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirIteratorSupportsPeekAdvanceAndSeek) 
 }
 
 FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirReturnsIndependentIterators) {
-  InodeID first_ino = 0, second_ino = 0;
-  impl_->Create(kRoot, "first", 0644, &first_ino, nullptr);
-  impl_->Create(kRoot, "second", 0644, &second_ino, nullptr);
+  impl_->Create(kRoot, "first", 0644, nullptr);
+  impl_->Create(kRoot, "second", 0644, nullptr);
 
   DirIteratorPtr first_iterator;
   DirIteratorPtr second_iterator;
@@ -179,11 +174,11 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirReturnsIndependentIterators) {
 }
 
 FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirRejectsNonDirectory) {
-  InodeID file_ino = 0;
-  impl_->Create(kRoot, "regular", 0644, &file_ino, nullptr);
+  SwordFsInode file;
+  impl_->Create(kRoot, "regular", 0644, &file);
 
   DirIteratorPtr iterator;
-  EXPECT_EQ(impl_->OpenDir(file_ino, &iterator).code(), Status::kNotDirectory);
+  EXPECT_EQ(impl_->OpenDir(file.ino, &iterator).code(), Status::kNotDirectory);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -191,11 +186,11 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirRejectsNonDirectory) {
 // ────────────────────────────────────────────────────────────────
 
 FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirNotADirectory) {
-  InodeID file_ino = 0;
-  impl_->Create(kRoot, "regular", 0644, &file_ino, nullptr);
+  SwordFsInode file;
+  impl_->Create(kRoot, "regular", 0644, &file);
 
   DirIteratorPtr iterator;
-  Status st = impl_->OpenDir(file_ino, &iterator);
+  Status st = impl_->OpenDir(file.ino, &iterator);
   EXPECT_TRUE(st.IsNotDirectory()) << st.message();
 }
 
@@ -204,9 +199,8 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirNotADirectory) {
 // ────────────────────────────────────────────────────────────────
 
 FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirMixedTypes) {
-  InodeID f_ino = 0, d_ino = 0;
-  impl_->Create(kRoot, "file.txt", 0644, &f_ino, nullptr);
-  impl_->MkDir(kRoot, "subdir", 0755, &d_ino, nullptr);
+  impl_->Create(kRoot, "file.txt", 0644, nullptr);
+  impl_->MkDir(kRoot, "subdir", 0755, nullptr);
 
   std::vector<SwordFsEntry> entries;
   EXPECT_TRUE(CollectEntries(kRoot, &entries).ok());
@@ -230,24 +224,25 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirMixedTypes) {
 // ────────────────────────────────────────────────────────────────
 
 FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirAfterMove) {
-  InodeID dir_a_ino = 0, dir_b_ino = 0;
-  impl_->MkDir(kRoot, "a", 0755, &dir_a_ino, nullptr);
-  impl_->MkDir(kRoot, "b", 0755, &dir_b_ino, nullptr);
+  SwordFsInode dir_a;
+  SwordFsInode dir_b;
+  impl_->MkDir(kRoot, "a", 0755, &dir_a);
+  impl_->MkDir(kRoot, "b", 0755, &dir_b);
 
-  InodeID f_ino = 0;
-  impl_->Create(dir_a_ino, "target", 0644, &f_ino, nullptr);
+  SwordFsInode file;
+  impl_->Create(dir_a.ino, "target", 0644, &file);
 
   // Move a/target → b/target
-  impl_->Rename(dir_a_ino, "target", dir_b_ino, "target", RenameFlag::kNone);
+  impl_->Rename(dir_a.ino, "target", dir_b.ino, "target", RenameFlag::kNone);
 
   // Dir A should be empty (apart from "." and "..")
   std::vector<SwordFsEntry> entries_a;
-  ASSERT_TRUE(CollectEntries(dir_a_ino, &entries_a).ok());
+  ASSERT_TRUE(CollectEntries(dir_a.ino, &entries_a).ok());
   EXPECT_EQ(entries_a.size(), 2);
 
   // Dir B should have "target" + "." + ".."
   std::vector<SwordFsEntry> entries_b;
-  ASSERT_TRUE(CollectEntries(dir_b_ino, &entries_b).ok());
+  ASSERT_TRUE(CollectEntries(dir_b.ino, &entries_b).ok());
   EXPECT_EQ(entries_b.size(), 3);
   // Find the real entry (skip "." and "..")
   const SwordFsEntry *target_entry = nullptr;
@@ -259,7 +254,7 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirAfterMove) {
   }
   ASSERT_NE(target_entry, nullptr);
   EXPECT_EQ(target_entry->name, "target");
-  EXPECT_EQ(target_entry->ino, f_ino);
+  EXPECT_EQ(target_entry->ino, file.ino);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -267,8 +262,7 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirAfterMove) {
 // ────────────────────────────────────────────────────────────────
 
 FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirAfterUnlink) {
-  InodeID f_ino = 0;
-  impl_->Create(kRoot, "to_delete", 0644, &f_ino, nullptr);
+  impl_->Create(kRoot, "to_delete", 0644, nullptr);
 
   impl_->Unlink(kRoot, "to_delete");
 
@@ -284,8 +278,7 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirAfterUnlink) {
 FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirLargeDirectory) {
   constexpr int kFiles = 200;
   for (int i = 0; i < kFiles; ++i) {
-    InodeID ino = 0;
-    impl_->Create(kRoot, "entry_" + std::to_string(i), 0644, &ino, nullptr);
+    impl_->Create(kRoot, "entry_" + std::to_string(i), 0644, nullptr);
   }
 
   std::vector<SwordFsEntry> entries;

@@ -11,9 +11,11 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
+#include "utils/Synchronization.hpp"
 
 namespace swordfs::metadata {
 
@@ -39,7 +41,7 @@ class MemMetaImpl : public IMetaEngine {
   Status CompleteReclaim(InodeID ino) override;
   Status VisitOrphanCandidates(const InodeVisitorFn &visitor) override;
   Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) override;
-  Status VisitPendingDeletes(const PendingDeleteVisitorFn &visitor) override;
+  Status VisitPendingDeletesBatch(size_t max_items, const PendingDeleteVisitorFn &visitor, bool *has_more) override;
   Status CompletePendingDelete(std::string_view key) override;
   Status AllocateChunkRevision(ChunkRevision *revision) override;
 
@@ -57,7 +59,6 @@ class MemMetaImpl : public IMetaEngine {
   Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                      const SwordFsChunk &replacement) override;
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
-  Status VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) override;
   Status Truncate(InodeID ino, uint64_t size) override;
 
   // Volume operations
@@ -71,6 +72,9 @@ class MemMetaImpl : public IMetaEngine {
  private:
   MemMetaStore store_;
   uint64_t chunk_size_ = SwordFsVolume{}.chunk_size;
+  utils::FiberMutex pending_delete_scan_mutex_;
+  std::vector<PendingDelete> pending_delete_snapshot_;
+  size_t pending_delete_snapshot_offset_ = 0;
 };
 
 }  // namespace swordfs::metadata

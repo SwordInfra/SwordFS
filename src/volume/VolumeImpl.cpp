@@ -34,16 +34,11 @@ Status CreateMetaEngine(std::string_view meta_url, std::string_view volume_name,
   }
 }
 
-Status CreateDataEngine(std::string_view bucket, std::unique_ptr<swordfs::storage::IDataEngine> *out) {
-  if (bucket.empty()) {
-    return Status::InvalidArgument("bucket URL is empty");
+Status CreateDataEngine(std::string_view storage, std::unique_ptr<swordfs::storage::IDataEngine> *out) {
+  if (storage.empty()) {
+    return Status::Malformed("volume storage backend is empty");
   }
-
-  utils::StorageUrl url;
-  if (!utils::StorageUrl::Parse(bucket, &url)) {
-    return Status::InvalidArgument("invalid bucket URL: " + std::string(bucket));
-  }
-  return swordfs::storage::DataEngineRegistry::Instance().CreateInstance(url.scheme, out);
+  return swordfs::storage::DataEngineRegistry::Instance().CreateInstance(storage, out);
 }
 
 }  // namespace
@@ -75,8 +70,14 @@ void VolumeImpl::set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine> 
 Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
   utils::ExpectInThreadDomain();
   config_.name = cfg.volume();
-  config_.storage = cfg.storage_backend();
   config_.bucket = cfg.bucket_url();
+  if (!config_.bucket.empty()) {
+    utils::StorageUrl url;
+    if (!utils::StorageUrl::Parse(config_.bucket, &url)) {
+      return Status::InvalidArgument("invalid bucket URL: " + config_.bucket);
+    }
+    config_.storage = std::move(url.scheme);
+  }
   config_.region = cfg.storage_region();
   if (config_.region.empty()) {
     config_.region = "auto";
@@ -117,7 +118,7 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
   }
 
   if (!config_.bucket.empty()) {
-    status = CreateDataEngine(config_.bucket, &data_engine_);
+    status = CreateDataEngine(config_.storage, &data_engine_);
     if (!status.ok()) {
       return status;
     }

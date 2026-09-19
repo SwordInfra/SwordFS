@@ -82,11 +82,17 @@ SwordFS has two top-level commands relevant to architecture: `format` and `mount
 The volume configuration contains, among other fields:
 
 - volume name;
-- data-storage backend type and bucket URL;
+- data-engine identity;
+- bucket/location string interpreted by that data engine;
 - region;
 - configured logical chunk size.
 
 For Redis metadata, volume configuration is persisted in Redis. For the in-memory backend, only the volume configuration is persisted locally in `/etc/swordfs/<volume>/volume.fmt`; inode, directory, chunk, orphan, and pending-reclaim state remain process-lifetime state.
+
+The persisted data-engine identity is authoritative for backend selection.
+The bucket/location string is backend-specific configuration rather than a
+second source of engine identity. Persistent metadata uses schema version 1;
+decoders require an exact match as part of current-format validation.
 
 ### 3.2 Mount
 
@@ -97,7 +103,8 @@ The mount sequence is intentionally ordered so thread-owning components are crea
 3. initialize `VolumeImpl`;
 4. create and initialize the metadata engine;
 5. load the persisted volume configuration;
-6. create and initialize the data engine from the volume's bucket URL;
+6. create the data engine from the volume's persisted engine identity, then
+   initialize it from the persisted backend-specific location/configuration;
 7. create the libfuse low-level session and enter the multi-threaded FUSE loop;
 8. initialize the first fiber runtime and the background reclaim worker from the FUSE init hook; other threads that submit filesystem work create their thread-local `FiberRuntime` lazily through `RunInFiber`.
 
@@ -150,7 +157,7 @@ VolumeImpl
 Backend creation is registry-driven:
 
 - `MetaEngineRegistry` creates a metadata engine from the metadata URL scheme;
-- `DataEngineRegistry` creates a data engine from the bucket URL scheme.
+- `DataEngineRegistry` creates a data engine from the persisted volume engine identity.
 
 ### 5.1 Implemented metadata backends
 
@@ -476,8 +483,8 @@ frozen object key, descriptor-derived key, and canonical chunk layout all
 agree before deleting data; malformed cleanup metadata fails closed. Queue
 membership is never itself permission to delete: the reclaimer first checks
 the current authoritative chunk descriptor and skips a candidate while that
-same immutable object key is still live. This also makes legacy staged records
-from older implementations safe.
+same immutable object key is still live. This revalidation is required because
+cleanup candidates can become stale relative to current authoritative metadata.
 
 Whole chunks at or beyond the new EOF are detached and queued. A partial
 boundary chunk is not queued for deletion because its immutable object remains
@@ -496,7 +503,7 @@ SwordFS intentionally defines exactly two execution domains:
 1. **Fiber domain** — filesystem runtime/business logic actively executing as a Folly fiber;
 2. **POSIX-thread domain** — normal threads used for lifecycle/control code and blocking external IO.
 
-There is no generic/unknown compatibility domain.
+There is no generic or unknown third execution domain.
 
 See [Thread model and synchronization](thread-model.md) for execution topology,
 worker handoff, state protection, and the shutdown state machine.
@@ -608,7 +615,7 @@ backlog cannot monopolize one reconciliation pass or allocate one vector for
 the entire pending set. The metadata backend reports whether its current
 scan cycle has more work; the Reclaimer still processes pending inode reclaims
 and orphan candidates in the current pass, then self-wakes for another
-pending-delete batch. A still-authoritative stale/legacy candidate therefore
+pending-delete batch. A still-authoritative stale candidate therefore
 consumes only its current scan position and cannot permanently pin later
 obsolete candidates behind it.
 

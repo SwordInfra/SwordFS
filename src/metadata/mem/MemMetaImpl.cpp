@@ -462,19 +462,43 @@ Status MemMetaImpl::VisitPendingReclaims(const ReclaimVisitorFn &visitor) {
   return Status::OK();
 }
 
-Status MemMetaImpl::VisitPendingDeletes(const PendingDeleteVisitorFn &visitor) {
+Status MemMetaImpl::VisitPendingDeletesBatch(size_t max_items, const PendingDeleteVisitorFn &visitor, bool *has_more) {
   utils::ExpectInFiberDomain();
+  if (max_items == 0) {
+    return Status::InvalidArgument("pending delete batch size must be positive");
+  }
   if (!visitor) {
     return Status::InvalidArgument("pending delete visitor is null");
   }
+  if (has_more == nullptr) {
+    return Status::InvalidArgument("pending delete has-more output is null");
+  }
 
-  std::vector<PendingDelete> pending;
-  store_.Transact([&](MemMetaTxn &txn) { return txn.ListPendingDeletes(pending); });
-  for (const auto &work : pending) {
+  std::lock_guard<utils::FiberMutex> lock(pending_delete_scan_mutex_);
+  if (pending_delete_snapshot_offset_ >= pending_delete_snapshot_.size()) {
+    pending_delete_snapshot_.clear();
+    pending_delete_snapshot_offset_ = 0;
+    auto status = store_.Transact([&](MemMetaTxn &txn) { return txn.ListPendingDeletes(pending_delete_snapshot_); });
+    if (!status.ok()) {
+      return status;
+    }
+  }
+
+  size_t visited = 0;
+  while (pending_delete_snapshot_offset_ < pending_delete_snapshot_.size() && visited < max_items) {
+    const auto &work = pending_delete_snapshot_[pending_delete_snapshot_offset_];
     auto status = visitor(work);
     if (!status.ok()) {
       return status;
     }
+    ++pending_delete_snapshot_offset_;
+    ++visited;
+  }
+
+  *has_more = pending_delete_snapshot_offset_ < pending_delete_snapshot_.size();
+  if (!*has_more) {
+    pending_delete_snapshot_.clear();
+    pending_delete_snapshot_offset_ = 0;
   }
   return Status::OK();
 }
@@ -750,25 +774,6 @@ Status MemMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &
 Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
   utils::ExpectInFiberDomain();
   return store_.Transact([&](MemMetaTxn &txn) { return txn.FindChunk(ino, idx, chunk); });
-}
-
-Status MemMetaImpl::VisitChunks(InodeID ino, const ChunkVisitorFn &visitor) {
-  utils::ExpectInFiberDomain();
-  if (!visitor) {
-    return Status::InvalidArgument("chunk visitor is null");
-  }
-  std::vector<SwordFsChunk> chunks;
-  auto status = store_.Transact([&](MemMetaTxn &txn) { return txn.ListChunks(ino, &chunks); });
-  if (!status.ok()) {
-    return status;
-  }
-  for (const auto &chunk : chunks) {
-    status = visitor(chunk);
-    if (!status.ok()) {
-      return status;
-    }
-  }
-  return Status::OK();
 }
 
 Status MemMetaImpl::Truncate(InodeID ino, uint64_t size) {

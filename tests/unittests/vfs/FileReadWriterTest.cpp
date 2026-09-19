@@ -40,7 +40,6 @@ using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
-using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
 using swordfs::utils::Status;
 using swordfs::vfs::FileReadWriter;
@@ -80,23 +79,6 @@ class MockDataEngine : public IDataEngine {
   Status Initialize() override {
     return Status::OK();
   }
-  DataEngineLimits Limits() const override {
-    DataEngineLimits lim;
-    lim.supports_multipart = false;
-    return lim;
-  }
-
-  bool Head(std::string_view key, size_t *size) override {
-    auto it = store_.find(std::string(key));
-    if (it == store_.end()) {
-      return false;
-    }
-    if (size) {
-      *size = it->second.size();
-    }
-    return true;
-  }
-
   Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) override {
     ++put_calls;
     const bool matches_key = fail_put_key.empty() || key == fail_put_key;
@@ -277,10 +259,18 @@ class MockMetaEngine : public IMetaEngine {
   Status VisitPendingReclaims(const swordfs::metadata::ReclaimVisitorFn &) override {
     return Status::OK();
   }
-  Status VisitPendingDeletes(const swordfs::metadata::PendingDeleteVisitorFn &visitor) override {
-    for (const auto &[key, pending] : pending_deletes_) {
+  Status VisitPendingDeletesBatch(size_t max_items, const swordfs::metadata::PendingDeleteVisitorFn &visitor,
+                                  bool *has_more) override {
+    std::vector<swordfs::metadata::PendingDelete> pending;
+    pending.reserve(pending_deletes_.size());
+    for (const auto &[key, work] : pending_deletes_) {
       (void)key;
-      auto status = visitor(pending);
+      pending.push_back(work);
+    }
+    *has_more = pending.size() > max_items;
+    const size_t count = std::min(max_items, pending.size());
+    for (size_t i = 0; i < count; ++i) {
+      auto status = visitor(pending[i]);
       if (!status.ok()) {
         return status;
       }
@@ -304,9 +294,6 @@ class MockMetaEngine : public IMetaEngine {
       return Status::InvalidArgument("chunk revision output is null");
     }
     *revision = next_revision_++;
-    return Status::OK();
-  }
-  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {

@@ -37,7 +37,6 @@ using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
-using swordfs::storage::DataEngineLimits;
 using swordfs::storage::IDataEngine;
 using swordfs::utils::Status;
 
@@ -118,7 +117,10 @@ class MissingMetaEngine final : public IMetaEngine {
   Status VisitPendingReclaims(const swordfs::metadata::ReclaimVisitorFn &) override {
     return Status::OK();
   }
-  Status VisitPendingDeletes(const swordfs::metadata::PendingDeleteVisitorFn &) override {
+  Status VisitPendingDeletesBatch(size_t, const swordfs::metadata::PendingDeleteVisitorFn &, bool *has_more) override {
+    if (has_more != nullptr) {
+      *has_more = false;
+    }
     return Status::OK();
   }
   Status CompletePendingDelete(std::string_view) override {
@@ -129,9 +131,6 @@ class MissingMetaEngine final : public IMetaEngine {
       return Status::InvalidArgument("chunk revision output is null");
     }
     *revision = next_revision_++;
-    return Status::OK();
-  }
-  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
@@ -154,12 +153,6 @@ class NullDataEngine final : public IDataEngine {
  public:
   Status Initialize() override {
     return Status::OK();
-  }
-  DataEngineLimits Limits() const override {
-    return {};
-  }
-  bool Head(std::string_view, size_t *) override {
-    return false;
   }
   Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
     return Status::OK();

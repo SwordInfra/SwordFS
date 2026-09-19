@@ -728,26 +728,6 @@ Status MemMetaTxn::ListPendingReclaims(std::vector<ReclaimWork> *out) {
   return Status::OK();
 }
 
-Status MemMetaTxn::ListChunks(InodeID ino, std::vector<SwordFsChunk> *out) {
-  if (!out) {
-    return Status::InvalidArgument("null out");
-  }
-  out->clear();
-  auto it = store_->chunks_.find(ino);
-  if (it == store_->chunks_.end()) {
-    return Status::OK();
-  }
-  out->reserve(it->second.size());
-  for (const auto &[idx, chunk] : it->second) {
-    out->push_back(chunk);
-  }
-  // F14FastMap iteration order is unspecified; the contract for
-  // ListChunks is ascending ChunkIndex so a single audit log of
-  // deletes reads top-to-bottom. Sort by index to honour it.
-  std::sort(out->begin(), out->end(), [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
-  return Status::OK();
-}
-
 // ────────────────────────────────────────────────────────────────
 // Private helpers — direct accessors over the store's tables.  No
 // "Locked" suffix: every MemMetaTxn method runs inside the store's

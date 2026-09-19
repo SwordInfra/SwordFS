@@ -256,26 +256,6 @@ utils::Status RedisMetaOps::VisitPendingReclaims(const std::function<utils::Stat
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaOps::VisitPendingDeletes(const std::function<utils::Status(const PendingDelete &)> &visitor) {
-  utils::ExpectInFiberDomain();
-  if (!visitor) {
-    return utils::Status::InvalidArgument("pending delete visitor is null");
-  }
-
-  std::vector<PendingDelete> pending;
-  auto status = CollectPendingDeletes(pending);
-  if (!status.ok()) {
-    return status;
-  }
-  for (const auto &work : pending) {
-    status = visitor(work);
-    if (!status.ok()) {
-      return status;
-    }
-  }
-  return utils::Status::OK();
-}
-
 utils::Status RedisMetaOps::VisitPendingDeletesBatch(size_t max_items,
                                                      const std::function<utils::Status(const PendingDelete &)> &visitor,
                                                      bool *has_more) {
@@ -396,54 +376,6 @@ utils::Status RedisMetaOps::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk 
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaOps::VisitChunks(InodeID ino,
-                                        const std::function<utils::Status(const SwordFsChunk &)> &visitor) {
-  utils::ExpectInFiberDomain();
-  if (!visitor) {
-    return utils::Status::InvalidArgument("chunk visitor is null");
-  }
-
-  return ScanChunkFields(ino, [this, &visitor](const std::string &field, const std::string &value) {
-    SwordFsChunk chunk;
-    auto status = chunk.ParseFrom(value);
-    if (!status.ok()) {
-      return status;
-    }
-    if (field != std::to_string(chunk.index) || !chunk.IsValidForChunkSize(chunk_size_)) {
-      return utils::Status::Malformed("persisted chunk descriptor does not match its canonical identity");
-    }
-    return visitor(chunk);
-  });
-}
-
-// ────────────────────────────────────────────────────────────────
-// Private scan helpers
-// ────────────────────────────────────────────────────────────────
-
-utils::Status RedisMetaOps::ScanChunkFields(InodeID ino, const ChunkFieldVisitorFn &visitor) {
-  utils::ExpectInFiberDomain();
-
-  constexpr size_t kScanBatchSize = 128;
-  uint64_t cursor = 0;
-  do {
-    std::vector<std::pair<std::string, std::string>> values;
-    uint64_t next_cursor = 0;
-    auto status = backend_->executor().RunFromFiber(
-        [&] { return backend_->client().HScan(key_.Chunk(ino), cursor, kScanBatchSize, &values, &next_cursor); });
-    if (!status.ok()) {
-      return status;
-    }
-    for (const auto &[field, value] : values) {
-      status = visitor(field, value);
-      if (!status.ok()) {
-        return status;
-      }
-    }
-    cursor = next_cursor;
-  } while (cursor != 0);
-  return utils::Status::OK();
-}
-
 void RedisMetaOps::RegisterPendingDeletesBestEffort(InodeID ino, const std::vector<SwordFsChunk> &chunks,
                                                     std::string_view reason) {
   utils::ExpectInFiberDomain();
@@ -535,34 +467,6 @@ utils::Status RedisMetaOps::ParsePendingDelete(std::string_view object_key, std:
     return utils::Status::Malformed("pending delete identity does not match persisted chunk layout");
   }
   out = std::move(pending);
-  return utils::Status::OK();
-}
-
-utils::Status RedisMetaOps::CollectPendingDeletes(std::vector<PendingDelete> &out) {
-  utils::ExpectInFiberDomain();
-  out.clear();
-
-  constexpr size_t kScanBatchSize = 128;
-  uint64_t cursor = 0;
-  do {
-    std::vector<std::pair<std::string, std::string>> values;
-    uint64_t next_cursor = 0;
-    auto status = backend_->executor().RunFromFiber(
-        [&] { return backend_->client().HScan(key_.PendingDeletes(), cursor, kScanBatchSize, &values, &next_cursor); });
-    if (!status.ok()) {
-      return status;
-    }
-    for (auto &[object_key, encoded] : values) {
-      PendingDelete pending;
-      status = ParsePendingDelete(object_key, encoded, pending);
-      if (!status.ok()) {
-        return status;
-      }
-      out.push_back(std::move(pending));
-    }
-    cursor = next_cursor;
-  } while (cursor != 0);
-
   return utils::Status::OK();
 }
 

@@ -50,12 +50,6 @@ class NoopDataEngine : public swordfs::storage::IDataEngine {
   swordfs::utils::Status Initialize() override {
     return swordfs::utils::Status::OK();
   }
-  swordfs::storage::DataEngineLimits Limits() const override {
-    return {};
-  }
-  bool Head(std::string_view, size_t *) override {
-    return false;
-  }
   swordfs::utils::Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
     return swordfs::utils::Status::OK();
   }
@@ -69,16 +63,6 @@ class NoopDataEngine : public swordfs::storage::IDataEngine {
 
 namespace folly {
 class IOBuf;
-}
-
-// ────────────────────────────────────────────────────────────────
-// Volume singleton access
-// ────────────────────────────────────────────────────────────────
-
-TEST(VfsImplTest, VolumeReturnsNonNullAfterInit) {
-  swordfs::volume::VolumeImpl::Initialize();
-  EXPECT_NE(VfsImpl::Volume(), nullptr);
-  swordfs::volume::VolumeImpl::Initialize();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -287,7 +271,10 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status VisitPendingReclaims(const swordfs::metadata::ReclaimVisitorFn &) override {
     return Status::OK();
   }
-  Status VisitPendingDeletes(const swordfs::metadata::PendingDeleteVisitorFn &) override {
+  Status VisitPendingDeletesBatch(size_t, const swordfs::metadata::PendingDeleteVisitorFn &, bool *has_more) override {
+    if (has_more != nullptr) {
+      *has_more = false;
+    }
     return Status::OK();
   }
   Status CompletePendingDelete(std::string_view) override {
@@ -298,9 +285,6 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
       return Status::InvalidArgument("chunk revision output is null");
     }
     *revision = next_revision_++;
-    return Status::OK();
-  }
-  Status VisitChunks(InodeID, const swordfs::metadata::ChunkVisitorFn &) override {
     return Status::OK();
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *iterator) override {
@@ -509,19 +493,6 @@ class RecordingDataEngine : public swordfs::storage::IDataEngine {
  public:
   swordfs::utils::Status Initialize() override {
     return swordfs::utils::Status::OK();
-  }
-  swordfs::storage::DataEngineLimits Limits() const override {
-    return {};
-  }
-  bool Head(std::string_view key, size_t *size) override {
-    auto it = objects_.find(std::string(key));
-    if (it == objects_.end()) {
-      return false;
-    }
-    if (size != nullptr) {
-      *size = it->second.size();
-    }
-    return true;
   }
   swordfs::utils::Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) override {
     objects_[std::string(key)] = std::string(reinterpret_cast<const char *>(data->data()), data->length());

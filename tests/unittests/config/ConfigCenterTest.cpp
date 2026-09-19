@@ -171,12 +171,12 @@ TEST(FormatParamsTest, UnknownFlag) {
       "memory://local",
       "--bucket",
       "s3://mybucket.s3.amazonaws.com/chunks",
-      "--storage",
-      "s3",
+      "--not-a-real-option",
+      "value",
   });
   EXPECT_FALSE(err.empty());
   // CLI11 uses "not a recognized" or similar for unknown flags.
-  EXPECT_NE(err.find("--storage"), std::string::npos) << err;
+  EXPECT_NE(err.find("--not-a-real-option"), std::string::npos) << err;
 }
 
 // ================================================================

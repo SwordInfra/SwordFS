@@ -1,7 +1,8 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// SwordFS FUSE hook factory — static callbacks that forward to SwordFsInterface.
+// SwordFS FUSE hook factory — static callbacks that admit requests to the
+// fiber runtime and delegate filesystem semantics to VfsImpl.
 
 #include "fuse/Vfs.hpp"
 

@@ -15,6 +15,7 @@
 #include "volume/VolumeImpl.hpp"
 
 using swordfs::config::ConfigCenter;
+using swordfs::metadata::SwordFsVolume;
 using swordfs::metadata::mem::VolumeFile;
 using swordfs::utils::Status;
 using swordfs::volume::VolumeImpl;
@@ -62,13 +63,19 @@ TEST_F(VolumeImplTest, CreateFromSucceeds) {
   EXPECT_TRUE(vol.CreateFrom(cfg).ok());
 }
 
+TEST_F(VolumeImplTest, CreateFromNormalizesDataEngineIdentity) {
+  auto cfg = makeConfig("memory://local", "testvol", "S3://endpoint.example.com/bucket");
+  VolumeImpl vol;
+  ASSERT_TRUE(vol.CreateFrom(cfg).ok());
+  EXPECT_EQ(vol.config().storage, "s3");
+}
+
 TEST_F(VolumeImplTest, CreateFromRedisEngine) {
   const char *redis_url = std::getenv("SWORDFS_REDIS_TEST_URL");
   if (redis_url == nullptr) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
   }
   auto cfg = makeConfig(redis_url, "redis-" + tmpdir_, "s3://endpoint.example.com/bucket");
-  cfg.set_storage_backend("s3");
   cfg.set_storage_region("us-east-1");
 
   VolumeImpl::Initialize();
@@ -98,19 +105,15 @@ TEST_F(VolumeImplTest, LoadFromS3Engine) {
   Status st = VolumeImpl::Instance().LoadFrom(cfg);
   ASSERT_TRUE(st.ok()) << st.message();
   ASSERT_NE(VolumeImpl::Instance().data_engine(), nullptr);
-  EXPECT_FALSE(VolumeImpl::Instance().data_engine()->Limits().supports_multipart);
   VolumeImpl::Instance().Shutdown();
 }
 
-TEST_F(VolumeImplTest, LoadFromInvalidBucketUrl) {
+TEST_F(VolumeImplTest, CreateFromRejectsInvalidBucketUrl) {
   auto cfg = makeConfig("memory://local", "testvol", "not-a-valid-url");
 
   VolumeImpl vol;
-  ASSERT_TRUE(vol.CreateFrom(cfg).ok());
-
-  VolumeImpl::Initialize();
-  Status st = VolumeImpl::Instance().LoadFrom(cfg);
-  EXPECT_FALSE(st.ok());
+  Status st = vol.CreateFrom(cfg);
+  EXPECT_EQ(st.code(), Status::kInvalidArgument) << st.message();
 }
 
 TEST_F(VolumeImplTest, LoadFromUnknownDataEngine) {
@@ -122,6 +125,31 @@ TEST_F(VolumeImplTest, LoadFromUnknownDataEngine) {
   VolumeImpl::Initialize();
   Status st = VolumeImpl::Instance().LoadFrom(cfg);
   EXPECT_TRUE(st.IsNotSupported()) << st.message();
+}
+
+TEST_F(VolumeImplTest, LoadFromUsesPersistedDataEngineIdentity) {
+  auto cfg = makeConfig("memory://local", "testvol");
+  SwordFsVolume stored;
+  stored.name = cfg.volume();
+  stored.storage = "does-not-exist";
+  stored.bucket = "s3://endpoint.example.com/bucket";
+  ASSERT_TRUE(VolumeFile{cfg.volume()}.Write(stored).ok());
+
+  VolumeImpl vol;
+  Status st = vol.LoadFrom(cfg);
+  EXPECT_TRUE(st.IsNotSupported()) << st.message();
+}
+
+TEST_F(VolumeImplTest, LoadFromRejectsMissingDataEngineIdentity) {
+  auto cfg = makeConfig("memory://local", "testvol");
+  SwordFsVolume stored;
+  stored.name = cfg.volume();
+  stored.bucket = "s3://endpoint.example.com/bucket";
+  ASSERT_TRUE(VolumeFile{cfg.volume()}.Write(stored).ok());
+
+  VolumeImpl vol;
+  Status st = vol.LoadFrom(cfg);
+  EXPECT_TRUE(st.IsMalformed()) << st.message();
 }
 
 TEST_F(VolumeImplTest, LoadFromS3UrlMissingBucketName) {

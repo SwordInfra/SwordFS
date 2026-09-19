@@ -87,6 +87,10 @@ TEST(ValidateBucketUrlTest, ValidBucketUrlWithPrefix) {
   EXPECT_TRUE(ValidateBucketUrl("s3://endpoint.example.com/bucket/prefix").empty());
 }
 
+TEST(ValidateBucketUrlTest, SchemeIsCaseInsensitive) {
+  EXPECT_TRUE(ValidateBucketUrl("S3://endpoint.example.com/my-bucket").empty());
+}
+
 TEST(ValidateBucketUrlTest, MissingBucketName) {
   std::string err = ValidateBucketUrl("s3://endpoint.example.com");
   EXPECT_FALSE(err.empty());

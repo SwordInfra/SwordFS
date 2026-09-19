@@ -93,10 +93,10 @@ utils::Status Reclaimer::DeletePendingObject(const metadata::PendingDelete &work
   auto *meta = volume::VolumeImpl::Instance().meta_engine();
   auto *data = volume::VolumeImpl::Instance().data_engine();
 
-  // PendingDelete is only a cleanup candidate, never delete authority. Legacy
-  // versions may also have staged candidates before the metadata transition.
-  // Do not delete until current authoritative metadata no longer names the
-  // exact immutable object key. Stale/live candidates are harmless.
+  // PendingDelete is only a cleanup candidate, never delete authority. Do not
+  // delete until current authoritative metadata no longer names the exact
+  // immutable object key. A candidate that still names live data is harmless
+  // because revalidation suppresses the physical delete.
   metadata::SwordFsChunk current;
   auto status = meta->FindChunk(work.ino, work.chunk.descriptor.index, &current);
   if (status.ok()) {
@@ -128,8 +128,8 @@ utils::Status Reclaimer::Reconcile() {
   size_t failures = 0;
 
   // DeletePendingObject always rechecks whether the exact immutable key is
-  // still authoritative. This is the deletion safety boundary regardless of
-  // when or by which backend version the cleanup candidate was registered.
+  // still authoritative. Candidate age or queue position never grants delete
+  // authority; only current metadata can make the physical delete safe.
   bool has_more_pending_deletes = false;
   auto status = meta->VisitPendingDeletesBatch(
       kPendingDeleteBatchSize,

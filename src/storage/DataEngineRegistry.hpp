@@ -27,7 +27,7 @@ class DataEngineRegistry {
   /// Register a data engine factory. Called at static initialization time.
   void Register(std::string_view name, Factory factory);
 
-  /// Return whether a data engine with the given scheme is registered.
+  /// Return whether a data engine with the given identity is registered.
   bool Available(std::string_view name) const;
 
   /// Create a data engine instance using its registered factory.

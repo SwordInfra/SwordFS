@@ -7,7 +7,6 @@
 #include "cmd/Mount.hpp"
 #include "config/Validator.hpp"
 #include "metadata/IMetaEngine.hpp"
-#include "storage/StorageUrl.hpp"
 
 namespace swordfs::config {
 
@@ -70,16 +69,6 @@ void ConfigCenter::RegisterFormatOptions(CLI::App &app) {
   cmd->add_option("--chunk-size", chunk_size_, "Chunk size in bytes (default: 64 MiB)")
       ->check(CLI::PositiveNumber)
       ->check(CLI::Range(4096ULL, 1024ULL * 1024 * 1024));
-
-  cmd->parse_complete_callback([this]() {
-    // Derive storage backend from --bucket scheme.
-    if (!bucket_url_.empty()) {
-      utils::StorageUrl url;
-      if (utils::StorageUrl::Parse(bucket_url_, &url)) {
-        storage_backend_ = url.scheme;
-      }
-    }
-  });
 
   SubCommand sc;
   sc.cmd = cmd;

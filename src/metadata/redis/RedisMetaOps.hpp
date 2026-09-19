@@ -63,14 +63,12 @@ class RedisMetaOps {
   utils::Status CompleteReclaim(InodeID ino);
   utils::Status VisitOrphanCandidates(const std::function<utils::Status(InodeID)> &visitor);
   utils::Status VisitPendingReclaims(const std::function<utils::Status(const ReclaimWork &)> &visitor);
-  utils::Status VisitPendingDeletes(const std::function<utils::Status(const PendingDelete &)> &visitor);
   utils::Status VisitPendingDeletesBatch(size_t max_items,
                                          const std::function<utils::Status(const PendingDelete &)> &visitor,
                                          bool *has_more);
   utils::Status CompletePendingDelete(std::string_view object_key);
   utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement);
   utils::Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
-  utils::Status VisitChunks(InodeID ino, const std::function<utils::Status(const SwordFsChunk &)> &visitor);
   utils::Status GetInodeCount(uint64_t *count);
   utils::Status AllocateInode(InodeID *ino);
   utils::Status AllocateChunkRevision(ChunkRevision *revision);
@@ -84,11 +82,6 @@ class RedisMetaOps {
   utils::Status TransactFromFiber(const std::function<utils::Status(RedisMetaTxn &)> &callback);
 
  private:
-  using ChunkFieldVisitorFn = std::function<utils::Status(const std::string &field, const std::string &value)>;
-
-  // Stream every field of the inode's chunk hash in HSCAN batches.
-  utils::Status ScanChunkFields(InodeID ino, const ChunkFieldVisitorFn &visitor);
-
   // Register cleanup candidates after a metadata mutation has a known
   // outcome. Failure is intentionally non-fatal: it may leak obsolete data,
   // but it must not invalidate an otherwise successful metadata operation.
@@ -100,10 +93,6 @@ class RedisMetaOps {
   // Snapshot the frozen pending-reclaim records, validating persisted state
   // before exposing it to the replay worker.
   utils::Status CollectPendingReclaims(std::vector<ReclaimWork> &out);
-
-  // Snapshot immutable object-delete candidates produced by truncate or chunk
-  // publication cleanup.
-  utils::Status CollectPendingDeletes(std::vector<PendingDelete> &out);
 
   utils::Status ParsePendingDelete(std::string_view object_key, std::string_view encoded, PendingDelete &out) const;
 

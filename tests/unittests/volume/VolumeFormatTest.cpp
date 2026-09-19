@@ -12,6 +12,7 @@
 #include <string>
 
 #include "metadata/mem/VolumeFile.hpp"
+#include "metadata/types/BufCodec.hpp"
 #include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
 
@@ -77,6 +78,23 @@ TEST(SwordFsVolumeTest, ParseFromRejectsMalformedData) {
   st = v.ParseFrom(encoded);
   EXPECT_FALSE(st.ok());
   EXPECT_EQ(st.code(), Status::kMalformed);
+}
+
+TEST(SwordFsVolumeTest, ParseFromRejectsUnexpectedSchemaVersion) {
+  swordfs::metadata::BufEncoder enc;
+  enc.String("SWFSMETA");
+  enc.U32(999);
+  enc.U32(static_cast<uint32_t>(swordfs::metadata::RecordType::kVolume));
+  enc.String("invalid-schema-volume");
+  enc.String("s3");
+  enc.String("s3://endpoint/mybucket/prefix");
+  enc.String("auto");
+  enc.U64(64ULL * 1024 * 1024);
+
+  std::string encoded;
+  enc.Finish(&encoded);
+  SwordFsVolume volume;
+  EXPECT_TRUE(volume.ParseFrom(encoded).IsMalformed());
 }
 
 TEST_F(VolumeFileTest, WriteAndReadRoundTrip) {

@@ -18,7 +18,7 @@ flowchart LR
 
 | Structure | Essential content | Authority and lifetime |
 | --- | --- | --- |
-| `SwordFsVolume` | Volume identity, backend configuration, chunk size | Defines how a mounted volume interprets its storage |
+| `SwordFsVolume` | Volume identity, data-engine identity, bucket/location, region, chunk size | Defines how a mounted volume interprets its storage |
 | Directory entry | Name, child inode ID, child type | Namespace mapping; multiple entries may name one regular-file inode |
 | `SwordFsInode` | ID, attributes including size and `nlink`, parent ID, symlink target | Canonical inode attributes; removing a name need not remove the inode |
 | `SwordFsChunk` | Index, start offset, revision, size | Currently published bytes for one logical chunk |
@@ -37,6 +37,12 @@ and gaps after chunk data represent holes, filled with zeroes by the read path.
 The object key is `<inode>/<chunk-index>/<revision>`. Revisions are volume-wide,
 monotonic, non-zero identities; gaps are valid. Each volume needs an isolated
 bucket/prefix because the derived key does not include a volume name.
+
+`SwordFsVolume` persists data-engine identity separately from the engine-specific
+bucket/location string. Format derives the identity from the current CLI input;
+mount uses the persisted identity to select the engine and then gives that
+engine its persisted location/configuration. Persistent metadata records use
+schema version 1 and require an exact match as a current-format integrity rule.
 
 ## Runtime ownership
 

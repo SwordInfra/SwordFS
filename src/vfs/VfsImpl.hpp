@@ -1,9 +1,9 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// VfsImpl — default VFS implementation.  Delegates to MetaStore and
-// translates Status-wrapped results into fuse_reply_* calls.
-// The VfsHookFactory layer only needs to wrap each call in RunInFiber.
+// VfsImpl — default VFS implementation. It coordinates the current volume,
+// metadata engine, runtime handles, and data path for FUSE-facing operations.
+// VfsHookFactory owns callback/reply mechanics and fiber admission.
 
 #pragma once
 
@@ -31,9 +31,6 @@ namespace vfs {
 
 class VfsImpl {
  public:
-  /// Return the VolumeImpl singleton (convenience).
-  static volume::VolumeImpl *Volume();
-
   static utils::Status Lookup(fuse_ino_t parent, const char *name, fuse_entry_param *entry);
   static utils::Status GetAttr(fuse_ino_t ino, struct stat *attr);
   static utils::Status SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, struct stat *out_attr);
