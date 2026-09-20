@@ -40,6 +40,8 @@ class InodeHandle {
 
   utils::Status Write(const folly::IOBuf &buf, off_t off);
 
+  utils::Status GetAttr(metadata::SwordFsInode *out) const;
+
   utils::Status SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields, metadata::SwordFsInode *out);
 
   /// Always flush — used by FUSE FLUSH / FSYNC.

@@ -1151,6 +1151,56 @@ TEST_F(FileReadWriterTest, FlushNeverShrinksExistingFileSize) {
   });
 }
 
+TEST_F(FileReadWriterTest, SuccessfulFlushClearsTransientLiveSize) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("Hello,_World!"), 0).ok());
+
+    SwordFsInode inode;
+    ASSERT_TRUE(rw.GetAttr(&inode).ok());
+    ASSERT_EQ(inode.attr.size, 13U);
+
+    ASSERT_TRUE(rw.Flush().ok());
+    ASSERT_EQ(mock_meta_->file_size(), 13);
+
+    // Once publication succeeds, metadata is authoritative again. A later
+    // size change from outside this local writer must not be masked by an old
+    // pre-flush lower bound.
+    mock_meta_->set_file_size(5);
+    ASSERT_TRUE(rw.GetAttr(&inode).ok());
+    EXPECT_EQ(inode.attr.size, 5U);
+  });
+}
+
+TEST_F(FileReadWriterTest, FailedFlushKeepsTransientLiveSize) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("Hello,_World!"), 0).ok());
+    mock_data_->put_status = Status::IOError("injected publication failure");
+
+    auto status = rw.Flush();
+    ASSERT_EQ(status.code(), Status::kIOError);
+    ASSERT_EQ(mock_meta_->file_size(), 0);
+
+    SwordFsInode inode;
+    ASSERT_TRUE(rw.GetAttr(&inode).ok());
+    EXPECT_EQ(inode.attr.size, 13U);
+  });
+}
+
+TEST_F(FileReadWriterTest, SuccessfulTruncateDoesNotLeaveTransientSizeOverlay) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("Hello,_World!"), 0).ok());
+    ASSERT_TRUE(rw.Truncate(5).ok());
+
+    mock_meta_->set_file_size(2);
+    SwordFsInode inode;
+    ASSERT_TRUE(rw.GetAttr(&inode).ok());
+    EXPECT_EQ(inode.attr.size, 2U);
+  });
+}
+
 TEST_F(FileReadWriterTest, FlushContinuesOtherChunksAfterOneChunkFails) {
   RunInTestFiber([&] {
     auto &vol = swordfs::volume::VolumeImpl::Instance();

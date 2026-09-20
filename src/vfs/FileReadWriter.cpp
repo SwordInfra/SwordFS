@@ -154,6 +154,7 @@ FileReadWriter::FileReadWriter(InodeID ino)
 utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
   std::lock_guard<utils::FiberRWMutex> operation_lock(operation_mutex_);
   SWORDFS_LOG_DEBUG << "FileReadWriter::Write: ino=" << ino_ << " size=" << buf.length() << " off=" << off;
+  const size_t write_size = buf.length();
   size_t remaining = buf.length();
   off_t cur_off = off;
 
@@ -181,6 +182,10 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
     }
     remaining -= n;
     cur_off += static_cast<off_t>(n);
+  }
+  if (write_size != 0) {
+    const auto write_end = static_cast<uint64_t>(cur_off);
+    live_size_ = std::max(live_size_.value_or(0), write_end);
   }
   return Status::OK();
 }
@@ -246,6 +251,22 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   return Status::OK();
 }
 
+utils::Status FileReadWriter::GetAttr(metadata::SwordFsInode *out) const {
+  std::shared_lock<utils::FiberRWMutex> operation_lock(operation_mutex_);
+  auto status = meta_->GetInode(ino_, out);
+  if (!status.ok()) {
+    return status;
+  }
+  ApplyLiveSize(out);
+  return utils::Status::OK();
+}
+
+void FileReadWriter::ApplyLiveSize(metadata::SwordFsInode *inode) const {
+  if (inode != nullptr && live_size_.has_value()) {
+    inode->attr.size = std::max(inode->attr.size, *live_size_);
+  }
+}
+
 // ────────────────────────────────────────────────────────────────
 // Flush
 // ────────────────────────────────────────────────────────────────
@@ -276,6 +297,13 @@ utils::Status FileReadWriter::Flush() {
     Reclaimer::Instance().Wake();
   }
 
+  if (first_error.ok()) {
+    // Every locally accepted dirty write is now represented by authoritative
+    // chunk/inode metadata. Keep no stale lower bound that could mask a later
+    // size change from another client.
+    live_size_.reset();
+  }
+
   return first_error;
 }
 
@@ -286,6 +314,9 @@ utils::Status FileReadWriter::Truncate(size_t size) {
     return status;
   }
   chunks_.TruncateToSize(size, chunk_size_);
+  // Truncate persists the logical size synchronously; after success metadata
+  // is authoritative and no transient size overlay remains necessary.
+  live_size_.reset();
   Reclaimer::Instance().Wake();
   return utils::Status::OK();
 }
@@ -299,8 +330,11 @@ utils::Status FileReadWriter::SetAttr(const metadata::SwordFsAttr &attr, metadat
   }
   if (metadata::HasSetAttrField(fields, metadata::SetAttrField::kSize)) {
     chunks_.TruncateToSize(attr.size, chunk_size_);
+    // A successful size setattr has already committed the new logical size.
+    live_size_.reset();
     Reclaimer::Instance().Wake();
   }
+  ApplyLiveSize(out);
   return utils::Status::OK();
 }
 

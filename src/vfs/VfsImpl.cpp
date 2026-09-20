@@ -44,9 +44,32 @@ using swordfs::volume::VolumeImpl;
 
 namespace swordfs::vfs {
 
+namespace {
+
+utils::Status RefreshTrackedInode(metadata::SwordFsInode *inode) {
+  auto handle = InodeHandleManager::Instance().Get(inode->ino, false);
+  if (!handle) {
+    return utils::Status::OK();
+  }
+  metadata::SwordFsInode refreshed;
+  refreshed.ino = inode->ino;
+  auto status = handle->GetAttr(&refreshed);
+  if (!status.ok()) {
+    return status;
+  }
+  *inode = std::move(refreshed);
+  return utils::Status::OK();
+}
+
+}  // namespace
+
 utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name, fuse_entry_param *entry) {
   SwordFsInode child;
   Status status = VolumeImpl::Instance().meta_engine()->Lookup(parent, name, &child);
+  if (!status.ok()) {
+    return status;
+  }
+  status = RefreshTrackedInode(&child);
   if (!status.ok()) {
     return status;
   }
@@ -60,7 +83,8 @@ utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name, fuse_entry_pa
 
 utils::Status VfsImpl::GetAttr(fuse_ino_t ino, struct stat *attr) {
   SwordFsInode inode;
-  Status status = VolumeImpl::Instance().meta_engine()->GetInode(ino, &inode);
+  auto handle = InodeHandleManager::Instance().Get(ino, false);
+  Status status = handle ? handle->GetAttr(&inode) : VolumeImpl::Instance().meta_engine()->GetInode(ino, &inode);
   if (status.ok()) {
     inode.attr.ToPosixStat(attr);
   }
@@ -71,14 +95,10 @@ utils::Status VfsImpl::SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, st
   SetAttrField fields = FromFuseSetAttrFields(to_set);
   SwordFsAttr metadata_attr = SwordFsAttr::FromPosixStat(*attr);
   SwordFsInode inode;
+  auto handle = InodeHandleManager::Instance().Get(ino, false);
   Status status;
-  if (metadata::HasSetAttrField(fields, SetAttrField::kSize)) {
-    auto handle = InodeHandleManager::Instance().Get(ino, false);
-    if (handle) {
-      status = handle->SetAttr(metadata_attr, fields, out_attr ? &inode : nullptr);
-    } else {
-      status = VolumeImpl::Instance().meta_engine()->SetAttr(ino, metadata_attr, fields, out_attr ? &inode : nullptr);
-    }
+  if (handle) {
+    status = handle->SetAttr(metadata_attr, fields, out_attr ? &inode : nullptr);
   } else {
     status = VolumeImpl::Instance().meta_engine()->SetAttr(ino, metadata_attr, fields, out_attr ? &inode : nullptr);
   }
@@ -162,6 +182,13 @@ utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent, const char *ne
   Status status = VolumeImpl::Instance().meta_engine()->Link(ino, newparent, newname, &inode);
   if (!status.ok()) {
     return status;
+  }
+  status = RefreshTrackedInode(&inode);
+  if (!status.ok()) {
+    // Link already committed successfully. Attribute enrichment must not turn
+    // that namespace mutation into an apparent failure that callers may retry.
+    // Keep the inode returned by Link; a later getattr can refresh it.
+    SWORDFS_LOG_WARN << "Link live-attribute refresh failed after commit: ino=" << ino << " — " << status.message();
   }
   *entry = {};
   entry->ino = inode.ino;
