@@ -87,21 +87,11 @@ class Chunk {
   }
 
  private:
-  struct PublicationAttempt {
-    std::optional<metadata::SwordFsChunk> expected;
-    metadata::SwordFsChunk replacement;
-    bool object_uploaded = false;
-    bool payload_current = true;
-    bool revision_reusable = true;
-  };
-
   /// Build a SwordFsChunk snapshot for metadata registration using |revision|.
   metadata::SwordFsChunk BuildMeta(metadata::ChunkRevision revision) const;
 
   const metadata::SwordFsChunk &PublishedChunk() const;
-  void MarkLocalDataChanged();
-  utils::Status ReconcilePublicationAttempt(bool &publication_complete);
-  utils::Status StartPublicationAttempt();
+  utils::Status RefreshPublicationBaseline();
   utils::Status HydrateForWrite();
   void CompletePublication(const metadata::SwordFsChunk &chunk);
 
@@ -114,7 +104,7 @@ class Chunk {
   storage::IDataEngine *data_;
   metadata::IMetaEngine *meta_;
   std::optional<metadata::SwordFsChunk> published_chunk_;
-  std::optional<PublicationAttempt> publication_attempt_;
+  bool refresh_publication_baseline_ = false;
 };
 
 }  // namespace swordfs::chunk

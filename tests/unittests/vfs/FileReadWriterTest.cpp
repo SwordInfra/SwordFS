@@ -305,12 +305,18 @@ class MockMetaEngine : public IMetaEngine {
 
   Status SeedChunkForTest(InodeID ino, const SwordFsChunk &chunk) {
     chunks_[ino][chunk.index] = chunk;
+    if (chunk.revision >= next_revision_) {
+      next_revision_ = chunk.revision + 1;
+    }
     return Status::OK();
   }
 
   void SetNextFindChunkResult(const SwordFsChunk &chunk) {
     next_find_chunk_result_ = chunk;
     next_find_chunk_status_.reset();
+    if (chunk.revision >= next_revision_) {
+      next_revision_ = chunk.revision + 1;
+    }
   }
 
   void SetNextFindChunkStatus(Status status) {
@@ -331,6 +337,9 @@ class MockMetaEngine : public IMetaEngine {
 
   Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                      const SwordFsChunk &replacement) override {
+    if (expected.has_value() && replacement.revision <= expected->revision) {
+      return Status::InvalidArgument("replacement revision must increase");
+    }
     if (!expected.has_value()) {
       if (!publish_chunk_status.ok() && !publish_chunk_commit_on_error) {
         if (publish_chunk_status.IsAlreadyExists() || publish_chunk_status.IsNotFound()) {
@@ -897,6 +906,23 @@ TEST_F(FileReadWriterTest, PutFailureRetryReconcilesMetadataBeforeRepublishing) 
     mock_data_->put_status = Status::OK();
     ASSERT_TRUE(rw.Flush().ok());
     EXPECT_EQ(mock_meta_->find_chunk_calls, 2);
+    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 2);
+    SwordFsChunk published;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &published).ok());
+    EXPECT_EQ(published.revision, 2U);
+  });
+}
+
+TEST_F(FileReadWriterTest, SuccessfulFirstFlushDoesNotRefreshMetadataBaseline) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello"), 0).ok());
+    ASSERT_EQ(mock_meta_->find_chunk_calls, 1);
+
+    ASSERT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_meta_->find_chunk_calls, 1);
+    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 1);
+    EXPECT_EQ(mock_data_->put_calls, 1);
   });
 }
 
@@ -904,12 +930,14 @@ TEST_F(FileReadWriterTest, FlushRetriesRevisionAllocationFailureBeforeUploadingO
   RunInTestFiber([&] {
     auto rw = Make();
     ASSERT_TRUE(rw.Write(Buf("hello"), 0).ok());
+    ASSERT_EQ(mock_meta_->find_chunk_calls, 1);
 
     mock_meta_->allocate_chunk_revision_status = Status::IOError("revision allocation failed");
     const auto failed = rw.Flush();
     EXPECT_EQ(failed.code(), Status::kIOError);
     EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 1);
     EXPECT_EQ(mock_data_->put_calls, 0);
+    EXPECT_EQ(mock_meta_->find_chunk_calls, 1);
     ASSERT_TRUE(rw.Write(Buf("H"), 0).ok());
     ASSERT_TRUE(rw.Write(Buf("!"), 5).ok());
 
@@ -917,6 +945,7 @@ TEST_F(FileReadWriterTest, FlushRetriesRevisionAllocationFailureBeforeUploadingO
     ASSERT_TRUE(rw.Flush().ok());
     EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 2);
     EXPECT_EQ(mock_data_->put_calls, 1);
+    EXPECT_EQ(mock_meta_->find_chunk_calls, 2);
 
     SwordFsChunk published;
     ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &published).ok());
@@ -955,7 +984,7 @@ TEST_F(FileReadWriterTest, CompetingInitialPublishersUseDistinctRevisionsAndObje
   });
 }
 
-TEST_F(FileReadWriterTest, FlushRetriesPublicationFailureUntilMetadataCommits) {
+TEST_F(FileReadWriterTest, FlushRetriesPublicationFailureWithFreshRevision) {
   RunInTestFiber([&] {
     auto rw = Make();
     const std::string payload = Repeat('M', 128);
@@ -968,13 +997,17 @@ TEST_F(FileReadWriterTest, FlushRetriesPublicationFailureUntilMetadataCommits) {
     EXPECT_EQ(mock_data_->StoredKeys().size(), 1U);
     EXPECT_FALSE(rw.Flush().ok());
     EXPECT_TRUE(mock_meta_->FindChunk(kIno, 0, &unpublished).IsNotFound());
-    EXPECT_EQ(mock_data_->StoredKeys().size(), 1U);
-    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 1);
+    EXPECT_EQ(mock_data_->StoredKeys().size(), 2U);
+    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 2);
 
     mock_meta_->publish_chunk_status = Status::OK();
     ASSERT_TRUE(rw.Flush().ok());
-    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 1);
+    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 3);
+    EXPECT_EQ(mock_data_->StoredKeys().size(), 3U);
     EXPECT_EQ(mock_meta_->file_size(), static_cast<off_t>(payload.size()));
+    SwordFsChunk published;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &published).ok());
+    EXPECT_EQ(published.revision, 3U);
 
     FileReadWriter reopened(kIno);
     auto out = folly::IOBuf::create(payload.size());
@@ -983,7 +1016,7 @@ TEST_F(FileReadWriterTest, FlushRetriesPublicationFailureUntilMetadataCommits) {
   });
 }
 
-TEST_F(FileReadWriterTest, FlushResolvesCommittedPublicationRetryWithoutAnotherPut) {
+TEST_F(FileReadWriterTest, FlushRetryAfterAmbiguousInitialCommitPublishesFreshRevision) {
   RunInTestFiber([&] {
     auto rw = Make();
     const std::string payload = Repeat('A', 128);
@@ -998,7 +1031,12 @@ TEST_F(FileReadWriterTest, FlushResolvesCommittedPublicationRetryWithoutAnotherP
     mock_meta_->publish_chunk_commit_on_error = false;
     mock_meta_->publish_chunk_status = Status::OK();
     EXPECT_TRUE(rw.Flush().ok());
-    EXPECT_EQ(mock_data_->put_calls, 1);
+    EXPECT_EQ(mock_data_->put_calls, 2);
+    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 2);
+    EXPECT_EQ(mock_meta_->replace_chunk_calls, 1);
+    SwordFsChunk published;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &published).ok());
+    EXPECT_EQ(published.revision, 2U);
   });
 }
 
@@ -1032,7 +1070,7 @@ TEST_F(FileReadWriterTest, FlushRebasesChangedAuthoritativeChunkAndPublishesLate
 
     SwordFsChunk current;
     ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &current).ok());
-    EXPECT_EQ(current.revision, 2U);
+    EXPECT_EQ(current.revision, 1000U);
     FileReadWriter reopened(kIno);
     auto out = folly::IOBuf::create(payload.size());
     ASSERT_TRUE(reopened.Read(payload.size(), 0, out.get()).ok());
@@ -1106,7 +1144,9 @@ TEST_F(FileReadWriterTest, FlushNeverShrinksExistingFileSize) {
   RunInTestFiber([&] {
     auto rw = Make(4096);
     ASSERT_TRUE(rw.Write(Buf(Repeat('S', 128)), 0).ok());
+    ASSERT_EQ(mock_meta_->find_chunk_calls, 1);
     ASSERT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_meta_->find_chunk_calls, 1);
     EXPECT_EQ(mock_meta_->file_size(), 4096);
   });
 }
@@ -1347,6 +1387,10 @@ TEST_F(FileReadWriterTest, RewritePutFailureKeepsOldVersionAuthoritativeAndCanRe
 
     mock_data_->put_status = Status::OK();
     ASSERT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 3);
+    SwordFsChunk published;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &published).ok());
+    EXPECT_EQ(published.revision, 3U);
     FileReadWriter new_reader(kIno);
     auto new_out = folly::IOBuf::create(11);
     ASSERT_TRUE(new_reader.Read(11, 0, new_out.get()).ok());
@@ -1354,7 +1398,7 @@ TEST_F(FileReadWriterTest, RewritePutFailureKeepsOldVersionAuthoritativeAndCanRe
   });
 }
 
-TEST_F(FileReadWriterTest, RewriteResolvesAmbiguousMetadataCommitWithoutAnotherPut) {
+TEST_F(FileReadWriterTest, RewriteRetryAfterAmbiguousCommitPublishesFreshRevision) {
   RunInTestFiber([&] {
     auto rw = Make();
     ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
@@ -1371,8 +1415,12 @@ TEST_F(FileReadWriterTest, RewriteResolvesAmbiguousMetadataCommitWithoutAnotherP
     mock_meta_->replace_chunk_commit_on_error = false;
     mock_meta_->replace_chunk_status = Status::OK();
     ASSERT_TRUE(rw.Flush().ok());
-    EXPECT_EQ(mock_data_->put_calls, 2);
+    EXPECT_EQ(mock_data_->put_calls, 3);
+    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 3);
     EXPECT_EQ(mock_meta_->replace_chunk_calls, 2);
+    SwordFsChunk published;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &published).ok());
+    EXPECT_EQ(published.revision, 3U);
 
     FileReadWriter reader(kIno);
     auto out = folly::IOBuf::create(11);
@@ -1381,7 +1429,7 @@ TEST_F(FileReadWriterTest, RewriteResolvesAmbiguousMetadataCommitWithoutAnotherP
   });
 }
 
-TEST_F(FileReadWriterTest, AmbiguousRewriteReplayFailureKeepsLatestDataWritable) {
+TEST_F(FileReadWriterTest, AmbiguousRewriteRetryFailureKeepsLatestDataWritable) {
   RunInTestFiber([&] {
     auto rw = Make();
     ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
@@ -1393,13 +1441,18 @@ TEST_F(FileReadWriterTest, AmbiguousRewriteReplayFailureKeepsLatestDataWritable)
     ASSERT_EQ(rw.Flush().code(), Status::kIOError);
 
     mock_meta_->replace_chunk_commit_on_error = false;
-    mock_meta_->replace_chunk_status = Status::IOError("replay failed");
+    mock_meta_->replace_chunk_status = Status::IOError("fresh retry failed");
     ASSERT_EQ(rw.Flush().code(), Status::kIOError);
     ASSERT_TRUE(rw.Write(Buf("!"), 11).ok());
 
     mock_meta_->replace_chunk_status = Status::OK();
     ASSERT_TRUE(rw.Flush().ok());
-    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 3);
+    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 4);
+    EXPECT_EQ(mock_data_->put_calls, 4);
+
+    SwordFsChunk published;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &published).ok());
+    EXPECT_EQ(published.revision, 4U);
 
     FileReadWriter reader(kIno);
     auto out = folly::IOBuf::create(12);
@@ -1431,7 +1484,8 @@ TEST_F(FileReadWriterTest, RewriteRetryRepairsMetadataSideEffectsAfterPartialCom
     mock_meta_->replace_chunk_descriptor_only_on_error = false;
     mock_meta_->replace_chunk_status = Status::OK();
     ASSERT_TRUE(rw.Flush().ok());
-    EXPECT_EQ(mock_data_->put_calls, 2);
+    EXPECT_EQ(mock_data_->put_calls, 3);
+    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 3);
     EXPECT_EQ(mock_meta_->replace_chunk_calls, 2);
     EXPECT_EQ(mock_meta_->file_size(), 11);
 
@@ -1655,6 +1709,14 @@ TEST_F(FileReadWriterTest, RewriteRetryPropagatesMetadataLookupFailure) {
     const auto status = rw.Flush();
     EXPECT_EQ(status.code(), Status::kIOError);
     EXPECT_EQ(status.message(), "retry lookup failed");
+
+    mock_meta_->find_chunk_status = Status::OK();
+    ASSERT_TRUE(rw.Flush().ok());
+    EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 3);
+
+    SwordFsChunk published;
+    ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &published).ok());
+    EXPECT_EQ(published.revision, 3U);
   });
 }
 
@@ -1691,7 +1753,7 @@ TEST_F(FileReadWriterTest, RewriteRetryRebasesChangedDescriptorAndPublishesLates
 
     SwordFsChunk current;
     ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &current).ok());
-    EXPECT_EQ(current.revision, 3U);
+    EXPECT_EQ(current.revision, 1000U);
     EXPECT_EQ(current.size, 12U);
     FileReadWriter reopened(kIno);
     auto out = folly::IOBuf::create(12);
@@ -1764,7 +1826,7 @@ TEST_F(FileReadWriterTest, RewriteRetryAfterFailedPutRebasesWithoutDeletingFaile
 
     SwordFsChunk current;
     ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &current).ok());
-    EXPECT_EQ(current.revision, 3U);
+    EXPECT_EQ(current.revision, 1000U);
   });
 }
 
@@ -1819,7 +1881,7 @@ TEST_F(FileReadWriterTest, RewriteRetryRemainsRetryableAfterDifferentDescriptorO
     EXPECT_TRUE(rw.Write(Buf("h"), 0).ok());
     SwordFsChunk current;
     ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &current).ok());
-    EXPECT_EQ(current.revision, 4U);
+    EXPECT_EQ(current.revision, 1001U);
   });
 }
 
