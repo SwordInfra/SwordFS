@@ -6,7 +6,7 @@
 // compute StartOffset) and the write buffer's capacity. If those
 // drift, writes that cross what the buffer thinks is "beyond capacity"
 // but stay within what the chunk thinks is "in range" return EINVAL
-// even though the chunk is in kWriting state.
+// even though the chunk is in kDirty state.
 
 #include <folly/io/IOBuf.h>
 #include <gtest/gtest.h>
@@ -43,7 +43,7 @@ using swordfs::utils::Status;
 namespace {
 
 // Minimal meta engine: FindChunk always returns NotFound so the chunk
-// transitions to kWriting and allocates a write buffer.
+// transitions to kDirty and allocates a write buffer.
 class MissingMetaEngine final : public IMetaEngine {
  public:
   Status Initialize() override {
@@ -245,4 +245,25 @@ TEST_F(ChunkTest, WriteBeyondChunkCapacityIsRejected) {
   auto status = c.Write(0, buf);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.code(), Status::kInvalidArgument);
+}
+
+TEST_F(ChunkTest, EmptyDirtyChunkIsNotFlushableAndFlushIsNoOp) {
+  Chunk c(42, 0);
+  ASSERT_TRUE(c.Initialize().ok());
+
+  EXPECT_FALSE(c.Flushable());
+  EXPECT_TRUE(c.Flush().ok());
+  EXPECT_FALSE(c.IsClean());
+}
+
+TEST_F(ChunkTest, TruncateToCurrentDirtySizeKeepsChunkFlushable) {
+  swordfs::volume::VolumeImpl::Instance().set_chunk_size_for_test(1024);
+
+  Chunk c(42, 0);
+  ASSERT_TRUE(c.Initialize().ok());
+  auto buf = *folly::IOBuf::copyBuffer("hello", 5);
+  ASSERT_TRUE(c.Write(0, buf).ok());
+
+  c.Truncate(5);
+  EXPECT_TRUE(c.Flushable());
 }

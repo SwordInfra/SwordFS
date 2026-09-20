@@ -30,17 +30,17 @@ namespace swordfs::chunk {
 class Chunk {
  public:
   enum class State : uint8_t {
-    kWriting,  // accepting writes
-    kSealed,   // no more writes, not yet in storage
-    kFlushed,  // data successfully persisted to storage
+    kDirty,     // latest complete local data is not yet confirmed authoritative
+    kFlushing,  // transient publication attempt under the file operation lock
+    kClean,     // authoritative publication is explicitly confirmed
   };
 
   /// Create a chunk ready to accept writes.
   Chunk(metadata::InodeID ino, metadata::ChunkIndex index);
 
-  /// Query VolumeImpl's meta engine for existing flushed metadata at
-  /// this chunk's start offset.  If found, transition to kFlushed;
-  /// otherwise stay in kWriting so the caller can write into it.
+  /// Query VolumeImpl's meta engine for existing published metadata at
+  /// this chunk's start offset. If found, transition to kClean; otherwise
+  /// stay in kDirty so the caller can write into the local buffer.
   utils::Status Initialize();
 
   /// Write |size| bytes from |data| at the given chunk-relative offset.
@@ -51,22 +51,20 @@ class Chunk {
   /// A zero-length read is a no-op. On failure, leaves |out| unchanged.
   utils::Status Read(off_t off, size_t len, folly::IOBuf *out) const;
 
-  /// Seal the chunk — no more writes accepted.
-  void Seal();
-
-  /// Seal (if writing) and upload to the storage engine.
-  /// Returns OK if there is nothing to flush.
+  /// Publish the latest dirty buffer. A publication attempt is transient:
+  /// every non-successful outcome returns the chunk to kDirty with the local
+  /// data retained and writable.
   utils::Status Flush();
 
   /// Discard bytes at or beyond |size| within this chunk while preserving
   /// the surviving prefix for a later flush/read.
   void Truncate(size_t size);
 
-  bool IsFlushed() const {
-    return state_ == State::kFlushed;
+  bool IsClean() const {
+    return state_ == State::kClean;
   }
   bool Flushable() const {
-    return (state_ == State::kWriting || state_ == State::kSealed) && wb_ && wb_->size() > 0;
+    return state_ == State::kDirty && wb_->size() > 0;
   }
 
   // ──────────────────────────────────────────────────────────────
@@ -82,22 +80,32 @@ class Chunk {
     return static_cast<off_t>(index_) * static_cast<off_t>(max_chunk_size_);
   }
   off_t DataEnd() const {
-    if (IsFlushed()) {
+    if (IsClean()) {
       return StartOffset() + static_cast<off_t>(PublishedChunk().size);
     }
     return StartOffset() + static_cast<off_t>(wb_->size());
   }
 
  private:
-  bool IsWriting() const {
-    return state_ == State::kWriting;
+  struct PublicationAttempt {
+    std::optional<metadata::SwordFsChunk> expected;
+    metadata::SwordFsChunk replacement;
+    bool object_uploaded = false;
+    bool payload_current = true;
+    bool revision_reusable = true;
+  };
+
+  bool IsDirty() const {
+    return state_ == State::kDirty;
   }
 
-  /// Build a SwordFsChunk snapshot for metadata registration.
-  metadata::SwordFsChunk BuildMeta() const;
+  /// Build a SwordFsChunk snapshot for metadata registration using |revision|.
+  metadata::SwordFsChunk BuildMeta(metadata::ChunkRevision revision) const;
 
   const metadata::SwordFsChunk &PublishedChunk() const;
-  utils::Status EnsurePendingRevision();
+  void MarkLocalDataChanged();
+  utils::Status ReconcilePublicationAttempt(bool &publication_complete);
+  utils::Status StartPublicationAttempt();
   utils::Status HydrateForWrite();
   void CompletePublication(const metadata::SwordFsChunk &chunk);
 
@@ -105,17 +113,12 @@ class Chunk {
   metadata::InodeID ino_;
   size_t max_chunk_size_;
   std::unique_ptr<WriteBuf> wb_;
-  State state_ = State::kWriting;
+  State state_ = State::kDirty;
   metadata::ChunkIndex index_;
   storage::IDataEngine *data_;
   metadata::IMetaEngine *meta_;
   std::optional<metadata::SwordFsChunk> published_chunk_;
-  metadata::ChunkRevision pending_revision_ = metadata::kInvalidChunkRevision;
-  // True once the current pending revision has completed at least one
-  // successful Put. It lets retry-side conflict resolution ask metadata to
-  // classify an already-uploaded candidate without ever treating a revision
-  // whose object was never known durable as publishable cleanup work.
-  bool pending_object_uploaded_ = false;
+  std::optional<PublicationAttempt> publication_attempt_;
 };
 
 }  // namespace swordfs::chunk

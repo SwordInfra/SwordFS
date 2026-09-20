@@ -102,7 +102,7 @@ utils::Status FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_mis
   auto status = chunk->Initialize();
   if (!status.ok()) {
     return status;
-  } else if (chunk->IsFlushed() || create_if_missing) {
+  } else if (chunk->IsClean() || create_if_missing) {
     it = chunks_.try_emplace(idx, std::move(chunk)).first;
     *out = it->second;
   }
@@ -265,7 +265,7 @@ utils::Status FileReadWriter::Flush() {
       }
       continue;
     }
-    // Chunk stays in the map with kFlushed state — future reads
+    // Chunk stays in the map with kClean state — future reads
     // will route through Chunk::Read() → data_->Get().
   }
 

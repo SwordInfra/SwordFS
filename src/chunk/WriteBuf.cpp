@@ -49,7 +49,7 @@ utils::Status WriteBuf::Write(off_t write_offset, const folly::IOBuf &data) {
   // The source buffer belongs to the FUSE layer.  Once
   // fuse_reply_write() returns, the kernel may reuse or free that
   // memory immediately.  We must own a private copy so the data
-  // survives until the chunk is sealed and uploaded.
+  // survives until the chunk publication is explicitly confirmed successful.
   std::memcpy(buf_->writableData() + offset, data.data(), data.length());
 
   if (end > static_cast<off_t>(old_size)) {
