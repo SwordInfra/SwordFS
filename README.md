@@ -5,10 +5,8 @@
 [![CI](https://github.com/SwordInfra/SwordFS/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SwordInfra/SwordFS/actions/workflows/ci.yml?query=branch%3Amain)
 [![codecov](https://codecov.io/gh/SwordInfra/SwordFS/branch/main/graph/badge.svg)](https://codecov.io/gh/SwordInfra/SwordFS)
 
-[POSIX Conformance / pjdfstest Status](https://github.com/SwordInfra/SwordFS/blob/pjdfstest-status/status.md)
-
 ## What is SwordFS?
-SwordFS is a modern, high-performance distributed filesystem project designed around POSIX-style filesystem semantics and modern AI/ML workloads. The project aims to become a high-performance distributed filesystem platform for the AI/ML era while its open-source implementation continues to expand filesystem and backend coverage.
+SwordFS is a modern, high-performance distributed filesystem project designed around [POSIX-style filesystem semantics](https://github.com/SwordInfra/SwordFS/blob/pjdfstest-status/status.md) and modern AI/ML workloads. The project aims to become a high-performance distributed filesystem platform for the AI/ML era while its open-source implementation continues to expand filesystem and backend coverage.
 
 The major differences between SwordFS and other distributed file systems are as follows:
 - High Performance: Performance is the top priority in SwordFS's architecture and feature design. That's why SwordFS is built with C++20, a battle-tested system programming language.
