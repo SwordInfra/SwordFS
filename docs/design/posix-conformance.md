@@ -141,6 +141,13 @@ stable branch. Publication also keeps `history.json` and a compact historical
 trend in `status.md`; it never creates generated commits on `main` or recursively
 triggers source CI.
 
+`history.json` retains every authoritative run for machine-readable audit and
+diagnostics. The human-readable historical trend is intentionally sparser: it
+adds a point only when `Overall support`, `Supported gate`, or `Classified`
+changes from the preceding trend point, whether the value increases or
+decreases. Runs that only repeat the same metrics, including infrastructure-only
+status changes without classified metrics, do not add trend rows.
+
 If the latest main run has semantic blockers, the status page records that
 failed result. If the conformance job fails before a classified report exists,
 publication records an infrastructure failure rather than leaving an older

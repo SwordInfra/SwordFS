@@ -24,6 +24,24 @@ def percent(value: object) -> str:
     return f"{float(value):.2f}%"
 
 
+def trend_history(history: list[dict[str, object]]) -> list[dict[str, object]]:
+    metric_names = (
+        "overall_support_percent",
+        "supported_regression_pass_percent",
+        "classified_rate_percent",
+    )
+    trend: list[dict[str, object]] = []
+    previous_metrics: tuple[object, ...] | None = None
+    for item in history:
+        metrics = tuple(item.get(name) for name in metric_names)
+        if any(value is None for value in metrics):
+            continue
+        if metrics != previous_metrics:
+            trend.append(item)
+            previous_metrics = metrics
+    return trend
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--result", type=pathlib.Path)
@@ -120,7 +138,7 @@ def main() -> int:
         "| Time | SwordFS | Status | Overall support | Supported gate | Classified |",
         "| --- | --- | --- | ---: | ---: | ---: |",
     ]
-    for item in history[-30:]:
+    for item in trend_history(history)[-30:]:
         commit = str(item.get("swordfs_commit", "unknown"))
         trend_lines.append(
             "| {timestamp} | `{commit}` | {status} | {overall} | {supported} | {classified} |".format(
