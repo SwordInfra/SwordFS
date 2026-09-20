@@ -29,12 +29,12 @@ utils::Status Chunk::Initialize() {
   metadata::SwordFsChunk chunk;
   auto status = meta_->FindChunk(ino_, index_, &chunk);
   if (status.ok()) {
-    state_ = State::kFlushed;
+    state_ = State::kClean;
     published_chunk_ = chunk;
     return Status::OK();
   } else if (status.IsNotFound()) {
     // create a chunk but not commit to metadata so only the local mount knows it.
-    state_ = State::kWriting;
+    state_ = State::kDirty;
     wb_ = std::make_unique<WriteBuf>(max_chunk_size_);
     return Status::OK();
   }
@@ -42,19 +42,18 @@ utils::Status Chunk::Initialize() {
 }
 
 utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf &data) {
-  if (IsFlushed()) {
+  if (IsClean()) {
     auto status = HydrateForWrite();
     if (!status.ok()) {
       return status;
     }
   }
-  if (!IsWriting()) {
-    return utils::Status::InvalidArgument("Chunk::Write: chunk is sealed");
-  }
   auto status = wb_->Write(write_offset - StartOffset(), data);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Chunk::Write FAILED: ino=" << ino_ << " index=" << index_ << " write_offset=" << write_offset
                       << " data_size=" << data.length() << " — " << status.message();
+  } else {
+    MarkLocalDataChanged();
   }
   return status;
 }
@@ -69,7 +68,7 @@ utils::Status Chunk::Read(off_t off, size_t len, folly::IOBuf *out) const {
 
   const size_t original_length = out->length();
   utils::Status status;
-  if (IsFlushed()) {
+  if (IsClean()) {
     const auto &published = PublishedChunk();
     status = data_->Get(FormatChunkObjectKey(ino_, index_, published.revision), off, len, out);
   } else {
@@ -88,19 +87,19 @@ utils::Status Chunk::Read(off_t off, size_t len, folly::IOBuf *out) const {
   return utils::Status::OK();
 }
 
-void Chunk::Seal() {
-  state_ = State::kSealed;
-}
-
 void Chunk::Truncate(size_t size) {
-  if (IsFlushed()) {
+  if (IsClean()) {
     if (published_chunk_) {
       published_chunk_->size = std::min<uint64_t>(published_chunk_->size, size);
     }
     return;
   }
   if (wb_) {
+    const auto old_size = wb_->size();
     wb_->Truncate(size);
+    if (wb_->size() != old_size) {
+      MarkLocalDataChanged();
+    }
   }
   if (published_chunk_) {
     // A rewrite remembers the old descriptor as its CAS expectation. Metadata
@@ -111,120 +110,76 @@ void Chunk::Truncate(size_t size) {
 }
 
 utils::Status Chunk::Flush() {
-  if (IsFlushed() || !wb_ || wb_->size() == 0) {
+  if (IsClean()) {
+    return utils::Status::OK();
+  }
+  if (wb_->size() == 0) {
     return utils::Status::OK();
   }
 
-  const bool retrying = !IsWriting();
-  if (IsWriting()) {
-    Seal();
-  }
+  state_ = State::kFlushing;
 
-  auto status = EnsurePendingRevision();
-  if (!status.ok()) {
+  auto fail = [&](utils::Status status) {
+    state_ = State::kDirty;
     return status;
-  }
-
-  const auto chunk_meta = BuildMeta();
-  const auto chunk_key = FormatChunkObjectKey(ino_, index_, chunk_meta.revision);
-  const auto expected = published_chunk_;
-
-  auto relinquish_rejected_revision = [&] {
-    // A known publication rejection makes this uploaded immutable revision
-    // terminal. Metadata may have registered it for best-effort cleanup, so a
-    // later Flush must allocate a fresh revision rather than republishing a key
-    // that the background Reclaimer may delete.
-    pending_revision_ = metadata::kInvalidChunkRevision;
-    pending_object_uploaded_ = false;
   };
 
-  if (retrying) {
-    // A failed/ambiguous publication leaves the chunk sealed. Resolve the
-    // authoritative descriptor before uploading again: a committed previous
-    // attempt can be completed idempotently, while a competing publication
-    // must not be overwritten or have its live object deleted.
-    metadata::SwordFsChunk current;
-    status = meta_->FindChunk(ino_, index_, &current);
-    if (status.ok()) {
-      if (current == chunk_meta) {
-        status = meta_->CommitChunk(ino_, expected, chunk_meta);
-        if (!status.ok()) {
-          return status;
-        }
-        CompletePublication(chunk_meta);
-        return utils::Status::OK();
-      }
+  bool publication_complete = false;
+  auto status = ReconcilePublicationAttempt(publication_complete);
+  if (!status.ok()) {
+    return fail(status);
+  }
+  if (publication_complete) {
+    return utils::Status::OK();
+  }
 
-      const bool current_matches_expected = expected.has_value() && current == *expected;
-      if (!current_matches_expected) {
-        if (pending_object_uploaded_) {
-          // Re-enter CommitChunk so metadata can classify the already-uploaded
-          // revision against the current authoritative state. If the CAS can
-          // still complete, the object is known durable so publication remains
-          // safe; a known rejection makes the revision terminal locally.
-          status = meta_->CommitChunk(ino_, expected, chunk_meta);
-          if (status.ok()) {
-            CompletePublication(chunk_meta);
-            return utils::Status::OK();
-          }
-        } else {
-          status = utils::Status::AlreadyExists("Chunk::Flush: published chunk changed before publication at index " +
-                                                std::to_string(index_));
-        }
-        if ((status.IsAlreadyExists() || status.IsNotFound()) && current.revision != chunk_meta.revision &&
-            pending_object_uploaded_) {
-          relinquish_rejected_revision();
-        }
-        return status;
-      }
-    } else if (status.IsNotFound() && expected.has_value() && pending_object_uploaded_) {
-      // The expected descriptor disappeared after an earlier successful Put.
-      // Route the definite rejection through CommitChunk so the backend can
-      // best-effort register cleanup after it confirms the publication result.
-      status = meta_->CommitChunk(ino_, expected, chunk_meta);
-      if (status.ok()) {
-        CompletePublication(chunk_meta);
-        return utils::Status::OK();
-      }
-      if (status.IsAlreadyExists() || status.IsNotFound()) {
-        relinquish_rejected_revision();
-      }
-      return status;
-    } else if (!status.IsNotFound() || expected.has_value()) {
-      return status;
+  if (!publication_attempt_) {
+    status = StartPublicationAttempt();
+    if (!status.ok()) {
+      return fail(status);
     }
   }
-
-  auto data = wb_->CloneBuf();
-  status = data_->Put(chunk_key, std::move(data));
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: ino=" << ino_ << " chunk=" << index_ << " size=" << chunk_meta.size
-                      << " — " << status.message();
-    return status;
+  if (!publication_attempt_) {
+    return fail(utils::Status::Internal("Chunk::Flush: publication attempt was not initialized"));
   }
-  pending_object_uploaded_ = true;
 
-  status = meta_->CommitChunk(ino_, expected, chunk_meta);
+  auto &attempt = *publication_attempt_;
+  const auto chunk_key = FormatChunkObjectKey(ino_, index_, attempt.replacement.revision);
+  if (!attempt.object_uploaded) {
+    auto data = wb_->CloneBuf();
+    status = data_->Put(chunk_key, std::move(data));
+    if (!status.ok()) {
+      SWORDFS_LOG_ERROR << "Chunk::Flush FAILED: ino=" << ino_ << " chunk=" << index_
+                        << " size=" << attempt.replacement.size << " — " << status.message();
+      return fail(status);
+    }
+    attempt.object_uploaded = true;
+  }
+
+  status = meta_->CommitChunk(ino_, attempt.expected, attempt.replacement);
   if (!status.ok()) {
     if (status.IsAlreadyExists() || status.IsNotFound()) {
-      relinquish_rejected_revision();
+      // Metadata may already have queued this immutable key for cleanup. Never
+      // reuse the same revision after a known rejection.
+      attempt.revision_reusable = false;
     }
     SWORDFS_LOG_ERROR << "Chunk::Flush CommitChunk FAILED: ino=" << ino_ << " chunk=" << index_
-                      << " size=" << chunk_meta.size << " — " << status.message();
-    return status;
+                      << " size=" << attempt.replacement.size << " — " << status.message();
+    return fail(status);
   }
 
-  CompletePublication(chunk_meta);
+  const auto published = attempt.replacement;
+  CompletePublication(published);
 
-  SWORDFS_LOG_DEBUG << "Flush uploaded: ino=" << ino_ << " chunk=" << index_ << " size=" << chunk_meta.size;
+  SWORDFS_LOG_DEBUG << "Flush uploaded: ino=" << ino_ << " chunk=" << index_ << " size=" << published.size;
   return utils::Status::OK();
 }
 
-metadata::SwordFsChunk Chunk::BuildMeta() const {
+metadata::SwordFsChunk Chunk::BuildMeta(metadata::ChunkRevision revision) const {
   metadata::SwordFsChunk chunk;
   chunk.index = index_;
   chunk.start_offset = static_cast<uint64_t>(StartOffset());
-  chunk.revision = pending_revision_;
+  chunk.revision = revision;
   chunk.size = wb_->size();
   return chunk;
 }
@@ -234,15 +189,83 @@ const metadata::SwordFsChunk &Chunk::PublishedChunk() const {
   return *published_chunk_;
 }
 
-utils::Status Chunk::EnsurePendingRevision() {
-  if (pending_revision_ != metadata::kInvalidChunkRevision) {
+void Chunk::MarkLocalDataChanged() {
+  if (!publication_attempt_) {
+    return;
+  }
+  publication_attempt_->payload_current = false;
+  publication_attempt_->revision_reusable = false;
+}
+
+utils::Status Chunk::ReconcilePublicationAttempt(bool &publication_complete) {
+  publication_complete = false;
+  if (!publication_attempt_) {
     return utils::Status::OK();
   }
-  auto status = meta_->AllocateChunkRevision(&pending_revision_);
+
+  const auto attempt = *publication_attempt_;
+  metadata::SwordFsChunk current;
+  auto status = meta_->FindChunk(ino_, index_, &current);
   if (status.ok()) {
-    pending_object_uploaded_ = false;
+    if (current == attempt.replacement) {
+      // A matching descriptor proves reader visibility, but an earlier
+      // transaction may have failed after updating it and before finishing
+      // inode side effects. Replay the commit before confirming publication.
+      status = meta_->CommitChunk(ino_, attempt.expected, attempt.replacement);
+      if (!status.ok()) {
+        return status;
+      }
+      published_chunk_ = current;
+      if (attempt.payload_current) {
+        CompletePublication(current);
+        publication_complete = true;
+        return utils::Status::OK();
+      }
+      publication_attempt_.reset();
+      return utils::Status::OK();
+    }
+
+    const bool current_matches_expected = attempt.expected.has_value() && current == *attempt.expected;
+    if (current_matches_expected && attempt.payload_current && attempt.revision_reusable) {
+      return utils::Status::OK();
+    }
+
+    // The old CAS expectation describes only the failed attempt. Under the
+    // supported single-active-mount contract, the latest complete local buffer
+    // remains valid and rebases on the current authoritative descriptor.
+    published_chunk_ = current;
+    publication_attempt_.reset();
+    return utils::Status::OK();
   }
+
+  if (status.IsNotFound()) {
+    const bool expected_absent = !attempt.expected.has_value();
+    if (expected_absent && attempt.payload_current && attempt.revision_reusable) {
+      return utils::Status::OK();
+    }
+
+    // The previous expected descriptor is no longer authoritative. A later
+    // attempt publishes the latest complete local buffer as an initial chunk.
+    published_chunk_.reset();
+    publication_attempt_.reset();
+    return utils::Status::OK();
+  }
+
   return status;
+}
+
+utils::Status Chunk::StartPublicationAttempt() {
+  metadata::ChunkRevision revision = metadata::kInvalidChunkRevision;
+  auto status = meta_->AllocateChunkRevision(&revision);
+  if (!status.ok()) {
+    return status;
+  }
+
+  PublicationAttempt attempt;
+  attempt.expected = published_chunk_;
+  attempt.replacement = BuildMeta(revision);
+  publication_attempt_ = attempt;
+  return utils::Status::OK();
 }
 
 utils::Status Chunk::HydrateForWrite() {
@@ -269,17 +292,15 @@ utils::Status Chunk::HydrateForWrite() {
   }
 
   wb_ = std::move(wb);
-  pending_revision_ = metadata::kInvalidChunkRevision;
-  pending_object_uploaded_ = false;
-  state_ = State::kWriting;
+  publication_attempt_.reset();
+  state_ = State::kDirty;
   return utils::Status::OK();
 }
 
 void Chunk::CompletePublication(const metadata::SwordFsChunk &chunk) {
   published_chunk_ = chunk;
-  pending_revision_ = metadata::kInvalidChunkRevision;
-  pending_object_uploaded_ = false;
-  state_ = State::kFlushed;
+  publication_attempt_.reset();
+  state_ = State::kClean;
   wb_.reset();
 }
 

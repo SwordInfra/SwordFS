@@ -410,7 +410,7 @@ S3 ranged reads write response data directly into the caller-provided buffer thr
 
 ## 11. Flush, fsync, close, and visibility
 
-`FileReadWriter::Flush` walks locally cached flushable chunks and flushes each one. A successfully flushed chunk remains cached in `kFlushed` state so later reads use the published object identity.
+`FileReadWriter::Flush` walks locally cached flushable chunks and flushes each one. A successfully published chunk remains cached in `kClean` state so later reads use the authoritative published object identity.
 
 An ordinary successful `write(2)` only means the bytes were accepted into this
 mount's userspace `WriteBuf`; it is **not** a persistence acknowledgement. The
