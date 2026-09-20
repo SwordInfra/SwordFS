@@ -5,6 +5,8 @@
 [![CI](https://github.com/SwordInfra/SwordFS/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SwordInfra/SwordFS/actions/workflows/ci.yml?query=branch%3Amain)
 [![codecov](https://codecov.io/gh/SwordInfra/SwordFS/branch/main/graph/badge.svg)](https://codecov.io/gh/SwordInfra/SwordFS)
 
+[POSIX Conformance / pjdfstest Status](https://github.com/SwordInfra/SwordFS/blob/pjdfstest-status/status.md)
+
 ## What is SwordFS?
 SwordFS is a modern, high-performance distributed filesystem project designed around POSIX-style filesystem semantics and modern AI/ML workloads. The project aims to become a high-performance distributed filesystem platform for the AI/ML era while its open-source implementation continues to expand filesystem and backend coverage.
 

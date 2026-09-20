@@ -260,3 +260,167 @@ jobs:
 
       - name: Test (E2E)
         run: sg fuse -c "bash scripts/run-e2e.sh --gtest_color=no"
+
+  pjdfstest-conformance:
+    name: pjdfstest-conformance (Release)
+    needs: clang-format
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Restore native dependency cache
+        uses: actions/cache@v4
+        with:
+          path: .deps/install
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native-deps-cache.env') }}
+
+      - name: Install dependencies
+        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
+
+      - name: Install pjdfstest tools
+        run: sudo apt-get install -y -qq autoconf automake perl
+
+      - name: Conformance test setup
+        run: |
+          sudo mkdir -p /etc/swordfs
+          sudo chown "$(id -u):$(id -g)" /etc/swordfs
+          sudo modprobe fuse
+          sudo chmod 666 /dev/fuse
+          if ! grep -Eq '^[[:space:]]*user_allow_other([[:space:]]|$)' /etc/fuse.conf 2>/dev/null; then
+            echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+          fi
+
+      - name: Configure Release
+        run: |
+          cmake --preset release \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install"
+
+      - name: Build SwordFS
+        run: cmake --build build --target swordfs
+
+      - name: Verify conformance tooling
+        run: python3 -m unittest discover -s tests/conformance -p 'test_*.py'
+
+      - name: Run pinned pjdfstest suite
+        id: pjdfstest-harness
+        run: |
+          set +e
+          sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
+            SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
+            bash scripts/run-pjdfstest.sh \
+              --output-dir "${{ github.workspace }}/build/pjdfstest-conformance"
+          status=$?
+          set -e
+          echo "${status}" | sudo tee build/pjdfstest-conformance/harness-status.txt >/dev/null
+          sudo chown -R "$(id -u):$(id -g)" build/pjdfstest-conformance
+          exit "${status}"
+
+      - name: Classify conformance results
+        if: always() && steps.pjdfstest-harness.outcome == 'success'
+        env:
+          ALLOW_SUPPORTED_REMOVAL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'conformance-semantic-change') }}
+        run: |
+          source conformance/pjdfstest/version.env
+          baseline_args=()
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            previous_supported="${RUNNER_TEMP}/pjdfstest-previous-supported.txt"
+            if git show "${{ github.event.pull_request.base.sha }}:conformance/pjdfstest/supported.txt" > "${previous_supported}" 2>/dev/null; then
+              baseline_args+=(--previous-supported-file "${previous_supported}")
+            fi
+            if [ "${ALLOW_SUPPORTED_REMOVAL}" = "true" ]; then
+              baseline_args+=(--allow-supported-removal)
+            fi
+          fi
+
+          python3 scripts/pjdfstest_classify.py \
+            --raw-dir build/pjdfstest-conformance/raw \
+            --supported-file conformance/pjdfstest/supported.txt \
+            --known-gaps-file conformance/pjdfstest/known-gaps.tsv \
+            --output-dir build/pjdfstest-conformance \
+            --swordfs-commit "${GITHUB_SHA}" \
+            --pjdfstest-commit "${PJDFSTEST_COMMIT}" \
+            --environment-json build/pjdfstest-conformance/environment.json \
+            "${baseline_args[@]}" \
+            --strict
+
+      - name: Publish conformance summary to job
+        if: always()
+        run: |
+          if [ -f build/pjdfstest-conformance/report.md ]; then
+            cat build/pjdfstest-conformance/report.md >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo '## pjdfstest infrastructure failure' >> "${GITHUB_STEP_SUMMARY}"
+            echo '' >> "${GITHUB_STEP_SUMMARY}"
+            echo 'The harness ended before a classified report was produced. Inspect the uploaded logs.' >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload pjdfstest evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pjdfstest-conformance
+          path: build/pjdfstest-conformance
+          if-no-files-found: warn
+
+  publish-pjdfstest-status:
+    name: publish-pjdfstest-status
+    needs: pjdfstest-conformance
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          submodules: false
+
+      - name: Download conformance evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: pjdfstest-conformance
+          path: build/pjdfstest-publish-input
+
+      - name: Publish stable status branch
+        env:
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CONFORMANCE_JOB_RESULT: ${{ needs.pjdfstest-conformance.result }}
+        run: |
+          set -euo pipefail
+          status_dir="${RUNNER_TEMP}/pjdfstest-status"
+          rm -rf "${status_dir}"
+
+          if git ls-remote --exit-code --heads origin pjdfstest-status >/dev/null 2>&1; then
+            git fetch origin pjdfstest-status:refs/remotes/origin/pjdfstest-status
+            git worktree add -B pjdfstest-status "${status_dir}" origin/pjdfstest-status
+          else
+            git worktree add --detach "${status_dir}" HEAD
+            (
+              cd "${status_dir}"
+              git switch --orphan pjdfstest-status
+              git rm -rf . >/dev/null 2>&1 || true
+            )
+          fi
+
+          python3 scripts/update-pjdfstest-status.py \
+            --result build/pjdfstest-publish-input/result.json \
+            --report build/pjdfstest-publish-input/report.md \
+            --history "${status_dir}/history.json" \
+            --output-dir "${status_dir}" \
+            --swordfs-commit "${GITHUB_SHA}" \
+            --run-url "${RUN_URL}" \
+            --infra-failure "pjdfstest-conformance job result: ${CONFORMANCE_JOB_RESULT}"
+
+          git -C "${status_dir}" config user.name github-actions[bot]
+          git -C "${status_dir}" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C "${status_dir}" add status.md latest.json history.json
+          git -C "${status_dir}" commit -m "status: update pjdfstest conformance for ${GITHUB_SHA}"
+          git -C "${status_dir}" push origin HEAD:pjdfstest-status
