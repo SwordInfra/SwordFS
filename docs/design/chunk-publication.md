@@ -70,13 +70,14 @@ upload, metadata commit, or reconciliation result returns the chunk to
 retryable. An empty dirty buffer does not need publication. Hydration failure
 leaves the chunk clean with its previous descriptor.
 
-Publication-attempt state is separate from chunk data state. A failed attempt
-may retain a candidate revision and CAS expectation for reconciliation, but a
-later write supersedes that attempt's payload. Changed bytes must never be
-published under the old immutable revision. If the previous metadata result
-was ambiguous, retry first reconciles that candidate against authoritative
-metadata and then publishes the newest complete local buffer from the current
-authoritative descriptor.
+Publication retry state is separate from chunk data state. A failed attempt's
+revision is never reused by a later Flush, even when the local payload has not
+changed. The next retry first refreshes the authoritative chunk descriptor,
+then allocates a new immutable revision and republishes the complete latest
+local buffer from that CAS baseline. This deliberately trades exceptional-path
+object I/O for a smaller correctness state machine: the client does not need to
+remember whether an old candidate was uploaded, whether its payload is still
+current, or whether that revision remains reusable.
 
 ## Persistence acknowledgement
 
@@ -99,55 +100,49 @@ of flushable chunks. Each chunk progresses independently; the file-level flush
 tries the remaining chunks after a failure and returns its first error.
 
 1. Transition the nonempty chunk from `kDirty` to transient `kFlushing`.
-2. Reconcile any retained failed publication attempt against authoritative
-   metadata before retrying it. This applies even when the previous attempt
-   failed during `Put`: another metadata mutation may have changed the CAS base
-   before the caller retries, and blindly reusing the old expectation would
-   cause another avoidable rejection. If the candidate replacement is already
-   authoritative, replay `CommitChunk` to confirm or repair transaction side
-   effects without another object `Put`. If the local buffer is unchanged,
-   that confirmation completes the publication. If the buffer changed, use
-   the confirmed descriptor only as the new authoritative base and publish the
-   newer local data with a fresh revision. If metadata differs from the old
-   CAS expectation, the expectation is stale; under the supported
-   single-active-mount contract the latest local buffer remains valid and
-   rebases on the current descriptor. This reconciliation round trip exists
-   only on retry/failure paths; a normal first-attempt successful flush does
-   not pay it.
-3. Allocate a fresh revision whenever there is no reusable candidate for the
-   exact current payload.
+2. If any earlier Flush attempt returned a non-success status, refresh the
+   authoritative descriptor with `FindChunk` before retrying. An existing
+   descriptor becomes the new cached CAS baseline; `NotFound` establishes an
+   absent baseline; other lookup failures remain observable and leave the
+   chunk dirty. This reconciliation round trip exists only on retry/failure
+   paths; a normal first-attempt successful Flush does not pay it.
+3. Allocate a fresh revision for every publication attempt. A revision from a
+   failed or ambiguous attempt is abandoned and never retried. The metadata
+   engine's volume-scoped monotonic allocator guarantees this new revision is
+   newer than any authoritative revision observed during the refresh.
 4. Upload the complete local buffer under the revision-qualified object key.
 5. CAS-publish the replacement using the current authoritative descriptor, or
    absence for a new chunk, as this attempt's expectation.
-6. Only known publication success, or reconciliation that proves the exact
-   candidate authoritative, transitions `kFlushing` to `kClean`. Successful
-   publication retains the descriptor and clears the dirty publication state.
+6. Only a known-success `CommitChunk` for the fresh attempt transitions
+   `kFlushing` to `kClean`. Successful publication retains the descriptor
+   and clears the retry-refresh state.
 7. Any non-successful result returns `kFlushing` to `kDirty` and returns the
-   error to the caller. The latest local bytes stay writable and retryable.
+   error to the caller. The latest local bytes stay writable and retryable,
+   and the next Flush refreshes its metadata baseline before allocating
+   another fresh revision.
 
-Once metadata has **definitely rejected** an uploaded revision, that revision
-is terminal for the local `Chunk`: it is relinquished and a later retry
-allocates a fresh revision. Cleanup registration is best effort, but if it did
-succeed the background Reclaimer may already be eligible to delete that key;
-reusing the revision would therefore violate immutable-key safety.
-
-The same fresh-revision rule applies when a write or truncate changes the
-payload after a failed attempt. Even a failed `Put()` can have an ambiguous
-backend outcome, so changed bytes are never written under that old key.
+Every failed Flush marks the next retry for authoritative refresh, including a
+revision-allocation failure where no candidate object exists yet. Whenever a
+revision was allocated for a failed attempt, that revision is never reused.
+This single rule covers definite metadata rejection, ambiguous metadata
+errors, failed/ambiguous `Put()`, and payload changes without separate
+candidate-reuse cases.
 
 `CommitChunk` is the visibility boundary. Cleanup registration/deletion failure
 after successful publication does not revert that publication; at worst the
-obsolete immutable object leaks. Local runtime state provides ambiguous-outcome
-retry information only while the process retains the chunk.
+obsolete immutable object leaks. A candidate abandoned after an ambiguous
+failure may also leak if no safe cleanup record was established. Retry
+correctness does not depend on reclaiming that object, and foreground code must
+not delete an uncertain candidate without authoritative-state revalidation.
 
 ## Failure and crash windows
 
 | Failure point | Persistent result | Reader-visible result |
 | --- | --- | --- |
-| Before/during failed `Put` | No object is guaranteed; no metadata commit is attempted; the exact candidate may be retried only while its payload is unchanged | The local chunk returns to `kDirty`; no new descriptor is visible |
+| Before/during failed `Put` | No object is guaranteed; no metadata commit is attempted; the candidate revision is abandoned | The local chunk returns to `kDirty`; the next Flush refreshes metadata and uses a new revision |
 | After successful `Put`, before a known `CommitChunk` result | A complete object may be live or unreachable; a crash can leave garbage | Only an actually committed descriptor is visible; the local chunk stays dirty/retryable |
-| `CommitChunk` returns a definite conflict / missing expected descriptor | That candidate revision is terminal and may be registered for cleanup; registration failure may leak it | The current descriptor remains authoritative for that failed attempt; a later retry may rebase and publish the latest local data with a fresh revision |
-| `CommitChunk` result is ambiguous | Retry resolves the authoritative descriptor and replays a matching commit when needed to repair side effects | A matching candidate can be confirmed without another `Put`; otherwise the latest local buffer remains dirty and rebases on current authoritative state |
+| `CommitChunk` returns a definite conflict / missing expected descriptor | That candidate revision is terminal and may be registered for cleanup; registration failure may leak it | A later retry refreshes the authoritative descriptor and publishes the latest local data with a fresh revision |
+| `CommitChunk` result is ambiguous | The old candidate may or may not be authoritative; retry reads the current descriptor but never reuses the old revision | If the old candidate is authoritative it becomes only the CAS baseline for a newer revision; otherwise the observed descriptor/absence becomes that baseline |
 | After successful rewrite `CommitChunk` | Replacement is authoritative; superseded revision is best-effort registered for cleanup | The replacement chunk is readable |
 
 The object-only crash windows are accepted under the current product contract:
@@ -158,12 +153,12 @@ changing this publication protocol.
 
 A separate metadata mutation such as truncate/setattr can also return an error
 after changing the authoritative chunk descriptor. In that case the local dirty
-buffer remains complete and writable. A subsequent flush may first receive a
-definite CAS rejection because its cached published descriptor is stale; that
-failed attempt remains dirty, and the next retry reconciles the current
-authoritative descriptor and republishes the latest complete local buffer with
-a fresh revision. The failed metadata call is never silently converted to
-success.
+buffer remains complete and writable. Any earlier failed Flush already marks
+the next retry for authoritative refresh; if a first attempt instead discovers
+the stale descriptor through a definite CAS rejection, that failure sets the
+same retry-refresh state. The following Flush rebases on current metadata and
+republishes the latest complete local buffer with a fresh revision. The failed
+metadata call is never silently converted to success.
 
 ## Cleanup authority
 
