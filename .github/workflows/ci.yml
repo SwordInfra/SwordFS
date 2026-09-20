@@ -25,8 +25,8 @@ jobs:
       - name: Check formatting
         run: pre-commit run --all-files
 
-  static-analysis:
-    name: static-analysis
+  dead-code-audit:
+    name: dead-code-audit
     needs: clang-format
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -48,7 +48,7 @@ jobs:
       - name: Install dependencies
         run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
 
-      - name: Install static-analysis tools
+      - name: Install dead-code audit tools
         run: |
           sudo apt-get install -y -qq clang-tidy python3-clang
 

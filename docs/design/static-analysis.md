@@ -139,7 +139,12 @@ are removed instead of accumulating.
 
 ## CI contract
 
-The static-analysis job performs these steps on the current checkout:
+The `dead-code-audit` job performs these steps on the current checkout:
+
+The job name intentionally reflects its scope: its repository-wide enforced
+analysis is focused on dead/unused production code. Broader `bugprone-*`,
+`performance-*`, and `modernize-use-override` clang-tidy checks run separately
+on changed production files in the Debug `build-and-test` job.
 
 ```text
 CMake configure
@@ -166,4 +171,4 @@ tooling. Python static-analysis scripts are intentionally outside the C++
 per-file Codecov patch-coverage gate; their correctness is established by the
 semantic fixture, the real-repository scan, and the CI gate itself. The shell
 entry point contains orchestration only and is exercised end-to-end by the
-static-analysis job.
+`dead-code-audit` job.
