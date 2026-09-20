@@ -95,10 +95,6 @@ class Chunk {
     bool revision_reusable = true;
   };
 
-  bool IsDirty() const {
-    return state_ == State::kDirty;
-  }
-
   /// Build a SwordFsChunk snapshot for metadata registration using |revision|.
   metadata::SwordFsChunk BuildMeta(metadata::ChunkRevision revision) const;
 
