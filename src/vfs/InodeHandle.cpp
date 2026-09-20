@@ -52,6 +52,10 @@ utils::Status InodeHandle::Write(const folly::IOBuf &buf, off_t off) {
   return rw_->Write(buf, off);
 }
 
+utils::Status InodeHandle::GetAttr(metadata::SwordFsInode *out) const {
+  return rw_->GetAttr(out);
+}
+
 utils::Status InodeHandle::SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields,
                                    metadata::SwordFsInode *out) {
   return rw_->SetAttr(attr, fields, out);

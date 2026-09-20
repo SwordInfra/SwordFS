@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "chunk/Chunk.hpp"
@@ -84,6 +85,10 @@ class FileReadWriter {
   /// On success, out->length() reflects bytes actually read.
   utils::Status Read(size_t size, off_t off, folly::IOBuf *out);
 
+  /// Read authoritative inode metadata and compose the transient local file
+  /// size while holding the inode operation lock.
+  utils::Status GetAttr(metadata::SwordFsInode *out) const;
+
   /// Seal and upload all dirty chunks, then register them with the
   /// metadata engine.
   utils::Status Flush();
@@ -97,6 +102,9 @@ class FileReadWriter {
   utils::Status SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields, metadata::SwordFsInode *out);
 
  private:
+  void ApplyLiveSize(metadata::SwordFsInode *inode) const;
+
+ private:
   InodeID ino_;
   size_t chunk_size_;
   metadata::IMetaEngine *meta_;
@@ -106,6 +114,12 @@ class FileReadWriter {
   // EventBase driver thread.
   mutable utils::FiberRWMutex operation_mutex_;
   FileChunkManager chunks_;
+  // A successful local write establishes a minimum visible EOF before
+  // persistence catches up. Fully successful flush/truncate/setattr-size
+  // makes metadata authoritative again and clears this transient lower bound.
+  // Failed persistence/size mutations leave it intact because the accepted
+  // local write is still not completely represented by authoritative state.
+  std::optional<uint64_t> live_size_;
 };
 
 }  // namespace vfs

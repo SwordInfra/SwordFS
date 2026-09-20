@@ -27,6 +27,7 @@
 #include "vfs/DirHandle.hpp"
 #include "vfs/FileHandle.hpp"
 #include "vfs/InodeHandle.hpp"
+#include "vfs/VfsImpl.hpp"
 #include "volume/VolumeImpl.hpp"
 
 namespace swordfs::vfs {
@@ -684,7 +685,20 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
   Status Rename(InodeID, std::string_view, InodeID, std::string_view, RenameFlag) override {
     return Status::OK();
   }
-  Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField, SwordFsInode *) override {
+  Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override {
+    auto it = attrs.find(ino);
+    if (it == attrs.end()) {
+      return Status::NotFound("inode not found");
+    }
+    if (swordfs::metadata::HasSetAttrField(fields, SetAttrField::kSize)) {
+      it->second.st_size = static_cast<off_t>(attr.size);
+    }
+    if (out != nullptr) {
+      auto status = GetInode(ino, out);
+      if (!status.ok()) {
+        return status;
+      }
+    }
     return Status::OK();
   }
   Status StatFs(SwordFsStatFs *) override {
@@ -767,7 +781,12 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
   Status FindChunk(InodeID, swordfs::metadata::ChunkIndex, swordfs::metadata::SwordFsChunk *) override {
     return Status::NotFound("no chunk");
   }
-  Status Truncate(InodeID, uint64_t) override {
+  Status Truncate(InodeID ino, uint64_t size) override {
+    auto it = attrs.find(ino);
+    if (it == attrs.end()) {
+      return Status::NotFound("inode not found");
+    }
+    it->second.st_size = static_cast<off_t>(size);
     return Status::OK();
   }
 
@@ -810,7 +829,7 @@ struct Engines {
   FakeDataEngine *data;
 };
 
-Engines InstallEnginesForInode(InodeID ino, nlink_t nlink) {
+Engines InstallEnginesForInode(InodeID ino, nlink_t nlink, off_t size = 0) {
   auto meta_up = std::make_unique<TrackingMetaEngine>();
   auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
@@ -819,6 +838,7 @@ Engines InstallEnginesForInode(InodeID ino, nlink_t nlink) {
   struct stat attr;
   std::memset(&attr, 0, sizeof(attr));
   attr.st_nlink = nlink;
+  attr.st_size = size;
   meta->SetAttr(ino, attr);
 
   auto &vol = swordfs::volume::VolumeImpl::Instance();
@@ -829,6 +849,119 @@ Engines InstallEnginesForInode(InodeID ino, nlink_t nlink) {
 }
 
 }  // namespace
+
+FIBER_TEST_F(FileHandleTest, GetAttrReflectsUnflushedWriteSize) {
+  ResetVolumeFromFiberForTest();
+  InstallEnginesForInode(7, /*nlink=*/1);
+
+  std::shared_ptr<FileHandle> handle;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDWR, &handle).ok());
+  auto payload = folly::IOBuf::copyBuffer("Hello,_World!");
+  ASSERT_TRUE(handle->Write(*payload, 0).ok());
+
+  struct stat attr{};
+  ASSERT_TRUE(VfsImpl::GetAttr(7, &attr).ok());
+  EXPECT_EQ(attr.st_size, static_cast<off_t>(payload->length()));
+  EXPECT_EQ(attr.st_nlink, 1U);
+
+  ASSERT_TRUE(handle->Release().ok());
+}
+
+FIBER_TEST_F(FileHandleTest, GetAttrKeepsUnlinkedMetadataWhileOverlayingLiveSize) {
+  ResetVolumeFromFiberForTest();
+  auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/1);
+  (void)data;
+
+  std::shared_ptr<FileHandle> handle;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDWR, &handle).ok());
+  auto payload = folly::IOBuf::copyBuffer("Hello,_World!");
+  ASSERT_TRUE(handle->Write(*payload, 0).ok());
+
+  struct stat unlinked{};
+  unlinked.st_nlink = 0;
+  meta->SetAttr(7, unlinked);
+
+  struct stat attr{};
+  ASSERT_TRUE(VfsImpl::GetAttr(7, &attr).ok());
+  EXPECT_EQ(attr.st_nlink, 0U);
+  EXPECT_EQ(attr.st_size, static_cast<off_t>(payload->length()));
+
+  ASSERT_TRUE(handle->Release().ok());
+}
+
+FIBER_TEST_F(FileHandleTest, GetAttrDoesNotShrinkPersistedSizeForInPlaceWrite) {
+  ResetVolumeFromFiberForTest();
+  InstallEnginesForInode(7, /*nlink=*/1, /*size=*/128);
+
+  std::shared_ptr<FileHandle> handle;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDWR, &handle).ok());
+  auto payload = folly::IOBuf::copyBuffer("x");
+  ASSERT_TRUE(handle->Write(*payload, 0).ok());
+
+  struct stat attr{};
+  ASSERT_TRUE(VfsImpl::GetAttr(7, &attr).ok());
+  EXPECT_EQ(attr.st_size, 128);
+
+  ASSERT_TRUE(handle->Release().ok());
+}
+
+FIBER_TEST_F(FileHandleTest, SuccessfulSetAttrShrinkReplacesEarlierLiveSize) {
+  ResetVolumeFromFiberForTest();
+  InstallEnginesForInode(7, /*nlink=*/1);
+
+  std::shared_ptr<FileHandle> handle;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDWR, &handle).ok());
+  auto payload = folly::IOBuf::copyBuffer("Hello,_World!");
+  ASSERT_TRUE(handle->Write(*payload, 0).ok());
+
+  SwordFsAttr requested{};
+  requested.size = 5;
+  ASSERT_TRUE(handle->handle()->SetAttr(requested, SetAttrField::kSize, nullptr).ok());
+
+  struct stat attr{};
+  ASSERT_TRUE(VfsImpl::GetAttr(7, &attr).ok());
+  EXPECT_EQ(attr.st_size, 5);
+
+  ASSERT_TRUE(handle->Release().ok());
+}
+
+FIBER_TEST_F(FileHandleTest, NonSizeSetAttrReplyPreservesLiveSize) {
+  ResetVolumeFromFiberForTest();
+  InstallEnginesForInode(7, /*nlink=*/1);
+
+  std::shared_ptr<FileHandle> handle;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDWR, &handle).ok());
+  auto payload = folly::IOBuf::copyBuffer("Hello,_World!");
+  ASSERT_TRUE(handle->Write(*payload, 0).ok());
+
+  struct stat requested{};
+  requested.st_mode = 0600;
+  struct stat returned{};
+  ASSERT_TRUE(VfsImpl::SetAttr(7, &requested, static_cast<int>(SetAttrField::kMode), &returned).ok());
+  EXPECT_EQ(returned.st_size, static_cast<off_t>(payload->length()));
+
+  ASSERT_TRUE(handle->Release().ok());
+}
+
+FIBER_TEST_F(FileHandleTest, OpenTruncateReplacesEarlierLiveSize) {
+  ResetVolumeFromFiberForTest();
+  InstallEnginesForInode(7, /*nlink=*/1);
+
+  std::shared_ptr<FileHandle> first;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDWR, &first).ok());
+  auto payload = folly::IOBuf::copyBuffer("Hello,_World!");
+  ASSERT_TRUE(first->Write(*payload, 0).ok());
+
+  std::shared_ptr<FileHandle> truncating;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDWR | O_TRUNC, &truncating).ok());
+
+  struct stat attr{};
+  ASSERT_TRUE(VfsImpl::GetAttr(7, &attr).ok());
+  EXPECT_EQ(attr.st_size, 0);
+
+  ASSERT_TRUE(truncating->Release().ok());
+  ASSERT_TRUE(first->Release().ok());
+}
 
 FIBER_TEST_F(FileHandleTest, ReclaimFenceBlocksOpenUntilReleased) {
   ResetVolumeFromFiberForTest();

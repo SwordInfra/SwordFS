@@ -192,6 +192,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     if (out) {
       *out = {};
       out->ino = 2;
+      out->attr.ino = 2;
     }
     return Status::OK();
   }
@@ -199,8 +200,9 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     if (out) {
       *out = {};
       out->ino = ino;
+      out->attr.ino = ino;
     }
-    return call_status_;
+    return get_inode_status_;
   }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
     if (out) {
@@ -246,6 +248,8 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     if (out) {
       *out = {};
       out->ino = 2;
+      out->attr.ino = 2;
+      out->attr.nlink = 2;
     }
     return Status::OK();
   }
@@ -308,12 +312,17 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     call_status_ = s;
   }
 
+  void set_get_inode_status(Status status) {
+    get_inode_status_ = std::move(status);
+  }
+
   int lookup_calls() const {
     return lookup_calls_;
   }
 
  private:
   Status call_status_{Status::OK()};
+  Status get_inode_status_{Status::OK()};
   int lookup_calls_ = 0;
   swordfs::metadata::ChunkRevision next_revision_ = 1;
 };
@@ -475,6 +484,71 @@ FIBER_TEST_F(VfsImplIntegrationTest, LinkSuccess) {
   auto status = VfsImpl::Link(2, 1, "hardlink", &entry);
   EXPECT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(entry.ino, 2u) << "Link should preserve ino";
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, LookupEntryPreservesLiveSizeForOpenInode) {
+  struct fuse_file_info fi{};
+  ASSERT_TRUE(VfsImpl::Open(2, &fi).ok());
+  auto handle = swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::FileHandle>(fi.fh);
+  ASSERT_NE(handle, nullptr);
+  auto payload = folly::IOBuf::copyBuffer("Hello,_World!");
+  ASSERT_TRUE(handle->Write(*payload, 0).ok());
+
+  fuse_entry_param entry{};
+  ASSERT_TRUE(VfsImpl::Lookup(1, "file", &entry).ok());
+  EXPECT_EQ(entry.attr.st_size, static_cast<off_t>(payload->length()));
+
+  ASSERT_TRUE(VfsImpl::Release(2, fi.fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, LookupPropagatesTrackedInodeAttributeRefreshFailure) {
+  struct fuse_file_info fi{};
+  ASSERT_TRUE(VfsImpl::Open(2, &fi).ok());
+
+  mock_meta_->set_get_inode_status(Status::IOError("injected lookup attribute refresh failure"));
+  fuse_entry_param entry{};
+  auto status = VfsImpl::Lookup(1, "file", &entry);
+
+  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_EQ(status.message(), "injected lookup attribute refresh failure");
+
+  mock_meta_->set_get_inode_status(Status::OK());
+  ASSERT_TRUE(VfsImpl::Release(2, fi.fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, LinkEntryPreservesLiveSizeForOpenInode) {
+  struct fuse_file_info fi{};
+  ASSERT_TRUE(VfsImpl::Open(2, &fi).ok());
+  auto handle = swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::FileHandle>(fi.fh);
+  ASSERT_NE(handle, nullptr);
+  auto payload = folly::IOBuf::copyBuffer("Hello,_World!");
+  ASSERT_TRUE(handle->Write(*payload, 0).ok());
+
+  fuse_entry_param entry{};
+  ASSERT_TRUE(VfsImpl::Link(2, 1, "hardlink", &entry).ok());
+  EXPECT_EQ(entry.attr.st_size, static_cast<off_t>(payload->length()));
+
+  ASSERT_TRUE(VfsImpl::Release(2, fi.fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, LinkSuccessIsNotReversedByAttributeRefreshFailure) {
+  struct fuse_file_info fi{};
+  ASSERT_TRUE(VfsImpl::Open(2, &fi).ok());
+  auto handle = swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::FileHandle>(fi.fh);
+  ASSERT_NE(handle, nullptr);
+  auto payload = folly::IOBuf::copyBuffer("Hello,_World!");
+  ASSERT_TRUE(handle->Write(*payload, 0).ok());
+
+  mock_meta_->set_get_inode_status(Status::IOError("injected post-link attribute refresh failure"));
+  fuse_entry_param entry{};
+  auto status = VfsImpl::Link(2, 1, "hardlink", &entry);
+
+  EXPECT_TRUE(status.ok()) << "a committed hard link must not be reported as failed: " << status.message();
+  EXPECT_EQ(entry.ino, 2U);
+  EXPECT_EQ(entry.attr.st_nlink, 2U) << "failed enrichment must preserve the committed Link result";
+
+  mock_meta_->set_get_inode_status(Status::OK());
+  ASSERT_TRUE(VfsImpl::Release(2, fi.fh).ok());
 }
 
 // ────────────────────────────────────────────────────────────────

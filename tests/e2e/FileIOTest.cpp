@@ -275,3 +275,26 @@ TEST_F(FileIOTest, UnlinkWhileOpenKeepsFileReadable) {
   struct stat st;
   EXPECT_EQ(fixture_.Stat(name, &st), -1);
 }
+
+TEST_F(FileIOTest, UnflushedWriteKeepsLiveSizeAndDataAfterUnlink) {
+  const std::string name = "open_unlink_dirty.txt";
+  const std::string payload = "Hello,_World!";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR), 0);
+
+  int fd = fixture_.OpenFile(name, O_RDWR);
+  ASSERT_GE(fd, 0);
+  ASSERT_EQ(::write(fd, payload.data(), payload.size()), static_cast<ssize_t>(payload.size()));
+
+  ASSERT_EQ(fixture_.UnlinkFile(name), 0);
+
+  struct stat attr{};
+  ASSERT_EQ(::fstat(fd, &attr), 0);
+  EXPECT_EQ(attr.st_nlink, 0U);
+  EXPECT_EQ(attr.st_size, static_cast<off_t>(payload.size()));
+
+  std::string observed(payload.size(), '\0');
+  ASSERT_EQ(::pread(fd, observed.data(), observed.size(), 0), static_cast<ssize_t>(observed.size()));
+  EXPECT_EQ(observed, payload);
+
+  ASSERT_EQ(::close(fd), 0);
+}
