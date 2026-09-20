@@ -13,6 +13,7 @@ API signatures and routine implementation details belong in source comments.
 | [Chunk publication](design/chunk-publication.md) | How does a buffered write become authoritative? What happens on failure or conflict? |
 | [Redis metadata](design/redis-metadata-schema.md) | How are logical records stored, and where are the transaction boundaries? |
 | [Static analysis](design/static-analysis.md) | Which automated code-quality gates run, what is considered high confidence, and how are exceptions handled? |
+| [POSIX conformance](design/posix-conformance.md) | How does pjdfstest define the supported regression contract, known semantic debt, and public conformance status? |
 
 ## Documentation scope
 
