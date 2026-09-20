@@ -91,16 +91,25 @@ utils::Status VfsImpl::GetAttr(fuse_ino_t ino, struct stat *attr) {
   return status;
 }
 
-utils::Status VfsImpl::SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, struct stat *out_attr) {
+utils::Status VfsImpl::SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, std::optional<uint64_t> fh,
+                               struct stat *out_attr) {
   SetAttrField fields = FromFuseSetAttrFields(to_set);
   SwordFsAttr metadata_attr = SwordFsAttr::FromPosixStat(*attr);
   SwordFsInode inode;
-  auto handle = InodeHandleManager::Instance().Get(ino, false);
   Status status;
-  if (handle) {
-    status = handle->SetAttr(metadata_attr, fields, out_attr ? &inode : nullptr);
+  if (fh.has_value()) {
+    auto file_handle = HandleManager::Instance().FindAs<FileHandle>(*fh);
+    if (!file_handle) {
+      return Status::InvalidArgument("unknown file fh=" + std::to_string(*fh));
+    }
+    status = file_handle->SetAttr(metadata_attr, fields, out_attr ? &inode : nullptr);
   } else {
-    status = VolumeImpl::Instance().meta_engine()->SetAttr(ino, metadata_attr, fields, out_attr ? &inode : nullptr);
+    auto inode_handle = InodeHandleManager::Instance().Get(ino, false);
+    if (inode_handle) {
+      status = inode_handle->SetAttr(metadata_attr, fields, out_attr ? &inode : nullptr);
+    } else {
+      status = VolumeImpl::Instance().meta_engine()->SetAttr(ino, metadata_attr, fields, out_attr ? &inode : nullptr);
+    }
   }
   if (status.ok() && out_attr) {
     inode.attr.ToPosixStat(out_attr);
@@ -411,10 +420,6 @@ utils::Status VfsImpl::RemoveXAttr(fuse_ino_t ino, const char *name) {
   return Status::NotSupported("removexattr");
 }
 
-utils::Status VfsImpl::Access(fuse_ino_t ino, int mask) {
-  return VolumeImpl::Instance().meta_engine()->Access(ino, static_cast<uint32_t>(mask));
-}
-
 utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry,
                               struct fuse_file_info *fi) {
   SwordFsInode child;
@@ -424,7 +429,7 @@ utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name, mode_t mode, 
     return status;
   }
   std::shared_ptr<FileHandle> handle;
-  status = FileHandle::Open(child.ino, fi->flags, &handle);
+  status = FileHandle::Create(child.ino, fi->flags, &handle);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Create: Open FAILED: ino=" << child.ino << " — " << status.message();
     return status;

@@ -14,6 +14,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -162,12 +163,12 @@ void VfsHookFactory::SwordFsGetattr(fuse_req_t req, fuse_ino_t ino, struct fuse_
 
 void VfsHookFactory::SwordFsSetattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr, int to_set,
                                     struct fuse_file_info *fi) {
-  (void)fi;
   const struct stat attr_copy = *attr;
-  RunFuseInFiber(req, [req, ino, attr = attr_copy, to_set]() mutable {
+  const std::optional<uint64_t> fh = fi != nullptr ? std::optional<uint64_t>(fi->fh) : std::nullopt;
+  RunFuseInFiber(req, [req, ino, attr = attr_copy, to_set, fh]() mutable {
     SetRequestContext(req);
     struct stat out_attr;
-    auto status = VfsImpl::SetAttr(ino, &attr, to_set, &out_attr);
+    auto status = VfsImpl::SetAttr(ino, &attr, to_set, fh, &out_attr);
     if (!status.ok()) {
       fuse_reply_err(req, status.ToErrno());
       return;
@@ -430,14 +431,6 @@ void VfsHookFactory::SwordFsRemovexattr(fuse_req_t req, fuse_ino_t ino, const ch
   });
 }
 
-void VfsHookFactory::SwordFsAccess(fuse_req_t req, fuse_ino_t ino, int mask) {
-  RunFuseInFiber(req, [req, ino, mask] {
-    SetRequestContext(req);
-    auto status = VfsImpl::Access(ino, mask);
-    fuse_reply_err(req, status.ToErrno());
-  });
-}
-
 void VfsHookFactory::SwordFsCreate(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode,
                                    struct fuse_file_info *fi) {
   // Copy |fi| by value — the caller's stack frame is gone by the
@@ -619,7 +612,6 @@ const struct fuse_lowlevel_ops &VfsHookFactory::get_ops() {
       .getxattr = SwordFsGetxattr,
       .listxattr = SwordFsListxattr,
       .removexattr = SwordFsRemovexattr,
-      .access = SwordFsAccess,
       .create = SwordFsCreate,
       .getlk = SwordFsGetlk,
       .setlk = SwordFsSetlk,

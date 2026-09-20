@@ -136,7 +136,7 @@ kernel request
 - `DirHandle`/metadata iterators for directory enumeration;
 - wakeups to the background reclaimer after namespace changes that may create reclaim work.
 
-Before dispatching an operation, the FUSE hook captures the request caller's `uid`, `gid`, `pid`, and `umask` into fiber-local `SwordFsContext`. Metadata policy code reads that context for ownership, access checks, sticky-directory deletion rules, and creation semantics rather than using the daemon process credentials as the caller identity.
+Before dispatching an operation, the FUSE hook captures the request caller's `uid`, `gid`, `pid`, and `umask` into fiber-local `SwordFsContext`. With `default_permissions`, Linux VFS owns ordinary POSIX DAC, including pathname checks, supplementary groups, and capability overrides. Metadata uses the captured context for post-authorization semantics that still require caller identity, including ownership assignment and transaction-local sticky-directory ownership safety; it does not reconstruct a second mode-bit permission engine.
 
 The current FUSE configuration is conservative around cache/coherency semantics:
 
@@ -442,8 +442,9 @@ The critical ordering is reference acquisition **before** metadata validation:
 
 1. `Open` checks the local fence and increments the open count under the same
    lock. If reclaim already owns the fence, open fails.
-2. It checks authoritative metadata and permissions. `O_TRUNC` then truncates
-   through the shared `FileReadWriter`. Failure releases the acquired reference.
+2. It validates authoritative metadata after kernel authorization. `O_TRUNC`
+   then truncates through the shared `FileReadWriter`. Failure releases the
+   acquired reference.
 3. Unlink may remove the last name while this reference exists. The inode
    remains an orphan candidate; reclaim cannot claim the local fence yet.
 4. A non-final close drops its reference. The final close retains its reference

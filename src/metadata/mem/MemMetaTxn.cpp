@@ -33,8 +33,9 @@ namespace swordfs::metadata {
 //   - moving an entry across parents adjusts both parents' nlink;
 //   - any entry-list change bumps the parent directories' mtime/ctime;
 //   - re-linking an inode (move/swap/link) bumps its ctime.
-// Callers compose primitives for POLICY (permissions, POSIX error
-// codes, flag dispatch) and never repeat this bookkeeping.
+// Callers compose primitives for POLICY (POSIX error codes, namespace/type
+// validation, flag dispatch) and never repeat this bookkeeping. Caller
+// authorization is handled before the metadata boundary by Linux VFS/FUSE.
 // ────────────────────────────────────────────────────────────────
 
 Status MemMetaTxn::LookupInode(InodeID ino, SwordFsInode *out) {

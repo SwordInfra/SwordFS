@@ -8,7 +8,6 @@
 #include <folly/logging/xlog.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -61,8 +60,9 @@ MemMetaImpl::~MemMetaImpl() {
 // Division of labour: the primitives maintain the tree's structural
 // invariants (parent nlink on directory link/unlink/move, mtime/ctime
 // on entry-list changes, ctime on re-linked inodes) — this layer only
-// contributes POLICY: name validation, permission and sticky checks,
-// cycle prevention, rename flags, and POSIX error codes.
+// contributes POLICY: name validation, type/namespace validation, cycle
+// prevention, rename flags, and POSIX error codes. Caller authorization is
+// owned by Linux VFS/FUSE `default_permissions`, not reconstructed here.
 //
 // Lookup idiom: check the Lookup status first and return it unchanged
 // (a missing inode is NotFound, NOT NotDirectory), then test the type
@@ -159,7 +159,6 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t m
     return Status::NameTooLong("file name exceeds maximum length");
   }
 
-  const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
   SwordFsInode child;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode parent;
@@ -170,11 +169,6 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t m
     if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
     }
-    // Check permissions: need write+execute on the parent directory
-    if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on parent");
-    }
-
     uint32_t file_mode = static_cast<uint32_t>(S_IFREG) | (mode & 0777u);
     return txn.AddEntry(parent_ino, name, file_mode, &child);
   });
@@ -210,19 +204,12 @@ Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
       return Status::NotDirectory("parent is not a directory");
     }
 
-    // Permission check on parent directory
-    if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on parent");
-    }
-
     SwordFsInode target;
     status = txn.LookupEntry(parent_ino, name, &target);
     if (!status.ok()) {
       return status;
     }
 
-    // Sticky bit on the parent directory: only root, the directory
-    // owner, or the entry's owner can unlink entries.
     if (!parent.CheckStickyDelete(ctx.uid, target)) {
       return Status::Permission("sticky bit denied");
     }
@@ -281,22 +268,12 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, In
       return Status::NotDirectory("new parent is not a directory");
     }
 
-    // Check write+execute permission on both parents
-    if (!old_parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on old parent");
-    }
-    if (!new_parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on new parent");
-    }
-
     SwordFsInode moved;
     status = txn.LookupEntry(old_parent_ino, old_name, &moved);
     if (!status.ok()) {
       return Status::NotFound("source entry not found");
     }
 
-    // Sticky bit on the old parent: only root, the directory owner, or
-    // the entry's owner can move entries out of it.
     if (!old_parent.CheckStickyDelete(ctx.uid, moved)) {
       return Status::Permission("sticky bit denied on source");
     }
@@ -304,9 +281,6 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, In
     SwordFsInode existing;
     bool target_exists = txn.LookupEntry(new_parent_ino, new_name, &existing).ok();
 
-    // Sticky bit on the new parent: overwriting or exchanging away an
-    // existing entry removes it from that directory, so it requires the
-    // same ownership as a delete.
     if (target_exists && !new_parent.CheckStickyDelete(ctx.uid, existing)) {
       return Status::Permission("sticky bit denied on target");
     }
@@ -357,26 +331,8 @@ Status MemMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField f
   return Status::OK();
 }
 
-Status MemMetaImpl::Access(InodeID ino, uint32_t mask) {
-  utils::ExpectInFiberDomain();
-  const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
-  return store_.Transact([&](MemMetaTxn &txn) -> Status {
-    SwordFsInode inode;
-    Status status = txn.LookupInode(ino, &inode);
-    if (!status.ok()) {
-      return status;
-    }
-
-    if (!inode.CheckAccess(ctx.uid, ctx.gid, mask)) {
-      return Status::Permission("access denied");
-    }
-    return Status::OK();
-  });
-}
-
 Status MemMetaImpl::Open(InodeID ino) {
   utils::ExpectInFiberDomain();
-  const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode inode;
     Status status = txn.LookupInode(ino, &inode);
@@ -396,13 +352,6 @@ Status MemMetaImpl::Open(InodeID ino) {
     // are resolved by the kernel).
     if (!inode.IsRegular()) {
       return Status::NotDirectory("not a regular file");
-    }
-
-    // Check read or write permission based on flags
-    // (The kernel already passes filtered fi->flags to the FUSE daemon, so
-    // O_RDONLY/O_WRONLY/O_RDWR are already set appropriately.)
-    if (!inode.CheckAccess(ctx.uid, ctx.gid, R_OK)) {
-      return Status::Permission("access denied");
     }
 
     // Update atime on the file.
@@ -523,7 +472,6 @@ Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mo
     return Status::NameTooLong("directory name exceeds maximum length");
   }
 
-  const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
   SwordFsInode child;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode parent;
@@ -533,10 +481,6 @@ Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mo
     }
     if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
-    }
-
-    if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on parent");
     }
 
     uint32_t dir_mode = static_cast<uint32_t>(S_IFDIR) | (mode & 0777u);
@@ -575,18 +519,12 @@ Status MemMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
       return Status::NotDirectory("parent is not a directory");
     }
 
-    if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on parent");
-    }
-
     SwordFsInode target;
     status = txn.LookupEntry(parent_ino, name, &target);
     if (!status.ok()) {
       return status;
     }
 
-    // Sticky bit on the parent directory: only root, the directory
-    // owner, or the entry's owner can remove entries.
     if (!parent.CheckStickyDelete(ctx.uid, target)) {
       return Status::Permission("sticky bit denied");
     }
@@ -644,7 +582,6 @@ Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::stri
     return Status::NameTooLong("symlink name exceeds maximum length");
   }
 
-  const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
   SwordFsInode child;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode parent;
@@ -654,10 +591,6 @@ Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::stri
     }
     if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
-    }
-
-    if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on parent");
     }
 
     uint32_t link_mode = static_cast<uint32_t>(S_IFLNK) | 0777u;
@@ -693,7 +626,6 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view ne
     return Status::NameTooLong("link name exceeds maximum length");
   }
 
-  const SwordFsContext ctx = folly::fibers::local<SwordFsContext>();
   SwordFsInode inode;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     Status status = txn.LookupInode(ino, &inode);
@@ -713,10 +645,6 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view ne
     }
     if (!newparent.IsDir()) {
       return Status::NotDirectory("new parent is not a directory");
-    }
-
-    if (!newparent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on new parent");
     }
 
     return txn.LinkExistingEntry(newparent_ino, newname, ino, &inode);

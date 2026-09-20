@@ -89,9 +89,6 @@ class MissingMetaEngine final : public IMetaEngine {
   Status StatFs(SwordFsStatFs *) override {
     return Status::OK();
   }
-  Status Access(InodeID, uint32_t) override {
-    return Status::OK();
-  }
   Status Symlink(InodeID, std::string_view, std::string_view, SwordFsInode *) override {
     return Status::OK();
   }

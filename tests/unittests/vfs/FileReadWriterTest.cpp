@@ -234,9 +234,6 @@ class MockMetaEngine : public IMetaEngine {
   Status StatFs(SwordFsStatFs *) override {
     return Status::OK();
   }
-  Status Access(InodeID, uint32_t) override {
-    return Status::OK();
-  }
   Status Symlink(InodeID, std::string_view, std::string_view, SwordFsInode *) override {
     return Status::OK();
   }
@@ -1243,7 +1240,8 @@ TEST_F(FileReadWriterTest, SetAttrTruncateOrdersAfterAmbiguousFlushRetry) {
 
     struct stat attr{};
     attr.st_size = 64;
-    ASSERT_TRUE(swordfs::vfs::VfsImpl::SetAttr(kIno, &attr, static_cast<int>(SetAttrField::kSize), nullptr).ok());
+    ASSERT_TRUE(
+        swordfs::vfs::VfsImpl::SetAttr(kIno, &attr, static_cast<int>(SetAttrField::kSize), std::nullopt, nullptr).ok());
 
     mock_meta_->publish_chunk_commit_on_error = false;
     mock_meta_->publish_chunk_status = Status::OK();

@@ -63,7 +63,6 @@ class VfsHookFactory {
   static void SwordFsGetxattr(fuse_req_t req, fuse_ino_t ino, const char *name, size_t size);
   static void SwordFsListxattr(fuse_req_t req, fuse_ino_t ino, size_t size);
   static void SwordFsRemovexattr(fuse_req_t req, fuse_ino_t ino, const char *name);
-  static void SwordFsAccess(fuse_req_t req, fuse_ino_t ino, int mask);
   static void SwordFsCreate(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode,
                             struct fuse_file_info *fi);
   static void SwordFsGetlk(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi, struct flock *lock);

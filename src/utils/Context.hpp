@@ -2,9 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 // SwordFsContext — per-request call context carrying caller identity.
-// Populated from fuse_req_ctx(req) at the VFS boundary and passed
-// through the internal APIs so that ownership / permission checks
-// use the real caller instead of the daemon's credentials.
+// Populated from fuse_req_ctx(req) at the VFS boundary for post-authorization
+// operation semantics such as assigning ownership to newly created objects.
+// Linux VFS/FUSE owns caller authorization under default_permissions.
 
 #pragma once
 

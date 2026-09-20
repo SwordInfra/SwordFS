@@ -12,8 +12,9 @@
 
 namespace swordfs::metadata {
 
-// Redis metadata engine policy layer. POSIX validation, permissions and flag
-// dispatch live here. RedisMetaOps exposes standalone metadata operations,
+// Redis metadata engine policy layer. POSIX namespace/type validation and flag
+// dispatch live here; caller authorization is owned by Linux VFS/FUSE.
+// RedisMetaOps exposes standalone metadata operations,
 // RedisMetaTxn owns transaction-scoped metadata semantics, and
 // RedisMetaClient/RedisKvTxn own raw Redis access and transaction mechanics.
 class RedisMetaImpl : public IMetaEngine {
@@ -42,7 +43,6 @@ class RedisMetaImpl : public IMetaEngine {
                 RenameFlag flags) override;
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override;
   Status StatFs(SwordFsStatFs *stbuf) override;
-  Status Access(InodeID ino, uint32_t mask) override;
   Status Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) override;
   Status Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) override;
   Status Readlink(InodeID ino, std::string *target) override;

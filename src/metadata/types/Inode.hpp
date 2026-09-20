@@ -59,9 +59,7 @@ struct SwordFsInode {
   bool IsDir() const;
   bool IsRegular() const;
   bool IsSymlink() const;
-  bool CheckAccess(uint64_t uid, uint64_t gid, uint32_t mask) const;
   bool CheckStickyDelete(uint64_t uid, const SwordFsInode &target) const;
-
   utils::Status SerializeTo(std::string *out) const;
   utils::Status ParseFrom(std::string_view data);
 };
