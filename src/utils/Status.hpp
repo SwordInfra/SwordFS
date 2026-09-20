@@ -27,7 +27,6 @@ class Status {
     kNotSupported,     // ENOSYS
     kIOError,          // EIO
     kBusy,             // EBUSY
-    kNoSpace,          // ENOSPC
     kNotPermitted,     // EPERM
     kPermission,       // EACCES
     kNoMemory,         // ENOMEM
@@ -129,9 +128,6 @@ class Status {
   }
   static Status NotEmpty(std::string msg) {
     return Status(kNotEmpty, std::move(msg));
-  }
-  static Status NoSpace(std::string msg) {
-    return Status(kNoSpace, std::move(msg));
   }
   static Status NotPermitted(std::string msg) {
     return Status(kNotPermitted, std::move(msg));

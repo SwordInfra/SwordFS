@@ -72,8 +72,6 @@ class VfsHookFactory {
   static void SwordFsIoctl(fuse_req_t req, fuse_ino_t ino, unsigned int cmd, void *arg, struct fuse_file_info *fi,
                            unsigned flags, const void *in_buf, size_t in_bufsz, size_t out_bufsz);
   static void SwordFsPoll(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi, struct fuse_pollhandle *ph);
-  static void SwordFsWriteBuf(fuse_req_t req, fuse_ino_t ino, struct fuse_bufvec *bufv, off_t off,
-                              struct fuse_file_info *fi);
   static void SwordFsRetrieveReply(fuse_req_t req, void *cookie, fuse_ino_t ino, off_t offset,
                                    struct fuse_bufvec *bufv);
   static void SwordFsFlock(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi, int op);

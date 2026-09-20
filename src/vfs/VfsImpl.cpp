@@ -39,7 +39,6 @@ using swordfs::metadata::InodeID;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsAttr;
-using swordfs::metadata::SwordFsEntry;
 using swordfs::metadata::SwordFsInode;
 using swordfs::volume::VolumeImpl;
 

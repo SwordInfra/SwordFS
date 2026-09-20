@@ -75,9 +75,6 @@ class MemMetaTxn {
   // (only kAtime/kMtime/kCtime are honoured).
   Status TouchInode(InodeID ino, SetAttrField fields);
 
-  // Add |delta| (may be negative) to the inode's nlink.
-  Status AdjustNlink(InodeID ino, int delta);
-
   // Set the symlink target of |ino| and update st_size to match.
   Status SetSymlinkTarget(InodeID ino, std::string_view target);
 

@@ -76,11 +76,6 @@ class FileReadWriter {
 
   FileReadWriter(InodeID ino);
 
-  /// Return the inode this writer is bound to.
-  InodeID ino() const {
-    return ino_;
-  }
-
   /// Write the contents of |buf| at |off|, splitting across chunk boundaries.
   utils::Status Write(const folly::IOBuf &buf, off_t off);
 

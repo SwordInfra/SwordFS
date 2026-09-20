@@ -505,15 +505,6 @@ void VfsHookFactory::SwordFsPoll(fuse_req_t req, fuse_ino_t ino, struct fuse_fil
   fuse_reply_err(req, ENOSYS);
 }
 
-void VfsHookFactory::SwordFsWriteBuf(fuse_req_t req, fuse_ino_t ino, struct fuse_bufvec *bufv, off_t off,
-                                     struct fuse_file_info *fi) {
-  (void)ino;
-  (void)bufv;
-  (void)off;
-  (void)fi;
-  fuse_reply_err(req, ENOSYS);
-}
-
 void VfsHookFactory::SwordFsRetrieveReply(fuse_req_t req, void *cookie, fuse_ino_t ino, off_t offset,
                                           struct fuse_bufvec *bufv) {
   auto status = VfsImpl::RetrieveReply(req, cookie, ino, offset, bufv);

@@ -29,8 +29,6 @@ namespace swordfs::storage {
 class PreallocatedOutputStreamBuf : public std::streambuf {
  public:
   PreallocatedOutputStreamBuf(char *buffer, size_t capacity);
-  /// Number of bytes actually written into the buffer.
-  size_t Written() const;
 
  protected:
   std::streamsize xsputn(const char *s, std::streamsize n) override;
@@ -46,7 +44,6 @@ class PreallocatedOutputStreamBuf : public std::streambuf {
 class PreallocatedResponseStream : public Aws::IOStream {
  public:
   PreallocatedResponseStream(char *buffer, size_t capacity);
-  size_t Written() const;
 
  private:
   PreallocatedOutputStreamBuf buf_;

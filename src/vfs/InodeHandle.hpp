@@ -66,11 +66,6 @@ class InodeHandle {
   // Exposed for unit-test access only.
   uint64_t open_count() const;
 
-  // Exposed for unit-test access only.
-  const std::shared_ptr<FileReadWriter> &rw() const {
-    return rw_;
-  }
-
  private:
   // Acquires one open-fd reference under state_mutex_, unless the inode is
   // already fenced for reclaim. The check and the increment are one critical

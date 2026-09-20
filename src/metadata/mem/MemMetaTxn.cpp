@@ -178,15 +178,6 @@ Status MemMetaTxn::TouchInode(InodeID ino, SetAttrField fields) {
   return Status::OK();
 }
 
-Status MemMetaTxn::AdjustNlink(InodeID ino, int delta) {
-  SwordFsInode *inode = FindInode(ino);
-  if (!inode) {
-    return Status::NotFound("inode not found");
-  }
-  inode->attr.nlink += delta;
-  return Status::OK();
-}
-
 Status MemMetaTxn::SetSymlinkTarget(InodeID ino, std::string_view target) {
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {

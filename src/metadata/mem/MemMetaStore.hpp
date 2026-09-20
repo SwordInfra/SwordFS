@@ -12,7 +12,7 @@
 //   The transaction interface uses VALUE SEMANTICS: reads hand out
 //   snapshot copies of SwordFsInode and writes go through explicit
 //   by-ino semantic mutation primitives (SetAttr, Truncate,
-//   TouchInode, AdjustNlink, ...). No pointers into store-owned memory
+//   TouchInode, SetSymlinkTarget, ...). No pointers into store-owned memory
 //   ever escape a transaction, so callers do not have to replay metadata
 //   bookkeeping around individual mutations.
 

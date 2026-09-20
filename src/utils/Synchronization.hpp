@@ -22,11 +22,6 @@ class FiberMutex {
     mutex_.lock();
   }
 
-  bool try_lock() {
-    ExpectInFiberDomain();
-    return mutex_.try_lock();
-  }
-
   void unlock() {
     ExpectInFiberDomain();
     mutex_.unlock();
@@ -43,11 +38,6 @@ class FiberRWMutex {
     mutex_.lock();
   }
 
-  bool try_lock() {
-    ExpectInFiberDomain();
-    return mutex_.try_lock();
-  }
-
   void unlock() {
     ExpectInFiberDomain();
     mutex_.unlock();
@@ -56,11 +46,6 @@ class FiberRWMutex {
   void lock_shared() {
     ExpectInFiberDomain();
     mutex_.lock_shared();
-  }
-
-  bool try_lock_shared() {
-    ExpectInFiberDomain();
-    return mutex_.try_lock_shared();
   }
 
   void unlock_shared() {
@@ -79,11 +64,6 @@ class ThreadMutex {
   void lock() {
     ExpectInThreadDomain();
     mutex_.lock();
-  }
-
-  bool try_lock() {
-    ExpectInThreadDomain();
-    return mutex_.try_lock();
   }
 
   void unlock() {
