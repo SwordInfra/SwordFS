@@ -4,19 +4,19 @@ Latest run: **PASS**
 
 | Metric | Value |
 | --- | ---: |
-| Overall conformance support | 57.14% |
+| Overall conformance support | 57.16% |
 | Supported regression pass | 100.00% |
 | Classified rate | 100.00% |
-| Supported assertion count | 5011 |
+| Supported assertion count | 5013 |
 | Blocking result count | 0 |
 
 ## Classification counts
 
 | Classification | Count |
 | --- | ---: |
-| KNOWN_SEMANTIC_DEFECT | 361 |
+| KNOWN_SEMANTIC_DEFECT | 359 |
 | KNOWN_UNSUPPORTED | 3398 |
-| PASS | 5011 |
+| PASS | 5013 |
 | UPSTREAM_NOT_APPLICABLE | 28 |
 
 ## Per-category support
@@ -32,13 +32,13 @@ Latest run: **PASS**
 | mkdir | 95 | 118 | 80.51% |
 | mkfifo | 48 | 120 | 40.00% |
 | mknod | 60 | 186 | 32.26% |
-| open | 234 | 337 | 69.44% |
+| open | 235 | 337 | 69.73% |
 | posix_fallocate | 1 | 1 | 100.00% |
 | rename | 2880 | 4857 | 59.30% |
 | rmdir | 125 | 145 | 86.21% |
 | symlink | 87 | 95 | 91.58% |
 | truncate | 77 | 84 | 91.67% |
-| unlink | 245 | 439 | 55.81% |
+| unlink | 246 | 439 | 56.04% |
 | utimensat | 95 | 122 | 77.87% |
 
 ## Known-gap Issues
@@ -47,9 +47,8 @@ Latest run: **PASS**
 | --- | --- | ---: | --- |
 | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | KNOWN_UNSUPPORTED | 104 | dependent assertion after unsupported special-file/FIFO/socket setup |
 | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | KNOWN_UNSUPPORTED | 3294 | special-file/FIFO/socket node semantics are not implemented |
-| [#210](https://github.com/SwordInfra/SwordFS/issues/210) | KNOWN_SEMANTIC_DEFECT | 84 | permission, ownership, or sticky-directory authorization differs from POSIX |
+| [#210](https://github.com/SwordInfra/SwordFS/issues/210) | KNOWN_SEMANTIC_DEFECT | 83 | permission, ownership, or sticky-directory authorization differs from POSIX |
 | [#211](https://github.com/SwordInfra/SwordFS/issues/211) | KNOWN_SEMANTIC_DEFECT | 9 | overlong path components must return ENAMETOOLONG consistently |
-| [#212](https://github.com/SwordInfra/SwordFS/issues/212) | KNOWN_SEMANTIC_DEFECT | 1 | open file data lifetime after unlink |
 | [#213](https://github.com/SwordInfra/SwordFS/issues/213) | KNOWN_SEMANTIC_DEFECT | 42 | pathname resolution or namespace error/transition semantics differ from POSIX |
 | [#215](https://github.com/SwordInfra/SwordFS/issues/215) | KNOWN_SEMANTIC_DEFECT | 2 | truncate, file-size, or timestamp semantics differ from POSIX |
 | [#217](https://github.com/SwordInfra/SwordFS/issues/217) | KNOWN_SEMANTIC_DEFECT | 223 | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
@@ -259,19 +258,19 @@ Latest run: **PASS**
 | `tests/chown/00.t#165` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chown/00.t#166` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 
-_Only the first 200 of 3759 known gaps are shown; see `result.json`._
+_Only the first 200 of 3757 known gaps are shown; see `result.json`._
 
 ## Baseline metadata
 
-- SwordFS commit: `ab995e9e894fea74ec658ef7c46d2fddc06791d8`
+- SwordFS commit: `4ad8c24be0615b27f942707fd095362d4f6dd23b`
 - pjdfstest commit: `85a8aea9e685999ef0540392fd80535f873d7ff7`
 - kernel: `6.17.0-1022-azure`
 - libfuse: `fusermount3 version: 3.18.2`
 - os: `Linux-6.17.0-1022-azure-x86_64-with-glibc2.43`
 - runner: `Linux`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/35502935823
-Recorded at: 2026-09-20T09:47:50+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/35514475353
+Recorded at: 2026-09-20T13:53:45+00:00
 
 ## Historical main-branch trend
 
@@ -283,5 +282,6 @@ Recorded at: 2026-09-20T09:47:50+00:00
 | 2026-09-20T09:02:32+00:00 | `2400e6b0c49f` | PASS | 57.14% | 100.00% | 100.00% |
 | 2026-09-20T09:36:44+00:00 | `e582a548952a` | PASS | 57.14% | 100.00% | 100.00% |
 | 2026-09-20T09:47:50+00:00 | `ab995e9e894f` | PASS | 57.14% | 100.00% | 100.00% |
+| 2026-09-20T13:53:45+00:00 | `4ad8c24be061` | PASS | 57.16% | 100.00% | 100.00% |
 
-Last fully healthy baseline: `ab995e9e894fea74ec658ef7c46d2fddc06791d8`
+Last fully healthy baseline: `4ad8c24be0615b27f942707fd095362d4f6dd23b`
