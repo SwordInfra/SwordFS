@@ -43,6 +43,59 @@ No `Writing` or `Uploading` record is stored in metadata. Readers therefore
 have only two persistent states to interpret: no descriptor (a hole) or a
 descriptor for a completed object.
 
+## Local publication generations
+
+Publication is owned per chunk rather than by a file-wide remote-I/O critical
+section. A chunk has one complete **current** buffer. Starting a flush freezes
+that buffer as the immutable **flushing generation** and then performs remote
+publication without holding an inode-wide or chunk lock for the remote
+latency.
+
+If no write arrives during publication, no extra copy is needed. The first
+write that arrives while `current == flushing` performs one whole-buffer copy
+while holding the per-chunk lock, installs the copy as the new current
+generation, and applies the new bytes there. Later writes during the same
+publication modify that current generation directly. Thus one flushing
+generation causes at most one copy, and only when write-during-flush occurs.
+
+The initial design intentionally performs that copy under the per-chunk lock.
+This accepts a bounded same-chunk memory-copy stall in exchange for a small,
+explicit state machine; independent chunks of the same inode remain free to
+make progress. Dirty-buffer representation and memory-amplification work may
+later change this trade-off without changing the publication contract.
+
+Reads always use the complete latest-local generation. There is no base-plus-
+overlay merge contract: before COW they use the flushing/current buffer; after
+COW they use the new complete current buffer.
+
+For a clean chunk, a read keeps a shared per-chunk lock while reading the
+published immutable object. This pins that local published revision until the
+remote read completes: the exclusive clean-to-dirty transition cannot make the
+old revision eligible for rewrite cleanup underneath an in-flight read. Shared
+locking preserves concurrent reads of the same chunk; this is deliberately a
+per-chunk lifetime boundary rather than an inode-wide remote-I/O lock.
+
+The first overwrite of a clean chunk snapshots its published descriptor, drops
+the chunk lock, hydrates that immutable object, then reacquires the chunk lock
+and revalidates the descriptor/state before installing the hydrated buffer.
+Concurrent first writers may therefore perform duplicate hydration I/O, but
+only one hydrated generation is installed; a writer that loses the race applies
+its bytes to the already-installed latest local generation. This keeps remote
+hydration outside both inode-wide and chunk-exclusive critical sections.
+
+At most one remote publication generation is in flight per chunk. Independent
+chunks publish concurrently in batches bounded by the configured storage worker
+count. Metadata calls use their own executor and are independently bounded by
+its worker count; a small metadata pool therefore does not unnecessarily
+serialize the longer object uploads. A file-level flush barrier is serialized
+against another flush barrier, so a newer generation of the same chunk cannot
+begin remote publication before the older generation finishes. Consequently,
+#199 adds at most one extra COW buffer for each chunk in the active publication
+batch, approximately `storage-thread-count * chunk-size` beyond the
+already-existing dirty buffers. The pre-existing total number of dirty chunks
+is not made unbounded by a generation queue; mount-wide dirty-memory accounting
+and backpressure for sparse workloads remains the separate #202 concern.
+
 ## Local state machine
 
 These states belong to the local `Chunk`, not to persistent metadata:
@@ -51,24 +104,29 @@ These states belong to the local `Chunk`, not to persistent metadata:
 stateDiagram-v2
     [*] --> Dirty: Initialize finds no descriptor
     [*] --> Clean: Initialize loads published descriptor
-    Dirty --> Dirty: Write updates latest local buffer
-    Dirty --> Flushing: Flush starts publication attempt
-    Flushing --> Dirty: any non-successful outcome
-    Flushing --> Clean: publication is explicitly confirmed
+    Dirty --> Dirty: Write updates latest current buffer
+    Dirty --> Flushing: Flush freezes current generation
+    Flushing --> Flushing: first concurrent Write COWs current generation
+    Flushing --> Dirty: publication finishes while newer current data exists
+    Flushing --> Dirty: non-successful outcome preserves latest current data
+    Flushing --> Clean: known success with no newer current generation
     Clean --> Dirty: overwrite hydrates published bytes
 ```
 
 | State | Retained state | Read/write behavior |
 | --- | --- | --- |
 | `kDirty` | Complete latest local buffer; last known published descriptor when rewriting | Reads local bytes; accepts writes |
-| `kFlushing` | Same local buffer plus one transient immutable publication attempt | Synchronous transient state under the file operation lock |
+| `kFlushing` | One immutable flushing generation and optionally a newer complete current buffer | Remote publication proceeds without holding a file-wide remote-I/O lock; writes may COW once and continue on the newer generation |
 | `kClean` | Confirmed authoritative descriptor; clean buffer retention is a separate cache policy | Reads authoritative data; overwrite becomes dirty |
 
-`kFlushing` is not a durable lifecycle state. Every non-successful allocation,
-upload, metadata commit, or reconciliation result returns the chunk to
-`kDirty`, preserving the complete latest local buffer as writable and
-retryable. An empty dirty buffer does not need publication. Hydration failure
-leaves the chunk clean with its previous descriptor.
+`kFlushing` is not a durable lifecycle state. The immutable generation remains
+stable for the entire remote attempt. If a newer current generation is created,
+success of the older publication advances the authoritative baseline but leaves
+the newer current generation dirty. A non-successful allocation, upload,
+metadata commit, or reconciliation result likewise preserves the complete
+latest current generation as writable and retryable. An empty dirty buffer
+does not need publication. Hydration failure leaves the chunk clean with its
+previous descriptor.
 
 Publication retry state is separate from chunk data state. A failed attempt's
 revision is never reused by a later Flush, even when the local payload has not
@@ -95,9 +153,22 @@ acknowledgement.
 
 ## Flush and retry steps
 
-`FileReadWriter` holds its exclusive operation lock while flushing a snapshot
-of flushable chunks. Each chunk progresses independently; the file-level flush
-tries the remaining chunks after a failure and returns its first error.
+`FileReadWriter` snapshots the chunks covered by the flush barrier, then allows
+independent chunks to publish with bounded concurrency. The file-level lock is
+reserved for genuinely file-wide coordination such as size/truncate barriers;
+S3/object upload and Redis chunk publication do not hold it for their remote
+latency. The flush still observes every chunk in its barrier even if another
+chunk fails and returns the first error after draining the submitted work.
+
+A file-level persistence barrier snapshots the currently flushable chunks after
+entering the serialized `Flush()` operation. Every write that completed before
+that snapshot is represented by a selected dirty chunk and is covered by the
+barrier. A selected chunk freezes its current generation under the per-chunk
+lock when publication starts; writes that race in before that freeze may be
+included as an allowed strengthening of the barrier. A write that linearizes
+after the freeze COWs into the next current generation and belongs to a later
+barrier; it remains visible locally and must not let the older publication
+clear transient live-size state.
 
 1. Transition the nonempty chunk from `kDirty` to transient `kFlushing`.
 2. If any earlier Flush attempt returned a non-success status, refresh the
@@ -113,9 +184,10 @@ tries the remaining chunks after a failure and returns its first error.
 4. Upload the complete local buffer under the revision-qualified object key.
 5. CAS-publish the replacement using the current authoritative descriptor, or
    absence for a new chunk, as this attempt's expectation.
-6. Only a known-success `CommitChunk` for the fresh attempt transitions
-   `kFlushing` to `kClean`. Successful publication retains the descriptor
-   and clears the retry-refresh state.
+6. A known-success `CommitChunk` advances the authoritative descriptor and
+   clears retry-refresh state. If the flushing buffer is still the current
+   buffer, the chunk becomes `kClean`; if COW created a newer current
+   generation, that newer generation remains `kDirty` for a later barrier.
 7. Any non-successful result returns `kFlushing` to `kDirty` and returns the
    error to the caller. The latest local bytes stay writable and retryable,
    and the next Flush refreshes its metadata baseline before allocating

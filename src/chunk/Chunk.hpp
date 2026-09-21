@@ -15,6 +15,7 @@
 #include "chunk/WriteBuf.hpp"
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
+#include "utils/Synchronization.hpp"
 
 namespace swordfs {
 namespace metadata {
@@ -31,7 +32,7 @@ class Chunk {
  public:
   enum class State : uint8_t {
     kDirty,     // latest complete local data is not yet confirmed authoritative
-    kFlushing,  // transient publication attempt under the file operation lock
+    kFlushing,  // one immutable generation is being published remotely
     kClean,     // authoritative publication is explicitly confirmed
   };
 
@@ -60,12 +61,8 @@ class Chunk {
   /// the surviving prefix for a later flush/read.
   void Truncate(size_t size);
 
-  bool IsClean() const {
-    return state_ == State::kClean;
-  }
-  bool Flushable() const {
-    return state_ == State::kDirty && wb_->size() > 0;
-  }
+  bool IsClean() const;
+  bool Flushable() const;
 
   // ──────────────────────────────────────────────────────────────
   // Accessors
@@ -79,26 +76,19 @@ class Chunk {
   off_t StartOffset() const {
     return static_cast<off_t>(index_) * static_cast<off_t>(max_chunk_size_);
   }
-  off_t DataEnd() const {
-    if (IsClean()) {
-      return StartOffset() + static_cast<off_t>(PublishedChunk().size);
-    }
-    return StartOffset() + static_cast<off_t>(wb_->size());
-  }
+  off_t DataEnd() const;
 
  private:
-  /// Build a SwordFsChunk snapshot for metadata registration using |revision|.
-  metadata::SwordFsChunk BuildMeta(metadata::ChunkRevision revision) const;
-
-  const metadata::SwordFsChunk &PublishedChunk() const;
-  utils::Status RefreshPublicationBaseline();
-  utils::Status HydrateForWrite();
-  void CompletePublication(const metadata::SwordFsChunk &chunk);
+  metadata::SwordFsChunk BuildMeta(metadata::ChunkRevision revision, size_t size) const;
+  utils::Status LoadPublicationBaseline(std::optional<metadata::SwordFsChunk> *out) const;
+  utils::Status HydrateForWrite(const metadata::SwordFsChunk &published, std::shared_ptr<WriteBuf> *out) const;
 
  private:
   metadata::InodeID ino_;
   size_t max_chunk_size_;
-  std::unique_ptr<WriteBuf> wb_;
+  mutable utils::FiberRWMutex mutex_;
+  std::shared_ptr<WriteBuf> wb_;
+  std::shared_ptr<WriteBuf> flushing_wb_;
   State state_ = State::kDirty;
   metadata::ChunkIndex index_;
   storage::IDataEngine *data_;

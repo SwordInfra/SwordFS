@@ -10,6 +10,7 @@
 #include <folly/io/async/EventBase.h>
 #include <gtest/gtest.h>
 
+#include <CLI/CLI.hpp>
 #include <algorithm>
 #include <cstring>
 #include <memory>
@@ -20,6 +21,7 @@
 
 #include "chunk/Chunk.hpp"
 #include "chunk/ChunkObjectKey.hpp"
+#include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "storage/IDataEngine.hpp"
@@ -58,6 +60,33 @@ static auto Buf(const std::string &s) {
   return *folly::IOBuf::copyBuffer(s.data(), s.size());
 }
 
+static void ConfigureWritebackConcurrencyForTest(int threads) {
+  CLI::App app{"SwordFS FileReadWriter test"};
+  auto &config = swordfs::config::ConfigCenter::Instance();
+  config.Initialize();
+  config.ConfigureOptions(app);
+
+  std::vector<std::string> args = {
+      "swordfs",
+      "mount",
+      "--volume",
+      "test",
+      "--meta",
+      "memory://local",
+      "--storage-thread-count",
+      std::to_string(threads),
+      "--meta-thread-count",
+      std::to_string(threads),
+      "/tmp/swordfs-test",
+  };
+  std::vector<const char *> argv;
+  argv.reserve(args.size());
+  for (const auto &arg : args) {
+    argv.push_back(arg.c_str());
+  }
+  app.parse(static_cast<int>(argv.size()), argv.data());
+}
+
 template <typename Fn>
 static void RunInTestFiber(Fn &&fn) {
   folly::EventBase evb;
@@ -83,6 +112,18 @@ class MockDataEngine : public IDataEngine {
   }
   Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) override {
     ++put_calls;
+    if (put_started_ != nullptr) {
+      auto *started = put_started_;
+      auto *release = put_release_;
+      put_started_ = nullptr;
+      put_release_ = nullptr;
+      started->post();
+      release->wait();
+    } else if (concurrent_put_started_ != nullptr) {
+      auto *started = concurrent_put_started_;
+      concurrent_put_started_ = nullptr;
+      started->post();
+    }
     const bool matches_key = fail_put_key.empty() || key == fail_put_key;
     const bool matches_prefix = fail_put_prefix.empty() || key.starts_with(fail_put_prefix);
     if (!put_status.ok() && matches_key && matches_prefix) {
@@ -157,6 +198,13 @@ class MockDataEngine : public IDataEngine {
     concurrent_get_started_ = concurrent_get_started;
   }
 
+  void BlockNextPut(folly::fibers::Baton *started, folly::fibers::Baton *release,
+                    folly::fibers::Baton *concurrent_put_started = nullptr) {
+    put_started_ = started;
+    put_release_ = release;
+    concurrent_put_started_ = concurrent_put_started;
+  }
+
   std::vector<std::string> delete_calls;
   Status delete_status = Status::OK();
   Status get_status = Status::OK();
@@ -171,6 +219,9 @@ class MockDataEngine : public IDataEngine {
   folly::fibers::Baton *get_started_{nullptr};
   folly::fibers::Baton *get_release_{nullptr};
   folly::fibers::Baton *concurrent_get_started_{nullptr};
+  folly::fibers::Baton *put_started_{nullptr};
+  folly::fibers::Baton *put_release_{nullptr};
+  folly::fibers::Baton *concurrent_put_started_{nullptr};
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -354,6 +405,14 @@ class MockMetaEngine : public IMetaEngine {
 
   Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                      const SwordFsChunk &replacement) override {
+    if (commit_started_ != nullptr) {
+      auto *started = commit_started_;
+      auto *release = commit_release_;
+      commit_started_ = nullptr;
+      commit_release_ = nullptr;
+      started->post();
+      release->wait();
+    }
     if (expected.has_value() && replacement.revision <= expected->revision) {
       return Status::InvalidArgument("replacement revision must increase");
     }
@@ -460,6 +519,11 @@ class MockMetaEngine : public IMetaEngine {
     return file_size_;
   }
 
+  void BlockNextCommit(folly::fibers::Baton *started, folly::fibers::Baton *release) {
+    commit_started_ = started;
+    commit_release_ = release;
+  }
+
   std::vector<std::string> PendingDeleteKeys() const {
     std::vector<std::string> out;
     out.reserve(pending_deletes_.size());
@@ -525,6 +589,8 @@ class MockMetaEngine : public IMetaEngine {
   std::unordered_map<std::string, swordfs::metadata::PendingDelete> pending_deletes_;
   std::optional<SwordFsChunk> next_find_chunk_result_;
   std::optional<Status> next_find_chunk_status_;
+  folly::fibers::Baton *commit_started_{nullptr};
+  folly::fibers::Baton *commit_release_{nullptr};
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -534,6 +600,7 @@ class MockMetaEngine : public IMetaEngine {
 class FileReadWriterTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    ConfigureWritebackConcurrencyForTest(2);
     auto data = std::make_unique<MockDataEngine>();
     auto meta = std::make_unique<MockMetaEngine>();
     mock_data_ = data.get();
@@ -2233,6 +2300,452 @@ TEST_F(FileReadWriterTest, ConcurrentReadsProceedWhileAnotherReadWaitsForBackend
   EXPECT_TRUE(first_status.ok());
   EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(first_out->data()), first_out->length()),
             Repeat('R', kChunkSize));
+  vol.clear_chunk_size_for_test();
+}
+
+TEST_F(FileReadWriterTest, IndependentChunkOverwriteHydrationDoesNotSerializeOnInode) {
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_chunk_size_for_test(kChunkSize);
+
+  for (ChunkIndex index = 0; index < 2; ++index) {
+    SwordFsChunk chunk{};
+    chunk.index = index;
+    chunk.start_offset = static_cast<uint64_t>(index) * kChunkSize;
+    chunk.revision = 17 + index;
+    chunk.size = kChunkSize;
+    ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
+    auto data = std::make_unique<folly::IOBuf>(Buf(Repeat(index == 0 ? 'A' : 'B', kChunkSize)));
+    ASSERT_TRUE(
+        mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(data)).ok());
+  }
+
+  auto rw = Make(2 * kChunkSize);
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton first_get_started;
+  folly::fibers::Baton release_first_get;
+  folly::fibers::Baton second_get_started;
+  folly::fibers::Baton first_done;
+  folly::fibers::Baton second_done;
+  mock_data_->BlockNextGet(&first_get_started, &release_first_get, &second_get_started);
+
+  Status first_status;
+  Status second_status;
+  fm.addTask([&] {
+    first_status = rw.Write(Buf("X"), 0);
+    first_done.post();
+  });
+  fm.addTask([&] {
+    first_get_started.wait();
+    second_status = rw.Write(Buf("Y"), kChunkSize);
+    second_done.post();
+  });
+
+  while (!second_get_started.try_wait() || !second_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_TRUE(second_status.ok());
+
+  release_first_get.post();
+  while (!first_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_TRUE(first_status.ok());
+  vol.clear_chunk_size_for_test();
+}
+
+TEST_F(FileReadWriterTest, WriteDuringBlockedFlushDoesNotWaitForRemotePut) {
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_chunk_size_for_test(kChunkSize);
+
+  auto rw = Make();
+  RunInTestFiber([&] { ASSERT_TRUE(rw.Write(Buf("AAAA"), 0).ok()); });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton put_started;
+  folly::fibers::Baton release_put;
+  folly::fibers::Baton write_started;
+  folly::fibers::Baton write_done;
+  folly::fibers::Baton probe_done;
+  folly::fibers::Baton flush_done;
+  mock_data_->BlockNextPut(&put_started, &release_put);
+
+  Status flush_status;
+  Status write_status;
+  fm.addTask([&] {
+    flush_status = rw.Flush();
+    flush_done.post();
+  });
+  fm.addTask([&] {
+    put_started.wait();
+    write_started.post();
+    write_status = rw.Write(Buf("BBBB"), 4);
+    write_done.post();
+  });
+  fm.addTask([&] {
+    write_started.wait();
+    for (int i = 0; i < 4; ++i) {
+      folly::fibers::yield();
+    }
+    probe_done.post();
+  });
+
+  while (!probe_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_TRUE(write_done.try_wait()) << "foreground write waited for the older generation's remote Put";
+
+  release_put.post();
+  while (!flush_done.try_wait() || !write_done.try_wait()) {
+    evb.loopOnce();
+  }
+  ASSERT_TRUE(flush_status.ok());
+  ASSERT_TRUE(write_status.ok());
+
+  RunInTestFiber([&] {
+    SwordFsInode inode;
+    ASSERT_TRUE(rw.GetAttr(&inode).ok());
+    EXPECT_EQ(inode.attr.size, 8U) << "the older flush must not clear the size overlay for the newer local generation";
+
+    auto local = folly::IOBuf::create(8);
+    ASSERT_TRUE(rw.Read(8, 0, local.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(local->data()), local->length()), "AAAABBBB");
+
+    ASSERT_TRUE(rw.Flush().ok());
+    FileReadWriter reopened(kIno);
+    auto persisted = folly::IOBuf::create(8);
+    ASSERT_TRUE(reopened.Read(8, 0, persisted.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(persisted->data()), persisted->length()), "AAAABBBB");
+  });
+  vol.clear_chunk_size_for_test();
+}
+
+TEST_F(FileReadWriterTest, WriteDuringBlockedCommitDoesNotWaitForRemotePublication) {
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_chunk_size_for_test(kChunkSize);
+
+  auto rw = Make();
+  RunInTestFiber([&] { ASSERT_TRUE(rw.Write(Buf("AAAA"), 0).ok()); });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton commit_started;
+  folly::fibers::Baton release_commit;
+  folly::fibers::Baton write_started;
+  folly::fibers::Baton write_done;
+  folly::fibers::Baton probe_done;
+  folly::fibers::Baton flush_done;
+  mock_meta_->BlockNextCommit(&commit_started, &release_commit);
+
+  Status flush_status;
+  Status write_status;
+  fm.addTask([&] {
+    flush_status = rw.Flush();
+    flush_done.post();
+  });
+  fm.addTask([&] {
+    commit_started.wait();
+    write_started.post();
+    write_status = rw.Write(Buf("BBBB"), 4);
+    write_done.post();
+  });
+  fm.addTask([&] {
+    write_started.wait();
+    for (int i = 0; i < 4; ++i) {
+      folly::fibers::yield();
+    }
+    probe_done.post();
+  });
+
+  while (!probe_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_TRUE(write_done.try_wait()) << "foreground write waited for the older generation's metadata commit";
+
+  release_commit.post();
+  while (!flush_done.try_wait() || !write_done.try_wait()) {
+    evb.loopOnce();
+  }
+  ASSERT_TRUE(flush_status.ok());
+  ASSERT_TRUE(write_status.ok());
+
+  RunInTestFiber([&] {
+    auto local = folly::IOBuf::create(8);
+    ASSERT_TRUE(rw.Read(8, 0, local.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(local->data()), local->length()), "AAAABBBB");
+
+    ASSERT_TRUE(rw.Flush().ok());
+    FileReadWriter reopened(kIno);
+    auto persisted = folly::IOBuf::create(8);
+    ASSERT_TRUE(reopened.Read(8, 0, persisted.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(persisted->data()), persisted->length()), "AAAABBBB");
+  });
+  vol.clear_chunk_size_for_test();
+}
+
+TEST_F(FileReadWriterTest, FailedOlderPutPreservesRepeatedWritesDuringFlush) {
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_chunk_size_for_test(kChunkSize);
+
+  auto rw = Make();
+  RunInTestFiber([&] { ASSERT_TRUE(rw.Write(Buf("AAAA"), 0).ok()); });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton put_started;
+  folly::fibers::Baton release_put;
+  folly::fibers::Baton writes_done;
+  folly::fibers::Baton flush_done;
+  mock_data_->put_status = Status::IOError("injected old-generation put failure");
+  mock_data_->BlockNextPut(&put_started, &release_put);
+
+  Status flush_status;
+  Status first_write_status;
+  Status second_write_status;
+  fm.addTask([&] {
+    flush_status = rw.Flush();
+    flush_done.post();
+  });
+  fm.addTask([&] {
+    put_started.wait();
+    first_write_status = rw.Write(Buf("BBBB"), 4);
+    second_write_status = rw.Write(Buf("CC"), 1);
+    writes_done.post();
+  });
+
+  while (!writes_done.try_wait()) {
+    evb.loopOnce();
+  }
+  ASSERT_TRUE(first_write_status.ok());
+  ASSERT_TRUE(second_write_status.ok());
+  release_put.post();
+  while (!flush_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_FALSE(flush_status.ok());
+
+  RunInTestFiber([&] {
+    auto local = folly::IOBuf::create(8);
+    ASSERT_TRUE(rw.Read(8, 0, local.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(local->data()), local->length()), "ACCABBBB");
+
+    mock_data_->put_status = Status::OK();
+    ASSERT_TRUE(rw.Flush().ok());
+    FileReadWriter reopened(kIno);
+    auto persisted = folly::IOBuf::create(8);
+    ASSERT_TRUE(reopened.Read(8, 0, persisted.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(persisted->data()), persisted->length()), "ACCABBBB");
+  });
+  vol.clear_chunk_size_for_test();
+}
+
+TEST_F(FileReadWriterTest, WriteDuringAmbiguousCommitPreservesLatestLocalGeneration) {
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_chunk_size_for_test(kChunkSize);
+
+  auto rw = Make();
+  RunInTestFiber([&] { ASSERT_TRUE(rw.Write(Buf("AAAA"), 0).ok()); });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton commit_started;
+  folly::fibers::Baton release_commit;
+  folly::fibers::Baton write_done;
+  folly::fibers::Baton flush_done;
+  mock_meta_->publish_chunk_status = Status::IOError("response lost after commit");
+  mock_meta_->publish_chunk_commit_on_error = true;
+  mock_meta_->BlockNextCommit(&commit_started, &release_commit);
+
+  Status flush_status;
+  Status write_status;
+  fm.addTask([&] {
+    flush_status = rw.Flush();
+    flush_done.post();
+  });
+  fm.addTask([&] {
+    commit_started.wait();
+    write_status = rw.Write(Buf("BBBB"), 4);
+    write_done.post();
+  });
+
+  while (!write_done.try_wait()) {
+    evb.loopOnce();
+  }
+  ASSERT_TRUE(write_status.ok());
+  release_commit.post();
+  while (!flush_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_FALSE(flush_status.ok());
+
+  RunInTestFiber([&] {
+    auto local = folly::IOBuf::create(8);
+    ASSERT_TRUE(rw.Read(8, 0, local.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(local->data()), local->length()), "AAAABBBB");
+
+    mock_meta_->publish_chunk_status = Status::OK();
+    mock_meta_->publish_chunk_commit_on_error = false;
+    ASSERT_TRUE(rw.Flush().ok());
+    FileReadWriter reopened(kIno);
+    auto persisted = folly::IOBuf::create(8);
+    ASSERT_TRUE(reopened.Read(8, 0, persisted.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(persisted->data()), persisted->length()), "AAAABBBB");
+  });
+  vol.clear_chunk_size_for_test();
+}
+
+TEST_F(FileReadWriterTest, ConcurrentFlushBarriersPublishGenerationsInOrder) {
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_chunk_size_for_test(kChunkSize);
+
+  auto rw = Make();
+  RunInTestFiber([&] { ASSERT_TRUE(rw.Write(Buf("AAAA"), 0).ok()); });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton first_put_started;
+  folly::fibers::Baton release_first_put;
+  folly::fibers::Baton write_done;
+  folly::fibers::Baton second_flush_started;
+  folly::fibers::Baton probe_done;
+  folly::fibers::Baton first_flush_done;
+  folly::fibers::Baton second_flush_done;
+  mock_data_->BlockNextPut(&first_put_started, &release_first_put);
+
+  Status first_flush_status;
+  Status second_flush_status;
+  Status write_status;
+  fm.addTask([&] {
+    first_flush_status = rw.Flush();
+    first_flush_done.post();
+  });
+  fm.addTask([&] {
+    first_put_started.wait();
+    write_status = rw.Write(Buf("BBBB"), 4);
+    write_done.post();
+  });
+  fm.addTask([&] {
+    write_done.wait();
+    second_flush_started.post();
+    second_flush_status = rw.Flush();
+    second_flush_done.post();
+  });
+  fm.addTask([&] {
+    second_flush_started.wait();
+    for (int i = 0; i < 4; ++i) {
+      folly::fibers::yield();
+    }
+    probe_done.post();
+  });
+
+  while (!probe_done.try_wait()) {
+    evb.loopOnce();
+  }
+  ASSERT_TRUE(write_status.ok());
+  EXPECT_EQ(mock_data_->put_calls, 1) << "a newer generation began publication before the older generation completed";
+
+  release_first_put.post();
+  while (!first_flush_done.try_wait() || !second_flush_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_TRUE(first_flush_status.ok());
+  EXPECT_TRUE(second_flush_status.ok());
+  EXPECT_EQ(mock_data_->put_calls, 2);
+
+  RunInTestFiber([&] {
+    FileReadWriter reopened(kIno);
+    auto persisted = folly::IOBuf::create(8);
+    ASSERT_TRUE(reopened.Read(8, 0, persisted.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(persisted->data()), persisted->length()), "AAAABBBB");
+  });
+  vol.clear_chunk_size_for_test();
+}
+
+TEST_F(FileReadWriterTest, MultiChunkFlushStartsAnotherPutWhileFirstPutIsBlocked) {
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_chunk_size_for_test(kChunkSize);
+
+  auto rw = Make();
+  RunInTestFiber([&] { ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize) + Repeat('B', kChunkSize)), 0).ok()); });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton first_put_started;
+  folly::fibers::Baton release_first_put;
+  folly::fibers::Baton second_put_started;
+  folly::fibers::Baton probe_done;
+  folly::fibers::Baton flush_done;
+  mock_data_->BlockNextPut(&first_put_started, &release_first_put, &second_put_started);
+
+  Status flush_status;
+  fm.addTask([&] {
+    flush_status = rw.Flush();
+    flush_done.post();
+  });
+  fm.addTask([&] {
+    first_put_started.wait();
+    for (int i = 0; i < 4; ++i) {
+      folly::fibers::yield();
+    }
+    probe_done.post();
+  });
+
+  while (!probe_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_TRUE(second_put_started.try_wait()) << "one chunk's remote Put serialized every chunk in the inode";
+
+  release_first_put.post();
+  while (!flush_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_TRUE(flush_status.ok());
+  EXPECT_EQ(mock_data_->put_calls, 2);
+  vol.clear_chunk_size_for_test();
+}
+
+TEST_F(FileReadWriterTest, TruncateWaitsForBlockedFlushPublication) {
+  auto &vol = swordfs::volume::VolumeImpl::Instance();
+  vol.set_chunk_size_for_test(kChunkSize);
+
+  auto rw = Make();
+  RunInTestFiber([&] { ASSERT_TRUE(rw.Write(Buf("AAAA"), 0).ok()); });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton put_started;
+  folly::fibers::Baton release_put;
+  folly::fibers::Baton truncate_started;
+  folly::fibers::Baton flush_done;
+  folly::fibers::Baton truncate_done;
+  mock_data_->BlockNextPut(&put_started, &release_put);
+
+  Status flush_status;
+  Status truncate_status;
+  fm.addTask([&] {
+    flush_status = rw.Flush();
+    flush_done.post();
+  });
+  fm.addTask([&] {
+    put_started.wait();
+    truncate_started.post();
+    truncate_status = rw.Truncate(0);
+    truncate_done.post();
+  });
+
+  while (!put_started.try_wait() || !truncate_started.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_EQ(mock_meta_->truncate_calls, 0) << "truncate raced an older publication and could be republished over EOF";
+
+  release_put.post();
+  while (!flush_done.try_wait() || !truncate_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_TRUE(flush_status.ok());
+  EXPECT_TRUE(truncate_status.ok());
+  EXPECT_EQ(mock_meta_->truncate_calls, 1);
   vol.clear_chunk_size_for_test();
 }
 
