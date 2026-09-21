@@ -259,15 +259,15 @@ _Only the first 200 of 3604 known gaps are shown; see `result.json`._
 
 ## Baseline metadata
 
-- SwordFS commit: `5f54cff705f3cc791f800a93fc417100f46b95cb`
+- SwordFS commit: `7ef903c05bd3a1a73b9e3055f6f05dd003b8a407`
 - pjdfstest commit: `85a8aea9e685999ef0540392fd80535f873d7ff7`
 - kernel: `6.17.0-1022-azure`
 - libfuse: `fusermount3 version: 3.18.2`
 - os: `Linux-6.17.0-1022-azure-x86_64-with-glibc2.43`
 - runner: `Linux`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/35553605837
-Recorded at: 2026-09-21T02:23:39+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/35568898271
+Recorded at: 2026-09-21T06:39:07+00:00
 
 ## Historical main-branch trend
 
@@ -277,4 +277,4 @@ Recorded at: 2026-09-21T02:23:39+00:00
 | 2026-09-20T13:53:45+00:00 | `4ad8c24be061` | PASS | 57.16% | 100.00% | 100.00% |
 | 2026-09-21T01:48:15+00:00 | `8deedcedadd0` | PASS | 58.91% | 100.00% | 100.00% |
 
-Last fully healthy baseline: `5f54cff705f3cc791f800a93fc417100f46b95cb`
+Last fully healthy baseline: `7ef903c05bd3a1a73b9e3055f6f05dd003b8a407`
