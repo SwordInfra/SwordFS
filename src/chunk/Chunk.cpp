@@ -57,10 +57,8 @@ utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf &data) {
   if (state_ == State::kFlushing && wb_ == flushing_wb_) {
     auto next = std::make_shared<WriteBuf>(max_chunk_size_);
     auto snapshot = wb_->CloneBuf();
-    auto status = next->Write(0, *snapshot);
-    if (!status.ok()) {
-      return status;
-    }
+    const auto copy_status = next->Write(0, *snapshot);
+    CHECK(copy_status.ok()) << "same-capacity COW copy must fit the destination buffer";
     wb_ = std::move(next);
   }
   auto status = wb_->Write(write_offset - StartOffset(), data);
