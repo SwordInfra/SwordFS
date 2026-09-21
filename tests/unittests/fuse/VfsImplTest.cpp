@@ -15,8 +15,11 @@
 #include <linux/fuse.h>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -29,6 +32,7 @@
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "storage/IDataEngine.hpp"
+#include "utils/FiberRuntime.hpp"
 #include "vfs/FileHandle.hpp"
 #include "vfs/InodeHandle.hpp"
 #include "vfs/Reclaimer.hpp"
@@ -46,6 +50,54 @@ using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
 using swordfs::vfs::VfsImpl;
+
+namespace {
+
+struct FuseReplyCapture {
+  fuse_ctx context{};
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool replied = false;
+  std::optional<int> error;
+  std::optional<fuse_entry_param> entry;
+
+  bool Wait() {
+    std::unique_lock lock(mutex);
+    return cv.wait_for(lock, std::chrono::seconds(5), [&] { return replied; });
+  }
+};
+
+FuseReplyCapture *CaptureFor(fuse_req_t req) {
+  return reinterpret_cast<FuseReplyCapture *>(req);
+}
+
+}  // namespace
+
+extern "C" const fuse_ctx *fuse_req_ctx(fuse_req_t req) {
+  return &CaptureFor(req)->context;
+}
+
+extern "C" int fuse_reply_err(fuse_req_t req, int err) {
+  auto *capture = CaptureFor(req);
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->error = err;
+    capture->replied = true;
+  }
+  capture->cv.notify_one();
+  return 0;
+}
+
+extern "C" int fuse_reply_entry(fuse_req_t req, const fuse_entry_param *entry) {
+  auto *capture = CaptureFor(req);
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->entry = *entry;
+    capture->replied = true;
+  }
+  capture->cv.notify_one();
+  return 0;
+}
 
 // Minimal no-op data engine. The VfsImplIntegrationTest fixture must
 // install one because every InodeHandle constructor asserts
@@ -81,10 +133,6 @@ class IOBuf;
     auto status = (call);                                                        \
     EXPECT_TRUE(status.IsNotSupported()) << #call << " => " << status.message(); \
   } while (0)
-
-TEST(VfsImplTest, Mknod) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::MkNod(1, "test", 0644, 0));
-}
 
 TEST(VfsImplTest, Fsyncdir) {
   EXPECT_NOT_SUPPORTED(VfsImpl::FSyncDir(1, 0));
@@ -273,6 +321,17 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return call_status_;
   }
+  Status MkNod(InodeID, std::string_view, uint32_t mode, uint64_t rdev, SwordFsInode *out) override {
+    ++mknod_calls_;
+    if (out) {
+      *out = {};
+      out->ino = 103;
+      out->attr.ino = 103;
+      out->attr.mode = mode;
+      out->attr.rdev = rdev;
+    }
+    return call_status_;
+  }
   Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
     if (out) {
       *out = {};
@@ -397,6 +456,10 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     return open_calls_;
   }
 
+  int mknod_calls() const {
+    return mknod_calls_;
+  }
+
   void set_get_inode_status(Status status) {
     get_inode_status_ = std::move(status);
   }
@@ -453,6 +516,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status get_inode_status_{Status::OK()};
   int lookup_calls_ = 0;
   int open_calls_ = 0;
+  int mknod_calls_ = 0;
   int get_inode_calls_ = 0;
   int get_inodes_calls_ = 0;
   size_t max_get_inodes_batch_size_ = 0;
@@ -481,6 +545,7 @@ class VfsImplIntegrationTest : public ::testing::Test {
   }
 
   void TearDown() override {
+    swordfs::utils::ShutdownFiberRuntime();
     // Reset singleton state for the next test.
     swordfs::volume::VolumeImpl::Initialize();
   }
@@ -517,6 +582,37 @@ TEST(VfsHookFactoryTest, InitResetsInodeHandleRegistryBeforeReturning) {
   swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
   stale_handle.reset();
   swordfs::volume::VolumeImpl::Initialize();
+}
+
+TEST_F(VfsImplIntegrationTest, FuseMknodRepliesWithAuthoritativeEntry) {
+  FuseReplyCapture capture;
+  capture.context.uid = 1000;
+  capture.context.gid = 100;
+  constexpr dev_t kDevice = static_cast<dev_t>(0x1234);
+
+  swordfs::fuse::VfsHookFactory::SwordFsMknod(reinterpret_cast<fuse_req_t>(&capture), 1, "char-device", S_IFCHR | 0620,
+                                              kDevice);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_FALSE(capture.error.has_value());
+  ASSERT_TRUE(capture.entry.has_value());
+  EXPECT_EQ(capture.entry->ino, 103U);
+  EXPECT_EQ(capture.entry->attr.st_mode, static_cast<mode_t>(S_IFCHR | 0620));
+  EXPECT_EQ(capture.entry->attr.st_rdev, kDevice);
+  EXPECT_EQ(mock_meta_->mknod_calls(), 1);
+}
+
+TEST_F(VfsImplIntegrationTest, FuseMknodRepliesWithErrnoOnMetadataFailure) {
+  mock_meta_->set_status(Status::AlreadyExists("duplicate"));
+  FuseReplyCapture capture;
+
+  swordfs::fuse::VfsHookFactory::SwordFsMknod(reinterpret_cast<fuse_req_t>(&capture), 1, "fifo", S_IFIFO | 0600, 0);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, EEXIST);
+  EXPECT_FALSE(capture.entry.has_value());
+  EXPECT_EQ(mock_meta_->mknod_calls(), 1);
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, UnlinkDoesNotPerformASeparateLookup) {
@@ -1115,6 +1211,29 @@ FIBER_TEST_F(VfsImplIntegrationTest, CreateEstablishesHandleWithoutReopeningNewI
   EXPECT_NE(fi.fh, 0u);
   EXPECT_EQ(mock_meta_->open_calls(), 0);
   ASSERT_TRUE(VfsImpl::Release(entry.ino, fi.fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, MknodReturnsAuthoritativeEntry) {
+  fuse_entry_param entry{};
+  constexpr dev_t kDevice = static_cast<dev_t>(0x1234);
+  auto status = VfsImpl::MkNod(1, "char-device", S_IFCHR | 0620, kDevice, &entry);
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(entry.ino, 103U);
+  EXPECT_EQ(entry.attr.st_ino, 103U);
+  EXPECT_EQ(entry.attr.st_mode, static_cast<mode_t>(S_IFCHR | 0620));
+  EXPECT_EQ(entry.attr.st_rdev, kDevice);
+  EXPECT_EQ(entry.attr_timeout, 1.0);
+  EXPECT_EQ(entry.entry_timeout, 1.0);
+  EXPECT_EQ(mock_meta_->mknod_calls(), 1);
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, MknodRejectsDirectorySymlinkAndUnknownTypesBeforeMetadata) {
+  fuse_entry_param entry{};
+  EXPECT_EQ(VfsImpl::MkNod(1, "directory", S_IFDIR | 0700, 0, &entry).code(), Status::kInvalidArgument);
+  EXPECT_EQ(VfsImpl::MkNod(1, "symlink", S_IFLNK | 0700, 0, &entry).code(), Status::kInvalidArgument);
+  EXPECT_EQ(VfsImpl::MkNod(1, "unknown", 0700, 0, &entry).code(), Status::kInvalidArgument);
+  EXPECT_EQ(mock_meta_->mknod_calls(), 0);
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, FtruncateRejectsReadOnlyFileHandle) {

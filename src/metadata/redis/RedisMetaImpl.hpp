@@ -37,6 +37,7 @@ class RedisMetaImpl : public IMetaEngine {
   Status GetInode(InodeID ino, SwordFsInode *out) override;
   Status GetInodes(const std::vector<InodeID> &inode_ids, std::vector<std::optional<SwordFsInode>> *out) override;
   Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
+  Status MkNod(InodeID parent_ino, std::string_view name, uint32_t mode, uint64_t rdev, SwordFsInode *out) override;
   Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status Unlink(InodeID parent_ino, std::string_view name) override;
   Status RmDir(InodeID parent_ino, std::string_view name) override;
@@ -62,7 +63,7 @@ class RedisMetaImpl : public IMetaEngine {
   Status Truncate(InodeID ino, uint64_t size) override;
 
  private:
-  Status CreateNode(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out);
+  Status CreateNode(InodeID parent_ino, std::string_view name, uint32_t mode, uint64_t rdev, SwordFsInode *out);
   void UpdateAtimeBestEffort(InodeID ino);
 
  private:

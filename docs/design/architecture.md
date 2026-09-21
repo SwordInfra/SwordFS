@@ -756,10 +756,15 @@ The architecture described above covers the implemented open-source path. Severa
 - `statx`;
 - `ioctl` and retrieve-reply handling;
 - `fsyncdir`;
-- `lseek` specialization;
-- device-node creation through `mknod`.
+- `lseek` specialization.
 
 These should not be inferred from the broad project mission as already implemented semantics.
+
+Special-node namespace creation is implemented through the low-level FUSE
+`mknod` path for regular files, FIFOs, character devices, block devices, and
+socket nodes. The authoritative type/mode/device identity is persisted by the
+metadata engine and returned in the successful FUSE entry reply; ordinary
+authorization remains owned by the kernel/FUSE boundary.
 
 The current open-source backend set is also intentionally narrower than possible future architecture:
 

@@ -96,10 +96,10 @@ class PjdfstestClassifyTest(unittest.TestCase):
         supported = MODULE.load_supported(ROOT / "conformance/pjdfstest/supported.txt")
         gaps = MODULE.load_gaps(ROOT / "conformance/pjdfstest/known-gaps.tsv")
         self.assertTrue(supported)
-        self.assertTrue(gaps)
         self.assertFalse(supported & gaps.keys())
         # The pinned upstream revision has 8,770 applicable assertions. Moving a
-        # known gap into the supported set must preserve complete classification.
+        # known gap into the supported set must preserve complete classification;
+        # a fully supported baseline may legitimately have no known gaps.
         self.assertEqual(8770, len(supported | gaps.keys()))
 
     def test_baseline_assertion_cannot_silently_become_upstream_todo(self):

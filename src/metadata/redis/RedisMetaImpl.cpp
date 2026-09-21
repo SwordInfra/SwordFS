@@ -144,7 +144,19 @@ Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t
   if (auto status = ValidateNameComponent(name); !status.ok()) {
     return status;
   }
-  return CreateNode(parent_ino, name, S_IFREG | (mode & 0777u), out);
+  return CreateNode(parent_ino, name, S_IFREG | (mode & 0777u), 0, out);
+}
+
+Status RedisMetaImpl::MkNod(InodeID parent_ino, std::string_view name, uint32_t mode, uint64_t rdev,
+                            SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
+  }
+  if (auto status = ValidateMknodMode(mode); !status.ok()) {
+    return status;
+  }
+  return CreateNode(parent_ino, name, mode, NormalizeMknodRdev(mode, rdev), out);
 }
 
 Status RedisMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
@@ -152,10 +164,11 @@ Status RedisMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t 
   if (auto status = ValidateNameComponent(name); !status.ok()) {
     return status;
   }
-  return CreateNode(parent_ino, name, S_IFDIR | (mode & 0777u), out);
+  return CreateNode(parent_ino, name, S_IFDIR | (mode & 0777u), 0, out);
 }
 
-Status RedisMetaImpl::CreateNode(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
+Status RedisMetaImpl::CreateNode(InodeID parent_ino, std::string_view name, uint32_t mode, uint64_t rdev,
+                                 SwordFsInode *out) {
   InodeID child_ino;
   // Allocate the inode ID before the metadata transaction because the ID is
   // needed to build the child record and Redis keys before EXEC. IDs only need
@@ -177,6 +190,7 @@ Status RedisMetaImpl::CreateNode(InodeID parent_ino, std::string_view name, uint
       return Status::NotDirectory("parent is not a directory");
     }
     SwordFsAttr attr(child_ino, mode, ctx.uid, parent.attr.gid);
+    attr.rdev = rdev;
     child = SwordFsInode(child_ino, attr, parent_ino);
     return txn.AddEntry(parent_ino, name, child, &parent);
   });

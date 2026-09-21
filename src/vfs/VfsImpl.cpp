@@ -10,6 +10,7 @@
 #include "config/ConfigCenter.hpp"
 #include "fuse/Limits.hpp"
 #include "metadata/IMetaEngine.hpp"
+#include "metadata/Utils.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
@@ -121,12 +122,24 @@ utils::Status VfsImpl::ReadLink(fuse_ino_t ino, std::string *target) {
   return VolumeImpl::Instance().meta_engine()->Readlink(ino, target);
 }
 
-utils::Status VfsImpl::MkNod(fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev) {
-  (void)parent;
-  (void)name;
-  (void)mode;
-  (void)rdev;
-  return Status::NotSupported("mknod");
+utils::Status VfsImpl::MkNod(fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev, fuse_entry_param *entry) {
+  if (auto status = metadata::ValidateMknodMode(static_cast<uint32_t>(mode)); !status.ok()) {
+    return status;
+  }
+
+  SwordFsInode child;
+  auto status = VolumeImpl::Instance().meta_engine()->MkNod(parent, name, static_cast<uint32_t>(mode),
+                                                            static_cast<uint64_t>(rdev), &child);
+  if (!status.ok()) {
+    return status;
+  }
+
+  *entry = {};
+  entry->ino = child.ino;
+  child.attr.ToPosixStat(&entry->attr);
+  entry->attr_timeout = 1.0;
+  entry->entry_timeout = 1.0;
+  return Status::OK();
 }
 
 utils::Status VfsImpl::MkDir(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry) {

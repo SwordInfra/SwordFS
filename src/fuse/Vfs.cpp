@@ -193,8 +193,13 @@ void VfsHookFactory::SwordFsReadlink(fuse_req_t req, fuse_ino_t ino) {
 void VfsHookFactory::SwordFsMknod(fuse_req_t req, fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev) {
   RunFuseInFiber(req, [req, parent, name = std::string(name), mode, rdev] {
     SetRequestContext(req);
-    auto status = VfsImpl::MkNod(parent, name.c_str(), mode, rdev);
-    fuse_reply_err(req, status.ToErrno());
+    fuse_entry_param entry;
+    auto status = VfsImpl::MkNod(parent, name.c_str(), mode, rdev, &entry);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    fuse_reply_entry(req, &entry);
   });
 }
 

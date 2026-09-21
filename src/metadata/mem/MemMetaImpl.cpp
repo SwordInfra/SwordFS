@@ -214,6 +214,39 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t m
   return Status::OK();
 }
 
+Status MemMetaImpl::MkNod(InodeID parent_ino, std::string_view name, uint32_t mode, uint64_t rdev, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
+  }
+  if (auto status = ValidateMknodMode(mode); !status.ok()) {
+    return status;
+  }
+
+  SwordFsInode child;
+  const uint64_t normalized_rdev = NormalizeMknodRdev(mode, rdev);
+  Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
+    SwordFsInode parent;
+    Status status = txn.LookupInode(parent_ino, &parent);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!parent.IsDir()) {
+      return Status::NotDirectory("parent is not a directory");
+    }
+    return txn.AddEntry(parent_ino, name, mode, normalized_rdev, &child);
+  });
+
+  if (!status.ok()) {
+    SWORDFS_LOG_DEBUG << "MkNod: parent=" << parent_ino << " name='" << name << "' failed: " << status.message();
+    return status;
+  }
+  if (out != nullptr) {
+    *out = child;
+  }
+  return Status::OK();
+}
+
 Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
   utils::ExpectInFiberDomain();
   if (auto status = ValidateNameComponent(name); !status.ok()) {
