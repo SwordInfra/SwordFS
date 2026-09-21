@@ -45,6 +45,10 @@ using swordfs::utils::Status;
 
 namespace {
 
+auto Buf(const std::string &value) {
+  return *folly::IOBuf::copyBuffer(value.data(), value.size());
+}
+
 // Minimal meta engine: FindChunk always returns NotFound so the chunk
 // transitions to kDirty and allocates a write buffer.
 class MissingMetaEngine final : public IMetaEngine {
@@ -161,6 +165,15 @@ class NullDataEngine final : public IDataEngine {
     return Status::OK();
   }
   Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
+    ++put_calls;
+    if (put_started_ != nullptr) {
+      auto *started = put_started_;
+      auto *release = put_release_;
+      put_started_ = nullptr;
+      put_release_ = nullptr;
+      started->post();
+      release->wait();
+    }
     return Status::OK();
   }
   Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
@@ -169,12 +182,26 @@ class NullDataEngine final : public IDataEngine {
   Status Delete(std::string_view) override {
     return Status::OK();
   }
+
+  void BlockNextPut(folly::fibers::Baton *started, folly::fibers::Baton *release) {
+    put_started_ = started;
+    put_release_ = release;
+  }
+
+  int put_calls = 0;
+
+ private:
+  folly::fibers::Baton *put_started_{nullptr};
+  folly::fibers::Baton *put_release_{nullptr};
 };
 
-void InstallEngines() {
+NullDataEngine *InstallEngines() {
   auto &vol = swordfs::volume::VolumeImpl::Instance();
   vol.set_meta_engine(std::make_unique<MissingMetaEngine>());
-  vol.set_data_engine(std::make_unique<NullDataEngine>());
+  auto data = std::make_unique<NullDataEngine>();
+  auto *raw = data.get();
+  vol.set_data_engine(std::move(data));
+  return raw;
 }
 
 template <typename Fn>
@@ -197,8 +224,10 @@ class ChunkTest : public ::testing::Test {
  protected:
   void SetUp() override {
     swordfs::volume::VolumeImpl::Initialize();
-    InstallEngines();
+    data_ = InstallEngines();
   }
+
+  NullDataEngine *data_ = nullptr;
 };
 
 TEST(ChunkObjectKeyTest, IncludesInodeIndexAndRevision) {
@@ -286,4 +315,83 @@ TEST_F(ChunkTest, TruncateToCurrentDirtySizeKeepsChunkFlushable) {
     c.Truncate(5);
     EXPECT_TRUE(c.Flushable());
   });
+}
+
+TEST_F(ChunkTest, DirtyReadRejectsNegativeOffsetWithoutAppending) {
+  RunInTestFiber([&] {
+    Chunk c(42, 0);
+    ASSERT_TRUE(c.Initialize().ok());
+    ASSERT_TRUE(c.Write(0, Buf("hello")).ok());
+
+    auto out = folly::IOBuf::create(8);
+    const auto status = c.Read(-1, 1, out.get());
+    EXPECT_EQ(status.code(), Status::kInvalidArgument);
+    EXPECT_EQ(out->length(), 0U);
+  });
+}
+
+TEST_F(ChunkTest, DirtyReadFailsClosedOnShortLocalRange) {
+  RunInTestFiber([&] {
+    Chunk c(42, 0);
+    ASSERT_TRUE(c.Initialize().ok());
+    ASSERT_TRUE(c.Write(0, Buf("hello")).ok());
+
+    auto out = folly::IOBuf::create(8);
+    const auto status = c.Read(0, 8, out.get());
+    EXPECT_EQ(status.code(), Status::kIOError);
+    EXPECT_EQ(out->length(), 0U);
+  });
+}
+
+TEST_F(ChunkTest, SuccessfulFlushBecomesCleanAndSecondFlushIsNoOp) {
+  RunInTestFiber([&] {
+    Chunk c(42, 0);
+    ASSERT_TRUE(c.Initialize().ok());
+    ASSERT_TRUE(c.Write(0, Buf("hello")).ok());
+    ASSERT_TRUE(c.Flush().ok());
+    EXPECT_TRUE(c.IsClean());
+    EXPECT_EQ(data_->put_calls, 1);
+
+    EXPECT_TRUE(c.Flush().ok());
+    EXPECT_EQ(data_->put_calls, 1);
+  });
+}
+
+TEST_F(ChunkTest, ConcurrentFlushOnSameChunkReturnsBusy) {
+  Chunk c(42, 0);
+  RunInTestFiber([&] {
+    ASSERT_TRUE(c.Initialize().ok());
+    ASSERT_TRUE(c.Write(0, Buf("hello")).ok());
+  });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton put_started;
+  folly::fibers::Baton release_put;
+  folly::fibers::Baton first_done;
+  folly::fibers::Baton second_done;
+  data_->BlockNextPut(&put_started, &release_put);
+
+  Status first_status;
+  Status second_status;
+  fm.addTask([&] {
+    first_status = c.Flush();
+    first_done.post();
+  });
+  fm.addTask([&] {
+    put_started.wait();
+    second_status = c.Flush();
+    second_done.post();
+  });
+
+  while (!second_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_EQ(second_status.code(), Status::kBusy);
+  release_put.post();
+  while (!first_done.try_wait()) {
+    evb.loopOnce();
+  }
+  EXPECT_TRUE(first_status.ok());
+  RunInTestFiber([&] { EXPECT_TRUE(c.IsClean()); });
 }
