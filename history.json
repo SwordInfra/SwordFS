@@ -1153,5 +1153,110 @@
     "supported_set_size": 5166,
     "swordfs_commit": "7ef903c05bd3a1a73b9e3055f6f05dd003b8a407",
     "timestamp": "2026-09-21T06:39:07+00:00"
+  },
+  {
+    "blocking_count": 0,
+    "by_category": {
+      "chflags": {
+        "applicable": 14,
+        "pass": 14,
+        "support_percent": 100.0
+      },
+      "chmod": {
+        "applicable": 327,
+        "pass": 199,
+        "support_percent": 60.85626911314985
+      },
+      "chown": {
+        "applicable": 1470,
+        "pass": 650,
+        "support_percent": 44.21768707482993
+      },
+      "ftruncate": {
+        "applicable": 89,
+        "pass": 89,
+        "support_percent": 100.0
+      },
+      "granular": {
+        "applicable": 7,
+        "pass": 7,
+        "support_percent": 100.0
+      },
+      "link": {
+        "applicable": 359,
+        "pass": 199,
+        "support_percent": 55.43175487465181
+      },
+      "mkdir": {
+        "applicable": 118,
+        "pass": 95,
+        "support_percent": 80.50847457627118
+      },
+      "mkfifo": {
+        "applicable": 120,
+        "pass": 51,
+        "support_percent": 42.5
+      },
+      "mknod": {
+        "applicable": 186,
+        "pass": 65,
+        "support_percent": 34.946236559139784
+      },
+      "open": {
+        "applicable": 337,
+        "pass": 258,
+        "support_percent": 76.55786350148368
+      },
+      "posix_fallocate": {
+        "applicable": 1,
+        "pass": 1,
+        "support_percent": 100.0
+      },
+      "rename": {
+        "applicable": 4857,
+        "pass": 2905,
+        "support_percent": 59.810582664196005
+      },
+      "rmdir": {
+        "applicable": 145,
+        "pass": 126,
+        "support_percent": 86.89655172413794
+      },
+      "symlink": {
+        "applicable": 95,
+        "pass": 87,
+        "support_percent": 91.57894736842105
+      },
+      "truncate": {
+        "applicable": 84,
+        "pass": 84,
+        "support_percent": 100.0
+      },
+      "unlink": {
+        "applicable": 439,
+        "pass": 247,
+        "support_percent": 56.264236902050115
+      },
+      "utimensat": {
+        "applicable": 122,
+        "pass": 102,
+        "support_percent": 83.60655737704919
+      }
+    },
+    "classified_rate_percent": 100.0,
+    "counts": {
+      "KNOWN_SEMANTIC_DEFECT": 42,
+      "KNOWN_UNSUPPORTED": 3549,
+      "PASS": 5179,
+      "UPSTREAM_NOT_APPLICABLE": 28
+    },
+    "overall_support_percent": 59.05359179019384,
+    "pjdfstest_commit": "85a8aea9e685999ef0540392fd80535f873d7ff7",
+    "run_url": "https://github.com/SwordInfra/SwordFS/actions/runs/35575387926",
+    "status": "PASS",
+    "supported_regression_pass_percent": 100.0,
+    "supported_set_size": 5179,
+    "swordfs_commit": "a2eeba4b9d3c65ff3ed1e32ab09ebe77ec7fdd86",
+    "timestamp": "2026-09-21T08:03:26+00:00"
   }
 ]
