@@ -125,6 +125,13 @@ assertion may still fail for a different reason. Such assertions must be moved
 to the newly demonstrated root cause instead of remaining hidden behind the
 old Issue classification.
 
+The same re-attribution rule applies even when no implementation change makes an
+assertion pass. If raw TAP evidence shows that a failure is only a downstream
+consequence of another unsupported prerequisite or defect, the baseline must
+move that assertion to the actual prerequisite Issue immediately. A still-red
+assertion is not evidence that its previous root-cause classification remains
+valid.
+
 Updating the pinned pjdfstest revision is an explicit reviewable change. Run
 the new revision, inspect the baseline delta, classify added/changed assertions,
 and only then update the baseline.
