@@ -8,7 +8,10 @@
 // but stay within what the chunk thinks is "in range" return EINVAL
 // even though the chunk is in kDirty state.
 
+#include <folly/fibers/Baton.h>
+#include <folly/fibers/FiberManagerMap.h>
 #include <folly/io/IOBuf.h>
+#include <folly/io/async/EventBase.h>
 #include <gtest/gtest.h>
 
 #include <limits>
@@ -174,6 +177,20 @@ void InstallEngines() {
   vol.set_data_engine(std::make_unique<NullDataEngine>());
 }
 
+template <typename Fn>
+void RunInTestFiber(Fn &&fn) {
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton done;
+  fm.addTask([&] {
+    fn();
+    done.post();
+  });
+  while (!done.try_wait()) {
+    evb.loopOnce();
+  }
+}
+
 }  // namespace
 
 class ChunkTest : public ::testing::Test {
@@ -225,48 +242,48 @@ TEST(SwordFsChunkDescriptorTest, ValidatesCanonicalFixedSizeIdentity) {
 TEST_F(ChunkTest, WriteAtChunkIndexOneStaysWithinCapacity) {
   swordfs::volume::VolumeImpl::Instance().set_chunk_size_for_test(1024);
 
-  Chunk c(/*ino=*/42, /*index=*/1);
-  ASSERT_TRUE(c.Initialize().ok());
-
-  // Writing up to (but not exceeding) the chunk's capacity must
-  // succeed at chunk-relative offset 0, which corresponds to
-  // file offset = 1 * 1024 = 1024.
-  auto buf = *folly::IOBuf::copyBuffer("hello", 5);
-  EXPECT_TRUE(c.Write(1024, buf).ok()) << "Chunk::Write at file offset 1024 (chunk-relative 0) "
-                                          "must succeed when chunk_size=1024";
+  RunInTestFiber([&] {
+    Chunk c(/*ino=*/42, /*index=*/1);
+    ASSERT_TRUE(c.Initialize().ok());
+    auto buf = *folly::IOBuf::copyBuffer("hello", 5);
+    EXPECT_TRUE(c.Write(1024, buf).ok()) << "Chunk::Write at file offset 1024 (chunk-relative 0) "
+                                            "must succeed when chunk_size=1024";
+  });
 }
 
 TEST_F(ChunkTest, WriteBeyondChunkCapacityIsRejected) {
   swordfs::volume::VolumeImpl::Instance().set_chunk_size_for_test(1024);
 
-  Chunk c(42, 0);
-  ASSERT_TRUE(c.Initialize().ok());
-
-  // One byte over the chunk's 1024-byte capacity must fail loudly.
-  std::string too_big(1025, 'x');
-  auto buf = *folly::IOBuf::copyBuffer(too_big.data(), too_big.size());
-  auto status = c.Write(0, buf);
-  EXPECT_FALSE(status.ok());
-  EXPECT_EQ(status.code(), Status::kInvalidArgument);
+  RunInTestFiber([&] {
+    Chunk c(42, 0);
+    ASSERT_TRUE(c.Initialize().ok());
+    std::string too_big(1025, 'x');
+    auto buf = *folly::IOBuf::copyBuffer(too_big.data(), too_big.size());
+    auto status = c.Write(0, buf);
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.code(), Status::kInvalidArgument);
+  });
 }
 
 TEST_F(ChunkTest, EmptyDirtyChunkIsNotFlushableAndFlushIsNoOp) {
-  Chunk c(42, 0);
-  ASSERT_TRUE(c.Initialize().ok());
-
-  EXPECT_FALSE(c.Flushable());
-  EXPECT_TRUE(c.Flush().ok());
-  EXPECT_FALSE(c.IsClean());
+  RunInTestFiber([&] {
+    Chunk c(42, 0);
+    ASSERT_TRUE(c.Initialize().ok());
+    EXPECT_FALSE(c.Flushable());
+    EXPECT_TRUE(c.Flush().ok());
+    EXPECT_FALSE(c.IsClean());
+  });
 }
 
 TEST_F(ChunkTest, TruncateToCurrentDirtySizeKeepsChunkFlushable) {
   swordfs::volume::VolumeImpl::Instance().set_chunk_size_for_test(1024);
 
-  Chunk c(42, 0);
-  ASSERT_TRUE(c.Initialize().ok());
-  auto buf = *folly::IOBuf::copyBuffer("hello", 5);
-  ASSERT_TRUE(c.Write(0, buf).ok());
-
-  c.Truncate(5);
-  EXPECT_TRUE(c.Flushable());
+  RunInTestFiber([&] {
+    Chunk c(42, 0);
+    ASSERT_TRUE(c.Initialize().ok());
+    auto buf = *folly::IOBuf::copyBuffer("hello", 5);
+    ASSERT_TRUE(c.Write(0, buf).ok());
+    c.Truncate(5);
+    EXPECT_TRUE(c.Flushable());
+  });
 }

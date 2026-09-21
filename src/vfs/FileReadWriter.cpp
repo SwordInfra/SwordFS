@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "chunk/Chunk.hpp"
+#include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "utils/Logging.hpp"
 #include "vfs/Reclaimer.hpp"
@@ -79,6 +80,47 @@ class MultiChunkReadWriter {
   std::vector<std::unique_ptr<Pending>> ops_;
 };
 
+class MultiChunkFlusher {
+ public:
+  using Status = utils::Status;
+
+  void Submit(std::shared_ptr<chunk::Chunk> chunk) {
+    auto pending = std::make_unique<Pending>();
+    pending->index = chunk->index();
+    auto &fm = folly::fibers::FiberManager::getFiberManager();
+    fm.addTask([chunk = std::move(chunk), raw = pending.get()] {
+      raw->status = chunk->Flush();
+      raw->baton.post();
+    });
+    ops_.push_back(std::move(pending));
+  }
+
+  Status Collect(metadata::InodeID ino) {
+    for (auto &pending : ops_) {
+      pending->baton.wait();
+    }
+    Status first_error;
+    for (auto &pending : ops_) {
+      if (!pending->status.ok()) {
+        SWORDFS_LOG_ERROR << "FileReadWriter::Flush chunk FAILED: ino=" << ino << " chunk=" << pending->index << " — "
+                          << pending->status.message();
+        if (first_error.ok()) {
+          first_error = pending->status;
+        }
+      }
+    }
+    return first_error;
+  }
+
+ private:
+  struct Pending {
+    folly::fibers::Baton baton;
+    metadata::ChunkIndex index = 0;
+    Status status;
+  };
+  std::vector<std::unique_ptr<Pending>> ops_;
+};
+
 }  // namespace
 
 // ────────────────────────────────────────────────────────────────
@@ -91,17 +133,25 @@ utils::Status FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_mis
     return utils::Status::InvalidArgument("FileChunkManager::Get output is null");
   }
   out->reset();
-  std::lock_guard<utils::FiberMutex> lock(mutex_);
-  auto it = chunks_.find(idx);
-  if (it != chunks_.end()) {
-    *out = it->second;
-    return utils::Status::OK();
+  {
+    std::lock_guard<utils::FiberMutex> lock(mutex_);
+    auto it = chunks_.find(idx);
+    if (it != chunks_.end()) {
+      *out = it->second;
+      return utils::Status::OK();
+    }
   }
-  // Not cached — try lazy-load from metadata engine.
+
   auto chunk = std::make_shared<chunk::Chunk>(ino_, idx);
   auto status = chunk->Initialize();
   if (!status.ok()) {
     return status;
+  }
+
+  std::lock_guard<utils::FiberMutex> lock(mutex_);
+  auto it = chunks_.find(idx);
+  if (it != chunks_.end()) {
+    *out = it->second;
   } else if (chunk->IsClean() || create_if_missing) {
     it = chunks_.try_emplace(idx, std::move(chunk)).first;
     *out = it->second;
@@ -152,7 +202,7 @@ FileReadWriter::FileReadWriter(InodeID ino)
 // ────────────────────────────────────────────────────────────────
 
 utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
-  std::lock_guard<utils::FiberRWMutex> operation_lock(operation_mutex_);
+  std::shared_lock<utils::FiberRWMutex> operation_lock(operation_mutex_);
   SWORDFS_LOG_DEBUG << "FileReadWriter::Write: ino=" << ino_ << " size=" << buf.length() << " off=" << off;
   const size_t write_size = buf.length();
   size_t remaining = buf.length();
@@ -185,7 +235,9 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
   }
   if (write_size != 0) {
     const auto write_end = static_cast<uint64_t>(cur_off);
+    std::lock_guard<utils::FiberMutex> live_size_lock(live_size_mutex_);
     live_size_ = std::max(live_size_.value_or(0), write_end);
+    ++write_epoch_;
   }
   return Status::OK();
 }
@@ -270,6 +322,7 @@ void LiveAttrGuard::Apply(metadata::SwordFsInode &inode) const {
 }
 
 void FileReadWriter::ApplyLiveSize(metadata::SwordFsInode *inode) const {
+  std::lock_guard<utils::FiberMutex> live_size_lock(live_size_mutex_);
   if (inode != nullptr && live_size_.has_value()) {
     inode->attr.size = std::max(inode->attr.size, *live_size_);
   }
@@ -280,22 +333,27 @@ void FileReadWriter::ApplyLiveSize(metadata::SwordFsInode *inode) const {
 // ────────────────────────────────────────────────────────────────
 
 utils::Status FileReadWriter::Flush() {
-  std::lock_guard<utils::FiberRWMutex> operation_lock(operation_mutex_);
+  std::lock_guard<utils::FiberMutex> flush_lock(flush_mutex_);
+  std::shared_lock<utils::FiberRWMutex> operation_lock(operation_mutex_);
+  uint64_t barrier_epoch = 0;
+  {
+    std::lock_guard<utils::FiberMutex> live_size_lock(live_size_mutex_);
+    barrier_epoch = write_epoch_;
+  }
   utils::Status first_error;
   auto flushable = chunks_.GetFlushable();
-  for (const auto &c : flushable) {
-    auto idx = c->index();
-    auto status = c->Flush();
-    if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "FileReadWriter::Flush chunk FAILED: ino=" << ino_ << " chunk=" << idx << " — "
-                        << status.message();
-      if (first_error.ok()) {
-        first_error = status;
-      }
-      continue;
+  const auto &config = config::ConfigCenter::Instance();
+  const size_t max_parallel = static_cast<size_t>(std::max(1, config.storage_thread_count()));
+  for (size_t begin = 0; begin < flushable.size(); begin += max_parallel) {
+    MultiChunkFlusher flusher;
+    const size_t end = std::min(flushable.size(), begin + max_parallel);
+    for (size_t i = begin; i < end; ++i) {
+      flusher.Submit(flushable[i]);
     }
-    // Chunk stays in the map with kClean state — future reads
-    // will route through Chunk::Read() → data_->Get().
+    auto status = flusher.Collect(ino_);
+    if (!status.ok() && first_error.ok()) {
+      first_error = status;
+    }
   }
 
   if (!flushable.empty()) {
@@ -306,10 +364,10 @@ utils::Status FileReadWriter::Flush() {
   }
 
   if (first_error.ok()) {
-    // Every locally accepted dirty write is now represented by authoritative
-    // chunk/inode metadata. Keep no stale lower bound that could mask a later
-    // size change from another client.
-    live_size_.reset();
+    std::lock_guard<utils::FiberMutex> live_size_lock(live_size_mutex_);
+    if (write_epoch_ == barrier_epoch) {
+      live_size_.reset();
+    }
   }
 
   return first_error;
@@ -324,7 +382,10 @@ utils::Status FileReadWriter::Truncate(size_t size) {
   chunks_.TruncateToSize(size, chunk_size_);
   // Truncate persists the logical size synchronously; after success metadata
   // is authoritative and no transient size overlay remains necessary.
-  live_size_.reset();
+  {
+    std::lock_guard<utils::FiberMutex> live_size_lock(live_size_mutex_);
+    live_size_.reset();
+  }
   Reclaimer::Instance().Wake();
   return utils::Status::OK();
 }
@@ -339,7 +400,10 @@ utils::Status FileReadWriter::SetAttr(const metadata::SwordFsAttr &attr, metadat
   if (metadata::HasSetAttrField(fields, metadata::SetAttrField::kSize)) {
     chunks_.TruncateToSize(attr.size, chunk_size_);
     // A successful size setattr has already committed the new logical size.
-    live_size_.reset();
+    {
+      std::lock_guard<utils::FiberMutex> live_size_lock(live_size_mutex_);
+      live_size_.reset();
+    }
     Reclaimer::Instance().Wake();
   }
   ApplyLiveSize(out);

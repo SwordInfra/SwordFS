@@ -114,18 +114,19 @@ class FileReadWriter {
   InodeID ino_;
   size_t chunk_size_;
   metadata::IMetaEngine *meta_;
-  // Coordinate operations for one inode. Reads may proceed concurrently;
-  // writes, flushes, and truncates take exclusive ownership so they cannot
-  // race chunk state transitions. Fiber-aware waiting never blocks the
-  // EventBase driver thread.
+  // Ordinary data-path operations share this lock; size-changing operations
+  // take exclusive ownership because they change file-wide reachability.
   mutable utils::FiberRWMutex operation_mutex_;
+  utils::FiberMutex flush_mutex_;
   FileChunkManager chunks_;
   // A successful local write establishes a minimum visible EOF before
   // persistence catches up. Fully successful flush/truncate/setattr-size
   // makes metadata authoritative again and clears this transient lower bound.
   // Failed persistence/size mutations leave it intact because the accepted
   // local write is still not completely represented by authoritative state.
+  mutable utils::FiberMutex live_size_mutex_;
   std::optional<uint64_t> live_size_;
+  uint64_t write_epoch_ = 0;
 };
 
 class LiveAttrGuard {
