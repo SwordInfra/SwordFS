@@ -4,19 +4,19 @@ Latest run: **PASS**
 
 | Metric | Value |
 | --- | ---: |
-| Overall conformance support | 57.16% |
+| Overall conformance support | 58.91% |
 | Supported regression pass | 100.00% |
 | Classified rate | 100.00% |
-| Supported assertion count | 5013 |
+| Supported assertion count | 5166 |
 | Blocking result count | 0 |
 
 ## Classification counts
 
 | Classification | Count |
 | --- | ---: |
-| KNOWN_SEMANTIC_DEFECT | 359 |
-| KNOWN_UNSUPPORTED | 3398 |
-| PASS | 5013 |
+| KNOWN_SEMANTIC_DEFECT | 263 |
+| KNOWN_UNSUPPORTED | 3341 |
+| PASS | 5166 |
 | UPSTREAM_NOT_APPLICABLE | 28 |
 
 ## Per-category support
@@ -24,34 +24,32 @@ Latest run: **PASS**
 | Category | PASS | Applicable | Support |
 | --- | ---: | ---: | ---: |
 | chflags | 14 | 14 | 100.00% |
-| chmod | 184 | 327 | 56.27% |
-| chown | 582 | 1470 | 39.59% |
-| ftruncate | 83 | 89 | 93.26% |
+| chmod | 198 | 327 | 60.55% |
+| chown | 648 | 1470 | 44.08% |
+| ftruncate | 88 | 89 | 98.88% |
 | granular | 7 | 7 | 100.00% |
-| link | 194 | 359 | 54.04% |
+| link | 198 | 359 | 55.15% |
 | mkdir | 95 | 118 | 80.51% |
-| mkfifo | 48 | 120 | 40.00% |
-| mknod | 60 | 186 | 32.26% |
-| open | 235 | 337 | 69.73% |
+| mkfifo | 50 | 120 | 41.67% |
+| mknod | 62 | 186 | 33.33% |
+| open | 258 | 337 | 76.56% |
 | posix_fallocate | 1 | 1 | 100.00% |
-| rename | 2880 | 4857 | 59.30% |
+| rename | 2904 | 4857 | 59.79% |
 | rmdir | 125 | 145 | 86.21% |
 | symlink | 87 | 95 | 91.58% |
-| truncate | 77 | 84 | 91.67% |
+| truncate | 83 | 84 | 98.81% |
 | unlink | 246 | 439 | 56.04% |
-| utimensat | 95 | 122 | 77.87% |
+| utimensat | 102 | 122 | 83.61% |
 
 ## Known-gap Issues
 
 | Issue | Classification | Assertions | Reason |
 | --- | --- | ---: | --- |
-| [#208](https://github.com/SwordInfra/SwordFS/issues/208) | KNOWN_UNSUPPORTED | 104 | dependent assertion after unsupported special-file/FIFO/socket setup |
-| [#208](https://github.com/SwordInfra/SwordFS/issues/208) | KNOWN_UNSUPPORTED | 3294 | special-file/FIFO/socket node semantics are not implemented |
-| [#210](https://github.com/SwordInfra/SwordFS/issues/210) | KNOWN_SEMANTIC_DEFECT | 83 | permission, ownership, or sticky-directory authorization differs from POSIX |
+| [#208](https://github.com/SwordInfra/SwordFS/issues/208) | KNOWN_UNSUPPORTED | 132 | dependent assertion after unsupported special-file/FIFO/socket setup |
+| [#208](https://github.com/SwordInfra/SwordFS/issues/208) | KNOWN_UNSUPPORTED | 3209 | special-file/FIFO/socket node semantics are not implemented |
 | [#211](https://github.com/SwordInfra/SwordFS/issues/211) | KNOWN_SEMANTIC_DEFECT | 9 | overlong path components must return ENAMETOOLONG consistently |
 | [#213](https://github.com/SwordInfra/SwordFS/issues/213) | KNOWN_SEMANTIC_DEFECT | 42 | pathname resolution or namespace error/transition semantics differ from POSIX |
-| [#215](https://github.com/SwordInfra/SwordFS/issues/215) | KNOWN_SEMANTIC_DEFECT | 2 | truncate, file-size, or timestamp semantics differ from POSIX |
-| [#217](https://github.com/SwordInfra/SwordFS/issues/217) | KNOWN_SEMANTIC_DEFECT | 223 | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
+| [#217](https://github.com/SwordInfra/SwordFS/issues/217) | KNOWN_SEMANTIC_DEFECT | 212 | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
 
 ## Known-gap assertions
 
@@ -101,10 +99,6 @@ Latest run: **PASS**
 | `tests/chmod/00.t#83` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chmod/00.t#84` | KNOWN_SEMANTIC_DEFECT | [#217](https://github.com/SwordInfra/SwordFS/issues/217) | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
 | `tests/chmod/00.t#85` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
-| `tests/chmod/00.t#87` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
-| `tests/chmod/00.t#88` | KNOWN_SEMANTIC_DEFECT | [#217](https://github.com/SwordInfra/SwordFS/issues/217) | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
-| `tests/chmod/00.t#91` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
-| `tests/chmod/00.t#92` | KNOWN_SEMANTIC_DEFECT | [#217](https://github.com/SwordInfra/SwordFS/issues/217) | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
 | `tests/chmod/00.t#94` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chmod/00.t#95` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chmod/00.t#96` | KNOWN_SEMANTIC_DEFECT | [#217](https://github.com/SwordInfra/SwordFS/issues/217) | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
@@ -121,7 +115,6 @@ Latest run: **PASS**
 | `tests/chmod/00.t#107` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chmod/00.t#108` | KNOWN_SEMANTIC_DEFECT | [#217](https://github.com/SwordInfra/SwordFS/issues/217) | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
 | `tests/chmod/00.t#109` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
-| `tests/chmod/00.t#117` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chmod/01.t#5` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chmod/01.t#6` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chmod/01.t#7` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
@@ -135,15 +128,6 @@ Latest run: **PASS**
 | `tests/chmod/01.t#15` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chmod/01.t#16` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chmod/02.t#5` | KNOWN_SEMANTIC_DEFECT | [#211](https://github.com/SwordInfra/SwordFS/issues/211) | overlong path components must return ENAMETOOLONG consistently |
-| `tests/chmod/05.t#8` | KNOWN_SEMANTIC_DEFECT | [#210](https://github.com/SwordInfra/SwordFS/issues/210) | permission, ownership, or sticky-directory authorization differs from POSIX |
-| `tests/chmod/07.t#7` | KNOWN_SEMANTIC_DEFECT | [#210](https://github.com/SwordInfra/SwordFS/issues/210) | permission, ownership, or sticky-directory authorization differs from POSIX |
-| `tests/chmod/07.t#8` | KNOWN_SEMANTIC_DEFECT | [#210](https://github.com/SwordInfra/SwordFS/issues/210) | permission, ownership, or sticky-directory authorization differs from POSIX |
-| `tests/chmod/07.t#10` | KNOWN_SEMANTIC_DEFECT | [#210](https://github.com/SwordInfra/SwordFS/issues/210) | permission, ownership, or sticky-directory authorization differs from POSIX |
-| `tests/chmod/07.t#11` | KNOWN_SEMANTIC_DEFECT | [#210](https://github.com/SwordInfra/SwordFS/issues/210) | permission, ownership, or sticky-directory authorization differs from POSIX |
-| `tests/chmod/07.t#17` | KNOWN_SEMANTIC_DEFECT | [#210](https://github.com/SwordInfra/SwordFS/issues/210) | permission, ownership, or sticky-directory authorization differs from POSIX |
-| `tests/chmod/07.t#18` | KNOWN_SEMANTIC_DEFECT | [#210](https://github.com/SwordInfra/SwordFS/issues/210) | permission, ownership, or sticky-directory authorization differs from POSIX |
-| `tests/chmod/07.t#20` | KNOWN_SEMANTIC_DEFECT | [#210](https://github.com/SwordInfra/SwordFS/issues/210) | permission, ownership, or sticky-directory authorization differs from POSIX |
-| `tests/chmod/07.t#21` | KNOWN_SEMANTIC_DEFECT | [#210](https://github.com/SwordInfra/SwordFS/issues/210) | permission, ownership, or sticky-directory authorization differs from POSIX |
 | `tests/chmod/11.t#18` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chmod/11.t#19` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chmod/11.t#20` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
@@ -257,20 +241,34 @@ Latest run: **PASS**
 | `tests/chown/00.t#164` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chown/00.t#165` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 | `tests/chown/00.t#166` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
+| `tests/chown/00.t#167` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
+| `tests/chown/00.t#168` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
+| `tests/chown/00.t#170` | KNOWN_SEMANTIC_DEFECT | [#217](https://github.com/SwordInfra/SwordFS/issues/217) | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
+| `tests/chown/00.t#171` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
+| `tests/chown/00.t#172` | KNOWN_SEMANTIC_DEFECT | [#217](https://github.com/SwordInfra/SwordFS/issues/217) | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
+| `tests/chown/00.t#174` | KNOWN_SEMANTIC_DEFECT | [#217](https://github.com/SwordInfra/SwordFS/issues/217) | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
+| `tests/chown/00.t#175` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
+| `tests/chown/00.t#176` | KNOWN_SEMANTIC_DEFECT | [#217](https://github.com/SwordInfra/SwordFS/issues/217) | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
+| `tests/chown/00.t#178` | KNOWN_SEMANTIC_DEFECT | [#217](https://github.com/SwordInfra/SwordFS/issues/217) | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
+| `tests/chown/00.t#179` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
+| `tests/chown/00.t#180` | KNOWN_SEMANTIC_DEFECT | [#217](https://github.com/SwordInfra/SwordFS/issues/217) | chmod/chown metadata mutation or mode/ownership side effects differ from POSIX |
+| `tests/chown/00.t#183` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
+| `tests/chown/00.t#184` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
+| `tests/chown/00.t#185` | KNOWN_UNSUPPORTED | [#208](https://github.com/SwordInfra/SwordFS/issues/208) | special-file/FIFO/socket node semantics are not implemented |
 
-_Only the first 200 of 3757 known gaps are shown; see `result.json`._
+_Only the first 200 of 3604 known gaps are shown; see `result.json`._
 
 ## Baseline metadata
 
-- SwordFS commit: `58fdf0d9a54affc67027a4b88f33efc4918c2cc5`
+- SwordFS commit: `8deedcedadd08ddd0ddd0edb3520c0b7ea9c3888`
 - pjdfstest commit: `85a8aea9e685999ef0540392fd80535f873d7ff7`
 - kernel: `6.17.0-1022-azure`
 - libfuse: `fusermount3 version: 3.18.2`
 - os: `Linux-6.17.0-1022-azure-x86_64-with-glibc2.43`
 - runner: `Linux`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/35515618239
-Recorded at: 2026-09-20T14:16:31+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/35551748771
+Recorded at: 2026-09-21T01:48:15+00:00
 
 ## Historical main-branch trend
 
@@ -278,5 +276,6 @@ Recorded at: 2026-09-20T14:16:31+00:00
 | --- | --- | --- | ---: | ---: | ---: |
 | 2026-09-20T08:18:31+00:00 | `e844e9a8df64` | PASS | 57.14% | 100.00% | 100.00% |
 | 2026-09-20T13:53:45+00:00 | `4ad8c24be061` | PASS | 57.16% | 100.00% | 100.00% |
+| 2026-09-21T01:48:15+00:00 | `8deedcedadd0` | PASS | 58.91% | 100.00% | 100.00% |
 
-Last fully healthy baseline: `58fdf0d9a54affc67027a4b88f33efc4918c2cc5`
+Last fully healthy baseline: `8deedcedadd08ddd0ddd0edb3520c0b7ea9c3888`
