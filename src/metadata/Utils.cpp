@@ -40,6 +40,13 @@ uint32_t ModeToDt(uint32_t mode) {
   return DT_UNKNOWN;
 }
 
+utils::Status ValidateNameComponent(std::string_view name) {
+  if (name.size() > kMaxNameLength) {
+    return utils::Status::NameTooLong("name exceeds maximum length");
+  }
+  return utils::Status::OK();
+}
+
 utils::Status ParseUrlScheme(std::string_view url, std::string *scheme) {
   if (scheme == nullptr) {
     return utils::Status::InvalidArgument("URL scheme output is null");

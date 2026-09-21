@@ -161,6 +161,26 @@ FIBER_TEST_F(MemMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) {
   EXPECT_EQ(impl_->AllocateChunkRevision(nullptr).code(), Status::kInvalidArgument);
 }
 
+FIBER_TEST_F(MemMetaImplTest, NamespaceOperationsRejectOverlongNameComponents) {
+  const auto limits = impl_->GetLimits();
+  const std::string long_name(limits.max_name_length + 1, 'x');
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "file", 0644, &file).ok());
+
+  SwordFsInode found;
+  EXPECT_TRUE(impl_->Lookup(kRoot, long_name, &found).IsNameTooLong());
+  EXPECT_TRUE(impl_->Unlink(kRoot, long_name).IsNameTooLong());
+  EXPECT_TRUE(impl_->RmDir(kRoot, long_name).IsNameTooLong());
+  EXPECT_TRUE(impl_->Rename(kRoot, long_name, kRoot, "moved", RenameFlag::kNone).IsNameTooLong());
+  EXPECT_TRUE(impl_->Rename(kRoot, "file", kRoot, long_name, RenameFlag::kNone).IsNameTooLong());
+
+  EXPECT_TRUE(impl_->Create(kRoot, long_name, 0644, nullptr).IsNameTooLong());
+  EXPECT_TRUE(impl_->MkDir(kRoot, long_name, 0755, nullptr).IsNameTooLong());
+  EXPECT_TRUE(impl_->Symlink(kRoot, long_name, "target", nullptr).IsNameTooLong());
+  EXPECT_TRUE(impl_->Link(file.ino, kRoot, long_name, nullptr).IsNameTooLong());
+}
+
 // ────────────────────────────────────────────────────────────────
 // Kernel-DAC boundary
 // ────────────────────────────────────────────────────────────────

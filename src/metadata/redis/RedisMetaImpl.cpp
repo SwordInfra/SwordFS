@@ -31,7 +31,7 @@
 
 namespace swordfs::metadata {
 
-constexpr Limits kRedisLimits{.max_name_length = 255, .max_free_inodes = UINT64_MAX};
+constexpr Limits kRedisLimits{.max_name_length = kMaxNameLength, .max_free_inodes = UINT64_MAX};
 
 utils::Status RedisMetaImpl::CreateInstance(std::string_view meta_url, std::string_view volume_name,
                                             std::unique_ptr<IMetaEngine> *out) {
@@ -89,6 +89,9 @@ Limits RedisMetaImpl::GetLimits() const {
 
 Status RedisMetaImpl::Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
+  }
   return ops_.LookupEntry(parent_ino, name, out);
 }
 
@@ -138,16 +141,16 @@ Status RedisMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
 
 Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
-  if (name.size() > kRedisLimits.max_name_length) {
-    return Status::NameTooLong("file name exceeds maximum length");
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
   }
   return CreateNode(parent_ino, name, S_IFREG | (mode & 0777u), out);
 }
 
 Status RedisMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
-  if (name.size() > kRedisLimits.max_name_length) {
-    return Status::NameTooLong("directory name exceeds maximum length");
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
   }
   return CreateNode(parent_ino, name, S_IFDIR | (mode & 0777u), out);
 }
@@ -185,6 +188,9 @@ Status RedisMetaImpl::CreateNode(InodeID parent_ino, std::string_view name, uint
 
 Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
   utils::ExpectInFiberDomain();
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
+  }
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot unlink . or ..");
   }
@@ -216,6 +222,9 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
 
 Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
   utils::ExpectInFiberDomain();
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
+  }
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot remove . or ..");
   }
@@ -247,8 +256,11 @@ Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
 Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
                              std::string_view new_name, RenameFlag flags) {
   utils::ExpectInFiberDomain();
-  if (old_name.size() > kRedisLimits.max_name_length || new_name.size() > kRedisLimits.max_name_length) {
-    return Status::NameTooLong("file name exceeds maximum length");
+  if (auto status = ValidateNameComponent(old_name); !status.ok()) {
+    return status;
+  }
+  if (auto status = ValidateNameComponent(new_name); !status.ok()) {
+    return status;
   }
   if (old_name == "." || old_name == ".." || new_name == "." || new_name == "..") {
     return Status::Busy("cannot rename . or ..");
@@ -355,8 +367,8 @@ Status RedisMetaImpl::StatFs(SwordFsStatFs *stbuf) {
 
 Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
-  if (name.size() > kRedisLimits.max_name_length) {
-    return Status::NameTooLong("symlink name exceeds maximum length");
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
   }
   InodeID child_ino;
   auto status = ops_.AllocateInode(&child_ino);
@@ -387,8 +399,8 @@ Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::st
 
 Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
-  if (newname.size() > kRedisLimits.max_name_length) {
-    return Status::NameTooLong("link name exceeds maximum length");
+  if (auto status = ValidateNameComponent(newname); !status.ok()) {
+    return status;
   }
   SwordFsInode linked;
   auto status = ops_.TransactFromFiber([&](RedisMetaTxn &txn) {
