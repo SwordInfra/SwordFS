@@ -75,13 +75,13 @@ old revision eligible for rewrite cleanup underneath an in-flight read. Shared
 locking preserves concurrent reads of the same chunk; this is deliberately a
 per-chunk lifetime boundary rather than an inode-wide remote-I/O lock.
 
-The first overwrite of a clean chunk snapshots its published descriptor, drops
-the chunk lock, hydrates that immutable object, then reacquires the chunk lock
-and revalidates the descriptor/state before installing the hydrated buffer.
-Concurrent first writers may therefore perform duplicate hydration I/O, but
-only one hydrated generation is installed; a writer that loses the race applies
-its bytes to the already-installed latest local generation. This keeps remote
-hydration outside both inode-wide and chunk-exclusive critical sections.
+The first overwrite of a clean chunk keeps the per-chunk exclusive lock while
+hydrating the authoritative immutable object and installing the complete dirty
+generation. This deliberately serializes same-chunk clean reads and first
+overwrite hydration, avoids duplicate whole-chunk hydration, and pins the
+source revision until the local generation is complete. The inode operation
+lock remains shared, so unrelated chunks can hydrate and write independently;
+only same-chunk work pays this remote-I/O critical section.
 
 At most one remote publication generation is in flight per chunk. Independent
 chunks publish concurrently in batches bounded by the configured storage worker
