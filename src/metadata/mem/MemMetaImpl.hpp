@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Memory-backed IMetaEngine implementation — thin facade around MemMetaStore
-// that adds file/dir handle accounting and permission checks.  Transactions
+// that adds filesystem policy and operation-level validation. Transactions
 // are owned by the store: each method here runs as a single
 // MemMetaStore::Transact() script so every IMetaEngine operation is atomic.
 
@@ -35,7 +35,6 @@ class MemMetaImpl : public IMetaEngine {
   Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
                 RenameFlag flags) override;
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override;
-  Status Access(InodeID ino, uint32_t mask) override;
   Status Open(InodeID ino) override;
   Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) override;
   Status CompleteReclaim(InodeID ino) override;

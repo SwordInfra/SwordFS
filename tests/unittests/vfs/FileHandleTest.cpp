@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -114,9 +115,6 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
   Status StatFs(SwordFsStatFs *) override {
-    return Status::OK();
-  }
-  Status Access(InodeID, uint32_t) override {
     return Status::OK();
   }
   Status Symlink(InodeID, std::string_view, std::string_view, SwordFsInode *) override {
@@ -473,6 +471,36 @@ FIBER_TEST_F(FileHandleTest, OpenTruncateFailurePropagates) {
   EXPECT_EQ(status.code(), Status::kInternal);
 }
 
+FIBER_TEST_F(FileHandleTest, CreateRejectsNullOutput) {
+  auto status = FileHandle::Create(42, O_RDWR, nullptr);
+  EXPECT_EQ(status.code(), Status::kInvalidArgument);
+}
+
+FIBER_TEST_F(FileHandleTest, CreateRespectsReclaimFence) {
+  auto inode_handle = InodeHandleManager::Instance().Get(42, /*create_if_missing=*/true);
+  ASSERT_NE(inode_handle, nullptr);
+  ASSERT_TRUE(inode_handle->TryStartReclaim());
+
+  std::shared_ptr<FileHandle> handle;
+  auto status = FileHandle::Create(42, O_RDWR, &handle);
+  EXPECT_TRUE(status.IsNotFound()) << status.message();
+  EXPECT_EQ(handle, nullptr);
+
+  inode_handle->FinishReclaim();
+}
+
+FIBER_TEST_F(FileHandleTest, AccessModeIsPerFileHandle) {
+  std::shared_ptr<FileHandle> read_only;
+  std::shared_ptr<FileHandle> write_only;
+  ASSERT_TRUE(FileHandle::Open(42, O_RDONLY, &read_only).ok());
+  ASSERT_TRUE(FileHandle::Open(42, O_WRONLY, &write_only).ok());
+  fhs_.push_back(read_only->fh());
+  fhs_.push_back(write_only->fh());
+
+  EXPECT_FALSE(read_only->writable());
+  EXPECT_TRUE(write_only->writable());
+}
+
 // ────────────────────────────────────────────────────────────────
 // InodeHandleManager
 // ────────────────────────────────────────────────────────────────
@@ -702,9 +730,6 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status StatFs(SwordFsStatFs *) override {
-    return Status::OK();
-  }
-  Status Access(InodeID, uint32_t) override {
     return Status::OK();
   }
   Status Symlink(InodeID, std::string_view, std::string_view, SwordFsInode *) override {
@@ -937,7 +962,7 @@ FIBER_TEST_F(FileHandleTest, NonSizeSetAttrReplyPreservesLiveSize) {
   struct stat requested{};
   requested.st_mode = 0600;
   struct stat returned{};
-  ASSERT_TRUE(VfsImpl::SetAttr(7, &requested, static_cast<int>(SetAttrField::kMode), &returned).ok());
+  ASSERT_TRUE(VfsImpl::SetAttr(7, &requested, static_cast<int>(SetAttrField::kMode), std::nullopt, &returned).ok());
   EXPECT_EQ(returned.st_size, static_cast<off_t>(payload->length()));
 
   ASSERT_TRUE(handle->Release().ok());

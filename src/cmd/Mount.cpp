@@ -35,6 +35,15 @@ using namespace swordfs::config;
 
 namespace swordfs::cmd {
 
+std::vector<std::string> detail::BuildFuseExtras(std::string_view user_opts) {
+  std::vector<std::string> extras{"-o", "default_permissions"};
+  if (!user_opts.empty()) {
+    extras.push_back("-o");
+    extras.emplace_back(user_opts);
+  }
+  return extras;
+}
+
 // Mountpoint validation
 static int ValidateMountpoint(const std::string &mountpoint) {
   if (mountpoint.empty() || mountpoint[0] == '-') {
@@ -239,13 +248,11 @@ int RunMount() {
   // The low-level session loop will exit cleanly on SIGINT/SIGTERM or when
   // the filesystem is unmounted externally.
 
-  // Build FUSE arguments from --log-level (if specified)
-  std::vector<std::string> fuse_extras;
-  const std::string &opts = cfg.fuse_opts();
-  if (!opts.empty()) {
-    fuse_extras.push_back("-o");
-    fuse_extras.push_back(opts);
-  }
+  // Build mandatory and user-supplied FUSE arguments.
+  // Ordinary POSIX DAC belongs to the kernel. Keep this mandatory rather
+  // than depending on callers to remember a mount option; SwordFS metadata
+  // intentionally does not duplicate the kernel's credential engine.
+  auto fuse_extras = detail::BuildFuseExtras(cfg.fuse_opts());
   int ret = Mount(mountpoint, fuse_extras, signal_fd);
   if (ret != 0) {
     SWORDFS_PROMPT_FMT("Error: mount failed (code {})", ret);

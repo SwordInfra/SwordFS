@@ -140,9 +140,11 @@ phase is needed.
 
 Rename illustrates why watching only the source name is insufficient:
 
-1. Read source/destination parents and entries, then affected inodes. Validate
-   permissions, sticky-directory rules, type compatibility, rename flags,
-   directory emptiness where required, and cycle prevention.
+1. Read source/destination parents and entries, then affected inodes. Ordinary
+   mode-bit DAC has already been handled by Linux VFS/FUSE; retain the
+   transaction-local sticky ownership safety check, then validate type
+   compatibility, rename flags, directory emptiness where required, and cycle
+   prevention.
 2. Plan source/destination mapping changes and inode/parent attribute changes
    from that watched state. Moving a directory also changes parent relationships
    and parent link counts.

@@ -486,7 +486,7 @@ FIBER_TEST_F(RedisMetaImplTest, RenameRejectsTypeMismatchAndDirectoryCycles) {
             Status::kInvalidArgument);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, SetAttrAccessAndStatFsCoverCommonFields) {
+FIBER_TEST_F(RedisMetaImplTest, SetAttrAndStatFsCoverCommonFields) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 06755, &file).ok());
 
@@ -510,14 +510,6 @@ FIBER_TEST_F(RedisMetaImplTest, SetAttrAccessAndStatFsCoverCommonFields) {
   EXPECT_EQ(file.attr.atime, 11);
   EXPECT_EQ(file.attr.mtime, 21);
   EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), 0U);
-
-  SwordFsContext ctx;
-  ctx.uid = 123;
-  ctx.gid = 456;
-  folly::fibers::local<SwordFsContext>() = ctx;
-  EXPECT_TRUE(impl_->Access(file.ino, R_OK).ok());
-  EXPECT_TRUE(impl_->Access(file.ino, W_OK).ok());
-  EXPECT_TRUE(impl_->Access(file.ino, X_OK).IsPermission());
 
   swordfs::metadata::SwordFsStatFs stat;
   ASSERT_TRUE(impl_->StatFs(&stat).ok());
@@ -645,12 +637,12 @@ FIBER_TEST_F(RedisMetaImplTest, ReclaimKeepsLinkedInodesAndRemovesOrphans) {
   EXPECT_TRUE(impl_->CompleteReclaim(file.ino).ok());
 }
 
-FIBER_TEST_F(RedisMetaImplTest, PermissionChecksRejectMutationsForUnprivilegedCaller) {
+FIBER_TEST_F(RedisMetaImplTest, MetadataDoesNotDuplicateKernelDac) {
   SwordFsAttr root_attr;
   SwordFsInode root;
   ASSERT_TRUE(impl_->GetInode(kRootInodeId, &root).ok());
   root_attr = root.attr;
-  root_attr.mode = S_IFDIR | 0555;
+  root_attr.mode = S_IFDIR | 01000;
   ASSERT_TRUE(impl_->SetAttr(kRootInodeId, root_attr, SetAttrField::kMode, nullptr).ok());
 
   SwordFsContext ctx;
@@ -658,48 +650,58 @@ FIBER_TEST_F(RedisMetaImplTest, PermissionChecksRejectMutationsForUnprivilegedCa
   ctx.gid = 1000;
   folly::fibers::local<SwordFsContext>() = ctx;
 
-  EXPECT_TRUE(impl_->Create(kRootInodeId, "create", 0644, nullptr).IsPermission());
-  EXPECT_TRUE(impl_->MkDir(kRootInodeId, "mkdir", 0755, nullptr).IsPermission());
-  EXPECT_TRUE(impl_->Symlink(kRootInodeId, "link", "target", nullptr).IsPermission());
-
-  folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   SwordFsInode file;
   SwordFsInode dir;
-  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
-  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
-
-  folly::fibers::local<SwordFsContext>() = ctx;
-  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "file").IsPermission());
-  EXPECT_TRUE(impl_->RmDir(kRootInodeId, "dir").IsPermission());
-  EXPECT_TRUE(
-      impl_->Rename(kRootInodeId, "file", kRootInodeId, "moved", swordfs::metadata::RenameFlag::kNone).IsPermission());
-  EXPECT_TRUE(impl_->Link(file.ino, kRootInodeId, "hard", nullptr).IsPermission());
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0000, &file).ok());
+  ASSERT_TRUE(impl_->Open(file.ino).ok());
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0000, &dir).ok());
+  ASSERT_TRUE(impl_->Symlink(kRootInodeId, "link", "target", nullptr).ok());
+  ASSERT_TRUE(impl_->Link(file.ino, kRootInodeId, "hard", nullptr).ok());
+  ASSERT_TRUE(impl_->Rename(kRootInodeId, "file", kRootInodeId, "moved", swordfs::metadata::RenameFlag::kNone).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "moved").ok());
+  ASSERT_TRUE(impl_->RmDir(kRootInodeId, "dir").ok());
 }
 
-FIBER_TEST_F(RedisMetaImplTest, StickyDirectoryProtectsEntriesOwnedByOtherUsers) {
-  SwordFsInode sticky;
-  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "sticky", 0777, &sticky).ok());
-  SwordFsAttr attr = sticky.attr;
-  attr.mode = S_IFDIR | 01777;
-  ASSERT_TRUE(impl_->SetAttr(sticky.ino, attr, SetAttrField::kMode, &sticky).ok());
+FIBER_TEST_F(RedisMetaImplTest, StickyDirectoryOwnershipSafetyRemainsInMetadata) {
+  SwordFsInode sticky_unlink;
+  SwordFsInode sticky_rmdir;
+  SwordFsInode sticky_source;
+  SwordFsInode plain_dest;
+  SwordFsInode plain_source;
+  SwordFsInode sticky_dest;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "sticky-unlink", 01777, &sticky_unlink).ok());
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "sticky-rmdir", 01777, &sticky_rmdir).ok());
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "sticky-source", 01777, &sticky_source).ok());
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "plain-dest", 0777, &plain_dest).ok());
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "plain-source", 0777, &plain_source).ok());
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "sticky-dest", 01777, &sticky_dest).ok());
 
-  SwordFsContext owner;
-  owner.uid = 1001;
-  owner.gid = 1001;
-  folly::fibers::local<SwordFsContext>() = owner;
-  SwordFsInode file;
-  SwordFsInode dir;
-  ASSERT_TRUE(impl_->Create(sticky.ino, "file", 0644, &file).ok());
-  ASSERT_TRUE(impl_->MkDir(sticky.ino, "dir", 0755, &dir).ok());
+  SwordFsAttr sticky_attr;
+  sticky_attr.uid = 1000;
+  sticky_attr.mode = S_IFDIR | 01777;
+  const auto sticky_fields = SetAttrField::kUid | SetAttrField::kMode;
+  ASSERT_TRUE(impl_->SetAttr(sticky_unlink.ino, sticky_attr, sticky_fields, nullptr).ok());
+  ASSERT_TRUE(impl_->SetAttr(sticky_rmdir.ino, sticky_attr, sticky_fields, nullptr).ok());
+  ASSERT_TRUE(impl_->SetAttr(sticky_source.ino, sticky_attr, sticky_fields, nullptr).ok());
+  ASSERT_TRUE(impl_->SetAttr(sticky_dest.ino, sticky_attr, sticky_fields, nullptr).ok());
 
-  SwordFsContext other;
-  other.uid = 1002;
-  other.gid = 1002;
-  folly::fibers::local<SwordFsContext>() = other;
-  EXPECT_TRUE(impl_->Unlink(sticky.ino, "file").IsPermission());
-  EXPECT_TRUE(impl_->RmDir(sticky.ino, "dir").IsPermission());
-  EXPECT_TRUE(
-      impl_->Rename(sticky.ino, "file", sticky.ino, "other", swordfs::metadata::RenameFlag::kNone).IsPermission());
+  ASSERT_TRUE(impl_->Create(sticky_unlink.ino, "file", 0644, nullptr).ok());
+  ASSERT_TRUE(impl_->MkDir(sticky_rmdir.ino, "subdir", 0755, nullptr).ok());
+  ASSERT_TRUE(impl_->Create(sticky_source.ino, "source", 0644, nullptr).ok());
+  ASSERT_TRUE(impl_->Create(plain_source.ino, "source", 0644, nullptr).ok());
+  ASSERT_TRUE(impl_->Create(sticky_dest.ino, "target", 0644, nullptr).ok());
+
+  SwordFsContext ctx;
+  ctx.uid = 2000;
+  ctx.gid = 2000;
+  folly::fibers::local<SwordFsContext>() = ctx;
+
+  EXPECT_TRUE(impl_->Unlink(sticky_unlink.ino, "file").IsPermission());
+  EXPECT_TRUE(impl_->RmDir(sticky_rmdir.ino, "subdir").IsPermission());
+  EXPECT_TRUE(impl_->Rename(sticky_source.ino, "source", plain_dest.ino, "moved", swordfs::metadata::RenameFlag::kNone)
+                  .IsPermission());
+  EXPECT_TRUE(impl_->Rename(plain_source.ino, "source", sticky_dest.ino, "target", swordfs::metadata::RenameFlag::kNone)
+                  .IsPermission());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, RenameExchangeDirectoriesAcrossParentsUpdatesParents) {
@@ -1074,7 +1076,6 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedParentMetadataIsRejectedAcrossMutatingO
   EXPECT_TRUE(impl_->RmDir(kRootInodeId, "x").IsMalformed());
   EXPECT_TRUE(impl_->Rename(kRootInodeId, "x", kRootInodeId, "y", swordfs::metadata::RenameFlag::kNone).IsMalformed());
   EXPECT_TRUE(impl_->Symlink(kRootInodeId, "x", "target", nullptr).IsMalformed());
-  EXPECT_TRUE(impl_->Access(kRootInodeId, R_OK).IsMalformed());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, MalformedInodeMetadataIsRejectedAcrossReadAndWriteOperations) {
@@ -1095,7 +1096,6 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedInodeMetadataIsRejectedAcrossReadAndWri
   EXPECT_TRUE(
       impl_->Rename(kRootInodeId, "file", kRootInodeId, "moved", swordfs::metadata::RenameFlag::kNone).IsMalformed());
   EXPECT_TRUE(impl_->SetAttr(file.ino, attr, SetAttrField::kMode, nullptr).IsMalformed());
-  EXPECT_TRUE(impl_->Access(file.ino, R_OK).IsMalformed());
   EXPECT_TRUE(impl_->Link(file.ino, kRootInodeId, "hard", nullptr).IsMalformed());
   EXPECT_TRUE(impl_->Readlink(file.ino, &target).IsMalformed());
   EXPECT_TRUE(impl_->Open(file.ino).IsMalformed());
@@ -1342,7 +1342,6 @@ FIBER_TEST_F(RedisMetaImplTest, MissingMetadataReturnsNotFoundConsistently) {
   EXPECT_TRUE(
       impl_->Rename(kRootInodeId, "missing", kRootInodeId, "y", swordfs::metadata::RenameFlag::kNone).IsNotFound());
   EXPECT_TRUE(impl_->SetAttr(kMissingIno, attr, SetAttrField::kMode, nullptr).IsNotFound());
-  EXPECT_TRUE(impl_->Access(kMissingIno, R_OK).IsNotFound());
   EXPECT_TRUE(impl_->Symlink(kMissingIno, "x", "target", nullptr).IsNotFound());
   EXPECT_TRUE(impl_->Link(kMissingIno, kRootInodeId, "x", nullptr).IsNotFound());
   EXPECT_TRUE(impl_->Readlink(kMissingIno, &target).IsNotFound());
@@ -1351,7 +1350,7 @@ FIBER_TEST_F(RedisMetaImplTest, MissingMetadataReturnsNotFoundConsistently) {
   EXPECT_TRUE(impl_->Truncate(kMissingIno, 1).IsNotFound());
 }
 
-FIBER_TEST_F(RedisMetaImplTest, RenameChecksNewParentAndNonEmptyTargetDirectory) {
+FIBER_TEST_F(RedisMetaImplTest, RenameRejectsNonEmptyTargetDirectory) {
   SwordFsInode source_parent;
   SwordFsInode source;
   SwordFsInode target_parent;
@@ -1366,17 +1365,6 @@ FIBER_TEST_F(RedisMetaImplTest, RenameChecksNewParentAndNonEmptyTargetDirectory)
   EXPECT_TRUE(
       impl_->Rename(source_parent.ino, "source", target_parent.ino, "target", swordfs::metadata::RenameFlag::kNone)
           .IsNotEmpty());
-
-  SwordFsAttr attr = target_parent.attr;
-  attr.mode = S_IFDIR | 0555;
-  ASSERT_TRUE(impl_->SetAttr(target_parent.ino, attr, SetAttrField::kMode, nullptr).ok());
-  SwordFsContext ctx;
-  ctx.uid = 2000;
-  ctx.gid = 2000;
-  folly::fibers::local<SwordFsContext>() = ctx;
-  EXPECT_TRUE(
-      impl_->Rename(source_parent.ino, "source", target_parent.ino, "moved", swordfs::metadata::RenameFlag::kNone)
-          .IsPermission());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, CreatePreservesRequestUidAcrossRedisWorker) {
@@ -1399,17 +1387,6 @@ FIBER_TEST_F(RedisMetaImplTest, CreatePreservesRequestUidAcrossRedisWorker) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(child.ino, "file", 0600, &file).ok());
   EXPECT_EQ(file.attr.uid, 1234U);
-  EXPECT_TRUE(impl_->Access(file.ino, R_OK | W_OK).ok());
-}
-
-FIBER_TEST_F(RedisMetaImplTest, OpenRejectsUnreadableRegularFile) {
-  SwordFsInode file;
-  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0600, &file).ok());
-  SwordFsContext ctx;
-  ctx.uid = 1234;
-  ctx.gid = 1234;
-  folly::fibers::local<SwordFsContext>() = ctx;
-  EXPECT_TRUE(impl_->Open(file.ino).IsPermission());
 }
 
 TEST_F(RedisMetaImplTest, LoadVolumeUsesVolumeMetadataAndValidatesName) {

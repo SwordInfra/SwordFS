@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,7 +34,8 @@ class VfsImpl {
  public:
   static utils::Status Lookup(fuse_ino_t parent, const char *name, fuse_entry_param *entry);
   static utils::Status GetAttr(fuse_ino_t ino, struct stat *attr);
-  static utils::Status SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, struct stat *out_attr);
+  static utils::Status SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, std::optional<uint64_t> fh,
+                               struct stat *out_attr);
   static utils::Status ReadLink(fuse_ino_t ino, std::string *target);
   static utils::Status MkNod(fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev);
   static utils::Status MkDir(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry);
@@ -60,7 +62,6 @@ class VfsImpl {
   static utils::Status GetXAttr(fuse_ino_t ino, const char *name, size_t size);
   static utils::Status ListXAttr(fuse_ino_t ino, size_t size);
   static utils::Status RemoveXAttr(fuse_ino_t ino, const char *name);
-  static utils::Status Access(fuse_ino_t ino, int mask);
   static utils::Status Create(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry,
                               struct fuse_file_info *fi);
   static utils::Status IoCtl(fuse_ino_t ino, int cmd, void *arg, struct fuse_file_info *fi, unsigned flags,

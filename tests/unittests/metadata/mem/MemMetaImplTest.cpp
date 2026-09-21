@@ -162,356 +162,82 @@ FIBER_TEST_F(MemMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Create permission checks
+// Kernel-DAC boundary
 // ────────────────────────────────────────────────────────────────
 
-FIBER_TEST_F(MemMetaImplTest, CreateOwnerWithWriteAndExecSucceeds) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
-  SetContext(kOwner, kOtherGroup);
-
-  SwordFsInode inode;
-  Status st = impl_->Create(dir_ino, "f", 0644, &inode);
-  EXPECT_TRUE(st.ok()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, CreateOwnerWithoutWriteFails) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0500);  // r-x, no write
-  SetContext(kOwner, kOtherGroup);
-
-  SwordFsInode inode;
-  Status st = impl_->Create(dir_ino, "f", 0644, &inode);
-  EXPECT_TRUE(st.IsPermission()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, CreateOwnerWithoutExecFails) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0600);  // rw-, no exec
-  SetContext(kOwner, kOtherGroup);
-
-  SwordFsInode inode;
-  Status st = impl_->Create(dir_ino, "f", 0644, &inode);
-  EXPECT_TRUE(st.IsPermission()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, CreateOwnerNoPermsFails) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0000);
-  SetContext(kOwner, kOtherGroup);
-
-  SwordFsInode inode;
-  Status st = impl_->Create(dir_ino, "f", 0644, &inode);
-  EXPECT_TRUE(st.IsPermission()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, CreateRootAlwaysSucceeds) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0000);  // no perms at all
-  SetContext(0, 0);                                  // root
-
-  SwordFsInode inode;
-  Status st = impl_->Create(dir_ino, "f", 0644, &inode);
-  EXPECT_TRUE(st.ok()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, CreateGroupMemberWithWriteExecSucceeds) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0770);
-  // kOther is NOT the owner, but IS in kGroup
-  SetDirOwner(dir_ino, kOther, kGroup);
-  SetContext(kOther, kGroup);
-
-  Status st = impl_->Create(dir_ino, "f", 0644, nullptr);
-  EXPECT_TRUE(st.ok()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, CreateGroupMemberWithoutWriteFails) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0750);  // group has r-x only
-  // Caller is in kGroup but is NOT the owner (kOwner=1000).
-  SetContext(3000, kGroup);
-
-  Status st = impl_->Create(dir_ino, "f", 0644, nullptr);
-  EXPECT_TRUE(st.IsPermission()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, CreateOtherWithWriteExecSucceeds) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0777);
-  // Not owner, not in group
-  SetDirOwner(dir_ino, kOwner, kGroup);
+FIBER_TEST_F(MemMetaImplTest, MetadataDoesNotDuplicateKernelDac) {
+  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01000);
   SetContext(kOther, kOtherGroup);
 
-  Status st = impl_->Create(dir_ino, "f", 0644, nullptr);
-  EXPECT_TRUE(st.ok()) << st.message();
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(dir_ino, "f", 0000, &file).ok());
+  ASSERT_TRUE(impl_->Open(file.ino).ok());
+  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0000, nullptr).ok());
+  ASSERT_TRUE(impl_->Symlink(dir_ino, "sym", "target", nullptr).ok());
+  ASSERT_TRUE(impl_->Link(file.ino, dir_ino, "hard", nullptr).ok());
+  ASSERT_TRUE(impl_->Rename(dir_ino, "f", dir_ino, "renamed", RenameFlag::kNone).ok());
+  ASSERT_TRUE(impl_->Unlink(dir_ino, "renamed").ok());
+  ASSERT_TRUE(impl_->RmDir(dir_ino, "sub").ok());
 }
 
-FIBER_TEST_F(MemMetaImplTest, CreateOtherWithoutWriteFails) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0755);  // other has r-x only
-  SetDirOwner(dir_ino, kOwner, kGroup);
+FIBER_TEST_F(MemMetaImplTest, StickyDirectoryOwnershipSafetyRemainsInMetadata) {
+  InodeID sticky_unlink_ino = MakeOwnedDir(kRoot, "sticky-unlink", 01777);
+  SwordFsInode unlink_target;
+  ASSERT_TRUE(impl_->Create(sticky_unlink_ino, "file", 0644, &unlink_target).ok());
+
+  InodeID sticky_rmdir_ino = MakeOwnedDir(kRoot, "sticky-rmdir", 01777);
+  ASSERT_TRUE(impl_->MkDir(sticky_rmdir_ino, "subdir", 0755, nullptr).ok());
+
+  InodeID sticky_source_ino = MakeOwnedDir(kRoot, "sticky-source", 01777);
+  InodeID plain_dest_ino = MakeOwnedDir(kRoot, "plain-dest", 0777);
+  ASSERT_TRUE(impl_->Create(sticky_source_ino, "source", 0644, nullptr).ok());
+
+  InodeID plain_source_ino = MakeOwnedDir(kRoot, "plain-source", 0777);
+  InodeID sticky_dest_ino = MakeOwnedDir(kRoot, "sticky-dest", 01777);
+  ASSERT_TRUE(impl_->Create(plain_source_ino, "source", 0644, nullptr).ok());
+  ASSERT_TRUE(impl_->Create(sticky_dest_ino, "target", 0644, nullptr).ok());
+
   SetContext(kOther, kOtherGroup);
-
-  Status st = impl_->Create(dir_ino, "f", 0644, nullptr);
-  EXPECT_TRUE(st.IsPermission()) << st.message();
+  EXPECT_TRUE(impl_->Unlink(sticky_unlink_ino, "file").IsPermission());
+  EXPECT_TRUE(impl_->RmDir(sticky_rmdir_ino, "subdir").IsPermission());
+  EXPECT_TRUE(impl_->Rename(sticky_source_ino, "source", plain_dest_ino, "moved", RenameFlag::kNone).IsPermission());
+  EXPECT_TRUE(impl_->Rename(plain_source_ino, "source", sticky_dest_ino, "target", RenameFlag::kNone).IsPermission());
 }
 
-// ────────────────────────────────────────────────────────────────
-// MkDir permission checks
-// ────────────────────────────────────────────────────────────────
-
-FIBER_TEST_F(MemMetaImplTest, MkDirPermissionDeniedWithoutWrite) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0500);  // no write for owner
+FIBER_TEST_F(MemMetaImplTest, StickyDirectoryOwnerCanUnlinkEntry) {
+  InodeID dir_ino = MakeOwnedDir(kRoot, "sticky-owner", 01700);
   SetContext(kOwner, kOtherGroup);
+  ASSERT_TRUE(impl_->Create(dir_ino, "file", 0644, nullptr).ok());
 
-  Status st = impl_->MkDir(dir_ino, "sub", 0755, nullptr);
-  EXPECT_TRUE(st.IsPermission()) << st.message();
+  EXPECT_TRUE(impl_->Unlink(dir_ino, "file").ok());
 }
 
-FIBER_TEST_F(MemMetaImplTest, MkDirRootAlwaysSucceeds) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0000);
+FIBER_TEST_F(MemMetaImplTest, StickyEntryOwnerCanUnlinkFromAnotherOwnersDirectory) {
+  InodeID dir_ino = MakeOwnedDir(kRoot, "sticky-file-owner", 01777);
+  SetDirOwner(dir_ino, kOther, kGroup);
+  SetContext(kOwner, kOtherGroup);
+  ASSERT_TRUE(impl_->Create(dir_ino, "file", 0644, nullptr).ok());
+
+  EXPECT_TRUE(impl_->Unlink(dir_ino, "file").ok());
+}
+
+FIBER_TEST_F(MemMetaImplTest, RootCanUnlinkFromStickyDirectory) {
+  InodeID dir_ino = MakeOwnedDir(kRoot, "sticky-root", 01777);
+  SetDirOwner(dir_ino, kOther, kGroup);
+  SetContext(kOwner, kOtherGroup);
+  ASSERT_TRUE(impl_->Create(dir_ino, "file", 0644, nullptr).ok());
+
   SetContext(0, 0);
-
-  Status st = impl_->MkDir(dir_ino, "sub", 0755, nullptr);
-  EXPECT_TRUE(st.ok()) << st.message();
+  EXPECT_TRUE(impl_->Unlink(dir_ino, "file").ok());
 }
 
-// ────────────────────────────────────────────────────────────────
-// Access permission checks
-// ────────────────────────────────────────────────────────────────
-
-FIBER_TEST_F(MemMetaImplTest, AccessOwnerPermissions) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);  // owner rwx
-  SetContext(kOwner, kOtherGroup);
-
-  EXPECT_TRUE(impl_->Access(dir_ino, R_OK).ok());
-  EXPECT_TRUE(impl_->Access(dir_ino, W_OK).ok());
-  EXPECT_TRUE(impl_->Access(dir_ino, X_OK).ok());
-  EXPECT_TRUE(impl_->Access(dir_ino, R_OK | W_OK).ok());
-}
-
-FIBER_TEST_F(MemMetaImplTest, AccessOwnerReadOnly) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0400);  // owner r--
-  SetContext(kOwner, kOtherGroup);
-
-  EXPECT_TRUE(impl_->Access(dir_ino, R_OK).ok());
-  EXPECT_TRUE(impl_->Access(dir_ino, W_OK).IsPermission());
-  EXPECT_TRUE(impl_->Access(dir_ino, X_OK).IsPermission());
-}
-
-FIBER_TEST_F(MemMetaImplTest, AccessGroupPermissions) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0070);  // group rwx
-  SetDirOwner(dir_ino, kOther, kGroup);
-  // Caller is NOT the owner (kOther=2000), but IS in kGroup (100).
-  SetContext(3000, kGroup);
-
-  EXPECT_TRUE(impl_->Access(dir_ino, R_OK).ok());
-  EXPECT_TRUE(impl_->Access(dir_ino, W_OK).ok());
-  EXPECT_TRUE(impl_->Access(dir_ino, X_OK).ok());
-}
-
-FIBER_TEST_F(MemMetaImplTest, AccessOtherPermissions) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0007);  // other rwx
-  SetDirOwner(dir_ino, kOwner, kGroup);
-  SetContext(kOther, kOtherGroup);
-
-  EXPECT_TRUE(impl_->Access(dir_ino, R_OK).ok());
-  EXPECT_TRUE(impl_->Access(dir_ino, W_OK).ok());
-  EXPECT_TRUE(impl_->Access(dir_ino, X_OK).ok());
-}
-
-FIBER_TEST_F(MemMetaImplTest, AccessRootAlwaysHasFullAccess) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0000);  // no perms
-  SetContext(0, 0);
-
-  EXPECT_TRUE(impl_->Access(dir_ino, R_OK | W_OK | X_OK).ok());
-}
-
-FIBER_TEST_F(MemMetaImplTest, AccessNotFoundFails) {
-  SetContext(kOwner, kGroup);
-  Status st = impl_->Access(99999, R_OK);
-  EXPECT_TRUE(st.IsNotFound());
-}
-
-// ────────────────────────────────────────────────────────────────
-// Unlink permission checks
-// ────────────────────────────────────────────────────────────────
-
-FIBER_TEST_F(MemMetaImplTest, UnlinkOwnerWithWriteSucceeds) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
-  // Create a file owned by kOwner (the creator)
-  SetContext(kOwner, kOtherGroup);
-  impl_->Create(dir_ino, "f", 0644, nullptr);
-
-  EXPECT_TRUE(impl_->Unlink(dir_ino, "f").ok());
-}
-
-FIBER_TEST_F(MemMetaImplTest, UnlinkWithoutWriteOnParentFails) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
-  SetContext(kOwner, kOtherGroup);
-  impl_->Create(dir_ino, "f", 0644, nullptr);
-
-  // Remove write from parent, keep exec
-  SetDirMode(dir_ino, 0500);
-  SetContext(kOwner, kOtherGroup);
-  Status st = impl_->Unlink(dir_ino, "f");
-  EXPECT_TRUE(st.IsPermission()) << st.message();
-}
-
-// ────────────────────────────────────────────────────────────────
-// Unlink sticky-bit checks
-// ────────────────────────────────────────────────────────────────
-
-FIBER_TEST_F(MemMetaImplTest, UnlinkStickyBitOwnerCanDelete) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01700);  // sticky + rwx for owner
-  SetContext(kOwner, kOtherGroup);
-  impl_->Create(dir_ino, "f", 0644, nullptr);
-
-  // The file's owner is kOwner (since kOwner created it).
-  // kOwner is also the dir owner.
-  EXPECT_TRUE(impl_->Unlink(dir_ino, "f").ok());
-}
-
-FIBER_TEST_F(MemMetaImplTest, UnlinkStickyBitFileOwnerCanDelete) {
-  // Dir owned by kOther, sticky bit
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);  // sticky + rwx for all
-  SetDirOwner(dir_ino, kOther, kGroup);
-
-  // File owned by kOwner (created by kOwner in a writable sticky dir)
-  SetContext(kOwner, kOtherGroup);
-  impl_->Create(dir_ino, "f", 0644, nullptr);
-
-  // kOwner tries to delete their own file from kOther's sticky dir
-  EXPECT_TRUE(impl_->Unlink(dir_ino, "f").ok());
-}
-
-FIBER_TEST_F(MemMetaImplTest, UnlinkStickyBitNonOwnerCannotDelete) {
-  // Dir owned by kOther, sticky bit
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
-  SetDirOwner(dir_ino, kOther, kGroup);
-
-  // File owned by kOwner
-  SetContext(kOwner, kOtherGroup);
-  impl_->Create(dir_ino, "f", 0644, nullptr);
-
-  // Now a third user (kOther3) tries to delete kOwner's file
-  SetContext(3000, kOtherGroup);
-  Status st = impl_->Unlink(dir_ino, "f");
-  EXPECT_TRUE(st.IsPermission()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, UnlinkStickyBitRootCanDelete) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
+FIBER_TEST_F(MemMetaImplTest, StickyEntryOwnerCanRemoveOwnDirectory) {
+  InodeID dir_ino = MakeOwnedDir(kRoot, "sticky-rmdir-owner", 01777);
   SetDirOwner(dir_ino, kOther, kGroup);
   SetContext(kOwner, kOtherGroup);
-  impl_->Create(dir_ino, "f", 0644, nullptr);
+  ASSERT_TRUE(impl_->MkDir(dir_ino, "subdir", 0755, nullptr).ok());
 
-  // Root can always delete
-  SetContext(0, 0);
-  EXPECT_TRUE(impl_->Unlink(dir_ino, "f").ok());
-}
-
-// ────────────────────────────────────────────────────────────────
-// RmDir sticky-bit checks
-// ────────────────────────────────────────────────────────────────
-
-FIBER_TEST_F(MemMetaImplTest, RmDirStickyBitOwnerCanDelete) {
-  // Sticky dir owned by kOther, writable for all.
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
-  SetDirOwner(dir_ino, kOther, kGroup);
-
-  // kOwner creates a subdirectory inside (so kOwner owns the entry).
-  SetContext(kOwner, kOtherGroup);
-  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, nullptr).ok());
-
-  // The entry's owner can remove it from someone else's sticky dir.
-  EXPECT_TRUE(impl_->RmDir(dir_ino, "sub").ok());
-}
-
-FIBER_TEST_F(MemMetaImplTest, RmDirStickyBitNonOwnerCannotDelete) {
-  // Sticky dir owned by kOther, writable for all.
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 01777);
-  SetDirOwner(dir_ino, kOther, kGroup);
-
-  // kOwner creates a subdirectory inside.
-  SetContext(kOwner, kOtherGroup);
-  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, nullptr).ok());
-
-  // A third user cannot remove kOwner's subdirectory.
-  SetContext(3000, kOtherGroup);
-  Status st = impl_->RmDir(dir_ino, "sub");
-  EXPECT_TRUE(st.IsPermission()) << st.message();
-}
-
-// ────────────────────────────────────────────────────────────────
-// Rename permission checks
-// ────────────────────────────────────────────────────────────────
-
-FIBER_TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnOldParent) {
-  InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
-  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0777);  // writable for all
-  SetContext(kOwner, kOtherGroup);
-  impl_->Create(src_ino, "f", 0644, nullptr);
-
-  // Remove write from src
-  SetDirMode(src_ino, 0500);
-  SetContext(kOwner, kOtherGroup);
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
-  EXPECT_TRUE(st.IsPermission()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, RenameRequiresWriteExecOnNewParent) {
-  InodeID src_ino = MakeOwnedDir(kRoot, "src", 0777);
-  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
-  SetContext(kOwner, kOtherGroup);
-  impl_->Create(src_ino, "f", 0644, nullptr);
-
-  // Remove write from dst
-  SetDirMode(dst_ino, 0500);
-  SetContext(kOwner, kOtherGroup);
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
-  EXPECT_TRUE(st.IsPermission()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, RenameRootSucceedsRegardlessOfPerms) {
-  InodeID src_ino = MakeOwnedDir(kRoot, "src", 0000);
-  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0000);
-  SetContext(kOwner, kOtherGroup);
-  SetContext(0, 0);
-  impl_->Create(src_ino, "f", 0644, nullptr);
-
-  // Root can rename even with no perms on either parent
-  SetContext(0, 0);
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
-  EXPECT_TRUE(st.ok()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, RenameStickyBitNonOwnerCannotMoveOut) {
-  // Sticky src dir owned by kOther, writable for all; dst fully open.
-  InodeID src_ino = MakeOwnedDir(kRoot, "src", 01777);
-  SetDirOwner(src_ino, kOther, kGroup);
-  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0777);
-
-  // kOwner creates the file in the sticky src (so kOwner owns it).
-  SetContext(kOwner, kOtherGroup);
-  ASSERT_TRUE(impl_->Create(src_ino, "f", 0644, nullptr).ok());
-
-  // A third user cannot move kOwner's file out of kOther's sticky dir.
-  SetContext(3000, kOtherGroup);
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
-  EXPECT_TRUE(st.IsPermission()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, RenameStickyBitCannotOverwriteOthersFile) {
-  // dst is a sticky dir owned by kOther and already holds kOther's file;
-  // src is fully open.
-  InodeID src_ino = MakeOwnedDir(kRoot, "src", 0777);
-  InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 01777);
-  SetDirOwner(dst_ino, kOther, kGroup);
-
-  // The victim file in dst is owned by kOther.
-  SetContext(kOther, kOtherGroup);
-  ASSERT_TRUE(impl_->Create(dst_ino, "f", 0644, nullptr).ok());
-
-  // kOwner's file in src.
-  SetContext(kOwner, kOtherGroup);
-  ASSERT_TRUE(impl_->Create(src_ino, "f", 0644, nullptr).ok());
-
-  // kOwner may not overwrite kOther's file in kOther's sticky dir.
-  Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNone);
-  EXPECT_TRUE(st.IsPermission()) << st.message();
+  EXPECT_TRUE(impl_->RmDir(dir_ino, "subdir").ok());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -597,70 +323,6 @@ FIBER_TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
   // RenameFlag::kExchange: file ↔ dir → EINVAL.
   Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
   EXPECT_EQ(st.code(), swordfs::utils::Status::kInvalidArgument) << st.message();
-}
-
-// ────────────────────────────────────────────────────────────────
-// RmDir permission checks
-// ────────────────────────────────────────────────────────────────
-
-FIBER_TEST_F(MemMetaImplTest, RmDirRequiresWriteExecOnParent) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "parent", 0700);
-  SetContext(kOwner, kOtherGroup);
-  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, nullptr).ok());
-
-  // Remove write from parent
-  SetDirMode(dir_ino, 0500);
-  SetContext(kOwner, kOtherGroup);
-  Status st = impl_->RmDir(dir_ino, "sub");
-  EXPECT_TRUE(st.IsPermission()) << st.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, RmDirRootAlwaysSucceeds) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "parent", 0000);
-  SetContext(0, 0);
-  ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0755, nullptr).ok());
-
-  SetDirMode(dir_ino, 0000);
-  SetContext(0, 0);
-  EXPECT_TRUE(impl_->RmDir(dir_ino, "sub").ok());
-}
-
-// ────────────────────────────────────────────────────────────────
-// Open permission checks
-// ────────────────────────────────────────────────────────────────
-
-FIBER_TEST_F(MemMetaImplTest, OpenRequiresReadPermission) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
-  SetContext(kOwner, kOtherGroup);
-  SwordFsInode file;
-  ASSERT_TRUE(impl_->Create(dir_ino, "f", 0644, &file).ok());
-
-  // Remove read from the file owner
-  SwordFsAttr attr;
-  attr.uid = kOwner;
-  attr.gid = kOtherGroup;
-  attr.mode = S_IFREG | 0200;  // -w-------
-  impl_->SetAttr(file.ino, attr, SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kMode, nullptr);
-
-  Status status = impl_->Open(file.ino);
-  EXPECT_TRUE(status.IsPermission()) << status.message();
-}
-
-FIBER_TEST_F(MemMetaImplTest, OpenRootSucceedsWithoutReadPerm) {
-  InodeID dir_ino = MakeOwnedDir(kRoot, "d", 0700);
-  SetContext(kOwner, kOtherGroup);
-  SwordFsInode file;
-  ASSERT_TRUE(impl_->Create(dir_ino, "f", 0644, &file).ok());
-
-  // Remove all perms
-  SwordFsAttr attr;
-  attr.mode = S_IFREG | 0000;
-  SetContext(0, 0);
-  impl_->SetAttr(file.ino, attr, SetAttrField::kMode, nullptr);
-
-  SetContext(0, 0);
-  Status status = impl_->Open(file.ino);
-  EXPECT_TRUE(status.ok()) << status.message();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -922,7 +584,7 @@ FIBER_TEST_F(MemMetaImplTest, UnlinkOnHardlinkedInodeKeepsInodeAlive) {
 FIBER_TEST_F(MemMetaImplTest, OpenAcceptsUnlinkedButLiveInode) {
   // POSIX open-unlink: the directory entry is gone, but the inode
   // stays alive because some fd is still referencing it. Subsequent
-  // meta-engine calls on the ino (Open/GetInode/Access/...) must
+  // meta-engine calls on the ino (Open/GetInode/...) must
   // succeed so the VFS layer can re-open or continue to operate on
   // the fd.
   SetContext(0, 0);
@@ -936,10 +598,8 @@ FIBER_TEST_F(MemMetaImplTest, OpenAcceptsUnlinkedButLiveInode) {
   // syscalls, or any "already-have-an-fd" re-bind take. Must succeed.
   EXPECT_TRUE(impl_->Open(file.ino).ok());
 
-  // GetInode/Access must also succeed so existing fds keep working.
+  // GetInode must also succeed so existing fds keep working.
   EXPECT_TRUE(impl_->GetInode(file.ino, &file).ok());
-  EXPECT_TRUE(impl_->Access(file.ino, R_OK).ok());
-  EXPECT_TRUE(impl_->Access(file.ino, W_OK).ok());
 }
 
 // ════════════════════════════════════════════════════════════════════

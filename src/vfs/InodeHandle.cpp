@@ -26,7 +26,7 @@ utils::Status InodeHandle::Open(int flags) {
     return utils::Status::NotFound("inode is being reclaimed");
   }
 
-  // Performs the open-time permission check and atime update.
+  // Performs existing-inode validation and the atime update.
   auto meta = volume::VolumeImpl::Instance().meta_engine();
   auto status = meta->Open(ino_);
   if (!status.ok()) {
@@ -40,6 +40,13 @@ utils::Status InodeHandle::Open(int flags) {
       ReleaseRef();
       return status;
     }
+  }
+  return utils::Status::OK();
+}
+
+utils::Status InodeHandle::OpenCreated() {
+  if (!AcquireRefUnlessReclaiming()) {
+    return utils::Status::NotFound("inode is being reclaimed");
   }
   return utils::Status::OK();
 }

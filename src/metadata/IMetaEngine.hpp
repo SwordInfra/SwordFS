@@ -119,9 +119,6 @@ class IMetaEngine {
   /// Get file system statistics.
   virtual Status StatFs(SwordFsStatFs *stbuf) = 0;
 
-  /// Check access permissions.
-  virtual Status Access(InodeID ino, uint32_t mask) = 0;
-
   /// Create a symbolic link.
   virtual Status Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) = 0;
 
@@ -131,8 +128,8 @@ class IMetaEngine {
   /// Read the target of a symbolic link.
   virtual Status Readlink(InodeID ino, std::string *target) = 0;
 
-  /// Open a regular file.  Performs the permission check (regular-file
-  /// validation + read permission) and updates atime.
+  /// Open a regular file after kernel DAC authorization. Validates the inode
+  /// type and performs metadata-side open effects such as the atime update.
   virtual Status Open(InodeID ino) = 0;
 
   /// Prepare the reclaim of |ino| and return the frozen object identities

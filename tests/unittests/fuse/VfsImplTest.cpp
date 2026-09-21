@@ -12,6 +12,7 @@
 
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -256,11 +257,9 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Access(InodeID, uint32_t) override {
-    return call_status_;
-  }
   Status Open(InodeID) override {
-    return call_status_;
+    ++open_calls_;
+    return open_status_;
   }
   Status PrepareReclaim(InodeID, std::optional<swordfs::metadata::ReclaimWork> *work) override {
     work->reset();
@@ -312,6 +311,14 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     call_status_ = s;
   }
 
+  void set_open_status(Status status) {
+    open_status_ = std::move(status);
+  }
+
+  int open_calls() const {
+    return open_calls_;
+  }
+
   void set_get_inode_status(Status status) {
     get_inode_status_ = std::move(status);
   }
@@ -322,8 +329,10 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
 
  private:
   Status call_status_{Status::OK()};
+  Status open_status_{Status::OK()};
   Status get_inode_status_{Status::OK()};
   int lookup_calls_ = 0;
+  int open_calls_ = 0;
   swordfs::metadata::ChunkRevision next_revision_ = 1;
 };
 
@@ -437,28 +446,78 @@ FIBER_TEST_F(VfsImplIntegrationTest, OpenSuccess) {
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, OpenPermissionDenied) {
-  mock_meta_->set_status(Status::Permission("denied"));
+  mock_meta_->set_open_status(Status::Permission("denied"));
 
   struct fuse_file_info fi = {};
   auto status = VfsImpl::Open(42, &fi);
   EXPECT_TRUE(status.IsPermission()) << status.message();
 }
 
+FIBER_TEST_F(VfsImplIntegrationTest, CreateEstablishesHandleWithoutReopeningNewInode) {
+  // CREATE is already one kernel-authorized create+open operation. The mode
+  // of the inode just created must not be used to re-authorize that same open.
+  mock_meta_->set_open_status(Status::Permission("existing-inode open must not run"));
+
+  fuse_entry_param entry{};
+  struct fuse_file_info fi = {};
+  fi.flags = O_RDWR;
+  auto status = VfsImpl::Create(1, "new-file", 0000, &entry, &fi);
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(entry.ino, 100u);
+  EXPECT_NE(fi.fh, 0u);
+  EXPECT_EQ(mock_meta_->open_calls(), 0);
+  ASSERT_TRUE(VfsImpl::Release(entry.ino, fi.fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, FtruncateRejectsReadOnlyFileHandle) {
+  struct fuse_file_info fi = {};
+  fi.flags = O_RDONLY;
+  ASSERT_TRUE(VfsImpl::Open(42, &fi).ok());
+
+  struct stat requested = {};
+  requested.st_size = 17;
+  auto status = VfsImpl::SetAttr(42, &requested, FUSE_SET_ATTR_SIZE, fi.fh, nullptr);
+
+  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+  ASSERT_TRUE(VfsImpl::Release(42, fi.fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, FtruncateRejectsUnknownFileHandle) {
+  struct stat requested = {};
+  requested.st_size = 17;
+
+  auto status = VfsImpl::SetAttr(42, &requested, FUSE_SET_ATTR_SIZE, 999999, nullptr);
+
+  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, FtruncateAcceptsWritableFileHandle) {
+  struct fuse_file_info fi = {};
+  fi.flags = O_WRONLY;
+  ASSERT_TRUE(VfsImpl::Open(42, &fi).ok());
+
+  struct stat requested = {};
+  requested.st_size = 17;
+  auto status = VfsImpl::SetAttr(42, &requested, FUSE_SET_ATTR_SIZE, fi.fh, nullptr);
+
+  EXPECT_TRUE(status.ok()) << status.message();
+  ASSERT_TRUE(VfsImpl::Release(42, fi.fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, PathTruncateDoesNotRequireFileHandle) {
+  struct stat requested = {};
+  requested.st_size = 17;
+
+  auto status = VfsImpl::SetAttr(42, &requested, FUSE_SET_ATTR_SIZE, std::nullopt, nullptr);
+
+  EXPECT_TRUE(status.ok()) << status.message();
+}
+
 FIBER_TEST_F(VfsImplIntegrationTest, StatfsSuccess) {
   struct statvfs stbuf;
   auto status = VfsImpl::StatFs(1, &stbuf);
   EXPECT_TRUE(status.ok()) << status.message();
-}
-
-FIBER_TEST_F(VfsImplIntegrationTest, AccessSuccess) {
-  auto status = VfsImpl::Access(1, R_OK);
-  EXPECT_TRUE(status.ok()) << status.message();
-}
-
-FIBER_TEST_F(VfsImplIntegrationTest, AccessDenied) {
-  mock_meta_->set_status(Status::Permission("denied"));
-  auto status = VfsImpl::Access(1, R_OK);
-  EXPECT_TRUE(status.IsPermission()) << status.message();
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, GetattrSuccess) {

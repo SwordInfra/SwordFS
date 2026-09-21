@@ -105,21 +105,6 @@ bool SwordFsInode::IsSymlink() const {
   return S_ISLNK(attr.mode);
 }
 
-bool SwordFsInode::CheckAccess(uint64_t uid, uint64_t gid, uint32_t mask) const {
-  if (uid == 0) {
-    return true;
-  }
-  uint32_t access_bits;
-  if (static_cast<uint64_t>(uid) == attr.uid) {
-    access_bits = (attr.mode & S_IRWXU) >> 6;
-  } else if (static_cast<uint64_t>(gid) == attr.gid) {
-    access_bits = (attr.mode & S_IRWXG) >> 3;
-  } else {
-    access_bits = attr.mode & S_IRWXO;
-  }
-  return (access_bits & mask) == mask;
-}
-
 bool SwordFsInode::CheckStickyDelete(uint64_t uid, const SwordFsInode &target) const {
   if (!(attr.mode & S_ISVTX)) {
     return true;

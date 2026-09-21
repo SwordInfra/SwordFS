@@ -168,9 +168,6 @@ Status RedisMetaImpl::CreateNode(InodeID parent_ino, std::string_view name, uint
     if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
     }
-    if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on parent");
-    }
     SwordFsAttr attr(child_ino, mode, ctx.uid, parent.attr.gid);
     child = SwordFsInode(child_ino, attr, parent_ino);
     return txn.AddEntry(parent_ino, name, child, &parent);
@@ -195,9 +192,6 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
     }
     if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
-    }
-    if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on parent");
     }
     SwordFsInode child;
     status = txn.LookupEntry(parent, name, &child);
@@ -229,9 +223,6 @@ Status RedisMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
     }
     if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
-    }
-    if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on parent");
     }
     SwordFsInode child;
     status = txn.LookupEntry(parent, name, &child);
@@ -293,13 +284,6 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     if (!new_parent_ptr->IsDir()) {
       return Status::NotDirectory("new parent is not a directory");
     }
-    if (!old_parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on old parent");
-    }
-    if (!new_parent_ptr->CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on new parent");
-    }
-
     SwordFsInode source;
     status = txn.LookupEntry(old_parent, old_name, &source);
     if (!status.ok()) {
@@ -308,7 +292,6 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     if (!old_parent.CheckStickyDelete(ctx.uid, source)) {
       return Status::Permission("sticky bit denied on source");
     }
-
     SwordFsInode target;
     status = txn.LookupEntry(*new_parent_ptr, new_name, &target);
     const bool target_exists = status.ok();
@@ -324,7 +307,6 @@ Status RedisMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, 
     if (target_exists && !new_parent_ptr->CheckStickyDelete(ctx.uid, target)) {
       return Status::Permission("sticky bit denied on target");
     }
-
     if (exchange) {
       if (!target_exists) {
         return Status::NotFound("target does not exist for RENAME_EXCHANGE");
@@ -366,17 +348,6 @@ Status RedisMetaImpl::StatFs(SwordFsStatFs *stbuf) {
   return Status::OK();
 }
 
-Status RedisMetaImpl::Access(InodeID ino, uint32_t mask) {
-  utils::ExpectInFiberDomain();
-  const auto ctx = folly::fibers::local<SwordFsContext>();
-  SwordFsInode inode;
-  auto status = ops_.GetInode(ino, &inode);
-  if (!status.ok()) {
-    return status;
-  }
-  return inode.CheckAccess(ctx.uid, ctx.gid, mask) ? Status::OK() : Status::Permission("access denied");
-}
-
 Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
   if (name.size() > kRedisLimits.max_name_length) {
@@ -398,9 +369,6 @@ Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::st
     if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
     }
-    if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on parent");
-    }
     SwordFsAttr attr(child_ino, S_IFLNK | 0777u, ctx.uid, parent.attr.gid);
     attr.size = link.size();
     child = SwordFsInode(child_ino, attr, parent_ino, std::string(link));
@@ -417,7 +385,6 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
   if (newname.size() > kRedisLimits.max_name_length) {
     return Status::NameTooLong("link name exceeds maximum length");
   }
-  const auto ctx = folly::fibers::local<SwordFsContext>();
   SwordFsInode linked;
   auto status = ops_.TransactFromFiber([&](RedisMetaTxn &txn) {
     SwordFsInode inode;
@@ -435,9 +402,6 @@ Status RedisMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view 
     }
     if (!parent.IsDir()) {
       return Status::NotDirectory("new parent is not a directory");
-    }
-    if (!parent.CheckAccess(ctx.uid, ctx.gid, W_OK | X_OK)) {
-      return Status::Permission("access denied on parent");
     }
     status = txn.LinkExistingEntry(newparent_ino, newname, &parent, &inode);
     if (!status.ok()) {
@@ -478,10 +442,6 @@ Status RedisMetaImpl::Open(InodeID ino) {
   }
   if (!inode.IsRegular()) {
     return Status::NotDirectory("not a regular file");
-  }
-  const auto ctx = folly::fibers::local<SwordFsContext>();
-  if (!inode.CheckAccess(ctx.uid, ctx.gid, R_OK)) {
-    return Status::Permission("access denied");
   }
   UpdateAtimeBestEffort(ino);
   return Status::OK();

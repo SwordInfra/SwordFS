@@ -36,6 +36,10 @@ class InodeHandle {
   /// Open one more file descriptor on this inode.
   utils::Status Open(int flags);
 
+  /// Acquire the descriptor reference for an inode created by the same FUSE
+  /// CREATE request, without re-entering existing-inode metadata Open logic.
+  utils::Status OpenCreated();
+
   utils::Status Read(size_t size, off_t off, folly::IOBuf *out);
 
   utils::Status Write(const folly::IOBuf &buf, off_t off);

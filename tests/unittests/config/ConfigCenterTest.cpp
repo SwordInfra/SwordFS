@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "cmd/Mount.hpp"
 #include "config/ConfigCenter.hpp"
 
 namespace {
@@ -99,6 +100,12 @@ TEST(MountParamsTest, MountWithFuseOpts) {
       "swordfs", "mount", "--volume", "myvol", "--meta", "memory://local", "-o", "allow_other,ro", "/mnt/point",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
+}
+
+TEST(MountParamsTest, MandatoryDefaultPermissionsArePreservedWithUserOptions) {
+  EXPECT_EQ(swordfs::cmd::detail::BuildFuseExtras(""), (std::vector<std::string>{"-o", "default_permissions"}));
+  EXPECT_EQ(swordfs::cmd::detail::BuildFuseExtras("allow_other,ro"),
+            (std::vector<std::string>{"-o", "default_permissions", "-o", "allow_other,ro"}));
 }
 
 // ================================================================
