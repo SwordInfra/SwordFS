@@ -105,6 +105,26 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirWithEntries) {
   }
 }
 
+FIBER_TEST_F(MemMetaImplReadDirTest, GetInodesReturnsAlignedPresentAndMissingResults) {
+  SwordFsInode first;
+  SwordFsInode second;
+  ASSERT_TRUE(impl_->Create(kRoot, "first-batch", 0644, &first).ok());
+  ASSERT_TRUE(impl_->Create(kRoot, "second-batch", 0600, &second).ok());
+  constexpr InodeID kMissingIno = 999999;
+
+  std::vector<std::optional<SwordFsInode>> results;
+  ASSERT_TRUE(impl_->GetInodes({first.ino, kMissingIno, second.ino}, &results).ok());
+  ASSERT_EQ(results.size(), 3u);
+  ASSERT_TRUE(results[0].has_value());
+  EXPECT_EQ(results[0]->ino, first.ino);
+  EXPECT_FALSE(results[1].has_value());
+  ASSERT_TRUE(results[2].has_value());
+  EXPECT_EQ(results[2]->ino, second.ino);
+  EXPECT_EQ(results[2]->attr.mode, second.attr.mode);
+
+  EXPECT_EQ(impl_->GetInodes({first.ino}, nullptr).code(), Status::kInvalidArgument);
+}
+
 // ────────────────────────────────────────────────────────────────
 // OpenDir: caller-owned iterator can be continued
 // ────────────────────────────────────────────────────────────────

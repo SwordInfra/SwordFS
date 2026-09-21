@@ -8,6 +8,8 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -29,6 +31,7 @@ class RedisMetaClient {
 
   utils::Status Ping();
   utils::Status Get(std::string_view key, std::string *value);
+  utils::Status MGet(const std::vector<std::string> &keys, std::vector<std::optional<std::string>> *values);
   utils::Status HGet(std::string_view key, std::string_view field, std::string *value);
   utils::Status Incr(std::string_view key, uint64_t *value);
   utils::Status HScan(std::string_view key, uint64_t cursor, size_t count,

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <shared_mutex>
 #include <vector>
 
 #include "chunk/Chunk.hpp"
@@ -34,6 +35,9 @@ class IMetaEngine;
 }
 
 namespace vfs {
+
+class InodeHandle;
+class LiveAttrGuard;
 
 // ────────────────────────────────────────────────────────────────
 // FileChunkManager — thread-safe manager of inode chunks (both dirty and
@@ -102,6 +106,8 @@ class FileReadWriter {
   utils::Status SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields, metadata::SwordFsInode *out);
 
  private:
+  friend class LiveAttrGuard;
+
   void ApplyLiveSize(metadata::SwordFsInode *inode) const;
 
  private:
@@ -120,6 +126,24 @@ class FileReadWriter {
   // Failed persistence/size mutations leave it intact because the accepted
   // local write is still not completely represented by authoritative state.
   std::optional<uint64_t> live_size_;
+};
+
+class LiveAttrGuard {
+ public:
+  LiveAttrGuard(LiveAttrGuard &&) noexcept = default;
+  LiveAttrGuard &operator=(LiveAttrGuard &&) noexcept = default;
+  LiveAttrGuard(const LiveAttrGuard &) = delete;
+  LiveAttrGuard &operator=(const LiveAttrGuard &) = delete;
+
+  void Apply(metadata::SwordFsInode &inode) const;
+
+ private:
+  friend class InodeHandle;
+
+  explicit LiveAttrGuard(std::shared_ptr<FileReadWriter> owner);
+
+  std::shared_ptr<FileReadWriter> owner_;
+  std::shared_lock<utils::FiberRWMutex> lock_;
 };
 
 }  // namespace vfs

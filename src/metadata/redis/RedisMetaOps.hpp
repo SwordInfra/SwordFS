@@ -55,6 +55,7 @@ class RedisMetaOps {
   // Standalone metadata operations. Each method owns any Redis transaction
   // needed to preserve its own consistency semantics.
   utils::Status GetInode(InodeID ino, SwordFsInode *out);
+  utils::Status GetInodes(const std::vector<InodeID> &inode_ids, std::vector<std::optional<SwordFsInode>> *out);
   utils::Status LookupEntry(InodeID parent_ino, std::string_view name, SwordFsInode *out);
   utils::Status SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out = nullptr);
   utils::Status Truncate(InodeID ino, uint64_t size);

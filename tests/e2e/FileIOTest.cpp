@@ -10,7 +10,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
+#include <vector>
 
 #include "tests/e2e/Fixture.hpp"
 
@@ -295,6 +297,26 @@ TEST_F(FileIOTest, UnflushedWriteKeepsLiveSizeAndDataAfterUnlink) {
   std::string observed(payload.size(), '\0');
   ASSERT_EQ(::pread(fd, observed.data(), observed.size(), 0), static_cast<ssize_t>(observed.size()));
   EXPECT_EQ(observed, payload);
+
+  ASSERT_EQ(::close(fd), 0);
+}
+
+TEST_F(FileIOTest, DirectoryEnumerationDoesNotHideUnflushedLiveSize) {
+  const std::string name = "readdirplus_live_size.txt";
+  const std::string payload = "live-before-flush";
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR), 0);
+
+  int fd = fixture_.OpenFile(name, O_RDWR);
+  ASSERT_GE(fd, 0);
+  ASSERT_EQ(::write(fd, payload.data(), payload.size()), static_cast<ssize_t>(payload.size()));
+
+  std::vector<std::string> entries;
+  ASSERT_EQ(fixture_.ReadDir(".", &entries), 0);
+  EXPECT_NE(std::find(entries.begin(), entries.end(), name), entries.end());
+
+  struct stat attr{};
+  ASSERT_EQ(fixture_.Stat(name, &attr), 0);
+  EXPECT_EQ(attr.st_size, static_cast<off_t>(payload.size()));
 
   ASSERT_EQ(::close(fd), 0);
 }

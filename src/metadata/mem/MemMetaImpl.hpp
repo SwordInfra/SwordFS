@@ -30,6 +30,7 @@ class MemMetaImpl : public IMetaEngine {
   // Entry operations
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
   Status GetInode(InodeID ino, SwordFsInode *out) override;
+  Status GetInodes(const std::vector<InodeID> &inode_ids, std::vector<std::optional<SwordFsInode>> *out) override;
   Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) override;
   Status Unlink(InodeID parent_ino, std::string_view name) override;
   Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,

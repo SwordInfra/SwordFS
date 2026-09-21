@@ -253,6 +253,25 @@ Enumeration is not a snapshot across concurrent mutations. The iterator
 retains shared ownership of backend context so its client/executor resources
 remain available for its lifetime.
 
+READDIRPLUS keeps this entry iterator unchanged and adds an explicit bounded
+attribute batch after enumeration. Up to 128 inode keys are read with one Redis
+`MGET`; results stay position-aligned with the requested inode IDs and a missing
+key represents an entry whose inode disappeared concurrently. Missing entries
+are skipped by VFS, while malformed inode values or Redis transport failures
+fail the request. A concurrently renamed entry whose inode remains live may be
+returned under the already-enumerated name; the scan is not a snapshot. Plain
+READDIR never issues this `MGET`.
+
+For inodes already tracked/open by the current mount, VFS acquires shared local
+inode-operation guards before the MGET and holds them through live-attribute
+composition. This is a local coherence fence only: it adds no Redis command and
+untracked directory entries acquire no per-inode VFS lock.
+
+All inode keys for one volume carry the same Redis hash tag, so the batch remains
+single-slot under the current schema. No Redis transaction or Lua script is
+needed: the contract requires correct inode/attribute binding for each returned
+entry, not a transaction-wide snapshot spanning HSCAN and the subsequent MGET.
+
 ## Current boundaries
 
 - Redis durability and no-eviction configuration must protect authoritative

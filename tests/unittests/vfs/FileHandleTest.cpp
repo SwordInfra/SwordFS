@@ -90,6 +90,21 @@ class MockMetaEngine : public IMetaEngine {
     }
     return Status::OK();
   }
+  Status GetInodes(const std::vector<InodeID> &inode_ids, std::vector<std::optional<SwordFsInode>> *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("inode batch output is null");
+    }
+    out->clear();
+    for (const InodeID requested_ino : inode_ids) {
+      SwordFsInode inode;
+      auto status = GetInode(requested_ino, &inode);
+      if (!status.ok()) {
+        return status;
+      }
+      out->emplace_back(std::move(inode));
+    }
+    return Status::OK();
+  }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
     if (out) {
       *out = {};
@@ -692,6 +707,25 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
       out->attr.mtime_nsec = it->second.st_mtim.tv_nsec;
       out->attr.ctime = it->second.st_ctime;
       out->attr.ctime_nsec = it->second.st_ctim.tv_nsec;
+    }
+    return Status::OK();
+  }
+  Status GetInodes(const std::vector<InodeID> &inode_ids, std::vector<std::optional<SwordFsInode>> *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("inode batch output is null");
+    }
+    out->clear();
+    for (const InodeID requested_ino : inode_ids) {
+      SwordFsInode inode;
+      auto status = GetInode(requested_ino, &inode);
+      if (status.IsNotFound()) {
+        out->emplace_back(std::nullopt);
+        continue;
+      }
+      if (!status.ok()) {
+        return status;
+      }
+      out->emplace_back(std::move(inode));
     }
     return Status::OK();
   }

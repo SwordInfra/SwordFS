@@ -638,6 +638,103 @@ TEST(RedisMetaOpsTest, GetInodeUsesDirectMetadataReadPath) {
   EXPECT_EQ(invalid_status.code(), utils::Status::kInvalidArgument);
 }
 
+TEST(RedisMetaClientTest, MGetValidatesOutputAndEmptyInput) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient client(config);
+  std::vector<std::optional<std::string>> values{std::string("stale")};
+  ASSERT_TRUE(client.MGet({}, &values).ok());
+  EXPECT_TRUE(values.empty());
+  EXPECT_EQ(client.MGet({"unused"}, nullptr).code(), utils::Status::kInvalidArgument);
+}
+
+TEST(RedisMetaClientTest, MGetReportsConnectionFailure) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.port = 1;
+  config.retry_attempts = 1;
+
+  RedisMetaClient client(config);
+  std::vector<std::optional<std::string>> values;
+  const auto status = client.MGet({"unreachable"}, &values);
+  EXPECT_EQ(status.code(), utils::Status::kIOError) << status.message();
+}
+
+TEST(RedisMetaOpsTest, GetInodesUsesAlignedBatchReadWithMissingEntries) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  const std::string volume_name = UniqueRedisName("ops-get-inodes");
+  RedisMetaOps ops(config, volume_name);
+  const redis::RedisKey key(config.db, volume_name);
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  SwordFsInode first(42, SwordFsAttr(42, S_IFREG | 0644), kRootInodeId);
+  first.attr.size = 1234;
+  SwordFsInode second(43, SwordFsAttr(43, S_IFDIR | 0750), kRootInodeId);
+  second.attr.nlink = 2;
+  ASSERT_TRUE(SeedInode(redis, key, first).ok());
+  ASSERT_TRUE(SeedInode(redis, key, second).ok());
+
+  std::vector<std::optional<SwordFsInode>> results;
+  const auto status = RunInFiber([&] { return ops.GetInodes({first.ino, 999999, second.ino}, &results); });
+  ASSERT_TRUE(status.ok()) << status.message();
+  ASSERT_EQ(results.size(), 3u);
+  ASSERT_TRUE(results[0].has_value());
+  EXPECT_EQ(results[0]->attr.size, first.attr.size);
+  EXPECT_FALSE(results[1].has_value());
+  ASSERT_TRUE(results[2].has_value());
+  EXPECT_EQ(results[2]->attr.nlink, second.attr.nlink);
+
+  results.emplace_back(first);
+  ASSERT_TRUE(RunInFiber([&] { return ops.GetInodes({}, &results); }).ok());
+  EXPECT_TRUE(results.empty());
+
+  const auto invalid_status = RunInFiber([&] { return ops.GetInodes({first.ino}, nullptr); });
+  EXPECT_EQ(invalid_status.code(), utils::Status::kInvalidArgument);
+}
+
+TEST(RedisMetaOpsTest, GetInodesPropagatesConnectionFailure) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.port = 1;
+  config.retry_attempts = 1;
+
+  RedisMetaOps ops(config, "unreachable-get-inodes");
+  std::vector<std::optional<SwordFsInode>> results;
+  const auto status = RunInFiber([&] { return ops.GetInodes({42}, &results); });
+  EXPECT_EQ(status.code(), utils::Status::kIOError) << status.message();
+}
+
+TEST(RedisMetaOpsTest, GetInodesRejectsMalformedAndMismatchedRecords) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  const std::string volume_name = UniqueRedisName("ops-get-inodes-invalid");
+  RedisMetaOps ops(config, volume_name);
+  const redis::RedisKey key(config.db, volume_name);
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  constexpr InodeID kMalformedIno = 44;
+  redis.set(key.Inode(kMalformedIno), "not-an-inode");
+  std::vector<std::optional<SwordFsInode>> results;
+  EXPECT_TRUE(RunInFiber([&] { return ops.GetInodes({kMalformedIno}, &results); }).IsMalformed());
+
+  constexpr InodeID kRequestedIno = 46;
+  SwordFsInode other(45, SwordFsAttr(45, S_IFREG | 0644), kRootInodeId);
+  std::string encoded;
+  ASSERT_TRUE(other.SerializeTo(&encoded).ok());
+  redis.set(key.Inode(kRequestedIno), encoded);
+  EXPECT_TRUE(RunInFiber([&] { return ops.GetInodes({kRequestedIno}, &results); }).IsMalformed());
+}
+
 TEST(RedisMetaOpsTest, LookupEntryOwnsReadOnlyTransaction) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {

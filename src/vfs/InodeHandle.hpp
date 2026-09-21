@@ -28,6 +28,7 @@ class IOBuf;
 namespace swordfs::vfs {
 
 class FileReadWriter;
+class LiveAttrGuard;
 
 class InodeHandle {
  public:
@@ -45,6 +46,10 @@ class InodeHandle {
   utils::Status Write(const folly::IOBuf &buf, off_t off);
 
   utils::Status GetAttr(metadata::SwordFsInode *out) const;
+
+  /// Hold the inode's shared operation lock across an external metadata read
+  /// and subsequent local live-attribute composition.
+  LiveAttrGuard LockLiveAttr() const;
 
   utils::Status SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields, metadata::SwordFsInode *out);
 

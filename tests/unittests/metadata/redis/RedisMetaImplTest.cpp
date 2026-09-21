@@ -220,6 +220,18 @@ FIBER_TEST_F(RedisMetaImplTest, OpenDirReturnsIndependentIteratorsAndSupportsSee
   second_iterator->Advance();
 }
 
+FIBER_TEST_F(RedisMetaImplTest, GetInodesReturnsAlignedPresentAndMissingResults) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "batch-file", 0644, &file).ok());
+
+  std::vector<std::optional<SwordFsInode>> results;
+  ASSERT_TRUE(impl_->GetInodes({file.ino, 999999}, &results).ok());
+  ASSERT_EQ(results.size(), 2u);
+  ASSERT_TRUE(results[0].has_value());
+  EXPECT_EQ(results[0]->ino, file.ino);
+  EXPECT_FALSE(results[1].has_value());
+}
+
 FIBER_TEST_F(RedisMetaImplTest, RenameDirectoryOverEmptyDirectoryUpdatesSameParentNlink) {
   SwordFsInode src;
   SwordFsInode dst;

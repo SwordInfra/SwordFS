@@ -303,6 +303,46 @@ The final close keeps its descriptor reference counted until its flush completes
 
 Directory handles follow the same separation of runtime and backend state. `DirHandle` owns a backend-neutral `DirIterator`; Memory can iterate an in-memory view while Redis keeps its private `HSCAN` cursor/prefetch state behind the iterator. The FUSE directory offset is a logical cookie and is not exposed as a Redis cursor.
 
+READDIR and READDIRPLUS deliberately diverge only after entry enumeration. Plain
+READDIR encodes `SwordFsEntry` records directly and never fetches inode metadata.
+READDIRPLUS gathers a bounded batch of entries, asks `IMetaEngine::GetInodes()`
+for the corresponding persistent inode records, composes any tracked/open local
+inode overlay, and only then encodes `fuse_entry_param`. Memory serves the batch
+under one metadata transaction; Redis uses one ordered `MGET` for the batch, so
+PLUS does not create a per-entry metadata round trip.
+
+The directory scan and attribute read are not one transaction-wide snapshot.
+An entry whose inode disappears between enumeration and the batch attr read is
+skipped; transport errors, malformed inode records, and inode-identity mismatch
+remain hard errors. This makes concurrent unlink/rename behavior explicit
+without returning fabricated attributes. If a concurrent rename moves an
+already-enumerated name while its inode remains live, that observed pre-rename
+name may still be returned with attributes bound to the same inode; directory
+enumeration intentionally does not promise snapshot isolation.
+
+Tracked/open state is composed onto the already-fetched persistent inode rather
+than by calling `GetAttr()` again. The attr guard retains the `FileReadWriter`
+whose shared operation lock it owns, so the lock and overlay source have one
+RAII lifetime. In particular, a dirty file's live size is applied without a
+second backend lookup, preserving the local coherence invariant while retaining
+bounded Redis RTTs.
+
+For tracked inodes, the persistent batch read and local overlay are one local
+consistency window. `DirHandle` resolves the tracked handles in a batch,
+deduplicates hard-linked inode IDs, orders them by inode ID, and holds each
+file's shared operation lock across `GetInodes()` and overlay composition. A
+concurrent local write, flush, truncate, or size-changing setattr therefore
+cannot slip between the persistent snapshot and its live overlay. The batch is
+bounded at 128 entries, so this can briefly delay writes to at most that many
+tracked files for one backend batch-read RTT; the bound and single-RTT read are
+the deliberate trade-off for avoiding both inconsistent mixed snapshots and an
+N+1 metadata path.
+
+READDIRPLUS currently uses zero entry and attribute cache timeouts. SwordFS has
+no cross-mount dentry/inode invalidation or lease mechanism that would justify
+caching directory-enumeration results; the previous one-second values were a
+provisional implementation detail rather than a coherence guarantee.
+
 ## 8. Chunk and data model
 
 Files are divided into fixed-size logical chunks. The default configured chunk size is 64 MiB, but the value is part of the volume configuration.

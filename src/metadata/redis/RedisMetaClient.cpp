@@ -90,6 +90,24 @@ utils::Status RedisMetaClient::Get(std::string_view key, std::string *value) {
   }
 }
 
+utils::Status RedisMetaClient::MGet(const std::vector<std::string> &keys,
+                                    std::vector<std::optional<std::string>> *values) {
+  utils::ExpectInThreadDomain();
+  if (values == nullptr) {
+    return utils::Status::InvalidArgument("Redis MGET output is null");
+  }
+  values->clear();
+  if (keys.empty()) {
+    return utils::Status::OK();
+  }
+  try {
+    redis_->mget(keys.begin(), keys.end(), std::back_inserter(*values));
+    return utils::Status::OK();
+  } catch (const sw::redis::Error &error) {
+    return RedisError("MGET", error);
+  }
+}
+
 utils::Status RedisMetaClient::HGet(std::string_view key, std::string_view field, std::string *value) {
   utils::ExpectInThreadDomain();
   if (value == nullptr) {

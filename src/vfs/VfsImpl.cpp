@@ -287,17 +287,13 @@ utils::Status VfsImpl::OpenDir(fuse_ino_t ino, uint64_t *fh) {
   return status;
 }
 
-// Common implementation for Readdir and Readdirplus. Directory iteration
-// state belongs to the FUSE directory handle; the metadata iterator hides
-// backend-specific directory-entry caching and continuation state.
+// Directory iteration state belongs to the FUSE directory handle; the
+// metadata iterator hides backend-specific directory-entry caching and
+// continuation state. Plain READDIR stays entry-only; READDIRPLUS uses a
+// separate encoder because it requires authoritative inode metadata.
 class FuseDirEntryEncoder final : public DirEntryEncoder {
  public:
-  enum class Mode : uint8_t {
-    kNormal,
-    kPlus,
-  };
-
-  FuseDirEntryEncoder(fuse_req_t req, Mode mode) : req_(req), mode_(mode) {
+  explicit FuseDirEntryEncoder(fuse_req_t req) : req_(req) {
   }
 
   size_t CalSpace(const metadata::SwordFsEntry &entry, off_t next_off) const override {
@@ -312,16 +308,6 @@ class FuseDirEntryEncoder final : public DirEntryEncoder {
 
  private:
   size_t AddEntry(const metadata::SwordFsEntry &entry, off_t next_off, char *buf, size_t capacity) const {
-    if (mode_ == Mode::kPlus) {
-      fuse_entry_param ep = {};
-      ep.ino = entry.ino;
-      ep.attr.st_ino = entry.ino;
-      ep.attr.st_mode = entry.type << 12;
-      ep.attr_timeout = 1.0;
-      ep.entry_timeout = 1.0;
-      return fuse_add_direntry_plus(req_, buf, capacity, entry.name.c_str(), &ep, next_off);
-    }
-
     struct stat st = {};
     st.st_ino = entry.ino;
     st.st_mode = entry.type << 12;
@@ -329,29 +315,61 @@ class FuseDirEntryEncoder final : public DirEntryEncoder {
   }
 
   fuse_req_t req_;
-  Mode mode_;
 };
 
-static utils::Status ReaddirCommon(fuse_req_t req, size_t size, off_t off, uint64_t fh, FuseDirEntryEncoder::Mode mode,
-                                   std::string *out) {
+class FuseDirEntryPlusEncoder final : public DirEntryPlusEncoder {
+ public:
+  explicit FuseDirEntryPlusEncoder(fuse_req_t req) : req_(req) {
+  }
+
+  size_t CalSpace(const metadata::SwordFsEntry &entry, off_t next_off) const override {
+    fuse_entry_param ep = {};
+    return fuse_add_direntry_plus(req_, nullptr, 0, entry.name.c_str(), &ep, next_off);
+  }
+
+  void Encode(const metadata::SwordFsEntry &entry, const metadata::SwordFsInode &inode, off_t next_off, size_t required,
+              std::string *out) const override {
+    const size_t old_size = out->size();
+    out->resize(old_size + required);
+    AddEntry(entry, inode, next_off, out->data() + old_size, required);
+  }
+
+ private:
+  size_t AddEntry(const metadata::SwordFsEntry &entry, const metadata::SwordFsInode &inode, off_t next_off, char *buf,
+                  size_t capacity) const {
+    fuse_entry_param ep = {};
+    ep.ino = inode.ino;
+    inode.attr.ToPosixStat(&ep.attr);
+    // SwordFS does not yet have a cross-mount dentry/inode invalidation or
+    // lease mechanism. Zero validity prevents READDIRPLUS from publishing a
+    // stale cache promise while still supplying correct attributes.
+    ep.attr_timeout = 0.0;
+    ep.entry_timeout = 0.0;
+    return fuse_add_direntry_plus(req_, buf, capacity, entry.name.c_str(), &ep, next_off);
+  }
+
+  fuse_req_t req_;
+};
+
+utils::Status VfsImpl::ReadDir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh, std::string *buf) {
+  (void)ino;
   auto handle = HandleManager::Instance().FindAs<DirHandle>(fh);
   if (!handle) {
     return Status::InvalidArgument("unknown directory fh=" + std::to_string(fh));
   }
-
-  FuseDirEntryEncoder encoder(req, mode);
-  return handle->ReadDir(off, size, encoder, out);
-}
-
-utils::Status VfsImpl::ReadDir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh, std::string *buf) {
-  (void)ino;
-  return ReaddirCommon(req, size, off, fh, FuseDirEntryEncoder::Mode::kNormal, buf);
+  FuseDirEntryEncoder encoder(req);
+  return handle->ReadDir(off, size, encoder, buf);
 }
 
 utils::Status VfsImpl::ReadDirPlus(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh,
                                    std::string *buf) {
   (void)ino;
-  return ReaddirCommon(req, size, off, fh, FuseDirEntryEncoder::Mode::kPlus, buf);
+  auto handle = HandleManager::Instance().FindAs<DirHandle>(fh);
+  if (!handle) {
+    return Status::InvalidArgument("unknown directory fh=" + std::to_string(fh));
+  }
+  FuseDirEntryPlusEncoder encoder(req);
+  return handle->ReadDirPlus(off, size, encoder, buf);
 }
 
 utils::Status VfsImpl::ReleaseDir(fuse_ino_t ino, uint64_t fh) {

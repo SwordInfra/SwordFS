@@ -26,6 +26,7 @@
 #include "utils/Status.hpp"
 #include "vfs/FileHandle.hpp"
 #include "vfs/FileReadWriter.hpp"
+#include "vfs/InodeHandle.hpp"
 #include "vfs/VfsImpl.hpp"
 #include "volume/VolumeImpl.hpp"
 
@@ -43,6 +44,7 @@ using swordfs::metadata::SwordFsVolume;
 using swordfs::storage::IDataEngine;
 using swordfs::utils::Status;
 using swordfs::vfs::FileReadWriter;
+using swordfs::vfs::InodeHandle;
 
 // ────────────────────────────────────────────────────────────────
 // Helpers
@@ -199,6 +201,21 @@ class MockMetaEngine : public IMetaEngine {
     if (out) {
       *out = {};
       out->attr.size = file_size_;
+    }
+    return Status::OK();
+  }
+  Status GetInodes(const std::vector<InodeID> &inode_ids, std::vector<std::optional<SwordFsInode>> *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("inode batch output is null");
+    }
+    out->clear();
+    for (const InodeID requested_ino : inode_ids) {
+      SwordFsInode inode;
+      auto status = GetInode(requested_ino, &inode);
+      if (!status.ok()) {
+        return status;
+      }
+      out->emplace_back(std::move(inode));
     }
     return Status::OK();
   }
@@ -1166,6 +1183,22 @@ TEST_F(FileReadWriterTest, SuccessfulFlushClearsTransientLiveSize) {
     mock_meta_->set_file_size(5);
     ASSERT_TRUE(rw.GetAttr(&inode).ok());
     EXPECT_EQ(inode.attr.size, 5U);
+  });
+}
+
+TEST_F(FileReadWriterTest, LiveAttrGuardUsesTransientSize) {
+  RunInTestFiber([&] {
+    mock_meta_->set_file_size(0);
+    InodeHandle handle(kIno);
+    ASSERT_TRUE(handle.Write(Buf("Hello,_World!"), 0).ok());
+    auto guard = handle.LockLiveAttr();
+
+    SwordFsInode inode;
+    inode.ino = kIno;
+    inode.attr.ino = kIno;
+    inode.attr.size = 1;
+    guard.Apply(inode);
+    EXPECT_EQ(inode.attr.size, 13U);
   });
 }
 

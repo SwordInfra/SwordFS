@@ -68,6 +68,9 @@ class MissingMetaEngine final : public IMetaEngine {
   Status GetInode(InodeID, SwordFsInode *) override {
     return Status::OK();
   }
+  Status GetInodes(const std::vector<InodeID> &, std::vector<std::optional<SwordFsInode>> *) override {
+    return Status::NotSupported("batch inode lookup is not used by this test double");
+  }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }

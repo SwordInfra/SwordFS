@@ -153,6 +153,32 @@ Status MemMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
   return Status::OK();
 }
 
+Status MemMetaImpl::GetInodes(const std::vector<InodeID> &inode_ids, std::vector<std::optional<SwordFsInode>> *out) {
+  utils::ExpectInFiberDomain();
+  if (out == nullptr) {
+    return Status::InvalidArgument("inode batch output is null");
+  }
+
+  std::vector<std::optional<SwordFsInode>> result;
+  result.reserve(inode_ids.size());
+  store_.Transact([&](MemMetaTxn &txn) {
+    for (const InodeID requested_ino : inode_ids) {
+      SwordFsInode inode;
+      // MemMetaTxn::LookupInode has exactly two outcomes: present or missing.
+      // Unlike remote backends there is no transport/decoding failure to
+      // propagate, so keep the Memory batch path free of unreachable status
+      // plumbing.
+      if (!txn.LookupInode(requested_ino, &inode).ok()) {
+        result.emplace_back(std::nullopt);
+        continue;
+      }
+      result.emplace_back(std::move(inode));
+    }
+  });
+  *out = std::move(result);
+  return Status::OK();
+}
+
 Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
   if (name.size() > kMemLimits.max_name_length) {
