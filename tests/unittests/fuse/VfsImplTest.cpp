@@ -7,14 +7,20 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <folly/fibers/Baton.h>
+#include <folly/fibers/FiberManagerMap.h>
 #include <folly/io/IOBuf.h>
+#include <folly/io/async/EventBase.h>
 #include <gtest/gtest.h>
+#include <linux/fuse.h>
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "FiberTest.hpp"
@@ -152,18 +158,33 @@ namespace {
 
 class TestDirIterator final : public swordfs::metadata::DirIterator {
  public:
+  TestDirIterator(std::vector<swordfs::metadata::SwordFsEntry> entries, int fail_seek_call, Status seek_failure,
+                  Status peek_status)
+      : entries_(std::move(entries)),
+        fail_seek_call_(fail_seek_call),
+        seek_failure_(std::move(seek_failure)),
+        peek_status_(std::move(peek_status)) {
+  }
+
   Status Seek(uint64_t cookie) override {
+    ++seek_calls_;
+    if (fail_seek_call_ != 0 && seek_calls_ == fail_seek_call_) {
+      return seek_failure_;
+    }
     position_ = cookie;
     return Status::OK();
   }
 
   Status Peek(swordfs::metadata::SwordFsEntry *entry, uint64_t *next_cookie) override {
-    if (position_ == 0) {
-      *entry = {".", DT_DIR, 1};
-      *next_cookie = 1;
-      return Status::OK();
+    if (!peek_status_.ok()) {
+      return peek_status_;
     }
-    return Status::EndOfDirectory("directory end");
+    if (position_ >= entries_.size()) {
+      return Status::EndOfDirectory("directory end");
+    }
+    *entry = entries_[position_];
+    *next_cookie = position_ + 1;
+    return Status::OK();
   }
 
   void Advance() override {
@@ -171,7 +192,12 @@ class TestDirIterator final : public swordfs::metadata::DirIterator {
   }
 
  private:
+  std::vector<swordfs::metadata::SwordFsEntry> entries_;
   uint64_t position_ = 0;
+  int seek_calls_ = 0;
+  int fail_seek_call_ = 0;
+  Status seek_failure_{Status::OK()};
+  Status peek_status_{Status::OK()};
 };
 
 class MockMetaEngine : public swordfs::metadata::IMetaEngine {
@@ -198,12 +224,47 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status GetInode(InodeID ino, SwordFsInode *out) override {
+    ++get_inode_calls_;
     if (out) {
-      *out = {};
-      out->ino = ino;
-      out->attr.ino = ino;
+      auto it = inodes_.find(ino);
+      if (it != inodes_.end()) {
+        *out = it->second;
+      } else {
+        *out = {};
+        out->ino = ino;
+        out->attr.ino = ino;
+      }
     }
     return get_inode_status_;
+  }
+  Status GetInodes(const std::vector<InodeID> &inode_ids, std::vector<std::optional<SwordFsInode>> *out) override {
+    ++get_inodes_calls_;
+    max_get_inodes_batch_size_ = std::max(max_get_inodes_batch_size_, inode_ids.size());
+    last_get_inodes_ids_ = inode_ids;
+    if (out == nullptr) {
+      return Status::InvalidArgument("inode batch output is null");
+    }
+    if (!get_inode_status_.ok()) {
+      return get_inode_status_;
+    }
+    std::vector<std::optional<SwordFsInode>> result;
+    result.reserve(inode_ids.size());
+    for (const InodeID requested_ino : inode_ids) {
+      auto it = inodes_.find(requested_ino);
+      if (it == inodes_.end()) {
+        result.emplace_back(std::nullopt);
+      } else {
+        result.emplace_back(it->second);
+      }
+    }
+    if (get_inodes_captured_ != nullptr) {
+      auto *captured = std::exchange(get_inodes_captured_, nullptr);
+      auto *release = std::exchange(get_inodes_release_, nullptr);
+      captured->post();
+      release->wait();
+    }
+    *out = std::move(result);
+    return Status::OK();
   }
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
     if (out) {
@@ -228,7 +289,23 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status Rename(InodeID, std::string_view, InodeID, std::string_view, RenameFlag) override {
     return Status::OK();
   }
-  Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField, SwordFsInode *) override {
+  Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override {
+    auto it = inodes_.find(ino);
+    if (it != inodes_.end() && swordfs::metadata::HasSetAttrField(fields, SetAttrField::kSize)) {
+      it->second.attr.size = attr.size;
+    }
+    if (out != nullptr) {
+      if (it != inodes_.end()) {
+        *out = it->second;
+      } else {
+        *out = {};
+        out->ino = ino;
+        out->attr.ino = ino;
+        if (swordfs::metadata::HasSetAttrField(fields, SetAttrField::kSize)) {
+          out->attr.size = attr.size;
+        }
+      }
+    }
     return Status::OK();
   }
   Status StatFs(SwordFsStatFs *stbuf) override {
@@ -292,7 +369,8 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *iterator) override {
     if (call_status_.ok() && iterator != nullptr) {
-      *iterator = std::make_shared<TestDirIterator>();
+      *iterator =
+          std::make_shared<TestDirIterator>(dir_entries_, fail_dir_seek_call_, dir_seek_failure_, dir_peek_status_);
     }
     return call_status_;
   }
@@ -327,13 +405,66 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     return lookup_calls_;
   }
 
+  int get_inodes_calls() const {
+    return get_inodes_calls_;
+  }
+
+  int get_inode_calls() const {
+    return get_inode_calls_;
+  }
+
+  size_t max_get_inodes_batch_size() const {
+    return max_get_inodes_batch_size_;
+  }
+
+  const std::vector<InodeID> &last_get_inodes_ids() const {
+    return last_get_inodes_ids_;
+  }
+
+  void set_inode(SwordFsInode inode) {
+    inodes_[inode.ino] = std::move(inode);
+  }
+
+  void set_inode_for(InodeID requested_ino, SwordFsInode inode) {
+    inodes_[requested_ino] = std::move(inode);
+  }
+
+  void set_dir_entries(std::vector<swordfs::metadata::SwordFsEntry> entries) {
+    dir_entries_ = std::move(entries);
+  }
+
+  void BlockNextGetInodes(folly::fibers::Baton *captured, folly::fibers::Baton *release) {
+    get_inodes_captured_ = captured;
+    get_inodes_release_ = release;
+  }
+
+  void set_dir_seek_failure(int call, Status status) {
+    fail_dir_seek_call_ = call;
+    dir_seek_failure_ = std::move(status);
+  }
+
+  void set_dir_peek_status(Status status) {
+    dir_peek_status_ = std::move(status);
+  }
+
  private:
   Status call_status_{Status::OK()};
   Status open_status_{Status::OK()};
   Status get_inode_status_{Status::OK()};
   int lookup_calls_ = 0;
   int open_calls_ = 0;
+  int get_inode_calls_ = 0;
+  int get_inodes_calls_ = 0;
+  size_t max_get_inodes_batch_size_ = 0;
+  std::vector<InodeID> last_get_inodes_ids_;
+  folly::fibers::Baton *get_inodes_captured_ = nullptr;
+  folly::fibers::Baton *get_inodes_release_ = nullptr;
+  int fail_dir_seek_call_ = 0;
+  Status dir_seek_failure_{Status::OK()};
+  Status dir_peek_status_{Status::OK()};
   swordfs::metadata::ChunkRevision next_revision_ = 1;
+  std::unordered_map<InodeID, SwordFsInode> inodes_;
+  std::vector<swordfs::metadata::SwordFsEntry> dir_entries_{{".", DT_DIR, 1}};
 };
 
 class VfsImplIntegrationTest : public ::testing::Test {
@@ -417,6 +548,12 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDir) {
   std::string buf;
   auto status = VfsImpl::ReadDir(nullptr, 1, 4096, 0, fh, &buf);
   EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 0);
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirRejectsUnknownHandle) {
+  std::string buf;
+  EXPECT_EQ(VfsImpl::ReadDir(nullptr, 1, 4096, 0, 999999, &buf).code(), Status::kInvalidArgument);
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlus) {
@@ -425,6 +562,516 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlus) {
   std::string buf;
   auto status = VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf);
   EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusRejectsUnknownHandle) {
+  std::string buf;
+  EXPECT_EQ(VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, 999999, &buf).code(), Status::kInvalidArgument);
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusAcceptsZeroSizeWithoutMetadataLookup) {
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf = "stale";
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, 0, 0, fh, &buf).ok());
+  EXPECT_TRUE(buf.empty());
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 0);
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusPropagatesInitialSeekFailure) {
+  mock_meta_->set_dir_seek_failure(1, Status::IOError("seek failed"));
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+
+  std::string buf;
+  const auto status = VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf);
+  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_TRUE(buf.empty());
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 0);
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusPropagatesIteratorPeekFailure) {
+  mock_meta_->set_dir_peek_status(Status::IOError("peek failed"));
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+
+  std::string buf;
+  const auto status = VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf);
+  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_TRUE(buf.empty());
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 0);
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusReturnsSuccessForEmptyDirectory) {
+  mock_meta_->set_dir_entries({});
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+
+  std::string buf = "stale";
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf).ok());
+  EXPECT_TRUE(buf.empty());
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 0);
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusRejectsEntryThatCannotFitEmptyReply) {
+  mock_meta_->set_dir_entries({{"entry", DT_REG, 2}});
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+
+  std::string buf;
+  const auto status = VfsImpl::ReadDirPlus(nullptr, 1, 1, 0, fh, &buf);
+  EXPECT_EQ(status.code(), Status::kNoMemory);
+  EXPECT_TRUE(buf.empty());
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 0);
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusPropagatesBatchMetadataFailure) {
+  mock_meta_->set_get_inode_status(Status::IOError("batch read failed"));
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+
+  std::string buf;
+  const auto status = VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf);
+  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_TRUE(buf.empty());
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusRejectsInodeIdentityMismatch) {
+  constexpr InodeID kRequestedIno = 2;
+  mock_meta_->set_dir_entries({{"file", DT_REG, kRequestedIno}});
+
+  SwordFsInode wrong_inode;
+  wrong_inode.ino = 3;
+  wrong_inode.attr = SwordFsAttr(3, S_IFREG | 0644, 100, 200);
+  mock_meta_->set_inode_for(kRequestedIno, wrong_inode);
+
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf;
+  EXPECT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf).IsMalformed());
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusReturnsAuthoritativeInodeAttributes) {
+  SwordFsInode inode;
+  inode.ino = 1;
+  inode.attr = SwordFsAttr(1, S_IFDIR | 0750, 123, 456);
+  inode.attr.nlink = 3;
+  inode.attr.size = 8192;
+  inode.attr.blocks = 16;
+  inode.attr.blksize = 4096;
+  inode.attr.atime = 11;
+  inode.attr.mtime = 22;
+  inode.attr.ctime = 33;
+  mock_meta_->set_inode(inode);
+
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf;
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf).ok());
+  ASSERT_GE(buf.size(), sizeof(fuse_direntplus));
+
+  fuse_direntplus result{};
+  std::memcpy(&result, buf.data(), sizeof(result));
+  EXPECT_EQ(result.entry_out.nodeid, 1u);
+  EXPECT_EQ(result.entry_out.attr.ino, 1u);
+  EXPECT_EQ(result.entry_out.attr.mode, inode.attr.mode);
+  EXPECT_EQ(result.entry_out.attr.nlink, inode.attr.nlink);
+  EXPECT_EQ(result.entry_out.attr.uid, inode.attr.uid);
+  EXPECT_EQ(result.entry_out.attr.gid, inode.attr.gid);
+  EXPECT_EQ(result.entry_out.attr.size, inode.attr.size);
+  EXPECT_EQ(result.entry_out.attr.blocks, inode.attr.blocks);
+  EXPECT_EQ(result.entry_out.attr.atime, inode.attr.atime);
+  EXPECT_EQ(result.entry_out.attr.mtime, inode.attr.mtime);
+  EXPECT_EQ(result.entry_out.attr.ctime, inode.attr.ctime);
+  EXPECT_EQ(result.entry_out.entry_valid, 0u);
+  EXPECT_EQ(result.entry_out.attr_valid, 0u);
+
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusSkipsEntryWhoseInodeDisappeared) {
+  mock_meta_->set_dir_entries({{"gone", DT_REG, 2}, {"present", DT_REG, 3}});
+  SwordFsInode present;
+  present.ino = 3;
+  present.attr = SwordFsAttr(3, S_IFREG | 0644, 100, 200);
+  present.attr.nlink = 1;
+  mock_meta_->set_inode(present);
+
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf;
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf).ok());
+  ASSERT_GE(buf.size(), sizeof(fuse_direntplus));
+
+  fuse_direntplus result{};
+  std::memcpy(&result, buf.data(), sizeof(result));
+  EXPECT_EQ(result.entry_out.nodeid, 3u);
+  ASSERT_LE(FUSE_NAME_OFFSET_DIRENTPLUS + result.dirent.namelen, buf.size());
+  EXPECT_EQ(std::string_view(buf.data() + FUSE_NAME_OFFSET_DIRENTPLUS, result.dirent.namelen), "present");
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
+
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusMayReturnEnumeratedNameAfterConcurrentRename) {
+  constexpr InodeID kFileIno = 2;
+  mock_meta_->set_dir_entries({{"before", DT_REG, kFileIno}});
+  SwordFsInode inode;
+  inode.ino = kFileIno;
+  inode.attr = SwordFsAttr(kFileIno, S_IFREG | 0644, 100, 200);
+  inode.attr.nlink = 1;
+  inode.attr.size = 123;
+  mock_meta_->set_inode(inode);
+
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+
+  // The opened iterator has already established its entry-enumeration view.
+  // Model a concurrent rename in the namespace while leaving the same inode
+  // alive. READDIRPLUS may return the previously enumerated name, but the attr
+  // payload must remain bound to that inode rather than to the new pathname.
+  mock_meta_->set_dir_entries({{"after", DT_REG, kFileIno}});
+
+  std::string buf;
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf).ok());
+  ASSERT_GE(buf.size(), sizeof(fuse_direntplus));
+
+  fuse_direntplus result{};
+  std::memcpy(&result, buf.data(), sizeof(result));
+  EXPECT_EQ(result.entry_out.nodeid, kFileIno);
+  EXPECT_EQ(result.entry_out.attr.ino, kFileIno);
+  EXPECT_EQ(result.entry_out.attr.size, inode.attr.size);
+  ASSERT_LE(FUSE_NAME_OFFSET_DIRENTPLUS + result.dirent.namelen, buf.size());
+  EXPECT_EQ(std::string_view(buf.data() + FUSE_NAME_OFFSET_DIRENTPLUS, result.dirent.namelen), "before");
+
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusComposesTrackedLiveSizeWithoutRefetchingPerEntry) {
+  constexpr InodeID kFileIno = 42;
+  const std::string payload = "live-before-flush";
+  mock_meta_->set_dir_entries({{"file", DT_REG, kFileIno}});
+
+  SwordFsInode persistent;
+  persistent.ino = kFileIno;
+  persistent.attr = SwordFsAttr(kFileIno, S_IFREG | 0644, 100, 200);
+  persistent.attr.nlink = 1;
+  persistent.attr.size = 0;
+  mock_meta_->set_inode(persistent);
+
+  struct fuse_file_info fi = {};
+  ASSERT_TRUE(VfsImpl::Open(kFileIno, &fi).ok());
+  auto data = folly::IOBuf::copyBuffer(payload);
+  ASSERT_TRUE(VfsImpl::Write(kFileIno, *data, 0, fi.fh).ok());
+
+  struct stat getattr_attr{};
+  ASSERT_TRUE(VfsImpl::GetAttr(kFileIno, &getattr_attr).ok());
+  ASSERT_EQ(getattr_attr.st_size, static_cast<off_t>(payload.size()));
+  const int get_inode_calls_before_plus = mock_meta_->get_inode_calls();
+
+  uint64_t dir_fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &dir_fh).ok());
+  std::string buf;
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, dir_fh, &buf).ok());
+  ASSERT_GE(buf.size(), sizeof(fuse_direntplus));
+
+  fuse_direntplus result{};
+  std::memcpy(&result, buf.data(), sizeof(result));
+  EXPECT_EQ(result.entry_out.nodeid, kFileIno);
+  EXPECT_EQ(result.entry_out.attr.size, static_cast<uint64_t>(getattr_attr.st_size));
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
+  EXPECT_EQ(mock_meta_->get_inode_calls(), get_inode_calls_before_plus);
+
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, dir_fh).ok());
+  EXPECT_TRUE(VfsImpl::Release(kFileIno, fi.fh).ok());
+}
+
+TEST_F(VfsImplIntegrationTest, ReadDirPlusKeepsMetadataSnapshotAndLiveOverlaySynchronized) {
+  constexpr InodeID kFileIno = 42;
+  const std::string payload = "live-before-flush";
+  mock_meta_->set_dir_entries({{"file", DT_REG, kFileIno}});
+
+  SwordFsInode persistent;
+  persistent.ino = kFileIno;
+  persistent.attr = SwordFsAttr(kFileIno, S_IFREG | 0644, 100, 200);
+  persistent.attr.nlink = 1;
+  persistent.attr.size = 0;
+  mock_meta_->set_inode(persistent);
+
+  struct fuse_file_info fi = {};
+  fi.flags = O_RDWR;
+  uint64_t dir_fh = 0;
+  swordfs::test::RunInTestFiber([&] {
+    ASSERT_TRUE(VfsImpl::Open(kFileIno, &fi).ok());
+    auto data = folly::IOBuf::copyBuffer(payload);
+    ASSERT_TRUE(VfsImpl::Write(kFileIno, *data, 0, fi.fh).ok());
+    ASSERT_TRUE(VfsImpl::OpenDir(1, &dir_fh).ok());
+  });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton snapshot_captured;
+  folly::fibers::Baton release_snapshot;
+  folly::fibers::Baton setattr_started;
+  folly::fibers::Baton setattr_done;
+  folly::fibers::Baton readdir_done;
+  mock_meta_->BlockNextGetInodes(&snapshot_captured, &release_snapshot);
+
+  Status readdir_status;
+  Status setattr_status;
+  std::string buf;
+  fm.addTask([&] {
+    readdir_status = VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, dir_fh, &buf);
+    readdir_done.post();
+  });
+  fm.addTask([&] {
+    snapshot_captured.wait();
+    setattr_started.post();
+    struct stat requested{};
+    requested.st_size = 1;
+    setattr_status = VfsImpl::SetAttr(kFileIno, &requested, FUSE_SET_ATTR_SIZE, fi.fh, nullptr);
+    setattr_done.post();
+  });
+
+  while (!snapshot_captured.try_wait() || !setattr_started.try_wait()) {
+    evb.loopOnce();
+  }
+  // #212 requires authoritative metadata and the local size overlay to be one
+  // coherent visible-attribute read. The size mutation must wait until this
+  // READDIRPLUS snapshot has been composed rather than slipping between them.
+  EXPECT_FALSE(setattr_done.try_wait());
+
+  release_snapshot.post();
+  while (!readdir_done.try_wait() || !setattr_done.try_wait()) {
+    evb.loopOnce();
+  }
+  ASSERT_TRUE(readdir_status.ok()) << readdir_status.message();
+  ASSERT_TRUE(setattr_status.ok()) << setattr_status.message();
+  ASSERT_GE(buf.size(), sizeof(fuse_direntplus));
+
+  fuse_direntplus result{};
+  std::memcpy(&result, buf.data(), sizeof(result));
+  EXPECT_EQ(result.entry_out.attr.size, payload.size());
+
+  swordfs::test::RunInTestFiber([&] {
+    struct stat after{};
+    ASSERT_TRUE(VfsImpl::GetAttr(kFileIno, &after).ok());
+    EXPECT_EQ(after.st_size, 1);
+    EXPECT_TRUE(VfsImpl::ReleaseDir(1, dir_fh).ok());
+    EXPECT_TRUE(VfsImpl::Release(kFileIno, fi.fh).ok());
+  });
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusBatchesOnlyEntriesThatFitReplyBuffer) {
+  mock_meta_->set_dir_entries({{"first", DT_REG, 2}, {"second", DT_REG, 3}});
+
+  SwordFsInode first;
+  first.ino = 2;
+  first.attr = SwordFsAttr(2, S_IFREG | 0644, 100, 200);
+  first.attr.nlink = 1;
+  mock_meta_->set_inode(first);
+
+  SwordFsInode second;
+  second.ino = 3;
+  second.attr = SwordFsAttr(3, S_IFREG | 0644, 100, 200);
+  second.attr.nlink = 1;
+  mock_meta_->set_inode(second);
+
+  fuse_entry_param probe{};
+  const size_t first_entry_size = fuse_add_direntry_plus(nullptr, nullptr, 0, "first", &probe, 1);
+
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf;
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, first_entry_size, 0, fh, &buf).ok());
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
+  ASSERT_EQ(mock_meta_->last_get_inodes_ids().size(), 1u);
+  EXPECT_EQ(mock_meta_->last_get_inodes_ids()[0], 2u);
+
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusReusesReplySpaceReservedForMissingInode) {
+  mock_meta_->set_dir_entries({{"gone", DT_REG, 2}, {"live", DT_REG, 3}});
+
+  SwordFsInode live;
+  live.ino = 3;
+  live.attr = SwordFsAttr(3, S_IFREG | 0644, 100, 200);
+  live.attr.nlink = 1;
+  mock_meta_->set_inode(live);
+
+  fuse_entry_param probe{};
+  const size_t one_entry_size = fuse_add_direntry_plus(nullptr, nullptr, 0, "gone", &probe, 1);
+
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf;
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, one_entry_size, 0, fh, &buf).ok());
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 2);
+  ASSERT_GE(buf.size(), sizeof(fuse_direntplus));
+
+  fuse_direntplus result{};
+  std::memcpy(&result, buf.data(), sizeof(result));
+  EXPECT_EQ(result.entry_out.nodeid, 3u);
+  ASSERT_LE(FUSE_NAME_OFFSET_DIRENTPLUS + result.dirent.namelen, buf.size());
+  EXPECT_EQ(std::string_view(buf.data() + FUSE_NAME_OFFSET_DIRENTPLUS, result.dirent.namelen), "live");
+
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusPropagatesReseekFailureAfterMissingEntry) {
+  mock_meta_->set_dir_entries({{"gone", DT_REG, 2}, {"live", DT_REG, 3}});
+  SwordFsInode live;
+  live.ino = 3;
+  live.attr = SwordFsAttr(3, S_IFREG | 0644, 100, 200);
+  mock_meta_->set_inode(live);
+  mock_meta_->set_dir_seek_failure(2, Status::IOError("reseek failed"));
+
+  fuse_entry_param probe{};
+  const size_t one_entry_size = fuse_add_direntry_plus(nullptr, nullptr, 0, "gone", &probe, 1);
+
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf;
+  const auto status = VfsImpl::ReadDirPlus(nullptr, 1, one_entry_size, 0, fh, &buf);
+  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_TRUE(buf.empty());
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusRejectsOversizedEntryAfterSkippedMissingBatch) {
+  const std::string large_name(200, 'x');
+  mock_meta_->set_dir_entries({{"a", DT_REG, 2}, {large_name, DT_REG, 3}});
+
+  fuse_entry_param probe{};
+  const size_t first_entry_size = fuse_add_direntry_plus(nullptr, nullptr, 0, "a", &probe, 1);
+  ASSERT_GT(fuse_add_direntry_plus(nullptr, nullptr, 0, large_name.c_str(), &probe, 2), first_entry_size);
+
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf;
+  const auto status = VfsImpl::ReadDirPlus(nullptr, 1, first_entry_size, 0, fh, &buf);
+  EXPECT_EQ(status.code(), Status::kNoMemory);
+  EXPECT_TRUE(buf.empty());
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusStopsCleanlyWhenNextBatchCannotFitRemainingReply) {
+  constexpr size_t kFirstBatchEntries = 128;
+  std::vector<swordfs::metadata::SwordFsEntry> entries;
+  entries.reserve(kFirstBatchEntries + 1);
+  for (size_t i = 0; i <= kFirstBatchEntries; ++i) {
+    const InodeID ino = 2000 + i;
+    entries.push_back({"x", DT_REG, ino});
+    SwordFsInode inode;
+    inode.ino = ino;
+    inode.attr = SwordFsAttr(ino, S_IFREG | 0644, 100, 200);
+    mock_meta_->set_inode(std::move(inode));
+  }
+  mock_meta_->set_dir_entries(std::move(entries));
+
+  fuse_entry_param probe{};
+  const size_t entry_size = fuse_add_direntry_plus(nullptr, nullptr, 0, "x", &probe, 1);
+  const size_t reply_size = kFirstBatchEntries * entry_size + entry_size / 2;
+
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf;
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, reply_size, 0, fh, &buf).ok());
+  EXPECT_EQ(buf.size(), kFirstBatchEntries * entry_size);
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
+  EXPECT_EQ(mock_meta_->max_get_inodes_batch_size(), kFirstBatchEntries);
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusStopsWhenReplyIsExactlyFullAfterOneBatch) {
+  constexpr size_t kFirstBatchEntries = 128;
+  std::vector<swordfs::metadata::SwordFsEntry> entries;
+  entries.reserve(kFirstBatchEntries + 1);
+  for (size_t i = 0; i <= kFirstBatchEntries; ++i) {
+    const InodeID ino = 3000 + i;
+    entries.push_back({"x", DT_REG, ino});
+    SwordFsInode inode;
+    inode.ino = ino;
+    inode.attr = SwordFsAttr(ino, S_IFREG | 0644, 100, 200);
+    mock_meta_->set_inode(std::move(inode));
+  }
+  mock_meta_->set_dir_entries(std::move(entries));
+
+  fuse_entry_param probe{};
+  const size_t entry_size = fuse_add_direntry_plus(nullptr, nullptr, 0, "x", &probe, 1);
+
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf;
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, kFirstBatchEntries * entry_size, 0, fh, &buf).ok());
+  EXPECT_EQ(buf.size(), kFirstBatchEntries * entry_size);
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusHandlesTrackedHardlinksAndUntrackedNeighbor) {
+  constexpr InodeID kUntrackedIno = 42;
+  constexpr InodeID kTrackedIno = 43;
+  mock_meta_->set_dir_entries(
+      {{"untracked", DT_REG, kUntrackedIno}, {"hardlink-a", DT_REG, kTrackedIno}, {"hardlink-b", DT_REG, kTrackedIno}});
+
+  for (const InodeID ino : {kUntrackedIno, kTrackedIno}) {
+    SwordFsInode inode;
+    inode.ino = ino;
+    inode.attr = SwordFsAttr(ino, S_IFREG | 0644, 100, 200);
+    inode.attr.nlink = ino == kTrackedIno ? 2 : 1;
+    mock_meta_->set_inode(std::move(inode));
+  }
+
+  struct fuse_file_info tracked_fi = {};
+  ASSERT_TRUE(VfsImpl::Open(kTrackedIno, &tracked_fi).ok());
+  uint64_t dir_fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &dir_fh).ok());
+
+  std::string buf;
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, dir_fh, &buf).ok());
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
+  EXPECT_EQ(mock_meta_->last_get_inodes_ids(), (std::vector<InodeID>{kUntrackedIno, kTrackedIno, kTrackedIno}));
+
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, dir_fh).ok());
+  EXPECT_TRUE(VfsImpl::Release(kTrackedIno, tracked_fi.fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusCapsAttributeBatchAt128Entries) {
+  constexpr size_t kEntryCount = 257;
+  std::vector<swordfs::metadata::SwordFsEntry> entries;
+  entries.reserve(kEntryCount);
+  for (size_t i = 0; i < kEntryCount; ++i) {
+    const InodeID entry_ino = 1000 + i;
+    entries.push_back({"entry-" + std::to_string(i), DT_REG, entry_ino});
+    SwordFsInode inode;
+    inode.ino = entry_ino;
+    inode.attr = SwordFsAttr(entry_ino, S_IFREG | 0644, 100, 200);
+    inode.attr.nlink = 1;
+    mock_meta_->set_inode(std::move(inode));
+  }
+  mock_meta_->set_dir_entries(std::move(entries));
+
+  uint64_t fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
+  std::string buf;
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, 1 << 20, 0, fh, &buf).ok());
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 3);
+  EXPECT_EQ(mock_meta_->max_get_inodes_batch_size(), 128u);
+
+  EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, ReleaseDirSuccess) {

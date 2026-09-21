@@ -63,6 +63,10 @@ utils::Status InodeHandle::GetAttr(metadata::SwordFsInode *out) const {
   return rw_->GetAttr(out);
 }
 
+LiveAttrGuard InodeHandle::LockLiveAttr() const {
+  return LiveAttrGuard(rw_);
+}
+
 utils::Status InodeHandle::SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields,
                                    metadata::SwordFsInode *out) {
   return rw_->SetAttr(attr, fields, out);

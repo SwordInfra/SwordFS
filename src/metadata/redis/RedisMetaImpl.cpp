@@ -97,6 +97,11 @@ Status RedisMetaImpl::GetInode(InodeID ino, SwordFsInode *out) {
   return ops_.GetInode(ino, out);
 }
 
+Status RedisMetaImpl::GetInodes(const std::vector<InodeID> &inode_ids, std::vector<std::optional<SwordFsInode>> *out) {
+  utils::ExpectInFiberDomain();
+  return ops_.GetInodes(inode_ids, out);
+}
+
 void RedisMetaImpl::UpdateAtimeBestEffort(InodeID ino) {
   auto status = ops_.TouchInode(ino, SetAttrField::kAtime);
   if (!status.ok()) {

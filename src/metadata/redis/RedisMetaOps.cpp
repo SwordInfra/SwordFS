@@ -155,6 +155,51 @@ utils::Status RedisMetaOps::GetInode(InodeID ino, SwordFsInode *out) {
   return out->ParseFrom(value);
 }
 
+utils::Status RedisMetaOps::GetInodes(const std::vector<InodeID> &inode_ids,
+                                      std::vector<std::optional<SwordFsInode>> *out) {
+  utils::ExpectInFiberDomain();
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("inode batch output is null");
+  }
+  if (inode_ids.empty()) {
+    out->clear();
+    return utils::Status::OK();
+  }
+
+  std::vector<std::string> keys;
+  keys.reserve(inode_ids.size());
+  for (const InodeID requested_ino : inode_ids) {
+    keys.push_back(key_.Inode(requested_ino));
+  }
+
+  std::vector<std::optional<std::string>> values;
+  auto status = backend_->executor().RunFromFiber([&] { return backend_->client().MGet(keys, &values); });
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::vector<std::optional<SwordFsInode>> result;
+  result.reserve(values.size());
+  for (size_t i = 0; i < values.size(); ++i) {
+    const auto &value = values[i];
+    if (!value.has_value()) {
+      result.emplace_back(std::nullopt);
+      continue;
+    }
+    SwordFsInode inode;
+    status = inode.ParseFrom(value.value());
+    if (!status.ok()) {
+      return status;
+    }
+    if (inode.ino != inode_ids[i]) {
+      return utils::Status::Malformed("Redis inode batch record identity mismatch");
+    }
+    result.emplace_back(std::move(inode));
+  }
+  *out = std::move(result);
+  return utils::Status::OK();
+}
+
 utils::Status RedisMetaOps::LookupEntry(InodeID parent_ino, std::string_view name, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
   if (out == nullptr) {

@@ -261,6 +261,14 @@ utils::Status FileReadWriter::GetAttr(metadata::SwordFsInode *out) const {
   return utils::Status::OK();
 }
 
+LiveAttrGuard::LiveAttrGuard(std::shared_ptr<FileReadWriter> owner)
+    : owner_(std::move(owner)), lock_(owner_->operation_mutex_) {
+}
+
+void LiveAttrGuard::Apply(metadata::SwordFsInode &inode) const {
+  owner_->ApplyLiveSize(&inode);
+}
+
 void FileReadWriter::ApplyLiveSize(metadata::SwordFsInode *inode) const {
   if (inode != nullptr && live_size_.has_value()) {
     inode->attr.size = std::max(inode->attr.size, *live_size_);

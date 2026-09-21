@@ -21,6 +21,15 @@ class DirEntryEncoder {
   virtual void Encode(const metadata::SwordFsEntry &entry, off_t next_off, size_t required, std::string *out) const = 0;
 };
 
+class DirEntryPlusEncoder {
+ public:
+  virtual ~DirEntryPlusEncoder() = default;
+
+  virtual size_t CalSpace(const metadata::SwordFsEntry &entry, off_t next_off) const = 0;
+  virtual void Encode(const metadata::SwordFsEntry &entry, const metadata::SwordFsInode &inode, off_t next_off,
+                      size_t required, std::string *out) const = 0;
+};
+
 class DirHandle : public Handle {
  public:
   explicit DirHandle(metadata::DirIteratorPtr iterator) : iterator_(std::move(iterator)) {
@@ -29,6 +38,7 @@ class DirHandle : public Handle {
   static utils::Status Open(metadata::InodeID ino, std::shared_ptr<DirHandle> *out);
   utils::Status Release();
   utils::Status ReadDir(off_t off, size_t size, const DirEntryEncoder &encoder, std::string *out);
+  utils::Status ReadDirPlus(off_t off, size_t size, const DirEntryPlusEncoder &encoder, std::string *out);
 
  private:
   utils::FiberMutex mutex_;

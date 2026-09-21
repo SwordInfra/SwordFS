@@ -91,6 +91,13 @@ class IMetaEngine {
   /// Get an inode metadata snapshot.
   virtual Status GetInode(InodeID ino, SwordFsInode *out) = 0;
 
+  /// Get a position-aligned batch of inode metadata snapshots. A missing
+  /// inode is represented by std::nullopt at the corresponding position;
+  /// backend/decoding failures fail the whole batch. Implementations must
+  /// provide a backend-native batch path rather than looping over remote
+  /// GetInode calls.
+  virtual Status GetInodes(const std::vector<InodeID> &inode_ids, std::vector<std::optional<SwordFsInode>> *out) = 0;
+
   /// Create a regular file.
   virtual Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) = 0;
 
