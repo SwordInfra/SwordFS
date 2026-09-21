@@ -27,7 +27,7 @@
 
 namespace swordfs::metadata {
 
-constexpr Limits kMemLimits{.max_name_length = 255, .max_free_inodes = UINT64_MAX};
+constexpr Limits kMemLimits{.max_name_length = kMaxNameLength, .max_free_inodes = UINT64_MAX};
 
 const RegisterMetaEngine kMemoryMetaEngine{"memory", MemMetaImpl::CreateInstance};
 
@@ -117,6 +117,9 @@ Status MemMetaImpl::LoadVolume(SwordFsVolume *config) {
 
 Status MemMetaImpl::Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
+  }
   SwordFsInode child;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     Status status = txn.LookupEntry(parent_ino, name, &child);
@@ -181,8 +184,8 @@ Status MemMetaImpl::GetInodes(const std::vector<InodeID> &inode_ids, std::vector
 
 Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
-  if (name.size() > kMemLimits.max_name_length) {
-    return Status::NameTooLong("file name exceeds maximum length");
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
   }
 
   SwordFsInode child;
@@ -213,6 +216,9 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t m
 
 Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
   utils::ExpectInFiberDomain();
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
+  }
   // Refuse to unlink "." or ".."
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot unlink . or ..");
@@ -259,8 +265,11 @@ Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
 Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,
                            std::string_view new_name, RenameFlag flags) {
   utils::ExpectInFiberDomain();
-  if (new_name.size() > kMemLimits.max_name_length) {
-    return Status::NameTooLong("target name exceeds maximum length");
+  if (auto status = ValidateNameComponent(old_name); !status.ok()) {
+    return status;
+  }
+  if (auto status = ValidateNameComponent(new_name); !status.ok()) {
+    return status;
   }
 
   // "." and ".." cannot be renamed
@@ -494,8 +503,8 @@ Status MemMetaImpl::AllocateChunkRevision(ChunkRevision *revision) {
 
 Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
-  if (name.size() > kMemLimits.max_name_length) {
-    return Status::NameTooLong("directory name exceeds maximum length");
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
   }
 
   SwordFsInode child;
@@ -528,6 +537,9 @@ Status MemMetaImpl::MkDir(InodeID parent_ino, std::string_view name, uint32_t mo
 
 Status MemMetaImpl::RmDir(InodeID parent_ino, std::string_view name) {
   utils::ExpectInFiberDomain();
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
+  }
   // Cannot remove "." or ".."
   if (name == "." || name == "..") {
     return Status::InvalidArgument("cannot remove . or ..");
@@ -604,8 +616,8 @@ Status MemMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
 
 Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
-  if (name.size() > kMemLimits.max_name_length) {
-    return Status::NameTooLong("symlink name exceeds maximum length");
+  if (auto status = ValidateNameComponent(name); !status.ok()) {
+    return status;
   }
 
   SwordFsInode child;
@@ -648,8 +660,8 @@ Status MemMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::stri
 
 Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
-  if (newname.size() > kMemLimits.max_name_length) {
-    return Status::NameTooLong("link name exceeds maximum length");
+  if (auto status = ValidateNameComponent(newname); !status.ok()) {
+    return status;
   }
 
   SwordFsInode inode;

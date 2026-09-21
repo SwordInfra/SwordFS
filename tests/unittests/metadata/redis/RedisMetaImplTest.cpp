@@ -383,6 +383,28 @@ FIBER_TEST_F(RedisMetaImplTest, VolumeAndBasicLookupOperations) {
   EXPECT_TRUE(impl_->Lookup(file.ino, "child", &found).IsNotDirectory());
 }
 
+FIBER_TEST_F(RedisMetaImplTest, NamespaceOperationsRejectOverlongNameComponents) {
+  const auto limits = impl_->GetLimits();
+  const std::string long_name(limits.max_name_length + 1, 'x');
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+
+  SwordFsInode found;
+  EXPECT_TRUE(impl_->Lookup(kRootInodeId, long_name, &found).IsNameTooLong());
+  EXPECT_TRUE(impl_->Unlink(kRootInodeId, long_name).IsNameTooLong());
+  EXPECT_TRUE(impl_->RmDir(kRootInodeId, long_name).IsNameTooLong());
+  EXPECT_TRUE(impl_->Rename(kRootInodeId, long_name, kRootInodeId, "moved", swordfs::metadata::RenameFlag::kNone)
+                  .IsNameTooLong());
+  EXPECT_TRUE(impl_->Rename(kRootInodeId, "file", kRootInodeId, long_name, swordfs::metadata::RenameFlag::kNone)
+                  .IsNameTooLong());
+
+  EXPECT_TRUE(impl_->Create(kRootInodeId, long_name, 0644, nullptr).IsNameTooLong());
+  EXPECT_TRUE(impl_->MkDir(kRootInodeId, long_name, 0755, nullptr).IsNameTooLong());
+  EXPECT_TRUE(impl_->Symlink(kRootInodeId, long_name, "target", nullptr).IsNameTooLong());
+  EXPECT_TRUE(impl_->Link(file.ino, kRootInodeId, long_name, nullptr).IsNameTooLong());
+}
+
 FIBER_TEST_F(RedisMetaImplTest, CreateAndMkdirValidateNamesParentsAndDuplicates) {
   const std::string long_name(256, 'x');
   EXPECT_TRUE(impl_->Create(kRootInodeId, long_name, 0644, nullptr).IsNameTooLong());

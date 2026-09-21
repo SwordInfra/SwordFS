@@ -17,7 +17,7 @@ tests/chflags/12.t#1
 tests/chflags/13.t#1
 tests/chmod/00.t#1-21,25,29-30,35,39-40,45,49-50,55,59-60,62-69,86-93,110-119
 tests/chmod/01.t#1-4,17
-tests/chmod/02.t#1-4
+tests/chmod/02.t#1-5
 tests/chmod/03.t#1-5
 tests/chmod/04.t#1-7
 tests/chmod/05.t#1-14
@@ -30,7 +30,7 @@ tests/chmod/11.t#1-17,21,24,29,32,37,40,45,48,50-68,72,77,82,87,92,97,102,107,10
 tests/chmod/12.t#1-14
 tests/chown/00.t#1-33,39,43-44,55,59-60,71,75-76,87,91-92,98-161,169,173,177,181-182,199,203,207,211-212,229,233,237,241-242,259,263,267,271-272,282-315,319,322-323,332,335-336,345,348-349,358,361-362,368-445,456,470,493,507,530,544,567,581,594-649,651-653,655-664,667-670,673-685,687-689,691-695,710,730,761,781,812,832,863,883,900-947,955,962,979,986,1003,1010,1027,1034,1044-1053,1055-1057,1059-1063,1065-1068,1070-1072,1074-1078,1080-1081,1086,1090,1101,1105,1116,1120,1131,1135,1142-1143,1145-1188,1195,1201,1216,1222,1237,1243,1258,1264,1273-1280
 tests/chown/01.t#1-5,22
-tests/chown/02.t#1-4,6-9
+tests/chown/02.t#1-10
 tests/chown/03.t#1-10
 tests/chown/04.t#1-9
 tests/chown/05.t#1-18
@@ -41,7 +41,7 @@ tests/chown/09.t#1
 tests/chown/10.t#1-4
 tests/ftruncate/00.t#1-26
 tests/ftruncate/01.t#1-5
-tests/ftruncate/02.t#1-4
+tests/ftruncate/02.t#1-5
 tests/ftruncate/03.t#1-5
 tests/ftruncate/04.t#1-4
 tests/ftruncate/05.t#1-15
@@ -63,7 +63,7 @@ tests/granular/05.t#1
 tests/granular/06.t#1
 tests/link/00.t#1-27,43,47,49,51-53,69,73,75,77-79,95,99,101,103-105,121,125,127,129-138,167-173,178-179,185-186,192-193,199-200,202
 tests/link/01.t#1-7,32
-tests/link/02.t#1-9
+tests/link/02.t#1-10
 tests/link/03.t#1-13
 tests/link/04.t#1-6
 tests/link/05.t#1
@@ -94,6 +94,7 @@ tests/mkdir/11.t#1
 tests/mkdir/12.t#1-2
 tests/mkfifo/00.t#1,17,24,28,36
 tests/mkfifo/01.t#1-4,17
+tests/mkfifo/02.t#4
 tests/mkfifo/03.t#4
 tests/mkfifo/04.t#1-3
 tests/mkfifo/05.t#1-3,6-8,11-12
@@ -106,6 +107,7 @@ tests/mkfifo/11.t#1
 tests/mkfifo/12.t#1-2
 tests/mknod/00.t#1,17,24,28,36
 tests/mknod/01.t#1-6,27
+tests/mknod/02.t#4,8,12
 tests/mknod/03.t#4,8,12
 tests/mknod/04.t#1-3
 tests/mknod/05.t#1-3,6-8,11-12
@@ -142,7 +144,7 @@ tests/open/25.t#1-6
 tests/open/26.t#1-9
 tests/posix_fallocate/00.t#1
 tests/rename/00.t#1-16,21,28,36,43,51,58,66,73,77-101,118-122
-tests/rename/01.t#1-7
+tests/rename/01.t#1-8
 tests/rename/02.t#1-6
 tests/rename/03.t#1-6
 tests/rename/04.t#1-18
@@ -168,7 +170,7 @@ tests/rename/23.t#1-9,42
 tests/rename/24.t#1-13
 tests/rmdir/00.t#1-10
 tests/rmdir/01.t#1-11
-tests/rmdir/02.t#1-3
+tests/rmdir/02.t#1-4
 tests/rmdir/03.t#1-5
 tests/rmdir/04.t#1-4
 tests/rmdir/05.t#1-6
@@ -197,7 +199,7 @@ tests/symlink/11.t#1
 tests/symlink/12.t#1-6
 tests/truncate/00.t#1-21
 tests/truncate/01.t#1-5
-tests/truncate/02.t#1-4
+tests/truncate/02.t#1-5
 tests/truncate/03.t#1-5
 tests/truncate/04.t#1-4
 tests/truncate/05.t#1-15
@@ -212,7 +214,7 @@ tests/truncate/13.t#1-4
 tests/truncate/14.t#1-2
 tests/unlink/00.t#1-9,13,17,21,25-30,51-54,71-77,82-83,88-89,94-95,100-112
 tests/unlink/01.t#1-5
-tests/unlink/02.t#1-3
+tests/unlink/02.t#1-4
 tests/unlink/03.t#1-4
 tests/unlink/04.t#1-4
 tests/unlink/05.t#1-10

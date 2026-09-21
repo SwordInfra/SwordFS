@@ -6,6 +6,21 @@ to be green while SwordFS is still in beta. The conformance system separates
 observation from the regression contract so capability debt stays visible and
 already-supported semantics cannot silently regress.
 
+## Namespace component limits
+
+SwordFS treats the maximum pathname-component length as a metadata namespace
+invariant rather than a syscall-specific rule. A single component may contain
+at most 255 bytes. Every metadata entry point that accepts a directory-entry
+name validates that component before ordinary lookup or mutation, so an
+overlong component returns `ENAMETOOLONG` instead of being collapsed into a
+later error such as `ENOENT`.
+
+The rule applies consistently to lookup, create, mkdir, unlink, rmdir,
+symlink, hard-link destination names, and both source and destination names of
+rename. Memory and persistent metadata backends share the same limit and
+validation contract; backend-specific storage or lookup behavior must not
+change this error precedence.
+
 ## Model
 
 The upstream revision is pinned in `conformance/pjdfstest/version.env`. A run
