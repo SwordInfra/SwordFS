@@ -369,6 +369,133 @@ jobs:
           path: build/pjdfstest-conformance
           if-no-files-found: warn
 
+  fstests-conformance:
+    name: fstests-conformance (Release)
+    needs: clang-format
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Restore native dependency cache
+        uses: actions/cache@v4
+        with:
+          path: .deps/install
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native-deps-cache.env') }}
+
+      - name: Install dependencies
+        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
+
+      - name: Install fstests tools
+        run: |
+          sudo apt-get install -y -qq \
+            acct acl attr autoconf automake bc e2fsprogs fio fsverity gawk \
+            libacl1-dev libaio-dev libcap-dev libtool libtool-bin \
+            lvm2 psmisc quota sqlite3 uuid-dev uuid-runtime xfslibs-dev xfsprogs
+
+      - name: Conformance test setup
+        run: |
+          sudo mkdir -p /etc/swordfs
+          sudo chown "$(id -u):$(id -g)" /etc/swordfs
+          sudo modprobe fuse
+          sudo chmod 666 /dev/fuse
+          if ! grep -Eq '^[[:space:]]*user_allow_other([[:space:]]|$)' /etc/fuse.conf 2>/dev/null; then
+            echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+          fi
+
+      - name: Configure Release
+        run: |
+          cmake --preset release \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install"
+
+      - name: Build SwordFS
+        run: cmake --build build --target swordfs
+
+      - name: Verify conformance tooling
+        run: python3 -m unittest discover -s tests/conformance -p 'test_*.py'
+
+      - name: Run pinned fstests suite
+        id: fstests-harness
+        run: |
+          mkdir -p build/fstests-conformance
+          set +e
+          sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
+            SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
+            bash scripts/run-fstests.sh \
+              --output-dir "${{ github.workspace }}/build/fstests-conformance"
+          status=$?
+          set -e
+          echo "${status}" | sudo tee build/fstests-conformance/harness-status.txt >/dev/null
+          sudo chown -R "$(id -u):$(id -g)" build/fstests-conformance
+          exit "${status}"
+
+      - name: Classify fstests results
+        if: always()
+        env:
+          ALLOW_SUPPORTED_REMOVAL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'conformance-semantic-change') }}
+          ALLOW_DEFERRED_ADDITION: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'conformance-deferred-change') }}
+        run: |
+          source conformance/fstests/version.env
+          baseline_args=()
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            previous_supported="${RUNNER_TEMP}/fstests-previous-supported.txt"
+            if git show "${{ github.event.pull_request.base.sha }}:conformance/fstests/supported.txt" > "${previous_supported}" 2>/dev/null; then
+              baseline_args+=(--previous-supported-file "${previous_supported}")
+            fi
+            previous_deferred="${RUNNER_TEMP}/fstests-previous-deferred.tsv"
+            if git show "${{ github.event.pull_request.base.sha }}:conformance/fstests/deferred-ci.tsv" > "${previous_deferred}" 2>/dev/null; then
+              baseline_args+=(--previous-deferred-file "${previous_deferred}")
+            fi
+            if [ "${ALLOW_SUPPORTED_REMOVAL}" = "true" ]; then
+              baseline_args+=(--allow-supported-removal)
+            fi
+            if [ "${ALLOW_DEFERRED_ADDITION}" = "true" ]; then
+              baseline_args+=(--allow-deferred-addition)
+            fi
+          fi
+
+          python3 scripts/fstests_classify.py \
+            --selected-xml build/fstests-conformance/raw/selection/result.xml \
+            --result-xml build/fstests-conformance/raw/results/result.xml \
+            --result-dir build/fstests-conformance/raw/results \
+            --supported-file conformance/fstests/supported.txt \
+            --known-gaps-file conformance/fstests/known-gaps.tsv \
+            --deferred-file conformance/fstests/deferred-ci.tsv \
+            --output-dir build/fstests-conformance \
+            --swordfs-commit "$(git rev-parse HEAD)" \
+            --fstests-commit "${FSTESTS_COMMIT}" \
+            --fstests-group "${FSTESTS_GROUP}" \
+            --environment-json build/fstests-conformance/environment.json \
+            --harness-status-file build/fstests-conformance/harness-status.txt \
+            "${baseline_args[@]}" \
+            --strict
+
+      - name: Publish fstests summary to job
+        if: always()
+        run: |
+          if [ -f build/fstests-conformance/report.md ]; then
+            cat build/fstests-conformance/report.md >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo '## fstests infrastructure failure' >> "${GITHUB_STEP_SUMMARY}"
+            echo '' >> "${GITHUB_STEP_SUMMARY}"
+            echo 'The job ended before a classified report was produced. Inspect the uploaded logs.' >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload fstests evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fstests-conformance
+          path: build/fstests-conformance
+          if-no-files-found: warn
+
   publish-pjdfstest-status:
     name: publish-pjdfstest-status
     needs: pjdfstest-conformance
