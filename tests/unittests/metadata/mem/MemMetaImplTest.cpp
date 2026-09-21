@@ -4,6 +4,7 @@
 // Tests for MemMetaImpl: permission checks, open-unlink behaviour, and
 // operation-level atomicity under concurrency.
 
+#include <dirent.h>
 #include <folly/fibers/FiberManagerInternal.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
@@ -179,6 +180,90 @@ FIBER_TEST_F(MemMetaImplTest, NamespaceOperationsRejectOverlongNameComponents) {
   EXPECT_TRUE(impl_->MkDir(kRoot, long_name, 0755, nullptr).IsNameTooLong());
   EXPECT_TRUE(impl_->Symlink(kRoot, long_name, "target", nullptr).IsNameTooLong());
   EXPECT_TRUE(impl_->Link(file.ino, kRoot, long_name, nullptr).IsNameTooLong());
+}
+
+FIBER_TEST_F(MemMetaImplTest, MknodPersistsSupportedTypesModeAndDeviceIdentity) {
+  struct Case {
+    const char *name;
+    mode_t mode;
+    dev_t rdev;
+    dev_t expected_rdev;
+  };
+  const std::vector<Case> cases = {
+      {"regular", S_IFREG | 0601, static_cast<dev_t>(123), 0},
+      {"fifo", S_IFIFO | 0620, static_cast<dev_t>(456), 0},
+      {"char", S_IFCHR | 0600, static_cast<dev_t>(0x1234), static_cast<dev_t>(0x1234)},
+      {"block", S_IFBLK | 0640, static_cast<dev_t>(0x5678), static_cast<dev_t>(0x5678)},
+      {"socket", S_IFSOCK | 0770, static_cast<dev_t>(789), 0},
+  };
+
+  auto &ctx = folly::fibers::local<SwordFsContext>();
+  ctx.umask = 0077;
+
+  for (const auto &test_case : cases) {
+    SwordFsInode created;
+    ASSERT_TRUE(impl_->MkNod(kRoot, test_case.name, test_case.mode, test_case.rdev, &created).ok()) << test_case.name;
+    EXPECT_EQ(created.attr.mode, static_cast<uint32_t>(test_case.mode)) << test_case.name;
+    EXPECT_EQ(created.attr.rdev, static_cast<uint64_t>(test_case.expected_rdev)) << test_case.name;
+    EXPECT_EQ(created.attr.nlink, 1U) << test_case.name;
+    EXPECT_EQ(created.attr.size, 0U) << test_case.name;
+
+    SwordFsInode found;
+    ASSERT_TRUE(impl_->Lookup(kRoot, test_case.name, &found).ok()) << test_case.name;
+    EXPECT_EQ(found.attr.mode, created.attr.mode) << test_case.name;
+    EXPECT_EQ(found.attr.rdev, created.attr.rdev) << test_case.name;
+  }
+}
+
+FIBER_TEST_F(MemMetaImplTest, MknodReusesNamespaceValidationAndRejectsNonMknodTypes) {
+  const std::string long_name(impl_->GetLimits().max_name_length + 1, 'x');
+  EXPECT_TRUE(impl_->MkNod(kRoot, long_name, S_IFIFO | 0600, 0, nullptr).IsNameTooLong());
+  EXPECT_EQ(impl_->MkNod(kRoot, "directory", S_IFDIR | 0700, 0, nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->MkNod(kRoot, "symlink", S_IFLNK | 0700, 0, nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->MkNod(kRoot, "unknown", 0700, 0, nullptr).code(), Status::kInvalidArgument);
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "parent-file", 0644, &file).ok());
+  EXPECT_TRUE(impl_->MkNod(file.ino, "child", S_IFIFO | 0600, 0, nullptr).IsNotDirectory());
+  EXPECT_TRUE(impl_->MkNod(999999, "missing-parent", S_IFIFO | 0600, 0, nullptr).IsNotFound());
+
+  ASSERT_TRUE(impl_->MkNod(kRoot, "duplicate", S_IFIFO | 0600, 0, nullptr).ok());
+  EXPECT_TRUE(impl_->MkNod(kRoot, "duplicate", S_IFIFO | 0600, 0, nullptr).IsAlreadyExists());
+}
+
+FIBER_TEST_F(MemMetaImplTest, MknodSpecialNodesUseOrdinaryNamespaceLifecycle) {
+  SwordFsInode fifo;
+  ASSERT_TRUE(impl_->MkNod(kRoot, "fifo", S_IFIFO | 0600, 0, &fifo).ok());
+
+  swordfs::metadata::DirIteratorPtr iterator;
+  ASSERT_TRUE(impl_->OpenDir(kRoot, &iterator).ok());
+  bool found_fifo = false;
+  for (;;) {
+    swordfs::metadata::SwordFsEntry entry;
+    uint64_t next_cookie = 0;
+    auto status = iterator->Peek(&entry, &next_cookie);
+    if (status.IsEndOfDirectory()) {
+      break;
+    }
+    ASSERT_TRUE(status.ok()) << status.message();
+    if (entry.name == "fifo") {
+      found_fifo = true;
+      EXPECT_EQ(entry.type, DT_FIFO);
+      EXPECT_EQ(entry.ino, fifo.ino);
+    }
+    iterator->Advance();
+  }
+  EXPECT_TRUE(found_fifo);
+
+  ASSERT_TRUE(impl_->Unlink(kRoot, "fifo").ok());
+  EXPECT_EQ(OrphanCandidates(), std::vector<InodeID>{fifo.ino});
+
+  std::optional<ReclaimWork> work;
+  ASSERT_TRUE(impl_->PrepareReclaim(fifo.ino, &work).ok());
+  ASSERT_TRUE(work.has_value());
+  EXPECT_TRUE(work->chunks.empty());
+  SwordFsInode reclaimed;
+  EXPECT_TRUE(impl_->GetInode(fifo.ino, &reclaimed).IsNotFound());
 }
 
 // ────────────────────────────────────────────────────────────────

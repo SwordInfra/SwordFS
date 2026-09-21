@@ -222,6 +222,9 @@ class MockMetaEngine : public IMetaEngine {
   Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
+  Status MkNod(InodeID, std::string_view, uint32_t, uint64_t, SwordFsInode *) override {
+    return Status::OK();
+  }
   Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }

@@ -101,6 +101,12 @@ class IMetaEngine {
   /// Create a regular file.
   virtual Status Create(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) = 0;
 
+  /// Create a non-directory/non-symlink inode with an explicit POSIX file
+  /// type. The mode is already kernel-normalized; implementations must not
+  /// apply umask again. Character/block nodes persist |rdev|, while other
+  /// accepted mknod types canonicalize it to zero.
+  virtual Status MkNod(InodeID parent_ino, std::string_view name, uint32_t mode, uint64_t rdev, SwordFsInode *out) = 0;
+
   /// Create a directory. Increments parent nlink to account for "..".
   virtual Status MkDir(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) = 0;
 

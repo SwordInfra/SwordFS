@@ -21,6 +21,36 @@ rename. Memory and persistent metadata backends share the same limit and
 validation contract; backend-specific storage or lookup behavior must not
 change this error precedence.
 
+## Special-node creation
+
+SwordFS treats `mknod` as one metadata-backed namespace creation operation,
+not as a collection of FIFO/device/socket-specific paths. The backend-neutral
+contract accepts the complete inode mode and `rdev`, creates the inode and
+dentry atomically, and returns the authoritative inode used for the FUSE entry
+reply.
+
+The accepted `mknod` inode types are regular files, FIFOs, character devices,
+block devices, and socket nodes. Directories and symbolic links remain owned
+by `mkdir` and `symlink`; unknown file-type encodings are rejected rather than
+persisted. Character and block devices persist the supplied `rdev` exactly.
+All other accepted node types canonicalize `rdev` to zero because device
+identity has no meaning for them.
+
+Mode ownership follows the current low-level FUSE contract. SwordFS does not
+enable `FUSE_CAP_DONT_MASK`, so the kernel applies the caller's umask before
+the `mknod` callback. Metadata therefore preserves the permission bits it
+receives and must not apply `SwordFsContext::umask` a second time. Likewise,
+Linux VFS/FUSE with `default_permissions` owns ordinary DAC and device-node
+authorization; metadata only enforces namespace/state invariants after kernel
+authorization.
+
+Special nodes reuse the ordinary inode/dentry lifecycle. They inherit the
+current creation uid/gid rule, start with one link, use zero size, participate
+in lookup/readdir/stat through their persisted mode, and follow the existing
+unlink/orphan/reclaim machinery. Persisting a socket inode represents the
+filesystem namespace object created by Unix-domain-socket `bind`; socket data
+transport remains kernel-owned.
+
 ## Model
 
 The upstream revision is pinned in `conformance/pjdfstest/version.env`. A run

@@ -37,7 +37,7 @@ class VfsImpl {
   static utils::Status SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, std::optional<uint64_t> fh,
                                struct stat *out_attr);
   static utils::Status ReadLink(fuse_ino_t ino, std::string *target);
-  static utils::Status MkNod(fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev);
+  static utils::Status MkNod(fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev, fuse_entry_param *entry);
   static utils::Status MkDir(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry);
   static utils::Status Unlink(fuse_ino_t parent, const char *name);
   static utils::Status RmDir(fuse_ino_t parent, const char *name);

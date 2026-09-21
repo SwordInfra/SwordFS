@@ -47,6 +47,23 @@ utils::Status ValidateNameComponent(std::string_view name) {
   return utils::Status::OK();
 }
 
+utils::Status ValidateMknodMode(uint32_t mode) {
+  switch (mode & S_IFMT) {
+    case S_IFREG:
+    case S_IFIFO:
+    case S_IFCHR:
+    case S_IFBLK:
+    case S_IFSOCK:
+      return utils::Status::OK();
+    default:
+      return utils::Status::InvalidArgument("unsupported mknod file type");
+  }
+}
+
+uint64_t NormalizeMknodRdev(uint32_t mode, uint64_t rdev) {
+  return S_ISCHR(mode) || S_ISBLK(mode) ? rdev : 0;
+}
+
 utils::Status ParseUrlScheme(std::string_view url, std::string *scheme) {
   if (scheme == nullptr) {
     return utils::Status::InvalidArgument("URL scheme output is null");

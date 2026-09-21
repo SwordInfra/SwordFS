@@ -93,6 +93,7 @@ class MemMetaTxn {
   // Linking a subdirectory also increments the parent's nlink (the new
   // ".." backlink); any successful link bumps the parent's mtime/ctime.
   Status AddEntry(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out);
+  Status AddEntry(InodeID parent_ino, std::string_view name, uint32_t mode, uint64_t rdev, SwordFsInode *out);
 
   // Move an existing entry from old_parent/old_name to
   // new_parent/new_name.  The inode is re-linked, not re-created.

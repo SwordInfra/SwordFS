@@ -208,6 +208,11 @@ Status MemMetaTxn::LookupEntry(InodeID parent_ino, std::string_view name, SwordF
 }
 
 Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name, uint32_t mode, SwordFsInode *out) {
+  return AddEntry(parent_ino, name, mode, 0, out);
+}
+
+Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name, uint32_t mode, uint64_t rdev,
+                            SwordFsInode *out) {
   SwordFsInode *parent = FindInode(parent_ino);
   if (!parent) {
     return Status::NotFound("parent directory not found");
@@ -222,6 +227,7 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name, uint32_t 
   auto &ctx = folly::fibers::local<swordfs::utils::SwordFsContext>();
   SwordFsAttr attr(store_->next_ino_.fetch_add(1, std::memory_order_relaxed), static_cast<uint32_t>(mode), ctx.uid,
                    parent->attr.gid);
+  attr.rdev = rdev;
 
   auto child = std::make_unique<SwordFsInode>(attr.ino, attr, parent_ino);
   SwordFsInode *child_ptr = child.get();
