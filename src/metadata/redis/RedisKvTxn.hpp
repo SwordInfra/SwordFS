@@ -47,6 +47,7 @@ class RedisKvTxn {
   // with exceptions escaping from callback code.
   utils::Status Commit();
   utils::Status ReleaseConnection();
+  void ReleaseRedisView();
 
  private:
   std::unique_ptr<sw::redis::Transaction> transaction_;

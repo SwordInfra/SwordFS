@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include <dirent.h>
+#include <folly/Conv.h>
 #include <folly/fibers/Baton.h>
 #include <folly/fibers/FiberManagerMap.h>
 #include <gtest/gtest.h>
@@ -82,6 +83,14 @@ sw::redis::ConnectionOptions ConnectionOptions(const RedisMetaConfig &config) {
 
 std::string UniqueRedisName(std::string_view suffix) {
   return swordfs::test::UniqueRedisTestNamespace("redis-meta-txn", suffix);
+}
+
+uint64_t RedisInfoCounter(sw::redis::Redis &redis, std::string_view section, std::string_view name) {
+  const auto info = redis.info(section);
+  const auto prefix = std::string(name) + ":";
+  const auto begin = info.find(prefix) + prefix.size();
+  const auto end = info.find('\r', begin);
+  return folly::to<uint64_t>(std::string_view(info).substr(begin, end - begin));
 }
 
 utils::Status SeedInode(sw::redis::Redis &redis, const redis::RedisKey &key, const SwordFsInode &inode) {
@@ -251,6 +260,56 @@ TEST(RedisMetaClientTest, StandalonePingAndWatchReadMultiExec) {
   });
   EXPECT_TRUE(status.ok()) << status.message();
   cleanup.del(key);
+}
+
+TEST(RedisMetaClientTest, SuccessfulTransactionsReusePooledConnection) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  // A single-slot pool makes connection reuse observable without depending on
+  // scheduler interleavings. The independent observer keeps one connection
+  // open while reading Redis' cumulative accepted-connection counter.
+  config.pool_size = 1;
+  RedisMetaClient store(config);
+  sw::redis::Redis observer(ConnectionOptions(config));
+  const std::string key = UniqueRedisName("pooled-connection-reuse");
+  observer.set(key, "0");
+
+  auto transact_once = [&] {
+    return store.Transact([&](RedisKvTxn &transaction) {
+      std::string value;
+      const auto status = transaction.Get(key, &value);
+      EXPECT_TRUE(status.ok()) << status.message();
+      return transaction.Set(key, value == "0" ? "1" : "0");
+    });
+  };
+
+  // Warm the lazy redis++ pool before taking the baseline so normal initial
+  // connection establishment is excluded from the measured delta.
+  auto status = transact_once();
+  ASSERT_TRUE(status.ok()) << status.message();
+  const auto before = RedisInfoCounter(observer, "stats", "total_connections_received");
+
+  constexpr int kTransactionCount = 64;
+  for (int i = 0; i < kTransactionCount; ++i) {
+    status = transact_once();
+    ASSERT_TRUE(status.ok()) << "transaction " << i << ": " << status.message();
+  }
+
+  const auto after = RedisInfoCounter(observer, "stats", "total_connections_received");
+  ASSERT_GE(after, before);
+  const auto connection_delta = after - before;
+
+  // The compose Redis healthcheck can contribute a small amount of background
+  // traffic, so assert a generous bounded delta rather than an exact value.
+  // A healthy one-slot pool reuses its connection; reconnect-per-transaction
+  // behavior grows approximately with kTransactionCount and must fail here.
+  EXPECT_LE(connection_delta, 16U) << "64 successful transactions opened " << connection_delta
+                                   << " additional Redis connections";
+
+  observer.del(key);
 }
 
 TEST(RedisMetaClientTest, RetriesWatchConflict) {

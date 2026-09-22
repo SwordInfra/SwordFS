@@ -92,6 +92,16 @@ share key-level conflict granularity: unrelated names in one directory or
 indexes in one chunk Hash can still cause retries. All reads must precede the
 first queued write; the wrapper rejects reads after writes.
 
+`RedisKvTxn` borrows its transaction connection from the shared redis++ pool
+with `transaction(false, false)`. The `Redis` view returned by
+`Transaction::redis()` is kept only for the callback's WATCH/read phase, where
+it must share the transaction connection. Before normal terminal `EXEC`,
+read-only completion, or `DISCARD`, SwordFS releases that view so redis++ can
+return the healthy connection to the pool during its terminal reset. Keeping
+the shared view alive through terminal handling prevents the pool return and
+causes redis++ destruction cleanup to invalidate an otherwise healthy
+connection, turning successful metadata transactions into reconnect churn.
+
 `RedisMetaClient::Transact` bounds retries and uses randomized exponential
 backoff. It reruns the callback after WATCH conflicts or retryable pre-EXEC
 connection failures. The callback must reconstruct its decisions from newly
