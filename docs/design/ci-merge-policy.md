@@ -27,9 +27,10 @@ success keeps the ruleset unsatisfied and prevents a normal merge to `main`.
 Strict required-check mode also requires the PR head to be tested against the
 current target branch state.
 
-`publish-pjdfstest-status` is intentionally not required because it runs only
-after a push to `main`; making a post-merge job a pre-merge requirement would
-make the policy impossible to satisfy.
+`publish-pjdfstest-status` and `publish-fstests-status` are intentionally not
+required because they run only after a push to `main`; making a post-merge
+publication job a pre-merge requirement would make the policy impossible to
+satisfy.
 
 Both `pjdfstest-conformance (Release)` and `fstests-conformance (Release)` are
 required semantic gates. pjdfstest protects the pathname/metadata-oriented
@@ -47,13 +48,13 @@ conformance job: they only authorize the classifier to evaluate the explicitly
 reviewed baseline transition. Restoring deferred coverage to normal execution
 requires no override.
 
-`pjdfstest-conformance` and `publish-pjdfstest-status` remain separate jobs
-primarily for least-privilege isolation. The conformance job only needs
-`contents: read` while validating PR semantics and enforcing regression policy.
-The publication job needs `contents: write` only after an authoritative `main`
-run so it can update the `pjdfstest-status` branch. Combining them would require
-granting write permission to the conformance job even on PR validation runs,
-without improving the regression gate itself.
+Each conformance gate remains separate from its status-publication job for
+least-privilege isolation. `pjdfstest-conformance` and `fstests-conformance`
+need only `contents: read` while validating PR semantics and enforcing
+regression policy. Their publication jobs need `contents: write` only after an
+authoritative `main` run so they can update `pjdfstest-status` and
+`fstests-status`. Combining these responsibilities would grant write permission
+to conformance jobs on PR validation runs without improving the regression gate.
 
 ## Check identity and maintenance
 

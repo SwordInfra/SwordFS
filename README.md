@@ -28,7 +28,7 @@ SwordFS uses established filesystem and system test suites to track POSIX and Li
 | Test suite | Status | Result | Details |
 | --- | --- | --- | --- |
 | [pjdfstest](https://github.com/pjd/pjdfstest) | Supported | **8770 / 8770 applicable assertions passing (100%)**, with **0 SwordFS known gaps** | [Compatibility report](https://github.com/SwordInfra/SwordFS/blob/pjdfstest-status/status.md) |
-| [fstests / xfstests](https://github.com/kdave/xfstests) | Planned | — | [#237](https://github.com/SwordInfra/SwordFS/issues/237) |
+| [fstests / xfstests](https://github.com/kdave/xfstests) | In progress | Continuously tracked on `main` | [Progress report](https://github.com/SwordInfra/SwordFS/blob/fstests-status/status.md) |
 | [stress-ng](https://github.com/ColinIanKing/stress-ng) | Planned | — | [#240](https://github.com/SwordInfra/SwordFS/issues/240) |
 
 ## Build

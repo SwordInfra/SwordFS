@@ -424,6 +424,32 @@ fstests is environment-sensitive and privileged, so complete execution belongs
 in GitHub Actions. Local development verifies the runner/classifier syntax and
 classifier unit tests; GitHub CI is authoritative for the mounted FUSE run.
 
+### Stable progress publication
+
+Every authoritative `main` run publishes the classifier output to the stable
+`fstests-status` branch. The branch contains `status.md`, `latest.json`, and
+`history.json`: the Markdown page is the durable human-facing compatibility
+report linked from README, while the JSON files preserve the latest machine-
+readable result and bounded publication history. Raw execution outcomes
+(`PASS`, `FAIL`, `NOTRUN`, and `DEFERRED`) are reported alongside semantic
+classifications so a reader can distinguish observed test outcomes from the
+reason a non-PASS result is currently accepted.
+
+The status branch is refreshed after every `main` fstests job, including an
+infrastructure-failed run. An infrastructure failure must replace a stale
+healthy headline rather than silently leaving the previous run looking current.
+`history.json` records each authoritative publication; the rendered historical
+progress table adds a row only when meaningful counts change, so unchanged main
+commits do not create visual noise. Because fstests runs are long enough for two
+`main` workflows to finish out of order, publication records the GitHub run id
+and refuses to replace a status already produced by a newer run. A concurrent
+status-branch push is retried after refetching the latest branch state. Raw CI
+artifacts remain the authoritative detailed evidence for each run.
+
+Publication is intentionally isolated in `publish-fstests-status`, which needs
+`contents: write` only on `main`. It is not a pre-merge required check; the
+required semantic gate remains `fstests-conformance (Release)`.
+
 The first rollout has an ordering constraint for repository protection. PRs
 introducing a brand-new status-check context cannot safely make that context a
 repository-wide required check before the workflow exists on `main`, because

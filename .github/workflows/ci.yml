@@ -551,3 +551,88 @@ jobs:
           git -C "${status_dir}" add status.md latest.json history.json
           git -C "${status_dir}" commit -m "status: update pjdfstest conformance for ${GITHUB_SHA}"
           git -C "${status_dir}" push origin HEAD:pjdfstest-status
+
+  publish-fstests-status:
+    name: publish-fstests-status
+    needs: fstests-conformance
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          submodules: false
+
+      - name: Download conformance evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: fstests-conformance
+          path: build/fstests-publish-input
+
+      - name: Publish stable status branch
+        env:
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CONFORMANCE_JOB_RESULT: ${{ needs.fstests-conformance.result }}
+        run: |
+          set -euo pipefail
+          status_dir="${RUNNER_TEMP}/fstests-status"
+          rm -rf "${status_dir}"
+
+          if git ls-remote --exit-code --heads origin fstests-status >/dev/null 2>&1; then
+            git fetch origin fstests-status:refs/remotes/origin/fstests-status
+            git worktree add -B fstests-status "${status_dir}" origin/fstests-status
+          else
+            git worktree add --detach "${status_dir}" HEAD
+            (
+              cd "${status_dir}"
+              git switch --orphan fstests-status
+              git rm -rf . >/dev/null 2>&1 || true
+            )
+          fi
+
+          git -C "${status_dir}" config user.name github-actions[bot]
+          git -C "${status_dir}" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+
+          publish_once() {
+            python3 scripts/update-fstests-status.py \
+              --result build/fstests-publish-input/result.json \
+              --report build/fstests-publish-input/report.md \
+              --history "${status_dir}/history.json" \
+              --output-dir "${status_dir}" \
+              --swordfs-commit "${GITHUB_SHA}" \
+              --run-url "${RUN_URL}" \
+              --run-id "${GITHUB_RUN_ID}" \
+              --infra-failure "fstests-conformance job result: ${CONFORMANCE_JOB_RESULT}" || return $?
+
+            git -C "${status_dir}" add status.md latest.json history.json || return $?
+            if git -C "${status_dir}" diff --cached --quiet; then
+              echo "No fstests status update required; a newer run is already published."
+              return 10
+            fi
+            git -C "${status_dir}" commit -m "status: update fstests conformance for ${GITHUB_SHA}" || return $?
+          }
+
+          for attempt in 1 2 3; do
+            if publish_once; then
+              if git -C "${status_dir}" push origin HEAD:fstests-status; then
+                exit 0
+              fi
+            else
+              publish_status=$?
+              if [ "${publish_status}" -eq 10 ]; then
+                exit 0
+              fi
+              exit "${publish_status}"
+            fi
+
+            if [ "${attempt}" -eq 3 ]; then
+              echo "Failed to publish fstests status after ${attempt} attempts" >&2
+              exit 1
+            fi
+
+            git fetch origin +refs/heads/fstests-status:refs/remotes/origin/fstests-status
+            git -C "${status_dir}" reset --hard origin/fstests-status
+          done
