@@ -37,7 +37,7 @@ class MemMetaImpl : public IMetaEngine {
   Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
                 RenameFlag flags) override;
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override;
-  Status Open(InodeID ino) override;
+  Status Open(InodeID ino, uint64_t *size = nullptr) override;
   Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) override;
   Status CompleteReclaim(InodeID ino) override;
   Status VisitOrphanCandidates(const InodeVisitorFn &visitor) override;

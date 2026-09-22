@@ -399,8 +399,9 @@ Status MemMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField f
   return Status::OK();
 }
 
-Status MemMetaImpl::Open(InodeID ino) {
+Status MemMetaImpl::Open(InodeID ino, uint64_t *size) {
   utils::ExpectInFiberDomain();
+  uint64_t authoritative_size = 0;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode inode;
     Status status = txn.LookupInode(ino, &inode);
@@ -422,12 +423,17 @@ Status MemMetaImpl::Open(InodeID ino) {
       return Status::NotDirectory("not a regular file");
     }
 
+    authoritative_size = inode.attr.size;
     // Update atime on the file.
     return txn.TouchInode(ino, SetAttrField::kAtime);
   });
 
   if (!status.ok()) {
     SWORDFS_LOG_DEBUG << "Open: ino " << ino << " failed: " << status.message();
+    return status;
+  }
+  if (size != nullptr) {
+    *size = authoritative_size;
   }
   return status;
 }

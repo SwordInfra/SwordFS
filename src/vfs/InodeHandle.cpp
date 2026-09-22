@@ -28,11 +28,13 @@ utils::Status InodeHandle::Open(int flags) {
 
   // Performs existing-inode validation and the atime update.
   auto meta = volume::VolumeImpl::Instance().meta_engine();
-  auto status = meta->Open(ino_);
+  uint64_t authoritative_size = 0;
+  auto status = meta->Open(ino_, &authoritative_size);
   if (!status.ok()) {
     ReleaseRef();
     return status;
   }
+  rw_->InitializeAuthoritativeSize(authoritative_size);
 
   if (flags & O_TRUNC) {
     status = rw_->Truncate(0);
@@ -48,6 +50,7 @@ utils::Status InodeHandle::OpenCreated() {
   if (!AcquireRefUnlessReclaiming()) {
     return utils::Status::NotFound("inode is being reclaimed");
   }
+  rw_->InitializeAuthoritativeSize(0);
   return utils::Status::OK();
 }
 

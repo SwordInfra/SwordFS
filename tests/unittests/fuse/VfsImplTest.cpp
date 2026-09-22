@@ -393,8 +393,11 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Open(InodeID) override {
+  Status Open(InodeID, uint64_t *size = nullptr) override {
     ++open_calls_;
+    if (size != nullptr) {
+      *size = 0;
+    }
     return open_status_;
   }
   Status PrepareReclaim(InodeID, std::optional<swordfs::metadata::ReclaimWork> *work) override {

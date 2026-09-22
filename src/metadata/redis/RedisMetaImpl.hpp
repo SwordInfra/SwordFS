@@ -48,7 +48,7 @@ class RedisMetaImpl : public IMetaEngine {
   Status Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) override;
   Status Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) override;
   Status Readlink(InodeID ino, std::string *target) override;
-  Status Open(InodeID ino) override;
+  Status Open(InodeID ino, uint64_t *size = nullptr) override;
   Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) override;
   Status CompleteReclaim(InodeID ino) override;
   Status VisitOrphanCandidates(const InodeVisitorFn &visitor) override;
