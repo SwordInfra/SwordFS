@@ -615,6 +615,29 @@ TEST_F(VfsImplIntegrationTest, FuseMknodRepliesWithErrnoOnMetadataFailure) {
   EXPECT_EQ(mock_meta_->mknod_calls(), 1);
 }
 
+TEST_F(VfsImplIntegrationTest, FuseStatxAcceptsNullFileInfo) {
+  FuseReplyCapture capture;
+
+  swordfs::fuse::VfsHookFactory::SwordFsStatx(reinterpret_cast<fuse_req_t>(&capture), 1, 0, STATX_BASIC_STATS, nullptr);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, ENOSYS);
+}
+
+TEST_F(VfsImplIntegrationTest, FuseStatxAcceptsNonNullFileInfo) {
+  FuseReplyCapture capture;
+  fuse_file_info file_info{};
+  file_info.fh = 123;
+
+  swordfs::fuse::VfsHookFactory::SwordFsStatx(reinterpret_cast<fuse_req_t>(&capture), 1, 0, STATX_BASIC_STATS,
+                                              &file_info);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, ENOSYS);
+}
+
 FIBER_TEST_F(VfsImplIntegrationTest, UnlinkDoesNotPerformASeparateLookup) {
   auto status = VfsImpl::Unlink(1, "file");
   EXPECT_TRUE(status.ok()) << status.message();

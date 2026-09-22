@@ -572,9 +572,17 @@ void VfsHookFactory::SwordFsTmpfile(fuse_req_t req, fuse_ino_t parent, mode_t mo
 }
 
 void VfsHookFactory::SwordFsStatx(fuse_req_t req, fuse_ino_t ino, int flags, int mask, struct fuse_file_info *fi) {
-  RunFuseInFiber(req, [req, ino, flags, mask, fi = *fi]() mutable {
+  std::optional<fuse_file_info> file_info;
+  if (fi != nullptr) {
+    file_info = *fi;
+  }
+  RunFuseInFiber(req, [req, ino, flags, mask, file_info]() mutable {
     SetRequestContext(req);
-    auto status = VfsImpl::StatX(ino, flags, mask, &fi);
+    fuse_file_info *file_info_ptr = nullptr;
+    if (file_info.has_value()) {
+      file_info_ptr = &file_info.value();
+    }
+    auto status = VfsImpl::StatX(ino, flags, mask, file_info_ptr);
     fuse_reply_err(req, status.ToErrno());
   });
 }
