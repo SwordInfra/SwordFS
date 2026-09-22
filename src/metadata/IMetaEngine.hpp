@@ -143,7 +143,10 @@ class IMetaEngine {
 
   /// Open a regular file after kernel DAC authorization. Validates the inode
   /// type and performs metadata-side open effects such as the atime update.
-  virtual Status Open(InodeID ino) = 0;
+  /// When |size| is non-null, returns the authoritative file size from the
+  /// inode already read for validation so the VFS need not issue a duplicate
+  /// metadata lookup merely to establish its local logical-EOF boundary.
+  virtual Status Open(InodeID ino, uint64_t *size = nullptr) = 0;
 
   /// Prepare the reclaim of |ino| and return the frozen object identities
   /// that must be deleted from the data engine.

@@ -464,7 +464,7 @@ Status RedisMetaImpl::Readlink(InodeID ino, std::string *target) {
   return Status::OK();
 }
 
-Status RedisMetaImpl::Open(InodeID ino) {
+Status RedisMetaImpl::Open(InodeID ino, uint64_t *size) {
   utils::ExpectInFiberDomain();
   SwordFsInode inode;
   auto status = ops_.GetInode(ino, &inode);
@@ -473,6 +473,9 @@ Status RedisMetaImpl::Open(InodeID ino) {
   }
   if (!inode.IsRegular()) {
     return Status::NotDirectory("not a regular file");
+  }
+  if (size != nullptr) {
+    *size = inode.attr.size;
   }
   UpdateAtimeBestEffort(ino);
   return Status::OK();

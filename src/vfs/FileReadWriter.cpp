@@ -235,8 +235,9 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
   }
   if (write_size != 0) {
     const auto write_end = static_cast<uint64_t>(cur_off);
-    std::lock_guard<utils::FiberMutex> live_size_lock(live_size_mutex_);
+    std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
     live_size_ = std::max(live_size_.value_or(0), write_end);
+    ++size_state_epoch_;
     ++write_epoch_;
   }
   return Status::OK();
@@ -248,8 +249,27 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
 
 utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   std::shared_lock<utils::FiberRWMutex> operation_lock(operation_mutex_);
+  if (size == 0) {
+    return utils::Status::OK();
+  }
+  if (off < 0) {
+    return utils::Status::InvalidArgument("FileReadWriter::Read: negative offset");
+  }
+
+  uint64_t visible_size = 0;
+  auto status = GetVisibleSize(&visible_size);
+  if (!status.ok()) {
+    return status;
+  }
+  const auto read_start = static_cast<uint64_t>(off);
+  if (read_start >= visible_size) {
+    return utils::Status::OK();
+  }
+
+  const uint64_t available = visible_size - read_start;
+  const size_t read_size = static_cast<size_t>(std::min<uint64_t>(static_cast<uint64_t>(size), available));
   MultiChunkReadWriter multi;
-  size_t remaining = size;
+  size_t remaining = read_size;
   off_t cur_off = off;
   auto *const write_start = out->writableData();
 
@@ -257,7 +277,7 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
     // 1) Try the unified chunk map (dirty + flushed).
     metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(cur_off / static_cast<off_t>(chunk_size_));
     std::shared_ptr<chunk::Chunk> c;
-    auto status = chunks_.Get(idx, /*create_if_missing=*/false, &c);
+    status = chunks_.Get(idx, /*create_if_missing=*/false, &c);
     if (!status.ok()) {
       multi.Drain();
       return status;
@@ -294,22 +314,70 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
     cur_off += static_cast<off_t>(hole);
   }
 
-  auto status = multi.Collect();
+  status = multi.Collect();
   if (!status.ok()) {
     return status;
   }
 
-  out->append(size - remaining);
+  out->append(read_size - remaining);
   return Status::OK();
 }
 
 utils::Status FileReadWriter::GetAttr(metadata::SwordFsInode *out) const {
   std::shared_lock<utils::FiberRWMutex> operation_lock(operation_mutex_);
+  uint64_t snapshot_epoch = 0;
+  {
+    std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
+    snapshot_epoch = size_state_epoch_;
+  }
   auto status = meta_->GetInode(ino_, out);
   if (!status.ok()) {
     return status;
   }
-  ApplyLiveSize(out);
+  {
+    std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
+    if (size_state_epoch_ == snapshot_epoch) {
+      authoritative_size_ = out->attr.size;
+    } else if (authoritative_size_.has_value()) {
+      out->attr.size = std::max(out->attr.size, *authoritative_size_);
+    }
+    if (live_size_.has_value()) {
+      out->attr.size = std::max(out->attr.size, *live_size_);
+    }
+  }
+  return utils::Status::OK();
+}
+
+void FileReadWriter::InitializeAuthoritativeSize(uint64_t size) {
+  std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
+  if (!authoritative_size_.has_value()) {
+    authoritative_size_ = size;
+    ++size_state_epoch_;
+  }
+}
+
+utils::Status FileReadWriter::GetVisibleSize(uint64_t *size) {
+  CHECK(size != nullptr);
+  {
+    std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
+    if (authoritative_size_.has_value()) {
+      *size = std::max(*authoritative_size_, live_size_.value_or(0));
+      return utils::Status::OK();
+    }
+  }
+
+  metadata::SwordFsInode inode;
+  auto status = meta_->GetInode(ino_, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
+  if (!authoritative_size_.has_value()) {
+    authoritative_size_ = inode.attr.size;
+    ++size_state_epoch_;
+  }
+  *size = std::max(*authoritative_size_, live_size_.value_or(0));
   return utils::Status::OK();
 }
 
@@ -322,7 +390,7 @@ void LiveAttrGuard::Apply(metadata::SwordFsInode &inode) const {
 }
 
 void FileReadWriter::ApplyLiveSize(metadata::SwordFsInode *inode) const {
-  std::lock_guard<utils::FiberMutex> live_size_lock(live_size_mutex_);
+  std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
   if (inode != nullptr && live_size_.has_value()) {
     inode->attr.size = std::max(inode->attr.size, *live_size_);
   }
@@ -336,9 +404,11 @@ utils::Status FileReadWriter::Flush() {
   std::lock_guard<utils::FiberMutex> flush_lock(flush_mutex_);
   std::shared_lock<utils::FiberRWMutex> operation_lock(operation_mutex_);
   uint64_t barrier_epoch = 0;
+  std::optional<uint64_t> barrier_live_size;
   {
-    std::lock_guard<utils::FiberMutex> live_size_lock(live_size_mutex_);
+    std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
     barrier_epoch = write_epoch_;
+    barrier_live_size = live_size_;
   }
   utils::Status first_error;
   auto flushable = chunks_.GetFlushable();
@@ -364,9 +434,15 @@ utils::Status FileReadWriter::Flush() {
   }
 
   if (first_error.ok()) {
-    std::lock_guard<utils::FiberMutex> live_size_lock(live_size_mutex_);
+    std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
+    if (barrier_live_size.has_value()) {
+      authoritative_size_ = std::max(authoritative_size_.value_or(0), *barrier_live_size);
+    }
     if (write_epoch_ == barrier_epoch) {
       live_size_.reset();
+    }
+    if (barrier_live_size.has_value()) {
+      ++size_state_epoch_;
     }
   }
 
@@ -383,8 +459,10 @@ utils::Status FileReadWriter::Truncate(size_t size) {
   // Truncate persists the logical size synchronously; after success metadata
   // is authoritative and no transient size overlay remains necessary.
   {
-    std::lock_guard<utils::FiberMutex> live_size_lock(live_size_mutex_);
+    std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
+    authoritative_size_ = size;
     live_size_.reset();
+    ++size_state_epoch_;
   }
   Reclaimer::Instance().Wake();
   return utils::Status::OK();
@@ -401,8 +479,10 @@ utils::Status FileReadWriter::SetAttr(const metadata::SwordFsAttr &attr, metadat
     chunks_.TruncateToSize(attr.size, chunk_size_);
     // A successful size setattr has already committed the new logical size.
     {
-      std::lock_guard<utils::FiberMutex> live_size_lock(live_size_mutex_);
+      std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
+      authoritative_size_ = attr.size;
       live_size_.reset();
+      ++size_state_epoch_;
     }
     Reclaimer::Instance().Wake();
   }

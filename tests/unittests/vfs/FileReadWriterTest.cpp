@@ -249,9 +249,21 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
   Status GetInode(InodeID, SwordFsInode *out) override {
+    if (!get_inode_status.ok()) {
+      return get_inode_status;
+    }
+    const off_t snapshot_size = file_size_;
+    if (get_inode_started_ != nullptr) {
+      auto *started = get_inode_started_;
+      auto *release = get_inode_release_;
+      get_inode_started_ = nullptr;
+      get_inode_release_ = nullptr;
+      started->post();
+      release->wait();
+    }
     if (out) {
       *out = {};
-      out->attr.size = file_size_;
+      out->attr.size = snapshot_size;
     }
     return Status::OK();
   }
@@ -314,7 +326,10 @@ class MockMetaEngine : public IMetaEngine {
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Open(InodeID) override {
+  Status Open(InodeID, uint64_t *size = nullptr) override {
+    if (size != nullptr) {
+      *size = static_cast<uint64_t>(file_size_);
+    }
     return Status::OK();
   }
   Status PrepareReclaim(InodeID, std::optional<swordfs::metadata::ReclaimWork> *work) override {
@@ -524,6 +539,11 @@ class MockMetaEngine : public IMetaEngine {
     commit_release_ = release;
   }
 
+  void BlockNextGetInode(folly::fibers::Baton *started, folly::fibers::Baton *release) {
+    get_inode_started_ = started;
+    get_inode_release_ = release;
+  }
+
   std::vector<std::string> PendingDeleteKeys() const {
     std::vector<std::string> out;
     out.reserve(pending_deletes_.size());
@@ -551,6 +571,7 @@ class MockMetaEngine : public IMetaEngine {
   bool set_attr_commit_on_error = false;
   bool truncate_commit_on_error = false;
   Status find_chunk_status = Status::OK();
+  Status get_inode_status = Status::OK();
   std::optional<ChunkIndex> find_chunk_error_idx;
 
  private:
@@ -589,6 +610,8 @@ class MockMetaEngine : public IMetaEngine {
   std::unordered_map<std::string, swordfs::metadata::PendingDelete> pending_deletes_;
   std::optional<SwordFsChunk> next_find_chunk_result_;
   std::optional<Status> next_find_chunk_status_;
+  folly::fibers::Baton *get_inode_started_{nullptr};
+  folly::fibers::Baton *get_inode_release_{nullptr};
   folly::fibers::Baton *commit_started_{nullptr};
   folly::fibers::Baton *commit_release_{nullptr};
 };
@@ -652,9 +675,30 @@ TEST_F(FileReadWriterTest, PartialChunkAtEOF) {
     ASSERT_TRUE(rw.Write(Buf(Repeat('A', 500)), 0).ok());
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(kChunkSize, 0, out.get()).ok());
-    std::string expected = Repeat('A', 500) + std::string(kChunkSize - 500, '\0');
-    EXPECT_EQ(out->length(), kChunkSize);
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
+    EXPECT_EQ(out->length(), 500);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('A', 500));
+  });
+}
+
+TEST_F(FileReadWriterTest, PersistedPartialChunkAtEOFReturnsShortRead) {
+  RunInTestFiber([&] {
+    SwordFsChunk chunk{};
+    chunk.index = 0;
+    chunk.start_offset = 0;
+    chunk.revision = 7;
+    chunk.size = 300;
+    ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
+
+    auto persisted = std::make_unique<folly::IOBuf>(Buf(Repeat('P', chunk.size)));
+    ASSERT_TRUE(
+        mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(persisted))
+            .ok());
+
+    auto rw = Make(chunk.size);
+    auto out = folly::IOBuf::create(kChunkSize);
+    ASSERT_TRUE(rw.Read(kChunkSize, 0, out.get()).ok());
+    EXPECT_EQ(out->length(), chunk.size);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), Repeat('P', chunk.size));
   });
 }
 
@@ -664,8 +708,7 @@ TEST_F(FileReadWriterTest, PastEOF) {
     ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(100, kChunkSize + 100, out.get()).ok());
-    EXPECT_EQ(out->length(), 100);
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), std::string(100, '\0'));
+    EXPECT_EQ(out->length(), 0);
   });
 }
 
@@ -721,15 +764,15 @@ TEST_F(FileReadWriterTest, CrossChunkExhaustsSecondChunk) {
     off_t off = static_cast<off_t>(kChunkSize) - 50;
     auto out = folly::IOBuf::create(kChunkSize * 2);
     ASSERT_TRUE(rw.Read(kChunkSize, off, out.get()).ok());
-    std::string expected = Repeat('A', 50) + Repeat('B', 200) + std::string(kChunkSize - 250, '\0');
-    EXPECT_EQ(out->length(), kChunkSize);
+    std::string expected = Repeat('A', 50) + Repeat('B', 200);
+    EXPECT_EQ(out->length(), expected.size());
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
   });
 }
 
 TEST_F(FileReadWriterTest, CrossChunkSecondChunkMissing) {
   RunInTestFiber([&] {
-    auto rw = Make();
+    auto rw = Make(kChunkSize + 150);
     ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
 
     off_t off = static_cast<off_t>(kChunkSize) - 50;
@@ -754,19 +797,90 @@ TEST_F(FileReadWriterTest, ZeroSizeRequest) {
   });
 }
 
+TEST_F(FileReadWriterTest, NegativeReadOffsetIsRejected) {
+  RunInTestFiber([&] {
+    auto rw = Make(64);
+    auto out = folly::IOBuf::create(64);
+
+    auto status = rw.Read(1, -1, out.get());
+
+    EXPECT_EQ(status.code(), Status::kInvalidArgument);
+    EXPECT_EQ(status.message(), "FileReadWriter::Read: negative offset");
+    EXPECT_EQ(out->length(), 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, VisibleSizeMetadataFailurePropagatesFromRead) {
+  RunInTestFiber([&] {
+    auto rw = Make(64);
+    mock_meta_->get_inode_status = Status::IOError("injected inode-size lookup failure");
+    auto out = folly::IOBuf::create(64);
+
+    auto status = rw.Read(64, 0, out.get());
+
+    EXPECT_EQ(status.code(), Status::kIOError);
+    EXPECT_EQ(status.message(), "injected inode-size lookup failure");
+    EXPECT_EQ(out->length(), 0);
+    EXPECT_EQ(mock_meta_->find_chunk_calls, 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, VisibleSizeSnapshotCannotRegressBehindCompletedFlush) {
+  auto rw = Make();
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton get_inode_started;
+  folly::fibers::Baton release_get_inode;
+  folly::fibers::Baton flush_done;
+  folly::fibers::Baton read_done;
+  mock_meta_->BlockNextGetInode(&get_inode_started, &release_get_inode);
+
+  Status read_status;
+  Status write_status;
+  Status flush_status;
+  auto out = folly::IOBuf::create(13);
+  fm.addTask([&] {
+    read_status = rw.Read(13, 0, out.get());
+    read_done.post();
+  });
+  fm.addTask([&] {
+    get_inode_started.wait();
+    write_status = rw.Write(Buf("Hello,_World!"), 0);
+    if (write_status.ok()) {
+      flush_status = rw.Flush();
+    }
+    flush_done.post();
+  });
+
+  while (!flush_done.try_wait()) {
+    evb.loopOnce();
+  }
+  ASSERT_TRUE(write_status.ok()) << write_status.message();
+  ASSERT_TRUE(flush_status.ok()) << flush_status.message();
+  ASSERT_EQ(mock_meta_->file_size(), 13);
+
+  release_get_inode.post();
+  while (!read_done.try_wait()) {
+    evb.loopOnce();
+  }
+  ASSERT_TRUE(read_status.ok()) << read_status.message();
+  EXPECT_EQ(out->length(), 13U);
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "Hello,_World!");
+}
+
 TEST_F(FileReadWriterTest, EmptyOutputOnNoData) {
   RunInTestFiber([&] {
     auto rw = Make();
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(64, 0, out.get()).ok());
-    EXPECT_EQ(out->length(), 64);
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), std::string(64, '\0'));
+    EXPECT_EQ(out->length(), 0);
   });
 }
 
 TEST_F(FileReadWriterTest, MissingChunkMetadataReadsAsSparseZeros) {
   RunInTestFiber([&] {
-    auto rw = Make();
+    auto rw = Make(64);
     mock_meta_->find_chunk_status = Status::NotFound("chunk is not materialized");
 
     auto out = folly::IOBuf::create(64);
@@ -847,7 +961,9 @@ TEST_F(FileReadWriterTest, PersistedChunkZeroLengthReadIsNoOp) {
 
 TEST_F(FileReadWriterTest, ChunkMetadataIOErrorPropagatesFromRead) {
   RunInTestFiber([&] {
-    auto rw = Make();
+    // Keep the request inside logical EOF so the read must resolve chunk
+    // metadata instead of correctly terminating at EOF first.
+    auto rw = Make(64);
     mock_meta_->find_chunk_status = Status::IOError("injected metadata read failure");
 
     auto out = folly::IOBuf::create(64);
@@ -861,7 +977,9 @@ TEST_F(FileReadWriterTest, ChunkMetadataIOErrorPropagatesFromRead) {
 
 TEST_F(FileReadWriterTest, MalformedChunkMetadataPropagatesFromRead) {
   RunInTestFiber([&] {
-    auto rw = Make();
+    // Keep the request inside logical EOF so malformed chunk metadata remains
+    // observable rather than being bypassed by the EOF boundary.
+    auto rw = Make(64);
     mock_meta_->find_chunk_status = Status::Malformed("injected malformed chunk metadata");
 
     auto out = folly::IOBuf::create(64);
@@ -1256,6 +1374,52 @@ TEST_F(FileReadWriterTest, SuccessfulFlushClearsTransientLiveSize) {
   });
 }
 
+TEST_F(FileReadWriterTest, GetAttrSnapshotCannotRegressReadEOFBehindCompletedFlush) {
+  auto rw = Make();
+  RunInTestFiber([&] { ASSERT_TRUE(rw.Write(Buf("Hello,_World!"), 0).ok()); });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton get_inode_started;
+  folly::fibers::Baton release_get_inode;
+  folly::fibers::Baton flush_done;
+  folly::fibers::Baton get_attr_done;
+  mock_meta_->BlockNextGetInode(&get_inode_started, &release_get_inode);
+
+  Status flush_status;
+  Status get_attr_status;
+  SwordFsInode inode;
+  fm.addTask([&] {
+    get_attr_status = rw.GetAttr(&inode);
+    get_attr_done.post();
+  });
+  fm.addTask([&] {
+    get_inode_started.wait();
+    flush_status = rw.Flush();
+    flush_done.post();
+  });
+
+  while (!flush_done.try_wait()) {
+    evb.loopOnce();
+  }
+  ASSERT_TRUE(flush_status.ok()) << flush_status.message();
+  ASSERT_EQ(mock_meta_->file_size(), 13);
+
+  release_get_inode.post();
+  while (!get_attr_done.try_wait()) {
+    evb.loopOnce();
+  }
+  ASSERT_TRUE(get_attr_status.ok()) << get_attr_status.message();
+  EXPECT_EQ(inode.attr.size, 13U);
+
+  RunInTestFiber([&] {
+    auto out = folly::IOBuf::create(13);
+    ASSERT_TRUE(rw.Read(13, 0, out.get()).ok());
+    EXPECT_EQ(out->length(), 13U);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "Hello,_World!");
+  });
+}
+
 TEST_F(FileReadWriterTest, LiveAttrGuardUsesTransientSize) {
   RunInTestFiber([&] {
     mock_meta_->set_file_size(0);
@@ -1360,7 +1524,7 @@ TEST_F(FileReadWriterTest, SetAttrTruncateOrdersAfterAmbiguousFlushRetry) {
     FileReadWriter reopened(kIno);
     auto out = folly::IOBuf::create(128);
     ASSERT_TRUE(reopened.Read(128, 0, out.get()).ok());
-    const std::string expected = Repeat('T', 64) + std::string(64, '\0');
+    const std::string expected = Repeat('T', 64);
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), expected);
 
     ASSERT_TRUE(handle->Release().ok());
@@ -2188,12 +2352,12 @@ TEST_F(FileReadWriterTest, TruncateDropsDirtyChunks) {
     auto rw = Make();
     ASSERT_TRUE(rw.Write(Buf(Repeat('A', kChunkSize)), 0).ok());
 
-    // Truncating to zero must drop the dirty chunk so a later read
-    // returns zeros instead of the previously written data.
+    // Truncating to zero must drop the dirty chunk and move logical EOF to
+    // zero, so a later read returns no bytes from the discarded data.
     ASSERT_TRUE(rw.Truncate(0).ok());
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(16, 0, out.get()).ok());
-    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), std::string(16, '\0'));
+    EXPECT_EQ(out->length(), 0);
   });
 }
 

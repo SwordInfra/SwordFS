@@ -70,10 +70,17 @@ accidental per-entry round-trip amplification, is tracked by #229.
 
 ## Concurrency
 
-The inode `FileReadWriter::operation_mutex_` is the serialization boundary for
-live data and live size. Attribute composition must hold a shared operation
-lock while reading the authoritative inode and applying the live-size overlay.
-Writes and size-changing operations hold the exclusive side of that same lock.
+The inode `FileReadWriter::operation_mutex_` is the file-wide coordination
+boundary. Reads, ordinary writes, flushes, and attribute composition may hold
+the shared side so independent chunk work can proceed concurrently. Truncate
+and size-changing setattr take the exclusive side because they change the
+file-wide reachability boundary. The narrower `size_mutex_` serializes the
+authoritative-size snapshot, transient live-size lower bound, and
+size-state/write epochs. Metadata reads do not hold this mutex across their
+backend round trip. Instead, `GetAttr` records the size-state epoch before
+fetching metadata and installs that snapshot only if no newer local size
+transition completed in the meantime. If the epoch changed, the newer local
+authoritative/live state wins over the stale snapshot.
 
 This ordering is required for shrink correctness. Reading metadata first and
 merging the live size later without the common lock can race a truncate:
@@ -84,8 +91,8 @@ truncate commits size = 50
 GetAttr overlays against its stale metadata snapshot
 ```
 
-The common lock gives `GetAttr`, write, and truncate a per-inode linearization
-order instead of trying to repair stale snapshots after the fact.
+The operation lock plus the size-state mutex give `GetAttr`, write, and
+truncate a coherent per-inode ordering without serializing unrelated chunk IO.
 
 ## Read and durability interaction
 
@@ -100,6 +107,36 @@ flush/fsync/final close -> object + chunk metadata + durable inode size
 
 The live-size overlay is therefore a visibility mechanism, not a second
 durability mechanism.
+
+The same visible size is also the regular-file read boundary. A read snapshots
+the inode's current logical EOF while holding the shared inode operation lock
+and returns at most the bytes in `[offset, logical EOF)`. Missing chunk data
+inside that range is a sparse hole and reads as zeroes; an offset at or beyond
+logical EOF returns no bytes. EOF must never be synthesized as a sparse hole.
+
+`FileReadWriter` retains the authoritative size associated with the inode's
+local open lifetime and composes it with the transient live-size lower bound.
+The existing metadata `Open` path already has to fetch the inode to validate
+its type, so it supplies that size to the local runtime state instead of adding
+another metadata round trip to each `read(2)`. A newly created file starts from
+authoritative size zero. A `FileReadWriter` reached without either initialization
+path may lazily obtain the metadata size once as a defensive fallback; normal
+opened-file reads do not require a per-read metadata lookup.
+
+When `GetAttr` performs an authoritative metadata read, it refreshes the
+retained authoritative size only when that snapshot is still ordered after the
+local size state it observed before the fetch. A concurrent successful flush,
+truncate, setattr-size, or write changes the size-state epoch, preventing an
+older metadata snapshot from regressing the EOF used by later reads. This cache
+is a mount-local coherence optimization, not a distributed lease: SwordFS still
+has no cross-mount invalidation/session mechanism, as documented by the overall
+architecture.
+
+Successful truncate/setattr-size updates the retained authoritative size and
+clears the transient lower bound. Successful flush advances the retained
+authoritative size through the flushed write barrier before clearing a covered
+live-size overlay. These updates keep later reads bounded correctly without
+changing the deferred publication/durability contract.
 
 ## Reference design
 

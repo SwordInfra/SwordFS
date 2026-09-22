@@ -276,7 +276,9 @@ FIBER_TEST_F(MemMetaImplTest, MetadataDoesNotDuplicateKernelDac) {
 
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(dir_ino, "f", 0000, &file).ok());
-  ASSERT_TRUE(impl_->Open(file.ino).ok());
+  uint64_t open_size = 1;
+  ASSERT_TRUE(impl_->Open(file.ino, &open_size).ok());
+  EXPECT_EQ(open_size, 0U);
   ASSERT_TRUE(impl_->MkDir(dir_ino, "sub", 0000, nullptr).ok());
   ASSERT_TRUE(impl_->Symlink(dir_ino, "sym", "target", nullptr).ok());
   ASSERT_TRUE(impl_->Link(file.ino, dir_ino, "hard", nullptr).ok());

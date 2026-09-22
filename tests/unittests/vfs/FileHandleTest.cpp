@@ -144,7 +144,10 @@ class MockMetaEngine : public IMetaEngine {
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Open(InodeID) override {
+  Status Open(InodeID, uint64_t *size = nullptr) override {
+    if (size != nullptr) {
+      *size = 0;
+    }
     return open_status;
   }
   Status PrepareReclaim(InodeID ino, std::optional<swordfs::metadata::ReclaimWork> *work) override {
@@ -689,6 +692,7 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     return Status::OK();
   }
   Status GetInode(InodeID ino, SwordFsInode *out) override {
+    ++get_inode_calls;
     auto it = attrs.find(ino);
     if (it == attrs.end()) {
       return Status::NotFound("inode not found");
@@ -781,7 +785,7 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Open(InodeID) override {
+  Status Open(InodeID ino, uint64_t *size = nullptr) override {
     if (open_entered_ != nullptr) {
       auto *entered = open_entered_;
       auto *release = open_release_;
@@ -789,6 +793,10 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
       open_release_ = nullptr;
       entered->post();
       release->wait();
+    }
+    if (size != nullptr) {
+      auto it = attrs.find(ino);
+      *size = it == attrs.end() ? 0 : static_cast<uint64_t>(it->second.st_size);
     }
     return open_status;
   }
@@ -857,6 +865,7 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
 
   int prepare_reclaim_calls = 0;
   int complete_reclaim_calls = 0;
+  int get_inode_calls = 0;
   InodeID last_reclaim_ino = 0;
   Status prepare_reclaim_status = Status::OK();
   Status reclaim_status = Status::OK();
@@ -966,6 +975,24 @@ FIBER_TEST_F(FileHandleTest, GetAttrDoesNotShrinkPersistedSizeForInPlaceWrite) {
   struct stat attr{};
   ASSERT_TRUE(VfsImpl::GetAttr(7, &attr).ok());
   EXPECT_EQ(attr.st_size, 128);
+
+  ASSERT_TRUE(handle->Release().ok());
+}
+
+FIBER_TEST_F(FileHandleTest, ReadUsesSizeCapturedByOpenWithoutMetadataRefetch) {
+  ResetVolumeFromFiberForTest();
+  auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/1, /*size=*/300);
+  (void)data;
+
+  std::shared_ptr<FileHandle> handle;
+  ASSERT_TRUE(FileHandle::Open(7, O_RDONLY, &handle).ok());
+  EXPECT_EQ(meta->get_inode_calls, 0);
+
+  auto out = folly::IOBuf::create(1024);
+  ASSERT_TRUE(handle->Read(1024, 0, out.get()).ok());
+  EXPECT_EQ(out->length(), 300U);
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), std::string(300, '\0'));
+  EXPECT_EQ(meta->get_inode_calls, 0);
 
   ASSERT_TRUE(handle->Release().ok());
 }

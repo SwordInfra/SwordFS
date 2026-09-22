@@ -664,7 +664,9 @@ FIBER_TEST_F(RedisMetaImplTest, SymlinkHardLinkAndOpenBehaveLikePosixMetadata) {
   SwordFsInode dir;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
   EXPECT_TRUE(impl_->Link(dir.ino, kRootInodeId, "dir-hard", nullptr).IsNotPermitted());
-  EXPECT_TRUE(impl_->Open(file.ino).ok());
+  uint64_t open_size = 1;
+  EXPECT_TRUE(impl_->Open(file.ino, &open_size).ok());
+  EXPECT_EQ(open_size, 0U);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, ChunkFindAndTruncateCoverSparseMetadata) {

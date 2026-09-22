@@ -111,7 +111,10 @@ class MissingMetaEngine final : public IMetaEngine {
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Open(InodeID) override {
+  Status Open(InodeID, uint64_t *size = nullptr) override {
+    if (size != nullptr) {
+      *size = 0;
+    }
     return Status::OK();
   }
   Status PrepareReclaim(InodeID, std::optional<swordfs::metadata::ReclaimWork> *work) override {

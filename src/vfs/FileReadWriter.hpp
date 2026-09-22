@@ -107,7 +107,10 @@ class FileReadWriter {
 
  private:
   friend class LiveAttrGuard;
+  friend class InodeHandle;
 
+  void InitializeAuthoritativeSize(uint64_t size);
+  utils::Status GetVisibleSize(uint64_t *size);
   void ApplyLiveSize(metadata::SwordFsInode *inode) const;
 
  private:
@@ -119,13 +122,13 @@ class FileReadWriter {
   mutable utils::FiberRWMutex operation_mutex_;
   utils::FiberMutex flush_mutex_;
   FileChunkManager chunks_;
-  // A successful local write establishes a minimum visible EOF before
-  // persistence catches up. Fully successful flush/truncate/setattr-size
-  // makes metadata authoritative again and clears this transient lower bound.
-  // Failed persistence/size mutations leave it intact because the accepted
-  // local write is still not completely represented by authoritative state.
-  mutable utils::FiberMutex live_size_mutex_;
+  // The size state composes the authoritative size captured for this local
+  // inode lifetime with a transient lower bound from accepted local writes.
+  // Reads use the same composition as attribute replies for their EOF bound.
+  mutable utils::FiberMutex size_mutex_;
+  mutable std::optional<uint64_t> authoritative_size_;
   std::optional<uint64_t> live_size_;
+  uint64_t size_state_epoch_ = 0;
   uint64_t write_epoch_ = 0;
 };
 
