@@ -41,6 +41,11 @@ sequenceDiagram
 ```
 
 Submission must retain or copy arguments needed after the callback returns.
+For libfuse parameters whose low-level API contract permits `nullptr`, the
+submitted work must preserve that nullability explicitly (for example with an
+optional owned copy) rather than dereferencing the pointer during admission or
+inventing a dummy object. Path-based requests such as `statx` legitimately
+arrive without an open-file `fuse_file_info`.
 Caller credentials live in fiber-local `SwordFsContext`. The offloaded worker
 finishes before `RunFromFiber` returns, preserving borrowed data lifetimes
 without blocking the driver. Lifecycle calls use `RunFromThread` and wait on
