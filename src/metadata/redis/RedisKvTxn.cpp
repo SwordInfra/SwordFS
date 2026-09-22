@@ -183,8 +183,19 @@ utils::Status RedisKvTxn::ReleaseConnection() {
   }
 }
 
+void RedisKvTxn::ReleaseRedisView() {
+  // transaction(false, false) borrows a connection from the shared redis++
+  // pool. The Redis view returned by Transaction::redis() shares that guarded
+  // connection, so it must be released before a normal terminal operation.
+  // Otherwise redis++ cannot return the healthy connection during _reset(),
+  // and the later QueuedRedis destructor invalidates it before returning it to
+  // the pool.
+  redis_.reset();
+}
+
 void RedisKvTxn::Discard() noexcept {
   utils::ExpectInThreadDomain();
+  ReleaseRedisView();
   try {
     if (!has_writes_) {
       transaction_->ping();
@@ -197,6 +208,7 @@ void RedisKvTxn::Discard() noexcept {
 
 utils::Status RedisKvTxn::Commit() {
   utils::ExpectInThreadDomain();
+  ReleaseRedisView();
   if (!has_writes_) {
     return ReleaseConnection();
   }
