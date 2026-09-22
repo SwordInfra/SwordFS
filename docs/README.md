@@ -15,6 +15,7 @@ API signatures and routine implementation details belong in source comments.
 | [Static analysis](design/static-analysis.md) | Which automated code-quality gates run, what is considered high confidence, and how are exceptions handled? |
 | [CI merge policy](design/ci-merge-policy.md) | Which CI results are mandatory before merge, and how is the repository merge gate enforced? |
 | [POSIX conformance](design/posix-conformance.md) | How does pjdfstest define the supported regression contract, known semantic debt, and public conformance status? |
+| [fstests conformance](design/fstests-conformance.md) | How does the broader Linux/FUSE fstests baseline select upstream tests, classify known gaps, and prevent silent coverage loss? |
 
 ## Documentation scope
 

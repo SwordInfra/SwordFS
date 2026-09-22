@@ -19,6 +19,7 @@ The required PR checks are:
 - `build-and-test (Release)`
 - `e2e-test (Release)`
 - `pjdfstest-conformance (Release)`
+- `fstests-conformance (Release)`
 - `codecov/patch`
 
 A required check that fails, is cancelled, is still pending, or does not report
@@ -29,6 +30,22 @@ current target branch state.
 `publish-pjdfstest-status` is intentionally not required because it runs only
 after a push to `main`; making a post-merge job a pre-merge requirement would
 make the policy impossible to satisfy.
+
+Both `pjdfstest-conformance (Release)` and `fstests-conformance (Release)` are
+required semantic gates. pjdfstest protects the pathname/metadata-oriented
+POSIX baseline; fstests exercises a broader Linux filesystem contract through
+the persistent Redis + MinIO FUSE path. Their known-gap mechanisms may keep
+validated missing capabilities visible, but unexpected regressions,
+infrastructure failures, stale XPASS entries, and disappearing supported
+coverage fail the corresponding required check.
+
+Baseline changes are themselves gated. Removing an already-supported testcase
+requires the explicitly reviewed `conformance-semantic-change` label. The
+fstests PR-CI deferred set is non-growing by default; adding a new deferred
+testcase requires `conformance-deferred-change`. These labels do not bypass the
+conformance job: they only authorize the classifier to evaluate the explicitly
+reviewed baseline transition. Restoring deferred coverage to normal execution
+requires no override.
 
 `pjdfstest-conformance` and `publish-pjdfstest-status` remain separate jobs
 primarily for least-privilege isolation. The conformance job only needs
@@ -44,6 +61,15 @@ Required status checks are identified by their reported GitHub context names.
 When a mandatory CI job is renamed, split, removed, or added, update the
 `CI-Must-Pass` ruleset in the same coordinated change. A stale required context
 must not be worked around by weakening the policy.
+
+There is one required activation-order constraint when introducing a brand-new
+check context: do **not** add that context to the repository ruleset before the
+workflow defining it has landed on the default branch. Otherwise unrelated PRs
+can be blocked by a required check that their target branch cannot produce.
+The introducing PR must run the new job and treat it as a manual merge gate;
+immediately after that PR lands, add the new context to `CI-Must-Pass` and
+verify the live ruleset. This transition rule does not make the new job
+optional; it prevents an impossible required-check state during rollout.
 
 GitHub Actions checks should be bound to the GitHub Actions app when the
 ruleset supports an integration ID. External checks such as `codecov/patch`
