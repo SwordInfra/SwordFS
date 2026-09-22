@@ -387,6 +387,11 @@ def summarize(
     deferred: dict[str, str],
 ) -> dict[str, object]:
     counts = Counter(observation.classification for observation in observations)
+    raw_results = Counter(
+        observation.result
+        for observation in observations
+        if observation.test in selected and observation.result in {"PASS", "FAIL", "NOTRUN", "DEFERRED"}
+    )
     selected_supported = selected & supported
     supported_pass = sum(1 for observation in observations if observation.test in selected_supported and observation.classification == "PASS")
     classified = len(selected & (supported | gaps.keys()))
@@ -410,6 +415,7 @@ def summarize(
         "classified_percent": round(100.0 * classified / len(selected), 2) if selected else 0.0,
         "executed_classified_percent": round(100.0 * executed_classified / executed_count, 2) if executed_count else 0.0,
         "blocking_count": sum(counts[name] for name in BLOCKING),
+        "raw_results": dict(sorted(raw_results.items())),
         "classifications": dict(sorted(counts.items())),
     }
 
@@ -426,13 +432,15 @@ def render_markdown(payload: dict[str, object], observations: list[Observation])
     lines = [
         "# SwordFS fstests conformance",
         "",
-        f"Result: **{status}**",
+        f"Baseline gate: **{status}**",
+        "",
+        "A passing baseline gate means the admitted supported/known-gap contract has no blocking regression; it does not mean every selected testcase passes.",
         "",
         "| Metric | Value |",
         "| --- | ---: |",
         f"| Selected upstream testcases | {summary['selected_count']} |",
-        f"| Executed in PR CI | {summary['executed_count']} |",
-        f"| Deferred from PR CI | {summary['deferred_count']} |",
+        f"| Executed testcases | {summary['executed_count']} |",
+        f"| Deferred from CI | {summary['deferred_count']} |",
         f"| Explicitly supported | {summary['supported_count']} |",
         f"| Known gaps | {summary['known_gap_count']} |",
         f"| Supported gate | {_percent(summary['supported_gate_percent'])} |",
@@ -440,11 +448,24 @@ def render_markdown(payload: dict[str, object], observations: list[Observation])
         f"| Full selected population classified | {_percent(summary['classified_percent'])} |",
         f"| Blocking outcomes | {summary['blocking_count']} |",
         "",
+        "## Raw execution outcomes",
+        "",
+        "| Result | Count |",
+        "| --- | ---: |",
+    ]
+    raw_results = summary.get("raw_results", {})
+    assert isinstance(raw_results, dict)
+    for name in ("PASS", "FAIL", "NOTRUN", "DEFERRED"):
+        if name in raw_results:
+            lines.append(f"| `{name}` | {raw_results[name]} |")
+
+    lines.extend([
+        "",
         "## Outcome counts",
         "",
         "| Classification | Count |",
         "| --- | ---: |",
-    ]
+    ])
     classifications = summary.get("classifications", {})
     assert isinstance(classifications, dict)
     for name, count in classifications.items():
@@ -452,7 +473,7 @@ def render_markdown(payload: dict[str, object], observations: list[Observation])
 
     deferred = [observation for observation in observations if observation.classification == "DEFERRED_CI"]
     if deferred:
-        lines.extend(["", "## Deferred from PR CI", "", "| Test | Reason |", "| --- | --- |"])
+        lines.extend(["", "## Deferred from CI", "", "| Test | Reason |", "| --- | --- |"])
         for observation in deferred:
             lines.append(f"| `{observation.test}` | {observation.reason.replace('|', '\\|')} |")
 
