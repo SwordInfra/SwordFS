@@ -52,7 +52,7 @@ Installs all required system packages (libfuse3-dev, build tools, folly build de
 and downloads + builds folly. Already-installed components are skipped:
 
 ```bash
-./scripts/install-deps.sh
+./scripts/build/install-deps.sh
 ```
 
 ### Build

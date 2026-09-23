@@ -147,7 +147,7 @@ each SwordFS volume:
                                 -> MinIO / S3-compatible data
 ```
 
-`scripts/fstests-mount-helper.sh` is installed temporarily as
+`scripts/conformance/fstests/mount-helper.sh` is installed temporarily as
 `/sbin/mount.fuse.swordfs` for the CI run. The runner uses each mountpoint
 itself as the corresponding FUSE source identity (`TEST_DEV == TEST_DIR` and
 `SCRATCH_DEV == SCRATCH_MNT`). `FSTYP=fuse` permits these opaque device values,
@@ -397,7 +397,7 @@ filter over the upstream suite.
 
 ## Execution, time bounds, and evidence
 
-`scripts/run-fstests.sh` owns the privileged CI execution environment. It:
+`scripts/conformance/fstests/run.sh` owns the privileged CI execution environment. It:
 
 1. fetches and verifies the exact pinned liburing and fstests commits;
 2. builds pinned liburing against the runner headers and builds the upstream
@@ -418,7 +418,7 @@ filter over the upstream suite.
    `dmesg` when the runner permits reading it; and
 9. tears down FUSE mounts and backend services on every exit path.
 
-`scripts/fstests_aggregate.py` is the only component allowed to convert shard
+`scripts/conformance/fstests/aggregate.py` is the only component allowed to convert shard
 evidence into the classifier input. It verifies the expected shard set and
 exactly-once population coverage before producing the merged XUnit/result tree.
 The classifier then reports both `Supported gate` (regression health within the
@@ -457,8 +457,7 @@ by Issue #249 without assuming Redis itself or the Redis client is the root
 cause. It is neither an environment skip nor a reason to defer the testcase.
 
 fstests is environment-sensitive and privileged, so complete execution belongs
-in GitHub Actions. Local development verifies the runner/classifier syntax and
-classifier unit tests; GitHub CI is authoritative for the mounted FUSE run.
+in GitHub Actions. Local development verifies conformance scripts with syntax checks and representative direct executions; GitHub CI is authoritative for the mounted FUSE run.
 
 ### Stable progress publication
 

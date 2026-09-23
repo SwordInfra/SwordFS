@@ -34,7 +34,7 @@ model for them; standard lock-protocol methods are the current example.
 The stable entry point is:
 
 ```bash
-scripts/run-static-audit.sh --build-dir build --output build/static-audit.json
+scripts/static-analysis/run.sh --build-dir build --output build/static-audit.json
 ```
 
 The caller must configure the build first. The script does not create or cache
@@ -133,7 +133,7 @@ specific semantic finding and must contain:
 - a non-empty engineering reason that explains why the symbol is live despite
   the normal reference model.
 
-Suppressions live in `scripts/static_audit_suppressions.json`. A suppression
+Suppressions live in `scripts/static-analysis/suppressions.json`. A suppression
 that no longer matches a current finding is an error so obsolete exceptions
 are removed instead of accumulating.
 

@@ -15,7 +15,7 @@ SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import fstests_plan  # noqa: E402
+import plan as fstests_plan  # noqa: E402
 
 
 class AggregateError(ValueError):

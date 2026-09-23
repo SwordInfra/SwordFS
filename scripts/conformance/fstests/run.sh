@@ -3,13 +3,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 VERSION_FILE="${PROJECT_DIR}/conformance/fstests/version.env"
-PLAN_SCRIPT="${PROJECT_DIR}/scripts/fstests_plan.py"
+PLAN_SCRIPT="${SCRIPT_DIR}/plan.py"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.e2e.yml"
-MOUNT_HELPER_SOURCE="${PROJECT_DIR}/scripts/fstests-mount-helper.sh"
+MOUNT_HELPER_SOURCE="${SCRIPT_DIR}/mount-helper.sh"
 MOUNT_HELPER_TARGET="/sbin/mount.fuse.swordfs"
-XUNIT_MERGER="${PROJECT_DIR}/scripts/fstests_xunit_merge.py"
+XUNIT_MERGER="${SCRIPT_DIR}/xunit_merge.py"
 MOUNT_CONFIG="/tmp/swordfs-fstests-mount.env"
 
 OUTPUT_DIR="${PROJECT_DIR}/build/fstests-conformance"

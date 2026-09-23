@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 UNIT_TEST_BIN="${UNIT_TEST_BIN:-${PROJECT_DIR}/build/swordfs_test}"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.e2e.yml"

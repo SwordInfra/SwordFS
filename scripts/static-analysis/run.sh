@@ -2,14 +2,14 @@
 
 set -euo pipefail
 
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 BUILD_DIR="$ROOT_DIR/build"
 OUTPUT="$ROOT_DIR/build/static-audit.json"
-SUPPRESSIONS="$ROOT_DIR/scripts/static_audit_suppressions.json"
+SUPPRESSIONS="$ROOT_DIR/scripts/static-analysis/suppressions.json"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run-static-audit.sh [options]
+Usage: scripts/static-analysis/run.sh [options]
 
 Options:
   --build-dir DIR      Configured CMake build directory (default: build)
@@ -61,7 +61,7 @@ if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
 fi
 
 symbol_status=0
-"$PYTHON_BIN" "$ROOT_DIR/scripts/symbol_audit.py" \
+"$PYTHON_BIN" "$ROOT_DIR/scripts/static-analysis/symbol_audit.py" \
   --repo-root "$ROOT_DIR" \
   --build-dir "$BUILD_DIR" \
   --suppressions "$SUPPRESSIONS" \

@@ -16,7 +16,7 @@ from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "static-analysis"))
 
 import symbol_audit  # noqa: E402
 
@@ -37,7 +37,7 @@ class SymbolAuditFixtureTest(unittest.TestCase):
         cls.report = symbol_audit.analyze(
             FIXTURE_ROOT,
             ARGS.build_dir,
-            REPO_ROOT / "scripts" / "static_audit_suppressions.json",
+            REPO_ROOT / "scripts" / "static-analysis" / "suppressions.json",
         )
         cls.findings = cls.report["findings"]
 
@@ -129,7 +129,7 @@ class SymbolAuditFixtureTest(unittest.TestCase):
         parallel_report = symbol_audit.analyze(
             FIXTURE_ROOT,
             ARGS.build_dir,
-            REPO_ROOT / "scripts" / "static_audit_suppressions.json",
+            REPO_ROOT / "scripts" / "static-analysis" / "suppressions.json",
             jobs=2,
         )
 
@@ -141,7 +141,7 @@ class SymbolAuditFixtureTest(unittest.TestCase):
             symbol_audit.analyze(
                 FIXTURE_ROOT,
                 ARGS.build_dir,
-                REPO_ROOT / "scripts" / "static_audit_suppressions.json",
+                REPO_ROOT / "scripts" / "static-analysis" / "suppressions.json",
                 jobs=0,
             )
 
@@ -232,7 +232,7 @@ class SymbolAuditFixtureTest(unittest.TestCase):
             args = argparse.Namespace(
                 repo_root=FIXTURE_ROOT,
                 build_dir=ARGS.build_dir,
-                suppressions=REPO_ROOT / "scripts" / "static_audit_suppressions.json",
+                suppressions=REPO_ROOT / "scripts" / "static-analysis" / "suppressions.json",
                 output=output,
                 jobs=1,
                 no_fail=False,
@@ -250,7 +250,7 @@ class SymbolAuditFixtureTest(unittest.TestCase):
         args = argparse.Namespace(
             repo_root=FIXTURE_ROOT,
             build_dir=ARGS.build_dir,
-            suppressions=REPO_ROOT / "scripts" / "static_audit_suppressions.json",
+            suppressions=REPO_ROOT / "scripts" / "static-analysis" / "suppressions.json",
             output=FIXTURE_ROOT / "unused.json",
             jobs=1,
             no_fail=False,
