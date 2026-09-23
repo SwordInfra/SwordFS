@@ -10,35 +10,35 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (6 fstests shards)",
-    "swordfs_commit": "ae2a1c12b28fcead8a5adeeb4c02abc76d96419b"
+    "swordfs_commit": "d8762eb140d4e22e02159461ad80aee1e2bc6aea"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "DEFERRED_CI": 3,
       "ENVIRONMENT": 7,
-      "KNOWN_SEMANTIC_DEFECT": 8,
+      "KNOWN_SEMANTIC_DEFECT": 6,
       "KNOWN_UNSUPPORTED": 141,
-      "PASS": 103,
-      "UPSTREAM_NOT_APPLICABLE": 383
+      "PASS": 106,
+      "UPSTREAM_NOT_APPLICABLE": 382
     },
     "classified_count": 642,
     "classified_percent": 99.53,
     "deferred_count": 3,
     "executed_classified_percent": 100.0,
     "executed_count": 642,
-    "known_gap_count": 539,
-    "overall_support_percent": 15.97,
+    "known_gap_count": 536,
+    "overall_support_percent": 16.43,
     "raw_results": {
       "DEFERRED": 3,
-      "FAIL": 24,
+      "FAIL": 21,
       "NOTRUN": 515,
-      "PASS": 103
+      "PASS": 106
     },
     "selected_count": 645,
-    "supported_count": 103,
+    "supported_count": 106,
     "supported_gate_percent": 100.0,
-    "supported_pass_count": 103
+    "supported_pass_count": 106
   },
   "tests": [
     {
@@ -2002,11 +2002,11 @@
       "test": "generic/313"
     },
     {
-      "classification": "KNOWN_SEMANTIC_DEFECT",
-      "issue": "#256",
-      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/314.out.bad)",
-      "reason": "SGID inheritance on child directory creation is incorrect; tracked by #256.",
-      "result": "FAIL",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/314"
     },
     {
@@ -2026,11 +2026,11 @@
       "test": "generic/316"
     },
     {
-      "classification": "KNOWN_SEMANTIC_DEFECT",
-      "issue": "#256",
-      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/317.out.bad)",
-      "reason": "Creation under a user namespace records the wrong gid; tracked by #256.",
-      "result": "FAIL",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/317"
     },
     {
@@ -4506,11 +4506,11 @@
       "test": "generic/695"
     },
     {
-      "classification": "UPSTREAM_NOT_APPLICABLE",
-      "issue": "-",
-      "message": "check: possible mount failures (see <FSTESTS_RESULT_DIR>/generic/696.mountfail)",
-      "reason": "The testcase requires a local-filesystem noacl mount option that is not applicable to the SwordFS FUSE model.",
-      "result": "FAIL",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/696"
     },
     {
