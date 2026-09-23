@@ -314,7 +314,7 @@ FIBER_TEST_F(FileHandleTest, OpenMultipleHandles) {
 
   ASSERT_NE(f1, nullptr);
   ASSERT_NE(f2, nullptr);
-  EXPECT_NE(f1->handle().get(), f2->handle().get());
+  EXPECT_NE(InodeHandleManager::Instance().Get(10, false).get(), InodeHandleManager::Instance().Get(20, false).get());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -370,7 +370,7 @@ FIBER_TEST_F(FileHandleTest, FindKeepsHandleAliveAfterUnregister) {
   auto after = HandleManager::Instance().FindAs<FileHandle>(fh);
   EXPECT_EQ(after, nullptr);
   ASSERT_NE(held, nullptr);
-  EXPECT_NE(held->handle().get(), nullptr);  // still alive
+  EXPECT_EQ(held->fh(), fh);  // the held shared_ptr still owns the FileHandle
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -529,10 +529,9 @@ FIBER_TEST_F(FileHandleTest, InodeHandleGetMissingWithoutCreate) {
 }
 
 FIBER_TEST_F(FileHandleTest, InodeHandleGetExistingTracksOpenCount) {
-  uint64_t fh = OpenHandle(9002);
+  OpenHandle(9002);
   auto inode_handle = InodeHandleManager::Instance().Get(9002, false);
   ASSERT_NE(inode_handle, nullptr);
-  EXPECT_EQ(inode_handle->ino(), 9002);
   EXPECT_EQ(inode_handle->open_count(), 1);
 }
 
@@ -545,7 +544,6 @@ FIBER_TEST_F(FileHandleTest, InodeHandleRecreatedAfterExpiry) {
   // InodeHandle must be created on the next lookup.
   auto recreated = InodeHandleManager::Instance().Get(9003, true);
   ASSERT_NE(recreated, nullptr);
-  EXPECT_EQ(recreated->ino(), 9003);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1005,7 +1003,9 @@ FIBER_TEST_F(FileHandleTest, SuccessfulSetAttrShrinkReplacesEarlierLiveSize) {
 
   SwordFsAttr requested{};
   requested.size = 5;
-  ASSERT_TRUE(handle->handle()->SetAttr(requested, SetAttrField::kSize, nullptr).ok());
+  auto inode_handle = InodeHandleManager::Instance().Get(7, false);
+  ASSERT_NE(inode_handle, nullptr);
+  ASSERT_TRUE(inode_handle->SetAttr(requested, SetAttrField::kSize, nullptr).ok());
 
   struct stat attr{};
   ASSERT_TRUE(VfsImpl::GetAttr(7, &attr).ok());

@@ -81,6 +81,8 @@ class ConfigCenter {
   const std::string &meta_url() const {
     return meta_url_;
   }
+  // Test-construction seam. Production configuration is populated by
+  // ConfigureOptions() through CLI11 bindings.
   void set_meta_url(const std::string &url) {
     meta_url_ = url;
   }
@@ -88,6 +90,7 @@ class ConfigCenter {
   const std::string &bucket_url() const {
     return bucket_url_;
   }
+  // Test-construction seam; see set_meta_url().
   void set_bucket_url(const std::string &u) {
     bucket_url_ = u;
   }
@@ -95,6 +98,7 @@ class ConfigCenter {
   const std::string &storage_region() const {
     return storage_region_;
   }
+  // Test-construction seam; see set_meta_url().
   void set_storage_region(const std::string &r) {
     storage_region_ = r;
   }
@@ -105,6 +109,7 @@ class ConfigCenter {
   const std::string &chunk_overwrite_strategy() const {
     return chunk_overwrite_strategy_;
   }
+  // Test-construction seam; see set_meta_url().
   void set_chunk_overwrite_strategy(std::string strategy) {
     chunk_overwrite_strategy_ = std::move(strategy);
   }
@@ -112,6 +117,7 @@ class ConfigCenter {
   const std::string &volume() const {
     return volume_;
   }
+  // Test-construction seam; see set_meta_url().
   void set_volume(const std::string &v) {
     volume_ = v;
   }

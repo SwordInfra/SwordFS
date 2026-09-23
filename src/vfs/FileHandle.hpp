@@ -46,11 +46,6 @@ class FileHandle : public Handle {
   /// Always flush — used by FUSE FLUSH / FSYNC.
   utils::Status Flush();
 
-  // Exposed for HandleManager and unit tests.
-  const std::shared_ptr<InodeHandle> &handle() const {
-    return handle_;
-  }
-
   bool writable() const;
 
  private:

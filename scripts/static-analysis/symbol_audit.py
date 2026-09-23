@@ -470,7 +470,7 @@ def _finding_for_symbol(symbol: Symbol) -> dict[str, Any] | None:
         confidence = "high"
     elif tests and not other:
         category = "test-only-production-symbol"
-        confidence = "review"
+        confidence = "high"
     else:
         category = "non-production-only-production-symbol"
         confidence = "review"

@@ -53,11 +53,13 @@ The following findings are **high confidence** and block CI:
 - a non-virtual, non-operator method with a repository definition and no
   semantic reference anywhere in the scanned repository;
 - a namespace/class type alias or typedef with no semantic reference anywhere
-  in the scanned repository.
+  in the scanned repository;
+- a production symbol whose only semantic consumers are tests. Such a symbol
+  must either be removed/reworked or be accepted as a deliberate testability
+  boundary through an exact suppression.
 
 The following findings are **review candidates** and do not block CI:
 
-- a production symbol whose only consumers are tests;
 - a production symbol whose only semantic consumers are outside `src/` and
   `tests/`.
 - standard lock-protocol methods (`lock`, `unlock`, `try_lock`, and shared-lock
@@ -66,9 +68,11 @@ The following findings are **review candidates** and do not block CI:
   intentionally prunes, so repository-only reference absence is not sufficient
   evidence for a blocking dead-code conclusion.
 
-Test-only use is intentionally not treated as proof of dead code. It is a
-strong signal that the production surface should be reviewed, but a deliberate
-test seam may still be valid.
+Test-only use is not proof that a symbol has no engineering value, but it is
+strong enough to require an explicit decision before merge. A deliberate test
+seam may remain through the exact suppression mechanism below; otherwise the
+production surface must be removed or the test must exercise a real production
+path instead.
 
 Every finding reports the Clang USR, qualified symbol, declaration/definition
 location, and production/test/other reference sites. JSON output is the
@@ -137,6 +141,13 @@ Suppressions live in `scripts/static-analysis/suppressions.json`. A suppression
 that no longer matches a current finding is an error so obsolete exceptions
 are removed instead of accumulating.
 
+For `test-only-production-symbol`, a suppression is appropriate only when the
+production declaration is itself the intentional testability boundary (for
+example deterministic engine injection, a bounded test-size override, or
+semantic status inspection). Tests should not preserve arbitrary accessors or
+mutation methods merely because they make assertions easier. Prefer observable
+behavior and existing production paths whenever they express the same contract.
+
 ## CI contract
 
 The `dead-code-audit` job performs these steps on the current checkout:
@@ -155,14 +166,17 @@ CMake configure
     -> JSON artifact + GitHub summary/annotations
 ```
 
-Any high-confidence unsuppressed finding fails the job. Review-only candidates
-remain visible in the JSON artifact and job summary but do not block until a
-rule has demonstrated enough precision to be promoted.
+Any high-confidence unsuppressed finding, including a production symbol used
+only by tests, fails the job. Review-only candidates remain visible in the JSON
+artifact and job summary but do not block until a rule has demonstrated enough
+precision to be promoted.
 
 The dedicated fixture covers production use, true zero-reference symbols,
 test-only use, virtual dispatch exclusions, callback/registration references,
 type aliases, overloaded names, operator exclusions, and standard-library
-lock-protocol indirection.
+lock-protocol indirection. It uses its own empty suppression set so repository
+exceptions cannot mask fixture findings or be misreported as stale while the
+fixture is analyzed in isolation.
 This protects the semantic classification rules independently of whatever
 symbols happen to exist in SwordFS production code.
 
