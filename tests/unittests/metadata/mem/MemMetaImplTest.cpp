@@ -215,6 +215,65 @@ FIBER_TEST_F(MemMetaImplTest, MknodPersistsSupportedTypesModeAndDeviceIdentity) 
   }
 }
 
+FIBER_TEST_F(MemMetaImplTest, CreateOwnershipUsesCallerGidWithoutParentSgid) {
+  constexpr uid_t kCallerUid = 4101;
+  constexpr gid_t kCallerGid = 4102;
+  constexpr gid_t kParentGid = 5102;
+
+  InodeID parent_ino = MakeOwnedDir(kRoot, "ordinary-parent", 0755);
+  SetDirOwner(parent_ino, kOwner, kParentGid);
+  SetContext(kCallerUid, kCallerGid);
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(parent_ino, "file", 0644, &file).ok());
+  EXPECT_EQ(file.attr.uid, kCallerUid);
+  EXPECT_EQ(file.attr.gid, kCallerGid);
+
+  SwordFsInode dir;
+  ASSERT_TRUE(impl_->MkDir(parent_ino, "dir", 0755, &dir).ok());
+  EXPECT_EQ(dir.attr.uid, kCallerUid);
+  EXPECT_EQ(dir.attr.gid, kCallerGid);
+  EXPECT_EQ(dir.attr.mode & S_ISGID, 0U);
+
+  SwordFsInode fifo;
+  ASSERT_TRUE(impl_->MkNod(parent_ino, "fifo", S_IFIFO | 0600, 0, &fifo).ok());
+  EXPECT_EQ(fifo.attr.gid, kCallerGid);
+
+  SwordFsInode symlink;
+  ASSERT_TRUE(impl_->Symlink(parent_ino, "symlink", "target", &symlink).ok());
+  EXPECT_EQ(symlink.attr.gid, kCallerGid);
+}
+
+FIBER_TEST_F(MemMetaImplTest, CreateOwnershipInheritsGidAndDirectorySgidFromParent) {
+  constexpr uid_t kCallerUid = 4201;
+  constexpr gid_t kCallerGid = 4202;
+  constexpr gid_t kParentGid = 5202;
+
+  InodeID parent_ino = MakeOwnedDir(kRoot, "sgid-parent", 02775);
+  SetDirOwner(parent_ino, kOwner, kParentGid);
+  SetDirMode(parent_ino, 02775);
+  SetContext(kCallerUid, kCallerGid);
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(parent_ino, "file", 0644, &file).ok());
+  EXPECT_EQ(file.attr.uid, kCallerUid);
+  EXPECT_EQ(file.attr.gid, kParentGid);
+
+  SwordFsInode dir;
+  ASSERT_TRUE(impl_->MkDir(parent_ino, "dir", 0755, &dir).ok());
+  EXPECT_EQ(dir.attr.uid, kCallerUid);
+  EXPECT_EQ(dir.attr.gid, kParentGid);
+  EXPECT_NE(dir.attr.mode & S_ISGID, 0U);
+
+  SwordFsInode fifo;
+  ASSERT_TRUE(impl_->MkNod(parent_ino, "fifo", S_IFIFO | 0600, 0, &fifo).ok());
+  EXPECT_EQ(fifo.attr.gid, kParentGid);
+
+  SwordFsInode symlink;
+  ASSERT_TRUE(impl_->Symlink(parent_ino, "symlink", "target", &symlink).ok());
+  EXPECT_EQ(symlink.attr.gid, kParentGid);
+}
+
 FIBER_TEST_F(MemMetaImplTest, MknodReusesNamespaceValidationAndRejectsNonMknodTypes) {
   const std::string long_name(impl_->GetLimits().max_name_length + 1, 'x');
   EXPECT_TRUE(impl_->MkNod(kRoot, long_name, S_IFIFO | 0600, 0, nullptr).IsNameTooLong());

@@ -190,10 +190,8 @@ generic/305	upstream_not_applicable	-	NOTRUN	Reflink not supported by scratch fi
 generic/306	upstream_not_applicable	-	FAIL	check: possible mount failures (see <FSTESTS_RESULT_DIR>/generic/306.mountfail)	The testcase requires remounting a FUSE scratch mount read-only with local-filesystem mount semantics.
 generic/307	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem type: fuse	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/312	known_unsupported	#255	NOTRUN	xfs_io falloc failed (old kernel/wrong fs?)	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
-generic/314	known_semantic_defect	#256	FAIL	- output mismatch (see <FSTESTS_RESULT_DIR>/generic/314.out.bad)	SGID inheritance on child directory creation is incorrect; tracked by #256.
 generic/315	known_unsupported	#255	NOTRUN	xfs_io falloc -k failed (old kernel/wrong fs?)	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/316	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong fs?)	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
-generic/317	known_semantic_defect	#256	FAIL	- output mismatch (see <FSTESTS_RESULT_DIR>/generic/317.out.bad)	Creation under a user namespace records the wrong gid; tracked by #256.
 generic/318	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem type: fuse	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/319	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem type: fuse	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/321	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
@@ -462,7 +460,6 @@ generic/690	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch 
 generic/692	upstream_not_applicable	-	NOTRUN	No verity support for fuse	Pinned fstests does not provide fs-verity coverage for FUSE, so this testcase is not applicable.
 generic/693	upstream_not_applicable	-	NOTRUN	No encryption support for fuse	The testcase requires local-filesystem encryption/inlinecrypt semantics that pinned fstests does not support for FUSE.
 generic/695	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
-generic/696	upstream_not_applicable	-	FAIL	check: possible mount failures (see <FSTESTS_RESULT_DIR>/generic/696.mountfail)	The testcase requires a local-filesystem noacl mount option that is not applicable to the SwordFS FUSE model.
 generic/697	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem type: fuse	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/698	upstream_not_applicable	-	NOTRUN	idmapped mounts not support by fuse	Pinned fstests excludes idmapped-mount coverage for FUSE.
 generic/699	upstream_not_applicable	-	NOTRUN	idmapped mounts not support by fuse	Pinned fstests excludes idmapped-mount coverage for FUSE.

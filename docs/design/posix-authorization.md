@@ -95,6 +95,39 @@ re-entering the existing-inode Open path. The newly created inode's final mode
 does not retroactively reject that already-authorized open. In particular,
 `open(O_CREAT|O_RDWR, 000)` may return a usable descriptor.
 
+### Create-time ownership and SGID inheritance
+
+Authorization and ownership assignment are separate responsibilities. Linux
+VFS/FUSE `default_permissions` decides whether the caller may create the entry;
+after that decision, SwordFS persists the Linux create-time ownership side
+effects from the request identity and the authoritative parent inode.
+
+For all inode-creating namespace operations, Memory and Redis use the same
+rule:
+
+```text
+ordinary parent directory:
+  child.uid = caller uid
+  child.gid = caller gid
+
+SGID parent directory:
+  child.uid = caller uid
+  child.gid = parent gid
+  if child is a directory:
+    child.mode |= S_ISGID
+```
+
+The parent mode/gid used for this decision must come from the same metadata
+transaction that publishes the child, so a concurrent parent ownership/mode
+change cannot be combined with a stale inheritance decision. This rule also
+applies to non-directory creation paths such as mknod and symlink for group
+ownership; directory SGID propagation applies only to child directories.
+
+SwordFS does not add a second supplementary-group or capability authorization
+engine to decide this rule. In particular, handling of an explicitly requested
+SGID bit on a non-directory is separate from the parent-directory inheritance
+rule and remains subject to the kernel/FUSE authorization boundary.
+
 ## Setattr and truncate
 
 Linux FUSE calls the VFS setattr preparation path before emitting FUSE_SETATTR

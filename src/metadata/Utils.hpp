@@ -12,8 +12,19 @@
 
 namespace swordfs::metadata {
 
+struct CreateInheritance {
+  uint64_t gid;
+  uint32_t mode;
+};
+
 // Convert metadata mode bits to dirent type (DT_DIR, DT_REG, etc.).
 uint32_t ModeToDt(uint32_t mode);
+
+/// Resolve Linux create-time group ownership and directory SGID inheritance
+/// from the caller identity and the authoritative parent attributes. This is
+/// a persistence policy only; caller authorization remains owned by FUSE
+/// default_permissions.
+CreateInheritance ResolveCreateInheritance(uint64_t caller_gid, const SwordFsAttr &parent, uint32_t child_mode);
 
 inline constexpr uint64_t kMaxNameLength = 255;
 
