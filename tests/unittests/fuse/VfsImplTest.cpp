@@ -680,6 +680,13 @@ TEST_F(VfsImplIntegrationTest, FailedEntryReplyDoesNotRetainLookupReference) {
   ASSERT_TRUE(capture.entry.has_value());
   const auto ino = capture.entry->ino;
 
+  // Capture notification happens inside fuse_reply_entry(), before the reply
+  // returns to PublishRetainedLookup(). Drain the runtime so the failed-reply
+  // rollback is complete before inspecting the lookup cache.
+  auto *runtime = swordfs::utils::ThisFiberRuntime();
+  ASSERT_NE(runtime, nullptr);
+  runtime->Shutdown();
+
   // A failed fuse_reply_entry() does not publish the inode to the kernel, so
   // the provisional userspace lookup reference must have been rolled back.
   // Once authoritative metadata says the inode is gone, no local cache entry

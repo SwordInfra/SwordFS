@@ -43,6 +43,22 @@ previous local state unchanged.
 When no local handle/runtime object exists, VFS attributes come directly from
 metadata.
 
+## FUSE lookup publication lifetime
+
+Entry-producing low-level FUSE operations retain a provisional mount-local
+lookup reference before publishing the reply. A successful
+`fuse_reply_entry()`, `fuse_reply_create()`, or `READDIRPLUS` reply
+transfers that reference to the kernel, which later releases it through
+`FORGET` / `FORGET_MULTI`. If reply publication fails, SwordFS rolls the
+provisional reference back after the reply function returns.
+
+The reply function returning is therefore the ownership decision point. Test
+fixtures that intercept a reply may signal that the reply was observed before
+the enclosing asynchronous FUSE callback has completed its rollback work.
+Tests that inspect post-callback lookup state must synchronize on completion of
+the submitted callback rather than treating reply capture itself as a
+completion barrier.
+
 ## Attribute reply paths
 
 The overlay applies to every FUSE reply that can refresh attributes for an
