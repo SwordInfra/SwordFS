@@ -9,8 +9,8 @@
     "libfuse": "fusermount3 version: 3.18.2",
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
-    "runner": "Linux",
-    "swordfs_commit": "00c7d60ed734fb6ca99861bc0c2c9cf512452645"
+    "runner": "GitHub Actions (6 fstests shards)",
+    "swordfs_commit": "d8e33622d4f3c83e51abb62afd82c2757e8fc65e"
   },
   "summary": {
     "blocking_count": 0,
@@ -28,6 +28,7 @@
     "executed_classified_percent": 100.0,
     "executed_count": 642,
     "known_gap_count": 540,
+    "overall_support_percent": 15.81,
     "raw_results": {
       "DEFERRED": 3,
       "FAIL": 25,
