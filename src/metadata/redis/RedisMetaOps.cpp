@@ -261,7 +261,19 @@ utils::Status RedisMetaOps::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     return utils::Status::InvalidArgument("reclaim work output is null");
   }
   work->reset();
-  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PrepareReclaim(ino, *work); });
+
+  std::optional<ReclaimWork> frozen;
+  auto status = TransactFromFiber([&](RedisMetaTxn &txn) { return txn.FreezeReclaim(ino, frozen); });
+  if (!status.ok() || !frozen.has_value()) {
+    return status;
+  }
+
+  status = TransactFromFiber([&](RedisMetaTxn &txn) { return txn.FinalizeReclaim(ino, *frozen); });
+  if (!status.ok()) {
+    return status;
+  }
+  *work = std::move(frozen);
+  return utils::Status::OK();
 }
 
 utils::Status RedisMetaOps::CompleteReclaim(InodeID ino) {

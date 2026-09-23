@@ -117,8 +117,8 @@ class WholeObjectStrategy final : public IChunkOverwriteStrategy {
     metadata::SwordFsInode inode;
     status = meta->GetInode(work.ino, &inode);
     if (status.ok()) {
-      // Redis EXEC may partially apply. A frozen record alone does not prove
-      // the live inode/head were removed, so never delete while it exists.
+      // Frozen work is durable before metadata finalization. The record alone
+      // therefore never authorizes physical deletion while the live inode exists.
       return utils::Status::Busy("reclaim inode is still live");
     }
     if (!status.IsNotFound()) {

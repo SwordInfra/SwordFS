@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <charconv>
 #include <limits>
 #include <map>
 #include <string>
@@ -310,12 +311,12 @@ utils::Status RedisMetaTxn::TouchInode(InodeID ino, SetAttrField fields) {
   return SetInode(inode);
 }
 
-utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> &work) {
+utils::Status RedisMetaTxn::FreezeReclaim(InodeID ino, std::optional<ReclaimWork> &work) {
   work.reset();
 
-  // Idempotent replay: once the point of no return has been crossed the
-  // frozen record — not the (already removed) live inode — is the authority,
-  // so crash recovery and retries get the same work back unchanged.
+  // Idempotent replay: once frozen work exists it is the recovery authority.
+  // Finalization is deliberately a separate transaction so a command error
+  // cannot destroy the live state needed to reconcile inode accounting.
   std::string existing;
   auto status = txn_.HGet(key_.Reclaims(), std::to_string(ino), &existing);
   if (status.ok()) {
@@ -327,32 +328,6 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     if (pending.ino != ino) {
       return utils::Status::Malformed("pending reclaim record inode mismatch");
     }
-    SwordFsInode live;
-    status = LookupInode(ino, &live);
-    if (status.ok()) {
-      if (live.IsDir() || live.attr.nlink != 0) {
-        // An earlier partial EXEC may already have removed some live chunk
-        // heads. The frozen record is the only remaining data reference; do
-        // not cancel it merely because an inode is still visible.
-        return utils::Status::Busy("frozen reclaim conflicts with a linked inode");
-      }
-      // Finish a partially applied preparation. The open-file fence is held
-      // by the caller; the frozen payload remains the authority for deletion.
-      status = ClearOrphanMarker(ino);
-      if (!status.ok()) {
-        return status;
-      }
-      status = DeleteChunks(ino);
-      if (!status.ok()) {
-        return status;
-      }
-      status = DeleteInode(ino);
-      if (!status.ok()) {
-        return status;
-      }
-    } else if (!status.IsNotFound()) {
-      return status;
-    }
     work = std::move(pending);
     return utils::Status::OK();
   }
@@ -360,10 +335,6 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     return status;
   }
 
-  // All remaining reads happen before the first write. The live inode and the
-  // complete chunk hash are WATCHed on the same Redis connection, so a
-  // concurrent metadata mutation aborts EXEC and RedisMetaClient retries the
-  // whole attempt from a fresh snapshot.
   SwordFsInode inode;
   status = LookupInode(ino, &inode);
   const bool has_inode = status.ok();
@@ -372,12 +343,9 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
   }
 
   if (!has_inode || inode.IsDir() || inode.attr.nlink != 0) {
-    // The inode was already reclaimed, is a directory (never reclaimed
-    // through an orphan candidate), or a concurrent Link revived it: it must
-    // not be frozen. Dropping the orphan marker in this same transaction is
-    // what makes that safe — the inode key is watched, so a concurrent unlink
-    // that publishes the marker either lands before this EXEC (and is then
-    // observed, so we freeze instead) or aborts it and is retried.
+    // Stale orphan candidates are cleaned up without creating reclaim work.
+    // The inode key is watched, so a concurrent unlink that publishes a fresh
+    // marker either lands before this EXEC or forces the transaction to retry.
     status = ClearOrphanMarker(ino);
     if (!status.ok()) {
       return status;
@@ -398,12 +366,9 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     heads.push_back(descriptor);
   }
   std::sort(heads.begin(), heads.end(), [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
+
   ReclaimWork pending;
   status = strategy_->FreezeReclaim(*this, ino, heads, chunk_size_, &pending);
-  if (!status.ok()) {
-    return status;
-  }
-  status = strategy_->index_participant().PrepareReclaim(*this, ino, heads);
   if (!status.ok()) {
     return status;
   }
@@ -414,14 +379,99 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     return status;
   }
 
-  // Retain the frozen work durably, then drop the live chunk map, the live
-  // inode and the orphan marker. This is the point of no return: from here on
-  // no Link can revive the inode and every remaining step is idempotent.
+  // Freeze only. Link observes the reclaim record and refuses revival, while
+  // all live metadata remains available for validated finalization/retry.
   status = txn_.HSet(key_.Reclaims(), std::to_string(ino), serialized);
   if (!status.ok()) {
     return status;
   }
-  status = ClearOrphanMarker(ino);
+
+  work = std::move(pending);
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaTxn::FinalizeReclaim(InodeID ino, const ReclaimWork &work) {
+  if (work.ino != ino) {
+    return utils::Status::InvalidArgument("reclaim work inode mismatch");
+  }
+
+  // Re-read every durable input from one fresh WATCH snapshot before the
+  // first destructive write. The frozen record must still be exactly the
+  // recovery authority selected by the freeze stage.
+  std::string encoded;
+  auto status = txn_.HGet(key_.Reclaims(), std::to_string(ino), &encoded);
+  if (!status.ok()) {
+    return status;
+  }
+  ReclaimWork persisted;
+  status = persisted.ParseFrom(encoded);
+  if (!status.ok()) {
+    return status;
+  }
+  if (persisted.ino != ino) {
+    return utils::Status::Malformed("pending reclaim record inode mismatch");
+  }
+  if (persisted != work) {
+    return utils::Status::Busy("pending reclaim record changed before finalization");
+  }
+
+  SwordFsInode inode;
+  status = LookupInode(ino, &inode);
+  if (status.IsNotFound()) {
+    // Under the two-stage protocol, inode removal is the durable proof that
+    // metadata finalization completed. A retry must not decrement again.
+    return utils::Status::OK();
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  if (inode.IsDir() || inode.attr.nlink != 0) {
+    return utils::Status::Busy("frozen reclaim conflicts with a linked inode");
+  }
+
+  std::string orphan;
+  status = txn_.HGet(key_.Orphans(), std::to_string(ino), &orphan);
+  if (!status.ok()) {
+    if (status.IsNotFound()) {
+      return utils::Status::Malformed("frozen reclaim live inode is missing orphan marker");
+    }
+    return status;
+  }
+  if (orphan != "1") {
+    return utils::Status::Malformed("invalid Redis orphan marker");
+  }
+
+  std::vector<std::pair<std::string, SwordFsChunk>> scanned;
+  status = ScanChunks(ino, scanned);
+  if (!status.ok()) {
+    return status;
+  }
+  std::vector<SwordFsChunk> heads;
+  heads.reserve(scanned.size());
+  for (const auto &[field, descriptor] : scanned) {
+    (void)field;
+    heads.push_back(descriptor);
+  }
+  std::sort(heads.begin(), heads.end(), [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
+
+  ReclaimWork current;
+  status = strategy_->FreezeReclaim(*this, ino, heads, chunk_size_, &current);
+  if (!status.ok()) {
+    return status;
+  }
+  if (current != work) {
+    return utils::Status::Busy("live chunk state changed after reclaim freeze");
+  }
+
+  status = ValidateInodeCount();
+  if (!status.ok()) {
+    return status;
+  }
+
+  // All validation reads are complete. Every queued command below is
+  // semantically non-failing for the watched schema snapshot. Redis WATCH
+  // forces a retry if any validated key changes before EXEC.
+  status = strategy_->index_participant().PrepareReclaim(*this, ino, heads);
   if (!status.ok()) {
     return status;
   }
@@ -429,13 +479,15 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
   if (!status.ok()) {
     return status;
   }
-  status = DeleteInode(ino);
+  status = ClearOrphanMarker(ino);
   if (!status.ok()) {
     return status;
   }
-
-  work = std::move(pending);
-  return utils::Status::OK();
+  status = AdjustInodeCount(-1);
+  if (!status.ok()) {
+    return status;
+  }
+  return txn_.Del(key_.Inode(ino));
 }
 
 utils::Status RedisMetaTxn::CompleteReclaim(InodeID ino) {
@@ -736,10 +788,10 @@ utils::Status RedisMetaTxn::LinkExistingEntry(InodeID parent_ino, std::string_vi
     return status;
   }
 
-  // A partially applied reclaim can leave its inode in place after deleting
-  // the live chunk hash. The frozen record is already the point of no return:
-  // reject a link before queuing any mutation. WATCH also prevents a
-  // concurrent PrepareReclaim from installing that record before this EXEC.
+  // A durable freeze is the point of no return for namespace revival even
+  // though live metadata intentionally remains until finalization. Reject a
+  // link before queuing any mutation. WATCH also prevents a concurrent freeze
+  // from installing that record before this EXEC.
   std::string pending_reclaim;
   status = txn_.HGet(key_.Reclaims(), std::to_string(inode->ino), &pending_reclaim);
   if (status.ok()) {
@@ -1048,6 +1100,20 @@ utils::Status RedisMetaTxn::SetChunk(InodeID ino, const SwordFsChunk &chunk) {
 
 utils::Status RedisMetaTxn::DeleteChunks(InodeID ino) {
   return txn_.Del(key_.Chunk(ino));
+}
+
+utils::Status RedisMetaTxn::ValidateInodeCount() {
+  std::string value;
+  auto status = txn_.Get(key_.InodeCount(), &value);
+  if (!status.ok()) {
+    return status;
+  }
+  int64_t parsed = 0;
+  const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+  if (error != std::errc{} || end != value.data() + value.size() || parsed <= 0) {
+    return utils::Status::IOError("invalid Redis inode count");
+  }
+  return utils::Status::OK();
 }
 
 utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size,
