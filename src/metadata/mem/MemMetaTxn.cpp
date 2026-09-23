@@ -9,9 +9,10 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <utility>
 
-#include "chunk/ChunkObjectKey.hpp"
+#include "chunk/IChunkOverwriteStrategy.hpp"
 #include "metadata/Types.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
@@ -21,6 +22,93 @@
 using Status = swordfs::utils::Status;
 
 namespace swordfs::metadata {
+
+std::string MemMetaTxn::PrivateHash(std::string_view hash) const {
+  const auto &strategy =
+      store_->chunk_strategy_ != nullptr ? *store_->chunk_strategy_ : chunk::DefaultChunkOverwriteStrategy();
+  return std::string(strategy.name()) + "/" + std::string(hash);
+}
+
+Status MemMetaTxn::Read(std::string_view hash, std::string_view field, std::string *value) {
+  if (value == nullptr || hash.empty()) {
+    return Status::InvalidArgument("private chunk index read requires hash and output");
+  }
+  const auto full_hash = PrivateHash(hash);
+  for (auto it = index_writes_.rbegin(); it != index_writes_.rend(); ++it) {
+    if (it->hash == full_hash && it->field == field) {
+      if (!it->value.has_value()) {
+        return Status::NotFound("private chunk index field not found");
+      }
+      *value = *it->value;
+      return Status::OK();
+    }
+  }
+  auto hash_it = store_->private_chunk_index_.find(full_hash);
+  if (hash_it == store_->private_chunk_index_.end()) {
+    return Status::NotFound("private chunk index hash not found");
+  }
+  auto field_it = hash_it->second.find(std::string(field));
+  if (field_it == hash_it->second.end()) {
+    return Status::NotFound("private chunk index field not found");
+  }
+  *value = field_it->second;
+  return Status::OK();
+}
+
+Status MemMetaTxn::Scan(std::string_view hash, std::vector<std::pair<std::string, std::string>> *values) {
+  if (values == nullptr || hash.empty()) {
+    return Status::InvalidArgument("private chunk index scan requires hash and output");
+  }
+  const auto full_hash = PrivateHash(hash);
+  std::map<std::string, std::string> merged;
+  auto hash_it = store_->private_chunk_index_.find(full_hash);
+  if (hash_it != store_->private_chunk_index_.end()) {
+    merged.insert(hash_it->second.begin(), hash_it->second.end());
+  }
+  for (const auto &write : index_writes_) {
+    if (write.hash == full_hash) {
+      if (write.value.has_value()) {
+        merged.insert_or_assign(write.field, *write.value);
+      } else {
+        merged.erase(write.field);
+      }
+    }
+  }
+  values->assign(merged.begin(), merged.end());
+  return Status::OK();
+}
+
+Status MemMetaTxn::Put(std::string_view hash, std::string_view field, std::string_view value) {
+  if (hash.empty()) {
+    return Status::InvalidArgument("private chunk index hash is empty");
+  }
+  index_writes_.push_back({PrivateHash(hash), std::string(field), std::string(value)});
+  return Status::OK();
+}
+
+Status MemMetaTxn::Erase(std::string_view hash, std::string_view field) {
+  if (hash.empty()) {
+    return Status::InvalidArgument("private chunk index hash is empty");
+  }
+  index_writes_.push_back({PrivateHash(hash), std::string(field), std::nullopt});
+  return Status::OK();
+}
+
+void MemMetaTxn::CommitPrivateIndex() {
+  for (auto &write : index_writes_) {
+    if (write.value.has_value()) {
+      store_->private_chunk_index_[write.hash].insert_or_assign(write.field, std::move(*write.value));
+    } else {
+      auto hash_it = store_->private_chunk_index_.find(write.hash);
+      if (hash_it != store_->private_chunk_index_.end()) {
+        hash_it->second.erase(write.field);
+        if (hash_it->second.empty()) {
+          store_->private_chunk_index_.erase(hash_it);
+        }
+      }
+    }
+  }
+}
 
 // ────────────────────────────────────────────────────────────────
 // Transaction primitives.  Every method runs with the store lock
@@ -121,15 +209,16 @@ Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fi
     st.ctime_nsec = 0;
   }
 
-  Status status = WriteAttr(ino, st);
-  if (!status.ok()) {
-    return status;
-  }
+  Status status;
   if (size_changed) {
     status = TruncateChunks(ino, st.size);
     if (!status.ok()) {
       return status;
     }
+  }
+  status = WriteAttr(ino, st);
+  if (!status.ok()) {
+    return status;
   }
   if (out) {
     *out = *inode;
@@ -154,11 +243,11 @@ Status MemMetaTxn::Truncate(InodeID ino, uint64_t size) {
   st.ctime = static_cast<int64_t>(::time(nullptr));
   st.ctime_nsec = 0;
 
-  Status status = WriteAttr(ino, st);
+  Status status = TruncateChunks(ino, size);
   if (!status.ok()) {
     return status;
   }
-  return TruncateChunks(ino, size);
+  return WriteAttr(ino, st);
 }
 
 Status MemMetaTxn::WriteAttr(InodeID ino, const SwordFsAttr &attr) {
@@ -509,7 +598,7 @@ Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a, In
 }
 
 Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
-                               const SwordFsChunk &replacement) {
+                               const SwordFsChunk &replacement, const ChunkPublishIntent &intent) {
   if (replacement.revision == kInvalidChunkRevision ||
       (expected.has_value() && expected->revision == kInvalidChunkRevision)) {
     return Status::InvalidArgument("chunk revision is invalid");
@@ -521,10 +610,14 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
       (expected->index != replacement.index || expected->start_offset != replacement.start_offset)) {
     return Status::InvalidArgument("replacement must preserve chunk index and start offset");
   }
-  auto queue_pending_delete = [&](const SwordFsChunk &chunk) {
-    const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
-    store_->pending_deletes_.insert_or_assign(
-        object_key, PendingDelete{.ino = ino, .chunk = ReclaimChunk{.descriptor = chunk, .key = object_key}});
+  const auto &strategy =
+      store_->chunk_strategy_ != nullptr ? *store_->chunk_strategy_ : chunk::DefaultChunkOverwriteStrategy();
+  auto queue_pending_delete = [&](const SwordFsChunk &head) {
+    PendingDelete pending;
+    auto status = strategy.FreezeRejectedPublication(ino, head, intent, store_->chunk_size_, &pending);
+    if (status.ok()) {
+      store_->pending_deletes_.insert_or_assign(pending.id, std::move(pending));
+    }
   };
 
   auto *inode = FindInode(ino);
@@ -542,6 +635,7 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
   auto &chunk_map = store_->chunks_[ino];
   auto it = chunk_map.find(replacement.index);
   bool replacement_already_published = false;
+  std::optional<PendingDelete> expected_cleanup;
   if (it != chunk_map.end()) {
     replacement_already_published = it->second == replacement;
     const bool current_matches_expected = expected.has_value() && it->second == *expected;
@@ -554,11 +648,25 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
       // cleanup candidate and replacing/replaying the descriptor are atomic.
       // Persistent backends may register the candidate after a known metadata
       // outcome because cleanup completeness is not publication correctness.
-      queue_pending_delete(*expected);
+      PendingDelete pending;
+      auto status = strategy.FreezePendingDelete(*this, ino, *expected, store_->chunk_size_, &pending);
+      if (!status.ok()) {
+        return status;
+      }
+      expected_cleanup = std::move(pending);
     }
   } else if (expected.has_value()) {
     queue_pending_delete(replacement);
     return Status::NotFound("chunk not found at index " + std::to_string(replacement.index));
+  }
+
+  auto status = strategy.index_participant().Publish(*this, ino, expected, replacement, intent);
+  if (!status.ok()) {
+    queue_pending_delete(replacement);
+    return status;
+  }
+  if (expected_cleanup.has_value()) {
+    store_->pending_deletes_.insert_or_assign(expected_cleanup->id, std::move(*expected_cleanup));
   }
 
   if (!replacement_already_published) {
@@ -593,30 +701,70 @@ Status MemMetaTxn::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
   return Status::OK();
 }
 
+Status MemMetaTxn::LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out) {
+  if (out == nullptr) {
+    return Status::InvalidArgument("chunk view output is null");
+  }
+  ChunkView view;
+  auto status = FindChunk(ino, idx, &view.head);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!view.head.IsValidForChunkSize(store_->chunk_size_)) {
+    return Status::Malformed("persisted chunk descriptor is invalid");
+  }
+  const auto &strategy =
+      store_->chunk_strategy_ != nullptr ? *store_->chunk_strategy_ : chunk::DefaultChunkOverwriteStrategy();
+  status = strategy.index_participant().LoadPublished(*this, ino, view.head, &view.private_snapshot);
+  if (!status.ok()) {
+    return status;
+  }
+  *out = std::move(view);
+  return Status::OK();
+}
+
 Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
   auto ino_it = store_->chunks_.find(ino);
   if (ino_it == store_->chunks_.end()) {
     return Status::OK();
   }
   auto &cmap = ino_it->second;
-  for (auto cit = cmap.begin(); cit != cmap.end();) {
-    auto &chunk = cit->second;
-    if (chunk.start_offset >= new_size) {
-      // The memory backend can record cleanup and drop the descriptor in the
-      // same critical section. Persistent backends may register cleanup after
-      // the authoritative truncate transaction has a known successful result.
-      const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
-      store_->pending_deletes_.insert_or_assign(
-          object_key, PendingDelete{.ino = ino, .chunk = ReclaimChunk{.descriptor = chunk, .key = object_key}});
-      cit = cmap.erase(cit);
-      continue;
+  const auto &strategy =
+      store_->chunk_strategy_ != nullptr ? *store_->chunk_strategy_ : chunk::DefaultChunkOverwriteStrategy();
+  std::vector<ChunkIndexChange> changes;
+  std::vector<PendingDelete> detached;
+  for (const auto &[index, head] : cmap) {
+    (void)index;
+    if (head.start_offset >= new_size) {
+      PendingDelete pending;
+      auto status = strategy.FreezePendingDelete(*this, ino, head, store_->chunk_size_, &pending);
+      if (!status.ok()) {
+        return status;
+      }
+      detached.push_back(std::move(pending));
+      changes.push_back({head, std::nullopt});
+    } else {
+      const uint64_t surviving_size = new_size - head.start_offset;
+      if (head.size > surviving_size) {
+        auto clamped = head;
+        clamped.size = surviving_size;
+        changes.push_back({head, clamped});
+      }
     }
-    // Chunk straddles the new size — clamp its size.
-    uint64_t new_chunk_size = new_size - chunk.start_offset;
-    if (chunk.size > new_chunk_size) {
-      chunk.size = new_chunk_size;
+  }
+  auto status = strategy.index_participant().Truncate(*this, ino, changes);
+  if (!status.ok()) {
+    return status;
+  }
+  for (auto &pending : detached) {
+    store_->pending_deletes_.insert_or_assign(pending.id, std::move(pending));
+  }
+  for (const auto &change : changes) {
+    if (change.current.has_value()) {
+      cmap[change.previous.index] = *change.current;
+    } else {
+      cmap.erase(change.previous.index);
     }
-    ++cit;
   }
   return Status::OK();
 }
@@ -650,20 +798,27 @@ Status MemMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work)
     return Status::OK();
   }
 
-  ReclaimWork frozen;
-  frozen.ino = ino;
+  std::vector<SwordFsChunk> heads;
   auto chunks_it = store_->chunks_.find(ino);
   if (chunks_it != store_->chunks_.end()) {
-    frozen.chunks.reserve(chunks_it->second.size());
-    for (const auto &[index, chunk] : chunks_it->second) {
+    heads.reserve(chunks_it->second.size());
+    for (const auto &[index, head] : chunks_it->second) {
       (void)index;
-      // Freeze the object identity that the authoritative descriptor derives
-      // right now. Later deletions replay this frozen key, never a key
-      // rebuilt from live state.
-      frozen.chunks.push_back(ReclaimChunk{chunk, chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision)});
+      heads.push_back(head);
     }
-    std::sort(frozen.chunks.begin(), frozen.chunks.end(),
-              [](const ReclaimChunk &a, const ReclaimChunk &b) { return a.descriptor.index < b.descriptor.index; });
+    std::sort(heads.begin(), heads.end(),
+              [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
+  }
+  const auto &strategy =
+      store_->chunk_strategy_ != nullptr ? *store_->chunk_strategy_ : chunk::DefaultChunkOverwriteStrategy();
+  ReclaimWork frozen;
+  auto status = strategy.FreezeReclaim(*this, ino, heads, store_->chunk_size_, &frozen);
+  if (!status.ok()) {
+    return status;
+  }
+  status = strategy.index_participant().PrepareReclaim(*this, ino, heads);
+  if (!status.ok()) {
+    return status;
   }
 
   // Retain the frozen work durably, then drop the live inode (and with it the

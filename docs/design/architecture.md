@@ -22,7 +22,7 @@ The architecture is guided by a few recurring principles:
 
 - **Keep filesystem semantics in the client, storage primitives below it.** FUSE/VFS code owns filesystem behavior; metadata and data engines expose storage-oriented contracts.
 - **Separate metadata authority from object data.** Namespace/inode/chunk descriptors live in the metadata engine; file bytes live in the data engine.
-- **Publish immutable data identities through metadata.** Object data is written under a revisioned key first, then metadata atomically makes that revision authoritative.
+- **Publish logical chunk heads through metadata.** The selected overwrite strategy prepares data first, then metadata atomically makes its new logical generation authoritative. The current whole-object strategy uses immutable revisioned objects.
 - **Treat persistent metadata as the source of truth for lifecycle/recovery.** Local runtime state may fence or cache work, but must not become the only record of persistent work.
 - **Make blocking external IO explicit.** Runtime filesystem logic executes as fibers; Redis/S3 calls run on POSIX worker threads through blocking executors.
 - **Prefer clear state ownership over cross-layer reconstruction.** Each lifecycle transition should have one authoritative owner and a small set of explicit invariants.
@@ -67,9 +67,13 @@ The major responsibilities are:
 | VFS/handle layer | POSIX-facing orchestration, open-handle lifetime, file/chunk runtime state | Durable namespace storage implementation |
 | Metadata engine | Authoritative inode, directory, chunk-descriptor, transaction, orphan/reclaim metadata | File object bytes |
 | Data engine | Put/Get/Delete immutable file objects | Namespace/link/inode semantics |
-| Reclaimer | Cross-engine deletion lifecycle after the last link disappears | Deciding namespace semantics |
+| Reclaimer | Schedule and acknowledge cleanup after unlink or replacement | Decoding strategy-private cleanup payloads or selecting physical data to delete |
 
-`VolumeImpl` binds one mounted volume to one metadata engine and, when configured, one data engine. Backends are selected by URL scheme through registries rather than hard-coded into VFS code.
+`VolumeImpl` binds one mounted volume to one metadata engine, one overwrite
+strategy, and, when configured, one data engine. Backends are selected by URL
+scheme through registries rather than hard-coded into VFS code. The overwrite
+strategy comes from the persisted volume format and stays fixed for that
+volume; it is not chosen per file or switched at runtime.
 
 ## 3. Process and mount lifecycle
 
@@ -85,7 +89,8 @@ The volume configuration contains, among other fields:
 - data-engine identity;
 - bucket/location string interpreted by that data engine;
 - region;
-- configured logical chunk size.
+- configured logical chunk size;
+- chunk overwrite strategy and its index-format version.
 
 For Redis metadata, volume configuration is persisted in Redis. For the in-memory backend, only the volume configuration is persisted locally in `/etc/swordfs/<volume>/volume.fmt`; inode, directory, chunk, orphan, and pending-reclaim state remain process-lifetime state.
 
@@ -213,19 +218,24 @@ The main logical records are:
 
 - **`SwordFsInode`** — inode ID, POSIX-like attributes, parent inode, optional symlink target;
 - **directory entry** — name/type/inode mapping owned by a directory;
-- **`SwordFsChunk`** — one authoritative published chunk descriptor containing logical index, start offset, revision, and size;
+- **`SwordFsChunk`** — the shared file-to-logical-chunk head, containing index, start offset, publication generation, and logical size;
 - **volume configuration** — storage/backend configuration and chunk size;
 - **orphan candidate** — inode whose last namespace link disappeared but which has not crossed the reclaim point of no return;
-- **`ReclaimWork`** — frozen immutable object identities for an inode already removed from live metadata and awaiting/undergoing data deletion.
+- **`ReclaimWork`** — a frozen, versioned, opaque strategy payload for an inode already removed from live metadata and awaiting/undergoing data deletion.
 
-Metadata does **not** store mutable object bytes. For the current object-storage data path, it stores the revision necessary to derive the immutable object identity.
+Directory entries, inodes, and logical chunk heads are common to every
+overwrite strategy. Chunk-internal fragment indexes belong to the selected
+strategy, under its own metadata key space and encoding. Metadata does
+**not** store mutable object bytes. In the current `whole_object` strategy,
+the head's generation also identifies an immutable object revision; common
+metadata and reclaim code do not derive physical keys from it.
 
 For relationships between these records, handles, and write buffers, see
 [Data structures and ownership](data-structures.md).
 
 ### 6.3 Memory transaction model
 
-The in-memory backend uses `MemMetaStore::Transact()` as its only mutation/operation entry point. A transaction holds one fiber mutex across the callback, so the callback is one atomic step relative to other metadata operations.
+The in-memory backend uses `MemMetaStore::Transact()` as its only mutation/operation entry point. A transaction holds one fiber mutex across the callback, so the callback has one visibility boundary relative to other metadata operations. Strategy-private index mutations are staged and committed only when the callback succeeds. Publication, size changes, and reclaim preparation invoke the strategy before changing the public head or inode, so a strategy rejection leaves both public and private state unchanged.
 
 No pointers to mutable store-owned inode state escape the transaction. Reads use value snapshots and writes go through explicit transaction primitives.
 
@@ -387,6 +397,18 @@ provisional implementation detail rather than a coherence guarantee.
 
 Files are divided into fixed-size logical chunks. The default configured chunk size is 64 MiB, but the value is part of the volume configuration.
 
+The volume format selects one overwrite strategy. `whole_object` is the only
+selectable implementation today; `chunk_slice` and `redis_cache` are reserved
+for later implementations and are rejected at format/mount until available.
+All implementations share directory, inode, and file-to-logical-chunk metadata.
+`IChunkSession` owns per-chunk runtime reads, writes, and publication. The
+strategy owns the chunk-internal index, physical mapping, and cleanup codec.
+`IChunkIndexParticipant` joins publication, size changes, and orphan
+preparation through `IChunkIndexTxn` in the same Memory or Redis metadata
+transaction as the shared head. That private transaction surface permits
+multiple records per chunk and keeps slice and Redis-cache index layouts
+independent. Freeze callbacks may read those records before detaching them.
+
 Each published chunk has a metadata descriptor:
 
 ```text
@@ -398,21 +420,28 @@ SwordFsChunk {
 }
 ```
 
-`revision` is a volume-wide monotonically allocated, non-zero identity. Allocated revisions may have gaps after failures, but a revision must not be reused while the volume's metadata remains authoritative.
+`revision` is a volume-wide monotonically allocated, non-zero publication
+generation for the shared head. Allocated generations may have gaps after
+failures, but one must not be reused while the volume's metadata remains
+authoritative. Its physical meaning is strategy-private.
 
-For the current S3/object-storage engine, the physical object key is:
+For the current `whole_object` implementation using S3/object storage, the
+physical object key is:
 
 ```text
 <inode>/<chunk-index>/<revision>
 ```
 
-This gives every published revision an immutable physical identity and allows metadata publication to change independently from an already-written object.
+This gives each whole-object revision an immutable physical identity and
+allows metadata publication to change independently from an already-written
+object. Future strategies may use a different physical layout under the same
+logical head.
 
 Within one inode, `FileReadWriter` uses a fiber read/write lock around file operations. Reads take the shared side, while write/flush/truncate-style state changes take the exclusive side. This allows concurrent reads without allowing local chunk publication/truncation state to race incompatible mutations on the same inode runtime object.
 
 ## 9. Write and publication path
 
-The most important data-path invariant is:
+For `whole_object`, the most important data-path invariant is:
 
 > **Object bytes are written before the metadata descriptor that makes those bytes authoritative.**
 
@@ -468,8 +497,9 @@ The current object-storage path uses **whole-chunk copy-on-write** for overwrite
    immutable revision in `pending_deletes` and wake the background reclaimer.
 
 The foreground rewrite path does not physically delete the previous object.
-Physical deletion is centralized in `Reclaimer`, which rechecks authoritative
-metadata before deleting any pending-delete candidate.
+`Reclaimer` schedules the physical cleanup, while the selected strategy
+validates its frozen payload, rechecks reachability, and deletes its own
+physical data.
 
 There is currently no slice/extent overlay or compaction layer in the open-source data path. Random overwrites can therefore incur whole-chunk read/write amplification.
 
@@ -545,13 +575,12 @@ map. Cleanup completeness is not a precondition for the metadata mutation.
 
 The per-inode exclusive operation lock covers this sequence:
 
-1. Commit the new inode size and prune or clamp authoritative chunk
-   descriptors. While doing so, the metadata backend records the exact
-   descriptors detached by a **known-success** transaction as cleanup
-   candidates for the caller.
-2. Best-effort register those detached immutable identities in
-   `pending_deletes`. Registration failure is logged and may leak garbage, but
-   does not invalidate the already-known truncate result.
+1. Commit the new inode size and prune or clamp authoritative logical chunk
+   heads. The selected strategy updates its private index in the same metadata
+   transaction and freezes opaque cleanup candidates for detached data.
+2. Best-effort register those candidates in `pending_deletes` after a
+   **known-success** metadata outcome. Registration failure is logged and may
+   leak garbage, but does not invalidate the already-known truncate result.
 3. Drop cached chunks wholly beyond the new end and shorten the boundary
    chunk. For a dirty rewrite, also clamp its saved CAS expectation.
 4. Wake the background reclaimer so pending-delete work is retried
@@ -560,15 +589,15 @@ The per-inode exclusive operation lock covers this sequence:
 Serializing size changes with writes and flushes prevents a local pending
 write from racing truncate and republishing the removed range.
 
-Pending-delete state is keyed by immutable object identity rather than by a
-mutable inode-level batch. Repeated truncates therefore cannot overwrite an
-earlier cleanup generation. Replay validates that the persisted Hash field,
-frozen object key, descriptor-derived key, and canonical chunk layout all
-agree before deleting data; malformed cleanup metadata fails closed. Queue
-membership is never itself permission to delete: the reclaimer first checks
-the current authoritative chunk descriptor and skips a candidate while that
-same immutable object key is still live. This revalidation is required because
-cleanup candidates can become stale relative to current authoritative metadata.
+Pending-delete state uses an opaque strategy-defined queue identity rather
+than a mutable inode-level batch. Repeated truncates therefore cannot
+overwrite earlier cleanup generations. Replay validates the common envelope
+and persisted Hash field; the selected strategy validates the private payload
+and checks current authoritative metadata before deleting data. For
+`whole_object`, this includes matching the frozen object key, derived key,
+canonical chunk layout, and live head. Queue membership is never itself
+permission to delete: cleanup candidates can become stale relative to
+authoritative metadata.
 
 Whole chunks at or beyond the new EOF are detached and queued. A partial
 boundary chunk is not queued for deletion because its immutable object remains
@@ -654,10 +683,16 @@ The **metadata point of no return** is `PrepareReclaim`.
 In one atomic metadata transition it must:
 
 1. re-check that the inode is still unlinked;
-2. freeze the authoritative chunk descriptors and immutable object keys into pending reclaim work;
-3. remove the live inode/chunk metadata and orphan marker so a later hard link cannot revive an inode whose data is being deleted.
+2. let the selected strategy freeze its opaque cleanup payload from the
+   authoritative logical heads and private index;
+3. remove the live inode/chunk metadata and orphan marker in the same metadata
+   transaction, so a later hard link cannot revive an inode whose data is
+   being deleted.
 
-After this point, the frozen `ReclaimWork` is the authority for deletion; live inode state is no longer consulted.
+After this point, the frozen `ReclaimWork` identifies deletion targets for the
+selected strategy. Before physical deletion, the strategy still checks that
+the live inode is absent. This fails closed if a Redis `EXEC` applied a pending
+record without completing live-inode removal.
 
 ### 14.2 Open-file fence
 
@@ -674,16 +709,18 @@ Once metadata preparation removes the live inode, the local fence can be release
 
 ### 14.3 Background reclaimer
 
-The `Reclaimer` is the sole production component that executes the cross-engine GC sequence:
+The `Reclaimer` coordinates the cross-engine GC sequence. It treats payloads
+as opaque and delegates physical deletion and reachability checks to the
+selected strategy:
 
-1. replay one bounded batch of immutable-object pending-delete records from
-   truncate and chunk publication cleanup, deleting each frozen object
-   idempotently and acknowledging the record only after success;
+1. replay one bounded batch of pending-delete records from truncate and chunk
+   publication cleanup, asking the strategy to delete each frozen target and
+   acknowledging the record only after success;
 2. replay already-pending last-link reclaim work;
 3. scan orphan candidates;
 4. acquire the local fence when applicable;
 5. call `PrepareReclaim`;
-6. delete every frozen object idempotently;
+6. ask the strategy to delete the frozen data idempotently;
 7. call `CompleteReclaim` only when all deletes succeed.
 
 Its worker runs:
@@ -752,14 +789,18 @@ After Redis EXEC, a timeout or connection close does not prove whether the serve
 
 ### 15.3 Reclaim
 
-After `PrepareReclaim`, failure is recoverable because the durable pending record contains the exact immutable object identities still to delete. `CompleteReclaim` is delayed until deletion succeeds.
+After `PrepareReclaim`, failure is recoverable because the durable pending
+record contains the strategy's frozen deletion targets. `CompleteReclaim` is
+delayed until deletion succeeds. Strategy deletion first verifies that a live
+inode is absent, which also protects against a partially applied Redis
+transaction.
 
 Rewrite/truncate cleanup deliberately uses a weaker contract than last-link
 reclaim. After a known metadata outcome, obsolete immutable identities are
 best-effort registered in `pending_deletes`; registration or later deletion
 failure may leave garbage. The safety rule is stronger and simpler: every
-physical pending-delete operation re-reads authoritative chunk metadata and
-must not delete an object whose exact immutable key is still live.
+physical pending-delete operation re-reads authoritative metadata through the
+selected strategy and must not delete data that is still live.
 
 The architecture generally prefers **leaking unreachable data over deleting reachable data** when a failure leaves uncertainty.
 
@@ -824,12 +865,13 @@ Future changes should preserve or explicitly revise the following contracts:
 5. **Rewrite publication is conditional.** A stale writer must not overwrite a newer authoritative chunk descriptor.
 6. **Open-handle runtime state does not replace durable metadata.** Local fences protect transitions; they are not persistent lifecycle records.
 7. **Last-link deletion is recoverable.** The metadata mutation that removes the last name must durably publish cleanup work before the foreground request can forget the inode.
-8. **Object deletion after reclaim uses frozen identities.** It must not reconstruct targets from mutable/live metadata after the point of no return.
-9. **Immutable-object cleanup is best effort, but deletion safety is strict.**
-   Rewrite/truncate may leave unreachable objects if cleanup registration or
-   execution fails. A pending-delete record is only a candidate; Reclaimer
-   must revalidate authoritative metadata and never delete the same immutable
-   key while it is still live.
+8. **Deletion after reclaim uses strategy-frozen targets.** The common
+   metadata and reclaimer layers do not reconstruct physical references from
+   the logical chunk head after the point of no return.
+9. **Cleanup is best effort, but deletion safety is strict.** Rewrite/truncate
+   may leave unreachable data if cleanup registration or execution fails. A
+   pending-delete record is only a candidate; the selected strategy must
+   revalidate authoritative reachability before deleting physical data.
 10. **Data-engine deletion is idempotent.** Registered cleanup may replay the same immutable key after restart, timeout, or acknowledgement failure.
 11. **Ambiguous external commits are not assumed to have rolled back.** Retry/reconciliation semantics must be safe under either outcome.
 12. **Shutdown ordering respects borrowed lifetimes.** Background work stops before the fiber runtime and engines it uses are destroyed.
@@ -841,6 +883,8 @@ Any PR that changes one of these invariants should update this document as part 
 The following areas are intentionally not presented as solved architecture:
 
 - whole-chunk object-store rewrite amplification remains until a different data representation is introduced;
+- `chunk_slice` and `redis_cache` require their own runtime sessions and
+  private chunk indexes before they can be selected in a volume format;
 - multi-mount/session ownership semantics are not represented by a distributed lease/session layer in the current architecture;
 - reclaim pending-work representation and progress tracking can be made more storage-native/compact over time;
 - GC backlog/age/throughput observability is still limited;
@@ -858,8 +902,8 @@ The most useful source entry points are:
 | FUSE admission/replies | `src/fuse/Vfs.*` |
 | VFS semantics | `src/vfs/VfsImpl.*` |
 | open handles/runtime state | `src/vfs/FileHandle.*`, `src/vfs/InodeHandle.*`, `src/vfs/DirHandle.*` |
-| file/chunk IO | `src/vfs/FileReadWriter.*`, `src/chunk/Chunk.*`, `src/chunk/WriteBuf.*` |
-| metadata abstraction | `src/metadata/IMetaEngine.hpp` |
+| file/chunk IO and overwrite strategy | `src/vfs/FileReadWriter.*`, `src/chunk/IChunkOverwriteStrategy.*`, `src/chunk/Chunk.*`, `src/chunk/WriteBuf.*` |
+| metadata abstraction and private index transaction | `src/metadata/IMetaEngine.hpp`, `src/metadata/IChunkIndexTxn.hpp` |
 | Memory metadata | `src/metadata/mem/` |
 | Redis metadata | `src/metadata/redis/` |
 | data-engine abstraction | `src/storage/IDataEngine.hpp` |

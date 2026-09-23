@@ -21,6 +21,10 @@ namespace config {
 class ConfigCenter;
 }
 
+namespace chunk {
+class IChunkOverwriteStrategy;
+}
+
 namespace metadata {
 class IMetaEngine;
 }
@@ -96,6 +100,7 @@ class VolumeImpl {
   swordfs::storage::IDataEngine *data_engine() const {
     return data_engine_.get();
   }
+  const swordfs::chunk::IChunkOverwriteStrategy *chunk_overwrite_strategy() const;
 
   // ────────────────────────────────────────────────────────────────
   // Testing only — inject mock engines before Bind().
@@ -108,6 +113,9 @@ class VolumeImpl {
   // Test-only override of config_.chunk_size; std::nullopt means
   // "use config_.chunk_size". Production code never sets this.
   std::optional<uint64_t> chunk_size_override_;
+  // Metadata backends retain a non-owning pointer to this strategy. Destroy
+  // the engines first, then the selected strategy.
+  std::unique_ptr<swordfs::chunk::IChunkOverwriteStrategy> chunk_overwrite_strategy_;
   std::unique_ptr<swordfs::metadata::IMetaEngine> meta_engine_;
   std::unique_ptr<swordfs::storage::IDataEngine> data_engine_;
 

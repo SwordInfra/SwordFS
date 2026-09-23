@@ -15,6 +15,7 @@
 #include <string_view>
 #include <vector>
 
+#include "metadata/IChunkIndexTxn.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
@@ -26,6 +27,10 @@
 
 using Status = swordfs::utils::Status;
 using SwordFsContext = swordfs::utils::SwordFsContext;
+
+namespace swordfs::chunk {
+class IChunkOverwriteStrategy;
+}
 
 namespace swordfs::metadata {
 
@@ -70,6 +75,11 @@ constexpr std::string_view kMemoryMetaUrl = "memory://local";
 class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
+
+  /// Bind the volume-selected strategy before runtime metadata operations.
+  virtual Status BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *) {
+    return Status::NotSupported("metadata backend does not support chunk strategies");
+  }
 
   /// Initialize a metadata backend connection and validate backend-specific
   /// runtime prerequisites. Persistent backends should not create a volume here.
@@ -239,6 +249,22 @@ class IMetaEngine {
   /// obsolete.
   virtual Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                              const SwordFsChunk &replacement) = 0;
+
+  /// Publish a strategy-owned intent with the public head in one metadata
+  /// transaction. Legacy engines may only accept an empty intent.
+  virtual Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
+                             const ChunkPublishIntent &intent) {
+    if (!intent.payload.empty()) {
+      return Status::NotSupported("metadata backend does not support chunk publication intent");
+    }
+    return CommitChunk(ino, expected, replacement);
+  }
+
+  /// Read the public head and the selected mechanism's private representation
+  /// from one validated metadata snapshot. NotFound means no public head.
+  virtual Status LoadChunkView(InodeID, ChunkIndex, ChunkView *) {
+    return Status::NotSupported("metadata backend does not support chunk index snapshots");
+  }
 
   /// Find the chunk at |idx|.  Returns OK and fills |*chunk| if a
   /// matching chunk is registered for the given inode.

@@ -29,6 +29,7 @@ class RedisMetaImpl : public IMetaEngine {
   RedisMetaImpl &operator=(const RedisMetaImpl &) = delete;
 
   utils::Status Initialize() override;
+  Status BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) override;
   utils::Status FormatVolume(const SwordFsVolume &config) override;
   utils::Status LoadVolume(SwordFsVolume *config) override;
   Limits GetLimits() const override;
@@ -59,7 +60,10 @@ class RedisMetaImpl : public IMetaEngine {
   Status OpenDir(InodeID ino, DirIteratorPtr *iterator) override;
   Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                      const SwordFsChunk &replacement) override;
+  Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
+                     const ChunkPublishIntent &intent) override;
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
+  Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out) override;
   Status Truncate(InodeID ino, uint64_t size) override;
 
  private:

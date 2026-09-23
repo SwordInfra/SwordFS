@@ -19,7 +19,7 @@
 #include <shared_mutex>
 #include <vector>
 
-#include "chunk/Chunk.hpp"
+#include "chunk/IChunkOverwriteStrategy.hpp"
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
 #include "utils/Synchronization.hpp"
@@ -47,7 +47,7 @@ class LiveAttrGuard;
 
 class FileChunkManager {
  public:
-  using Map = folly::F14FastMap<metadata::ChunkIndex, std::shared_ptr<chunk::Chunk>>;
+  using Map = folly::F14FastMap<metadata::ChunkIndex, std::shared_ptr<chunk::IChunkSession>>;
 
   explicit FileChunkManager(metadata::InodeID ino) : ino_(ino) {
   }
@@ -57,12 +57,12 @@ class FileChunkManager {
   /// exists and |create_if_missing| is false. Initialization failures are
   /// returned as Status and are never encoded as a null chunk.
   /// The shared pointer keeps the chunk alive if the map is changed.
-  utils::Status Get(metadata::ChunkIndex idx, bool create_if_missing, std::shared_ptr<chunk::Chunk> *out);
+  utils::Status Get(metadata::ChunkIndex idx, bool create_if_missing, std::shared_ptr<chunk::IChunkSession> *out);
 
   /// Snapshot chunks with pending data, including sealed chunks from a
   /// previous failed flush. The caller may attempt each snapshot entry once
   /// without repeatedly selecting the same failed chunk.
-  std::vector<std::shared_ptr<chunk::Chunk>> GetFlushable();
+  std::vector<std::shared_ptr<chunk::IChunkSession>> GetFlushable();
 
   /// Apply a file-size change to cached chunks. A partial boundary chunk keeps
   /// only its surviving prefix; chunks wholly beyond EOF are dropped locally.

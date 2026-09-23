@@ -12,6 +12,7 @@
 #include <optional>
 #include <vector>
 
+#include "chunk/IChunkOverwriteStrategy.hpp"
 #include "chunk/WriteBuf.hpp"
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
@@ -28,7 +29,7 @@ class IDataEngine;
 
 namespace swordfs::chunk {
 
-class Chunk {
+class Chunk final : public IChunkSession {
  public:
   enum class State : uint8_t {
     kDirty,     // latest complete local data is not yet confirmed authoritative
@@ -42,41 +43,41 @@ class Chunk {
   /// Query VolumeImpl's meta engine for existing published metadata at
   /// this chunk's start offset. If found, transition to kClean; otherwise
   /// stay in kDirty so the caller can write into the local buffer.
-  utils::Status Initialize();
+  utils::Status Initialize() override;
 
   /// Write |size| bytes from |data| at the given chunk-relative offset.
   /// Returns InvalidArgument if the write would exceed chunk bounds.
-  utils::Status Write(off_t write_offset, const folly::IOBuf &data);
+  utils::Status Write(off_t write_offset, const folly::IOBuf &data) override;
 
   /// Read exactly |len| bytes starting at chunk-relative |off| into |out|.
   /// A zero-length read is a no-op. On failure, leaves |out| unchanged.
-  utils::Status Read(off_t off, size_t len, folly::IOBuf *out) const;
+  utils::Status Read(off_t off, size_t len, folly::IOBuf *out) const override;
 
   /// Publish the latest dirty buffer. A publication attempt is transient:
   /// every non-successful outcome returns the chunk to kDirty with the local
   /// data retained and writable.
-  utils::Status Flush();
+  utils::Status Flush() override;
 
   /// Discard bytes at or beyond |size| within this chunk while preserving
   /// the surviving prefix for a later flush/read.
-  void Truncate(size_t size);
+  void Truncate(size_t size) override;
 
-  bool IsClean() const;
-  bool Flushable() const;
+  bool IsClean() const override;
+  bool Flushable() const override;
 
   // ──────────────────────────────────────────────────────────────
   // Accessors
   // ──────────────────────────────────────────────────────────────
 
-  metadata::ChunkIndex index() const {
+  metadata::ChunkIndex index() const override {
     return index_;
   }
 
   /// File-offset range: [StartOffset(), EndOffset()).
-  off_t StartOffset() const {
+  off_t StartOffset() const override {
     return static_cast<off_t>(index_) * static_cast<off_t>(max_chunk_size_);
   }
-  off_t DataEnd() const;
+  off_t DataEnd() const override;
 
  private:
   metadata::SwordFsChunk BuildMeta(metadata::ChunkRevision revision, size_t size) const;

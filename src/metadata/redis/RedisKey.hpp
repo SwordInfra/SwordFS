@@ -23,6 +23,9 @@ class RedisKey {
   std::string Inode(uint64_t ino) const;
   std::string Directory(uint64_t parent_ino) const;
   std::string Chunk(uint64_t ino) const;
+  // Generic storage namespace for the selected strategy's private index.
+  // The strategy, not RedisKey, defines hash/field encodings.
+  std::string PrivateChunkIndex(std::string_view strategy, std::string_view hash) const;
   std::string InodeCount() const;
 
   // Orphan candidates: hash of inode id -> marker. Written in the same

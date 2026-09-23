@@ -19,6 +19,8 @@ std::string SwordFsVolume::SerializeTo() const {
   enc.String(bucket);
   enc.String(region);
   enc.U64(chunk_size);
+  enc.String(chunk_overwrite_strategy);
+  enc.U32(chunk_index_format_version);
   enc.Finish(&out);
   return out;
 }
@@ -32,7 +34,10 @@ utils::Status SwordFsVolume::ParseFrom(std::string_view data) {
   dec.String(&volume.bucket);
   dec.String(&volume.region);
   dec.U64(&volume.chunk_size);
-  if (!dec || volume.name.empty() || volume.chunk_size == 0 || !dec.Done()) {
+  dec.String(&volume.chunk_overwrite_strategy);
+  dec.U32(&volume.chunk_index_format_version);
+  if (!dec || volume.name.empty() || volume.chunk_size == 0 || volume.chunk_overwrite_strategy.empty() ||
+      volume.chunk_index_format_version == 0 || !dec.Done()) {
     return utils::Status::Malformed("Malformed volume metadata record");
   }
   const bool has_data_engine = !volume.storage.empty();

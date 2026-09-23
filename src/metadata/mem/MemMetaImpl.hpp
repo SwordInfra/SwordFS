@@ -26,6 +26,7 @@ class MemMetaImpl : public IMetaEngine {
 
   MemMetaImpl();
   ~MemMetaImpl() override;
+  Status BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) override;
 
   // Entry operations
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
@@ -59,7 +60,10 @@ class MemMetaImpl : public IMetaEngine {
   // Chunk metadata
   Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                      const SwordFsChunk &replacement) override;
+  Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
+                     const ChunkPublishIntent &intent) override;
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
+  Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out) override;
   Status Truncate(InodeID ino, uint64_t size) override;
 
   // Volume operations

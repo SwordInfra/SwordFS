@@ -60,7 +60,40 @@ TEST(VolumeImplDomainTest, LifecycleRejectsFiberCaller) {
 TEST_F(VolumeImplTest, CreateFromSucceeds) {
   auto cfg = makeConfig("memory://local");
   VolumeImpl vol;
-  EXPECT_TRUE(vol.CreateFrom(cfg).ok());
+  const auto status = vol.CreateFrom(cfg);
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(vol.config().chunk_overwrite_strategy, "whole_object");
+  EXPECT_EQ(vol.config().chunk_index_format_version, 1U);
+}
+
+TEST_F(VolumeImplTest, FormatRejectsUnimplementedStrategy) {
+  auto cfg = makeConfig("memory://local");
+  cfg.set_chunk_overwrite_strategy("redis_cache");
+  VolumeImpl vol;
+  const auto status = vol.CreateFrom(cfg);
+  EXPECT_TRUE(status.IsNotSupported()) << status.message();
+  EXPECT_FALSE(VolumeFile{cfg.volume()}.Exists());
+}
+
+TEST_F(VolumeImplTest, MountUsesPersistedStrategyAndRejectsUnsupportedVersion) {
+  auto cfg = makeConfig("memory://local");
+  VolumeImpl formatted;
+  const auto format_status = formatted.CreateFrom(cfg);
+  ASSERT_TRUE(format_status.ok()) << format_status.message();
+
+  cfg.set_chunk_overwrite_strategy("redis_cache");
+  VolumeImpl mounted;
+  ASSERT_TRUE(mounted.LoadFrom(cfg).ok());
+  ASSERT_NE(mounted.chunk_overwrite_strategy(), nullptr);
+  EXPECT_EQ(mounted.config().chunk_overwrite_strategy, "whole_object");
+
+  SwordFsVolume stored = mounted.config();
+  stored.chunk_index_format_version = 2;
+  const auto unsupported_cfg = makeConfig("memory://local");
+  stored.name = unsupported_cfg.volume();
+  ASSERT_TRUE(VolumeFile{stored.name}.Write(stored).ok());
+  VolumeImpl unsupported;
+  EXPECT_TRUE(unsupported.LoadFrom(unsupported_cfg).IsNotSupported());
 }
 
 TEST_F(VolumeImplTest, CreateFromNormalizesDataEngineIdentity) {

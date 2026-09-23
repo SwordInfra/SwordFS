@@ -18,6 +18,7 @@
 
 #include "FiberTest.hpp"
 #include "chunk/ChunkObjectKey.hpp"
+#include "chunk/WholeObjectCleanup.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
@@ -158,12 +159,9 @@ class MockMetaEngine : public IMetaEngine {
     }
     if (work != nullptr) {
       swordfs::metadata::ReclaimWork frozen;
-      frozen.ino = ino;
-      for (const auto &chunk : reclaim_chunks) {
-        // Mirror the real engines: the frozen identity is derived once, at
-        // freeze time, from the authoritative descriptor.
-        frozen.chunks.push_back(
-            swordfs::metadata::ReclaimChunk{chunk, chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision)});
+      auto status = chunk::FreezeWholeObjectReclaim(ino, reclaim_chunks, 0, &frozen);
+      if (!status.ok()) {
+        return status;
       }
       *work = std::move(frozen);
     }
@@ -808,10 +806,9 @@ class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
     }
     if (work != nullptr) {
       swordfs::metadata::ReclaimWork frozen;
-      frozen.ino = ino;
-      for (const auto &chunk : chunks) {
-        frozen.chunks.push_back(
-            swordfs::metadata::ReclaimChunk{chunk, chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision)});
+      auto status = chunk::FreezeWholeObjectReclaim(ino, chunks, 0, &frozen);
+      if (!status.ok()) {
+        return status;
       }
       *work = std::move(frozen);
     }

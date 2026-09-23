@@ -35,6 +35,10 @@ std::string RedisKey::Chunk(uint64_t ino) const {
   return folly::sformat("{}chunk:{}", prefix_, ino);
 }
 
+std::string RedisKey::PrivateChunkIndex(std::string_view strategy, std::string_view hash) const {
+  return folly::sformat("{}private_chunk_index:{}:{}", prefix_, strategy, hash);
+}
+
 std::string RedisKey::InodeCount() const {
   return prefix_ + "inode_count";
 }

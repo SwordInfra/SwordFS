@@ -185,7 +185,7 @@ utils::Status Chunk::Flush() {
     return fail(status);
   }
 
-  status = meta_->CommitChunk(ino_, expected, replacement);
+  status = meta_->CommitChunk(ino_, expected, replacement, metadata::ChunkPublishIntent{});
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Chunk::Flush CommitChunk FAILED: ino=" << ino_ << " chunk=" << index_
                       << " size=" << replacement.size << " — " << status.message();

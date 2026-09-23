@@ -1,24 +1,18 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// Unit tests for the frozen reclaim record — the durable, immutable object
-// identities of an inode whose last directory entry is gone.
-//
-// The record is the only thing the delayed deletes are driven from, so its
-// round-trip and its validation are a data-safety boundary: a record that
-// parses with an identity the authoritative descriptor does not derive could
-// delete another inode's live object. These tests pin the round-trip, the
-// write-side argument validation, and every read-side rejection (malformed
-// envelope, truncated identity, corrupt count, tampered key, trailing bytes).
+// The common reclaim envelope is opaque. Only the selected strategy may
+// interpret or authorize deletion of the private payload.
 
 #include <gtest/gtest.h>
 
 #include <cstdint>
 #include <string>
-#include <utility>
+#include <string_view>
 #include <vector>
 
 #include "chunk/ChunkObjectKey.hpp"
+#include "chunk/WholeObjectCleanup.hpp"
 #include "metadata/types/BufCodec.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
@@ -30,368 +24,231 @@ namespace {
 
 using swordfs::utils::Status;
 
-// One frozen chunk whose key is exactly the identity its descriptor derives,
-// as every engine publishes it at freeze time.
-ReclaimChunk FrozenChunk(InodeID ino, ChunkIndex index, ChunkRevision revision, uint64_t size = 64) {
-  SwordFsChunk descriptor{
-      .index = index, .start_offset = static_cast<uint64_t>(index) * size, .revision = revision, .size = size};
-  return ReclaimChunk{descriptor, chunk::FormatChunkObjectKey(ino, index, revision)};
+constexpr uint64_t kChunkSize = 128;
+
+SwordFsChunk Head(ChunkIndex index, ChunkRevision revision, uint64_t size = 64) {
+  return SwordFsChunk{
+      .index = index, .start_offset = static_cast<uint64_t>(index) * kChunkSize, .revision = revision, .size = size};
 }
 
 ReclaimWork MakeWork(InodeID ino = 42) {
   ReclaimWork work;
-  work.ino = ino;
-  work.chunks.push_back(FrozenChunk(ino, 0, 1));
-  work.chunks.push_back(FrozenChunk(ino, 1, 2, 128));
+  EXPECT_TRUE(chunk::FreezeWholeObjectReclaim(ino, {Head(0, 1), Head(1, 2, 128)}, kChunkSize, &work).ok());
   return work;
 }
 
-// Encode a record envelope by hand so a test can forge records the encoder
-// would never produce: a zero inode, a tampered key, a corrupt count.
-void EncodeRecord(uint64_t ino, const std::vector<std::pair<SwordFsChunk, std::string>> &chunks, std::string *out) {
-  BufEncoder enc;
-  enc.Header(RecordType::kReclaim);
-  enc.U64(ino);
-  enc.U32(static_cast<uint32_t>(chunks.size()));
-  for (const auto &[descriptor, key] : chunks) {
-    enc.U32(descriptor.index);
-    enc.U64(descriptor.start_offset);
-    enc.U64(descriptor.revision);
-    enc.U64(descriptor.size);
-    enc.String(key);
-  }
-  enc.Finish(out);
+PendingDelete MakePendingDelete(InodeID ino = 42) {
+  PendingDelete work;
+  EXPECT_TRUE(chunk::FreezeWholeObjectDelete(ino, Head(3, 7), kChunkSize, &work).ok());
+  return work;
 }
 
-std::string SerializeOrDie(const ReclaimWork &work) {
+template <typename Work>
+std::string SerializeOrDie(const Work &work) {
   std::string blob;
   const auto status = work.SerializeTo(&blob);
   EXPECT_TRUE(status.ok()) << status.message();
   return blob;
 }
 
-PendingDelete MakePendingDelete(InodeID ino = 42, ChunkIndex index = 3, ChunkRevision revision = 7) {
-  PendingDelete pending;
-  pending.ino = ino;
-  pending.chunk = FrozenChunk(ino, index, revision);
-  return pending;
+std::string EncodePrivateRefs(InodeID ino, const std::vector<chunk::WholeObjectRef> &refs, bool trailing = false) {
+  BufEncoder enc;
+  enc.Header(RecordType::kWholeObjectCleanup);
+  enc.U64(ino);
+  enc.U32(static_cast<uint32_t>(refs.size()));
+  for (const auto &ref : refs) {
+    enc.U32(ref.descriptor.index);
+    enc.U64(ref.descriptor.start_offset);
+    enc.U64(ref.descriptor.revision);
+    enc.U64(ref.descriptor.size);
+    enc.String(ref.key);
+  }
+  if (trailing) {
+    enc.U64(123);
+  }
+  std::string result;
+  enc.Finish(&result);
+  return result;
 }
 
-std::string SerializeOrDie(const PendingDelete &pending) {
-  std::string blob;
-  const auto status = pending.SerializeTo(&blob);
-  EXPECT_TRUE(status.ok()) << status.message();
-  return blob;
-}
-
-// ────────────────────────────────────────────────────────────────
-// Round-trip
-// ────────────────────────────────────────────────────────────────
-
-TEST(ReclaimWorkTest, RoundTripsEveryFrozenIdentity) {
-  const ReclaimWork work = MakeWork();
-  const std::string blob = SerializeOrDie(work);
-
+TEST(ReclaimWorkTest, RoundTripsOpaqueEnvelopeAndPrivateFrozenIdentities) {
+  const ReclaimWork original = MakeWork();
   ReclaimWork parsed;
-  ASSERT_TRUE(parsed.ParseFrom(blob).ok());
+  ASSERT_TRUE(parsed.ParseFrom(SerializeOrDie(original)).ok());
+  EXPECT_EQ(parsed, original);
+  EXPECT_EQ(parsed.ino, 42U);
+  EXPECT_EQ(parsed.index_format_version, 1U);
 
-  EXPECT_EQ(parsed, work);
-  // The identity travels verbatim: the delete must never rebuild it from live
-  // inode state, so the parsed key is exactly the frozen one.
-  ASSERT_EQ(parsed.chunks.size(), 2U);
-  EXPECT_EQ(parsed.chunks[0].key, chunk::FormatChunkObjectKey(42, 0, 1));
-  EXPECT_EQ(parsed.chunks[1].key, chunk::FormatChunkObjectKey(42, 1, 2));
-  EXPECT_EQ(parsed.chunks[1].descriptor.start_offset, 128U);
-  EXPECT_EQ(parsed.chunks[1].descriptor.size, 128U);
+  std::vector<chunk::WholeObjectRef> refs;
+  ASSERT_TRUE(chunk::DecodeWholeObjectReclaim(parsed, kChunkSize, &refs).ok());
+  ASSERT_EQ(refs.size(), 2U);
+  EXPECT_EQ(refs[0].ino, 42U);
+  EXPECT_EQ(refs[0].key, chunk::FormatChunkObjectKey(42, 0, 1));
+  EXPECT_EQ(refs[1].key, chunk::FormatChunkObjectKey(42, 1, 2));
+  EXPECT_EQ(refs[1].descriptor.size, 128U);
 }
 
-TEST(ReclaimWorkTest, RoundTripsAnInodeWithoutChunks) {
-  // An unlinked inode that never flushed a chunk has no object to delete; the
-  // record still has to round-trip so the pending reclaim can be completed.
-  ReclaimWork work;
-  work.ino = 7;
-
+TEST(ReclaimWorkTest, EmptyInodeStillHasDecodablePrivatePayload) {
+  ReclaimWork original;
+  ASSERT_TRUE(chunk::FreezeWholeObjectReclaim(7, {}, kChunkSize, &original).ok());
   ReclaimWork parsed;
-  ASSERT_TRUE(parsed.ParseFrom(SerializeOrDie(work)).ok());
-
-  EXPECT_EQ(parsed.ino, 7U);
-  EXPECT_TRUE(parsed.chunks.empty());
-  EXPECT_EQ(parsed, work);
+  ASSERT_TRUE(parsed.ParseFrom(SerializeOrDie(original)).ok());
+  std::vector<chunk::WholeObjectRef> refs;
+  ASSERT_TRUE(chunk::DecodeWholeObjectReclaim(parsed, kChunkSize, &refs).ok());
+  EXPECT_TRUE(refs.empty());
 }
 
-TEST(ReclaimWorkTest, EqualityDetectsDifferentWorkAndChunkFields) {
-  const ReclaimWork base = MakeWork();
-
-  ReclaimWork different_ino = base;
-  different_ino.ino++;
-  EXPECT_NE(different_ino, base);
-
-  ReclaimWork different_chunk_count = base;
-  different_chunk_count.chunks.pop_back();
-  EXPECT_NE(different_chunk_count, base);
-
-  ReclaimWork different_descriptor = base;
-  different_descriptor.chunks[0].descriptor.size++;
-  EXPECT_NE(different_descriptor, base);
-
-  ReclaimWork different_key = base;
-  different_key.chunks[0].key.push_back('x');
-  EXPECT_NE(different_key, base);
+TEST(ReclaimWorkTest, EqualityIncludesEnvelopeAndOpaquePayload) {
+  const ReclaimWork original = MakeWork();
+  auto changed = original;
+  changed.ino++;
+  EXPECT_NE(changed, original);
+  changed = original;
+  changed.index_format_version++;
+  EXPECT_NE(changed, original);
+  changed = original;
+  changed.payload.push_back('x');
+  EXPECT_NE(changed, original);
 }
 
-// ────────────────────────────────────────────────────────────────
-// Write-side validation
-// ────────────────────────────────────────────────────────────────
-
-TEST(ReclaimWorkTest, RejectsNullOutput) {
-  const ReclaimWork work = MakeWork();
+TEST(ReclaimWorkTest, RejectsInvalidEnvelopeOnWriteAndRead) {
+  ReclaimWork work = MakeWork();
   EXPECT_EQ(work.SerializeTo(nullptr).code(), Status::kInvalidArgument);
-}
-
-TEST(ReclaimWorkTest, RejectsMissingInode) {
-  ReclaimWork work = MakeWork();
+  std::string blob;
   work.ino = 0;
-
-  std::string blob;
   EXPECT_EQ(work.SerializeTo(&blob).code(), Status::kInvalidArgument);
-}
-
-TEST(ReclaimWorkTest, RejectsChunkWithoutARevision) {
-  // Revision 0 is the invalid sentinel; a record carrying one would freeze an
-  // identity that no published chunk can have.
-  ReclaimWork work = MakeWork();
-  work.chunks[1].descriptor.revision = kInvalidChunkRevision;
-
-  std::string blob;
+  work = MakeWork();
+  work.index_format_version = 0;
   EXPECT_EQ(work.SerializeTo(&blob).code(), Status::kInvalidArgument);
-}
+  work = MakeWork();
+  work.payload.clear();
+  EXPECT_EQ(work.SerializeTo(&blob).code(), Status::kInvalidArgument);
 
-// ────────────────────────────────────────────────────────────────
-// Read-side validation: malformed envelopes
-// ────────────────────────────────────────────────────────────────
-
-TEST(ReclaimWorkTest, RejectsEmptyBuffer) {
   ReclaimWork parsed = MakeWork();
+  const auto before = parsed;
+  EXPECT_TRUE(parsed.ParseFrom("").IsMalformed());
+  EXPECT_EQ(parsed, before);
+  EXPECT_TRUE(parsed.ParseFrom(SerializeOrDie(before).substr(0, 8)).IsMalformed());
+  EXPECT_EQ(parsed, before);
+  EXPECT_TRUE(parsed.ParseFrom(SerializeOrDie(before) + "x").IsMalformed());
+  EXPECT_EQ(parsed, before);
 
-  const auto status = parsed.ParseFrom(std::string_view());
-  EXPECT_TRUE(status.IsMalformed()) << status.message();
-}
-
-TEST(ReclaimWorkTest, RejectsAnotherRecordType) {
-  // A record of a different type must not be readable as a reclaim record:
-  // the frozen identities of another record family are not identities at all.
-  std::string blob;
   BufEncoder enc;
-  enc.Header(RecordType::kInode);
-  enc.U64(42);
-  enc.U32(0);
+  enc.Header(RecordType::kPendingDelete);
+  enc.String("other-record");
+  enc.U32(1);
+  enc.String("payload");
   enc.Finish(&blob);
-
-  ReclaimWork parsed;
-  EXPECT_TRUE(parsed.ParseFrom(blob).IsMalformed());
-}
-
-TEST(ReclaimWorkTest, RejectsZeroInode) {
-  std::string blob;
-  EncodeRecord(0, {}, &blob);
-
-  ReclaimWork parsed;
-  EXPECT_TRUE(parsed.ParseFrom(blob).IsMalformed());
-}
-
-TEST(ReclaimWorkTest, RejectsTruncatedObjectIdentity) {
-  const std::string blob = SerializeOrDie(MakeWork());
-
-  ReclaimWork parsed;
-  ASSERT_TRUE(parsed.ParseFrom(blob).ok()) << "the untruncated record must be readable";
-
-  // Cut into the last key: its length prefix still reads, the bytes do not.
-  std::string truncated = blob;
-  truncated.resize(blob.size() - 4);
-  EXPECT_TRUE(parsed.ParseFrom(truncated).IsMalformed());
-}
-
-TEST(ReclaimWorkTest, RejectsCorruptChunkCountWithoutSpinning) {
-  // A corrupt count claims more chunks than the buffer holds. Each entry
-  // consumes a bounded number of bytes, so the decoder must fail rather than
-  // loop — the record is rejected instead of reporting a huge chunk list.
-  std::string blob;
-  BufEncoder enc;
-  enc.Header(RecordType::kReclaim);
-  enc.U64(42);
-  enc.U32(0xFFFFFFFFu);  // a count no buffer could ever satisfy
-  enc.U32(0);
-  enc.U64(0);
-  enc.U64(1);
-  enc.U64(64);
-  enc.String(chunk::FormatChunkObjectKey(42, 0, 1));
-  enc.Finish(&blob);
-
-  ReclaimWork parsed;
-  EXPECT_TRUE(parsed.ParseFrom(blob).IsMalformed());
-}
-
-TEST(ReclaimWorkTest, RejectsTrailingData) {
-  // Anything appended to a record is a schema violation: a reader that
-  // tolerated it could be fed a second, unvalidated identity.
-  const std::string blob = SerializeOrDie(MakeWork()) + "x";
-
-  ReclaimWork parsed;
-  EXPECT_TRUE(parsed.ParseFrom(blob).IsMalformed());
-}
-
-// ────────────────────────────────────────────────────────────────
-// Read-side validation: corrupt / tampered identities
-// ────────────────────────────────────────────────────────────────
-
-TEST(ReclaimWorkTest, RejectsIdentityOfAnotherInode) {
-  // The guard that matters most: a key that derives from a different inode
-  // would delete that inode's live object, so the record must be rejected.
-  std::string blob;
-  EncodeRecord(
-      42,
-      {{SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64}, chunk::FormatChunkObjectKey(43, 0, 1)}},
-      &blob);
-
-  ReclaimWork parsed;
-  EXPECT_TRUE(parsed.ParseFrom(blob).IsMalformed());
-}
-
-TEST(ReclaimWorkTest, RejectsIdentityOfAnotherChunkSlot) {
-  // Same inode, but the key names a different index/revision than the frozen
-  // descriptor: the record is internally inconsistent.
-  std::string blob;
-  EncodeRecord(
-      42,
-      {{SwordFsChunk{.index = 3, .start_offset = 0, .revision = 1, .size = 64}, chunk::FormatChunkObjectKey(42, 4, 1)},
-       {SwordFsChunk{.index = 5, .start_offset = 0, .revision = 2, .size = 64}, chunk::FormatChunkObjectKey(42, 5, 3)}},
-      &blob);
-
-  ReclaimWork parsed;
-  EXPECT_TRUE(parsed.ParseFrom(blob).IsMalformed());
-}
-
-TEST(ReclaimWorkTest, RejectsIdentityWithInvalidRevision) {
-  // A self-consistent but revision-less identity ("<ino>/0/0") passes the
-  // derivation check and must still be rejected: revision 0 is never a
-  // published chunk.
-  std::string blob;
-  EncodeRecord(42,
-               {{SwordFsChunk{.index = 0, .start_offset = 0, .revision = kInvalidChunkRevision, .size = 64},
-                 chunk::FormatChunkObjectKey(42, 0, kInvalidChunkRevision)}},
-               &blob);
-
-  ReclaimWork parsed;
-  EXPECT_TRUE(parsed.ParseFrom(blob).IsMalformed());
-}
-
-TEST(ReclaimWorkTest, FailedParseLeavesTheRecordUntouched) {
-  // A rejected record must not be applied half-way: the caller keeps the
-  // record it already had, so a failed read can never shrink a pending
-  // reclaim's work to a prefix of its identities.
-  ReclaimWork parsed = MakeWork();
-  const ReclaimWork before = parsed;
-
-  std::string blob;
-  EncodeRecord(42,
-               {{SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64}, "42/0/1"},
-                {SwordFsChunk{.index = 1, .start_offset = 64, .revision = 2, .size = 64}, "999/1/2"}},
-               &blob);
-
   EXPECT_TRUE(parsed.ParseFrom(blob).IsMalformed());
   EXPECT_EQ(parsed, before);
 }
 
-// ────────────────────────────────────────────────────────────────
-// Pending truncate delete identity
-// ────────────────────────────────────────────────────────────────
+TEST(ReclaimWorkTest, PrivateDecoderRejectsTamperedIdentitiesAndUnknownVersion) {
+  ReclaimWork work = MakeWork();
+  std::vector<chunk::WholeObjectRef> refs;
+  work.index_format_version = 99;
+  EXPECT_EQ(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).code(), Status::kNotSupported);
 
-TEST(PendingDeleteTest, RoundTripsFrozenIdentity) {
-  const PendingDelete pending = MakePendingDelete();
-  PendingDelete parsed;
-
-  ASSERT_TRUE(parsed.ParseFrom(SerializeOrDie(pending)).ok());
-  EXPECT_EQ(parsed.ino, pending.ino);
-  EXPECT_EQ(parsed.chunk, pending.chunk);
-  EXPECT_EQ(parsed.chunk.key, chunk::FormatChunkObjectKey(42, 3, 7));
+  work = MakeWork();
+  work.payload = EncodePrivateRefs(43, {{43, Head(0, 1), chunk::FormatChunkObjectKey(43, 0, 1)}});
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+  work.payload = EncodePrivateRefs(42, {{42, Head(0, 1), chunk::FormatChunkObjectKey(43, 0, 1)}});
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+  work.payload = EncodePrivateRefs(42, {{42, Head(0, 0), chunk::FormatChunkObjectKey(42, 0, 0)}});
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+  work.payload = EncodePrivateRefs(42, {{42, Head(0, 1), chunk::FormatChunkObjectKey(42, 0, 1)}}, true);
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+  work.payload.resize(work.payload.size() - 4);
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
 }
 
-TEST(PendingDeleteTest, RejectsInvalidWriteIdentity) {
-  PendingDelete pending = MakePendingDelete();
-  EXPECT_EQ(pending.SerializeTo(nullptr).code(), Status::kInvalidArgument);
+TEST(ReclaimWorkTest, WholeObjectCodecRejectsInvalidArgumentsAndTruncatedPayload) {
+  ReclaimWork work;
+  EXPECT_EQ(chunk::FreezeWholeObjectReclaim(0, {}, kChunkSize, &work).code(), Status::kInvalidArgument);
+  EXPECT_EQ(chunk::FreezeWholeObjectReclaim(42, {}, kChunkSize, nullptr).code(), Status::kInvalidArgument);
 
-  pending.ino = 0;
+  auto invalid = Head(1, 2);
+  invalid.start_offset = 0;
+  EXPECT_EQ(chunk::FreezeWholeObjectReclaim(42, {invalid}, kChunkSize, &work).code(), Status::kInvalidArgument);
+
+  work = MakeWork();
+  EXPECT_EQ(chunk::DecodeWholeObjectReclaim(work, kChunkSize, nullptr).code(), Status::kInvalidArgument);
+  work.payload.resize(5);
+  std::vector<chunk::WholeObjectRef> refs;
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+
+  work = MakeWork();
+  work.payload = EncodePrivateRefs(0, {});
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+}
+
+TEST(PendingDeleteTest, RoundTripsOpaqueEnvelopeAndPrivateIdentity) {
+  const PendingDelete original = MakePendingDelete();
+  PendingDelete parsed;
+  ASSERT_TRUE(parsed.ParseFrom(SerializeOrDie(original)).ok());
+  EXPECT_EQ(parsed, original);
+  EXPECT_EQ(parsed.id, "whole_object:" + chunk::FormatChunkObjectKey(42, 3, 7));
+
+  chunk::WholeObjectRef ref;
+  ASSERT_TRUE(chunk::DecodeWholeObjectDelete(parsed, kChunkSize, &ref).ok());
+  EXPECT_EQ(ref.ino, 42U);
+  EXPECT_EQ(ref.descriptor, Head(3, 7));
+  EXPECT_EQ(ref.key, chunk::FormatChunkObjectKey(42, 3, 7));
+}
+
+TEST(PendingDeleteTest, RejectsInvalidEnvelopeOnWriteAndRead) {
+  PendingDelete work = MakePendingDelete();
+  EXPECT_EQ(work.SerializeTo(nullptr).code(), Status::kInvalidArgument);
   std::string blob;
-  EXPECT_EQ(pending.SerializeTo(&blob).code(), Status::kInvalidArgument);
+  work.id.clear();
+  EXPECT_EQ(work.SerializeTo(&blob).code(), Status::kInvalidArgument);
+  work = MakePendingDelete();
+  work.index_format_version = 0;
+  EXPECT_EQ(work.SerializeTo(&blob).code(), Status::kInvalidArgument);
+  work = MakePendingDelete();
+  work.payload.clear();
+  EXPECT_EQ(work.SerializeTo(&blob).code(), Status::kInvalidArgument);
 
-  pending = MakePendingDelete();
-  pending.chunk.descriptor.revision = kInvalidChunkRevision;
-  pending.chunk.key =
-      chunk::FormatChunkObjectKey(pending.ino, pending.chunk.descriptor.index, pending.chunk.descriptor.revision);
-  EXPECT_EQ(pending.SerializeTo(&blob).code(), Status::kInvalidArgument);
-
-  pending = MakePendingDelete();
-  pending.chunk.key =
-      chunk::FormatChunkObjectKey(43, pending.chunk.descriptor.index, pending.chunk.descriptor.revision);
-  EXPECT_EQ(pending.SerializeTo(&blob).code(), Status::kInvalidArgument);
-}
-
-TEST(PendingDeleteTest, RejectsMalformedPersistedFields) {
-  const PendingDelete pending = MakePendingDelete();
-  auto encode = [&](InodeID ino, ChunkRevision revision, std::string key, bool trailing) {
-    std::string blob;
-    BufEncoder enc;
-    enc.Header(RecordType::kPendingDelete);
-    enc.U64(ino);
-    enc.U32(pending.chunk.descriptor.index);
-    enc.U64(pending.chunk.descriptor.start_offset);
-    enc.U64(revision);
-    enc.U64(pending.chunk.descriptor.size);
-    enc.String(key);
-    if (trailing) {
-      enc.U64(123);
-    }
-    enc.Finish(&blob);
-    return blob;
-  };
-
-  PendingDelete parsed;
-  EXPECT_TRUE(parsed.ParseFrom(encode(0, pending.chunk.descriptor.revision, pending.chunk.key, false)).IsMalformed());
-  EXPECT_TRUE(
-      parsed
-          .ParseFrom(encode(
-              pending.ino, kInvalidChunkRevision,
-              chunk::FormatChunkObjectKey(pending.ino, pending.chunk.descriptor.index, kInvalidChunkRevision), false))
-          .IsMalformed());
-  EXPECT_TRUE(
-      parsed.ParseFrom(encode(pending.ino, pending.chunk.descriptor.revision, pending.chunk.key, true)).IsMalformed());
-}
-
-TEST(PendingDeleteTest, RejectsTamperedPersistedIdentity) {
-  const PendingDelete pending = MakePendingDelete();
-  std::string blob;
-  BufEncoder enc;
-  enc.Header(RecordType::kPendingDelete);
-  enc.U64(pending.ino);
-  enc.U32(pending.chunk.descriptor.index);
-  enc.U64(pending.chunk.descriptor.start_offset);
-  enc.U64(pending.chunk.descriptor.revision);
-  enc.U64(pending.chunk.descriptor.size);
-  enc.String(
-      chunk::FormatChunkObjectKey(pending.ino + 1, pending.chunk.descriptor.index, pending.chunk.descriptor.revision));
-  enc.Finish(&blob);
-
-  PendingDelete parsed;
-  EXPECT_TRUE(parsed.ParseFrom(blob).IsMalformed());
-}
-
-TEST(PendingDeleteTest, FailedParseLeavesRecordUntouched) {
   PendingDelete parsed = MakePendingDelete();
-  const PendingDelete before = parsed;
-
+  const auto before = parsed;
   EXPECT_TRUE(parsed.ParseFrom("broken").IsMalformed());
-  EXPECT_EQ(parsed.ino, before.ino);
-  EXPECT_EQ(parsed.chunk, before.chunk);
+  EXPECT_EQ(parsed, before);
+  EXPECT_TRUE(parsed.ParseFrom(SerializeOrDie(before) + "x").IsMalformed());
+  EXPECT_EQ(parsed, before);
+}
+
+TEST(PendingDeleteTest, PrivateDecoderRejectsTamperingBeforeDeletion) {
+  PendingDelete work = MakePendingDelete();
+  chunk::WholeObjectRef ref;
+  work.index_format_version = 99;
+  EXPECT_EQ(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).code(), Status::kNotSupported);
+
+  work = MakePendingDelete();
+  work.id += "tampered";
+  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).IsMalformed());
+  work = MakePendingDelete();
+  work.payload = EncodePrivateRefs(42, {{42, Head(3, 7), chunk::FormatChunkObjectKey(43, 3, 7)}});
+  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).IsMalformed());
+  work = MakePendingDelete();
+  work.payload = EncodePrivateRefs(42, {{42, Head(3, 7), chunk::FormatChunkObjectKey(42, 3, 7)},
+                                        {42, Head(4, 8), chunk::FormatChunkObjectKey(42, 4, 8)}});
+  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).IsMalformed());
+}
+
+TEST(PendingDeleteTest, WholeObjectCodecRejectsInvalidArgumentsAndMalformedInode) {
+  PendingDelete work;
+  EXPECT_EQ(chunk::FreezeWholeObjectDelete(0, Head(0, 1), kChunkSize, &work).code(), Status::kInvalidArgument);
+  EXPECT_EQ(chunk::FreezeWholeObjectDelete(42, Head(0, 1), kChunkSize, nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(chunk::FreezeWholeObjectDelete(42, Head(0, 0), kChunkSize, &work).code(), Status::kInvalidArgument);
+
+  work = MakePendingDelete();
+  EXPECT_EQ(chunk::DecodeWholeObjectDelete(work, kChunkSize, nullptr).code(), Status::kInvalidArgument);
+  chunk::WholeObjectRef ref;
+  work.payload = EncodePrivateRefs(0, {});
+  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).IsMalformed());
+  work = MakePendingDelete();
+  work.payload.resize(5);
+  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).IsMalformed());
 }
 
 }  // namespace

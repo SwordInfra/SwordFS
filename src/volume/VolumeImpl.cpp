@@ -5,6 +5,7 @@
 
 #include <folly/logging/xlog.h>
 
+#include "chunk/IChunkOverwriteStrategy.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
@@ -43,7 +44,12 @@ Status CreateDataEngine(std::string_view storage, std::unique_ptr<swordfs::stora
 
 }  // namespace
 
-VolumeImpl::VolumeImpl() = default;
+VolumeImpl::VolumeImpl() {
+  // Tests that inject engines without a format record still exercise the
+  // currently implemented mechanism. Normal mounts replace this from disk.
+  auto status = chunk::CreateChunkOverwriteStrategy("whole_object", 1, &chunk_overwrite_strategy_);
+  CHECK(status.ok());
+}
 VolumeImpl::~VolumeImpl() {
   utils::ExpectInThreadDomain();
 }
@@ -67,6 +73,13 @@ void VolumeImpl::set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine> 
   data_engine_ = std::move(data);
 }
 
+const chunk::IChunkOverwriteStrategy *VolumeImpl::chunk_overwrite_strategy() const {
+  // Unit tests can inject engines without formatting a volume. Preserve the
+  // existing whole-object behavior for that fixture path.
+  return chunk_overwrite_strategy_ != nullptr ? chunk_overwrite_strategy_.get()
+                                              : &chunk::DefaultChunkOverwriteStrategy();
+}
+
 Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
   utils::ExpectInThreadDomain();
   config_.name = cfg.volume();
@@ -83,8 +96,20 @@ Status VolumeImpl::CreateFrom(const swordfs::config::ConfigCenter &cfg) {
     config_.region = "auto";
   }
   config_.chunk_size = cfg.chunk_size();
+  config_.chunk_overwrite_strategy = cfg.chunk_overwrite_strategy();
+  config_.chunk_index_format_version = 1;
 
-  auto status = CreateMetaEngine(cfg.meta_url(), config_.name, &meta_engine_);
+  auto status = chunk::CreateChunkOverwriteStrategy(config_.chunk_overwrite_strategy,
+                                                    config_.chunk_index_format_version, &chunk_overwrite_strategy_);
+  if (!status.ok()) {
+    return status;
+  }
+
+  status = CreateMetaEngine(cfg.meta_url(), config_.name, &meta_engine_);
+  if (!status.ok()) {
+    return status;
+  }
+  status = meta_engine_->BindChunkOverwriteStrategy(chunk_overwrite_strategy_.get());
   if (!status.ok()) {
     return status;
   }
@@ -117,6 +142,16 @@ Status VolumeImpl::LoadFrom(const swordfs::config::ConfigCenter &cfg) {
     return status;
   }
 
+  status = chunk::CreateChunkOverwriteStrategy(config_.chunk_overwrite_strategy, config_.chunk_index_format_version,
+                                               &chunk_overwrite_strategy_);
+  if (!status.ok()) {
+    return status;
+  }
+  status = meta_engine_->BindChunkOverwriteStrategy(chunk_overwrite_strategy_.get());
+  if (!status.ok()) {
+    return status;
+  }
+
   if (!config_.storage.empty()) {
     status = CreateDataEngine(config_.storage, &data_engine_);
     if (!status.ok()) {
@@ -135,6 +170,7 @@ void VolumeImpl::Shutdown() {
   utils::ExpectInThreadDomain();
   data_engine_.reset();
   meta_engine_.reset();
+  chunk_overwrite_strategy_.reset();
 }
 
 }  // namespace swordfs::volume

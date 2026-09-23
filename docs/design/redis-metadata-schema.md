@@ -14,14 +14,15 @@ not by itself establish support for every Cluster deployment configuration.
 | --- | --- | --- |
 | `format` | String | Serialized volume configuration |
 | `next_ino` | Integer string | Inode allocator |
-| `next_chunk_revision` | Integer string | Volume-wide immutable revision allocator |
+| `next_chunk_revision` | Integer string | Volume-wide logical publication-generation allocator |
 | `inode_count` | Integer string | Live-inode lifecycle counter |
 | `inode:<ino>` | String | Canonical serialized `SwordFsInode` |
 | `dir:<parent_ino>` | Hash | Name → child type and inode ID |
-| `chunk:<ino>` | Hash | Chunk index → published `SwordFsChunk` |
+| `chunk:<ino>` | Hash | Chunk index → shared published logical `SwordFsChunk` head |
+| `private_chunk_index:<strategy>:<hash>` | Hash | Strategy-owned chunk-internal fields; schema and field layout belong only to that strategy |
 | `orphans` | Hash | Inode ID → orphan marker |
-| `reclaims` | Hash | Inode ID → serialized frozen `ReclaimWork` |
-| `pending_deletes` | Hash | Immutable obsolete/losing object key → serialized frozen `PendingDelete` |
+| `reclaims` | Hash | Inode ID → serialized frozen opaque `ReclaimWork` |
+| `pending_deletes` | Hash | Opaque strategy-defined queue ID → serialized frozen opaque `PendingDelete` |
 
 ### Why these structures
 
@@ -30,19 +31,28 @@ contain enough information to enumerate names and types without fetching every
 child inode. Full attributes remain canonical in the inode record. A missing
 directory Hash represents an empty directory when its directory inode exists.
 
-A chunk Hash represents one authoritative descriptor per logical index. It
-contains neither mutable write buffers nor uploading records. Object keys are
-derived from inode, index, and revision; the descriptor stores that revision
-rather than a physical key. Frozen reclaim records retain the exact object
-keys needed for delayed deletion. Truncate and rewrite publication use
-`pending_deletes` as best-effort maintenance state for immutable objects that
-became obsolete after a known metadata outcome. Its value redundantly stores
-the inode, descriptor, and exact key so replay can validate the deletion target
-before touching object storage. Queue membership is not delete authority.
+A chunk Hash represents one authoritative logical head per index. It contains
+neither mutable write buffers nor uploading records. The selected strategy
+owns any chunk-internal index in its private key space. Its transaction
+participant may read or change multiple private fields in the same WATCH/EXEC
+transaction as the logical head and inode. The common metadata engine never
+interprets those fields. For the currently selectable `whole_object` strategy,
+the head generation is also the immutable object revision and the physical
+key derives from inode, index, and revision. That strategy has no additional
+durable private fragment records.
 
-There is no inode-to-parents reverse index or slice/extent overlay. Hard links
-use forward directory mappings and the inode link count. The current data path
-rewrites whole chunks.
+Frozen reclaim and pending-delete records carry versioned opaque payloads.
+The common queue validates its envelope and Hash field identity; only the
+selected strategy interprets physical references and checks reachability
+before deletion. Truncate and rewrite publication use `pending_deletes` as
+best-effort maintenance state after a known metadata outcome. Queue
+membership is not delete authority.
+
+There is no inode-to-parents reverse index. Hard links use forward directory
+mappings and the inode link count. The current data path rewrites whole chunks.
+`chunk_slice` and `redis_cache` remain unselectable until their runtime
+sessions and private indexes are implemented; their different index layouts
+will remain isolated behind the same volume-fixed strategy framework.
 
 Allocators use atomic `INCR` independently of the subsequent namespace or
 publication transaction. Gaps after failure are harmless. Revision reuse is
@@ -92,6 +102,21 @@ share key-level conflict granularity: unrelated names in one directory or
 indexes in one chunk Hash can still cause retries. All reads must precede the
 first queued write; the wrapper rejects reads after writes.
 
+`IChunkIndexTxn` exposes strategy-private hash read/scan/put/erase operations
+through the same `RedisKvTxn`. Strategy freeze callbacks and index
+participants finish private-index reads during the watched read phase, before
+any write is queued. Private-index writes, the shared logical head, and inode
+updates are queued in that transaction. Since Redis can partially apply a
+failed `EXEC`, a strategy must make every manifest required to read a new head
+durable before queuing that head; a private write earlier in the same `EXEC`
+is insufficient as its only readable copy. The session passes an opaque
+publication intent to the participant and retains it for cleanup after a
+definite rejection. `LoadChunkView` watches the public head and private
+index during a read-only transaction, validating the snapshot at `EXEC` before
+the session interprets it. The current `whole_object` strategy has no extra
+private records; slice and Redis-cache implementations must satisfy these
+rules before format selection is enabled.
+
 `RedisKvTxn` borrows its transaction connection from the shared redis++ pool
 with `transaction(false, false)`. The `Redis` view returned by
 `Transaction::redis()` is kept only for the callback's WATCH/read phase, where
@@ -135,11 +160,11 @@ together, rather than one subsection for every API.
 | Namespace creation | Child inode, parent name mapping, parent attributes, inode count | No visible name without its newly created inode |
 | Hard-link addition | Name mapping, inode link count, parent attributes, orphan cleanup when applicable | A revived inode cannot remain eligible for reclaim preparation |
 | Namespace removal or replacement | Directory mappings, affected inode/link counts and parent attributes, orphan marker when last link disappears | Cleanup work is recorded with the namespace change |
-| Chunk publication | Expected descriptor validation, replacement descriptor, inode size | Only the CAS winner becomes authoritative; cleanup registration happens separately after a known outcome |
-| Size change | Inode size, pruned/clamped chunk descriptors | Metadata does not retain readable ranges beyond the new size; detached whole chunks are returned for later best-effort cleanup registration |
-| Reclaim preparation | Frozen work, removal of orphan marker, live inode/chunks, inode count | Live state is removed together with durable deletion targets |
+| Chunk publication | Expected logical head validation, strategy-private index update, replacement head, inode size | Only the CAS winner becomes authoritative; cleanup registration happens separately after a known outcome |
+| Size change | Inode size, pruned/clamped logical heads, strategy-private index update | Metadata does not retain readable ranges beyond the new size; frozen opaque cleanup candidates are returned for later best-effort registration |
+| Reclaim preparation | Frozen strategy work, private index update, removal of orphan marker, live inode/chunk heads, inode count | Live state is removed together with durable deletion targets; deletion fails closed while a live inode remains |
 | Reclaim completion | Pending reclaim record | Work disappears only after all frozen objects have been deleted |
-| Pending object-delete completion | Pending-delete field | Work disappears only after that frozen immutable object has been deleted |
+| Pending-delete completion | Pending-delete field | Work disappears only after the strategy confirms frozen data is no longer live and deletion succeeds |
 
 Empty directory removal is an atomic namespace mutation. It watches directory
 contents to exclude concurrent child creation, adjusts parent link counts,
@@ -174,22 +199,33 @@ than being treated as a definite rollback.
 
 Redis and the object store do not share a transaction. The handoff is
 `orphans → reclaims → completion` for last-link reclaim: preparation freezes
-deletion targets while removing live metadata, and completion removes the
-frozen work only after deletion succeeds.
+strategy-owned deletion targets while removing live metadata, and completion
+removes the frozen work only after deletion succeeds. Freeze may read the
+strategy-private index in that same transaction. Replay uses the frozen
+payload; it does not reconstruct targets from a newer logical head. Before
+physical deletion, the strategy verifies that the live inode is absent, so a
+partially applied Redis `EXEC` cannot authorize deletion of still-live data.
+Preparation replay finishes an unlinked live inode's transition. Once a
+frozen reclaim record exists, `Link` refuses to revive that inode because a
+partial `EXEC` may already have removed its public chunk Hash. An unexpected
+linked inode retains the frozen record and returns an error. The reclaimer
+routes pending records back through preparation under its local open-handle
+fence before asking the strategy to delete data.
 
 Rewrite/truncate cleanup intentionally uses a weaker contract. The
 authoritative metadata transaction does **not** depend on `pending_deletes`:
 
 1. a truncate transaction scans the authoritative `chunk:<ino>` Hash, validates
-   canonical descriptor identity, applies whole-chunk removal / boundary clamp
-   / inode-size updates, and returns the exact whole descriptors it detached;
-2. a rewrite publication transaction performs only its CAS publication/inode
-   side effects and returns an immutable cleanup candidate when the outcome is
-   known: the old `expected` descriptor after success/replay, or the uploaded
-   replacement after a definite logical rejection;
+   canonical logical heads, applies removal or boundary clamp and inode-size
+   updates, coordinates the strategy-private index, and returns frozen opaque
+   cleanup candidates for detached data;
+2. a rewrite publication transaction performs its CAS publication, private
+   index, and inode side effects and returns a frozen candidate when the
+   outcome is known: the old expected data after success/replay, or the
+   uploaded replacement after a definite logical rejection;
 3. after the authoritative transaction reports a **known** outcome,
    `RedisMetaOps` attempts a separate transaction that writes
-   `pending_deletes[object_key] = PendingDelete{ino, descriptor, object_key}`;
+   `pending_deletes[opaque_id] = PendingDelete{opaque_id, version, payload}`;
 4. cleanup-registration failure is logged and ignored by the logical operation.
    It may leak an obsolete object, but it cannot invalidate a metadata mutation
    whose result is already known.
@@ -211,14 +247,14 @@ before queueing writes. It validates that each field matches the descriptor's
 index and canonical fixed-size chunk layout. A concurrent chunk-map mutation
 changes the watched Hash and forces the optimistic transaction to retry.
 
-The background reclaimer scans `pending_deletes`, validates that the Hash
-field equals the frozen key and that the descriptor derives the same immutable
-identity, then checks current authoritative chunk metadata. If the same
-immutable object key is still live, the candidate is left untouched. Otherwise
-the reclaimer deletes the object idempotently and removes the field only after
-success. Retries therefore use frozen identities, never keys reconstructed
-from a newer live descriptor. This authoritative revalidation prevents stale
-maintenance candidates from deleting an object that is currently live.
+The background reclaimer scans `pending_deletes`. Common Redis metadata checks
+that the Hash field equals the frozen opaque ID, without decoding the private
+payload. The selected strategy validates the payload and checks authoritative
+reachability. For `whole_object`, it verifies the frozen descriptor, canonical
+layout, and derived key against the current logical head. A still-live target
+is left untouched; otherwise the strategy deletes it idempotently and the
+reclaimer removes the queue field only after success. Unknown versions and
+malformed private payloads fail closed and remain queued.
 
 Reconciliation does not snapshot the complete Hash. Redis metadata keeps a
 process-local HSCAN cursor plus at most one decoded HSCAN response and exposes
@@ -290,7 +326,8 @@ entry, not a transaction-wide snapshot spanning HSCAN and the subsequent MGET.
 - Last-link reclaim requires durable pending work because the live inode is
   removed at its point of no return. Rewrite/truncate object cleanup is
   best-effort maintenance: failures may leave unreachable objects, while
-  Reclaimer's authoritative-key check remains mandatory before deletion.
+  strategy-owned authoritative reachability checks remain mandatory before
+  deletion.
 - `StatFs` exposes `inode_count` as its file count. Its block-capacity fields
   are fixed values, not measurements of object-store capacity or usage.
 - Directory scan behavior under concurrent mutation does not provide snapshot

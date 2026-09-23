@@ -21,6 +21,7 @@
 
 #include "chunk/Chunk.hpp"
 #include "chunk/ChunkObjectKey.hpp"
+#include "chunk/WholeObjectCleanup.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
@@ -547,9 +548,14 @@ class MockMetaEngine : public IMetaEngine {
   std::vector<std::string> PendingDeleteKeys() const {
     std::vector<std::string> out;
     out.reserve(pending_deletes_.size());
-    for (const auto &[key, pending] : pending_deletes_) {
-      (void)pending;
-      out.push_back(key);
+    for (const auto &[id, pending] : pending_deletes_) {
+      (void)id;
+      swordfs::chunk::WholeObjectRef ref;
+      auto status = swordfs::chunk::DecodeWholeObjectDelete(pending, 0, &ref);
+      EXPECT_TRUE(status.ok()) << status.message();
+      if (status.ok()) {
+        out.push_back(ref.key);
+      }
     }
     std::sort(out.begin(), out.end());
     return out;
@@ -576,10 +582,12 @@ class MockMetaEngine : public IMetaEngine {
 
  private:
   void QueuePendingDelete(InodeID ino, const SwordFsChunk &chunk) {
-    const auto key = swordfs::chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
-    pending_deletes_.insert_or_assign(
-        key, swordfs::metadata::PendingDelete{
-                 .ino = ino, .chunk = swordfs::metadata::ReclaimChunk{.descriptor = chunk, .key = key}});
+    swordfs::metadata::PendingDelete work;
+    auto status = swordfs::chunk::FreezeWholeObjectDelete(ino, chunk, 0, &work);
+    EXPECT_TRUE(status.ok()) << status.message();
+    if (status.ok()) {
+      pending_deletes_.insert_or_assign(work.id, std::move(work));
+    }
   }
 
   void TruncateChunks(InodeID ino, uint64_t size) {

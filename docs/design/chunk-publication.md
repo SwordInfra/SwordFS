@@ -1,5 +1,67 @@
 # Chunk Publication Contract
 
+## Volume-fixed overwrite strategy
+
+The formatted volume records one overwrite strategy and its index-format
+version. Mount constructs one implementation from that persisted selection;
+there is no per-file or per-chunk strategy tag and no live switching. Until
+the chunk-slice implementation is activated by #270–#275, the existing
+immutable whole-object path is the selectable `whole_object` implementation.
+`chunk_slice` and `redis_cache` are rejected while unimplemented.
+
+Directory entries, inodes, and the file-to-logical-chunk head are shared. The
+head states chunk existence, logical size, and a publication generation for
+conditional replacement. A generation is an authority token, not a physical
+object reference for common code to interpret. The selected strategy owns the
+chunk session, its internal index schema and operations, the translation from
+private index state to physical data, and cleanup validation/deletion.
+
+The metadata backend supplies a transaction-scoped `IChunkIndexTxn` with
+private hash read, scan, put, and erase operations. The strategy's
+`IChunkIndexParticipant` uses that surface in the same Memory or Redis
+transaction as the common head and inode size. Publication, truncate/setattr
+size changes, and orphan preparation are the coordination points. Cleanup
+freeze callbacks can read that private index through the same transaction to
+capture the exact physical references being detached. A strategy can use
+multiple private records per chunk; the common head and transaction protocol
+do not prescribe a fragment list or one physical reference. Private index
+keys are namespaced by strategy and interpreted only by that implementation;
+a future Redis-cache implementation does not reuse or interpret the
+chunk-slice index.
+
+A chunk session supplies an opaque `ChunkPublishIntent` after making its new
+data durable. `CommitChunk` passes those bytes unchanged to the selected
+participant while publishing the shared head. The strategy also uses that
+intent to freeze cleanup for a definitely rejected upload, which may never
+have appeared in the live private index. Reads use `LoadChunkView`: the
+metadata backend reads the public head and asks the participant to copy its
+private snapshot in one Memory lock or validated Redis WATCH/EXEC read
+transaction. The session interprets the snapshot after that transaction;
+object-store I/O does not hold a metadata transaction open.
+
+Reclaim and pending-delete records carry versioned opaque strategy payloads.
+The common metadata engine persists their envelope and queue identity without
+decoding physical references. The common Reclaimer schedules, retries, and
+acknowledges those records; only the selected strategy decodes them, checks
+live reachability where applicable, and issues physical deletion. Unknown
+versions or malformed payloads fail closed and remain queued. Orphan
+preparation freezes the strategy payload in the same transaction that removes
+the live inode and chunk heads; later replay uses the frozen bytes, not a
+reconstructed target from current state.
+For pending inode reclaims, the worker re-enters `PrepareReclaim` under the
+open-handle fence before deletion. This finishes a partially applied Redis
+transition with an unlinked live inode. A frozen record is the point of no
+return even if a partial Redis `EXEC` left the inode visible: `Link` refuses
+to revive it, and an unexpected linked inode leaves the frozen record intact
+with an error rather than risking loss of its remaining chunk references.
+
+The whole-object publication protocol below describes the transitional
+`whole_object` implementation. Its object revision and key are private to that
+implementation. The common strategy contract preserves local-write visibility,
+exact bounded reads, successful-flush acknowledgement, retryable failures,
+and generation isolation; it does not require other strategies to hydrate or
+rewrite a complete chunk.
+
 SwordFS stores each flushed chunk as an immutable object and publishes a
 descriptor for that object through the metadata engine. The object and its
 metadata are intentionally separate durability domains, so their ordering is
@@ -235,10 +297,13 @@ metadata call is never silently converted to success.
 ## Cleanup authority
 
 `pending_deletes` stores maintenance candidates, not permission to delete.
-`Reclaimer` always reads current authoritative chunk metadata before physical
-deletion. If the same immutable key is still live, it skips that candidate.
-This rule prevents stale maintenance state from deleting an object that is
-currently authoritative; queue membership alone never grants delete authority.
+The selected strategy validates its private payload and rechecks authoritative
+metadata before physical deletion. For `whole_object`, it compares the frozen
+immutable key with the current logical head and skips a candidate while that
+key is still live. Last-link reclaim also checks that the live inode is absent
+before deleting frozen data, so a partially applied Redis transaction cannot
+turn a pending record into delete authority. Queue membership alone never
+grants delete authority.
 
 ## Why there is no post-upload `HEAD`
 

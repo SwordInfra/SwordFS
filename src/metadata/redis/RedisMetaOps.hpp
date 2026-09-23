@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include "metadata/IChunkIndexTxn.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/types/Chunk.hpp"
@@ -21,6 +22,10 @@
 #include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
 #include "utils/Synchronization.hpp"
+
+namespace swordfs::chunk {
+class IChunkOverwriteStrategy;
+}
 
 namespace swordfs::metadata {
 
@@ -47,6 +52,7 @@ class RedisMetaOps {
   RedisMetaOps &operator=(RedisMetaOps &&) = delete;
 
   utils::Status Initialize();
+  utils::Status BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy);
   utils::Status FormatVolume(const SwordFsVolume &config);
   utils::Status LoadVolume(SwordFsVolume *config);
   utils::Status CreateDirIterator(InodeID ino, std::vector<SwordFsEntry> prefix_entries,
@@ -68,8 +74,10 @@ class RedisMetaOps {
                                          const std::function<utils::Status(const PendingDelete &)> &visitor,
                                          bool *has_more);
   utils::Status CompletePendingDelete(std::string_view object_key);
-  utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement);
+  utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
+                            const ChunkPublishIntent &intent = {});
   utils::Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
+  utils::Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out);
   utils::Status GetInodeCount(uint64_t *count);
   utils::Status AllocateInode(InodeID *ino);
   utils::Status AllocateChunkRevision(ChunkRevision *revision);
@@ -86,7 +94,7 @@ class RedisMetaOps {
   // Register cleanup candidates after a metadata mutation has a known
   // outcome. Failure is intentionally non-fatal: it may leak obsolete data,
   // but it must not invalidate an otherwise successful metadata operation.
-  void RegisterPendingDeletesBestEffort(InodeID ino, const std::vector<SwordFsChunk> &chunks, std::string_view reason);
+  void RegisterPendingDeletesBestEffort(InodeID ino, const std::vector<PendingDelete> &work, std::string_view reason);
 
   // Snapshot the inode ids published as orphan candidates.
   utils::Status CollectOrphanCandidates(std::vector<InodeID> &out);
@@ -99,6 +107,7 @@ class RedisMetaOps {
 
  private:
   std::shared_ptr<RedisBackendContext> backend_;
+  const chunk::IChunkOverwriteStrategy *chunk_strategy_ = nullptr;
   redis::RedisKey key_;
   uint64_t chunk_size_ = 0;
   utils::FiberMutex pending_delete_scan_mutex_;

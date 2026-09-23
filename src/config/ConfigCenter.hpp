@@ -102,6 +102,12 @@ class ConfigCenter {
   size_t chunk_size() const {
     return chunk_size_;
   }
+  const std::string &chunk_overwrite_strategy() const {
+    return chunk_overwrite_strategy_;
+  }
+  void set_chunk_overwrite_strategy(std::string strategy) {
+    chunk_overwrite_strategy_ = std::move(strategy);
+  }
   /// Returns the volume name (format and mount subcommands).
   const std::string &volume() const {
     return volume_;
@@ -155,6 +161,7 @@ class ConfigCenter {
   std::string fuse_opts_;                    // -o FUSE mount options (e.g. allow_other,ro)
   std::string pidfile_;                      // --pidfile (mount daemon PID file)
   size_t chunk_size_ = 64ULL * 1024 * 1024;  // --chunk-size
+  std::string chunk_overwrite_strategy_ = "whole_object";
 
   // Subcommands registered with the CLI::App.
   std::vector<SubCommand> sub_commands_;
