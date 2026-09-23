@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "${SCRIPT_DIR}")"
 VERSION_FILE="${PROJECT_DIR}/conformance/fstests/version.env"
-DEFERRED_FILE="${PROJECT_DIR}/conformance/fstests/deferred-ci.tsv"
+PLAN_SCRIPT="${PROJECT_DIR}/scripts/fstests_plan.py"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.e2e.yml"
 MOUNT_HELPER_SOURCE="${PROJECT_DIR}/scripts/fstests-mount-helper.sh"
 MOUNT_HELPER_TARGET="/sbin/mount.fuse.swordfs"
@@ -13,11 +13,26 @@ XUNIT_MERGER="${PROJECT_DIR}/scripts/fstests_xunit_merge.py"
 MOUNT_CONFIG="/tmp/swordfs-fstests-mount.env"
 
 OUTPUT_DIR="${PROJECT_DIR}/build/fstests-conformance"
+TESTS_FILE=""
+SHARD_NAME=""
+VERIFY_SELECTION=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output-dir)
       OUTPUT_DIR="$2"
       shift 2
+      ;;
+    --tests-file)
+      TESTS_FILE="$2"
+      shift 2
+      ;;
+    --shard-name)
+      SHARD_NAME="$2"
+      shift 2
+      ;;
+    --verify-selection)
+      VERIFY_SELECTION=1
+      shift
       ;;
     *)
       echo "ERROR: unknown argument: $1" >&2
@@ -25,6 +40,15 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -z "${TESTS_FILE}" || ! -r "${TESTS_FILE}" ]]; then
+  echo "ERROR: --tests-file must name a readable shard testcase list" >&2
+  exit 2
+fi
+if [[ -z "${SHARD_NAME}" ]]; then
+  echo "ERROR: --shard-name is required" >&2
+  exit 2
+fi
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "ERROR: fstests conformance must run as root." >&2
@@ -61,6 +85,38 @@ RAW_DIR="${OUTPUT_DIR}/raw"
 rm -rf "${RAW_DIR}"
 mkdir -p "${RAW_DIR}"
 
+python3 - "${TESTS_FILE}" "${OUTPUT_DIR}/planned-tests.txt" "${OUTPUT_DIR}/shard.json" "${SHARD_NAME}" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+source = pathlib.Path(sys.argv[1])
+planned_path = pathlib.Path(sys.argv[2])
+metadata_path = pathlib.Path(sys.argv[3])
+shard = sys.argv[4]
+test_re = re.compile(r"^[a-z0-9_-]+/[0-9]+$")
+tests = []
+seen = set()
+for line_number, raw in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
+    test = raw.strip()
+    if not test:
+        continue
+    if not test_re.fullmatch(test):
+        raise SystemExit(f"{source}:{line_number}: invalid testcase {test!r}")
+    if test in seen:
+        raise SystemExit(f"{source}:{line_number}: duplicate testcase {test}")
+    seen.add(test)
+    tests.append(test)
+if not tests:
+    raise SystemExit(f"{source}: shard testcase list is empty")
+planned_path.write_text("".join(f"{test}\n" for test in tests), encoding="utf-8")
+metadata_path.write_text(
+    json.dumps({"shard": shard, "planned_tests": tests}, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+PY
+
 python3 - "${OUTPUT_DIR}/environment.json" <<PY
 import json
 import os
@@ -85,6 +141,7 @@ pathlib.Path("${OUTPUT_DIR}/environment.json").write_text(
             "fstests_repository": "${FSTESTS_REPOSITORY}",
             "fstests_selector": "${FSTESTS_GROUP}",
             "liburing_commit": "${LIBURING_COMMIT}",
+            "shard": "${SHARD_NAME}",
         },
         indent=2,
         sort_keys=True,
@@ -104,7 +161,7 @@ LIBURING_DIR="${WORK_DIR}/liburing"
 LIBURING_PREFIX="${WORK_DIR}/liburing-install"
 TEST_DIR="${WORK_DIR}/test"
 SCRATCH_MNT="${WORK_DIR}/scratch"
-SELECT_RESULTS="${RAW_DIR}/selection"
+SELECT_RESULTS="${RAW_DIR}/selection-verification"
 RUN_RESULTS="${RAW_DIR}/results"
 XUNIT_PARTS="${RAW_DIR}/xunit-parts"
 RUN_TAG="${GITHUB_RUN_ID:-$$}${GITHUB_RUN_ATTEMPT:-0}"
@@ -396,45 +453,22 @@ export TEST_FS_MOUNT_OPTS="-o allow_other"
 EOF
 cp "${FSTESTS_DIR}/local.config" "${OUTPUT_DIR}/local.config"
 
-echo "=== Capturing upstream-selected ${FSTESTS_GROUP} population ==="
-mkdir -p "${SELECT_RESULTS}"
-(
-  cd "${FSTESTS_DIR}"
-  RESULT_BASE="${SELECT_RESULTS}" ./check -n -R xunit-quiet -fuse -g "${FSTESTS_GROUP}"
-) >"${RAW_DIR}/selection.log" 2>&1
-if [[ ! -s "${SELECT_RESULTS}/result.xml" ]]; then
-  echo "ERROR: fstests dry-run did not produce selection XUnit" >&2
-  exit 2
+if [[ "${VERIFY_SELECTION}" -eq 1 ]]; then
+  echo "=== Verifying pinned upstream selection ${FSTESTS_GROUP} ==="
+  mkdir -p "${SELECT_RESULTS}"
+  (
+    cd "${FSTESTS_DIR}"
+    RESULT_BASE="${SELECT_RESULTS}" ./check -n -R xunit-quiet -fuse -g "${FSTESTS_GROUP}"
+  ) >"${RAW_DIR}/selection-verification.log" 2>&1
+  if [[ ! -s "${SELECT_RESULTS}/result.xml" ]]; then
+    echo "ERROR: fstests selection verification did not produce XUnit" >&2
+    exit 2
+  fi
+  python3 "${PLAN_SCRIPT}" --verify-selection-xml "${SELECT_RESULTS}/result.xml"
 fi
 
-echo "=== Running pinned fstests ${FSTESTS_GROUP} population ==="
+echo "=== Running fstests shard ${SHARD_NAME} with per-test isolation ==="
 mkdir -p "${RUN_RESULTS}" "${XUNIT_PARTS}"
-awk -F '\t' 'NR > 1 && $1 !~ /^#/ && $1 != "" { print $1 }' "${DEFERRED_FILE}" >"${OUTPUT_DIR}/deferred-ci.txt"
-
-python3 - "${SELECT_RESULTS}/result.xml" "${OUTPUT_DIR}/deferred-ci.txt" "${OUTPUT_DIR}/execute-tests.txt" <<'PY'
-import pathlib
-import sys
-import xml.etree.ElementTree as ET
-
-selection = pathlib.Path(sys.argv[1])
-deferred_file = pathlib.Path(sys.argv[2])
-output = pathlib.Path(sys.argv[3])
-deferred = {
-    line.strip()
-    for line in deferred_file.read_text(encoding="utf-8").splitlines()
-    if line.strip()
-}
-tests = []
-seen = set()
-for case in ET.parse(selection).getroot().iter("testcase"):
-    test = case.get("name", "")
-    if not test or test in seen:
-        raise SystemExit(f"invalid or duplicate selected testcase: {test!r}")
-    seen.add(test)
-    if test not in deferred:
-        tests.append(test)
-output.write_text("".join(f"{test}\n" for test in tests), encoding="utf-8")
-PY
 
 mark_isolation_failure() {
   local test="$1"
@@ -495,17 +529,6 @@ backend_healthy() {
     curl --max-time 5 -fsS "http://127.0.0.1:${MINIO_PORT}/minio/health/live" >/dev/null 2>&1
 }
 
-redis_total_connections() {
-  set +e
-  local value
-  value="$(timeout 5s "${DOCKER_COMPOSE[@]}" -f "${COMPOSE_FILE}" exec -T redis \
-    redis-cli --raw INFO stats 2>/dev/null | awk -F: '$1 == "total_connections_received" { gsub("\\r", "", $2); print $2; exit }')"
-  set -e
-  if [[ "${value}" =~ ^[0-9]+$ ]]; then
-    printf '%s\n' "${value}"
-  fi
-}
-
 suite_seconds="$(python3 - "${FSTESTS_SUITE_TIMEOUT}" <<'PY'
 import re
 import sys
@@ -523,8 +546,6 @@ suite_deadline=$(( $(date +%s) + suite_seconds ))
 check_status=0
 : >"${RAW_DIR}/check.log"
 : >"${RAW_DIR}/check-status.tsv"
-printf 'test\tstatus\ttotal_connections_received\tdelta_since_previous_sample\n' >"${RAW_DIR}/redis-connections.tsv"
-previous_connections="$(redis_total_connections)"
 
 while IFS= read -r test <&3; do
   [[ -n "${test}" ]] || continue
@@ -546,18 +567,6 @@ while IFS= read -r test <&3; do
   test_status=$?
   set -e
   printf '%s\t%s\n' "${test}" "${test_status}" >>"${RAW_DIR}/check-status.tsv"
-  current_connections="$(redis_total_connections)"
-  if [[ "${current_connections}" =~ ^[0-9]+$ && "${previous_connections}" =~ ^[0-9]+$ ]]; then
-    connection_delta=$((current_connections - previous_connections))
-    printf '%s\t%s\t%s\t%s\n' "${test}" "${test_status}" "${current_connections}" "${connection_delta}" \
-      >>"${RAW_DIR}/redis-connections.tsv"
-  else
-    printf '%s\t%s\t%s\t%s\n' "${test}" "${test_status}" "${current_connections:-unavailable}" unavailable \
-      >>"${RAW_DIR}/redis-connections.tsv"
-  fi
-  if [[ "${current_connections}" =~ ^[0-9]+$ ]]; then
-    previous_connections="${current_connections}"
-  fi
 
   if [[ -s "${RUN_RESULTS}/result.xml" ]]; then
     cp "${RUN_RESULTS}/result.xml" "${XUNIT_PARTS}/${test//\//-}.xml"
@@ -580,9 +589,9 @@ while IFS= read -r test <&3; do
     check_status=2
     break
   fi
-done 3<"${OUTPUT_DIR}/execute-tests.txt"
+done 3<"${OUTPUT_DIR}/planned-tests.txt"
 
-expected_execute_count="$(wc -l <"${OUTPUT_DIR}/execute-tests.txt")"
+expected_execute_count="$(wc -l <"${OUTPUT_DIR}/planned-tests.txt")"
 completed_execute_count="$(wc -l <"${RAW_DIR}/check-status.tsv")"
 if [[ "${check_status}" -ne 2 && "${check_status}" -ne 124 && "${check_status}" -ne 137 && \
       "${completed_execute_count}" -ne "${expected_execute_count}" ]]; then
@@ -594,7 +603,7 @@ python3 "${XUNIT_MERGER}" --parts-dir "${XUNIT_PARTS}" --output "${RUN_RESULTS}/
 printf '%s\n' "${check_status}" >"${RAW_DIR}/check.exit"
 
 if [[ "${check_status}" -eq 124 || "${check_status}" -eq 137 ]]; then
-  echo "ERROR: fstests suite exceeded ${FSTESTS_SUITE_TIMEOUT}" >&2
+  echo "ERROR: fstests shard exceeded ${FSTESTS_SUITE_TIMEOUT}" >&2
   exit 2
 fi
 if [[ "${check_status}" -eq 2 ]]; then
@@ -602,11 +611,11 @@ if [[ "${check_status}" -eq 2 ]]; then
   exit 2
 fi
 if [[ ! -s "${RUN_RESULTS}/result.xml" ]]; then
-  echo "ERROR: fstests run did not produce XUnit results (status ${check_status})" >&2
+  echo "ERROR: fstests shard did not produce XUnit results (status ${check_status})" >&2
   exit 2
 fi
 
 # A normal fstests run returns non-zero when one or more testcases fail. The
-# classifier, not the raw suite exit code, decides whether those failures are
-# known gaps or regressions. Selection/result completeness is checked there.
-echo "=== fstests raw execution complete (check status ${check_status}) ==="
+# aggregate classifier, not the raw shard exit code, decides whether those
+# failures are admitted known gaps or blocking regressions.
+echo "=== fstests shard ${SHARD_NAME} raw execution complete (check status ${check_status}) ==="

@@ -369,14 +369,24 @@ jobs:
           path: build/pjdfstest-conformance
           if-no-files-found: warn
 
-  fstests-conformance:
-    name: fstests-conformance (Release)
+  fstests-conformance-shard:
+    name: fstests-shard (${{ matrix.shard }})
     needs: clang-format
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - supported-0
+          - supported-1
+          - supported-2
+          - supported-3
+          - baseline-rest-0
+          - baseline-rest-1
     steps:
       - uses: actions/checkout@v4
         with:
@@ -421,20 +431,81 @@ jobs:
       - name: Verify conformance tooling
         run: python3 -m unittest discover -s tests/conformance -p 'test_*.py'
 
-      - name: Run pinned fstests suite
+      - name: Build deterministic fstests shard
+        run: |
+          python3 scripts/fstests_plan.py \
+            --shard "${{ matrix.shard }}" \
+            > "${RUNNER_TEMP}/fstests-tests.txt"
+          test -s "${RUNNER_TEMP}/fstests-tests.txt"
+
+      - name: Run pinned fstests shard
         id: fstests-harness
+        env:
+          FSTESTS_SHARD: ${{ matrix.shard }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           mkdir -p build/fstests-conformance
+          verify_args=()
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${FSTESTS_SHARD}" = "supported-0" ]; then
+            if ! git diff --quiet "${PR_BASE_SHA}" HEAD -- \
+              conformance/fstests/version.env conformance/fstests/selected.txt; then
+              verify_args+=(--verify-selection)
+            fi
+          fi
+
           set +e
           sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
             SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
             bash scripts/run-fstests.sh \
-              --output-dir "${{ github.workspace }}/build/fstests-conformance"
+              --tests-file "${RUNNER_TEMP}/fstests-tests.txt" \
+              --shard-name "${FSTESTS_SHARD}" \
+              --output-dir "${{ github.workspace }}/build/fstests-conformance" \
+              "${verify_args[@]}"
           status=$?
           set -e
           echo "${status}" | sudo tee build/fstests-conformance/harness-status.txt >/dev/null
           sudo chown -R "$(id -u):$(id -g)" build/fstests-conformance
           exit "${status}"
+
+      - name: Upload fstests shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fstests-conformance-${{ matrix.shard }}
+          path: build/fstests-conformance
+          if-no-files-found: warn
+
+  fstests-conformance:
+    name: fstests-conformance (Release)
+    needs: fstests-conformance-shard
+    if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Download fstests shard evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fstests-conformance-*
+          path: build/fstests-shards
+          merge-multiple: false
+
+      - name: Aggregate fstests shard evidence
+        env:
+          FSTESTS_SHARD_MATRIX_RESULT: ${{ needs.fstests-conformance-shard.result }}
+        run: |
+          python3 scripts/fstests_aggregate.py \
+            --shards-dir build/fstests-shards \
+            --output-dir build/fstests-conformance \
+            --matrix-result "${FSTESTS_SHARD_MATRIX_RESULT}"
 
       - name: Classify fstests results
         if: always()
@@ -462,7 +533,7 @@ jobs:
           fi
 
           python3 scripts/fstests_classify.py \
-            --selected-xml build/fstests-conformance/raw/selection/result.xml \
+            --selected-file conformance/fstests/selected.txt \
             --result-xml build/fstests-conformance/raw/results/result.xml \
             --result-dir build/fstests-conformance/raw/results \
             --supported-file conformance/fstests/supported.txt \
@@ -485,7 +556,7 @@ jobs:
           else
             echo '## fstests infrastructure failure' >> "${GITHUB_STEP_SUMMARY}"
             echo '' >> "${GITHUB_STEP_SUMMARY}"
-            echo 'The job ended before a classified report was produced. Inspect the uploaded logs.' >> "${GITHUB_STEP_SUMMARY}"
+            echo 'The aggregate job ended before a classified report was produced. Inspect the uploaded logs.' >> "${GITHUB_STEP_SUMMARY}"
           fi
 
       - name: Upload fstests evidence

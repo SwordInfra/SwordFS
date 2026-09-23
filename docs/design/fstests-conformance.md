@@ -28,17 +28,22 @@ FSTYP=fuse
 ./check -fuse -g generic/quick
 ```
 
-SwordFS does not keep a project-owned list of tests to execute. Before the real
-run, the harness invokes the same selector with fstests' `-n` mode and XUnit
-reporting. That dry run records the exact testcase population chosen by the
-pinned upstream revision. The strict classifier then requires the real XUnit
-result to contain exactly that population. Missing or additional testcase
-results are infrastructure failures.
+SwordFS keeps the exact population selected by that pinned upstream revision in
+`conformance/fstests/selected.txt`. The manifest records the fstests commit and
+selector identity in its header and then lists every selected testcase exactly
+once. Normal PR CI consumes this reviewed manifest directly instead of paying
+for an upstream `./check -n` discovery run on every change.
 
-This separation is an anti-gaming invariant: `supported.txt` describes the
-regression contract, but it never decides which upstream tests are executed.
-Changing the upstream commit or `FSTESTS_GROUP` therefore makes the selected
-population change visible in review and in the next classified run.
+The manifest remains independent of `supported.txt`, `known-gaps.tsv`, and
+`deferred-ci.tsv`. Those files classify the selected population but never
+decide which upstream tests exist. This separation is the anti-gaming
+invariant: removing a testcase from a semantic baseline cannot remove it from
+execution. When the pinned upstream commit, selector, or selection manifest
+changes, a dedicated verification path reruns upstream selection and requires
+the resulting testcase set to match the reviewed manifest exactly. That
+relatively expensive discovery is therefore paid only by selection-changing
+work, while normal CI still detects missing, duplicate, or unexpected executed
+results against the pinned manifest.
 
 ### Peer check against ZeroFS
 
@@ -184,17 +189,37 @@ distinguishes kernel unmount completion from userspace-daemon teardown and
 prevents an invalid FUSE identity or teardown race from contaminating hundreds
 of testcase results before the harness notices.
 
-The dry-run selection remains one canonical upstream `generic/quick` run so the
-645-case denominator cannot be curated by the SwordFS harness. Real execution
-then invokes the **unmodified pinned upstream `check` once per selected,
-non-deferred testcase**. Each invocation still performs upstream fstests'
-normal init, testcase body, result qualification, XUnit generation, and
-TEST/SCRATCH cleanup. The outer runner waits for both SwordFS daemon PIDs and
-mountpoints to disappear before starting the next testcase. If cleanup needs
-runner intervention, that testcase receives `.isolationfail` evidence and is
-classified as infrastructure; the recovered environment can then continue
-collecting independent evidence for later tests instead of propagating a stale
-userspace FUSE client through the rest of the population.
+The checked-in selection manifest remains the canonical 645-case denominator.
+Real execution is split into deterministic parallel shards. Four shards contain
+the supported population and are balanced with reviewed historical testcase
+runtime weights. The remaining selected, non-deferred population is split into
+two count-balanced `baseline-rest` shards because most of those tests are fast
+known-gap/NOTRUN cases and fixed one-test process/isolation overhead dominates
+their wall time. Missing runtime weights can affect balance only, never coverage.
+This keeps the semantic split visible while preventing either the few
+multi-minute supported tests or the large baseline population from becoming a
+serialized long tail.
+
+Within every shard, the runner deliberately keeps the pre-#264 isolation model:
+it invokes the **unmodified pinned upstream `check` once per testcase**. After
+each invocation, the outer runner verifies that TEST/SCRATCH FUSE mounts are
+gone and waits for both SwordFS daemon pidfiles to exit before starting the next
+test. If cleanup requires runner intervention, the testcase receives
+`.isolationfail` evidence, the runner force-unmounts and retires the daemon, and
+the testcase remains blocking `INFRASTRUCTURE` even when the recovered
+environment can continue collecting later evidence. Per-test XUnit reports are
+merged into the shard XUnit without rewriting outcomes.
+
+This process boundary is intentional. Draft PR #265 tested one `check` process
+per whole shard in GitHub Actions run `35807585352`. Parallelism reduced each
+shard job to roughly 8–11 minutes, but sharing one fstests lifecycle changed the
+observed FUSE results: only 69 admitted supported cases passed and the aggregate
+reported 264 blockers instead of the admitted 102 PASS / zero blockers. Concrete
+artifacts showed later tests inheriting invalid TEST_DIR lifecycle state and
+manufacturing widespread mount failures such as `common/config: TEST_DIR (...) is
+not a directory`. Recreating mountpoints from an unmount wrapper would also
+change testcase-internal mount/unmount behavior, so whole-shard batching is
+rejected rather than papered over with a SwordFS-specific reset path.
 
 Upstream fstests' own `.mountfail` file has a different meaning. `check`
 retains it only as diagnostic detail for a testcase that already failed, and
@@ -211,28 +236,29 @@ backend failure state. Such recovery/stability defects are tracked independently
 rather than being allowed to contaminate or silently redefine unrelated
 conformance results.
 
-Per-test XUnit files are preserved under `raw/xunit-parts/` and merged without
-rewriting testcase outcomes into the single `raw/results/result.xml` consumed
-by the classifier. The overall suite deadline remains the pinned `FSTESTS_SUITE_TIMEOUT` (75m);
-an individual test may consume the remaining deadline rather than being
-subjected to an arbitrary short per-test timeout.
+Each shard preserves its merged testcase XUnit and per-test detail files. Shard jobs do
+not classify semantic outcomes. After every shard finishes, one aggregate job
+requires both the matrix job result to be `success` and the exact expected shard
+artifact set, merges XUnit and testcase detail evidence, rejects duplicate
+testcase IDs, rejects missing non-deferred selected IDs, rejects execution of
+deferred IDs, and converts any missing/failed shard into blocking infrastructure
+evidence. Only then does it invoke the strict classifier once over the complete
+population. Checking the matrix result as well as artifacts prevents a failure
+outside the harness (for example a later shard job step) from being hidden by
+otherwise complete raw results. The aggregate job retains the authoritative
+`fstests-conformance (Release)` check name and publishes the `fstests-conformance`
+artifact consumed by the stable status publisher.
 
-The runner also records Redis `total_connections_received` after each testcase
-in `raw/redis-connections.tsv`. The delta is an interval-level diagnostic, not
-an attribution counter: it includes the testcase workload plus expected harness
-traffic such as the testcase's fresh SwordFS client/pool setup, Redis' periodic
-Docker healthcheck, the sampling `redis-cli INFO` connection, and an additional
-backend-health probe after a failing testcase. It is therefore used to locate
-abnormal connection-churn spikes relative to neighboring testcases, not as an
-exact reconnect count. This evidence is diagnostic only and is not a pass/fail
-criterion.
+The per-test Redis `total_connections_received` sampling is not part of the
+conformance contract and is removed from the testcase hot path. Backend health
+is still checked when an abnormal raw fstests outcome must be distinguished from
+infrastructure failure, and teardown captures Redis/MinIO state, INFO, and logs
+for post-failure diagnosis.
 
-The testcase list is read through a dedicated shell file descriptor and each
-upstream `check` invocation receives `/dev/null` as standard input, so a
-test/helper cannot consume the remaining execution list. After the loop, the
-runner requires the number of recorded testcase statuses to equal the planned
-non-deferred population unless execution stopped for an explicit timeout or
-infrastructure failure.
+Each shard has a bounded suite deadline derived from the pinned timeout. The
+parallel layout reduces wall-clock latency but does not impose a new arbitrary
+short per-test timeout: an individual upstream testcase can still consume the
+remaining shard deadline.
 
 ## Baseline model
 
@@ -333,11 +359,14 @@ Core dumps from fstests helper programs such as `xfs_io` do not trigger this
 classification.
 
 `*.isolationfail` is never an admissible semantic/unsupported known gap. It
-means the SwordFS wrapper had to repair testcase cleanup and therefore cannot
-trust isolation for subsequent evidence. The classifier checks the raw result
-directory and forces such cases to blocking `INFRASTRUCTURE`, even if the
-testcase also has a known-gap entry. Upstream `*.mountfail` remains raw fstests
-diagnostic evidence and does not override the testcase's XUnit classification.
+means the SwordFS wrapper had to intervene in testcase cleanup. If forced daemon
+retirement succeeds, later testcases may continue on a restored clean session;
+the affected testcase itself still becomes blocking `INFRASTRUCTURE`. If forced
+retirement cannot restore the session, the shard is also failed as
+infrastructure. The classifier checks the raw result directory and forces every
+such testcase to blocking `INFRASTRUCTURE`, even if it also has a known-gap
+entry. Upstream `*.mountfail` remains raw fstests diagnostic evidence and does
+not override the testcase's XUnit classification.
 
 The first CI run for a new upstream population is discovery by design. The
 classifier emits `bootstrap-supported.txt` from unclassified passes and a
@@ -379,17 +408,24 @@ filter over the upstream suite.
    root-owned CI work directory;
 4. starts Redis and MinIO and formats fresh TEST and SCRATCH SwordFS volumes;
 5. installs the temporary FUSE mount helper and writes fstests `local.config`;
-6. records the exact upstream-selected testcase population in XUnit;
-7. runs the selected population minus the exact entries in
-   `conformance/fstests/deferred-ci.tsv` as isolated, exact single-test
-   invocations of the unmodified upstream `check`, under one bounded overall
-   suite deadline. The full pre-exclusion selection remains the authoritative
-   denominator;
-8. preserves raw fstests output, per-test and merged XUnit, environment metadata, SwordFS logs,
+6. validates the shard's testcase list against the checked-in selected/deferred
+   manifests;
+7. invokes unmodified upstream `check` once per shard testcase and performs the
+   established outer mount/daemon isolation recovery before the next testcase;
+8. preserves raw fstests output, per-test and merged shard XUnit, environment metadata, SwordFS logs,
    concrete Redis/MinIO image identities and versions, final backend container
    state, Redis INFO, Redis/MinIO runtime logs, mount/isolation evidence, and
    `dmesg` when the runner permits reading it; and
 9. tears down FUSE mounts and backend services on every exit path.
+
+`scripts/fstests_aggregate.py` is the only component allowed to convert shard
+evidence into the classifier input. It verifies the expected shard set and
+exactly-once population coverage before producing the merged XUnit/result tree.
+The classifier then reports both `Supported gate` (regression health within the
+already-admitted supported set) and `Overall support` (passing supported tests
+divided by the full pinned selected population). The latter is also persisted in
+`fstests-status` so capability progress is visible independently of regression
+health.
 
 The suite's raw exit code is not the semantic gate because fstests normally
 returns non-zero for any testcase failure, including a known gap. The strict
