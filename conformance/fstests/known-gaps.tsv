@@ -16,7 +16,6 @@ generic/031	known_unsupported	#255	NOTRUN	xfs_io fcollapse failed (old kernel/wr
 generic/032	known_unsupported	#255	NOTRUN	xfs_io falloc failed (old kernel/wrong fs?)	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/033	known_unsupported	#255	NOTRUN	xfs_io fzero failed (old kernel/wrong fs?)	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/034	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
-generic/035	known_semantic_defect	#256	FAIL	- output mismatch (see <FSTESTS_RESULT_DIR>/generic/035.out.bad)	Rename-overwrite does not preserve an already-open directory victim lifetime; tracked by #256.
 generic/037	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/039	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/040	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.

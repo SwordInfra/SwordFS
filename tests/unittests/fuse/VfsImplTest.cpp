@@ -15,6 +15,7 @@
 #include <linux/fuse.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -34,6 +35,7 @@
 #include "storage/IDataEngine.hpp"
 #include "utils/FiberRuntime.hpp"
 #include "vfs/FileHandle.hpp"
+#include "vfs/FuseInodeCache.hpp"
 #include "vfs/InodeHandle.hpp"
 #include "vfs/Reclaimer.hpp"
 #include "vfs/VfsImpl.hpp"
@@ -60,6 +62,10 @@ struct FuseReplyCapture {
   bool replied = false;
   std::optional<int> error;
   std::optional<fuse_entry_param> entry;
+  std::optional<uint64_t> fh;
+  std::string buffer;
+  bool none = false;
+  int reply_result = 0;
 
   bool Wait() {
     std::unique_lock lock(mutex);
@@ -90,13 +96,56 @@ extern "C" int fuse_reply_err(fuse_req_t req, int err) {
 
 extern "C" int fuse_reply_entry(fuse_req_t req, const fuse_entry_param *entry) {
   auto *capture = CaptureFor(req);
+  int reply_result = 0;
   {
     std::lock_guard lock(capture->mutex);
     capture->entry = *entry;
     capture->replied = true;
+    reply_result = capture->reply_result;
   }
   capture->cv.notify_one();
-  return 0;
+  return reply_result;
+}
+
+extern "C" int fuse_reply_create(fuse_req_t req, const fuse_entry_param *entry, const fuse_file_info *fi) {
+  auto *capture = CaptureFor(req);
+  int reply_result = 0;
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->entry = *entry;
+    capture->fh = fi->fh;
+    capture->replied = true;
+    reply_result = capture->reply_result;
+  }
+  capture->cv.notify_one();
+  return reply_result;
+}
+
+extern "C" int fuse_reply_buf(fuse_req_t req, const char *buf, size_t size) {
+  auto *capture = CaptureFor(req);
+  int reply_result = 0;
+  {
+    std::lock_guard lock(capture->mutex);
+    if (buf != nullptr && size > 0) {
+      capture->buffer.assign(buf, size);
+    } else {
+      capture->buffer.clear();
+    }
+    capture->replied = true;
+    reply_result = capture->reply_result;
+  }
+  capture->cv.notify_one();
+  return reply_result;
+}
+
+extern "C" void fuse_reply_none(fuse_req_t req) {
+  auto *capture = CaptureFor(req);
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->none = true;
+    capture->replied = true;
+  }
+  capture->cv.notify_one();
 }
 
 // Minimal no-op data engine. The VfsImplIntegrationTest fixture must
@@ -538,6 +587,7 @@ class VfsImplIntegrationTest : public ::testing::Test {
  protected:
   void SetUp() override {
     swordfs::volume::VolumeImpl::Initialize();
+    swordfs::test::RunInTestFiber([&] { swordfs::vfs::FuseInodeCache::Instance().Initialize(); });
     auto &vol = swordfs::volume::VolumeImpl::Instance();
     auto mock = std::make_unique<MockMetaEngine>();
     mock_meta_ = mock.get();
@@ -549,6 +599,7 @@ class VfsImplIntegrationTest : public ::testing::Test {
 
   void TearDown() override {
     swordfs::utils::ShutdownFiberRuntime();
+    swordfs::test::RunInTestFiber([&] { swordfs::vfs::FuseInodeCache::Instance().Initialize(); });
     // Reset singleton state for the next test.
     swordfs::volume::VolumeImpl::Initialize();
   }
@@ -616,6 +667,93 @@ TEST_F(VfsImplIntegrationTest, FuseMknodRepliesWithErrnoOnMetadataFailure) {
   EXPECT_EQ(*capture.error, EEXIST);
   EXPECT_FALSE(capture.entry.has_value());
   EXPECT_EQ(mock_meta_->mknod_calls(), 1);
+}
+
+TEST_F(VfsImplIntegrationTest, FailedEntryReplyDoesNotRetainLookupReference) {
+  FuseReplyCapture capture;
+  capture.reply_result = -ENOENT;
+
+  swordfs::fuse::VfsHookFactory::SwordFsMknod(reinterpret_cast<fuse_req_t>(&capture), 1, "reply-fails", S_IFREG | 0600,
+                                              0);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.entry.has_value());
+  const auto ino = capture.entry->ino;
+
+  // A failed fuse_reply_entry() does not publish the inode to the kernel, so
+  // the provisional userspace lookup reference must have been rolled back.
+  // Once authoritative metadata says the inode is gone, no local cache entry
+  // may resurrect it as a detached inode.
+  mock_meta_->set_get_inode_status(Status::NotFound("removed after failed reply"));
+  swordfs::test::RunInTestFiber([&] {
+    struct stat attr{};
+    EXPECT_TRUE(VfsImpl::GetAttr(ino, &attr).IsNotFound());
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, LookupHookPublishesLookupReference) {
+  FuseReplyCapture capture;
+  swordfs::fuse::VfsHookFactory::SwordFsLookup(reinterpret_cast<fuse_req_t>(&capture), 1, "child");
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.entry.has_value());
+  ASSERT_EQ(capture.entry->ino, 2U);
+
+  mock_meta_->set_get_inode_status(Status::NotFound("detached after lookup publication"));
+  swordfs::test::RunInTestFiber([&] {
+    struct stat attr{};
+    EXPECT_TRUE(VfsImpl::GetAttr(2, &attr).ok());
+    EXPECT_EQ(attr.st_nlink, 0U);
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, CreateHookPublishesLookupReference) {
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+  swordfs::fuse::VfsHookFactory::SwordFsCreate(reinterpret_cast<fuse_req_t>(&capture), 1, "created", 0644, &fi);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.entry.has_value());
+  ASSERT_EQ(capture.entry->ino, 100U);
+  ASSERT_TRUE(capture.fh.has_value());
+
+  mock_meta_->set_get_inode_status(Status::NotFound("detached after create publication"));
+  swordfs::test::RunInTestFiber([&] {
+    struct stat attr{};
+    EXPECT_TRUE(VfsImpl::GetAttr(100, &attr).ok());
+    EXPECT_EQ(attr.st_nlink, 0U);
+    EXPECT_TRUE(VfsImpl::Release(100, *capture.fh).ok());
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, EntryProducingHooksPublishLookupReferences) {
+  FuseReplyCapture mkdir_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsMkdir(reinterpret_cast<fuse_req_t>(&mkdir_capture), 1, "dir", 0755);
+  ASSERT_TRUE(mkdir_capture.Wait());
+  ASSERT_TRUE(mkdir_capture.entry.has_value());
+  EXPECT_EQ(mkdir_capture.entry->ino, 101U);
+
+  FuseReplyCapture symlink_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsSymlink(reinterpret_cast<fuse_req_t>(&symlink_capture), "/target", 1, "link");
+  ASSERT_TRUE(symlink_capture.Wait());
+  ASSERT_TRUE(symlink_capture.entry.has_value());
+  EXPECT_EQ(symlink_capture.entry->ino, 102U);
+
+  FuseReplyCapture link_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsLink(reinterpret_cast<fuse_req_t>(&link_capture), 2, 1, "hardlink");
+  ASSERT_TRUE(link_capture.Wait());
+  ASSERT_TRUE(link_capture.entry.has_value());
+  EXPECT_EQ(link_capture.entry->ino, 2U);
+
+  // Successful entry replies transfer the provisional userspace references to
+  // the kernel. Once metadata reports those inode identities gone, each one
+  // must still resolve from the mount-local inode cache until FORGET arrives.
+  mock_meta_->set_get_inode_status(Status::NotFound("detached after entry publication"));
+  swordfs::test::RunInTestFiber([&] {
+    for (const InodeID ino : {InodeID{101}, InodeID{102}, InodeID{2}}) {
+      struct stat attr{};
+      EXPECT_TRUE(VfsImpl::GetAttr(ino, &attr).ok());
+      EXPECT_EQ(attr.st_nlink, 0U);
+    }
+  });
 }
 
 TEST_F(VfsImplIntegrationTest, FuseStatxAcceptsNullFileInfo) {
@@ -1318,6 +1456,19 @@ FIBER_TEST_F(VfsImplIntegrationTest, GetattrSuccess) {
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
+FIBER_TEST_F(VfsImplIntegrationTest, GetattrDoesNotHideAuthoritativeMetadataErrorBehindLookupCache) {
+  fuse_entry_param entry{};
+  ASSERT_TRUE(VfsImpl::Lookup(1, "file", &entry).ok());
+  ASSERT_EQ(entry.ino, 2U);
+
+  mock_meta_->set_get_inode_status(Status::IOError("injected metadata failure"));
+  struct stat attr{};
+  const auto status = VfsImpl::GetAttr(entry.ino, &attr);
+
+  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_EQ(status.message(), "injected metadata failure");
+}
+
 FIBER_TEST_F(VfsImplIntegrationTest, ReadlinkSuccess) {
   std::string target;
   auto status = VfsImpl::ReadLink(1, &target);
@@ -1457,7 +1608,10 @@ class VfsLastLinkCleanupTest : public ::testing::Test {
     // Volume lifecycle is control-plane work: initialize it on the gtest POSIX
     // thread, then reset the fiber-owned handle registry from a fiber.
     swordfs::volume::VolumeImpl::Initialize();
-    swordfs::test::RunInTestFiber([&] { swordfs::vfs::InodeHandleManager::Instance().Initialize(); });
+    swordfs::test::RunInTestFiber([&] {
+      swordfs::vfs::InodeHandleManager::Instance().Initialize();
+      swordfs::vfs::FuseInodeCache::Instance().Initialize();
+    });
 
     auto meta = std::make_unique<swordfs::metadata::MemMetaImpl>();
     auto data = std::make_unique<RecordingDataEngine>();
@@ -1479,7 +1633,10 @@ class VfsLastLinkCleanupTest : public ::testing::Test {
         }
       }
     });
-    swordfs::test::RunInTestFiber([&] { swordfs::vfs::InodeHandleManager::Instance().Initialize(); });
+    swordfs::test::RunInTestFiber([&] {
+      swordfs::vfs::InodeHandleManager::Instance().Initialize();
+      swordfs::vfs::FuseInodeCache::Instance().Initialize();
+    });
     swordfs::volume::VolumeImpl::Initialize();
   }
 
@@ -1530,6 +1687,260 @@ class VfsLastLinkCleanupTest : public ::testing::Test {
 };
 
 }  // namespace
+
+FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwriteKeepsLookedUpDirectoryVictimVisibleByInode) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  swordfs::metadata::SwordFsInode source;
+  swordfs::metadata::SwordFsInode victim;
+  ASSERT_TRUE(meta_->MkDir(kRoot, "source-dir", 0755, &source).ok());
+  ASSERT_TRUE(meta_->MkDir(kRoot, "victim-dir", 0755, &victim).ok());
+
+  // A successful lookup represents the kernel already knowing this inode.
+  // Overwrite-rename may remove the durable victim, but inode-based requests
+  // must remain answerable until FUSE later forgets that lookup reference.
+  fuse_entry_param victim_entry{};
+  ASSERT_TRUE(VfsImpl::Lookup(kRoot, "victim-dir", &victim_entry).ok());
+  ASSERT_EQ(victim_entry.ino, victim.ino);
+
+  uint64_t dir_fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(victim.ino, &dir_fh).ok());
+  ASSERT_TRUE(VfsImpl::Rename(kRoot, "source-dir", kRoot, "victim-dir", 0).ok());
+
+  EXPECT_TRUE(meta_->GetInode(victim.ino, nullptr).IsNotFound())
+      << "durable namespace state does not retain the overwritten directory";
+
+  struct stat attr{};
+  const auto status = VfsImpl::GetAttr(victim.ino, &attr);
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(attr.st_ino, victim.ino);
+  EXPECT_EQ(attr.st_nlink, 0U);
+
+  ASSERT_TRUE(VfsImpl::ReleaseDir(victim.ino, dir_fh).ok());
+}
+
+FIBER_TEST_F(VfsLastLinkCleanupTest, LiveGetattrRefreshesSnapshotUsedAfterDetachment) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  swordfs::metadata::SwordFsInode victim;
+  ASSERT_TRUE(meta_->MkDir(kRoot, "victim-dir", 0755, &victim).ok());
+
+  fuse_entry_param victim_entry{};
+  ASSERT_TRUE(VfsImpl::Lookup(kRoot, "victim-dir", &victim_entry).ok());
+
+  SwordFsAttr requested;
+  requested.uid = 1234;
+  ASSERT_TRUE(meta_->SetAttr(victim.ino, requested, SetAttrField::kUid, nullptr).ok());
+
+  struct stat live_attr{};
+  ASSERT_TRUE(VfsImpl::GetAttr(victim.ino, &live_attr).ok());
+  ASSERT_EQ(live_attr.st_uid, 1234U);
+
+  ASSERT_TRUE(VfsImpl::RmDir(kRoot, "victim-dir").ok());
+  struct stat detached_attr{};
+  const auto status = VfsImpl::GetAttr(victim.ino, &detached_attr);
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(detached_attr.st_uid, 1234U);
+  EXPECT_EQ(detached_attr.st_nlink, 0U);
+}
+
+FIBER_TEST_F(VfsLastLinkCleanupTest, SetattrRefreshesSnapshotUsedAfterDetachment) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  swordfs::metadata::SwordFsInode victim;
+  ASSERT_TRUE(meta_->MkDir(kRoot, "victim-dir", 0755, &victim).ok());
+
+  fuse_entry_param victim_entry{};
+  ASSERT_TRUE(VfsImpl::Lookup(kRoot, "victim-dir", &victim_entry).ok());
+
+  struct stat requested{};
+  requested.st_uid = 1234;
+  struct stat updated{};
+  ASSERT_TRUE(VfsImpl::SetAttr(victim.ino, &requested, FUSE_SET_ATTR_UID, std::nullopt, &updated).ok());
+  ASSERT_EQ(updated.st_uid, 1234U);
+
+  ASSERT_TRUE(VfsImpl::RmDir(kRoot, "victim-dir").ok());
+  struct stat detached_attr{};
+  const auto status = VfsImpl::GetAttr(victim.ino, &detached_attr);
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(detached_attr.st_uid, 1234U);
+  EXPECT_EQ(detached_attr.st_nlink, 0U);
+}
+
+TEST_F(VfsLastLinkCleanupTest, ForgetReleasesDetachedVictimOnlyAfterFinalLookupReference) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  swordfs::metadata::SwordFsInode source;
+  swordfs::metadata::SwordFsInode victim;
+  swordfs::test::RunInTestFiber([&] {
+    ASSERT_TRUE(meta_->MkDir(kRoot, "source-dir", 0755, &source).ok());
+    ASSERT_TRUE(meta_->MkDir(kRoot, "victim-dir", 0755, &victim).ok());
+    fuse_entry_param first{};
+    fuse_entry_param second{};
+    ASSERT_TRUE(VfsImpl::Lookup(kRoot, "victim-dir", &first).ok());
+    ASSERT_TRUE(VfsImpl::Lookup(kRoot, "victim-dir", &second).ok());
+    ASSERT_TRUE(VfsImpl::Rename(kRoot, "source-dir", kRoot, "victim-dir", 0).ok());
+  });
+
+  const auto &ops = swordfs::fuse::VfsHookFactory::get_ops();
+  ASSERT_NE(ops.forget, nullptr);
+
+  FuseReplyCapture first_forget;
+  ops.forget(reinterpret_cast<fuse_req_t>(&first_forget), victim.ino, 1);
+  ASSERT_TRUE(first_forget.Wait());
+  EXPECT_TRUE(first_forget.none);
+  swordfs::test::RunInTestFiber([&] {
+    struct stat attr{};
+    EXPECT_TRUE(VfsImpl::GetAttr(victim.ino, &attr).ok());
+    EXPECT_EQ(attr.st_nlink, 0U);
+  });
+
+  FuseReplyCapture final_forget;
+  ops.forget(reinterpret_cast<fuse_req_t>(&final_forget), victim.ino, 1);
+  ASSERT_TRUE(final_forget.Wait());
+  EXPECT_TRUE(final_forget.none);
+  swordfs::test::RunInTestFiber([&] {
+    struct stat attr{};
+    EXPECT_TRUE(VfsImpl::GetAttr(victim.ino, &attr).IsNotFound());
+  });
+}
+
+TEST_F(VfsLastLinkCleanupTest, ForgetMultiReleasesMultipleDetachedVictims) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  swordfs::metadata::SwordFsInode first;
+  swordfs::metadata::SwordFsInode second;
+  swordfs::test::RunInTestFiber([&] {
+    ASSERT_TRUE(meta_->MkDir(kRoot, "first", 0755, &first).ok());
+    ASSERT_TRUE(meta_->MkDir(kRoot, "second", 0755, &second).ok());
+    fuse_entry_param first_entry{};
+    fuse_entry_param second_entry{};
+    ASSERT_TRUE(VfsImpl::Lookup(kRoot, "first", &first_entry).ok());
+    ASSERT_TRUE(VfsImpl::Lookup(kRoot, "second", &second_entry).ok());
+    ASSERT_TRUE(VfsImpl::RmDir(kRoot, "first").ok());
+    ASSERT_TRUE(VfsImpl::RmDir(kRoot, "second").ok());
+  });
+
+  const auto &ops = swordfs::fuse::VfsHookFactory::get_ops();
+  ASSERT_NE(ops.forget_multi, nullptr);
+  std::array<fuse_forget_data, 2> forgets{{
+      {.ino = first.ino, .nlookup = 1},
+      {.ino = second.ino, .nlookup = 1},
+  }};
+  FuseReplyCapture capture;
+  ops.forget_multi(reinterpret_cast<fuse_req_t>(&capture), forgets.size(), forgets.data());
+  ASSERT_TRUE(capture.Wait());
+  EXPECT_TRUE(capture.none);
+
+  swordfs::test::RunInTestFiber([&] {
+    struct stat attr{};
+    EXPECT_TRUE(VfsImpl::GetAttr(first.ino, &attr).IsNotFound());
+    EXPECT_TRUE(VfsImpl::GetAttr(second.ino, &attr).IsNotFound());
+  });
+}
+
+TEST_F(VfsLastLinkCleanupTest, ForgetUnknownInodeIsHarmless) {
+  const auto &ops = swordfs::fuse::VfsHookFactory::get_ops();
+  ASSERT_NE(ops.forget, nullptr);
+
+  FuseReplyCapture capture;
+  ops.forget(reinterpret_cast<fuse_req_t>(&capture), 999999, 1);
+  ASSERT_TRUE(capture.Wait());
+  EXPECT_TRUE(capture.none);
+}
+
+TEST_F(VfsLastLinkCleanupTest, FailedReadDirPlusReplyDoesNotRetainLookupReferences) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  swordfs::metadata::SwordFsInode victim;
+  uint64_t dir_fh = 0;
+  swordfs::test::RunInTestFiber([&] {
+    ASSERT_TRUE(meta_->MkDir(kRoot, "victim-dir", 0755, &victim).ok());
+    ASSERT_TRUE(VfsImpl::OpenDir(kRoot, &dir_fh).ok());
+  });
+
+  fuse_file_info fi{};
+  fi.fh = dir_fh;
+  FuseReplyCapture capture;
+  capture.reply_result = -ENOENT;
+  const auto &ops = swordfs::fuse::VfsHookFactory::get_ops();
+  ASSERT_NE(ops.readdirplus, nullptr);
+  ops.readdirplus(reinterpret_cast<fuse_req_t>(&capture), kRoot, 4096, 0, &fi);
+  ASSERT_TRUE(capture.Wait());
+  EXPECT_FALSE(capture.buffer.empty());
+
+  swordfs::test::RunInTestFiber([&] {
+    ASSERT_TRUE(VfsImpl::RmDir(kRoot, "victim-dir").ok());
+    struct stat attr{};
+    EXPECT_TRUE(VfsImpl::GetAttr(victim.ino, &attr).IsNotFound());
+    ASSERT_TRUE(VfsImpl::ReleaseDir(kRoot, dir_fh).ok());
+  });
+}
+
+TEST_F(VfsLastLinkCleanupTest, SuccessfulReadDirPlusReplyRetainsLookupUntilForget) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  swordfs::metadata::SwordFsInode victim;
+  uint64_t dir_fh = 0;
+  swordfs::test::RunInTestFiber([&] {
+    ASSERT_TRUE(meta_->MkDir(kRoot, "victim-dir", 0755, &victim).ok());
+    ASSERT_TRUE(VfsImpl::OpenDir(kRoot, &dir_fh).ok());
+  });
+
+  fuse_file_info fi{};
+  fi.fh = dir_fh;
+  FuseReplyCapture capture;
+  const auto &ops = swordfs::fuse::VfsHookFactory::get_ops();
+  ASSERT_NE(ops.readdirplus, nullptr);
+  ops.readdirplus(reinterpret_cast<fuse_req_t>(&capture), kRoot, 4096, 0, &fi);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_FALSE(capture.error.has_value());
+  EXPECT_FALSE(capture.buffer.empty());
+
+  swordfs::test::RunInTestFiber([&] { ASSERT_TRUE(VfsImpl::RmDir(kRoot, "victim-dir").ok()); });
+
+  swordfs::test::RunInTestFiber([&] {
+    struct stat attr{};
+    ASSERT_TRUE(VfsImpl::GetAttr(victim.ino, &attr).ok());
+    EXPECT_EQ(attr.st_nlink, 0U);
+  });
+
+  FuseReplyCapture forget_capture;
+  ASSERT_NE(ops.forget, nullptr);
+  ops.forget(reinterpret_cast<fuse_req_t>(&forget_capture), victim.ino, 1);
+  ASSERT_TRUE(forget_capture.Wait());
+  EXPECT_TRUE(forget_capture.none);
+
+  swordfs::test::RunInTestFiber([&] {
+    struct stat attr{};
+    EXPECT_TRUE(VfsImpl::GetAttr(victim.ino, &attr).IsNotFound());
+    ASSERT_TRUE(VfsImpl::ReleaseDir(kRoot, dir_fh).ok());
+  });
+}
+
+TEST_F(VfsLastLinkCleanupTest, ReadDirPlusHookFailureDoesNotRetainLookups) {
+  fuse_file_info fi{};
+  fi.fh = 999999;
+  FuseReplyCapture capture;
+  const auto &ops = swordfs::fuse::VfsHookFactory::get_ops();
+  ASSERT_NE(ops.readdirplus, nullptr);
+
+  ops.readdirplus(reinterpret_cast<fuse_req_t>(&capture), swordfs::metadata::kRootInodeId, 4096, 0, &fi);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, EINVAL);
+}
+
+FIBER_TEST_F(VfsLastLinkCleanupTest, ReadDirPlusRetainsEmittedInodeUntilForget) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  swordfs::metadata::SwordFsInode victim;
+  ASSERT_TRUE(meta_->MkDir(kRoot, "victim-dir", 0755, &victim).ok());
+
+  uint64_t dir_fh = 0;
+  ASSERT_TRUE(VfsImpl::OpenDir(kRoot, &dir_fh).ok());
+  std::string buf;
+  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, kRoot, 4096, 0, dir_fh, &buf).ok());
+  ASSERT_TRUE(VfsImpl::RmDir(kRoot, "victim-dir").ok());
+
+  struct stat attr{};
+  const auto status = VfsImpl::GetAttr(victim.ino, &attr);
+  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(attr.st_nlink, 0U);
+  ASSERT_TRUE(VfsImpl::ReleaseDir(kRoot, dir_fh).ok());
+}
 
 FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkPublishesBackgroundCleanupAndOpenDescriptorDefersWorker) {
   const InodeID ino = CreateChunkedFile("f");
