@@ -69,10 +69,6 @@ class InodeHandle {
   /// Release a fence previously claimed by TryStartReclaim().
   void FinishReclaim();
 
-  /// Number of open file descriptors referencing this handle.
-  // Exposed for unit-test access only.
-  uint64_t open_count() const;
-
  private:
   // Acquires one open-fd reference under state_mutex_, unless the inode is
   // already fenced for reclaim. The check and the increment are one critical

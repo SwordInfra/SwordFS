@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <memory>
 #include <optional>
 #include <string>
@@ -160,7 +161,7 @@ FIBER_TEST(DirHandleTest, ReadDirStopsWhenEntryDoesNotFit) {
 
   std::string output;
   auto status = handle->ReadDir(0, 3, Encoder(), &output);
-  EXPECT_EQ(status.code(), Status::kNoMemory);
+  EXPECT_EQ(status.ToErrno(), ENOMEM);
   EXPECT_TRUE(output.empty());
 }
 

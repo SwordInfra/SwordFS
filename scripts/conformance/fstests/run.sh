@@ -150,7 +150,11 @@ pathlib.Path("${OUTPUT_DIR}/environment.json").write_text(
 )
 PY
 
-WORK_DIR="$(mktemp -d /tmp/swordfs-fstests.XXXXXX)"
+# Do not place the random suffix after a dot. Upstream xfstests dependency
+# generation rewrites `.o` targets with sed; a random suffix beginning with
+# `o` would therefore make a path such as `swordfs-fstests.oXXXXX` look like
+# an object-file token and can corrupt absolute dependency paths.
+WORK_DIR="$(mktemp -d /tmp/swordfs-fstests-XXXXXX)"
 # mktemp creates mode 0700 by default. Upstream fstests deliberately executes
 # a subset of cases as fsgqa/other non-root identities, so those users must be
 # able to traverse the harness parent directory before they can reach the FUSE

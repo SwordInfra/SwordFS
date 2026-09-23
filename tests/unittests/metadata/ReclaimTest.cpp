@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cerrno>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -113,24 +114,24 @@ TEST(ReclaimWorkTest, EqualityIncludesEnvelopeAndOpaquePayload) {
 
 TEST(ReclaimWorkTest, RejectsInvalidEnvelopeOnWriteAndRead) {
   ReclaimWork work = MakeWork();
-  EXPECT_EQ(work.SerializeTo(nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(work.SerializeTo(nullptr).ToErrno(), EINVAL);
   std::string blob;
   work.ino = 0;
-  EXPECT_EQ(work.SerializeTo(&blob).code(), Status::kInvalidArgument);
+  EXPECT_EQ(work.SerializeTo(&blob).ToErrno(), EINVAL);
   work = MakeWork();
   work.index_format_version = 0;
-  EXPECT_EQ(work.SerializeTo(&blob).code(), Status::kInvalidArgument);
+  EXPECT_EQ(work.SerializeTo(&blob).ToErrno(), EINVAL);
   work = MakeWork();
   work.payload.clear();
-  EXPECT_EQ(work.SerializeTo(&blob).code(), Status::kInvalidArgument);
+  EXPECT_EQ(work.SerializeTo(&blob).ToErrno(), EINVAL);
 
   ReclaimWork parsed = MakeWork();
   const auto before = parsed;
-  EXPECT_TRUE(parsed.ParseFrom("").IsMalformed());
+  EXPECT_TRUE(parsed.ParseFrom("").ToErrno() == EIO);
   EXPECT_EQ(parsed, before);
-  EXPECT_TRUE(parsed.ParseFrom(SerializeOrDie(before).substr(0, 8)).IsMalformed());
+  EXPECT_TRUE(parsed.ParseFrom(SerializeOrDie(before).substr(0, 8)).ToErrno() == EIO);
   EXPECT_EQ(parsed, before);
-  EXPECT_TRUE(parsed.ParseFrom(SerializeOrDie(before) + "x").IsMalformed());
+  EXPECT_TRUE(parsed.ParseFrom(SerializeOrDie(before) + "x").ToErrno() == EIO);
   EXPECT_EQ(parsed, before);
 
   BufEncoder enc;
@@ -139,7 +140,7 @@ TEST(ReclaimWorkTest, RejectsInvalidEnvelopeOnWriteAndRead) {
   enc.U32(1);
   enc.String("payload");
   enc.Finish(&blob);
-  EXPECT_TRUE(parsed.ParseFrom(blob).IsMalformed());
+  EXPECT_TRUE(parsed.ParseFrom(blob).ToErrno() == EIO);
   EXPECT_EQ(parsed, before);
 }
 
@@ -147,39 +148,39 @@ TEST(ReclaimWorkTest, PrivateDecoderRejectsTamperedIdentitiesAndUnknownVersion) 
   ReclaimWork work = MakeWork();
   std::vector<chunk::WholeObjectRef> refs;
   work.index_format_version = 99;
-  EXPECT_EQ(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).code(), Status::kNotSupported);
+  EXPECT_EQ(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno(), ENOSYS);
 
   work = MakeWork();
   work.payload = EncodePrivateRefs(43, {{43, Head(0, 1), chunk::FormatChunkObjectKey(43, 0, 1)}});
-  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno() == EIO);
   work.payload = EncodePrivateRefs(42, {{42, Head(0, 1), chunk::FormatChunkObjectKey(43, 0, 1)}});
-  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno() == EIO);
   work.payload = EncodePrivateRefs(42, {{42, Head(0, 0), chunk::FormatChunkObjectKey(42, 0, 0)}});
-  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno() == EIO);
   work.payload = EncodePrivateRefs(42, {{42, Head(0, 1), chunk::FormatChunkObjectKey(42, 0, 1)}}, true);
-  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno() == EIO);
   work.payload.resize(work.payload.size() - 4);
-  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno() == EIO);
 }
 
 TEST(ReclaimWorkTest, WholeObjectCodecRejectsInvalidArgumentsAndTruncatedPayload) {
   ReclaimWork work;
-  EXPECT_EQ(chunk::FreezeWholeObjectReclaim(0, {}, kChunkSize, &work).code(), Status::kInvalidArgument);
-  EXPECT_EQ(chunk::FreezeWholeObjectReclaim(42, {}, kChunkSize, nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(chunk::FreezeWholeObjectReclaim(0, {}, kChunkSize, &work).ToErrno(), EINVAL);
+  EXPECT_EQ(chunk::FreezeWholeObjectReclaim(42, {}, kChunkSize, nullptr).ToErrno(), EINVAL);
 
   auto invalid = Head(1, 2);
   invalid.start_offset = 0;
-  EXPECT_EQ(chunk::FreezeWholeObjectReclaim(42, {invalid}, kChunkSize, &work).code(), Status::kInvalidArgument);
+  EXPECT_EQ(chunk::FreezeWholeObjectReclaim(42, {invalid}, kChunkSize, &work).ToErrno(), EINVAL);
 
   work = MakeWork();
-  EXPECT_EQ(chunk::DecodeWholeObjectReclaim(work, kChunkSize, nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(chunk::DecodeWholeObjectReclaim(work, kChunkSize, nullptr).ToErrno(), EINVAL);
   work.payload.resize(5);
   std::vector<chunk::WholeObjectRef> refs;
-  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno() == EIO);
 
   work = MakeWork();
   work.payload = EncodePrivateRefs(0, {});
-  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).IsMalformed());
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno() == EIO);
 }
 
 TEST(PendingDeleteTest, RoundTripsOpaqueEnvelopeAndPrivateIdentity) {
@@ -198,22 +199,22 @@ TEST(PendingDeleteTest, RoundTripsOpaqueEnvelopeAndPrivateIdentity) {
 
 TEST(PendingDeleteTest, RejectsInvalidEnvelopeOnWriteAndRead) {
   PendingDelete work = MakePendingDelete();
-  EXPECT_EQ(work.SerializeTo(nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(work.SerializeTo(nullptr).ToErrno(), EINVAL);
   std::string blob;
   work.id.clear();
-  EXPECT_EQ(work.SerializeTo(&blob).code(), Status::kInvalidArgument);
+  EXPECT_EQ(work.SerializeTo(&blob).ToErrno(), EINVAL);
   work = MakePendingDelete();
   work.index_format_version = 0;
-  EXPECT_EQ(work.SerializeTo(&blob).code(), Status::kInvalidArgument);
+  EXPECT_EQ(work.SerializeTo(&blob).ToErrno(), EINVAL);
   work = MakePendingDelete();
   work.payload.clear();
-  EXPECT_EQ(work.SerializeTo(&blob).code(), Status::kInvalidArgument);
+  EXPECT_EQ(work.SerializeTo(&blob).ToErrno(), EINVAL);
 
   PendingDelete parsed = MakePendingDelete();
   const auto before = parsed;
-  EXPECT_TRUE(parsed.ParseFrom("broken").IsMalformed());
+  EXPECT_TRUE(parsed.ParseFrom("broken").ToErrno() == EIO);
   EXPECT_EQ(parsed, before);
-  EXPECT_TRUE(parsed.ParseFrom(SerializeOrDie(before) + "x").IsMalformed());
+  EXPECT_TRUE(parsed.ParseFrom(SerializeOrDie(before) + "x").ToErrno() == EIO);
   EXPECT_EQ(parsed, before);
 }
 
@@ -221,34 +222,34 @@ TEST(PendingDeleteTest, PrivateDecoderRejectsTamperingBeforeDeletion) {
   PendingDelete work = MakePendingDelete();
   chunk::WholeObjectRef ref;
   work.index_format_version = 99;
-  EXPECT_EQ(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).code(), Status::kNotSupported);
+  EXPECT_EQ(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).ToErrno(), ENOSYS);
 
   work = MakePendingDelete();
   work.id += "tampered";
-  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).IsMalformed());
+  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).ToErrno() == EIO);
   work = MakePendingDelete();
   work.payload = EncodePrivateRefs(42, {{42, Head(3, 7), chunk::FormatChunkObjectKey(43, 3, 7)}});
-  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).IsMalformed());
+  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).ToErrno() == EIO);
   work = MakePendingDelete();
   work.payload = EncodePrivateRefs(42, {{42, Head(3, 7), chunk::FormatChunkObjectKey(42, 3, 7)},
                                         {42, Head(4, 8), chunk::FormatChunkObjectKey(42, 4, 8)}});
-  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).IsMalformed());
+  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).ToErrno() == EIO);
 }
 
 TEST(PendingDeleteTest, WholeObjectCodecRejectsInvalidArgumentsAndMalformedInode) {
   PendingDelete work;
-  EXPECT_EQ(chunk::FreezeWholeObjectDelete(0, Head(0, 1), kChunkSize, &work).code(), Status::kInvalidArgument);
-  EXPECT_EQ(chunk::FreezeWholeObjectDelete(42, Head(0, 1), kChunkSize, nullptr).code(), Status::kInvalidArgument);
-  EXPECT_EQ(chunk::FreezeWholeObjectDelete(42, Head(0, 0), kChunkSize, &work).code(), Status::kInvalidArgument);
+  EXPECT_EQ(chunk::FreezeWholeObjectDelete(0, Head(0, 1), kChunkSize, &work).ToErrno(), EINVAL);
+  EXPECT_EQ(chunk::FreezeWholeObjectDelete(42, Head(0, 1), kChunkSize, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(chunk::FreezeWholeObjectDelete(42, Head(0, 0), kChunkSize, &work).ToErrno(), EINVAL);
 
   work = MakePendingDelete();
-  EXPECT_EQ(chunk::DecodeWholeObjectDelete(work, kChunkSize, nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(chunk::DecodeWholeObjectDelete(work, kChunkSize, nullptr).ToErrno(), EINVAL);
   chunk::WholeObjectRef ref;
   work.payload = EncodePrivateRefs(0, {});
-  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).IsMalformed());
+  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).ToErrno() == EIO);
   work = MakePendingDelete();
   work.payload.resize(5);
-  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).IsMalformed());
+  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).ToErrno() == EIO);
 }
 
 }  // namespace

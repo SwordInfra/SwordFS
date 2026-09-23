@@ -26,10 +26,10 @@ static void PrintVersion() {
             << SWORDFS_VERSION_PATCH << " (libfuse " << FUSE_MAJOR_VERSION << "." << FUSE_MINOR_VERSION << ")" << "\n";
 }
 
-/// Describes one registered subcommand: its CLI::App handle and the closure
-/// that executes it (called after logging is initialized).
+/// Describes one registered subcommand and the closure that executes it after
+/// logging is initialized.
 struct SubCommand {
-  CLI::App *cmd;
+  std::string name;
   std::function<int()> run;
 };
 
@@ -44,7 +44,7 @@ class ConfigCenter {
 
   /// Bind CLI options directly to ConfigCenter members.
   void ConfigureOptions(CLI::App &app);
-  /// Returns the selected subcommand.
+  /// Returns the selected subcommand after CLI parsing.
   std::optional<SubCommand> SelectedSubCommand() const;
 
   /// Returns the log file path and level (set by --log-file / --log-level).
@@ -81,26 +81,13 @@ class ConfigCenter {
   const std::string &meta_url() const {
     return meta_url_;
   }
-  // Test-construction seam. Production configuration is populated by
-  // ConfigureOptions() through CLI11 bindings.
-  void set_meta_url(const std::string &url) {
-    meta_url_ = url;
-  }
   /// Returns the bucket URL (e.g. "s3://endpoint/bucket/prefix").
   const std::string &bucket_url() const {
     return bucket_url_;
   }
-  // Test-construction seam; see set_meta_url().
-  void set_bucket_url(const std::string &u) {
-    bucket_url_ = u;
-  }
   /// Returns the storage region (e.g. "auto", "us-east-1").
   const std::string &storage_region() const {
     return storage_region_;
-  }
-  // Test-construction seam; see set_meta_url().
-  void set_storage_region(const std::string &r) {
-    storage_region_ = r;
   }
   /// Returns the chunk size in bytes (format subcommand).
   size_t chunk_size() const {
@@ -109,35 +96,19 @@ class ConfigCenter {
   const std::string &chunk_overwrite_strategy() const {
     return chunk_overwrite_strategy_;
   }
-  // Test-construction seam; see set_meta_url().
-  void set_chunk_overwrite_strategy(std::string strategy) {
-    chunk_overwrite_strategy_ = std::move(strategy);
-  }
   /// Returns the volume name (format and mount subcommands).
   const std::string &volume() const {
     return volume_;
-  }
-  // Test-construction seam; see set_meta_url().
-  void set_volume(const std::string &v) {
-    volume_ = v;
   }
   /// Returns the FUSE mount options string (e.g. "allow_other,ro").
   const std::string &fuse_opts() const {
     return fuse_opts_;
   }
 
-  /// Reset all state (testing only).
-  void Initialize() {
-    *this = ConfigCenter{};
-  }
-
  private:
- public:
   ConfigCenter() = default;
   ConfigCenter(ConfigCenter &&) = default;
   ConfigCenter &operator=(ConfigCenter &&) = default;
-
- private:
   ConfigCenter(const ConfigCenter &) = delete;
   ConfigCenter &operator=(const ConfigCenter &) = delete;
   /// Register mount options with the CLI::App.
@@ -171,6 +142,7 @@ class ConfigCenter {
 
   // Subcommands registered with the CLI::App.
   std::vector<SubCommand> sub_commands_;
+  std::string selected_subcommand_;
 };
 
 }  // namespace swordfs::config

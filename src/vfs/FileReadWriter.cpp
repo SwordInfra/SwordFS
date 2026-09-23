@@ -12,7 +12,6 @@
 #include <vector>
 
 #include "chunk/IChunkOverwriteStrategy.hpp"
-#include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "utils/Logging.hpp"
 #include "vfs/Reclaimer.hpp"
@@ -191,9 +190,10 @@ void FileChunkManager::TruncateToSize(size_t size, size_t chunk_size) {
 // FileReadWriter
 // ────────────────────────────────────────────────────────────────
 
-FileReadWriter::FileReadWriter(InodeID ino)
+FileReadWriter::FileReadWriter(InodeID ino, size_t max_parallel_flushes)
     : ino_(ino),
       chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
+      max_parallel_flushes_(std::max<size_t>(1, max_parallel_flushes)),
       meta_(volume::VolumeImpl::Instance().meta_engine()),
       chunks_(ino) {
 }
@@ -413,11 +413,9 @@ utils::Status FileReadWriter::Flush() {
   }
   utils::Status first_error;
   auto flushable = chunks_.GetFlushable();
-  const auto &config = config::ConfigCenter::Instance();
-  const size_t max_parallel = static_cast<size_t>(std::max(1, config.storage_thread_count()));
-  for (size_t begin = 0; begin < flushable.size(); begin += max_parallel) {
+  for (size_t begin = 0; begin < flushable.size(); begin += max_parallel_flushes_) {
     MultiChunkFlusher flusher;
-    const size_t end = std::min(flushable.size(), begin + max_parallel);
+    const size_t end = std::min(flushable.size(), begin + max_parallel_flushes_);
     for (size_t i = begin; i < end; ++i) {
       flusher.Submit(flushable[i]);
     }

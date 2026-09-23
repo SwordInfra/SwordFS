@@ -11,6 +11,10 @@
 namespace swordfs::config {
 
 void ConfigCenter::ConfigureOptions(CLI::App &app) {
+  // Configuration is a complete parse snapshot. Rebinding starts from
+  // defaults rather than leaking values or subcommands from an earlier parse.
+  *this = ConfigCenter{};
+
   static const std::unordered_map<std::string, std::string> kLogLevelMap = {
       {"info", "INFO"},
       {"debug", "DBG0"},
@@ -48,9 +52,10 @@ void ConfigCenter::RegisterMountOptions(CLI::App &app) {
       ->check(CLI::PositiveNumber)
       ->check(CLI::Range(1, static_cast<int>(std::thread::hardware_concurrency())));
   cmd->add_option("--pidfile", pidfile_, "Write daemon PID to this file");
+  cmd->callback([this] { selected_subcommand_ = "mount"; });
 
   SubCommand sc;
-  sc.cmd = cmd;
+  sc.name = "mount";
   sc.run = swordfs::cmd::RunMount;
   sub_commands_.push_back(sc);
 }
@@ -71,16 +76,17 @@ void ConfigCenter::RegisterFormatOptions(CLI::App &app) {
       ->check(CLI::Range(4096ULL, 1024ULL * 1024 * 1024));
   cmd->add_option("--chunk-overwrite-strategy", chunk_overwrite_strategy_,
                   "Volume-wide chunk overwrite strategy (currently: whole_object)");
+  cmd->callback([this] { selected_subcommand_ = "format"; });
 
   SubCommand sc;
-  sc.cmd = cmd;
+  sc.name = "format";
   sc.run = swordfs::cmd::RunFormat;
   sub_commands_.push_back(sc);
 }
 
 std::optional<SubCommand> ConfigCenter::SelectedSubCommand() const {
   for (const auto &cmd : sub_commands_) {
-    if (cmd.cmd->parsed()) {
+    if (cmd.name == selected_subcommand_) {
       return cmd;
     }
   }

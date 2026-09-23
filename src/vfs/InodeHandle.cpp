@@ -5,15 +5,20 @@
 
 #include <folly/container/F14Map.h>
 
+#include <algorithm>
 #include <mutex>
 
+#include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "vfs/FileReadWriter.hpp"
 #include "volume/VolumeImpl.hpp"
 
 namespace swordfs::vfs {
 
-InodeHandle::InodeHandle(metadata::InodeID ino) : ino_(ino), rw_(std::make_shared<FileReadWriter>(ino)) {
+InodeHandle::InodeHandle(metadata::InodeID ino)
+    : ino_(ino),
+      rw_(std::make_shared<FileReadWriter>(
+          ino, static_cast<size_t>(std::max(1, config::ConfigCenter::Instance().storage_thread_count())))) {
 }
 
 utils::Status InodeHandle::Open(int flags) {
@@ -93,11 +98,6 @@ utils::Status InodeHandle::Close() {
   // observes this count at zero and claims the fence.
   ReleaseRef();
   return status;
-}
-
-uint64_t InodeHandle::open_count() const {
-  std::lock_guard<utils::FiberMutex> lock(state_mutex_);
-  return open_count_;
 }
 
 bool InodeHandle::AcquireRefUnlessReclaiming() {

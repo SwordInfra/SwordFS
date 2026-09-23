@@ -31,6 +31,15 @@ using Status = swordfs::utils::Status;
 
 namespace swordfs::storage {
 
+/// Configuration supplied by the owning mounted volume when constructing a
+/// data engine. `location` and `region` come from persisted volume metadata;
+/// `worker_count` is a runtime mount setting and is not persisted.
+struct DataEngineOptions {
+  std::string location;
+  std::string region;
+  size_t worker_count = 1;
+};
+
 /// Abstract data-plane engine.
 ///
 /// Chunks are addressed by opaque string keys derived by the chunk/data-layout

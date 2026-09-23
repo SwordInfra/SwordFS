@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
+#include <cerrno>
 #include <set>
 
 #include "FiberTest.hpp"
@@ -122,7 +123,7 @@ FIBER_TEST_F(MemMetaImplReadDirTest, GetInodesReturnsAlignedPresentAndMissingRes
   EXPECT_EQ(results[2]->ino, second.ino);
   EXPECT_EQ(results[2]->attr.mode, second.attr.mode);
 
-  EXPECT_EQ(impl_->GetInodes({first.ino}, nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->GetInodes({first.ino}, nullptr).ToErrno(), EINVAL);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -198,7 +199,7 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirRejectsNonDirectory) {
   impl_->Create(kRoot, "regular", 0644, &file);
 
   DirIteratorPtr iterator;
-  EXPECT_EQ(impl_->OpenDir(file.ino, &iterator).code(), Status::kNotDirectory);
+  EXPECT_EQ(impl_->OpenDir(file.ino, &iterator).ToErrno(), ENOTDIR);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -211,7 +212,7 @@ FIBER_TEST_F(MemMetaImplReadDirTest, OpenDirNotADirectory) {
 
   DirIteratorPtr iterator;
   Status st = impl_->OpenDir(file.ino, &iterator);
-  EXPECT_TRUE(st.IsNotDirectory()) << st.message();
+  EXPECT_TRUE(st.ToErrno() == ENOTDIR) << st.message();
 }
 
 // ────────────────────────────────────────────────────────────────

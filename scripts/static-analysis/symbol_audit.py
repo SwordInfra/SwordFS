@@ -515,6 +515,11 @@ def _load_suppressions(path: Path) -> list[dict[str, str]]:
             )
         if any(not isinstance(entry[key], str) or not entry[key].strip() for key in required):
             raise AuditError(f"suppression #{index + 1} contains an empty or non-string field")
+        if entry["category"] == "test-only-production-symbol":
+            raise AuditError(
+                f"suppression #{index + 1} must not suppress test-only-production-symbol; "
+                "remove the production-only test seam instead"
+            )
         suppressions.append(entry)
     return suppressions
 

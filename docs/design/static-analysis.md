@@ -55,8 +55,8 @@ The following findings are **high confidence** and block CI:
 - a namespace/class type alias or typedef with no semantic reference anywhere
   in the scanned repository;
 - a production symbol whose only semantic consumers are tests. Such a symbol
-  must either be removed/reworked or be accepted as a deliberate testability
-  boundary through an exact suppression.
+  must be removed or the production/test construction design must be reworked
+  so tests exercise a legitimate production contract.
 
 The following findings are **review candidates** and do not block CI:
 
@@ -68,11 +68,12 @@ The following findings are **review candidates** and do not block CI:
   intentionally prunes, so repository-only reference absence is not sufficient
   evidence for a blocking dead-code conclusion.
 
-Test-only use is not proof that a symbol has no engineering value, but it is
-strong enough to require an explicit decision before merge. A deliberate test
-seam may remain through the exact suppression mechanism below; otherwise the
-production surface must be removed or the test must exercise a real production
-path instead.
+Test-only use is treated as evidence of an invalid production surface. Tests
+must not preserve setters, getters, hooks, flags, or other production APIs
+whose only genuine consumers are tests. If a useful test scenario is difficult
+to construct through the current production API, refactor the production
+construction/configuration/dependency boundary so the test can use a cleaner
+real contract instead of adding or retaining a test-only seam.
 
 Every finding reports the Clang USR, qualified symbol, declaration/definition
 location, and production/test/other reference sites. JSON output is the
@@ -141,12 +142,20 @@ Suppressions live in `scripts/static-analysis/suppressions.json`. A suppression
 that no longer matches a current finding is an error so obsolete exceptions
 are removed instead of accumulating.
 
-For `test-only-production-symbol`, a suppression is appropriate only when the
-production declaration is itself the intentional testability boundary (for
-example deterministic engine injection, a bounded test-size override, or
-semantic status inspection). Tests should not preserve arbitrary accessors or
-mutation methods merely because they make assertions easier. Prefer observable
-behavior and existing production paths whenever they express the same contract.
+`test-only-production-symbol` findings are not suppressible as intentional
+test seams. The exact suppression mechanism remains available for categories
+where the analyzer cannot see a real production reference (for example an
+external ABI/dynamic lookup that is invisible to the C++ AST), but it must not
+be used to retain production code solely for test construction or inspection.
+
+This rule is semantic rather than name-based. Moving a test-only setter/hook
+behind an optional parameter of a production-used function does not make the
+test seam legitimate when that parameter path still has no production
+consumer. Tests should construct state through the same production
+configuration, factory/registry, dependency, or lifecycle path used by the
+runtime. If those paths are too hard to use in a focused test, refactor the
+production design so the real contract is cleaner instead of hiding the test
+dependency inside an otherwise live API.
 
 ## CI contract
 

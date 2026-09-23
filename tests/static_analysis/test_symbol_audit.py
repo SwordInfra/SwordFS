@@ -188,6 +188,10 @@ class SymbolAuditFixtureTest(unittest.TestCase):
             (json.dumps({}), "must be a JSON array"),
             (json.dumps([{key: value for key, value in valid.items() if key != "reason"}]), "must contain exactly"),
             (json.dumps([{**valid, "reason": ""}]), "empty or non-string"),
+            (
+                json.dumps([{**valid, "category": "test-only-production-symbol"}]),
+                "must not suppress test-only-production-symbol",
+            ),
         ]
 
         with tempfile.TemporaryDirectory() as directory:

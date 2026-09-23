@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cerrno>
 #include <cstdlib>
 #include <optional>
 #include <stdexcept>
@@ -279,7 +280,7 @@ TEST(RedisMetaClientTest, DetectsExecCommandErrorAndReportsPossiblePartialCommit
     return txn.Set(later_key, "applied");
   });
 
-  EXPECT_EQ(status.code(), utils::Status::kIOError);
+  EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_NE(status.message().find("commit may be partial"), std::string::npos);
   const auto later_value = redis.get(later_key);
   ASSERT_TRUE(later_value.has_value());
@@ -456,7 +457,7 @@ TEST(RedisMetaClientTest, ReturnsCallbackBusyWithoutRetry) {
     ++attempts;
     return utils::Status::Busy("filesystem operation is busy");
   });
-  EXPECT_TRUE(status.IsBusy());
+  EXPECT_TRUE(status.ToErrno() == EBUSY);
   EXPECT_EQ(status.message(), "filesystem operation is busy");
   EXPECT_EQ(attempts, 1);
 }
@@ -474,7 +475,7 @@ TEST(RedisMetaClientTest, DoesNotRetryWatchErrorEscapingFromCallback) {
     throw sw::redis::WatchError();
   });
 
-  EXPECT_EQ(status.code(), utils::Status::kIOError);
+  EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_EQ(attempts, 1);
 }
 
@@ -512,7 +513,7 @@ TEST(RedisMetaClientTest, WatchConflictRetryLimitReturnsIOError) {
     return transaction.Set(key, "committed");
   });
 
-  EXPECT_EQ(status.code(), utils::Status::kIOError);
+  EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_EQ(status.message(), "Redis transaction retry limit exceeded");
   EXPECT_EQ(attempts, 3);
   other.del(key);
@@ -548,7 +549,7 @@ TEST(RedisMetaClientTest, DoesNotRetryAmbiguousExecTimeout) {
   });
   control.command<void>("CLIENT", "UNPAUSE");
 
-  EXPECT_EQ(status.code(), utils::Status::kIOError);
+  EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_NE(status.message().find("ambiguous after EXEC"), std::string::npos);
   EXPECT_EQ(attempts, 1);
   control.del(key);
@@ -582,13 +583,13 @@ TEST(RedisMetaClientTest, KvTransactionValidatesOutputsAndRejectsReadAfterWrite)
   RedisMetaClient store(config);
   const std::string key = UniqueRedisName("kv-validation");
   const auto status = store.Transact([&](RedisKvTxn &txn) {
-    EXPECT_EQ(txn.Get(key, nullptr).code(), utils::Status::kInvalidArgument);
-    EXPECT_EQ(txn.HGet(key, "field", nullptr).code(), utils::Status::kInvalidArgument);
-    EXPECT_EQ(txn.HLen(key, nullptr).code(), utils::Status::kInvalidArgument);
+    EXPECT_EQ(txn.Get(key, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.HGet(key, "field", nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.HLen(key, nullptr).ToErrno(), EINVAL);
     uint64_t next_cursor = 0;
     std::vector<std::pair<std::string, std::string>> values;
-    EXPECT_EQ(txn.HScan(key, 0, 16, nullptr, &next_cursor).code(), utils::Status::kInvalidArgument);
-    EXPECT_EQ(txn.HScan(key, 0, 16, &values, nullptr).code(), utils::Status::kInvalidArgument);
+    EXPECT_EQ(txn.HScan(key, 0, 16, nullptr, &next_cursor).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.HScan(key, 0, 16, &values, nullptr).ToErrno(), EINVAL);
 
     auto status = txn.Set(key, "value");
     if (!status.ok()) {
@@ -596,10 +597,10 @@ TEST(RedisMetaClientTest, KvTransactionValidatesOutputsAndRejectsReadAfterWrite)
     }
     std::string value;
     uint64_t length = 0;
-    EXPECT_EQ(txn.Get(key, &value).code(), utils::Status::kInvalidArgument);
-    EXPECT_EQ(txn.HGet(key, "field", &value).code(), utils::Status::kInvalidArgument);
-    EXPECT_EQ(txn.HLen(key, &length).code(), utils::Status::kInvalidArgument);
-    EXPECT_EQ(txn.HScan(key, 0, 16, &values, &next_cursor).code(), utils::Status::kInvalidArgument);
+    EXPECT_EQ(txn.Get(key, &value).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.HGet(key, "field", &value).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.HLen(key, &length).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.HScan(key, 0, 16, &values, &next_cursor).ToErrno(), EINVAL);
     return utils::Status::OK();
   });
   EXPECT_TRUE(status.ok()) << status.message();
@@ -761,7 +762,7 @@ TEST(RedisMetaOpsTest, GetInodeUsesDirectMetadataReadPath) {
   EXPECT_EQ(loaded.attr.size, inode.attr.size);
 
   const auto invalid_status = RunInFiber([&] { return ops.GetInode(inode.ino, nullptr); });
-  EXPECT_EQ(invalid_status.code(), utils::Status::kInvalidArgument);
+  EXPECT_EQ(invalid_status.ToErrno(), EINVAL);
 }
 
 TEST(RedisMetaClientTest, MGetValidatesOutputAndEmptyInput) {
@@ -774,7 +775,7 @@ TEST(RedisMetaClientTest, MGetValidatesOutputAndEmptyInput) {
   std::vector<std::optional<std::string>> values{std::string("stale")};
   ASSERT_TRUE(client.MGet({}, &values).ok());
   EXPECT_TRUE(values.empty());
-  EXPECT_EQ(client.MGet({"unused"}, nullptr).code(), utils::Status::kInvalidArgument);
+  EXPECT_EQ(client.MGet({"unused"}, nullptr).ToErrno(), EINVAL);
 }
 
 TEST(RedisMetaClientTest, MGetReportsConnectionFailure) {
@@ -786,7 +787,7 @@ TEST(RedisMetaClientTest, MGetReportsConnectionFailure) {
   RedisMetaClient client(config);
   std::vector<std::optional<std::string>> values;
   const auto status = client.MGet({"unreachable"}, &values);
-  EXPECT_EQ(status.code(), utils::Status::kIOError) << status.message();
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
 }
 
 TEST(RedisMetaOpsTest, GetInodesUsesAlignedBatchReadWithMissingEntries) {
@@ -822,7 +823,7 @@ TEST(RedisMetaOpsTest, GetInodesUsesAlignedBatchReadWithMissingEntries) {
   EXPECT_TRUE(results.empty());
 
   const auto invalid_status = RunInFiber([&] { return ops.GetInodes({first.ino}, nullptr); });
-  EXPECT_EQ(invalid_status.code(), utils::Status::kInvalidArgument);
+  EXPECT_EQ(invalid_status.ToErrno(), EINVAL);
 }
 
 TEST(RedisMetaOpsTest, GetInodesPropagatesConnectionFailure) {
@@ -834,7 +835,7 @@ TEST(RedisMetaOpsTest, GetInodesPropagatesConnectionFailure) {
   RedisMetaOps ops(config, "unreachable-get-inodes");
   std::vector<std::optional<SwordFsInode>> results;
   const auto status = RunInFiber([&] { return ops.GetInodes({42}, &results); });
-  EXPECT_EQ(status.code(), utils::Status::kIOError) << status.message();
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
 }
 
 TEST(RedisMetaOpsTest, GetInodesRejectsMalformedAndMismatchedRecords) {
@@ -851,14 +852,14 @@ TEST(RedisMetaOpsTest, GetInodesRejectsMalformedAndMismatchedRecords) {
   constexpr InodeID kMalformedIno = 44;
   redis.set(key.Inode(kMalformedIno), "not-an-inode");
   std::vector<std::optional<SwordFsInode>> results;
-  EXPECT_TRUE(RunInFiber([&] { return ops.GetInodes({kMalformedIno}, &results); }).IsMalformed());
+  EXPECT_TRUE(RunInFiber([&] { return ops.GetInodes({kMalformedIno}, &results); }).ToErrno() == EIO);
 
   constexpr InodeID kRequestedIno = 46;
   SwordFsInode other(45, SwordFsAttr(45, S_IFREG | 0644), kRootInodeId);
   std::string encoded;
   ASSERT_TRUE(other.SerializeTo(&encoded).ok());
   redis.set(key.Inode(kRequestedIno), encoded);
-  EXPECT_TRUE(RunInFiber([&] { return ops.GetInodes({kRequestedIno}, &results); }).IsMalformed());
+  EXPECT_TRUE(RunInFiber([&] { return ops.GetInodes({kRequestedIno}, &results); }).ToErrno() == EIO);
 }
 
 TEST(RedisMetaOpsTest, LookupEntryOwnsReadOnlyTransaction) {
@@ -886,7 +887,7 @@ TEST(RedisMetaOpsTest, LookupEntryOwnsReadOnlyTransaction) {
   EXPECT_EQ(loaded.ino, child.ino);
 
   const auto invalid_status = RunInFiber([&] { return ops.LookupEntry(kRootInodeId, "child", nullptr); });
-  EXPECT_EQ(invalid_status.code(), utils::Status::kInvalidArgument);
+  EXPECT_EQ(invalid_status.ToErrno(), EINVAL);
 }
 
 TEST(RedisMetaTxnTest, PrivateIndexPublicationCommitsAndRejectsWithLogicalHead) {
@@ -948,7 +949,7 @@ TEST(RedisMetaTxnTest, PrivateIndexPublicationCommitsAndRejectsWithLogicalHead) 
 
   const SwordFsChunk replacement{.index = 0, .start_offset = 0, .revision = 2, .size = 96};
   strategy.index.reject_publish = true;
-  EXPECT_EQ(publish(first, replacement, ChunkPublishIntent{.payload = "manifest-two"}).code(), utils::Status::kIOError);
+  EXPECT_EQ(publish(first, replacement, ChunkPublishIntent{.payload = "manifest-two"}).ToErrno(), EIO);
   ASSERT_TRUE(last_cleanup.has_value());
   EXPECT_FALSE(redis.hget(private_hash, "2").has_value());
   SwordFsChunk head;
@@ -1016,7 +1017,7 @@ TEST(RedisMetaTxnTest, AddEntryRejectsExistingNameWithoutPersistingChild) {
     RedisMetaTxn txn(kv_txn, key, 4096);
     return txn.AddEntry(kRootInodeId, "child", child, &root);
   });
-  EXPECT_TRUE(status.IsAlreadyExists());
+  EXPECT_TRUE(status.ToErrno() == EEXIST);
   EXPECT_FALSE(redis.exists(key.Inode(child.ino)));
   EXPECT_EQ(redis.get(key.InodeCount()).value_or(""), "2");
 }
@@ -1100,12 +1101,12 @@ TEST(RedisMetaTxnTest, ReadPrimitivesValidateOutputs) {
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096);
-    EXPECT_EQ(txn.LookupInode(file.ino, nullptr).code(), utils::Status::kInvalidArgument);
+    EXPECT_EQ(txn.LookupInode(file.ino, nullptr).ToErrno(), EINVAL);
 
     SwordFsInode missing;
     auto status = txn.LookupEntry(file.ino, "missing", &missing);
-    EXPECT_TRUE(status.IsNotDirectory());
-    EXPECT_EQ(txn.LookupEntry(file.ino, "missing", nullptr).code(), utils::Status::kInvalidArgument);
+    EXPECT_TRUE(status.ToErrno() == ENOTDIR);
+    EXPECT_EQ(txn.LookupEntry(file.ino, "missing", nullptr).ToErrno(), EINVAL);
 
     return utils::Status::OK();
   });
@@ -1132,7 +1133,7 @@ TEST(RedisMetaTxnTest, LookupEntryRejectsDanglingDirectoryEntry) {
     SwordFsInode out;
     return txn.LookupEntry(kRootInodeId, "dangling", &out);
   });
-  EXPECT_TRUE(status.IsMalformed()) << status.message();
+  EXPECT_TRUE(status.ToErrno() == EIO) << status.message();
 }
 
 TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
@@ -1181,7 +1182,7 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
   const auto invalid_status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 0);
-    EXPECT_EQ(txn.Truncate(9, 1024).code(), utils::Status::kInternal);
+    EXPECT_EQ(txn.Truncate(9, 1024).ToErrno(), EIO);
     return utils::Status::OK();
   });
   EXPECT_TRUE(invalid_status.ok()) << invalid_status.message();
@@ -1236,7 +1237,7 @@ TEST(RedisMetaTxnTest, RegisterPendingDeletesRejectsInvalidEnvelope) {
     RedisMetaTxn txn(kv_txn, key, 4096);
     return txn.RegisterPendingDeletes(work);
   });
-  EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
+  EXPECT_EQ(status.ToErrno(), EINVAL);
   EXPECT_EQ(redis.hlen(key.PendingDeletes()), 0);
 }
 
@@ -1336,7 +1337,7 @@ TEST(RedisMetaTxnTest, TruncateRejectsInvalidChunkIdentity) {
     RedisMetaTxn txn(kv_txn, key, 4096);
     return txn.Truncate(file.ino, 0);
   });
-  EXPECT_TRUE(status.IsMalformed()) << status.message();
+  EXPECT_TRUE(status.ToErrno() == EIO) << status.message();
   EXPECT_TRUE(redis.hexists(key.Chunk(file.ino), "0"));
 
   redis.del(key.Chunk(file.ino));
@@ -1347,7 +1348,7 @@ TEST(RedisMetaTxnTest, TruncateRejectsInvalidChunkIdentity) {
     RedisMetaTxn txn(kv_txn, key, 4096);
     return txn.Truncate(file.ino, 0);
   });
-  EXPECT_TRUE(field_mismatch_status.IsMalformed()) << field_mismatch_status.message();
+  EXPECT_TRUE(field_mismatch_status.ToErrno() == EIO) << field_mismatch_status.message();
 }
 
 TEST(RedisMetaTxnTest, TruncatePropagatesWrongTypeChunkMapFromDestructivePhase) {
@@ -1398,7 +1399,7 @@ TEST(RedisMetaTxnTest, CommitChunkRejectsCorruptPersistedDescriptor) {
 
   SwordFsChunk replacement{.index = 0, .start_offset = 0, .revision = 2, .size = 64};
   const auto status = CommitChunkTxn(store, key, 4096, file.ino, std::nullopt, replacement);
-  EXPECT_TRUE(status.IsMalformed()) << status.message();
+  EXPECT_TRUE(status.ToErrno() == EIO) << status.message();
 }
 
 TEST(RedisMetaTxnTest, CommitChunkReturnsCleanupCandidateWithoutPendingDeleteDependency) {
@@ -1475,7 +1476,7 @@ TEST(RedisMetaTxnTest, CommitChunkDefiniteRejectionReturnsReplacementAsCleanupCa
   });
 
   ASSERT_TRUE(status.ok()) << status.message();
-  EXPECT_TRUE(publication_result.IsAlreadyExists()) << publication_result.message();
+  EXPECT_TRUE(publication_result.ToErrno() == EEXIST) << publication_result.message();
   ASSERT_TRUE(cleanup_candidate.has_value());
   swordfs::chunk::WholeObjectRef cleanup_ref;
   ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectDelete(*cleanup_candidate, 4096, &cleanup_ref).ok());
@@ -1502,7 +1503,7 @@ TEST(RedisMetaTxnTest, CommitChunkRejectsConflictingInitialPublication) {
 
   chunk.revision = 2;
   const auto duplicate_status = CommitChunkTxn(store, key, 4096, 9, std::nullopt, chunk);
-  EXPECT_TRUE(duplicate_status.IsAlreadyExists()) << duplicate_status.message();
+  EXPECT_TRUE(duplicate_status.ToErrno() == EEXIST) << duplicate_status.message();
 
   const auto value = redis.hget(key.Chunk(9), "0");
   ASSERT_TRUE(value.has_value());

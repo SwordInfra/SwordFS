@@ -10,6 +10,8 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
+#include <cerrno>
+
 #include "FiberTest.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "utils/Context.hpp"
@@ -61,7 +63,7 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameSourceNotFound) {
 
 FIBER_TEST_F(MemMetaImplRenameTest, RenameRefusesDot) {
   Status st = impl_->Rename(kRoot, ".", kRoot, "new", RenameFlag::kNone);
-  EXPECT_TRUE(st.IsBusy()) << "should refuse to rename '.'";
+  EXPECT_TRUE(st.ToErrno() == EBUSY) << "should refuse to rename '.'";
 }
 
 FIBER_TEST_F(MemMetaImplRenameTest, RenameRefusesDotDot) {
@@ -70,7 +72,7 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameRefusesDotDot) {
   impl_->Create(sub.ino, "f", 0644, nullptr);
 
   Status st = impl_->Rename(sub.ino, "..", kRoot, "new", RenameFlag::kNone);
-  EXPECT_TRUE(st.IsBusy()) << "should refuse to rename '..'";
+  EXPECT_TRUE(st.ToErrno() == EBUSY) << "should refuse to rename '..'";
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -181,7 +183,7 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoSubtreeFails) {
   impl_->MkDir(a.ino, "b", 0755, &b);
 
   Status st = impl_->Rename(kRoot, "a", b.ino, "a", RenameFlag::kNone);
-  EXPECT_EQ(st.code(), Status::kInvalidArgument) << st.message();
+  EXPECT_EQ(st.ToErrno(), EINVAL) << st.message();
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -193,7 +195,7 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameFileOverDirectoryFails) {
   impl_->MkDir(kRoot, "d", 0755, nullptr);
 
   Status st = impl_->Rename(kRoot, "f", kRoot, "d", RenameFlag::kNone);
-  EXPECT_EQ(st.code(), Status::kIsDirectory) << st.message();
+  EXPECT_EQ(st.ToErrno(), EISDIR) << st.message();
 }
 
 FIBER_TEST_F(MemMetaImplRenameTest, RenameDirectoryOverFileFails) {
@@ -201,7 +203,7 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameDirectoryOverFileFails) {
   impl_->MkDir(kRoot, "d", 0755, nullptr);
 
   Status st = impl_->Rename(kRoot, "d", kRoot, "f", RenameFlag::kNone);
-  EXPECT_EQ(st.code(), Status::kNotDirectory) << st.message();
+  EXPECT_EQ(st.ToErrno(), ENOTDIR) << st.message();
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -217,7 +219,7 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameOverwriteNonEmptyDirectoryFails) {
   impl_->Create(d2.ino, "child", 0644, nullptr);
 
   Status st = impl_->Rename(kRoot, "d1", kRoot, "d2", RenameFlag::kNone);
-  EXPECT_TRUE(st.IsNotEmpty()) << st.message();
+  EXPECT_TRUE(st.ToErrno() == ENOTEMPTY) << st.message();
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -275,7 +277,7 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoItselfFails) {
   // Rename "a" to become a child of itself (mv a a/x).  The descendant
   // check alone misses this because IsDescendantOf(a, a) is false.
   Status status = impl_->Rename(kRoot, "a", a.ino, "x", RenameFlag::kNone);
-  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+  EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
 
   // The directory must still be reachable from the root, unchanged.
   SwordFsInode found;
@@ -292,7 +294,7 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameDirectoryIntoOwnSubtreeStillFails) {
   impl_->MkDir(a.ino, "b", 0755, &b);
 
   Status status = impl_->Rename(kRoot, "a", b.ino, "x", RenameFlag::kNone);
-  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+  EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
 
   SwordFsInode found;
   EXPECT_TRUE(impl_->Lookup(kRoot, "a", &found).ok());
@@ -308,7 +310,7 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameExchangeDirectoryIntoItselfFails) {
   // Exchange root/a with a/b: the moved directory's new parent would be
   // itself.  The EXCHANGE path runs the same cycle check.
   Status status = impl_->Rename(kRoot, "a", a.ino, "b", RenameFlag::kExchange);
-  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+  EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
 
   // Both entries must be untouched.
   SwordFsInode found;
@@ -331,7 +333,7 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameExchangeWithAncestorDirectoryFails) {
   // The source-side check (a into b) passes here — only the symmetric
   // check catches this direction.
   Status status = impl_->Rename(x.ino, "a", kRoot, "b", RenameFlag::kExchange);
-  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+  EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
 
   // The whole subtree must be untouched.
   SwordFsInode found;

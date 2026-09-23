@@ -4,6 +4,8 @@
 #include <dirent.h>
 #include <gtest/gtest.h>
 
+#include <cerrno>
+
 #include "metadata/Types.hpp"
 #include "metadata/types/BufCodec.hpp"
 
@@ -104,7 +106,7 @@ TEST(MetadataTypesTest, ChunkRejectsInvalidRevision) {
   SwordFsChunk chunk{
       .index = 3, .start_offset = 4096, .revision = swordfs::metadata::kInvalidChunkRevision, .size = 1024};
   std::string encoded;
-  EXPECT_EQ(chunk.SerializeTo(&encoded).code(), swordfs::utils::Status::kInvalidArgument);
+  EXPECT_EQ(chunk.SerializeTo(&encoded).ToErrno(), EINVAL);
 
   swordfs::metadata::BufEncoder enc;
   enc.Header(swordfs::metadata::RecordType::kChunk);
@@ -115,7 +117,7 @@ TEST(MetadataTypesTest, ChunkRejectsInvalidRevision) {
   enc.Finish(&encoded);
 
   SwordFsChunk parsed;
-  EXPECT_TRUE(parsed.ParseFrom(encoded).IsMalformed());
+  EXPECT_TRUE(parsed.ParseFrom(encoded).ToErrno() == EIO);
 }
 
 TEST(MetadataTypesTest, ChunkRejectsNonCurrentSchemaVersion) {
@@ -132,7 +134,7 @@ TEST(MetadataTypesTest, ChunkRejectsNonCurrentSchemaVersion) {
     std::string encoded;
     enc.Finish(&encoded);
     SwordFsChunk parsed;
-    EXPECT_TRUE(parsed.ParseFrom(encoded).IsMalformed()) << "schema=" << schema_version;
+    EXPECT_TRUE(parsed.ParseFrom(encoded).ToErrno() == EIO) << "schema=" << schema_version;
   }
 }
 
