@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -116,6 +117,42 @@ utils::Status SeedEntry(sw::redis::Redis &redis, const redis::RedisKey &key, Ino
   return utils::Status::OK();
 }
 
+utils::Status SeedFrozenWholeObjectReclaim(sw::redis::Redis &redis, const redis::RedisKey &key, InodeID ino,
+                                           const SwordFsChunk &chunk, ReclaimWork *work) {
+  if (work == nullptr) {
+    return utils::Status::InvalidArgument("reclaim work output is null");
+  }
+
+  SwordFsAttr attr(ino, S_IFREG | 0644);
+  attr.nlink = 0;
+  SwordFsInode inode(ino, attr, kRootInodeId);
+  auto status = SeedInode(redis, key, inode);
+  if (!status.ok()) {
+    return status;
+  }
+
+  std::string chunk_value;
+  status = chunk.SerializeTo(&chunk_value);
+  if (!status.ok()) {
+    return status;
+  }
+  redis.hset(key.Chunk(ino), std::to_string(chunk.index), chunk_value);
+  redis.hset(key.Orphans(), std::to_string(ino), "1");
+  redis.set(key.InodeCount(), "2");
+
+  status = chunk::FreezeWholeObjectReclaim(ino, {chunk}, 4096, work);
+  if (!status.ok()) {
+    return status;
+  }
+  std::string encoded;
+  status = work->SerializeTo(&encoded);
+  if (!status.ok()) {
+    return status;
+  }
+  redis.hset(key.Reclaims(), std::to_string(ino), encoded);
+  return utils::Status::OK();
+}
+
 utils::Status CommitChunkTxn(RedisMetaClient &store, const redis::RedisKey &key, uint64_t chunk_size, InodeID ino,
                              const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement) {
   utils::Status publication_result;
@@ -133,6 +170,7 @@ utils::Status CommitChunkTxn(RedisMetaClient &store, const redis::RedisKey &key,
 class RecordingRedisIndex final : public IChunkIndexParticipant {
  public:
   bool reject_publish = false;
+  std::function<void()> prepare_reclaim_hook;
 
   utils::Status LoadPublished(IChunkIndexReader &reader, InodeID file_ino, const SwordFsChunk &head,
                               std::string *private_snapshot) const override {
@@ -153,6 +191,9 @@ class RecordingRedisIndex final : public IChunkIndexParticipant {
     return utils::Status::OK();
   }
   utils::Status PrepareReclaim(IChunkIndexTxn &, InodeID, const std::vector<SwordFsChunk> &) const override {
+    if (prepare_reclaim_hook) {
+      prepare_reclaim_hook();
+    }
     return utils::Status::OK();
   }
 };
@@ -160,6 +201,7 @@ class RecordingRedisIndex final : public IChunkIndexParticipant {
 class RecordingRedisStrategy final : public chunk::IChunkOverwriteStrategy {
  public:
   RecordingRedisIndex index;
+  std::function<void()> freeze_reclaim_hook;
 
   std::string_view name() const override {
     return "recording_redis";
@@ -183,6 +225,9 @@ class RecordingRedisStrategy final : public chunk::IChunkOverwriteStrategy {
   }
   utils::Status FreezeReclaim(IChunkIndexTxn &, InodeID file_ino, const std::vector<SwordFsChunk> &heads,
                               uint64_t chunk_size, ReclaimWork *out) const override {
+    if (freeze_reclaim_hook) {
+      freeze_reclaim_hook();
+    }
     return chunk::FreezeWholeObjectReclaim(file_ino, heads, chunk_size, out);
   }
   utils::Status DeletePending(const PendingDelete &work, uint64_t chunk_size, IMetaEngine *meta,
@@ -1511,7 +1556,7 @@ TEST(RedisMetaTxnTest, CommitChunkRejectsConflictingInitialPublication) {
   EXPECT_EQ(persisted.revision, 1U);
 }
 
-TEST(RedisMetaTxnTest, PrepareReclaimScansAuthoritativeChunksInsideTransaction) {
+TEST(RedisMetaTxnTest, FreezeReclaimScansAuthoritativeChunksInsideTransaction) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
@@ -1534,7 +1579,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimScansAuthoritativeChunksInsideTransaction) 
   std::optional<ReclaimWork> work;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096);
-    return txn.PrepareReclaim(file.ino, work);
+    return txn.FreezeReclaim(file.ino, work);
   });
 
   ASSERT_TRUE(status.ok()) << status.message();
@@ -1544,9 +1589,238 @@ TEST(RedisMetaTxnTest, PrepareReclaimScansAuthoritativeChunksInsideTransaction) 
   ASSERT_EQ(refs.size(), 1U);
   EXPECT_EQ(refs[0].descriptor, chunk);
   EXPECT_EQ(refs[0].key, swordfs::chunk::FormatChunkObjectKey(file.ino, chunk.index, chunk.revision));
-  EXPECT_FALSE(redis.exists(key.Inode(file.ino)));
-  EXPECT_FALSE(redis.exists(key.Chunk(file.ino)));
+  EXPECT_TRUE(redis.exists(key.Inode(file.ino)));
+  EXPECT_TRUE(redis.exists(key.Chunk(file.ino)));
   EXPECT_TRUE(redis.hexists(key.Reclaims(), std::to_string(file.ino)));
+}
+
+TEST(RedisMetaTxnTest, FinalizeReclaimRejectsInvalidFrozenAuthorityBeforeMutation) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  constexpr InodeID kIno = 9;
+  const SwordFsChunk chunk{0, 0, 1, 4096};
+  RedisMetaClient store(config);
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  auto finalize = [&](const redis::RedisKey &key, const ReclaimWork &work) {
+    return store.Transact([&](RedisKvTxn &kv_txn) {
+      RedisMetaTxn txn(kv_txn, key, 4096);
+      return txn.FinalizeReclaim(kIno, work);
+    });
+  };
+
+  {
+    const redis::RedisKey key(config.db, UniqueRedisName("finalize-work-ino"));
+    ReclaimWork work;
+    ASSERT_TRUE(SeedFrozenWholeObjectReclaim(redis, key, kIno, chunk, &work).ok());
+    work.ino = kIno + 1;
+    const auto status = finalize(key, work);
+    EXPECT_EQ(status.code(), utils::Status::kInvalidArgument);
+    EXPECT_TRUE(redis.exists(key.Inode(kIno)));
+  }
+
+  {
+    const redis::RedisKey key(config.db, UniqueRedisName("finalize-malformed-reclaim"));
+    ReclaimWork work;
+    ASSERT_TRUE(SeedFrozenWholeObjectReclaim(redis, key, kIno, chunk, &work).ok());
+    redis.hset(key.Reclaims(), std::to_string(kIno), "malformed");
+    const auto status = finalize(key, work);
+    EXPECT_TRUE(status.IsMalformed()) << status.message();
+    EXPECT_TRUE(redis.exists(key.Inode(kIno)));
+  }
+
+  {
+    const redis::RedisKey key(config.db, UniqueRedisName("finalize-reclaim-ino-mismatch"));
+    ReclaimWork work;
+    ASSERT_TRUE(SeedFrozenWholeObjectReclaim(redis, key, kIno, chunk, &work).ok());
+    ReclaimWork persisted = work;
+    persisted.ino = kIno + 1;
+    std::string encoded;
+    ASSERT_TRUE(persisted.SerializeTo(&encoded).ok());
+    redis.hset(key.Reclaims(), std::to_string(kIno), encoded);
+    const auto status = finalize(key, work);
+    EXPECT_TRUE(status.IsMalformed()) << status.message();
+    EXPECT_TRUE(redis.exists(key.Inode(kIno)));
+  }
+
+  {
+    const redis::RedisKey key(config.db, UniqueRedisName("finalize-reclaim-content-mismatch"));
+    ReclaimWork work;
+    ASSERT_TRUE(SeedFrozenWholeObjectReclaim(redis, key, kIno, chunk, &work).ok());
+    ReclaimWork different;
+    const SwordFsChunk different_chunk{0, 0, 2, 4096};
+    ASSERT_TRUE(chunk::FreezeWholeObjectReclaim(kIno, {different_chunk}, 4096, &different).ok());
+    const auto status = finalize(key, different);
+    EXPECT_TRUE(status.IsBusy()) << status.message();
+    EXPECT_TRUE(redis.exists(key.Inode(kIno)));
+  }
+}
+
+TEST(RedisMetaTxnTest, FinalizeReclaimRejectsInvalidLiveStateBeforeMutation) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  constexpr InodeID kIno = 9;
+  const SwordFsChunk chunk{0, 0, 1, 4096};
+  RedisMetaClient store(config);
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  auto finalize = [&](const redis::RedisKey &key, const ReclaimWork &work) {
+    return store.Transact([&](RedisKvTxn &kv_txn) {
+      RedisMetaTxn txn(kv_txn, key, 4096);
+      return txn.FinalizeReclaim(kIno, work);
+    });
+  };
+  auto expect_live = [&](const redis::RedisKey &key) {
+    EXPECT_TRUE(redis.exists(key.Inode(kIno)));
+    EXPECT_TRUE(redis.exists(key.Chunk(kIno)));
+  };
+
+  {
+    const redis::RedisKey key(config.db, UniqueRedisName("finalize-missing-orphan"));
+    ReclaimWork work;
+    ASSERT_TRUE(SeedFrozenWholeObjectReclaim(redis, key, kIno, chunk, &work).ok());
+    redis.hdel(key.Orphans(), std::to_string(kIno));
+    const auto status = finalize(key, work);
+    EXPECT_TRUE(status.IsMalformed()) << status.message();
+    expect_live(key);
+  }
+
+  {
+    const redis::RedisKey key(config.db, UniqueRedisName("finalize-invalid-orphan"));
+    ReclaimWork work;
+    ASSERT_TRUE(SeedFrozenWholeObjectReclaim(redis, key, kIno, chunk, &work).ok());
+    redis.hset(key.Orphans(), std::to_string(kIno), "invalid");
+    const auto status = finalize(key, work);
+    EXPECT_TRUE(status.IsMalformed()) << status.message();
+    expect_live(key);
+  }
+
+  {
+    const redis::RedisKey key(config.db, UniqueRedisName("finalize-malformed-chunks"));
+    ReclaimWork work;
+    ASSERT_TRUE(SeedFrozenWholeObjectReclaim(redis, key, kIno, chunk, &work).ok());
+    redis.del(key.Chunk(kIno));
+    redis.set(key.Chunk(kIno), "wrong-type");
+    const auto status = finalize(key, work);
+    EXPECT_EQ(status.code(), utils::Status::kIOError);
+    EXPECT_TRUE(redis.exists(key.Inode(kIno)));
+  }
+
+  {
+    const redis::RedisKey key(config.db, UniqueRedisName("finalize-changed-chunk"));
+    ReclaimWork work;
+    ASSERT_TRUE(SeedFrozenWholeObjectReclaim(redis, key, kIno, chunk, &work).ok());
+    const SwordFsChunk changed{0, 0, 2, 4096};
+    std::string encoded;
+    ASSERT_TRUE(changed.SerializeTo(&encoded).ok());
+    redis.hset(key.Chunk(kIno), "0", encoded);
+    const auto status = finalize(key, work);
+    EXPECT_TRUE(status.IsBusy()) << status.message();
+    expect_live(key);
+  }
+
+  {
+    const redis::RedisKey key(config.db, UniqueRedisName("finalize-missing-count"));
+    ReclaimWork work;
+    ASSERT_TRUE(SeedFrozenWholeObjectReclaim(redis, key, kIno, chunk, &work).ok());
+    redis.del(key.InodeCount());
+    const auto status = finalize(key, work);
+    EXPECT_TRUE(status.IsNotFound()) << status.message();
+    expect_live(key);
+  }
+}
+
+TEST(RedisMetaTxnTest, FinalizeReclaimIgnoresUnrelatedSharedMetadataChanges) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  constexpr InodeID kIno = 9;
+  constexpr InodeID kUnrelatedIno = 10;
+  const SwordFsChunk chunk{0, 0, 1, 4096};
+  const redis::RedisKey key(config.db, UniqueRedisName("finalize-unrelated-shared-state"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+  ReclaimWork work;
+  ASSERT_TRUE(SeedFrozenWholeObjectReclaim(redis, key, kIno, chunk, &work).ok());
+
+  RecordingRedisStrategy strategy;
+  int hook_calls = 0;
+  strategy.index.prepare_reclaim_hook = [&] {
+    ++hook_calls;
+    redis.hset(key.Reclaims(), std::to_string(kUnrelatedIno), "unrelated");
+    redis.hset(key.Orphans(), std::to_string(kUnrelatedIno), "1");
+    (void)redis.incrby(key.InodeCount(), 1);
+  };
+
+  RedisMetaClient store(config);
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    return txn.FinalizeReclaim(kIno, work);
+  });
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(hook_calls, 1);
+  EXPECT_FALSE(redis.exists(key.Inode(kIno)));
+  EXPECT_FALSE(redis.exists(key.Chunk(kIno)));
+  EXPECT_FALSE(redis.hexists(key.Orphans(), std::to_string(kIno)));
+  EXPECT_TRUE(redis.hexists(key.Reclaims(), std::to_string(kIno)));
+  EXPECT_TRUE(redis.hexists(key.Reclaims(), std::to_string(kUnrelatedIno)));
+  EXPECT_TRUE(redis.hexists(key.Orphans(), std::to_string(kUnrelatedIno)));
+  const auto count = redis.get(key.InodeCount());
+  ASSERT_TRUE(count.has_value());
+  EXPECT_EQ(*count, "2");
+}
+
+TEST(RedisMetaTxnTest, FreezeReclaimIgnoresUnrelatedFrozenWorkChanges) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  constexpr InodeID kIno = 9;
+  constexpr InodeID kUnrelatedIno = 10;
+  const SwordFsChunk chunk{0, 0, 1, 4096};
+  const redis::RedisKey key(config.db, UniqueRedisName("freeze-unrelated-reclaim"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  SwordFsAttr attr(kIno, S_IFREG | 0644);
+  attr.nlink = 0;
+  ASSERT_TRUE(SeedInode(redis, key, SwordFsInode(kIno, attr, kRootInodeId)).ok());
+  std::string chunk_value;
+  ASSERT_TRUE(chunk.SerializeTo(&chunk_value).ok());
+  redis.hset(key.Chunk(kIno), std::to_string(chunk.index), chunk_value);
+  redis.hset(key.Orphans(), std::to_string(kIno), "1");
+
+  RecordingRedisStrategy strategy;
+  int hook_calls = 0;
+  strategy.freeze_reclaim_hook = [&] {
+    ++hook_calls;
+    redis.hset(key.Reclaims(), std::to_string(kUnrelatedIno), "unrelated-" + std::to_string(hook_calls));
+  };
+
+  RedisMetaClient store(config);
+  std::optional<ReclaimWork> work;
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    return txn.FreezeReclaim(kIno, work);
+  });
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(hook_calls, 1);
+  ASSERT_TRUE(work.has_value());
+  EXPECT_EQ(work->ino, kIno);
+  EXPECT_TRUE(redis.hexists(key.Reclaims(), std::to_string(kIno)));
+  EXPECT_TRUE(redis.hexists(key.Reclaims(), std::to_string(kUnrelatedIno)));
+  EXPECT_TRUE(redis.exists(key.Inode(kIno)));
+  EXPECT_TRUE(redis.exists(key.Chunk(kIno)));
+  EXPECT_TRUE(redis.hexists(key.Orphans(), std::to_string(kIno)));
 }
 
 }  // namespace swordfs::metadata

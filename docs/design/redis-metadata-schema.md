@@ -97,10 +97,14 @@ stateDiagram-v2
     Uncertain --> [*]
 ```
 
-Reads through `RedisKvTxn` watch the key before reading. Hash fields therefore
-share key-level conflict granularity: unrelated names in one directory or
-indexes in one chunk Hash can still cause retries. All reads must precede the
-first queued write; the wrapper rejects reads after writes.
+Reads through `RedisKvTxn` watch the key before reading by default. Hash
+fields therefore share key-level conflict granularity: unrelated names in one
+directory or indexes in one chunk Hash can still cause retries. A narrow
+`kUnwatched` read mode exists for validation-only reads whose same-key
+concurrent changes are explicitly outside the transaction's correctness
+snapshot; reclaim uses it for per-inode fields inside shared lifecycle Hashes
+and for the globally changing inode counter's type validation. All reads must
+precede the first queued write; the wrapper rejects reads after writes.
 
 `IChunkIndexTxn` exposes strategy-private hash read/scan/put/erase operations
 through the same `RedisKvTxn`. Strategy freeze callbacks and index
@@ -198,19 +202,57 @@ than being treated as a definite rollback.
 ### Object cleanup registration and delete authority
 
 Redis and the object store do not share a transaction. The handoff is
-`orphans → reclaims → completion` for last-link reclaim: preparation freezes
-strategy-owned deletion targets while removing live metadata, and completion
-removes the frozen work only after deletion succeeds. Freeze may read the
-strategy-private index in that same transaction. Replay uses the frozen
-payload; it does not reconstruct targets from a newer logical head. Before
-physical deletion, the strategy verifies that the live inode is absent, so a
-partially applied Redis `EXEC` cannot authorize deletion of still-live data.
-Preparation replay finishes an unlinked live inode's transition. Once a
-frozen reclaim record exists, `Link` refuses to revive that inode because a
-partial `EXEC` may already have removed its public chunk Hash. An unexpected
-linked inode retains the frozen record and returns an error. The reclaimer
-routes pending records back through preparation under its local open-handle
-fence before asking the strategy to delete data.
+`orphans → reclaims → completion` for last-link reclaim. Redis preparation
+uses two metadata transactions:
+
+1. **Freeze** reads the live inode, published chunk heads, and
+   strategy-private index, then persists the opaque `ReclaimWork` record
+   without removing live metadata. Once the frozen record exists, `Link`
+   refuses to revive the inode and retry has a durable recovery authority.
+2. **Finalize** validates the frozen record and orphan marker, then starts from
+   a fresh watched snapshot of the still-unlinked live inode and
+   public/private chunk state. The frozen/orphan fields live in shared Hashes,
+   so their per-inode values are validated without WATCHing the whole shared
+   key: after freeze they are immutable for that inode until finalization and
+   completion, while unrelated inode fields may continue to change.
+   `inode_count` is likewise validated as a positive signed Redis integer
+   without WATCHing its numeric value. Legitimate concurrent `INCRBY`
+   operations preserve that type invariant and are not part of this inode's
+   reclaim snapshot. The transaction then applies strategy-private reclaim
+   changes, removes public chunk heads and the orphan marker, decrements
+   `inode_count`, and deletes the live inode.
+
+The split prevents a command-error partial `EXEC` from destroying the
+information needed to reconcile inode accounting. Under the supported schema,
+all finalization commands are type-valid before `EXEC`; there is no expected
+command-error path that can delete the inode without applying its count
+transition. If freeze succeeds and finalization fails before `EXEC`, the live
+inode/chunk/orphan state is still available and retry can resume safely. If
+finalization completed but its reply was ambiguous, retry observes the frozen
+record with no live inode and treats metadata finalization as complete.
+
+This WATCH scope is deliberately inode-local. Redis WATCH tracks whole keys,
+not individual Hash fields. Watching the shared `reclaims` or `orphans`
+Hashes, or the globally changing `inode_count` key, would make independent
+inode lifecycle operations conflict and can turn reclaim into a global
+serialization point. Schema corruption racing finalization is outside the
+normal protocol; supported writers preserve the validated Redis types.
+
+The superseded single-transaction protocol was intrinsically ambiguous:
+`reclaim exists + inode absent + orphan absent` could mean either full
+success or a partial `EXEC` where inode deletion succeeded and the later
+counter decrement failed. Replaying another decrement would corrupt the
+successful case. SwordFS is beta, so the current design replaces that
+ambiguous protocol instead of adding migration logic for historical ambiguous
+states.
+
+Replay always uses the frozen payload; it does not reconstruct targets from a
+newer logical head. Before physical deletion, the strategy verifies that the
+live inode is absent, so a partially applied Redis `EXEC` cannot authorize
+deletion of still-live data. An unexpected linked inode retains the frozen
+record and returns an error. The reclaimer routes pending records back through
+preparation under its local open-handle fence before asking the strategy to
+delete data. Completion removes the frozen work only after deletion succeeds.
 
 Rewrite/truncate cleanup intentionally uses a weaker contract. The
 authoritative metadata transaction does **not** depend on `pending_deletes`:

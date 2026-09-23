@@ -56,14 +56,17 @@ class RedisMetaTxn : public IChunkIndexTxn {
   // ────────────────────────────────────────────────────────────────
   // Reclaim operations
   // ────────────────────────────────────────────────────────────────
-  // Freeze the reclaim of |ino|. The transaction scans and WATCHes the
-  // authoritative chunk hash itself before queuing any writes so the frozen
-  // identities and live-metadata removal use one optimistic snapshot.
-  //
-  // On OK, |work| contains the frozen identities when the point of no return
-  // was crossed/replayed. An empty optional is the normal non-reclaimable
-  // outcome after stale orphan cleanup.
-  utils::Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> &work);
+  // Persist immutable reclaim work without removing live metadata. On OK,
+  // |work| contains the frozen identities when reclaim is active/replayed.
+  // An empty optional is the normal non-reclaimable outcome after stale
+  // orphan cleanup.
+  utils::Status FreezeReclaim(InodeID ino, std::optional<ReclaimWork> &work);
+
+  // Finalize a previously frozen reclaim from a fresh watched snapshot.
+  // Every state needed by the destructive transition is validated before the
+  // first write is queued. Missing live inode means a previous finalization
+  // already completed under the current protocol.
+  utils::Status FinalizeReclaim(InodeID ino, const ReclaimWork &work);
 
   // Drop the frozen record of |ino|. Called only once every object of the
   // record has been deleted; missing records are not an error.
@@ -122,6 +125,7 @@ class RedisMetaTxn : public IChunkIndexTxn {
   utils::Status TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size,
                                std::vector<PendingDelete> *detached_chunks);
   utils::Status DeleteChunks(InodeID ino);
+  utils::Status ValidateInodeCount();
   utils::Status IsDescendantOf(InodeID ancestor_ino, InodeID child_ino, bool *result);
   utils::Status DetachEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &target,
                             SwordFsInode *parent);
