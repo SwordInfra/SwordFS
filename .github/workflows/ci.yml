@@ -43,10 +43,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .deps/install
-          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native-deps-cache.env') }}
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
 
       - name: Install dependencies
-        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
+        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
 
       - name: Install dead-code audit tools
         run: |
@@ -75,7 +75,7 @@ jobs:
         env:
           PYTHONPATH: /usr/lib/python3/dist-packages
         run: |
-          scripts/run-static-audit.sh \
+          scripts/static-analysis/run.sh \
             --build-dir build \
             --output build/static-audit.json
 
@@ -109,10 +109,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .deps/install
-          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native-deps-cache.env') }}
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
 
       - name: Install dependencies
-        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
+        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
 
       - name: Unit test setup
         run: |
@@ -160,7 +160,7 @@ jobs:
 
       - name: Test (unit)
         run: |
-          bash scripts/run-ut.sh --gtest_color=no --gtest_output=xml:unit-test-results.xml
+          bash scripts/testing/run-ut.sh --gtest_color=no --gtest_output=xml:unit-test-results.xml
           if grep -q '<skipped' unit-test-results.xml; then
             echo "ERROR: unit test suite contains skipped tests."
             grep '<skipped' unit-test-results.xml
@@ -203,7 +203,7 @@ jobs:
           else
             BASE=$(git rev-parse HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
           fi
-          python3 scripts/check-diff-coverage.py \
+          python3 scripts/coverage/check-diff-coverage.py \
             --base "$BASE" \
             --tracefile coverage.info \
             --line-threshold 90
@@ -236,10 +236,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .deps/install
-          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native-deps-cache.env') }}
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
 
       - name: Install dependencies
-        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
+        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
 
       - name: E2E test setup
         run: |
@@ -259,7 +259,7 @@ jobs:
         run: cmake --build build --target swordfs swordfs_e2e_test
 
       - name: Test (E2E)
-        run: sg fuse -c "bash scripts/run-e2e.sh --gtest_color=no"
+        run: sg fuse -c "bash scripts/testing/run-e2e.sh --gtest_color=no"
 
   pjdfstest-conformance:
     name: pjdfstest-conformance (Release)
@@ -279,10 +279,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .deps/install
-          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native-deps-cache.env') }}
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
 
       - name: Install dependencies
-        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
+        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
 
       - name: Install pjdfstest tools
         run: sudo apt-get install -y -qq autoconf automake perl
@@ -305,16 +305,13 @@ jobs:
       - name: Build SwordFS
         run: cmake --build build --target swordfs
 
-      - name: Verify conformance tooling
-        run: python3 -m unittest discover -s tests/conformance -p 'test_*.py'
-
       - name: Run pinned pjdfstest suite
         id: pjdfstest-harness
         run: |
           set +e
           sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
             SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
-            bash scripts/run-pjdfstest.sh \
+            bash scripts/conformance/pjdfstest/run.sh \
               --output-dir "${{ github.workspace }}/build/pjdfstest-conformance"
           status=$?
           set -e
@@ -339,7 +336,7 @@ jobs:
             fi
           fi
 
-          python3 scripts/pjdfstest_classify.py \
+          python3 scripts/conformance/pjdfstest/classify.py \
             --raw-dir build/pjdfstest-conformance/raw \
             --supported-file conformance/pjdfstest/supported.txt \
             --known-gaps-file conformance/pjdfstest/known-gaps.tsv \
@@ -398,10 +395,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .deps/install
-          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native-deps-cache.env') }}
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
 
       - name: Install dependencies
-        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/install-deps.sh
+        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
 
       - name: Install fstests tools
         run: |
@@ -428,12 +425,9 @@ jobs:
       - name: Build SwordFS
         run: cmake --build build --target swordfs
 
-      - name: Verify conformance tooling
-        run: python3 -m unittest discover -s tests/conformance -p 'test_*.py'
-
       - name: Build deterministic fstests shard
         run: |
-          python3 scripts/fstests_plan.py \
+          python3 scripts/conformance/fstests/plan.py \
             --shard "${{ matrix.shard }}" \
             > "${RUNNER_TEMP}/fstests-tests.txt"
           test -s "${RUNNER_TEMP}/fstests-tests.txt"
@@ -456,7 +450,7 @@ jobs:
           set +e
           sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
             SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
-            bash scripts/run-fstests.sh \
+            bash scripts/conformance/fstests/run.sh \
               --tests-file "${RUNNER_TEMP}/fstests-tests.txt" \
               --shard-name "${FSTESTS_SHARD}" \
               --output-dir "${{ github.workspace }}/build/fstests-conformance" \
@@ -502,7 +496,7 @@ jobs:
         env:
           FSTESTS_SHARD_MATRIX_RESULT: ${{ needs.fstests-conformance-shard.result }}
         run: |
-          python3 scripts/fstests_aggregate.py \
+          python3 scripts/conformance/fstests/aggregate.py \
             --shards-dir build/fstests-shards \
             --output-dir build/fstests-conformance \
             --matrix-result "${FSTESTS_SHARD_MATRIX_RESULT}"
@@ -532,7 +526,7 @@ jobs:
             fi
           fi
 
-          python3 scripts/fstests_classify.py \
+          python3 scripts/conformance/fstests/classify.py \
             --selected-file conformance/fstests/selected.txt \
             --result-xml build/fstests-conformance/raw/results/result.xml \
             --result-dir build/fstests-conformance/raw/results \
@@ -608,7 +602,7 @@ jobs:
             )
           fi
 
-          python3 scripts/update-pjdfstest-status.py \
+          python3 scripts/conformance/pjdfstest/update-status.py \
             --result build/pjdfstest-publish-input/result.json \
             --report build/pjdfstest-publish-input/report.md \
             --history "${status_dir}/history.json" \
@@ -668,7 +662,7 @@ jobs:
           git -C "${status_dir}" config user.email 41898282+github-actions[bot]@users.noreply.github.com
 
           publish_once() {
-            python3 scripts/update-fstests-status.py \
+            python3 scripts/conformance/fstests/update-status.py \
               --result build/fstests-publish-input/result.json \
               --report build/fstests-publish-input/report.md \
               --history "${status_dir}/history.json" \

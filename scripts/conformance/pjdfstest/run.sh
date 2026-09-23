@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 VERSION_FILE="${PROJECT_DIR}/conformance/pjdfstest/version.env"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.e2e.yml"
 

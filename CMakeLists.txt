@@ -27,7 +27,7 @@ endif()
 list(FILTER CMAKE_PREFIX_PATH EXCLUDE REGEX "/opt/conda")
 list(FILTER CMAKE_SYSTEM_PREFIX_PATH EXCLUDE REGEX "/opt/conda")
 
-# folly (install via: ./scripts/install-deps.sh)
+# folly (install via: ./scripts/build/install-deps.sh)
 find_package(folly REQUIRED)
 
 # fuse3 (system package, install via: apt install libfuse3-dev)
@@ -131,8 +131,9 @@ list(FILTER SWORDFS_SOURCES EXCLUDE REGEX "src/cmd/Main\.cpp$")
 
 add_custom_target(
   check_fiber_safety
-  COMMAND ${CMAKE_COMMAND} -DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR} -P
-          ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check-fiber-safety.cmake
+  COMMAND
+    ${CMAKE_COMMAND} -DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR} -P
+    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/static-analysis/check-fiber-safety.cmake
   COMMENT "Checking fiber-safe synchronization primitives"
   VERBATIM)
 

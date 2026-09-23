@@ -657,7 +657,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--suppressions",
         type=Path,
-        default=repo_root / "scripts" / "static_audit_suppressions.json",
+        default=repo_root / "scripts" / "static-analysis" / "suppressions.json",
     )
     parser.add_argument("--output", type=Path, default=repo_root / "build" / "static-audit.json")
     parser.add_argument(

@@ -100,7 +100,7 @@ infrastructure failures and block the job.
 
 ## Execution and CI
 
-`scripts/run-pjdfstest.sh` owns the privileged execution environment. It:
+`scripts/conformance/pjdfstest/run.sh` owns the privileged execution environment. It:
 
 1. checks out the exact upstream revision;
 2. builds the upstream `pjdfstest` helper;
@@ -113,7 +113,7 @@ infrastructure failures and block the job.
 7. unmounts SwordFS and tears down dependencies even on failure.
 
 The GitHub Actions conformance job builds SwordFS in Release mode and runs the
-harness as root. `scripts/pjdfstest_classify.py` then creates `result.json` and
+harness as root. `scripts/conformance/pjdfstest/classify.py` then creates `result.json` and
 `report.md`. Strict classification is the regression gate; raw upstream exit
 status is not used as a proxy for SwordFS support.
 

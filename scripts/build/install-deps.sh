@@ -2,7 +2,7 @@
 # Install all third-party dependencies needed to build SwordFS.
 #
 # Usage:
-#   ./scripts/install-deps.sh [--force] [--skip-heavy] [--only-heavy]
+#   ./scripts/build/install-deps.sh [--force] [--skip-heavy] [--only-heavy]
 #
 #   --force        Rebuild and reinstall even if already present.
 #   --skip-heavy   Only install system packages; skip heavy dependencies.
@@ -33,7 +33,7 @@ for arg in "$@"; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DEPS_PREFIX="${DEPS_PREFIX:-/usr/local}"
 # shellcheck source=native-deps-cache.env
 . "$SCRIPT_DIR/native-deps-cache.env"
