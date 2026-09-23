@@ -14,6 +14,17 @@
 
 namespace swordfs::metadata {
 
+CreateInheritance ResolveCreateInheritance(uint64_t caller_gid, const SwordFsAttr &parent, uint32_t child_mode) {
+  CreateInheritance result{.gid = caller_gid, .mode = child_mode};
+  if ((parent.mode & S_ISGID) != 0) {
+    result.gid = parent.gid;
+    if (S_ISDIR(child_mode)) {
+      result.mode |= S_ISGID;
+    }
+  }
+  return result;
+}
+
 // Convert st_mode to dirent type (DT_DIR, DT_REG, etc.)
 uint32_t ModeToDt(uint32_t mode) {
   if (S_ISDIR(mode)) {

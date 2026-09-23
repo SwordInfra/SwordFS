@@ -439,6 +439,79 @@ FIBER_TEST_F(RedisMetaImplTest, MknodPersistsSupportedTypesModeAndDeviceIdentity
   }
 }
 
+FIBER_TEST_F(RedisMetaImplTest, CreateOwnershipUsesCallerGidWithoutParentSgid) {
+  constexpr uid_t kCallerUid = 4101;
+  constexpr gid_t kCallerGid = 4102;
+  constexpr gid_t kParentGid = 5102;
+
+  SwordFsInode parent;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "ordinary-parent", 0755, &parent).ok());
+  SwordFsAttr parent_attr = parent.attr;
+  parent_attr.gid = kParentGid;
+  ASSERT_TRUE(impl_->SetAttr(parent.ino, parent_attr, SetAttrField::kGid, &parent).ok());
+
+  auto &ctx = folly::fibers::local<SwordFsContext>();
+  ctx.uid = kCallerUid;
+  ctx.gid = kCallerGid;
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(parent.ino, "file", 0644, &file).ok());
+  EXPECT_EQ(file.attr.uid, kCallerUid);
+  EXPECT_EQ(file.attr.gid, kCallerGid);
+
+  SwordFsInode dir;
+  ASSERT_TRUE(impl_->MkDir(parent.ino, "dir", 0755, &dir).ok());
+  EXPECT_EQ(dir.attr.uid, kCallerUid);
+  EXPECT_EQ(dir.attr.gid, kCallerGid);
+  EXPECT_EQ(dir.attr.mode & S_ISGID, 0U);
+
+  SwordFsInode fifo;
+  ASSERT_TRUE(impl_->MkNod(parent.ino, "fifo", S_IFIFO | 0600, 0, &fifo).ok());
+  EXPECT_EQ(fifo.attr.gid, kCallerGid);
+
+  SwordFsInode symlink;
+  ASSERT_TRUE(impl_->Symlink(parent.ino, "symlink", "target", &symlink).ok());
+  EXPECT_EQ(symlink.attr.gid, kCallerGid);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, CreateOwnershipInheritsGidAndDirectorySgidFromParent) {
+  constexpr uid_t kCallerUid = 4201;
+  constexpr gid_t kCallerGid = 4202;
+  constexpr gid_t kParentGid = 5202;
+
+  SwordFsInode parent;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "sgid-parent", 0755, &parent).ok());
+  SwordFsAttr parent_attr = parent.attr;
+  parent_attr.gid = kParentGid;
+  ASSERT_TRUE(impl_->SetAttr(parent.ino, parent_attr, SetAttrField::kGid, &parent).ok());
+  parent_attr = parent.attr;
+  parent_attr.mode = S_IFDIR | 02775;
+  ASSERT_TRUE(impl_->SetAttr(parent.ino, parent_attr, SetAttrField::kMode, &parent).ok());
+
+  auto &ctx = folly::fibers::local<SwordFsContext>();
+  ctx.uid = kCallerUid;
+  ctx.gid = kCallerGid;
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(parent.ino, "file", 0644, &file).ok());
+  EXPECT_EQ(file.attr.uid, kCallerUid);
+  EXPECT_EQ(file.attr.gid, kParentGid);
+
+  SwordFsInode dir;
+  ASSERT_TRUE(impl_->MkDir(parent.ino, "dir", 0755, &dir).ok());
+  EXPECT_EQ(dir.attr.uid, kCallerUid);
+  EXPECT_EQ(dir.attr.gid, kParentGid);
+  EXPECT_NE(dir.attr.mode & S_ISGID, 0U);
+
+  SwordFsInode fifo;
+  ASSERT_TRUE(impl_->MkNod(parent.ino, "fifo", S_IFIFO | 0600, 0, &fifo).ok());
+  EXPECT_EQ(fifo.attr.gid, kParentGid);
+
+  SwordFsInode symlink;
+  ASSERT_TRUE(impl_->Symlink(parent.ino, "symlink", "target", &symlink).ok());
+  EXPECT_EQ(symlink.attr.gid, kParentGid);
+}
+
 FIBER_TEST_F(RedisMetaImplTest, MknodReusesNamespaceValidationAndRejectsNonMknodTypes) {
   const std::string long_name(impl_->GetLimits().max_name_length + 1, 'x');
   EXPECT_TRUE(impl_->MkNod(kRootInodeId, long_name, S_IFIFO | 0600, 0, nullptr).IsNameTooLong());

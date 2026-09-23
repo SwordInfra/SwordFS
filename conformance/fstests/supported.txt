@@ -52,6 +52,8 @@ generic/263
 generic/308
 generic/309
 generic/313
+generic/314
+generic/317
 generic/346
 generic/355
 generic/360
@@ -93,6 +95,7 @@ generic/647
 generic/676
 generic/678
 generic/680
+generic/696
 generic/706
 generic/708
 generic/729

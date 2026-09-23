@@ -189,7 +189,8 @@ Status RedisMetaImpl::CreateNode(InodeID parent_ino, std::string_view name, uint
     if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
     }
-    SwordFsAttr attr(child_ino, mode, ctx.uid, parent.attr.gid);
+    const auto inheritance = ResolveCreateInheritance(ctx.gid, parent.attr, mode);
+    SwordFsAttr attr(child_ino, inheritance.mode, ctx.uid, inheritance.gid);
     attr.rdev = rdev;
     child = SwordFsInode(child_ino, attr, parent_ino);
     return txn.AddEntry(parent_ino, name, child, &parent);
@@ -400,7 +401,8 @@ Status RedisMetaImpl::Symlink(InodeID parent_ino, std::string_view name, std::st
     if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
     }
-    SwordFsAttr attr(child_ino, S_IFLNK | 0777u, ctx.uid, parent.attr.gid);
+    const auto inheritance = ResolveCreateInheritance(ctx.gid, parent.attr, S_IFLNK | 0777u);
+    SwordFsAttr attr(child_ino, inheritance.mode, ctx.uid, inheritance.gid);
     attr.size = link.size();
     child = SwordFsInode(child_ino, attr, parent_ino, std::string(link));
     return txn.AddEntry(parent_ino, name, child, &parent);
