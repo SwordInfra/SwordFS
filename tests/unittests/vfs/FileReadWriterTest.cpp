@@ -1579,9 +1579,9 @@ TEST_F(FileReadWriterTest, UnflushedWriteVisibleAcrossHandles) {
     auto h2 = mgr.FindAs<swordfs::vfs::FileHandle>(fh2);
     ASSERT_NE(h1, nullptr);
     ASSERT_NE(h2, nullptr);
-    EXPECT_EQ(h1->handle().get(), h2->handle().get());
 
-    // Write through handle 1, read through handle 2 (same instance).
+    // Write through handle 1, read through handle 2. Shared inode state is
+    // verified through the observable data path rather than an internal pointer.
     ASSERT_TRUE(h1->Write(Buf(Repeat('Z', 300)), 100).ok());
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(h2->Read(300, 100, out.get()).ok());

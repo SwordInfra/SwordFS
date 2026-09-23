@@ -29,6 +29,7 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
 
 ARGS, UNITTEST_ARGS = _parse_args()
 FIXTURE_ROOT = Path(__file__).resolve().parent / "fixture"
+FIXTURE_SUPPRESSIONS = FIXTURE_ROOT / "suppressions.json"
 
 
 class SymbolAuditFixtureTest(unittest.TestCase):
@@ -37,7 +38,7 @@ class SymbolAuditFixtureTest(unittest.TestCase):
         cls.report = symbol_audit.analyze(
             FIXTURE_ROOT,
             ARGS.build_dir,
-            REPO_ROOT / "scripts" / "static-analysis" / "suppressions.json",
+            FIXTURE_SUPPRESSIONS,
         )
         cls.findings = cls.report["findings"]
 
@@ -60,10 +61,10 @@ class SymbolAuditFixtureTest(unittest.TestCase):
         self.assertEqual(1, len(findings))
         self.assertEqual("high", findings[0]["confidence"])
 
-    def test_test_only_function_is_review_only(self) -> None:
+    def test_test_only_function_is_blocking(self) -> None:
         findings = self._find("TestOnlyFunction", "test-only-production-symbol")
         self.assertEqual(1, len(findings))
-        self.assertEqual("review", findings[0]["confidence"])
+        self.assertEqual("high", findings[0]["confidence"])
         self.assertGreater(findings[0]["test_reference_count"], 0)
         self.assertEqual(0, findings[0]["production_reference_count"])
 
@@ -72,10 +73,10 @@ class SymbolAuditFixtureTest(unittest.TestCase):
         self.assertEqual(1, len(findings))
         self.assertIn("string_view", findings[0]["symbol"])
 
-    def test_test_only_alias_is_visible_without_blocking(self) -> None:
+    def test_test_only_alias_is_blocking(self) -> None:
         findings = self._find("TestAlias", "test-only-production-symbol")
         self.assertEqual(1, len(findings))
-        self.assertEqual("review", findings[0]["confidence"])
+        self.assertEqual("high", findings[0]["confidence"])
 
     def test_virtual_and_registered_surfaces_are_not_false_positives(self) -> None:
         reported_spellings = {finding["spelling"] for finding in self.findings}
@@ -129,7 +130,7 @@ class SymbolAuditFixtureTest(unittest.TestCase):
         parallel_report = symbol_audit.analyze(
             FIXTURE_ROOT,
             ARGS.build_dir,
-            REPO_ROOT / "scripts" / "static-analysis" / "suppressions.json",
+            FIXTURE_SUPPRESSIONS,
             jobs=2,
         )
 
@@ -232,7 +233,7 @@ class SymbolAuditFixtureTest(unittest.TestCase):
             args = argparse.Namespace(
                 repo_root=FIXTURE_ROOT,
                 build_dir=ARGS.build_dir,
-                suppressions=REPO_ROOT / "scripts" / "static-analysis" / "suppressions.json",
+                suppressions=FIXTURE_SUPPRESSIONS,
                 output=output,
                 jobs=1,
                 no_fail=False,
@@ -250,7 +251,7 @@ class SymbolAuditFixtureTest(unittest.TestCase):
         args = argparse.Namespace(
             repo_root=FIXTURE_ROOT,
             build_dir=ARGS.build_dir,
-            suppressions=REPO_ROOT / "scripts" / "static-analysis" / "suppressions.json",
+            suppressions=FIXTURE_SUPPRESSIONS,
             output=FIXTURE_ROOT / "unused.json",
             jobs=1,
             no_fail=False,

@@ -69,10 +69,6 @@ class InodeHandle {
   /// Release a fence previously claimed by TryStartReclaim().
   void FinishReclaim();
 
-  metadata::InodeID ino() const {
-    return ino_;
-  }
-
   /// Number of open file descriptors referencing this handle.
   // Exposed for unit-test access only.
   uint64_t open_count() const;
