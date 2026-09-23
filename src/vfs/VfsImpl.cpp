@@ -17,6 +17,7 @@
 #include "vfs/DirHandle.hpp"
 #include "vfs/FileHandle.hpp"
 #include "vfs/FileReadWriter.hpp"
+#include "vfs/FuseInodeCache.hpp"
 #include "vfs/Handle.hpp"
 #include "vfs/InodeHandle.hpp"
 #include "vfs/Reclaimer.hpp"
@@ -79,6 +80,7 @@ utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name, fuse_entry_pa
   child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
+  FuseInodeCache::Instance().RetainLookup(child);
   return Status::OK();
 }
 
@@ -86,7 +88,11 @@ utils::Status VfsImpl::GetAttr(fuse_ino_t ino, struct stat *attr) {
   SwordFsInode inode;
   auto handle = InodeHandleManager::Instance().Get(ino, false);
   Status status = handle ? handle->GetAttr(&inode) : VolumeImpl::Instance().meta_engine()->GetInode(ino, &inode);
+  if (status.IsNotFound() && FuseInodeCache::Instance().ResolveDetachedAfterNotFound(ino, &inode)) {
+    status = Status::OK();
+  }
   if (status.ok()) {
+    FuseInodeCache::Instance().RefreshIfRetained(inode);
     inode.attr.ToPosixStat(attr);
   }
   return status;
@@ -113,6 +119,7 @@ utils::Status VfsImpl::SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, st
     }
   }
   if (status.ok() && out_attr) {
+    FuseInodeCache::Instance().RefreshIfRetained(inode);
     inode.attr.ToPosixStat(out_attr);
   }
   return status;
@@ -139,6 +146,7 @@ utils::Status VfsImpl::MkNod(fuse_ino_t parent, const char *name, mode_t mode, d
   child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
+  FuseInodeCache::Instance().RetainLookup(child);
   return Status::OK();
 }
 
@@ -153,6 +161,7 @@ utils::Status VfsImpl::MkDir(fuse_ino_t parent, const char *name, mode_t mode, f
   child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
+  FuseInodeCache::Instance().RetainLookup(child);
   return Status::OK();
 }
 
@@ -183,6 +192,7 @@ utils::Status VfsImpl::Symlink(const char *link, fuse_ino_t parent, const char *
   child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
+  FuseInodeCache::Instance().RetainLookup(child);
   return Status::OK();
 }
 
@@ -217,6 +227,7 @@ utils::Status VfsImpl::Link(fuse_ino_t ino, fuse_ino_t newparent, const char *ne
   inode.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
+  FuseInodeCache::Instance().RetainLookup(inode);
   return Status::OK();
 }
 
@@ -332,7 +343,8 @@ class FuseDirEntryEncoder final : public DirEntryEncoder {
 
 class FuseDirEntryPlusEncoder final : public DirEntryPlusEncoder {
  public:
-  explicit FuseDirEntryPlusEncoder(fuse_req_t req) : req_(req) {
+  FuseDirEntryPlusEncoder(fuse_req_t req, std::vector<fuse_ino_t> *retained_lookups)
+      : req_(req), retained_lookups_(retained_lookups) {
   }
 
   size_t CalSpace(const metadata::SwordFsEntry &entry, off_t next_off) const override {
@@ -342,6 +354,12 @@ class FuseDirEntryPlusEncoder final : public DirEntryPlusEncoder {
 
   void Encode(const metadata::SwordFsEntry &entry, const metadata::SwordFsInode &inode, off_t next_off, size_t required,
               std::string *out) const override {
+    if (entry.name != "." && entry.name != "..") {
+      FuseInodeCache::Instance().RetainLookup(inode);
+      if (retained_lookups_ != nullptr) {
+        retained_lookups_->push_back(inode.ino);
+      }
+    }
     const size_t old_size = out->size();
     out->resize(old_size + required);
     AddEntry(entry, inode, next_off, out->data() + old_size, required);
@@ -362,6 +380,7 @@ class FuseDirEntryPlusEncoder final : public DirEntryPlusEncoder {
   }
 
   fuse_req_t req_;
+  std::vector<fuse_ino_t> *retained_lookups_;
 };
 
 utils::Status VfsImpl::ReadDir(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh, std::string *buf) {
@@ -375,13 +394,16 @@ utils::Status VfsImpl::ReadDir(fuse_req_t req, fuse_ino_t ino, size_t size, off_
 }
 
 utils::Status VfsImpl::ReadDirPlus(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, uint64_t fh,
-                                   std::string *buf) {
+                                   std::string *buf, std::vector<fuse_ino_t> *retained_lookups) {
   (void)ino;
+  if (retained_lookups != nullptr) {
+    retained_lookups->clear();
+  }
   auto handle = HandleManager::Instance().FindAs<DirHandle>(fh);
   if (!handle) {
     return Status::InvalidArgument("unknown directory fh=" + std::to_string(fh));
   }
-  FuseDirEntryPlusEncoder encoder(req);
+  FuseDirEntryPlusEncoder encoder(req, retained_lookups);
   return handle->ReadDirPlus(off, size, encoder, buf);
 }
 
@@ -471,6 +493,7 @@ utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name, mode_t mode, 
   child.attr.ToPosixStat(&entry->attr);
   entry->attr_timeout = 1.0;
   entry->entry_timeout = 1.0;
+  FuseInodeCache::Instance().RetainLookup(child);
   SWORDFS_LOG_DEBUG << "Create: ino=" << child.ino << " fh=" << handle->fh() << " name='" << name << "'";
   return Status::OK();
 }

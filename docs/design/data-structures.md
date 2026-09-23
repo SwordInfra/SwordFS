@@ -51,6 +51,8 @@ exact match as a current-format integrity rule.
 
 ```mermaid
 flowchart TD
+    E[FUSE entry replies] -->|lookup refs| L[LocalInode per inode]
+    G[FORGET / FORGET_MULTI] -->|release refs| L
     F[FileHandle per descriptor] -->|shared ownership| I[InodeHandle per inode]
     M[InodeHandleManager] -.->|weak reference by inode ID| I
     I --> R[FileReadWriter]
@@ -66,8 +68,15 @@ registry references allow runtime state to disappear when no owner retains it.
 This graph is local to a mount; it provides neither distributed cache coherence
 nor a lease protecting another mount's descriptors.
 
+The `LocalInode` registry is not a coherent metadata cache. Live inode
+operations continue to use authoritative metadata. When an authoritative
+`GetInode` returns `NotFound`, an already-retained local inode is lazily
+classified as `DETACHED` and exposes the cached attributes with `nlink == 0`.
+The copy disappears on the final `FORGET`.
+
 | Runtime state | Owner | Purpose |
 | --- | --- | --- |
+| FUSE lookup count, live/detached state, cached inode | `LocalInode` registry | Keep kernel-referenced inode identity/attributes alive independently of durable namespace lifetime |
 | Open/opening count and reclaim fence | `InodeHandle` | Exclude local reclaim preparation while a descriptor or open attempt is live |
 | Operation read/write lock | `FileReadWriter` | Concurrent reads; serialized writes, flushes, and size changes |
 | Dirty and flushed chunk map | `FileChunkManager` | Retain chunks by logical index |

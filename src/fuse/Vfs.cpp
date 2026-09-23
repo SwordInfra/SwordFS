@@ -25,6 +25,7 @@
 #include "utils/ExecutionDomain.hpp"
 #include "utils/FiberRuntime.hpp"
 #include "utils/Logging.hpp"
+#include "vfs/FuseInodeCache.hpp"
 #include "vfs/InodeHandle.hpp"
 #include "vfs/Reclaimer.hpp"
 #include "vfs/VfsImpl.hpp"
@@ -35,26 +36,46 @@ namespace swordfs::fuse {
 
 namespace {
 
-template <typename Fn>
-void RunFuseInFiber(fuse_req_t req, Fn &&fn) {
+template <typename Fn, typename RejectFn>
+void RunFuseInFiber(fuse_req_t req, Fn &&fn, RejectFn &&on_reject) {
   ::swordfs::utils::RunInFiber(
       [fn = std::forward<Fn>(fn)]() mutable {
         ::swordfs::utils::ExpectInFiberDomain();
         fn();
       },
-      [req] {
+      [on_reject = std::forward<RejectFn>(on_reject)]() mutable {
         SWORDFS_LOG_ERROR << "Failed to admit FUSE request into the fiber runtime";
-        fuse_reply_err(req, EIO);
+        on_reject();
       });
 }
 
-bool ResetInodeHandleRegistryForMount() {
+template <typename Fn>
+void RunFuseInFiber(fuse_req_t req, Fn &&fn) {
+  RunFuseInFiber(req, std::forward<Fn>(fn), [req] { fuse_reply_err(req, EIO); });
+}
+
+template <typename ReplyFn>
+void PublishRetainedLookup(metadata::InodeID ino, ReplyFn &&reply) {
+  if (std::forward<ReplyFn>(reply)() != 0) {
+    ::swordfs::vfs::FuseInodeCache::Instance().Forget(ino, 1);
+  }
+}
+
+void RollbackRetainedLookups(const std::vector<fuse_ino_t> &inos) {
+  auto &cache = ::swordfs::vfs::FuseInodeCache::Instance();
+  for (const auto ino : inos) {
+    cache.Forget(ino, 1);
+  }
+}
+
+bool ResetRuntimeRegistriesForMount() {
   ::swordfs::utils::FiberBaton done;
   std::atomic<bool> initialized{false};
   const bool submitted = ::swordfs::utils::RunInFiber(
       [&] {
         auto post = folly::makeGuard([&] { done.post(); });
         ::swordfs::vfs::InodeHandleManager::Instance().Initialize();
+        ::swordfs::vfs::FuseInodeCache::Instance().Initialize();
         initialized.store(true, std::memory_order_release);
       },
       [&] { done.post(); });
@@ -93,8 +114,8 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   // this mount. The registry is fiber-domain state, so submit the reset to the
   // runtime and wait only for this short operation. Reconciliation itself can
   // remain asynchronous once the registry starts from a known-empty state.
-  if (!ResetInodeHandleRegistryForMount()) {
-    SWORDFS_LOG_ERROR << "Failed to reset inode-handle registry during mount initialization";
+  if (!ResetRuntimeRegistriesForMount()) {
+    SWORDFS_LOG_ERROR << "Failed to reset inode runtime registries during mount initialization";
   }
 
   // The reclaim worker runs one pass immediately, then on foreground wakeups
@@ -143,8 +164,18 @@ void VfsHookFactory::SwordFsLookup(fuse_req_t req, fuse_ino_t parent, const char
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    fuse_reply_entry(req, &entry);
+    PublishRetainedLookup(entry.ino, [req, &entry] { return fuse_reply_entry(req, &entry); });
   });
+}
+
+void VfsHookFactory::SwordFsForget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup) {
+  RunFuseInFiber(
+      req,
+      [req, ino, nlookup] {
+        ::swordfs::vfs::FuseInodeCache::Instance().Forget(ino, nlookup);
+        fuse_reply_none(req);
+      },
+      [req] { fuse_reply_none(req); });
 }
 
 void VfsHookFactory::SwordFsGetattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
@@ -199,7 +230,7 @@ void VfsHookFactory::SwordFsMknod(fuse_req_t req, fuse_ino_t parent, const char 
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    fuse_reply_entry(req, &entry);
+    PublishRetainedLookup(entry.ino, [req, &entry] { return fuse_reply_entry(req, &entry); });
   });
 }
 
@@ -212,7 +243,7 @@ void VfsHookFactory::SwordFsMkdir(fuse_req_t req, fuse_ino_t parent, const char 
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    fuse_reply_entry(req, &entry);
+    PublishRetainedLookup(entry.ino, [req, &entry] { return fuse_reply_entry(req, &entry); });
   });
 }
 
@@ -241,7 +272,7 @@ void VfsHookFactory::SwordFsSymlink(fuse_req_t req, const char *link, fuse_ino_t
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    fuse_reply_entry(req, &entry);
+    PublishRetainedLookup(entry.ino, [req, &entry] { return fuse_reply_entry(req, &entry); });
   });
 }
 
@@ -263,7 +294,7 @@ void VfsHookFactory::SwordFsLink(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newp
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    fuse_reply_entry(req, &entry);
+    PublishRetainedLookup(entry.ino, [req, &entry] { return fuse_reply_entry(req, &entry); });
   });
 }
 
@@ -448,7 +479,7 @@ void VfsHookFactory::SwordFsCreate(fuse_req_t req, fuse_ino_t parent, const char
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    fuse_reply_create(req, &entry, &fi);
+    PublishRetainedLookup(entry.ino, [req, &entry, &fi] { return fuse_reply_create(req, &entry, &fi); });
   });
 }
 
@@ -509,6 +540,20 @@ void VfsHookFactory::SwordFsRetrieveReply(fuse_req_t req, void *cookie, fuse_ino
   fuse_reply_err(req, status.ToErrno());
 }
 
+void VfsHookFactory::SwordFsForgetMulti(fuse_req_t req, size_t count, struct fuse_forget_data *forgets) {
+  std::vector<fuse_forget_data> owned_forgets(forgets, forgets + count);
+  RunFuseInFiber(
+      req,
+      [req, forgets = std::move(owned_forgets)] {
+        auto &cache = ::swordfs::vfs::FuseInodeCache::Instance();
+        for (const auto &forget : forgets) {
+          cache.Forget(forget.ino, forget.nlookup);
+        }
+        fuse_reply_none(req);
+      },
+      [req] { fuse_reply_none(req); });
+}
+
 void VfsHookFactory::SwordFsFlock(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi, int op) {
   RunFuseInFiber(req, [req, ino, fi = *fi, op]() mutable {
     SetRequestContext(req);
@@ -532,12 +577,16 @@ void VfsHookFactory::SwordFsReaddirplus(fuse_req_t req, fuse_ino_t ino, size_t s
   RunFuseInFiber(req, [req, ino, size, off, fh] {
     SetRequestContext(req);
     std::string buf;
-    auto status = VfsImpl::ReadDirPlus(req, ino, size, off, fh, &buf);
+    std::vector<fuse_ino_t> retained_lookups;
+    auto status = VfsImpl::ReadDirPlus(req, ino, size, off, fh, &buf, &retained_lookups);
     if (!status.ok()) {
+      RollbackRetainedLookups(retained_lookups);
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    fuse_reply_buf(req, buf.data(), buf.size());
+    if (fuse_reply_buf(req, buf.data(), buf.size()) != 0) {
+      RollbackRetainedLookups(retained_lookups);
+    }
   });
 }
 
@@ -589,17 +638,15 @@ void VfsHookFactory::SwordFsStatx(fuse_req_t req, fuse_ino_t ino, int flags, int
 
 // Operation table
 //
-// FORGET notifications are intentionally not handled. SwordFS currently has no
-// inode-scoped runtime resource whose lifetime depends on FUSE lookup counts.
-// If that changes (for example, cache eviction tied to inode lifetime), add an
-// explicit FORGET lifecycle policy rather than treating these callbacks as
-// mandatory bookkeeping.
+// FORGET/FORGET_MULTI release the mount-local lookup references retained in
+// FuseInodeCache. They intentionally perform no metadata or reclaim IO.
 
 const struct fuse_lowlevel_ops &VfsHookFactory::get_ops() {
   static const struct fuse_lowlevel_ops kOps = {
       .init = SwordFsInit,
       .destroy = SwordFsDestroy,
       .lookup = SwordFsLookup,
+      .forget = SwordFsForget,
       .getattr = SwordFsGetattr,
       .setattr = SwordFsSetattr,
       .readlink = SwordFsReadlink,
@@ -633,6 +680,7 @@ const struct fuse_lowlevel_ops &VfsHookFactory::get_ops() {
       .poll = SwordFsPoll,
       .write_buf = nullptr,  // not implemented — force kernel to use .write
       .retrieve_reply = SwordFsRetrieveReply,
+      .forget_multi = SwordFsForgetMulti,
       .flock = SwordFsFlock,
       .fallocate = SwordFsFallocate,
       .readdirplus = SwordFsReaddirplus,

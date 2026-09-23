@@ -273,9 +273,42 @@ Timeout or connection loss after EXEC is treated as an **ambiguous commit**, not
 
 Detailed Redis key layout and access patterns are documented separately in [Redis Metadata Schema and Access-Pattern Review](redis-metadata-schema.md). That document is a persistence-detail reference; this document remains the architecture entry point.
 
-## 7. File-handle and inode runtime ownership
+## 7. FUSE inode and file-handle runtime ownership
 
-Open-file runtime state is deliberately separate from persistent inode metadata.
+Kernel-visible inode lifetime, open-file runtime state, and persistent metadata
+have separate ownership.
+
+The low-level FUSE protocol may keep referring to an inode after its final
+namespace name has been removed. SwordFS therefore keeps a mount-local inode
+representation for every inode with outstanding FUSE lookup references:
+
+```text
+FUSE entry reply / READDIRPLUS
+  -> LocalInode (per inode within the mount)
+       - lookup reference count
+       - LIVE or DETACHED state
+       - cached SwordFsInode
+
+FORGET / FORGET_MULTI
+  -> drop lookup references
+  -> destroy a detached LocalInode when its final reference is gone
+```
+
+For a `LIVE` inode, the metadata engine remains authoritative; the local copy
+is not a general write-back metadata cache. `GETATTR` reads authoritative
+metadata first. If and only if that lookup returns `NotFound` while the
+mount-local object still has lookup references, the object transitions lazily
+to `DETACHED`, its cached `nlink` is normalized to zero, and validated
+inode-only requests can continue from that local representation. Transport or
+other metadata failures never fall back to cached state. The durable metadata
+engine therefore does not need rename-victim plumbing or to keep a directory
+inode solely because the current FUSE mount still has a lookup reference.
+
+This state is intentionally ephemeral. On unmount or process failure the FUSE
+connection and its lookup references disappear with the local registry; the
+metadata engine already contains the durable post-namespace-mutation state.
+
+Open-file runtime state is separately owned.
 
 The main ownership chain is:
 
@@ -291,6 +324,13 @@ FUSE file handle
 `HandleManager` maps FUSE handle IDs to open `FileHandle`/`DirHandle` objects.
 
 `InodeHandleManager` maintains shared per-inode handles through weak references so multiple opens in the same mount can share runtime state without keeping every inode alive forever.
+
+The FUSE lookup registry and `InodeHandleManager` deliberately solve different
+problems. Lookup references retain an inode identity/attribute representation
+for kernel requests. `InodeHandle` retains regular-file data-path state and
+the open/reclaim fence required for final-close flush and durable object
+cleanup. FUSE lookup references do not, by themselves, delay Redis/object
+reclaim.
 
 `InodeHandle` owns two important runtime concepts:
 
