@@ -39,6 +39,7 @@ def trend_history(history: list[dict[str, object]]) -> list[dict[str, object]]:
             item.get("selected_count"),
             item.get("executed_count"),
             item.get("supported_count"),
+            item.get("overall_support_percent"),
             item.get("known_gap_count"),
             item.get("deferred_count"),
             *(raw_result_count(item, name) for name in RAW_RESULT_NAMES),
@@ -96,6 +97,7 @@ def main() -> int:
             "supported_count": summary.get("supported_count"),
             "known_gap_count": summary.get("known_gap_count"),
             "supported_gate_percent": summary.get("supported_gate_percent"),
+            "overall_support_percent": summary.get("overall_support_percent"),
             "executed_classified_percent": summary.get("executed_classified_percent"),
             "blocking_count": summary.get("blocking_count"),
             "raw_results": raw_results,
@@ -126,6 +128,7 @@ def main() -> int:
             "supported_count": None,
             "known_gap_count": None,
             "supported_gate_percent": None,
+            "overall_support_percent": None,
             "executed_classified_percent": None,
             "blocking_count": None,
             "raw_results": {},
@@ -169,16 +172,21 @@ def main() -> int:
         "",
         "## Historical main-branch progress",
         "",
-        "| Time | SwordFS | Status | Supported | PASS | FAIL | NOTRUN | Deferred | Known gaps |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Time | SwordFS | Status | Overall support | Supported | PASS | FAIL | NOTRUN | Deferred | Known gaps |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in trend_history(history)[-30:]:
         commit = str(item.get("swordfs_commit", "unknown"))
         trend_lines.append(
-            "| {timestamp} | `{commit}` | {status} | {supported} | {passed} | {failed} | {notrun} | {deferred} | {gaps} |".format(
+            "| {timestamp} | `{commit}` | {status} | {overall} | {supported} | {passed} | {failed} | {notrun} | {deferred} | {gaps} |".format(
                 timestamp=item.get("timestamp", "unknown"),
                 commit=commit[:12],
                 status=item.get("status", "unknown"),
+                overall=(
+                    "n/a"
+                    if item.get("overall_support_percent") is None
+                    else f"{float(item['overall_support_percent']):.2f}%"
+                ),
                 supported=item.get("supported_count", "n/a"),
                 passed=raw_result_count(item, "PASS"),
                 failed=raw_result_count(item, "FAIL"),

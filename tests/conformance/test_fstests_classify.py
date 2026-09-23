@@ -234,6 +234,7 @@ class FstestsClassifyTest(unittest.TestCase):
         self.assertEqual(1, summary["supported_count"])
         self.assertEqual(100.0, summary["executed_classified_percent"])
         self.assertEqual(50.0, summary["classified_percent"])
+        self.assertEqual(50.0, summary["overall_support_percent"])
         self.assertEqual(0, summary["blocking_count"])
 
     def test_summary_counts_observed_execution_instead_of_assuming_non_deferred_population(self):
@@ -312,6 +313,53 @@ class FstestsClassifyTest(unittest.TestCase):
         )
         by_test = {result.test: result.classification for result in results}
         self.assertEqual("BASELINE_NOT_SELECTED", by_test["generic/999"])
+
+    def test_selected_manifest_ignores_metadata_comments_and_rejects_duplicates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary) / "selected.txt"
+            path.write_text(
+                "# fstests_commit=abc\n# fstests_group=generic/quick\ngeneric/001\ngeneric/002\n",
+                encoding="utf-8",
+            )
+            self.assertEqual({"generic/001", "generic/002"}, MODULE.load_selected(path))
+            path.write_text("generic/001\ngeneric/001\n", encoding="utf-8")
+            with self.assertRaises(MODULE.BaselineError):
+                MODULE.load_selected(path)
+
+    def test_report_distinguishes_overall_support_from_supported_gate(self):
+        selected = {"generic/001", "generic/002", "generic/003", "generic/004"}
+        supported = {"generic/001", "generic/002"}
+        observations = MODULE.classify(
+            selected,
+            {
+                "generic/001": MODULE.RawResult("generic/001", "PASS"),
+                "generic/002": MODULE.RawResult("generic/002", "PASS"),
+                "generic/003": MODULE.RawResult("generic/003", "NOTRUN", "not applicable"),
+                "generic/004": MODULE.RawResult("generic/004", "NOTRUN", "not applicable"),
+            },
+            supported,
+            {
+                "generic/003": MODULE.Gap("upstream_not_applicable", "-", "NOTRUN", "not applicable", "n/a"),
+                "generic/004": MODULE.Gap("upstream_not_applicable", "-", "NOTRUN", "not applicable", "n/a"),
+            },
+            {},
+        )
+        summary = MODULE.summarize(
+            observations,
+            selected,
+            supported,
+            {
+                "generic/003": MODULE.Gap("upstream_not_applicable", "-", "NOTRUN", "not applicable", "n/a"),
+                "generic/004": MODULE.Gap("upstream_not_applicable", "-", "NOTRUN", "not applicable", "n/a"),
+            },
+            {},
+        )
+        payload = {"metadata": {}, "summary": summary}
+        report = MODULE.render_markdown(payload, observations)
+        self.assertEqual(50.0, summary["overall_support_percent"])
+        self.assertEqual(100.0, summary["supported_gate_percent"])
+        self.assertIn("| Overall support | 50.00% |", report)
+        self.assertIn("| Supported gate | 100.00% |", report)
 
     def test_supported_set_is_monotonic_without_explicit_override(self):
         with self.assertRaises(MODULE.BaselineError):

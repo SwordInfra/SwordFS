@@ -114,6 +114,22 @@ def _validate_test_id(test: str, source: str) -> None:
         raise BaselineError(f"{source}: invalid exact fstests testcase id: {test!r}")
 
 
+
+
+def load_selected(path: pathlib.Path) -> set[str]:
+    selected: set[str] = set()
+    for line_number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        _validate_test_id(line, f"{path}:{line_number}")
+        if line in selected:
+            raise BaselineError(f"{path}:{line_number}: duplicate testcase {line}")
+        selected.add(line)
+    if not selected:
+        raise BaselineError(f"{path}: selected testcase manifest is empty")
+    return selected
+
 def load_supported(path: pathlib.Path) -> set[str]:
     supported: set[str] = set()
     for line_number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -411,6 +427,7 @@ def summarize(
         "known_gap_count": len(selected & gaps.keys()),
         "supported_pass_count": supported_pass,
         "supported_gate_percent": round(100.0 * supported_pass / len(selected_supported), 2) if selected_supported else 0.0,
+        "overall_support_percent": round(100.0 * supported_pass / len(selected), 2) if selected else 0.0,
         "classified_count": classified,
         "classified_percent": round(100.0 * classified / len(selected), 2) if selected else 0.0,
         "executed_classified_percent": round(100.0 * executed_classified / executed_count, 2) if executed_count else 0.0,
@@ -443,6 +460,7 @@ def render_markdown(payload: dict[str, object], observations: list[Observation])
         f"| Deferred from CI | {summary['deferred_count']} |",
         f"| Explicitly supported | {summary['supported_count']} |",
         f"| Known gaps | {summary['known_gap_count']} |",
+        f"| Overall support | {_percent(summary['overall_support_percent'])} |",
         f"| Supported gate | {_percent(summary['supported_gate_percent'])} |",
         f"| Executed population classified | {_percent(summary['executed_classified_percent'])} |",
         f"| Full selected population classified | {_percent(summary['classified_percent'])} |",
@@ -541,7 +559,7 @@ def write_bootstrap(output_dir: pathlib.Path, observations: list[Observation]) -
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--selected-xml", type=pathlib.Path, required=True)
+    parser.add_argument("--selected-file", type=pathlib.Path, required=True)
     parser.add_argument("--result-xml", type=pathlib.Path, required=True)
     parser.add_argument("--result-dir", type=pathlib.Path, required=True)
     parser.add_argument("--supported-file", type=pathlib.Path, required=True)
@@ -563,6 +581,7 @@ def main(argv: list[str] | None = None) -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     infrastructure: list[str] = []
     try:
+        selected = load_selected(args.selected_file)
         supported = load_supported(args.supported_file)
         gaps = load_gaps(args.known_gaps_file)
         deferred = load_deferred(args.deferred_file)
@@ -579,11 +598,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
-    selected_results, selected_error = try_load_xunit(args.selected_xml, "selection XUnit")
     actual, actual_error = try_load_xunit(args.result_xml, "result XUnit")
-    selected = set(selected_results)
-    if selected_error:
-        infrastructure.append(selected_error)
     if actual_error:
         infrastructure.append(actual_error)
 
