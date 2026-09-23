@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstring>
 #include <string>
 
 #include "tests/e2e/Fixture.hpp"
@@ -183,7 +184,9 @@ TEST_F(PersistenceTest, CrossChunkTruncatePersistsPrunedMetadataAcrossRemount) {
   ASSERT_GE(fd, 0);
   ASSERT_EQ(::pwrite(fd, head.data(), head.size(), 0), static_cast<ssize_t>(head.size()));
   ASSERT_EQ(::pwrite(fd, tail.data(), tail.size(), kChunkSize), static_cast<ssize_t>(tail.size()));
-  ASSERT_EQ(::fsync(fd), 0);
+  const int fsync_result = ::fsync(fd);
+  const int fsync_errno = errno;
+  ASSERT_EQ(fsync_result, 0) << "fsync errno=" << fsync_errno << " (" << std::strerror(fsync_errno) << ")";
   ASSERT_EQ(::close(fd), 0);
   ASSERT_EQ(fixture_.Truncate(name, 3), 0);
 

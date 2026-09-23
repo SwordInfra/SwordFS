@@ -9,18 +9,70 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "chunk/ChunkObjectKey.hpp"
+#include "chunk/IChunkOverwriteStrategy.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 
 namespace swordfs::metadata {
 
-RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size)
-    : txn_(txn), key_(key), chunk_size_(chunk_size) {
+RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size,
+                           const chunk::IChunkOverwriteStrategy *strategy)
+    : txn_(txn),
+      key_(key),
+      chunk_size_(chunk_size),
+      strategy_(strategy != nullptr ? strategy : &chunk::DefaultChunkOverwriteStrategy()) {
+}
+
+std::string RedisMetaTxn::PrivateHash(std::string_view hash) const {
+  return key_.PrivateChunkIndex(strategy_->name(), hash);
+}
+
+utils::Status RedisMetaTxn::Read(std::string_view hash, std::string_view field, std::string *value) {
+  if (hash.empty() || value == nullptr) {
+    return utils::Status::InvalidArgument("private chunk index read requires hash and output");
+  }
+  return txn_.HGet(PrivateHash(hash), field, value);
+}
+
+utils::Status RedisMetaTxn::Scan(std::string_view hash, std::vector<std::pair<std::string, std::string>> *values) {
+  if (hash.empty() || values == nullptr) {
+    return utils::Status::InvalidArgument("private chunk index scan requires hash and output");
+  }
+  std::map<std::string, std::string> merged;
+  uint64_t cursor = 0;
+  do {
+    std::vector<std::pair<std::string, std::string>> page;
+    uint64_t next_cursor = 0;
+    auto status = txn_.HScan(PrivateHash(hash), cursor, 128, &page, &next_cursor);
+    if (!status.ok()) {
+      return status;
+    }
+    for (auto &entry : page) {
+      merged.insert_or_assign(std::move(entry.first), std::move(entry.second));
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+  values->assign(merged.begin(), merged.end());
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaTxn::Put(std::string_view hash, std::string_view field, std::string_view value) {
+  if (hash.empty()) {
+    return utils::Status::InvalidArgument("private chunk index hash is empty");
+  }
+  return txn_.HSet(PrivateHash(hash), field, value);
+}
+
+utils::Status RedisMetaTxn::Erase(std::string_view hash, std::string_view field) {
+  if (hash.empty()) {
+    return utils::Status::InvalidArgument("private chunk index hash is empty");
+  }
+  return txn_.HDel(PrivateHash(hash), field);
 }
 
 utils::Status RedisMetaTxn::LookupInode(InodeID ino, SwordFsInode *out) {
@@ -141,7 +193,7 @@ utils::Status RedisMetaTxn::AdjustNlink(SwordFsInode *inode, int delta, uint64_t
 }
 
 utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out,
-                                    std::vector<SwordFsChunk> *detached_chunks) {
+                                    std::vector<PendingDelete> *detached_chunks) {
   if (detached_chunks != nullptr) {
     detached_chunks->clear();
   }
@@ -226,7 +278,7 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaTxn::Truncate(InodeID ino, uint64_t size, std::vector<SwordFsChunk> *detached_chunks) {
+utils::Status RedisMetaTxn::Truncate(InodeID ino, uint64_t size, std::vector<PendingDelete> *detached_chunks) {
   if (detached_chunks != nullptr) {
     detached_chunks->clear();
   }
@@ -275,6 +327,32 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     if (pending.ino != ino) {
       return utils::Status::Malformed("pending reclaim record inode mismatch");
     }
+    SwordFsInode live;
+    status = LookupInode(ino, &live);
+    if (status.ok()) {
+      if (live.IsDir() || live.attr.nlink != 0) {
+        // An earlier partial EXEC may already have removed some live chunk
+        // heads. The frozen record is the only remaining data reference; do
+        // not cancel it merely because an inode is still visible.
+        return utils::Status::Busy("frozen reclaim conflicts with a linked inode");
+      }
+      // Finish a partially applied preparation. The open-file fence is held
+      // by the caller; the frozen payload remains the authority for deletion.
+      status = ClearOrphanMarker(ino);
+      if (!status.ok()) {
+        return status;
+      }
+      status = DeleteChunks(ino);
+      if (!status.ok()) {
+        return status;
+      }
+      status = DeleteInode(ino);
+      if (!status.ok()) {
+        return status;
+      }
+    } else if (!status.IsNotFound()) {
+      return status;
+    }
     work = std::move(pending);
     return utils::Status::OK();
   }
@@ -313,18 +391,22 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     return status;
   }
 
-  ReclaimWork pending;
-  pending.ino = ino;
-  pending.chunks.reserve(scanned.size());
+  std::vector<SwordFsChunk> heads;
+  heads.reserve(scanned.size());
   for (const auto &[field, descriptor] : scanned) {
     (void)field;
-    // Freeze the object identity the authoritative descriptor derives right
-    // now; deletions replay these keys verbatim from the frozen record.
-    pending.chunks.push_back(
-        ReclaimChunk{descriptor, chunk::FormatChunkObjectKey(ino, descriptor.index, descriptor.revision)});
+    heads.push_back(descriptor);
   }
-  std::sort(pending.chunks.begin(), pending.chunks.end(),
-            [](const ReclaimChunk &a, const ReclaimChunk &b) { return a.descriptor.index < b.descriptor.index; });
+  std::sort(heads.begin(), heads.end(), [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
+  ReclaimWork pending;
+  status = strategy_->FreezeReclaim(*this, ino, heads, chunk_size_, &pending);
+  if (!status.ok()) {
+    return status;
+  }
+  status = strategy_->index_participant().PrepareReclaim(*this, ino, heads);
+  if (!status.ok()) {
+    return status;
+  }
 
   std::string serialized;
   status = pending.SerializeTo(&serialized);
@@ -654,6 +736,19 @@ utils::Status RedisMetaTxn::LinkExistingEntry(InodeID parent_ino, std::string_vi
     return status;
   }
 
+  // A partially applied reclaim can leave its inode in place after deleting
+  // the live chunk hash. The frozen record is already the point of no return:
+  // reject a link before queuing any mutation. WATCH also prevents a
+  // concurrent PrepareReclaim from installing that record before this EXEC.
+  std::string pending_reclaim;
+  status = txn_.HGet(key_.Reclaims(), std::to_string(inode->ino), &pending_reclaim);
+  if (status.ok()) {
+    return utils::Status::NotFound("inode is already entering reclaim");
+  }
+  if (!status.IsNotFound()) {
+    return status;
+  }
+
   status = LinkEntry(parent_ino, name, *inode, parent);
   if (!status.ok()) {
     return status;
@@ -790,20 +885,18 @@ utils::Status RedisMetaTxn::ScanChunks(InodeID ino, std::vector<std::pair<std::s
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaTxn::QueuePendingDelete(InodeID ino, const SwordFsChunk &chunk) {
-  const auto object_key = chunk::FormatChunkObjectKey(ino, chunk.index, chunk.revision);
-  PendingDelete pending{.ino = ino, .chunk = ReclaimChunk{.descriptor = chunk, .key = object_key}};
+utils::Status RedisMetaTxn::QueuePendingDelete(const PendingDelete &pending) {
   std::string encoded;
   auto status = pending.SerializeTo(&encoded);
   if (!status.ok()) {
     return status;
   }
-  return txn_.HSet(key_.PendingDeletes(), object_key, encoded);
+  return txn_.HSet(key_.PendingDeletes(), pending.id, encoded);
 }
 
-utils::Status RedisMetaTxn::RegisterPendingDeletes(InodeID ino, const std::vector<SwordFsChunk> &chunks) {
-  for (const auto &chunk : chunks) {
-    auto status = QueuePendingDelete(ino, chunk);
+utils::Status RedisMetaTxn::RegisterPendingDeletes(const std::vector<PendingDelete> &work) {
+  for (const auto &pending : work) {
+    auto status = QueuePendingDelete(pending);
     if (!status.ok()) {
       return status;
     }
@@ -813,7 +906,8 @@ utils::Status RedisMetaTxn::RegisterPendingDeletes(InodeID ino, const std::vecto
 
 utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                                         const SwordFsChunk &replacement, utils::Status &publication_result,
-                                        std::optional<SwordFsChunk> &cleanup_candidate) {
+                                        std::optional<PendingDelete> &cleanup_candidate,
+                                        const ChunkPublishIntent &intent) {
   publication_result = utils::Status::OK();
   cleanup_candidate.reset();
 
@@ -838,7 +932,12 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
     // A known logical rejection proves this uploaded replacement is not the
     // authoritative descriptor. Cleanup registration happens after this
     // transaction has a known outcome and is intentionally best effort.
-    cleanup_candidate = replacement;
+    PendingDelete pending;
+    auto status = strategy_->FreezeRejectedPublication(ino, replacement, intent, chunk_size_, &pending);
+    if (!status.ok()) {
+      return status;
+    }
+    cleanup_candidate = std::move(pending);
     publication_result = std::move(rejection);
     return utils::Status::OK();
   };
@@ -869,13 +968,32 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
                                                              std::to_string(replacement.index)));
     }
     if (expected.has_value()) {
-      cleanup_candidate = *expected;
+      PendingDelete pending;
+      status = strategy_->FreezePendingDelete(*this, ino, *expected, chunk_size_, &pending);
+      if (!status.ok()) {
+        return status;
+      }
+      cleanup_candidate = std::move(pending);
     }
   } else if (status.IsNotFound()) {
     if (expected.has_value()) {
       return reject_publication(status);
     }
   } else {
+    return status;
+  }
+
+  status = strategy_->index_participant().Publish(*this, ino, expected, replacement, intent);
+  if (!status.ok()) {
+    // Returning a non-OK callback status discards any private writes already
+    // queued by the participant. Keep the candidate cleanup for the caller's
+    // best-effort registration after that definite rejection.
+    PendingDelete pending;
+    auto cleanup_status = strategy_->FreezeRejectedPublication(ino, replacement, intent, chunk_size_, &pending);
+    if (cleanup_status.ok()) {
+      cleanup_candidate = std::move(pending);
+      publication_result = status;
+    }
     return status;
   }
 
@@ -899,6 +1017,26 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
   return SetInode(inode);
 }
 
+utils::Status RedisMetaTxn::LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("chunk view output is null");
+  }
+  ChunkView view;
+  auto status = LookupChunk(ino, idx, &view.head);
+  if (!status.ok()) {
+    return status;
+  }
+  if (view.head.index != idx || !view.head.IsValidForChunkSize(chunk_size_)) {
+    return utils::Status::Malformed("persisted chunk descriptor does not match its canonical identity");
+  }
+  status = strategy_->index_participant().LoadPublished(*this, ino, view.head, &view.private_snapshot);
+  if (!status.ok()) {
+    return status;
+  }
+  *out = std::move(view);
+  return utils::Status::OK();
+}
+
 utils::Status RedisMetaTxn::SetChunk(InodeID ino, const SwordFsChunk &chunk) {
   std::string value;
   auto status = chunk.SerializeTo(&value);
@@ -913,7 +1051,7 @@ utils::Status RedisMetaTxn::DeleteChunks(InodeID ino) {
 }
 
 utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size,
-                                           std::vector<SwordFsChunk> *detached_chunks) {
+                                           std::vector<PendingDelete> *detached_chunks) {
   if (new_size > old_size) {
     return utils::Status::OK();
   }
@@ -931,25 +1069,40 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
     return status;
   }
 
-  for (auto &[field, chunk] : chunks) {
-    if (chunk.start_offset >= new_size) {
+  std::vector<ChunkIndexChange> changes;
+  for (const auto &[field, head] : chunks) {
+    (void)field;
+    if (head.start_offset >= new_size) {
       if (detached_chunks != nullptr) {
-        detached_chunks->push_back(chunk);
+        PendingDelete pending;
+        status = strategy_->FreezePendingDelete(*this, ino, head, chunk_size_, &pending);
+        if (!status.ok()) {
+          return status;
+        }
+        detached_chunks->push_back(std::move(pending));
       }
-      status = txn_.HDel(key_.Chunk(ino), field);
-      if (!status.ok()) {
-        return status;
+      changes.push_back({head, std::nullopt});
+    } else {
+      const uint64_t surviving_size = new_size - head.start_offset;
+      if (head.size > surviving_size) {
+        auto clamped = head;
+        clamped.size = surviving_size;
+        changes.push_back({head, clamped});
       }
-      continue;
     }
-
-    const uint64_t surviving_size = new_size - chunk.start_offset;
-    if (chunk.size > surviving_size) {
-      chunk.size = surviving_size;
-      auto status = SetChunk(ino, chunk);
-      if (!status.ok()) {
-        return status;
-      }
+  }
+  status = strategy_->index_participant().Truncate(*this, ino, changes);
+  if (!status.ok()) {
+    return status;
+  }
+  for (const auto &change : changes) {
+    if (change.current.has_value()) {
+      status = SetChunk(ino, *change.current);
+    } else {
+      status = txn_.HDel(key_.Chunk(ino), std::to_string(change.previous.index));
+    }
+    if (!status.ok()) {
+      return status;
     }
   }
   return utils::Status::OK();

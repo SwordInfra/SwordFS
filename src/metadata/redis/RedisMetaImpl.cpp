@@ -64,6 +64,11 @@ RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view vol
 
 RedisMetaImpl::~RedisMetaImpl() = default;
 
+Status RedisMetaImpl::BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) {
+  utils::ExpectInThreadDomain();
+  return ops_.BindChunkOverwriteStrategy(strategy);
+}
+
 utils::Status RedisMetaImpl::Initialize() {
   utils::ExpectInThreadDomain();
   try {
@@ -523,13 +528,23 @@ Status RedisMetaImpl::AllocateChunkRevision(ChunkRevision *revision) {
 
 Status RedisMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                                   const SwordFsChunk &replacement) {
+  return CommitChunk(ino, expected, replacement, {});
+}
+
+Status RedisMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
+                                  const SwordFsChunk &replacement, const ChunkPublishIntent &intent) {
   utils::ExpectInFiberDomain();
-  return ops_.CommitChunk(ino, expected, replacement);
+  return ops_.CommitChunk(ino, expected, replacement, intent);
 }
 
 Status RedisMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
   utils::ExpectInFiberDomain();
   return ops_.FindChunk(ino, idx, chunk);
+}
+
+Status RedisMetaImpl::LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out) {
+  utils::ExpectInFiberDomain();
+  return ops_.LoadChunkView(ino, idx, out);
 }
 
 Status RedisMetaImpl::Truncate(InodeID ino, uint64_t size) {

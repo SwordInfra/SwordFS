@@ -11,7 +11,7 @@
 #include <shared_mutex>
 #include <vector>
 
-#include "chunk/Chunk.hpp"
+#include "chunk/IChunkOverwriteStrategy.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "utils/Logging.hpp"
@@ -35,7 +35,8 @@ class MultiChunkReadWriter {
   /// Submit a read from |c| at chunk-relative |off| for up to |len|
   /// bytes into |window|.  |window| should be a takeOwnership IOBuf
   /// pointing to the correct slice of the parent output buffer.
-  void SubmitRead(std::shared_ptr<chunk::Chunk> c, off_t off, size_t len, std::unique_ptr<folly::IOBuf> window) {
+  void SubmitRead(std::shared_ptr<chunk::IChunkSession> c, off_t off, size_t len,
+                  std::unique_ptr<folly::IOBuf> window) {
     auto p = std::make_unique<Pending>();
     p->window = std::move(window);
     auto &fm = folly::fibers::FiberManager::getFiberManager();
@@ -84,7 +85,7 @@ class MultiChunkFlusher {
  public:
   using Status = utils::Status;
 
-  void Submit(std::shared_ptr<chunk::Chunk> chunk) {
+  void Submit(std::shared_ptr<chunk::IChunkSession> chunk) {
     auto pending = std::make_unique<Pending>();
     pending->index = chunk->index();
     auto &fm = folly::fibers::FiberManager::getFiberManager();
@@ -128,7 +129,7 @@ class MultiChunkFlusher {
 // ────────────────────────────────────────────────────────────────
 
 utils::Status FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_missing,
-                                    std::shared_ptr<chunk::Chunk> *out) {
+                                    std::shared_ptr<chunk::IChunkSession> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("FileChunkManager::Get output is null");
   }
@@ -142,8 +143,8 @@ utils::Status FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_mis
     }
   }
 
-  auto chunk = std::make_shared<chunk::Chunk>(ino_, idx);
-  auto status = chunk->Initialize();
+  auto session = volume::VolumeImpl::Instance().chunk_overwrite_strategy()->OpenSession(ino_, idx);
+  auto status = session->Initialize();
   if (!status.ok()) {
     return status;
   }
@@ -152,16 +153,16 @@ utils::Status FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_mis
   auto it = chunks_.find(idx);
   if (it != chunks_.end()) {
     *out = it->second;
-  } else if (chunk->IsClean() || create_if_missing) {
-    it = chunks_.try_emplace(idx, std::move(chunk)).first;
+  } else if (session->IsClean() || create_if_missing) {
+    it = chunks_.try_emplace(idx, std::move(session)).first;
     *out = it->second;
   }
   return utils::Status::OK();
 }
 
-std::vector<std::shared_ptr<chunk::Chunk>> FileChunkManager::GetFlushable() {
+std::vector<std::shared_ptr<chunk::IChunkSession>> FileChunkManager::GetFlushable() {
   std::lock_guard<utils::FiberMutex> lock(mutex_);
-  std::vector<std::shared_ptr<chunk::Chunk>> flushable;
+  std::vector<std::shared_ptr<chunk::IChunkSession>> flushable;
   for (auto &[idx, chunk] : chunks_) {
     if (chunk->Flushable()) {
       flushable.push_back(chunk);
@@ -211,7 +212,7 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
   while (remaining > 0) {
     metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(cur_off / static_cast<off_t>(chunk_size_));
 
-    std::shared_ptr<chunk::Chunk> c;
+    std::shared_ptr<chunk::IChunkSession> c;
     auto status = chunks_.Get(idx, /*create_if_missing=*/true, &c);
     if (!status.ok()) {
       return status;
@@ -276,7 +277,7 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   while (remaining > 0) {
     // 1) Try the unified chunk map (dirty + flushed).
     metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(cur_off / static_cast<off_t>(chunk_size_));
-    std::shared_ptr<chunk::Chunk> c;
+    std::shared_ptr<chunk::IChunkSession> c;
     status = chunks_.Get(idx, /*create_if_missing=*/false, &c);
     if (!status.ok()) {
       multi.Drain();

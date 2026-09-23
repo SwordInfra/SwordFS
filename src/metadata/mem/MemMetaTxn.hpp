@@ -34,6 +34,7 @@
 #include <string_view>
 #include <vector>
 
+#include "metadata/IChunkIndexTxn.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
@@ -47,7 +48,7 @@ namespace swordfs::metadata {
 
 class MemMetaStore;
 
-class MemMetaTxn {
+class MemMetaTxn : public IChunkIndexTxn {
  public:
   // ────────────────────────────────────────────────────────────────
   // Inode reads (snapshot copies)
@@ -155,8 +156,10 @@ class MemMetaTxn {
   // ────────────────────────────────────────────────────────────────
 
   Status AllocateChunkRevision(ChunkRevision *revision);
-  Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement);
+  Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
+                     const ChunkPublishIntent &intent = {});
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
+  Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out);
   Status TruncateChunks(InodeID ino, uint64_t new_size);
 
   // ────────────────────────────────────────────────────────────────
@@ -189,8 +192,23 @@ class MemMetaTxn {
   Status ListPendingDeletes(std::vector<PendingDelete> &out);
   Status CompletePendingDelete(std::string_view key);
 
+  // Transaction-scoped, strategy-private index operations. Writes are staged
+  // until MemMetaStore::Transact commits a successful callback.
+  Status Read(std::string_view hash, std::string_view field, std::string *value) override;
+  Status Scan(std::string_view hash, std::vector<std::pair<std::string, std::string>> *values) override;
+  Status Put(std::string_view hash, std::string_view field, std::string_view value) override;
+  Status Erase(std::string_view hash, std::string_view field) override;
+
  private:
   friend class MemMetaStore;
+
+  struct IndexWrite {
+    std::string hash;
+    std::string field;
+    std::optional<std::string> value;
+  };
+  std::string PrivateHash(std::string_view hash) const;
+  void CommitPrivateIndex();
 
   // Only MemMetaStore::Transact() may begin a transaction.
   explicit MemMetaTxn(MemMetaStore *store) : store_(store) {
@@ -213,6 +231,7 @@ class MemMetaTxn {
 
   // Non-owning; the store outlives every transaction.
   MemMetaStore *store_;
+  std::vector<IndexWrite> index_writes_;
 };
 
 }  // namespace swordfs::metadata

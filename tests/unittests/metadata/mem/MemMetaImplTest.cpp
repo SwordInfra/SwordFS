@@ -17,6 +17,7 @@
 
 #include "FiberTest.hpp"
 #include "chunk/ChunkObjectKey.hpp"
+#include "chunk/WholeObjectCleanup.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "utils/Context.hpp"
@@ -136,7 +137,12 @@ class MemMetaImplTest : public ::testing::Test {
     auto status = impl_->VisitPendingDeletesBatch(
         1024,
         [&out](const swordfs::metadata::PendingDelete &work) {
-          out.push_back(work.chunk.key);
+          swordfs::chunk::WholeObjectRef ref;
+          auto status = swordfs::chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref);
+          EXPECT_TRUE(status.ok()) << status.message();
+          if (status.ok()) {
+            out.push_back(ref.key);
+          }
           return Status::OK();
         },
         &has_more);
@@ -320,7 +326,9 @@ FIBER_TEST_F(MemMetaImplTest, MknodSpecialNodesUseOrdinaryNamespaceLifecycle) {
   std::optional<ReclaimWork> work;
   ASSERT_TRUE(impl_->PrepareReclaim(fifo.ino, &work).ok());
   ASSERT_TRUE(work.has_value());
-  EXPECT_TRUE(work->chunks.empty());
+  std::vector<swordfs::chunk::WholeObjectRef> refs;
+  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, kChunkSize, &refs).ok());
+  EXPECT_TRUE(refs.empty());
   SwordFsInode reclaimed;
   EXPECT_TRUE(impl_->GetInode(fifo.ino, &reclaimed).IsNotFound());
 }
@@ -588,6 +596,26 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSizeM
   SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
   EXPECT_EQ(stored.revision, first.revision);
+}
+
+FIBER_TEST_F(MemMetaImplTest, LoadChunkViewReturnsPublishedHeadAndWholeObjectSnapshot) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "chunk-view", 0644, &file).ok());
+  const SwordFsChunk head{.index = 0, .start_offset = 0, .revision = 1, .size = 128};
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, head).ok());
+
+  swordfs::metadata::ChunkView view;
+  ASSERT_TRUE(impl_->LoadChunkView(file.ino, 0, &view).ok());
+  EXPECT_EQ(view.head, head);
+  EXPECT_TRUE(view.private_snapshot.empty());
+  EXPECT_TRUE(impl_->LoadChunkView(file.ino, 1, &view).IsNotFound());
+  EXPECT_EQ(impl_->LoadChunkView(file.ino, 0, nullptr).code(), Status::kInvalidArgument);
+
+  const SwordFsChunk replacement{.index = 0, .start_offset = 0, .revision = 2, .size = 128};
+  const swordfs::metadata::ChunkPublishIntent unexpected{.payload = "not-whole-object"};
+  EXPECT_EQ(impl_->CommitChunk(file.ino, head, replacement, unexpected).code(), Status::kInvalidArgument);
+  ASSERT_TRUE(impl_->LoadChunkView(file.ino, 0, &view).ok());
+  EXPECT_EQ(view.head, head);
 }
 
 FIBER_TEST_F(MemMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempotent) {
@@ -1017,11 +1045,13 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFence
   ASSERT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
   ASSERT_TRUE(work.has_value());
   EXPECT_EQ(work->ino, f_ino);
-  ASSERT_EQ(work->chunks.size(), 2U);
-  EXPECT_EQ(work->chunks[0].descriptor.index, 0U);
-  EXPECT_EQ(work->chunks[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, 1));
-  EXPECT_EQ(work->chunks[1].descriptor.index, 1U);
-  EXPECT_EQ(work->chunks[1].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 1, 2));
+  std::vector<swordfs::chunk::WholeObjectRef> refs;
+  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, kChunkSize, &refs).ok());
+  ASSERT_EQ(refs.size(), 2U);
+  EXPECT_EQ(refs[0].descriptor.index, 0U);
+  EXPECT_EQ(refs[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, 1));
+  EXPECT_EQ(refs[1].descriptor.index, 1U);
+  EXPECT_EQ(refs[1].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 1, 2));
 
   // The live inode and its chunk metadata are gone, so no name and no
   // inode-by-number reference can reach the data again...
@@ -1066,10 +1096,12 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimUsesCurrentRevisionAfterRewrite) {
   std::optional<ReclaimWork> work;
   ASSERT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
   ASSERT_TRUE(work.has_value());
-  ASSERT_EQ(work->chunks.size(), 1U);
+  std::vector<swordfs::chunk::WholeObjectRef> refs;
+  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, kChunkSize, &refs).ok());
+  ASSERT_EQ(refs.size(), 1U);
   // The frozen identity is the current revisioned key, never the retired one.
-  EXPECT_EQ(work->chunks[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, replacement.revision));
-  EXPECT_NE(work->chunks[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, first.revision));
+  EXPECT_EQ(refs[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, replacement.revision));
+  EXPECT_NE(refs[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, first.revision));
 }
 
 FIBER_TEST_F(MemMetaImplTest, PrepareReclaimRejectsLinkedInode) {
@@ -1338,7 +1370,7 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchMakesProgressWithoutQueueMutatio
   std::vector<std::string> visited;
   bool has_more = false;
   auto visit_one = [&](const swordfs::metadata::PendingDelete &work) {
-    visited.push_back(work.chunk.key);
+    visited.push_back(work.id);
     return Status::OK();
   };
 

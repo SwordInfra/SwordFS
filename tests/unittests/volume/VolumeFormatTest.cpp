@@ -64,6 +64,24 @@ TEST(SwordFsVolumeTest, SerializeToAndParseFromRoundTrip) {
   EXPECT_EQ(parsed.bucket, original.bucket);
   EXPECT_EQ(parsed.region, original.region);
   EXPECT_EQ(parsed.chunk_size, original.chunk_size);
+  EXPECT_EQ(parsed.chunk_overwrite_strategy, "whole_object");
+  EXPECT_EQ(parsed.chunk_index_format_version, 1U);
+}
+
+TEST(SwordFsVolumeTest, PersistsStrategyAndRejectsMissingOrZeroVersion) {
+  SwordFsVolume volume = MakeVolume();
+  volume.chunk_overwrite_strategy = "redis_cache";
+  volume.chunk_index_format_version = 7;
+  SwordFsVolume parsed;
+  ASSERT_TRUE(parsed.ParseFrom(volume.SerializeTo()).ok());
+  EXPECT_EQ(parsed.chunk_overwrite_strategy, "redis_cache");
+  EXPECT_EQ(parsed.chunk_index_format_version, 7U);
+
+  volume.chunk_overwrite_strategy.clear();
+  EXPECT_TRUE(parsed.ParseFrom(volume.SerializeTo()).IsMalformed());
+  volume.chunk_overwrite_strategy = "whole_object";
+  volume.chunk_index_format_version = 0;
+  EXPECT_TRUE(parsed.ParseFrom(volume.SerializeTo()).IsMalformed());
 }
 
 TEST(SwordFsVolumeTest, ParseFromRejectsMalformedData) {

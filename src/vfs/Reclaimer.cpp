@@ -13,7 +13,7 @@
 #include <thread>
 #include <vector>
 
-#include "chunk/ChunkObjectKey.hpp"
+#include "chunk/IChunkOverwriteStrategy.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/ExecutionDomain.hpp"
@@ -69,22 +69,10 @@ utils::Status Reclaimer::PrepareOrphan(metadata::InodeID ino) {
 utils::Status Reclaimer::DeleteFrozenObjects(const metadata::ReclaimWork &work) {
   auto *meta = volume::VolumeImpl::Instance().meta_engine();
   auto *data = volume::VolumeImpl::Instance().data_engine();
-
-  size_t failed = 0;
-  for (const auto &chunk : work.chunks) {
-    // Only the frozen identity is used: never a key rebuilt from live state.
-    auto status = data->Delete(chunk.key);
-    if (!status.ok()) {
-      ++failed;
-      SWORDFS_LOG_ERROR << "Reclaim(" << work.ino << "): data->Delete(" << chunk.key
-                        << ") failed: " << status.message();
-    }
-  }
-  if (failed != 0) {
-    // Keep the frozen record: the deletes are idempotent, so the next
-    // reconciliation pass (or mount) finishes the job.
-    return utils::Status::IOError("reclaim of inode " + std::to_string(work.ino) + " left " + std::to_string(failed) +
-                                  " of " + std::to_string(work.chunks.size()) + " objects undeleted");
+  auto *strategy = volume::VolumeImpl::Instance().chunk_overwrite_strategy();
+  auto status = strategy->DeleteFrozen(work, volume::VolumeImpl::Instance().chunk_size(), meta, data);
+  if (!status.ok()) {
+    return status;
   }
   return meta->CompleteReclaim(work.ino);
 }
@@ -92,28 +80,16 @@ utils::Status Reclaimer::DeleteFrozenObjects(const metadata::ReclaimWork &work) 
 utils::Status Reclaimer::DeletePendingObject(const metadata::PendingDelete &work) {
   auto *meta = volume::VolumeImpl::Instance().meta_engine();
   auto *data = volume::VolumeImpl::Instance().data_engine();
-
-  // PendingDelete is only a cleanup candidate, never delete authority. Do not
-  // delete until current authoritative metadata no longer names the exact
-  // immutable object key. A candidate that still names live data is harmless
-  // because revalidation suppresses the physical delete.
-  metadata::SwordFsChunk current;
-  auto status = meta->FindChunk(work.ino, work.chunk.descriptor.index, &current);
-  if (status.ok()) {
-    const auto current_key = chunk::FormatChunkObjectKey(work.ino, current.index, current.revision);
-    if (current_key == work.chunk.key) {
-      return utils::Status::OK();
-    }
-  } else if (!status.IsNotFound()) {
-    return status;
-  }
-
-  status = data->Delete(work.chunk.key);
+  auto *strategy = volume::VolumeImpl::Instance().chunk_overwrite_strategy();
+  bool completed = false;
+  auto status = strategy->DeletePending(work, volume::VolumeImpl::Instance().chunk_size(), meta, data, &completed);
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "Pending delete: data->Delete(" << work.chunk.key << ") failed: " << status.message();
     return status;
   }
-  return meta->CompletePendingDelete(work.chunk.key);
+  if (!completed) {
+    return utils::Status::OK();
+  }
+  return meta->CompletePendingDelete(work.id);
 }
 
 utils::Status Reclaimer::Reconcile() {
@@ -127,9 +103,8 @@ utils::Status Reclaimer::Reconcile() {
 
   size_t failures = 0;
 
-  // DeletePendingObject always rechecks whether the exact immutable key is
-  // still authoritative. Candidate age or queue position never grants delete
-  // authority; only current metadata can make the physical delete safe.
+  // The selected mechanism rechecks reachability before physical deletion.
+  // Candidate age or queue position never grants delete authority.
   bool has_more_pending_deletes = false;
   auto status = meta->VisitPendingDeletesBatch(
       kPendingDeleteBatchSize,
@@ -137,7 +112,7 @@ utils::Status Reclaimer::Reconcile() {
         auto status = DeletePendingObject(work);
         if (!status.ok()) {
           ++failures;
-          SWORDFS_LOG_WARN << "Reconcile: pending object delete " << work.chunk.key << " failed: " << status.message();
+          SWORDFS_LOG_WARN << "Reconcile: pending delete " << work.id << " failed: " << status.message();
         }
         return utils::Status::OK();
       },
@@ -152,11 +127,12 @@ utils::Status Reclaimer::Reconcile() {
     Wake();
   }
 
-  // Already-prepared work crossed the point of no return: the live inode no
-  // longer exists, so no local open-fd fence is needed. Replay the frozen work
-  // directly rather than going back through PrepareReclaim.
+  // Prepared work may have survived a partial Redis EXEC that left the live
+  // inode behind. Re-enter preparation under the local open-handle fence:
+  // Redis can finish an unlinked inode's transition. A conflicting linked
+  // inode leaves the frozen record intact and fails closed.
   status = meta->VisitPendingReclaims([this, &failures](const metadata::ReclaimWork &work) {
-    auto status = DeleteFrozenObjects(work);
+    auto status = PrepareOrphan(work.ino);
     if (!status.ok()) {
       ++failures;
       SWORDFS_LOG_WARN << "Reconcile: pending reclaim of ino " << work.ino << " failed: " << status.message();
@@ -168,8 +144,8 @@ utils::Status Reclaimer::Reconcile() {
   }
 
   // Orphan candidates still have a live inode and may have local descriptors.
-  // The InodeHandle fence is acquired only around preparation; object deletion
-  // uses the durable frozen record afterwards.
+  // The InodeHandle fence is acquired only around preparation; physical
+  // deletion uses the durable frozen record afterwards.
   status = meta->VisitOrphanCandidates([this, &failures](metadata::InodeID ino) {
     auto status = PrepareOrphan(ino);
     if (!status.ok()) {

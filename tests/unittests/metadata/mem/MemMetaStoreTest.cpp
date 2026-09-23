@@ -10,8 +10,13 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "FiberTest.hpp"
 #include "chunk/ChunkObjectKey.hpp"
+#include "chunk/WholeObjectCleanup.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "utils/Status.hpp"
@@ -66,6 +71,60 @@ FIBER_TEST_F(MemMetaStoreTest, ConstructorCreatesRoot) {
   EXPECT_TRUE(Lookup(kRoot, &root).ok());
   EXPECT_TRUE(root.IsDir());
   EXPECT_EQ(root.ino, kRoot);
+}
+
+FIBER_TEST_F(MemMetaStoreTest, PrivateChunkIndexReadsStagedWritesAndDropsRejectedChanges) {
+  ASSERT_TRUE(store_->Transact([](MemMetaTxn &txn) { return txn.Put("fragments", "first", "original"); }).ok());
+
+  const auto rejected = store_->Transact([](MemMetaTxn &txn) {
+    std::string value;
+    EXPECT_TRUE(txn.Read("fragments", "first", &value).ok());
+    EXPECT_EQ(value, "original");
+    EXPECT_TRUE(txn.Put("fragments", "second", "new").ok());
+    EXPECT_TRUE(txn.Read("fragments", "second", &value).ok());
+    EXPECT_EQ(value, "new");
+    std::vector<std::pair<std::string, std::string>> values;
+    EXPECT_TRUE(txn.Scan("fragments", &values).ok());
+    EXPECT_EQ(values.size(), 2U);
+    EXPECT_TRUE(txn.Erase("fragments", "first").ok());
+    EXPECT_TRUE(txn.Read("fragments", "first", &value).IsNotFound());
+    EXPECT_TRUE(txn.Scan("fragments", &values).ok());
+    EXPECT_EQ(values.size(), 1U);
+    if (!values.empty()) {
+      EXPECT_EQ(values[0].first, "second");
+    }
+    return Status::IOError("reject private index changes");
+  });
+  EXPECT_EQ(rejected.code(), Status::kIOError);
+
+  ASSERT_TRUE(store_
+                  ->Transact([](MemMetaTxn &txn) {
+                    std::string value;
+                    EXPECT_TRUE(txn.Read("fragments", "first", &value).ok());
+                    EXPECT_EQ(value, "original");
+                    EXPECT_TRUE(txn.Read("fragments", "second", &value).IsNotFound());
+                    return txn.Erase("fragments", "first");
+                  })
+                  .ok());
+  std::vector<std::pair<std::string, std::string>> values;
+  EXPECT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.Scan("fragments", &values); }).ok());
+  EXPECT_TRUE(values.empty());
+}
+
+FIBER_TEST_F(MemMetaStoreTest, PrivateChunkIndexRejectsInvalidHashAndOutputs) {
+  EXPECT_TRUE(store_
+                  ->Transact([](MemMetaTxn &txn) {
+                    std::string value;
+                    std::vector<std::pair<std::string, std::string>> values;
+                    EXPECT_EQ(txn.Read("", "field", &value).code(), Status::kInvalidArgument);
+                    EXPECT_EQ(txn.Read("hash", "field", nullptr).code(), Status::kInvalidArgument);
+                    EXPECT_EQ(txn.Scan("", &values).code(), Status::kInvalidArgument);
+                    EXPECT_EQ(txn.Scan("hash", nullptr).code(), Status::kInvalidArgument);
+                    EXPECT_EQ(txn.Put("", "field", "value").code(), Status::kInvalidArgument);
+                    EXPECT_EQ(txn.Erase("", "field").code(), Status::kInvalidArgument);
+                    return Status::OK();
+                  })
+                  .ok());
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -262,7 +321,9 @@ FIBER_TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   ASSERT_TRUE(status.ok());
   ASSERT_TRUE(work.has_value());
   EXPECT_EQ(work->ino, ino);
-  EXPECT_TRUE(work->chunks.empty());
+  std::vector<swordfs::chunk::WholeObjectRef> refs;
+  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, 0, &refs).ok());
+  EXPECT_TRUE(refs.empty());
   EXPECT_EQ(count(), 1);
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 
@@ -564,9 +625,11 @@ FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimFreezesWorkAndDropsOrphanedInode) {
   ASSERT_TRUE(status.ok());
   ASSERT_TRUE(work.has_value());
   EXPECT_EQ(work->ino, ino);
-  ASSERT_EQ(work->chunks.size(), 1U);
-  EXPECT_EQ(work->chunks[0].descriptor, MakeChunk(0, 0, 100));
-  EXPECT_EQ(work->chunks[0].key, swordfs::chunk::FormatChunkObjectKey(ino, 0, 1));
+  std::vector<swordfs::chunk::WholeObjectRef> refs;
+  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, 0, &refs).ok());
+  ASSERT_EQ(refs.size(), 1U);
+  EXPECT_EQ(refs[0].descriptor, MakeChunk(0, 0, 100));
+  EXPECT_EQ(refs[0].key, swordfs::chunk::FormatChunkObjectKey(ino, 0, 1));
   EXPECT_EQ(count(), 1);
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 

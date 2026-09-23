@@ -33,6 +33,7 @@ const RegisterMetaEngine kMemoryMetaEngine{"memory", MemMetaImpl::CreateInstance
 
 MemMetaImpl::MemMetaImpl() {
   utils::ExpectInThreadDomain();
+  store_.SetChunkSize(chunk_size_);
 }
 
 utils::Status MemMetaImpl::CreateInstance(std::string_view, std::string_view, std::unique_ptr<IMetaEngine> *out) {
@@ -46,6 +47,15 @@ utils::Status MemMetaImpl::CreateInstance(std::string_view, std::string_view, st
 
 MemMetaImpl::~MemMetaImpl() {
   utils::ExpectInThreadDomain();
+}
+
+Status MemMetaImpl::BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) {
+  utils::ExpectInThreadDomain();
+  if (strategy == nullptr) {
+    return Status::InvalidArgument("chunk strategy is null");
+  }
+  store_.BindChunkOverwriteStrategy(strategy);
+  return Status::OK();
 }
 
 // Transaction model: every method below runs its metadata mutation as a
@@ -95,6 +105,7 @@ Status MemMetaImpl::FormatVolume(const SwordFsVolume &config) {
   auto status = file.Write(config);
   if (status.ok()) {
     chunk_size_ = config.chunk_size;
+    store_.SetChunkSize(chunk_size_);
   }
   return status;
 }
@@ -107,6 +118,7 @@ Status MemMetaImpl::LoadVolume(SwordFsVolume *config) {
   auto status = mem::VolumeFile(config->name).Read(config);
   if (status.ok()) {
     chunk_size_ = config->chunk_size;
+    store_.SetChunkSize(chunk_size_);
   }
   return status;
 }
@@ -767,6 +779,11 @@ Status MemMetaImpl::Readlink(InodeID ino, std::string *target) {
 
 Status MemMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                                 const SwordFsChunk &replacement) {
+  return CommitChunk(ino, expected, replacement, {});
+}
+
+Status MemMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
+                                const SwordFsChunk &replacement, const ChunkPublishIntent &intent) {
   utils::ExpectInFiberDomain();
   if (!replacement.IsValidForChunkSize(chunk_size_)) {
     return Status::InvalidArgument("replacement chunk descriptor is invalid");
@@ -774,12 +791,20 @@ Status MemMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &
   if (expected.has_value() && !expected->IsValidForChunkSize(chunk_size_)) {
     return Status::InvalidArgument("expected chunk descriptor is invalid");
   }
-  return store_.Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(ino, expected, replacement); });
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(ino, expected, replacement, intent); });
 }
 
 Status MemMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
   utils::ExpectInFiberDomain();
   return store_.Transact([&](MemMetaTxn &txn) { return txn.FindChunk(ino, idx, chunk); });
+}
+
+Status MemMetaImpl::LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out) {
+  utils::ExpectInFiberDomain();
+  if (out == nullptr) {
+    return Status::InvalidArgument("chunk view output is null");
+  }
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.LoadChunkView(ino, idx, out); });
 }
 
 Status MemMetaImpl::Truncate(InodeID ino, uint64_t size) {
