@@ -76,7 +76,7 @@ utils::Status RedisKvTxn::Get(std::string_view key, std::string *value) {
   });
 }
 
-utils::Status RedisKvTxn::HGet(std::string_view key, std::string_view field, std::string *value) {
+utils::Status RedisKvTxn::HGet(std::string_view key, std::string_view field, std::string *value, ReadMode mode) {
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis HGET output is null");
   }
@@ -84,7 +84,9 @@ utils::Status RedisKvTxn::HGet(std::string_view key, std::string_view field, std
     return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
   }
   return RunRedisCommand("HGET", [&] {
-    redis_->watch(key);
+    if (mode == ReadMode::kWatched) {
+      redis_->watch(key);
+    }
     auto result = redis_->hget(std::string(key), std::string(field));
     if (!result.has_value()) {
       return utils::Status::NotFound("Redis hash field not found");

@@ -78,7 +78,6 @@ class RedisMetaOps {
                             const ChunkPublishIntent &intent = {});
   utils::Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
   utils::Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out);
-  utils::Status GetInodeCount(uint64_t *count);
   utils::Status AllocateInode(InodeID *ino);
   utils::Status AllocateChunkRevision(ChunkRevision *revision);
 

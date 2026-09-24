@@ -127,12 +127,11 @@ utils::Status Reclaimer::Reconcile() {
     Wake();
   }
 
-  // Prepared work may have survived a partial Redis EXEC that left the live
-  // inode behind. Re-enter preparation under the local open-handle fence:
-  // Redis can finish an unlinked inode's transition. A conflicting linked
-  // inode leaves the frozen record intact and fails closed.
+  // Prepared work already crossed the metadata point of no return. Recovery
+  // can continue from the immutable record directly; DeleteFrozenObjects
+  // independently fails closed if an inconsistent live inode still exists.
   status = meta->VisitPendingReclaims([this, &failures](const metadata::ReclaimWork &work) {
-    auto status = PrepareOrphan(work.ino);
+    auto status = DeleteFrozenObjects(work);
     if (!status.ok()) {
       ++failures;
       SWORDFS_LOG_WARN << "Reconcile: pending reclaim of ino " << work.ino << " failed: " << status.message();

@@ -58,9 +58,6 @@ class MemMetaTxn : public IChunkIndexTxn {
   // copy of the inode record.
   Status LookupInode(InodeID ino, SwordFsInode *out);
 
-  // Return the total number of inodes currently stored.
-  uint64_t InodeCount();
-
   // ────────────────────────────────────────────────────────────────
   // Inode writes (by ino)
   // ────────────────────────────────────────────────────────────────

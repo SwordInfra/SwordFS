@@ -833,8 +833,8 @@ Status MemMetaImpl::StatFs(SwordFsStatFs *stbuf) {
   stbuf->blocks = 268435456;  // ~1 TiB
   stbuf->blocks_free = 268435456;
   stbuf->blocks_available = 268435456;
-  store_.Transact([&](MemMetaTxn &txn) { stbuf->files = txn.InodeCount(); });
-  stbuf->files_free = limits.max_free_inodes;
+  stbuf->files = limits.max_free_inodes;
+  stbuf->files_free = stbuf->files;
   return Status::OK();
 }
 

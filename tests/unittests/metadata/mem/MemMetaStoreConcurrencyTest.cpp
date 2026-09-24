@@ -83,9 +83,9 @@ FIBER_TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntryNoDuplicate) {
 
   EXPECT_EQ(success_count.load(), kThreads * kPerThread);
   EXPECT_EQ(error_count.load(), 0);
-  // root + all created files
-  size_t inode_count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
-  EXPECT_EQ(inode_count, 1 + kThreads * kPerThread);
+  std::vector<SwordFsEntry> entries;
+  ASSERT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.ListEntries(kRoot, &entries); }).ok());
+  EXPECT_EQ(entries.size(), 2U + kThreads * kPerThread);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -262,9 +262,23 @@ FIBER_TEST_F(MemMetaStoreConcurrencyTest, ConcurrentRemoveAndAdd) {
   }
 
   EXPECT_EQ(ops_fail.load(), 0);
-  // After: root + 100 - 100 + 100 = 101 inodes
-  size_t inode_count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
-  EXPECT_EQ(inode_count, 1 + kFiles) << "Inode count mismatch";
+  for (const auto ino : inodes) {
+    SwordFsInode inode;
+    EXPECT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.LookupInode(ino, &inode); }).IsNotFound());
+  }
+
+  std::vector<SwordFsEntry> entries;
+  ASSERT_TRUE(store_->Transact([&](MemMetaTxn &txn) { return txn.ListEntries(kRoot, &entries); }).ok());
+  ASSERT_EQ(entries.size(), 2U + kFiles);
+  std::set<std::string> names;
+  for (const auto &entry : entries) {
+    names.insert(entry.name);
+  }
+  for (int t = 0; t < kThreads; ++t) {
+    for (int i = 0; i < 25; ++i) {
+      EXPECT_TRUE(names.contains("new_" + std::to_string(t) + "_" + std::to_string(i)));
+    }
+  }
 }
 
 // ────────────────────────────────────────────────────────────────

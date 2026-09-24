@@ -165,9 +165,9 @@ class StagedIntentMetaEngine : public MemMetaImpl {
   Status find_status_ = Status::OK();
 };
 
-class PartialReclaimMetaEngine : public MemMetaImpl {
+class PendingReclaimMetaEngine : public MemMetaImpl {
  public:
-  explicit PartialReclaimMetaEngine(metadata::ReclaimWork frozen) : frozen_(std::move(frozen)) {
+  explicit PendingReclaimMetaEngine(metadata::ReclaimWork frozen) : frozen_(std::move(frozen)) {
   }
 
   Status VisitPendingDeletesBatch(size_t, const metadata::PendingDeleteVisitorFn &, bool *has_more) override {
@@ -180,25 +180,11 @@ class PartialReclaimMetaEngine : public MemMetaImpl {
   Status VisitOrphanCandidates(const metadata::InodeVisitorFn &) override {
     return Status::OK();
   }
-  Status PrepareReclaim(InodeID file_ino, std::optional<metadata::ReclaimWork> *work) override {
-    if (file_ino != frozen_.ino) {
-      return Status::NotFound("reclaim inode mismatch");
-    }
-    ++prepare_calls;
-    live_ = false;
-    *work = frozen_;
-    return Status::OK();
-  }
   Status GetInode(InodeID file_ino, SwordFsInode *out) override {
-    if (!live_ || file_ino != frozen_.ino) {
+    if (file_ino == frozen_.ino) {
       return Status::NotFound("inode already removed");
     }
-    if (out != nullptr) {
-      metadata::SwordFsAttr attr(file_ino, S_IFREG | 0644);
-      attr.nlink = 0;
-      *out = SwordFsInode(file_ino, attr, kRootInodeId);
-    }
-    return Status::OK();
+    return MemMetaImpl::GetInode(file_ino, out);
   }
   Status CompleteReclaim(InodeID file_ino) override {
     if (file_ino != frozen_.ino) {
@@ -208,12 +194,10 @@ class PartialReclaimMetaEngine : public MemMetaImpl {
     return Status::OK();
   }
 
-  int prepare_calls = 0;
   bool completed = false;
 
  private:
   metadata::ReclaimWork frozen_;
-  bool live_ = true;
 };
 
 class ReclaimerTest : public ::testing::Test {
@@ -346,13 +330,13 @@ FIBER_TEST_F(ReclaimerTest, FrozenWorkDoesNotAuthorizeDeletingALiveInode) {
   ASSERT_TRUE(meta_->CompleteReclaim(file_ino).ok());
 }
 
-TEST_F(ReclaimerTest, PendingReclaimReplaysPreparationBeforeDeletion) {
+TEST_F(ReclaimerTest, PendingReclaimContinuesDirectlyToDeletion) {
   constexpr InodeID kFileIno = 42;
   const SwordFsChunk head{.index = 0, .start_offset = 0, .revision = 7, .size = 64};
   metadata::ReclaimWork frozen;
   ASSERT_TRUE(chunk::FreezeWholeObjectReclaim(kFileIno, {head}, 0, &frozen).ok());
-  auto replacement = std::make_unique<swordfs::test::ConfiguredMetaEngine<PartialReclaimMetaEngine>>(frozen);
-  auto *partial_meta = replacement.get();
+  auto replacement = std::make_unique<swordfs::test::ConfiguredMetaEngine<PendingReclaimMetaEngine>>(frozen);
+  auto *pending_meta = replacement.get();
   auto data = std::make_unique<RecordingDataEngine>();
   data_ = data.get();
   SwordFsVolume config;
@@ -362,8 +346,7 @@ TEST_F(ReclaimerTest, PendingReclaimReplaysPreparationBeforeDeletion) {
   data_->Seed(key);
 
   swordfs::test::RunInTestFiber([&] { ASSERT_TRUE(Reclaimer::Instance().Reconcile().ok()); });
-  EXPECT_EQ(partial_meta->prepare_calls, 1);
-  EXPECT_TRUE(partial_meta->completed);
+  EXPECT_TRUE(pending_meta->completed);
   EXPECT_FALSE(data_->Contains(key));
 }
 

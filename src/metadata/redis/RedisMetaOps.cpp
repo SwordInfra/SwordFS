@@ -557,27 +557,6 @@ utils::Status RedisMetaOps::ParsePendingDelete(std::string_view object_key, std:
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaOps::GetInodeCount(uint64_t *count) {
-  utils::ExpectInFiberDomain();
-  if (count == nullptr) {
-    return utils::Status::InvalidArgument("inode count output is null");
-  }
-
-  std::string value;
-  auto status = backend_->executor().RunFromFiber([&] { return backend_->client().Get(key_.InodeCount(), &value); });
-  if (!status.ok()) {
-    return status;
-  }
-
-  uint64_t parsed = 0;
-  const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed);
-  if (error != std::errc{} || end != value.data() + value.size()) {
-    return utils::Status::IOError("invalid Redis inode count");
-  }
-  *count = parsed;
-  return utils::Status::OK();
-}
-
 utils::Status RedisMetaOps::AllocateInode(InodeID *ino) {
   utils::ExpectInFiberDomain();
   if (ino == nullptr) {

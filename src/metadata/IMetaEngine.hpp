@@ -161,8 +161,8 @@ class IMetaEngine {
   /// Prepare the reclaim of |ino| and return the frozen object identities
   /// that must be deleted from the data engine.
   ///
-  /// This is the inode's reclaim point of no return. In one atomic mutation
-  /// the engine must:
+  /// This is the inode's reclaim point of no return. In one atomic metadata
+  /// mutation the engine must:
   ///   - recheck that |ino| is still orphaned (nlink == 0);
   ///   - freeze the authoritative chunk descriptors and their immutable
   ///     object keys into a durable pending-reclaim record;
@@ -177,8 +177,9 @@ class IMetaEngine {
   /// being overloaded into the no-op outcome.
   ///
   /// The memory backend mirrors these semantics for the lifetime of the
-  /// process; persistent backends must persist the pending record so that
-  /// mount-time reconciliation can finish the job after a crash.
+  /// process; persistent backends must persist the pending record in the same
+  /// metadata transition so mount-time reconciliation can finish object
+  /// deletion after a crash.
   virtual Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) = 0;
 
   /// Remove the durable pending-reclaim record for |ino| together with its

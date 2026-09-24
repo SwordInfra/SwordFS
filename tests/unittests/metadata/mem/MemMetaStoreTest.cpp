@@ -56,22 +56,26 @@ class MemMetaStoreTest : public ::testing::Test {
   Status LookupChild(InodeID parent_ino, std::string_view name, SwordFsInode *out = nullptr) {
     return store_->Transact([&](MemMetaTxn &txn) { return txn.LookupEntry(parent_ino, name, out); });
   }
+  Status List(InodeID ino, std::vector<SwordFsEntry> *entries) {
+    return store_->Transact([&](MemMetaTxn &txn) { return txn.ListEntries(ino, entries); });
+  }
 
   MemMetaStore *store_;
 };
 
 // ────────────────────────────────────────────────────────────────
-// Constructor & InodeCount
+// Constructor
 // ────────────────────────────────────────────────────────────────
 
 FIBER_TEST_F(MemMetaStoreTest, ConstructorCreatesRoot) {
-  size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
-  EXPECT_EQ(count, 1);
-
   SwordFsInode root;
   EXPECT_TRUE(Lookup(kRoot, &root).ok());
   EXPECT_TRUE(root.IsDir());
   EXPECT_EQ(root.ino, kRoot);
+
+  std::vector<SwordFsEntry> entries;
+  ASSERT_TRUE(List(kRoot, &entries).ok());
+  EXPECT_EQ(entries.size(), 2U);
 }
 
 FIBER_TEST_F(MemMetaStoreTest, PrivateChunkIndexReadsStagedWritesAndDropsRejectedChanges) {
@@ -154,8 +158,13 @@ FIBER_TEST_F(MemMetaStoreTest, AddEntryCreatesFile) {
   EXPECT_FALSE(child.IsDir());
   EXPECT_GT(child.ino, 0);
 
-  size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
-  EXPECT_EQ(count, 2);
+  SwordFsInode stored;
+  ASSERT_TRUE(Lookup(child.ino, &stored).ok());
+  EXPECT_EQ(stored.ino, child.ino);
+
+  std::vector<SwordFsEntry> entries;
+  ASSERT_TRUE(List(kRoot, &entries).ok());
+  EXPECT_EQ(entries.size(), 3U);
 }
 
 FIBER_TEST_F(MemMetaStoreTest, AddEntryCreatesDirectory) {
@@ -303,16 +312,12 @@ FIBER_TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   Add(kRoot, "f", kRegFile, &f);
   InodeID ino = f.ino;
 
-  auto count = [&] { return store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); }); };
-
-  EXPECT_EQ(count(), 2);  // root + f
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "f"); });
   EXPECT_TRUE(status.ok());
 
   // Entry gone from directory
   EXPECT_TRUE(LookupChild(kRoot, "f").IsNotFound());
   // Inode and its metadata stay alive (nlink == 0).
-  EXPECT_EQ(count(), 2);
   EXPECT_TRUE(Lookup(ino).ok());
 
   // Caller follows up with the reclaim protocol: preparation freezes the
@@ -325,7 +330,6 @@ FIBER_TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   std::vector<swordfs::chunk::WholeObjectRef> refs;
   ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, 0, &refs).ok());
   EXPECT_TRUE(refs.empty());
-  EXPECT_EQ(count(), 1);
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 
   status = store_->Transact([&](MemMetaTxn &txn) { return txn.CompleteReclaim(ino); });
@@ -335,8 +339,10 @@ FIBER_TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
 FIBER_TEST_F(MemMetaStoreTest, UnlinkMissingEntryReturnsNotFound) {
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "nonexistent"); });
   EXPECT_TRUE(status.IsNotFound());
-  size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
-  EXPECT_EQ(count, 1);
+  EXPECT_TRUE(Lookup(kRoot).ok());
+  std::vector<SwordFsEntry> entries;
+  ASSERT_TRUE(List(kRoot, &entries).ok());
+  EXPECT_EQ(entries.size(), 2U);
 }
 
 FIBER_TEST_F(MemMetaStoreTest, UnlinkNonEmptyDirectory) {
@@ -348,8 +354,8 @@ FIBER_TEST_F(MemMetaStoreTest, UnlinkNonEmptyDirectory) {
 
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "sub"); });
   EXPECT_TRUE(status.ToErrno() == ENOTEMPTY);
-  size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
-  EXPECT_EQ(count, 3);  // root + sub + f
+  EXPECT_TRUE(LookupChild(kRoot, "sub").ok());
+  EXPECT_TRUE(LookupChild(sub.ino, "f").ok());
 }
 
 FIBER_TEST_F(MemMetaStoreTest, UnlinkEmptyDirectory) {
@@ -361,8 +367,9 @@ FIBER_TEST_F(MemMetaStoreTest, UnlinkEmptyDirectory) {
   EXPECT_TRUE(status.ok());
   // Both sub and its dir entry table freed
   EXPECT_TRUE(Lookup(sub_ino).IsNotFound());
-  size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
-  EXPECT_EQ(count, 1);
+  std::vector<SwordFsEntry> entries;
+  ASSERT_TRUE(List(kRoot, &entries).ok());
+  EXPECT_EQ(entries.size(), 2U);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -602,14 +609,10 @@ FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimFreezesWorkAndDropsOrphanedInode) {
       store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(ino, std::nullopt, MakeChunk(0, 0, 100)); });
   ASSERT_TRUE(status.ok());
 
-  auto count = [&] { return store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); }); };
-  ASSERT_EQ(count(), 2);
-
   // Unlink detaches the entry, drops nlink to 0 and publishes the inode as an
   // orphan candidate; the inode (and its chunk metadata) survives for now.
   status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "f"); });
   ASSERT_TRUE(status.ok());
-  EXPECT_EQ(count(), 2);
   EXPECT_TRUE(Lookup(ino).ok());
 
   std::vector<InodeID> candidates;
@@ -628,7 +631,6 @@ FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimFreezesWorkAndDropsOrphanedInode) {
   ASSERT_EQ(refs.size(), 1U);
   EXPECT_EQ(refs[0].descriptor, MakeChunk(0, 0, 100));
   EXPECT_EQ(refs[0].key, swordfs::chunk::FormatChunkObjectKey(ino, 0, 1));
-  EXPECT_EQ(count(), 1);
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 
   std::vector<ReclaimWork> pending;
@@ -661,8 +663,6 @@ FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimKeepsLinkedInode) {
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, &work); });
   EXPECT_TRUE(status.ok());
   EXPECT_FALSE(work.has_value());
-  size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
-  EXPECT_EQ(count, 2);
   SwordFsInode out;
   ASSERT_TRUE(Lookup(ino, &out).ok());
   EXPECT_EQ(out.ino, f.ino);
