@@ -81,8 +81,9 @@ The residual tests use two legitimate boundaries:
 - a MinIO-backed E2E test exercises `S3DataEngine` directly through its public
   `IDataEngine` contract: prefixed object identity, complete Put/Get, bounded and
   remainder range reads, undersized caller-buffer rejection, missing-object
-  translation, Delete, and idempotent repeated Delete. Runtime operations execute from a real Folly fiber, matching
-  the production execution-domain contract.
+  translation, Delete, idempotent repeated Delete, and propagation of Put/Delete
+  failures from a deliberately absent bucket. Runtime operations execute from a
+  real Folly fiber, matching the production execution-domain contract.
 
 No AWS client is mocked and no private helper or production test hook is
 exposed. Service-backed execution remains GitHub-CI-only.

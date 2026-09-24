@@ -63,6 +63,35 @@ class S3DataEngineE2ETest : public ::testing::Test {
   std::string prefix_;
 };
 
+TEST_F(S3DataEngineE2ETest, SurfacesMissingBucketWriteAndDeleteFailures) {
+  const char *bucket = std::getenv("SWORDFS_E2E_S3_BUCKET");
+  ASSERT_NE(bucket, nullptr);
+  ASSERT_NE(bucket[0], '\0');
+
+  std::string missing_location(bucket);
+  while (!missing_location.empty() && missing_location.back() == '/') {
+    missing_location.pop_back();
+  }
+  missing_location += "-missing-" + std::to_string(::getpid());
+
+  DataEngineOptions options{.location = std::move(missing_location), .worker_count = 1};
+  if (const char *region = std::getenv("AWS_DEFAULT_REGION")) {
+    options.region = region;
+  }
+
+  S3DataEngine missing_bucket(std::move(options));
+  ASSERT_TRUE(missing_bucket.Initialize().ok());
+
+  Status put_status;
+  swordfs::test::RunInTestFiber(
+      [&] { put_status = missing_bucket.Put("object", folly::IOBuf::copyBuffer("payload")); });
+  EXPECT_EQ(put_status.ToErrno(), EIO) << put_status.message();
+
+  Status delete_status;
+  swordfs::test::RunInTestFiber([&] { delete_status = missing_bucket.Delete("object"); });
+  EXPECT_EQ(delete_status.ToErrno(), EIO) << delete_status.message();
+}
+
 TEST_F(S3DataEngineE2ETest, RoundTripsRangesMissingObjectsAndIdempotentDelete) {
   constexpr std::string_view kKey = "contract-object";
   constexpr std::string_view kPayload = "0123456789";
