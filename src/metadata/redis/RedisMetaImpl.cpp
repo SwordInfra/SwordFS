@@ -368,11 +368,6 @@ Status RedisMetaImpl::StatFs(SwordFsStatFs *stbuf) {
   if (!stbuf) {
     return Status::InvalidArgument("statfs output is null");
   }
-  uint64_t files = 0;
-  auto status = ops_.GetInodeCount(&files);
-  if (!status.ok()) {
-    return status;
-  }
   const auto limits = GetLimits();
   *stbuf = {};
   stbuf->name_max = limits.max_name_length;
@@ -380,8 +375,10 @@ Status RedisMetaImpl::StatFs(SwordFsStatFs *stbuf) {
   stbuf->block_size = 4096;
   stbuf->blocks = 268435456;
   stbuf->blocks_free = stbuf->blocks_available = stbuf->blocks;
-  stbuf->files = files;
-  stbuf->files_free = limits.max_free_inodes;
+  // There is no inode quota. Do not expose advisory lifecycle accounting as
+  // an exact filesystem capacity or make statfs depend on its integrity.
+  stbuf->files = limits.max_free_inodes;
+  stbuf->files_free = stbuf->files;
   return Status::OK();
 }
 

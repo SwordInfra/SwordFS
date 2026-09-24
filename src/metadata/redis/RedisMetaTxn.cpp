@@ -313,11 +313,11 @@ utils::Status RedisMetaTxn::TouchInode(InodeID ino, SetAttrField fields) {
 utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> &work) {
   work.reset();
 
-  // Idempotent replay: once the point of no return has been crossed the
-  // frozen record — not the (already removed) live inode — is the authority,
-  // so crash recovery and retries get the same work back unchanged.
+  // The shared reclaims Hash is not a serialization point. The inode key is:
+  // every fresh reclaim and Link watches it, so unrelated reclaim fields must
+  // not make this transaction retry.
   std::string existing;
-  auto status = txn_.HGet(key_.Reclaims(), std::to_string(ino), &existing);
+  auto status = txn_.HGet(key_.Reclaims(), std::to_string(ino), &existing, RedisKvTxn::ReadMode::kUnwatched);
   if (status.ok()) {
     ReclaimWork pending;
     status = pending.ParseFrom(existing);
@@ -330,26 +330,10 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     SwordFsInode live;
     status = LookupInode(ino, &live);
     if (status.ok()) {
-      if (live.IsDir() || live.attr.nlink != 0) {
-        // An earlier partial EXEC may already have removed some live chunk
-        // heads. The frozen record is the only remaining data reference; do
-        // not cancel it merely because an inode is still visible.
-        return utils::Status::Busy("frozen reclaim conflicts with a linked inode");
-      }
-      // Finish a partially applied preparation. The open-file fence is held
-      // by the caller; the frozen payload remains the authority for deletion.
-      status = ClearOrphanMarker(ino);
-      if (!status.ok()) {
-        return status;
-      }
-      status = DeleteChunks(ino);
-      if (!status.ok()) {
-        return status;
-      }
-      status = DeleteInode(ino);
-      if (!status.ok()) {
-        return status;
-      }
+      // The current beta protocol publishes frozen work and removes the live
+      // inode in one transaction. A frozen+live state is therefore outside
+      // the supported state machine; preserve everything and fail closed.
+      return utils::Status::Busy("frozen reclaim conflicts with live inode");
     } else if (!status.IsNotFound()) {
       return status;
     }
@@ -414,9 +398,9 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     return status;
   }
 
-  // Retain the frozen work durably, then drop the live chunk map, the live
-  // inode and the orphan marker. This is the point of no return: from here on
-  // no Link can revive the inode and every remaining step is idempotent.
+  // Publish immutable deletion targets first in the same EXEC that removes
+  // their live metadata. Under the supported valid-schema model these writes
+  // form one transition; advisory inode_count is intentionally not involved.
   status = txn_.HSet(key_.Reclaims(), std::to_string(ino), serialized);
   if (!status.ok()) {
     return status;
@@ -429,7 +413,7 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
   if (!status.ok()) {
     return status;
   }
-  status = DeleteInode(ino);
+  status = txn_.Del(key_.Inode(ino));
   if (!status.ok()) {
     return status;
   }
@@ -736,18 +720,9 @@ utils::Status RedisMetaTxn::LinkExistingEntry(InodeID parent_ino, std::string_vi
     return status;
   }
 
-  // A partially applied reclaim can leave its inode in place after deleting
-  // the live chunk hash. The frozen record is already the point of no return:
-  // reject a link before queuing any mutation. WATCH also prevents a
-  // concurrent PrepareReclaim from installing that record before this EXEC.
-  std::string pending_reclaim;
-  status = txn_.HGet(key_.Reclaims(), std::to_string(inode->ino), &pending_reclaim);
-  if (status.ok()) {
-    return utils::Status::NotFound("inode is already entering reclaim");
-  }
-  if (!status.IsNotFound()) {
-    return status;
-  }
+  // Link and reclaim both reached this point from a watched read of the same
+  // inode. Whichever transaction changes/deletes it first invalidates the
+  // other's snapshot, so no shared reclaim-Hash fence is needed.
 
   status = LinkEntry(parent_ino, name, *inode, parent);
   if (!status.ok()) {

@@ -23,8 +23,16 @@ class RedisMetaClient;
 // about SwordFS metadata schemas or POSIX semantics.
 class RedisKvTxn {
  public:
+  enum class ReadMode {
+    kWatched,
+    kUnwatched,
+  };
+
   utils::Status Get(std::string_view key, std::string *value);
-  utils::Status HGet(std::string_view key, std::string_view field, std::string *value);
+  // Hash reads are watched by default. kUnwatched is for validation whose
+  // serialization is provided by another watched key in the same operation.
+  utils::Status HGet(std::string_view key, std::string_view field, std::string *value,
+                     ReadMode mode = ReadMode::kWatched);
   utils::Status HLen(std::string_view key, uint64_t *length);
   utils::Status HScan(std::string_view key, uint64_t cursor, size_t count,
                       std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor);

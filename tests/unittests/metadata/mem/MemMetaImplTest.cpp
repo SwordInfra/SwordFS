@@ -169,6 +169,22 @@ FIBER_TEST_F(MemMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) {
   EXPECT_EQ(impl_->AllocateChunkRevision(nullptr).ToErrno(), EINVAL);
 }
 
+FIBER_TEST_F(MemMetaImplTest, StatFsReportsVirtualInodeCapacity) {
+  swordfs::metadata::SwordFsStatFs stat;
+  ASSERT_TRUE(impl_->StatFs(&stat).ok());
+  const auto limits = impl_->GetLimits();
+  EXPECT_GT(stat.files, 0U);
+  EXPECT_EQ(stat.files, limits.max_free_inodes);
+  EXPECT_EQ(stat.files_free, stat.files);
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "file", 0644, &file).ok());
+  ASSERT_TRUE(impl_->StatFs(&stat).ok());
+  EXPECT_EQ(stat.files, limits.max_free_inodes);
+  EXPECT_EQ(stat.files_free, stat.files);
+  EXPECT_EQ(impl_->StatFs(nullptr).ToErrno(), EINVAL);
+}
+
 FIBER_TEST_F(MemMetaImplTest, NamespaceOperationsRejectOverlongNameComponents) {
   const auto limits = impl_->GetLimits();
   const std::string long_name(limits.max_name_length + 1, 'x');

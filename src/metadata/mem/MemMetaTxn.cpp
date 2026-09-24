@@ -137,10 +137,6 @@ Status MemMetaTxn::LookupInode(InodeID ino, SwordFsInode *out) {
   return Status::OK();
 }
 
-uint64_t MemMetaTxn::InodeCount() {
-  return store_->inodes_.size();
-}
-
 Status MemMetaTxn::AllocateChunkRevision(ChunkRevision *revision) {
   if (revision == nullptr) {
     return Status::InvalidArgument("chunk revision output is null");
