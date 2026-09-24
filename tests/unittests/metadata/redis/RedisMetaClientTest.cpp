@@ -1113,6 +1113,123 @@ TEST(RedisMetaTxnTest, ReadPrimitivesValidateOutputs) {
   EXPECT_TRUE(status.ok()) << status.message();
 }
 
+TEST(RedisMetaTxnTest, PrivateChunkIndexPrimitivesValidateTheirPublicContract) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("private-index-contract"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+  RecordingRedisStrategy strategy;
+
+  const auto validation_status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    std::string value;
+    std::vector<std::pair<std::string, std::string>> values;
+    EXPECT_EQ(txn.Read("", "field", &value).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.Read("manifest", "field", nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.Scan("", &values).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.Scan("manifest", nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.Put("", "field", "value").ToErrno(), EINVAL);
+    EXPECT_EQ(txn.Erase("", "field").ToErrno(), EINVAL);
+    return utils::Status::OK();
+  });
+  ASSERT_TRUE(validation_status.ok()) << validation_status.message();
+
+  const auto put_status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    return txn.Put("manifest", "b", "two");
+  });
+  ASSERT_TRUE(put_status.ok()) << put_status.message();
+  redis.hset(key.PrivateChunkIndex(strategy.name(), "manifest"), "a", "one");
+
+  const auto read_status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    std::string value;
+    auto status = txn.Read("manifest", "b", &value);
+    EXPECT_TRUE(status.ok()) << status.message();
+    EXPECT_EQ(value, "two");
+
+    std::vector<std::pair<std::string, std::string>> values;
+    status = txn.Scan("manifest", &values);
+    EXPECT_TRUE(status.ok()) << status.message();
+    EXPECT_EQ(values, (std::vector<std::pair<std::string, std::string>>{{"a", "one"}, {"b", "two"}}));
+    return utils::Status::OK();
+  });
+  ASSERT_TRUE(read_status.ok()) << read_status.message();
+
+  const auto erase_status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    return txn.Erase("manifest", "a");
+  });
+  ASSERT_TRUE(erase_status.ok()) << erase_status.message();
+  EXPECT_FALSE(redis.hexists(key.PrivateChunkIndex(strategy.name(), "manifest"), "a"));
+  EXPECT_EQ(redis.hget(key.PrivateChunkIndex(strategy.name(), "manifest"), "b").value_or(""), "two");
+}
+
+TEST(RedisMetaTxnTest, PrivateChunkIndexScanFailsClosedOnCorruptBackendType) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("private-index-wrong-type"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+  RecordingRedisStrategy strategy;
+  redis.set(key.PrivateChunkIndex(strategy.name(), "manifest"), "not-a-hash");
+
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    std::vector<std::pair<std::string, std::string>> values;
+    return txn.Scan("manifest", &values);
+  });
+
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
+  EXPECT_EQ(redis.get(key.PrivateChunkIndex(strategy.name(), "manifest")).value_or(""), "not-a-hash");
+}
+
+TEST(RedisMetaTxnTest, MoveEntryRejectsCorruptDirectoryAncestryWithoutMutation) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("rename-parent-cycle"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
+  root_attr.nlink = 3;
+  SwordFsInode root(kRootInodeId, root_attr, kRootInodeId);
+  SwordFsAttr source_attr(2, S_IFDIR | 0755);
+  source_attr.nlink = 2;
+  SwordFsInode source(2, source_attr, kRootInodeId);
+  SwordFsAttr first_cycle_attr(3, S_IFDIR | 0755);
+  SwordFsInode first_cycle(3, first_cycle_attr, 4);
+  SwordFsAttr second_cycle_attr(4, S_IFDIR | 0755);
+  SwordFsInode second_cycle(4, second_cycle_attr, 3);
+
+  ASSERT_TRUE(SeedInode(redis, key, root).ok());
+  ASSERT_TRUE(SeedInode(redis, key, source).ok());
+  ASSERT_TRUE(SeedInode(redis, key, first_cycle).ok());
+  ASSERT_TRUE(SeedInode(redis, key, second_cycle).ok());
+  ASSERT_TRUE(SeedEntry(redis, key, root.ino, SwordFsEntry{"source", DT_DIR, source.ino}).ok());
+
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.MoveEntry(root.ino, "source", first_cycle.ino, "moved", &root, &first_cycle, &source, nullptr,
+                         /*overwrite=*/false);
+  });
+
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
+  EXPECT_TRUE(redis.hexists(key.Directory(root.ino), "source"));
+  EXPECT_FALSE(redis.hexists(key.Directory(first_cycle.ino), "moved"));
+  EXPECT_TRUE(redis.get(key.Inode(source.ino)).has_value());
+}
+
 TEST(RedisMetaTxnTest, LookupEntryRejectsDanglingDirectoryEntry) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {

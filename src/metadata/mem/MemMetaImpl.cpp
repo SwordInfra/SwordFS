@@ -752,6 +752,9 @@ Status MemMetaImpl::Link(InodeID ino, InodeID newparent_ino, std::string_view ne
 
 Status MemMetaImpl::Readlink(InodeID ino, std::string *target) {
   utils::ExpectInFiberDomain();
+  if (target == nullptr) {
+    return Status::InvalidArgument("Readlink output is null");
+  }
   SwordFsInode inode;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     Status status = txn.LookupInode(ino, &inode);

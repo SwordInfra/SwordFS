@@ -185,6 +185,31 @@ FIBER_TEST_F(MemMetaImplTest, StatFsReportsVirtualInodeCapacity) {
   EXPECT_EQ(impl_->StatFs(nullptr).ToErrno(), EINVAL);
 }
 
+FIBER_TEST_F(MemMetaImplTest, ReadlinkRejectsNullOutput) {
+  SwordFsInode link;
+  ASSERT_TRUE(impl_->Symlink(kRoot, "link", "target", &link).ok());
+
+  // IMetaEngine backends share one public contract: callers must receive a
+  // status for an invalid output pointer rather than a backend-specific crash.
+  EXPECT_EQ(impl_->Readlink(link.ino, nullptr).ToErrno(), EINVAL);
+}
+
+FIBER_TEST_F(MemMetaImplTest, ReadlinkReturnsStoredTargetAndRejectsNonSymlinks) {
+  constexpr std::string_view kTarget = "../dir/file";
+  SwordFsInode link;
+  ASSERT_TRUE(impl_->Symlink(kRoot, "link", kTarget, &link).ok());
+  EXPECT_TRUE(link.IsSymlink());
+  EXPECT_EQ(link.attr.size, kTarget.size());
+
+  std::string target;
+  auto status = impl_->Readlink(link.ino, &target);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(target, kTarget);
+
+  EXPECT_EQ(impl_->Readlink(kRoot, &target).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->Readlink(std::numeric_limits<InodeID>::max(), &target).ToErrno(), ENOENT);
+}
+
 FIBER_TEST_F(MemMetaImplTest, NamespaceOperationsRejectOverlongNameComponents) {
   const auto limits = impl_->GetLimits();
   const std::string long_name(limits.max_name_length + 1, 'x');
