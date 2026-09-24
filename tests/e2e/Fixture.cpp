@@ -238,6 +238,10 @@ bool Fixture::StopMount() {
     }
   }
   mounted_ = false;
+  if (daemon_pid_ > 0 && !IsDaemonGone()) {
+    std::fprintf(stderr, "E2E: daemon %d did not exit after unmount\n", daemon_pid_);
+    return false;
+  }
   return true;
 }
 
@@ -246,8 +250,9 @@ bool Fixture::IsDaemonGone() const {
     return false;
   }
   // fusermount3 -u returns before the daemon has fully exited;
-  // retry for up to 500 ms.
-  for (int i = 0; i < 10; ++i) {
+  // Coverage-instrumented daemons may spend extra time flushing counters at exit;
+  // wait for the real process lifetime rather than assuming unmount completion implies exit.
+  for (int i = 0; i < 40; ++i) {
     if (kill(daemon_pid_, 0) != 0 && errno == ESRCH) {
       return true;
     }

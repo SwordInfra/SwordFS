@@ -139,6 +139,10 @@ jobs:
       - name: Build
         run: cmake --build build --target swordfs swordfs_test
 
+      - name: Build focused Debug E2E coverage target
+        if: matrix.build_type == 'Debug'
+        run: cmake --build build --target swordfs_e2e_test
+
       - name: Run clang-tidy (changed files only)
         if: matrix.build_type == 'Debug'
         run: |
@@ -166,6 +170,13 @@ jobs:
             grep '<skipped' unit-test-results.xml
             exit 1
           fi
+
+      - name: Run MinIO-backed S3 coverage scenarios
+        if: matrix.build_type == 'Debug'
+        run: |
+          bash scripts/testing/run-e2e.sh \
+            --gtest_filter='S3DataEngineE2ETest.*' \
+            --gtest_color=no
 
       - name: Generate coverage report
         if: matrix.build_type == 'Debug'
@@ -243,6 +254,7 @@ jobs:
 
       - name: E2E test setup
         run: |
+          sudo apt-get install -y -qq lcov
           sudo mkdir -p /etc/swordfs
           sudo chown "$(id -u):$(id -g)" /etc/swordfs
           sudo modprobe fuse
@@ -253,13 +265,42 @@ jobs:
       - name: Configure Release
         run: |
           cmake --preset release \
-            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install"
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install" \
+            -DCMAKE_CXX_FLAGS="--coverage" \
+            -DCMAKE_EXE_LINKER_FLAGS="--coverage"
 
       - name: Build E2E
         run: cmake --build build --target swordfs swordfs_e2e_test
 
       - name: Test (E2E)
         run: sg fuse -c "bash scripts/testing/run-e2e.sh --gtest_color=no"
+
+      - name: Generate E2E coverage report
+        run: |
+          set -euo pipefail
+          lcov --capture --directory build --output-file e2e-coverage.info \
+               --branch-coverage \
+               --filter branch,exception,brace,blank,range \
+               --ignore-errors inconsistent,gcov,source,mismatch,negative,empty,unused,corrupt,range
+          lcov --remove e2e-coverage.info \
+               '/usr/*' '*/_deps/*' '*/googletest-src/*' '*/build/*' \
+               --output-file e2e-coverage-filtered.info \
+               --branch-coverage \
+               --filter branch,exception,brace,blank,range \
+               --ignore-errors unused,empty,source,mismatch,corrupt,inconsistent,range
+          test -s e2e-coverage-filtered.info
+          mv e2e-coverage-filtered.info e2e-coverage.info
+          lcov --list e2e-coverage.info --branch-coverage --ignore-errors unused,empty,source || true
+
+      - name: Upload E2E coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: e2e-coverage.info
+          flags: e2e
+          disable_search: true
+          plugins: noop
+          fail_ci_if_error: false
 
   pjdfstest-conformance:
     name: pjdfstest-conformance (Release)

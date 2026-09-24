@@ -176,6 +176,10 @@ Status S3DataEngine::Put(std::string_view key, std::unique_ptr<folly::IOBuf> dat
 }
 
 Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) {
+  if (size > 0 && out->tailroom() < size) {
+    return Status::InvalidArgument("Get: output buffer too small");
+  }
+
   try {
     return executor_->RunFromFiber([this, key, out, offset, size] {
       utils::ExpectInThreadDomain();
