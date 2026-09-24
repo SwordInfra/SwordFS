@@ -36,7 +36,7 @@ BLOCKING = {
 }
 ISSUE_RE = re.compile(r"^#[1-9][0-9]*$")
 TEST_RE = re.compile(r"^[a-z0-9_-]+/[0-9]+$")
-WORK_DIR_RE = re.compile(r"/tmp/swordfs-fstests\.[^/\s)]+")
+WORK_DIR_RE = re.compile(r"/tmp/swordfs-fstests[.-][^/\s)]+")
 RESULT_DIR_RE = re.compile(r"/(?:[^/\s)]+/)*build/fstests-conformance/raw/results")
 SWORDFS_CORE_RE = re.compile(r"^\s*Message:\s+Process\s+\d+\s+\(swordfs\).*dumped core\.\s*$", re.MULTILINE)
 

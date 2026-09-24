@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <CLI/CLI.hpp>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -16,12 +17,12 @@ namespace {
 
 // Helper: parse a vector of argument strings and return the error message.
 // Returns empty string on success (no error).
-std::string ParseOptions(std::vector<std::string> args) {
+std::string ParseOptions(std::vector<std::string> args,
+                         const std::function<void(const swordfs::config::ConfigCenter &)> &inspect = {}) {
   CLI::App app{"SwordFS test"};
   app.allow_extras(false);
 
   auto &cfg = swordfs::config::ConfigCenter::Instance();
-  cfg.Initialize();
   cfg.ConfigureOptions(app);
 
   // Convert to argc/argv as CLI11's vector-based parse can behave
@@ -38,6 +39,9 @@ std::string ParseOptions(std::vector<std::string> args) {
   } catch (const CLI::ParseError &e) {
     return e.what();
   }
+  if (inspect) {
+    inspect(cfg);
+  }
   return {};
 }
 
@@ -53,6 +57,26 @@ TEST(FormatParamsTest, MinimalMemoryFormat) {
       "--meta",  "memory://local", "--bucket", "s3://mybucket.s3.amazonaws.com/chunks",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
+}
+
+TEST(ConfigCenterTest, SelectsParsedSubcommandWithoutRetainingCliPointers) {
+  CLI::App app{"SwordFS test"};
+  auto &cfg = swordfs::config::ConfigCenter::Instance();
+  cfg.ConfigureOptions(app);
+  std::vector<std::string> args = {
+      "swordfs", "format",         "--volume", "myvol",
+      "--meta",  "memory://local", "--bucket", "s3://mybucket.s3.amazonaws.com/chunks",
+  };
+  std::vector<const char *> argv;
+  argv.reserve(args.size());
+  for (const auto &arg : args) {
+    argv.push_back(arg.c_str());
+  }
+  app.parse(static_cast<int>(argv.size()), argv.data());
+
+  const auto sub_command = cfg.SelectedSubCommand();
+  ASSERT_TRUE(sub_command.has_value());
+  EXPECT_EQ(sub_command->name, "format");
 }
 
 TEST(FormatParamsTest, MemoryFormatWithRegion) {
@@ -76,23 +100,25 @@ TEST(MountParamsTest, MinimalMemoryMount) {
 }
 
 TEST(MountParamsTest, MountWithIndependentThreadCounts) {
-  auto err = ParseOptions({
-      "swordfs",
-      "mount",
-      "--volume",
-      "myvol",
-      "--meta",
-      "memory://local",
-      "--storage-thread-count",
-      "4",
-      "--meta-thread-count",
-      "7",
-      "/mnt/point",
-  });
+  auto err = ParseOptions(
+      {
+          "swordfs",
+          "mount",
+          "--volume",
+          "myvol",
+          "--meta",
+          "memory://local",
+          "--storage-thread-count",
+          "4",
+          "--meta-thread-count",
+          "7",
+          "/mnt/point",
+      },
+      [](const swordfs::config::ConfigCenter &cfg) {
+        EXPECT_EQ(cfg.storage_thread_count(), 4);
+        EXPECT_EQ(cfg.meta_thread_count(), 7);
+      });
   EXPECT_TRUE(err.empty()) << err;
-  auto &cfg = swordfs::config::ConfigCenter::Instance();
-  EXPECT_EQ(cfg.storage_thread_count(), 4);
-  EXPECT_EQ(cfg.meta_thread_count(), 7);
 }
 
 TEST(MountParamsTest, MountWithFuseOpts) {

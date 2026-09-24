@@ -20,7 +20,8 @@ bool DataEngineRegistry::Available(std::string_view name) const {
   return factories_.find(std::string(name)) != factories_.end();
 }
 
-utils::Status DataEngineRegistry::CreateInstance(std::string_view name, std::unique_ptr<IDataEngine> *out) const {
+utils::Status DataEngineRegistry::CreateInstance(std::string_view name, const DataEngineOptions &options,
+                                                 std::unique_ptr<IDataEngine> *out) const {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("data engine output is null");
   }
@@ -28,7 +29,7 @@ utils::Status DataEngineRegistry::CreateInstance(std::string_view name, std::uni
   if (it == factories_.end()) {
     return utils::Status::NotSupported("unknown data storage engine: " + std::string(name));
   }
-  return it->second(out);
+  return it->second(options, out);
 }
 
 }  // namespace swordfs::storage

@@ -78,24 +78,24 @@ TEST(SwordFsVolumeTest, PersistsStrategyAndRejectsMissingOrZeroVersion) {
   EXPECT_EQ(parsed.chunk_index_format_version, 7U);
 
   volume.chunk_overwrite_strategy.clear();
-  EXPECT_TRUE(parsed.ParseFrom(volume.SerializeTo()).IsMalformed());
+  EXPECT_TRUE(parsed.ParseFrom(volume.SerializeTo()).ToErrno() == EIO);
   volume.chunk_overwrite_strategy = "whole_object";
   volume.chunk_index_format_version = 0;
-  EXPECT_TRUE(parsed.ParseFrom(volume.SerializeTo()).IsMalformed());
+  EXPECT_TRUE(parsed.ParseFrom(volume.SerializeTo()).ToErrno() == EIO);
 }
 
 TEST(SwordFsVolumeTest, ParseFromRejectsMalformedData) {
   SwordFsVolume v;
   Status st = v.ParseFrom("not volume metadata");
   EXPECT_FALSE(st.ok());
-  EXPECT_EQ(st.code(), Status::kMalformed);
+  EXPECT_EQ(st.ToErrno(), EIO);
 
   SwordFsVolume original = MakeVolume();
   std::string encoded = original.SerializeTo();
   encoded.push_back('\0');
   st = v.ParseFrom(encoded);
   EXPECT_FALSE(st.ok());
-  EXPECT_EQ(st.code(), Status::kMalformed);
+  EXPECT_EQ(st.ToErrno(), EIO);
 }
 
 TEST(SwordFsVolumeTest, ParseFromRejectsOneSidedDataEngineConfig) {
@@ -103,12 +103,12 @@ TEST(SwordFsVolumeTest, ParseFromRejectsOneSidedDataEngineConfig) {
   missing_identity.storage.clear();
   SwordFsVolume parsed;
   Status status = parsed.ParseFrom(missing_identity.SerializeTo());
-  EXPECT_TRUE(status.IsMalformed()) << status.message();
+  EXPECT_TRUE(status.ToErrno() == EIO) << status.message();
 
   SwordFsVolume missing_location = MakeVolume();
   missing_location.bucket.clear();
   status = parsed.ParseFrom(missing_location.SerializeTo());
-  EXPECT_TRUE(status.IsMalformed()) << status.message();
+  EXPECT_TRUE(status.ToErrno() == EIO) << status.message();
 }
 
 TEST(SwordFsVolumeTest, ParseFromRejectsNonCurrentSchemaVersion) {
@@ -126,7 +126,7 @@ TEST(SwordFsVolumeTest, ParseFromRejectsNonCurrentSchemaVersion) {
     std::string encoded;
     enc.Finish(&encoded);
     SwordFsVolume volume;
-    EXPECT_TRUE(volume.ParseFrom(encoded).IsMalformed()) << "schema=" << schema_version;
+    EXPECT_TRUE(volume.ParseFrom(encoded).ToErrno() == EIO) << "schema=" << schema_version;
   }
 }
 
@@ -160,7 +160,7 @@ TEST_F(VolumeFileTest, ReadNotFound) {
   swordfs::metadata::mem::VolumeFile file{"nonexistent-volume-file"};
   Status st = file.Read(&v);
   EXPECT_FALSE(st.ok());
-  EXPECT_EQ(st.code(), Status::kNotFound);
+  EXPECT_EQ(st.ToErrno(), ENOENT);
 }
 
 TEST_F(VolumeFileTest, Exists) {

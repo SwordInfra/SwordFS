@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
+#include <cerrno>
 #include <string>
 #include <utility>
 #include <vector>
@@ -95,7 +96,7 @@ FIBER_TEST_F(MemMetaStoreTest, PrivateChunkIndexReadsStagedWritesAndDropsRejecte
     }
     return Status::IOError("reject private index changes");
   });
-  EXPECT_EQ(rejected.code(), Status::kIOError);
+  EXPECT_EQ(rejected.ToErrno(), EIO);
 
   ASSERT_TRUE(store_
                   ->Transact([](MemMetaTxn &txn) {
@@ -116,12 +117,12 @@ FIBER_TEST_F(MemMetaStoreTest, PrivateChunkIndexRejectsInvalidHashAndOutputs) {
                   ->Transact([](MemMetaTxn &txn) {
                     std::string value;
                     std::vector<std::pair<std::string, std::string>> values;
-                    EXPECT_EQ(txn.Read("", "field", &value).code(), Status::kInvalidArgument);
-                    EXPECT_EQ(txn.Read("hash", "field", nullptr).code(), Status::kInvalidArgument);
-                    EXPECT_EQ(txn.Scan("", &values).code(), Status::kInvalidArgument);
-                    EXPECT_EQ(txn.Scan("hash", nullptr).code(), Status::kInvalidArgument);
-                    EXPECT_EQ(txn.Put("", "field", "value").code(), Status::kInvalidArgument);
-                    EXPECT_EQ(txn.Erase("", "field").code(), Status::kInvalidArgument);
+                    EXPECT_EQ(txn.Read("", "field", &value).ToErrno(), EINVAL);
+                    EXPECT_EQ(txn.Read("hash", "field", nullptr).ToErrno(), EINVAL);
+                    EXPECT_EQ(txn.Scan("", &values).ToErrno(), EINVAL);
+                    EXPECT_EQ(txn.Scan("hash", nullptr).ToErrno(), EINVAL);
+                    EXPECT_EQ(txn.Put("", "field", "value").ToErrno(), EINVAL);
+                    EXPECT_EQ(txn.Erase("", "field").ToErrno(), EINVAL);
                     return Status::OK();
                   })
                   .ok());
@@ -169,7 +170,7 @@ FIBER_TEST_F(MemMetaStoreTest, AddEntryAlreadyExists) {
   Add(kRoot, "file", kRegFile);
 
   Status status = Add(kRoot, "file", kRegFile);
-  EXPECT_TRUE(status.IsAlreadyExists());
+  EXPECT_TRUE(status.ToErrno() == EEXIST);
 }
 
 FIBER_TEST_F(MemMetaStoreTest, AddEntryParentNotFound) {
@@ -184,7 +185,7 @@ FIBER_TEST_F(MemMetaStoreTest, AddEntryParentNotDirectory) {
 
   // Try to add a child under the regular file
   Status status = Add(f.ino, "nested", kRegFile);
-  EXPECT_TRUE(status.IsNotDirectory());
+  EXPECT_TRUE(status.ToErrno() == ENOTDIR);
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -262,7 +263,7 @@ FIBER_TEST_F(MemMetaStoreTest, MoveEntryTargetExists) {
   Add(d2.ino, "f", kRegFile);
 
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.MoveEntry(d1.ino, "f", d2.ino, "f", false); });
-  EXPECT_TRUE(status.IsAlreadyExists());
+  EXPECT_TRUE(status.ToErrno() == EEXIST);
 }
 
 FIBER_TEST_F(MemMetaStoreTest, MoveEntryOverwriteWorksWithoutResultOutput) {
@@ -346,7 +347,7 @@ FIBER_TEST_F(MemMetaStoreTest, UnlinkNonEmptyDirectory) {
   Add(sub.ino, "f", kRegFile);
 
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRoot, "sub"); });
-  EXPECT_TRUE(status.IsNotEmpty());
+  EXPECT_TRUE(status.ToErrno() == ENOTEMPTY);
   size_t count = store_->Transact([&](MemMetaTxn &txn) { return txn.InodeCount(); });
   EXPECT_EQ(count, 3);  // root + sub + f
 }
@@ -475,7 +476,7 @@ FIBER_TEST_F(MemMetaStoreTest, CommitChunkConflictingInitialPublicationFails) {
   ASSERT_TRUE(status.ok());
   chunk.revision++;
   status = store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(file.ino, std::nullopt, chunk); });
-  EXPECT_TRUE(status.IsAlreadyExists());
+  EXPECT_TRUE(status.ToErrno() == EEXIST);
 }
 
 FIBER_TEST_F(MemMetaStoreTest, FindChunkNotFound) {
@@ -580,12 +581,9 @@ FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimMissingInodeIsNoOp) {
 }
 
 FIBER_TEST_F(MemMetaStoreTest, ReclaimPrimitivesValidateOutputsAndRejectDirectories) {
-  EXPECT_EQ(store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(kRoot, nullptr); }).code(),
-            Status::kInvalidArgument);
-  EXPECT_EQ(store_->Transact([&](MemMetaTxn &txn) { return txn.ListOrphanCandidates(nullptr); }).code(),
-            Status::kInvalidArgument);
-  EXPECT_EQ(store_->Transact([&](MemMetaTxn &txn) { return txn.ListPendingReclaims(nullptr); }).code(),
-            Status::kInvalidArgument);
+  EXPECT_EQ(store_->Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(kRoot, nullptr); }).ToErrno(), EINVAL);
+  EXPECT_EQ(store_->Transact([&](MemMetaTxn &txn) { return txn.ListOrphanCandidates(nullptr); }).ToErrno(), EINVAL);
+  EXPECT_EQ(store_->Transact([&](MemMetaTxn &txn) { return txn.ListPendingReclaims(nullptr); }).ToErrno(), EINVAL);
 
   // Directories are never candidates for this file-data reclaim lifecycle.
   // Exercise that branch independently from the regular-file nlink>0 case.

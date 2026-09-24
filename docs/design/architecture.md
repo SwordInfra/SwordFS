@@ -168,6 +168,26 @@ Backend creation is registry-driven:
 - `MetaEngineRegistry` creates a metadata engine from the metadata URL scheme;
 - `DataEngineRegistry` creates a data engine from the persisted volume engine identity.
 
+`ConfigCenter` owns CLI/process configuration. The command path passes that
+configuration to `VolumeImpl` through a narrow adapter overload, which
+immediately normalizes it into explicit `FormatOptions` / `MountOptions` value
+objects; `VolumeImpl` does not reach back into the global configuration
+singleton. `VolumeImpl::Initialize` creates an empty process runtime.
+`LoadFrom()` then binds the persisted volume and constructs metadata/data
+engines through the registered production factories.
+Tests that need alternate engine implementations use those same option,
+registry, and load paths; the production singleton API does not expose engine
+mutation or test-only injection seams.
+
+Data-engine initialization is also explicit. `VolumeImpl::LoadFrom()` combines
+the persisted backend location/region with runtime-only mount settings such as
+the storage worker count into `DataEngineOptions`, then passes that value
+through `DataEngineRegistry` to the selected engine. A data engine must not
+reach back into `VolumeImpl::Instance()` or `ConfigCenter::Instance()` to
+recover its own configuration. This keeps engine ownership local to the
+mounting `VolumeImpl`, avoids hidden process-global state coupling, and makes
+the same production construction path usable by focused tests.
+
 ### 5.1 Implemented metadata backends
 
 The current repository implements:
@@ -521,6 +541,11 @@ S3 ranged reads write response data directly into the caller-provided buffer thr
 ## 11. Flush, fsync, close, and visibility
 
 `FileReadWriter::Flush` walks locally cached flushable chunks and flushes each one. A successfully published chunk remains cached in `kClean` state so later reads use the authoritative published object identity.
+
+The maximum number of concurrently submitted chunk flushes is an explicit
+`FileReadWriter` construction dependency. `InodeHandle` snapshots the configured
+storage-thread count when it creates the inode-shared writer, so the data path
+does not repeatedly consult mutable process-wide configuration while flushing.
 
 An ordinary successful `write(2)` only means the bytes were accepted into this
 mount's userspace `WriteBuf`; it is **not** a persistence acknowledgement. The

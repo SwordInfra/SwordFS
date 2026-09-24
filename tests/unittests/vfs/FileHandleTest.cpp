@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cerrno>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -17,6 +18,7 @@
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/ChunkObjectKey.hpp"
 #include "chunk/WholeObjectCleanup.hpp"
 #include "metadata/IMetaEngine.hpp"
@@ -231,22 +233,17 @@ class MockMetaEngine : public IMetaEngine {
 class FileHandleTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    // Volume lifecycle is control-plane work and follows the production
-    // topology: initialize it on the gtest POSIX thread before entering a
-    // fiber for runtime-only state reset.
-    volume::VolumeImpl::Initialize();
+    auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<MockMetaEngine>>();
+    mock_meta_ = meta.get();
+    SwordFsVolume config;
+    const auto status =
+        swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::make_unique<NoopDataEngine>(), std::move(config));
+    ASSERT_TRUE(status.ok()) << status.message();
     swordfs::test::RunInTestFiber([&] {
       // Drop any per-inode state left by a prior test. The
       // InodeHandleManager is fiber-owned runtime state.
       InodeHandleManager::Instance().Initialize();
     });
-
-    auto meta = std::make_unique<MockMetaEngine>();
-    mock_meta_ = meta.get();
-    volume::VolumeImpl::Instance().set_meta_engine(std::move(meta));
-    // FileReadWriter paths require a data engine (production invariant —
-    // --bucket is required), so install a no-op fake for handle tests.
-    volume::VolumeImpl::Instance().set_data_engine(std::make_unique<NoopDataEngine>());
   }
 
   void TearDown() override {
@@ -470,7 +467,7 @@ FIBER_TEST_F(FileHandleTest, OpenMetaFailurePropagates) {
   mock_meta_->open_status = Status::Permission("denied");
   std::shared_ptr<FileHandle> handle;
   auto status = FileHandle::Open(42, 0, &handle);
-  EXPECT_TRUE(status.IsPermission());
+  EXPECT_TRUE(status.ToErrno() == EACCES);
 }
 
 FIBER_TEST_F(FileHandleTest, OpenTruncateAppliesOTrunc) {
@@ -487,12 +484,12 @@ FIBER_TEST_F(FileHandleTest, OpenTruncateFailurePropagates) {
   std::shared_ptr<FileHandle> handle;
   auto status = FileHandle::Open(42, O_TRUNC, &handle);
   EXPECT_FALSE(status.ok());
-  EXPECT_EQ(status.code(), Status::kInternal);
+  EXPECT_EQ(status.ToErrno(), EIO);
 }
 
 FIBER_TEST_F(FileHandleTest, CreateRejectsNullOutput) {
   auto status = FileHandle::Create(42, O_RDWR, nullptr);
-  EXPECT_EQ(status.code(), Status::kInvalidArgument);
+  EXPECT_EQ(status.ToErrno(), EINVAL);
 }
 
 FIBER_TEST_F(FileHandleTest, CreateRespectsReclaimFence) {
@@ -528,11 +525,11 @@ FIBER_TEST_F(FileHandleTest, InodeHandleGetMissingWithoutCreate) {
   EXPECT_EQ(InodeHandleManager::Instance().Get(9001, /*create_if_missing=*/false), nullptr);
 }
 
-FIBER_TEST_F(FileHandleTest, InodeHandleGetExistingTracksOpenCount) {
+FIBER_TEST_F(FileHandleTest, InodeHandleGetExistingReflectsLiveDescriptor) {
   OpenHandle(9002);
   auto inode_handle = InodeHandleManager::Instance().Get(9002, false);
   ASSERT_NE(inode_handle, nullptr);
-  EXPECT_EQ(inode_handle->open_count(), 1);
+  EXPECT_FALSE(inode_handle->TryStartReclaim());
 }
 
 FIBER_TEST_F(FileHandleTest, InodeHandleRecreatedAfterExpiry) {
@@ -558,7 +555,6 @@ FIBER_TEST_F(FileHandleTest, ReclaimFenceRefusesWhileDescriptorIsOpenAndAllowsAf
 
   EXPECT_FALSE(inode_handle->TryStartReclaim()) << "a live descriptor must block reclaim preparation";
   ASSERT_TRUE(handle->Release().ok());
-  EXPECT_EQ(inode_handle->open_count(), 0U);
 
   ASSERT_TRUE(inode_handle->TryStartReclaim());
   std::shared_ptr<FileHandle> blocked;
@@ -581,24 +577,22 @@ FIBER_TEST_F(FileHandleTest, CloseOnlyReleasesItsOwnReference) {
   // Close only owns descriptor accounting. Durable orphan work and object
   // deletion belong to Reclaimer, so no metadata reclaim call is made here.
   ASSERT_TRUE(h1->Release().ok());
-  EXPECT_EQ(inode_handle->open_count(), 1);
   EXPECT_FALSE(inode_handle->TryStartReclaim());
 
   ASSERT_TRUE(h2->Release().ok());
-  EXPECT_EQ(inode_handle->open_count(), 0);
   ASSERT_TRUE(inode_handle->TryStartReclaim());
   inode_handle->FinishReclaim();
 }
 
 // ────────────────────────────────────────────────────────────────
-// InodeHandle open-fd tracking
+// InodeHandle open-fd lifecycle
 // ────────────────────────────────────────────────────────────────
 //
-// The background Reclaimer consults this count through TryStartReclaim(). The
-// case below exercises the lifecycle: no handle -> open fd -> tracked count ->
-// close -> zero.
+// The background Reclaimer observes descriptor liveness through
+// TryStartReclaim(). The case below exercises no handle -> open -> reclaim
+// blocked -> close -> reclaim allowed without exposing the internal counter.
 
-FIBER_TEST_F(FileHandleTest, InodeHandleOpenFdTracking) {
+FIBER_TEST_F(FileHandleTest, InodeHandleOpenFdLifecycleControlsReclaim) {
   // No handle yet -> Get without create reports absence.
   InodeID test_ino = 9998;
   EXPECT_EQ(InodeHandleManager::Instance().Get(test_ino, false), nullptr);
@@ -608,11 +602,12 @@ FIBER_TEST_F(FileHandleTest, InodeHandleOpenFdTracking) {
   ASSERT_TRUE(FileHandle::Open(test_ino, O_RDWR, &handle).ok());
   auto inode_handle = InodeHandleManager::Instance().Get(test_ino, false);
   ASSERT_NE(inode_handle, nullptr);
-  EXPECT_GT(inode_handle->open_count(), 0u);
+  EXPECT_FALSE(inode_handle->TryStartReclaim());
 
-  // Release drops the open fd; the handle's open_count reflects it.
+  // Release drops the descriptor reference so reclaim may claim its fence.
   ASSERT_TRUE(handle->Release().ok());
-  EXPECT_EQ(inode_handle->open_count(), 0u);
+  ASSERT_TRUE(inode_handle->TryStartReclaim());
+  inode_handle->FinishReclaim();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -670,7 +665,7 @@ class FakeDataEngine : public swordfs::storage::IDataEngine {
 
 // Mock metadata engine with configurable Open/Prepare behaviour for runtime
 // handle lifecycle tests.
-class TrackingMetaEngine final : public swordfs::metadata::IMetaEngine {
+class TrackingMetaEngine : public swordfs::metadata::IMetaEngine {
  public:
   Status Initialize() override {
     return Status::OK();
@@ -899,7 +894,7 @@ struct Engines {
 };
 
 Engines InstallEnginesForInode(InodeID ino, nlink_t nlink, off_t size = 0) {
-  auto meta_up = std::make_unique<TrackingMetaEngine>();
+  auto meta_up = std::make_unique<swordfs::test::ConfiguredMetaEngine<TrackingMetaEngine>>();
   auto data_up = std::make_unique<FakeDataEngine>();
   auto *meta = meta_up.get();
   auto *data = data_up.get();
@@ -910,10 +905,12 @@ Engines InstallEnginesForInode(InodeID ino, nlink_t nlink, off_t size = 0) {
   attr.st_size = size;
   meta->SetAttr(ino, attr);
 
-  auto &vol = swordfs::volume::VolumeImpl::Instance();
-  vol.set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine>(meta_up.release()));
-  vol.set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine>(data_up.release()));
-  vol.set_chunk_size_for_test(4096);
+  SwordFsVolume config;
+  config.chunk_size = 4096;
+  swordfs::test::RunInTestThreadFromFiber([&] {
+    const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta_up), std::move(data_up), std::move(config));
+    ASSERT_TRUE(status.ok()) << status.message();
+  });
   return {meta, data};
 }
 
@@ -1114,8 +1111,10 @@ FIBER_TEST_F(FileHandleTest, ConcurrentOpenSucceedsWhileLastCloseFlushesLinkedIn
 
   auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/false);
   ASSERT_NE(inode_handle, nullptr);
-  EXPECT_EQ(inode_handle->open_count(), 1U);
+  EXPECT_FALSE(inode_handle->TryStartReclaim());
   ASSERT_TRUE(reopened->Release().ok());
+  ASSERT_TRUE(inode_handle->TryStartReclaim());
+  inode_handle->FinishReclaim();
 }
 
 FIBER_TEST_F(FileHandleTest, FailedLastCloseFlushStillReleasesDescriptorReference) {
@@ -1129,12 +1128,11 @@ FIBER_TEST_F(FileHandleTest, FailedLastCloseFlushStillReleasesDescriptorReferenc
 
   data->put_status = Status::IOError("injected flush failure");
   const auto close_status = handle->Release();
-  EXPECT_EQ(close_status.code(), Status::kIOError);
+  EXPECT_EQ(close_status.ToErrno(), EIO);
   EXPECT_EQ(meta->prepare_reclaim_calls, 0) << "Close must never execute durable reclaim itself";
 
   auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/false);
   ASSERT_NE(inode_handle, nullptr);
-  EXPECT_EQ(inode_handle->open_count(), 0U) << "the descriptor is closed even when its flush fails";
   EXPECT_TRUE(inode_handle->TryStartReclaim()) << "failed flush must not leak the local reclaim fence";
   inode_handle->FinishReclaim();
 }
@@ -1150,15 +1148,15 @@ FIBER_TEST_F(FileHandleTest, FailedOpenReleasesItsReferenceWithoutReclaimingLink
   // requirement that an expired registry entry remain observable.
   auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/true);
   ASSERT_NE(inode_handle, nullptr);
-  EXPECT_EQ(inode_handle->open_count(), 0U);
 
   std::shared_ptr<FileHandle> handle;
   const auto status = FileHandle::Open(7, O_RDONLY, &handle);
-  EXPECT_EQ(status.code(), Status::kPermission);
+  EXPECT_EQ(status.ToErrno(), EACCES);
   EXPECT_EQ(handle, nullptr);
 
-  EXPECT_EQ(inode_handle->open_count(), 0U);
   EXPECT_EQ(meta->prepare_reclaim_calls, 0);
+  ASSERT_TRUE(inode_handle->TryStartReclaim()) << "failed open must release its temporary descriptor reference";
+  inode_handle->FinishReclaim();
 }
 
 FIBER_TEST_F(FileHandleTest, FailedSecondOpenReleasesOnlyItsOwnReference) {
@@ -1170,17 +1168,19 @@ FIBER_TEST_F(FileHandleTest, FailedSecondOpenReleasesOnlyItsOwnReference) {
   ASSERT_TRUE(FileHandle::Open(7, O_RDONLY, &first).ok());
   auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/false);
   ASSERT_NE(inode_handle, nullptr);
-  ASSERT_EQ(inode_handle->open_count(), 1U);
+  ASSERT_FALSE(inode_handle->TryStartReclaim());
 
   meta->open_status = Status::Permission("denied");
   std::shared_ptr<FileHandle> second;
   const auto status = FileHandle::Open(7, O_RDONLY, &second);
-  EXPECT_EQ(status.code(), Status::kPermission);
+  EXPECT_EQ(status.ToErrno(), EACCES);
   EXPECT_EQ(second, nullptr);
-  EXPECT_EQ(inode_handle->open_count(), 1U) << "failed open must release only the reference it acquired";
+  EXPECT_FALSE(inode_handle->TryStartReclaim()) << "failed open must preserve the first descriptor reference";
   EXPECT_EQ(meta->prepare_reclaim_calls, 0);
 
   ASSERT_TRUE(first->Release().ok());
+  ASSERT_TRUE(inode_handle->TryStartReclaim());
+  inode_handle->FinishReclaim();
 }
 
 FIBER_TEST_F(FileHandleTest, OpenInProgressBlocksReclaimAndFailedOpenReleasesItsReference) {
@@ -1193,11 +1193,11 @@ FIBER_TEST_F(FileHandleTest, OpenInProgressBlocksReclaimAndFailedOpenReleasesIts
   meta->open_status = Status::Permission("denied");
   meta->BlockNextOpen(&open_entered, &open_release);
 
-  std::atomic<int> open_code{Status::kOk};
+  std::atomic<int> open_code{0};
   auto opening_thread = swordfs::test::StartFiberTestThread([&] {
     std::shared_ptr<FileHandle> handle;
     const auto status = FileHandle::Open(7, O_RDONLY, &handle);
-    open_code.store(status.code());
+    open_code.store(status.ToErrno());
   });
 
   // The opening operation already owns a temporary descriptor reference while
@@ -1205,15 +1205,13 @@ FIBER_TEST_F(FileHandleTest, OpenInProgressBlocksReclaimAndFailedOpenReleasesIts
   open_entered.wait();
   auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/false);
   ASSERT_NE(inode_handle, nullptr);
-  EXPECT_EQ(inode_handle->open_count(), 1U);
   EXPECT_FALSE(inode_handle->TryStartReclaim());
 
   // When the metadata check fails, Open releases only its temporary reference;
   // the durable orphan remains entirely a Reclaimer concern.
   open_release.post();
   opening_thread.join();
-  EXPECT_EQ(open_code.load(), Status::kPermission);
-  EXPECT_EQ(inode_handle->open_count(), 0U);
+  EXPECT_EQ(open_code.load(), EACCES);
   ASSERT_TRUE(inode_handle->TryStartReclaim()) << "failed Open must not leak a descriptor reference";
   inode_handle->FinishReclaim();
 }
@@ -1238,7 +1236,6 @@ FIBER_TEST_F(FileHandleTest, ReclaimFenceRefusesWhileAnOpenHandleHoldsTheInode) 
   ASSERT_TRUE(FileHandle::Open(7, O_RDONLY, &fh).ok());
   auto inode_handle = InodeHandleManager::Instance().Get(7, false);
   ASSERT_NE(inode_handle, nullptr);
-  ASSERT_GT(inode_handle->open_count(), 0u);
 
   EXPECT_FALSE(inode_handle->TryStartReclaim());
 

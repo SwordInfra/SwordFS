@@ -13,7 +13,7 @@
 namespace swordfs::utils {
 
 class Status {
- public:
+ private:
   enum Code : int {
     kOk = 0,
     kNotFound,         // ENOENT
@@ -34,9 +34,8 @@ class Status {
     kInternal,         // internal / unexpected error
   };
 
+ public:
   Status() : code_(kOk) {
-  }
-  Status(Code code, std::string msg) : code_(code), msg_(std::move(msg)) {
   }
 
   // queries
@@ -49,40 +48,6 @@ class Status {
   }
   bool IsEndOfDirectory() const {
     return code_ == kEndOfDirectory;
-  }
-  bool IsAlreadyExists() const {
-    return code_ == kAlreadyExists;
-  }
-  bool IsBusy() const {
-    return code_ == kBusy;
-  }
-  bool IsNotEmpty() const {
-    return code_ == kNotEmpty;
-  }
-  bool IsNotDirectory() const {
-    return code_ == kNotDirectory;
-  }
-  bool IsDirectory() const {
-    return code_ == kIsDirectory;
-  }
-  bool IsMalformed() const {
-    return code_ == kMalformed;
-  }
-  bool IsNotSupported() const {
-    return code_ == kNotSupported;
-  }
-  bool IsNameTooLong() const {
-    return code_ == kNameTooLong;
-  }
-  bool IsNotPermitted() const {
-    return code_ == kNotPermitted;
-  }
-  bool IsPermission() const {
-    return code_ == kPermission;
-  }
-
-  Code code() const {
-    return code_;
   }
   const std::string &message() const {
     return msg_;
@@ -146,6 +111,9 @@ class Status {
   }
 
  private:
+  Status(Code code, std::string msg) : code_(code), msg_(std::move(msg)) {
+  }
+
   Code code_;
   std::string msg_;
 };

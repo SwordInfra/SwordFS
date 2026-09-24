@@ -79,7 +79,7 @@ class FileReadWriter {
  public:
   using InodeID = metadata::InodeID;
 
-  FileReadWriter(InodeID ino);
+  FileReadWriter(InodeID ino, size_t max_parallel_flushes);
 
   /// Write the contents of |buf| at |off|, splitting across chunk boundaries.
   utils::Status Write(const folly::IOBuf &buf, off_t off);
@@ -116,6 +116,7 @@ class FileReadWriter {
  private:
   InodeID ino_;
   size_t chunk_size_;
+  size_t max_parallel_flushes_;
   metadata::IMetaEngine *meta_;
   // Ordinary data-path operations share this lock; size-changing operations
   // take exclusive ownership because they change file-wide reachability.

@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 
+#include <cerrno>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -222,7 +223,7 @@ FIBER_TEST_F(ChunkIndexStrategyTest, PublishStagesMultiplePrivateRecordsWithPubl
   const SwordFsChunk replacement{.index = 0, .start_offset = 0, .revision = 2, .size = 96};
   const ChunkPublishIntent intent{.payload = "uploaded:r2"};
   strategy_.participant.reject_publish = true;
-  EXPECT_EQ(Publish(file.ino, first, replacement, intent).code(), utils::Status::kIOError);
+  EXPECT_EQ(Publish(file.ino, first, replacement, intent).ToErrno(), EIO);
   ASSERT_TRUE(Find(file.ino, 0, &head).ok());
   EXPECT_EQ(head, first);
   ASSERT_TRUE(Lookup(file.ino, &inode).ok());
@@ -258,8 +259,7 @@ FIBER_TEST_F(ChunkIndexStrategyTest, TruncateAndSetAttrRejectWithoutPublicOrPriv
   ASSERT_TRUE(Publish(file.ino, std::nullopt, second).ok());
 
   strategy_.participant.reject_truncate = true;
-  EXPECT_EQ(store_.Transact([&](MemMetaTxn &txn) { return txn.Truncate(file.ino, 64); }).code(),
-            utils::Status::kIOError);
+  EXPECT_EQ(store_.Transact([&](MemMetaTxn &txn) { return txn.Truncate(file.ino, 64); }).ToErrno(), EIO);
   SwordFsInode inode;
   ASSERT_TRUE(Lookup(file.ino, &inode).ok());
   EXPECT_EQ(inode.attr.size, 198);
@@ -275,8 +275,8 @@ FIBER_TEST_F(ChunkIndexStrategyTest, TruncateAndSetAttrRejectWithoutPublicOrPriv
   SwordFsAttr requested = inode.attr;
   requested.size = 50;
   EXPECT_EQ(
-      store_.Transact([&](MemMetaTxn &txn) { return txn.SetAttr(file.ino, requested, SetAttrField::kSize); }).code(),
-      utils::Status::kIOError);
+      store_.Transact([&](MemMetaTxn &txn) { return txn.SetAttr(file.ino, requested, SetAttrField::kSize); }).ToErrno(),
+      EIO);
   ASSERT_TRUE(Lookup(file.ino, &inode).ok());
   EXPECT_EQ(inode.attr.size, 198);
   EXPECT_EQ(Fragments(file.ino).size(), 4U);
@@ -317,8 +317,7 @@ FIBER_TEST_F(ChunkIndexStrategyTest, ReclaimFreezesPrivateIndexAndRejectsBeforeI
 
   strategy_.participant.reject_reclaim = true;
   std::optional<ReclaimWork> work;
-  EXPECT_EQ(store_.Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(file.ino, &work); }).code(),
-            utils::Status::kIOError);
+  EXPECT_EQ(store_.Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(file.ino, &work); }).ToErrno(), EIO);
   EXPECT_FALSE(work.has_value());
   SwordFsInode inode;
   ASSERT_TRUE(Lookup(file.ino, &inode).ok());

@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <barrier>
+#include <cerrno>
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -25,6 +26,7 @@
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/ChunkObjectKey.hpp"
 #include "chunk/IChunkOverwriteStrategy.hpp"
 #include "chunk/WholeObjectCleanup.hpp"
@@ -47,6 +49,7 @@ using swordfs::metadata::kRootInodeId;
 using swordfs::metadata::MemMetaImpl;
 using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
+using swordfs::metadata::SwordFsVolume;
 using swordfs::utils::Status;
 
 metadata::PendingDelete MakePendingDelete(InodeID ino, const SwordFsChunk &descriptor) {
@@ -216,19 +219,14 @@ class PartialReclaimMetaEngine : public MemMetaImpl {
 class ReclaimerTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    // Volume lifecycle is control-plane work and follows the production
-    // topology: initialize it on the gtest POSIX thread, then reset the
-    // fiber-owned handle registry from a fiber.
-    volume::VolumeImpl::Initialize();
-    swordfs::test::RunInTestFiber([&] { InodeHandleManager::Instance().Initialize(); });
-
-    auto meta = std::make_unique<MemMetaImpl>();
+    auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<MemMetaImpl>>();
     auto data = std::make_unique<RecordingDataEngine>();
     meta_ = meta.get();
     data_ = data.get();
-    auto &vol = volume::VolumeImpl::Instance();
-    vol.set_meta_engine(std::move(meta));
-    vol.set_data_engine(std::move(data));
+    SwordFsVolume config;
+    const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
+    ASSERT_TRUE(status.ok()) << status.message();
+    swordfs::test::RunInTestFiber([&] { InodeHandleManager::Instance().Initialize(); });
   }
 
   void TearDown() override {
@@ -335,7 +333,7 @@ FIBER_TEST_F(ReclaimerTest, FrozenWorkDoesNotAuthorizeDeletingALiveInode) {
   ASSERT_TRUE(chunk::FreezeWholeObjectReclaim(file_ino, {head}, 0, &frozen).ok());
   const auto *strategy = volume::VolumeImpl::Instance().chunk_overwrite_strategy();
   const auto status = strategy->DeleteFrozen(frozen, 0, meta_, data_);
-  EXPECT_TRUE(status.IsBusy()) << status.message();
+  EXPECT_TRUE(status.ToErrno() == EBUSY) << status.message();
   EXPECT_TRUE(data_->Contains(key));
   EXPECT_TRUE(data_->delete_calls.empty());
 
@@ -353,9 +351,13 @@ TEST_F(ReclaimerTest, PendingReclaimReplaysPreparationBeforeDeletion) {
   const SwordFsChunk head{.index = 0, .start_offset = 0, .revision = 7, .size = 64};
   metadata::ReclaimWork frozen;
   ASSERT_TRUE(chunk::FreezeWholeObjectReclaim(kFileIno, {head}, 0, &frozen).ok());
-  auto replacement = std::make_unique<PartialReclaimMetaEngine>(frozen);
+  auto replacement = std::make_unique<swordfs::test::ConfiguredMetaEngine<PartialReclaimMetaEngine>>(frozen);
   auto *partial_meta = replacement.get();
-  volume::VolumeImpl::Instance().set_meta_engine(std::move(replacement));
+  auto data = std::make_unique<RecordingDataEngine>();
+  data_ = data.get();
+  SwordFsVolume config;
+  const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(replacement), std::move(data), std::move(config));
+  ASSERT_TRUE(status.ok()) << status.message();
   const auto key = chunk::FormatChunkObjectKey(kFileIno, 0, 7);
   data_->Seed(key);
 
@@ -409,7 +411,7 @@ FIBER_TEST_F(ReclaimerTest, TruncateCleanupRetriesFailedDelete) {
   ASSERT_TRUE(meta_->Truncate(f_ino, 0).ok());
   data_->fail_keys[key] = Status::IOError("injected delete failure");
 
-  EXPECT_EQ(Reclaimer::Instance().Reconcile().code(), Status::kIOError);
+  EXPECT_EQ(Reclaimer::Instance().Reconcile().ToErrno(), EIO);
   EXPECT_EQ(PendingDeletes(), std::vector<std::string>{key});
   EXPECT_TRUE(data_->Contains(key));
 
@@ -456,9 +458,14 @@ FIBER_TEST_F(ReclaimerTest, PendingDeleteCandidateDoesNotDeleteStillAuthoritativ
   // the fixture's MemMetaImpl on a POSIX thread so the Debug execution-domain
   // contract remains identical to production lifecycle.
   swordfs::test::RunInTestThreadFromFiber([&] {
-    auto staged_meta = std::make_unique<StagedIntentMetaEngine>(pending);
+    auto staged_meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<StagedIntentMetaEngine>>(pending);
     staged = staged_meta.get();
-    volume::VolumeImpl::Instance().set_meta_engine(std::move(staged_meta));
+    auto data = std::make_unique<RecordingDataEngine>();
+    data_ = data.get();
+    SwordFsVolume config;
+    const auto status =
+        swordfs::test::LoadTestVolumeRuntime(std::move(staged_meta), std::move(data), std::move(config));
+    ASSERT_TRUE(status.ok()) << status.message();
   });
   data_->Seed(key);
 
@@ -487,15 +494,20 @@ FIBER_TEST_F(ReclaimerTest, PendingDeleteFailsClosedWhenAuthoritativeChunkLookup
 
   StagedIntentMetaEngine *staged = nullptr;
   swordfs::test::RunInTestThreadFromFiber([&] {
-    auto staged_meta = std::make_unique<StagedIntentMetaEngine>(pending);
+    auto staged_meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<StagedIntentMetaEngine>>(pending);
     staged = staged_meta.get();
     staged->SetFindStatus(Status::IOError("chunk lookup unavailable"));
-    volume::VolumeImpl::Instance().set_meta_engine(std::move(staged_meta));
+    auto data = std::make_unique<RecordingDataEngine>();
+    data_ = data.get();
+    SwordFsVolume config;
+    const auto load_status =
+        swordfs::test::LoadTestVolumeRuntime(std::move(staged_meta), std::move(data), std::move(config));
+    ASSERT_TRUE(load_status.ok()) << load_status.message();
   });
   data_->Seed(key);
 
   const auto status = Reclaimer::Instance().Reconcile();
-  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_TRUE(data_->Contains(key));
   EXPECT_TRUE(data_->delete_calls.empty());
   EXPECT_TRUE(staged->completed_keys.empty());
@@ -509,10 +521,15 @@ FIBER_TEST_F(ReclaimerTest, PendingDeleteRemovesSupersededRevisionWhileNewRevisi
 
   StagedIntentMetaEngine *staged = nullptr;
   swordfs::test::RunInTestThreadFromFiber([&] {
-    auto staged_meta = std::make_unique<StagedIntentMetaEngine>(pending);
+    auto staged_meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<StagedIntentMetaEngine>>(pending);
     staged = staged_meta.get();
     staged->SetCurrent(SwordFsChunk{.index = 0, .start_offset = 0, .revision = 8, .size = 64});
-    volume::VolumeImpl::Instance().set_meta_engine(std::move(staged_meta));
+    auto data = std::make_unique<RecordingDataEngine>();
+    data_ = data.get();
+    SwordFsVolume config;
+    const auto status =
+        swordfs::test::LoadTestVolumeRuntime(std::move(staged_meta), std::move(data), std::move(config));
+    ASSERT_TRUE(status.ok()) << status.message();
   });
   data_->Seed(old_key);
 
@@ -713,9 +730,12 @@ FIBER_TEST_F(ReclaimerNoEngineTest, ReconcileWithoutEnginesIsANoOp) {
 }
 
 FIBER_TEST_F(ReclaimerNoEngineTest, MissingDataEngineFailsClosedAndReconcileStaysHarmless) {
-  std::unique_ptr<MemMetaImpl> meta;
-  swordfs::test::RunInTestThreadFromFiber([&] { meta = std::make_unique<MemMetaImpl>(); });
-  volume::VolumeImpl::Instance().set_meta_engine(std::move(meta));
+  swordfs::test::RunInTestThreadFromFiber([&] {
+    SwordFsVolume config;
+    auto configured = std::make_unique<swordfs::test::ConfiguredMetaEngine<MemMetaImpl>>();
+    const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(configured), nullptr, std::move(config));
+    ASSERT_TRUE(status.ok()) << status.message();
+  });
   ASSERT_NE(volume::VolumeImpl::Instance().meta_engine(), nullptr);
   ASSERT_EQ(volume::VolumeImpl::Instance().data_engine(), nullptr);
 
@@ -751,7 +771,7 @@ FIBER_TEST_F(ReclaimerTest, ReconcileCountsEveryFailedCleanupItem) {
   data_->fail_keys[truncated_key] = Status::IOError("injected delete failure");
   data_->fail_keys[orphan_key] = Status::IOError("injected delete failure");
   const auto status = Reclaimer::Instance().Reconcile();
-  EXPECT_EQ(status.code(), Status::kIOError) << status.message();
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
   EXPECT_NE(status.message().find("left 3 cleanup item(s) pending"), std::string::npos) << status.message();
 
   // All three durable records survive for the next pass.
@@ -814,12 +834,13 @@ class FailingScanMetaEngine : public MemMetaImpl {
 class ReclaimerScanFailureTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    volume::VolumeImpl::Initialize();
     swordfs::test::RunInTestFiber([&] { InodeHandleManager::Instance().Initialize(); });
-    auto meta = std::make_unique<FailingScanMetaEngine>();
+    auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<FailingScanMetaEngine>>();
     meta_ = meta.get();
-    volume::VolumeImpl::Instance().set_meta_engine(std::move(meta));
-    volume::VolumeImpl::Instance().set_data_engine(std::make_unique<RecordingDataEngine>());
+    SwordFsVolume config;
+    const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::make_unique<RecordingDataEngine>(),
+                                                             std::move(config));
+    ASSERT_TRUE(status.ok()) << status.message();
   }
 
   void TearDown() override {
@@ -834,7 +855,7 @@ FIBER_TEST_F(ReclaimerScanFailureTest, ReconcileSurfacesOrphanScanFailure) {
   meta_->orphan_scan_status = Status::IOError("orphan scan unavailable");
 
   const auto status = Reclaimer::Instance().Reconcile();
-  EXPECT_EQ(status.code(), Status::kIOError) << status.message();
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
   EXPECT_EQ(status.message(), "orphan scan unavailable");
 }
 
@@ -842,7 +863,7 @@ FIBER_TEST_F(ReclaimerScanFailureTest, ReconcileSurfacesPendingDeleteScanFailure
   meta_->pending_delete_scan_status = Status::IOError("pending delete scan unavailable");
 
   const auto status = Reclaimer::Instance().Reconcile();
-  EXPECT_EQ(status.code(), Status::kIOError) << status.message();
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
   EXPECT_EQ(status.message(), "pending delete scan unavailable");
 }
 
@@ -852,7 +873,7 @@ FIBER_TEST_F(ReclaimerScanFailureTest, ReconcileSurfacesPendingScanFailure) {
   meta_->pending_scan_status = Status::IOError("pending scan unavailable");
 
   const auto status = Reclaimer::Instance().Reconcile();
-  EXPECT_EQ(status.code(), Status::kIOError) << status.message();
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
   EXPECT_EQ(status.message(), "pending scan unavailable");
 }
 

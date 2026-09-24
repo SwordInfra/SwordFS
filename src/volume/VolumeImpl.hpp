@@ -8,8 +8,9 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
-#include <optional>
+#include <string>
 #include <string_view>
 
 #include "metadata/types/Volume.hpp"
@@ -17,12 +18,12 @@
 
 namespace swordfs {
 
-namespace config {
-class ConfigCenter;
-}
-
 namespace chunk {
 class IChunkOverwriteStrategy;
+}
+
+namespace config {
+class ConfigCenter;
 }
 
 namespace metadata {
@@ -34,6 +35,21 @@ class IDataEngine;
 }
 
 namespace volume {
+
+struct FormatOptions {
+  std::string name;
+  std::string meta_url;
+  std::string bucket;
+  std::string region;
+  uint64_t chunk_size = 64ULL * 1024 * 1024;
+  std::string chunk_overwrite_strategy = "whole_object";
+};
+
+struct MountOptions {
+  std::string name;
+  std::string meta_url;
+  size_t storage_thread_count = 1;
+};
 
 class VolumeImpl {
  public:
@@ -47,9 +63,8 @@ class VolumeImpl {
   // access point eliminates parameter threading.
   // ────────────────────────────────────────────────────────────────
 
-  /// Initialize the singleton.  Must be called exactly once during
-  /// mount, before any other code accesses Instance().  Also serves
-  /// as a reset (testing only).
+  /// Initialize an empty singleton runtime. LoadFrom() binds persisted volume
+  /// state and constructs engines through the production registries.
   static void Initialize();
 
   /// Return the singleton instance.  Must be called after Initialize().
@@ -60,11 +75,13 @@ class VolumeImpl {
   // ────────────────────────────────────────────────────────────────
 
   /// Build and persist volume configuration, then format the metadata engine.
-  Status CreateFrom(const swordfs::config::ConfigCenter &cfg);
+  Status CreateFrom(const config::ConfigCenter &config);
+  Status CreateFrom(const FormatOptions &options);
 
   /// Load volume configuration from the metadata backend or volume.fmt for
   /// memory mode, then initialise both engines.
-  Status LoadFrom(const swordfs::config::ConfigCenter &cfg);
+  Status LoadFrom(const config::ConfigCenter &config);
+  Status LoadFrom(const MountOptions &options);
 
   /// Explicitly tear down engines before static destruction.  Must be
   /// called before the process exits to avoid blocking in
@@ -75,23 +92,9 @@ class VolumeImpl {
     return config_;
   }
 
-  /// Chunk size in bytes — normally immutable after format, but see
-  /// `set_chunk_size_for_test` for the unit-test escape hatch.
+  /// Chunk size in bytes from the active volume configuration.
   uint64_t chunk_size() const {
-    return chunk_size_override_.value_or(config_.chunk_size);
-  }
-
-  // Test-only override: lets unit tests shrink the chunk size so a
-  // single Write across multiple chunks doesn't need to push tens of
-  // MiB through the I/O stack. Production code paths never call this.
-  void set_chunk_size_for_test(uint64_t cs) {
-    chunk_size_override_ = cs;
-  }
-
-  // Test-only: clear the override so chunk_size() falls back to
-  // config_.chunk_size again.
-  void clear_chunk_size_for_test() {
-    chunk_size_override_.reset();
+    return config_.chunk_size;
   }
 
   swordfs::metadata::IMetaEngine *meta_engine() const {
@@ -102,17 +105,8 @@ class VolumeImpl {
   }
   const swordfs::chunk::IChunkOverwriteStrategy *chunk_overwrite_strategy() const;
 
-  // ────────────────────────────────────────────────────────────────
-  // Testing only — inject mock engines before Bind().
-  // ────────────────────────────────────────────────────────────────
-  void set_meta_engine(std::unique_ptr<swordfs::metadata::IMetaEngine> meta);
-  void set_data_engine(std::unique_ptr<swordfs::storage::IDataEngine> data);
-
  private:
   swordfs::metadata::SwordFsVolume config_;
-  // Test-only override of config_.chunk_size; std::nullopt means
-  // "use config_.chunk_size". Production code never sets this.
-  std::optional<uint64_t> chunk_size_override_;
   // Metadata backends retain a non-owning pointer to this strategy. Destroy
   // the engines first, then the selected strategy.
   std::unique_ptr<swordfs::chunk::IChunkOverwriteStrategy> chunk_overwrite_strategy_;

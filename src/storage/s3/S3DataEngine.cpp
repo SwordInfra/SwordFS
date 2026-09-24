@@ -15,16 +15,14 @@
 #include <folly/logging/xlog.h>
 
 #include <algorithm>
-#include <thread>
+#include <utility>
 
-#include "config/ConfigCenter.hpp"
 #include "storage/DataEngineRegistry.hpp"
 #include "storage/StorageUrl.hpp"
 #include "storage/s3/S3StreamBuf.hpp"
 #include "utils/BlockingExecutor.hpp"
 #include "utils/ExecutionDomain.hpp"
 #include "utils/Logging.hpp"
-#include "volume/VolumeImpl.hpp"
 
 namespace swordfs::storage {
 
@@ -70,14 +68,15 @@ void EnsureAwsSdkInit() {
 
 }  // namespace
 
-Status S3DataEngine::CreateInstance(std::unique_ptr<IDataEngine> *out) {
-  *out = std::make_unique<S3DataEngine>();
+Status S3DataEngine::CreateInstance(const DataEngineOptions &options, std::unique_ptr<IDataEngine> *out) {
+  *out = std::make_unique<S3DataEngine>(options);
   return Status::OK();
 }
 
 RegisterDataEngine kS3DataEngine{"s3", S3DataEngine::CreateInstance};
 
-S3DataEngine::S3DataEngine() = default;
+S3DataEngine::S3DataEngine(DataEngineOptions options) : options_(std::move(options)) {
+}
 
 Status S3DataEngine::Initialize() {
   utils::ExpectInThreadDomain();
@@ -86,10 +85,7 @@ Status S3DataEngine::Initialize() {
     return status;
   }
 
-  const int configured_threads = swordfs::config::ConfigCenter::Instance().storage_thread_count();
-  const size_t worker_count = configured_threads > 0 ? static_cast<size_t>(configured_threads)
-                                                     : std::max<size_t>(1, std::thread::hardware_concurrency());
-  executor_ = std::make_unique<utils::BlockingExecutor>(worker_count, "swordfs-s3");
+  executor_ = std::make_unique<utils::BlockingExecutor>(std::max<size_t>(1, options_.worker_count), "swordfs-s3");
 
   EnsureAwsSdkInit();
   Aws::S3::S3ClientConfiguration aws_cfg;
@@ -111,11 +107,10 @@ Status S3DataEngine::Initialize() {
 }
 
 Status S3DataEngine::ParseBucketUrl() {
-  auto &vol = swordfs::volume::VolumeImpl::Instance().config();
   using swordfs::utils::StorageUrl;
   StorageUrl url;
-  if (!StorageUrl::Parse(vol.bucket, &url) || url.scheme != "s3") {
-    return Status::InvalidArgument("invalid bucket URL: " + vol.bucket);
+  if (!StorageUrl::Parse(options_.location, &url) || url.scheme != "s3") {
+    return Status::InvalidArgument("invalid bucket URL: " + options_.location);
   }
 
   // Respect SWORDFS_S3_NO_SSL to allow plain HTTP connections
@@ -123,7 +118,7 @@ Status S3DataEngine::ParseBucketUrl() {
   const char *no_ssl = std::getenv("SWORDFS_S3_NO_SSL");
   const char *proto = (no_ssl && no_ssl[0] == '1') ? "http://" : "https://";
   endpoint_ = std::string(proto) + url.host;
-  region_ = vol.region;
+  region_ = options_.region;
 
   // First path segment is bucket, rest is prefix.
   std::string path = url.path;
@@ -142,7 +137,7 @@ Status S3DataEngine::ParseBucketUrl() {
         "bucket URL is missing bucket name. "
         "Expected format: s3://<endpoint>/<bucket>[/<prefix>], "
         "got: " +
-        vol.bucket);
+        options_.location);
   }
   SWORDFS_LOG_INFO << "S3DataEngine: endpoint=" << endpoint_ << " bucket=" << bucket_;
   return Status::OK();

@@ -14,11 +14,13 @@
 #include <folly/io/async/EventBase.h>
 #include <gtest/gtest.h>
 
+#include <cerrno>
 #include <limits>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/Chunk.hpp"
 #include "chunk/ChunkObjectKey.hpp"
 #include "chunk/WriteBuf.hpp"
@@ -51,7 +53,7 @@ auto Buf(const std::string &value) {
 
 // Minimal meta engine: FindChunk always returns NotFound so the chunk
 // transitions to kDirty and allocates a write buffer.
-class MissingMetaEngine final : public IMetaEngine {
+class MissingMetaEngine : public IMetaEngine {
  public:
   Status Initialize() override {
     return Status::OK();
@@ -198,12 +200,14 @@ class NullDataEngine final : public IDataEngine {
   folly::fibers::Baton *put_release_{nullptr};
 };
 
-NullDataEngine *InstallEngines() {
-  auto &vol = swordfs::volume::VolumeImpl::Instance();
-  vol.set_meta_engine(std::make_unique<MissingMetaEngine>());
+NullDataEngine *InitializeRuntime() {
+  SwordFsVolume config;
+  config.chunk_size = 1024;
   auto data = std::make_unique<NullDataEngine>();
   auto *raw = data.get();
-  vol.set_data_engine(std::move(data));
+  auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<MissingMetaEngine>>();
+  const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
+  EXPECT_TRUE(status.ok()) << status.message();
   return raw;
 }
 
@@ -226,8 +230,7 @@ void RunInTestFiber(Fn &&fn) {
 class ChunkTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    swordfs::volume::VolumeImpl::Initialize();
-    data_ = InstallEngines();
+    data_ = InitializeRuntime();
   }
 
   NullDataEngine *data_ = nullptr;
@@ -272,8 +275,6 @@ TEST(SwordFsChunkDescriptorTest, ValidatesCanonicalFixedSizeIdentity) {
 // fix is that Chunk's constructor must snapshot chunk_size into
 // max_chunk_size_ exactly once.
 TEST_F(ChunkTest, WriteAtChunkIndexOneStaysWithinCapacity) {
-  swordfs::volume::VolumeImpl::Instance().set_chunk_size_for_test(1024);
-
   RunInTestFiber([&] {
     Chunk c(/*ino=*/42, /*index=*/1);
     ASSERT_TRUE(c.Initialize().ok());
@@ -284,8 +285,6 @@ TEST_F(ChunkTest, WriteAtChunkIndexOneStaysWithinCapacity) {
 }
 
 TEST_F(ChunkTest, WriteBeyondChunkCapacityIsRejected) {
-  swordfs::volume::VolumeImpl::Instance().set_chunk_size_for_test(1024);
-
   RunInTestFiber([&] {
     Chunk c(42, 0);
     ASSERT_TRUE(c.Initialize().ok());
@@ -293,7 +292,7 @@ TEST_F(ChunkTest, WriteBeyondChunkCapacityIsRejected) {
     auto buf = *folly::IOBuf::copyBuffer(too_big.data(), too_big.size());
     auto status = c.Write(0, buf);
     EXPECT_FALSE(status.ok());
-    EXPECT_EQ(status.code(), Status::kInvalidArgument);
+    EXPECT_EQ(status.ToErrno(), EINVAL);
   });
 }
 
@@ -308,8 +307,6 @@ TEST_F(ChunkTest, EmptyDirtyChunkIsNotFlushableAndFlushIsNoOp) {
 }
 
 TEST_F(ChunkTest, TruncateToCurrentDirtySizeKeepsChunkFlushable) {
-  swordfs::volume::VolumeImpl::Instance().set_chunk_size_for_test(1024);
-
   RunInTestFiber([&] {
     Chunk c(42, 0);
     ASSERT_TRUE(c.Initialize().ok());
@@ -328,7 +325,7 @@ TEST_F(ChunkTest, DirtyReadRejectsNegativeOffsetWithoutAppending) {
 
     auto out = folly::IOBuf::create(8);
     const auto status = c.Read(-1, 1, out.get());
-    EXPECT_EQ(status.code(), Status::kInvalidArgument);
+    EXPECT_EQ(status.ToErrno(), EINVAL);
     EXPECT_EQ(out->length(), 0U);
   });
 }
@@ -341,7 +338,7 @@ TEST_F(ChunkTest, DirtyReadFailsClosedOnShortLocalRange) {
 
     auto out = folly::IOBuf::create(8);
     const auto status = c.Read(0, 8, out.get());
-    EXPECT_EQ(status.code(), Status::kIOError);
+    EXPECT_EQ(status.ToErrno(), EIO);
     EXPECT_EQ(out->length(), 0U);
   });
 }
@@ -390,7 +387,7 @@ TEST_F(ChunkTest, ConcurrentFlushOnSameChunkReturnsBusy) {
   while (!second_done.try_wait()) {
     evb.loopOnce();
   }
-  EXPECT_EQ(second_status.code(), Status::kBusy);
+  EXPECT_EQ(second_status.ToErrno(), EBUSY);
   release_put.post();
   while (!first_done.try_wait()) {
     evb.loopOnce();

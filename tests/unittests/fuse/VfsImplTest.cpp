@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -28,6 +29,7 @@
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/ChunkObjectKey.hpp"
 #include "fuse/Vfs.hpp"
 #include "metadata/IMetaEngine.hpp"
@@ -177,10 +179,10 @@ class IOBuf;
 // Not-yet-implemented methods — all return NotSupported
 // ────────────────────────────────────────────────────────────────
 
-#define EXPECT_NOT_SUPPORTED(call)                                               \
-  do {                                                                           \
-    auto status = (call);                                                        \
-    EXPECT_TRUE(status.IsNotSupported()) << #call << " => " << status.message(); \
+#define EXPECT_NOT_SUPPORTED(call)                                                  \
+  do {                                                                              \
+    auto status = (call);                                                           \
+    EXPECT_TRUE(status.ToErrno() == ENOSYS) << #call << " => " << status.message(); \
   } while (0)
 
 TEST(VfsImplTest, Fsyncdir) {
@@ -586,15 +588,13 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
 class VfsImplIntegrationTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    swordfs::volume::VolumeImpl::Initialize();
-    swordfs::test::RunInTestFiber([&] { swordfs::vfs::FuseInodeCache::Instance().Initialize(); });
-    auto &vol = swordfs::volume::VolumeImpl::Instance();
-    auto mock = std::make_unique<MockMetaEngine>();
+    auto mock = std::make_unique<swordfs::test::ConfiguredMetaEngine<MockMetaEngine>>();
     mock_meta_ = mock.get();
-    vol.set_meta_engine(std::move(mock));
-    // InodeHandle's constructor asserts CHECK(data_engine != nullptr);
-    // install a no-op so the test paths that go through Open succeed.
-    vol.set_data_engine(std::make_unique<NoopDataEngine>());
+    swordfs::metadata::SwordFsVolume config;
+    const auto status =
+        swordfs::test::LoadTestVolumeRuntime(std::move(mock), std::make_unique<NoopDataEngine>(), std::move(config));
+    ASSERT_TRUE(status.ok()) << status.message();
+    swordfs::test::RunInTestFiber([&] { swordfs::vfs::FuseInodeCache::Instance().Initialize(); });
   }
 
   void TearDown() override {
@@ -610,10 +610,10 @@ class VfsImplIntegrationTest : public ::testing::Test {
 }  // namespace
 
 TEST(VfsHookFactoryTest, InitResetsInodeHandleRegistryBeforeReturning) {
+  // This test exercises only mount-local handle-registry reset. It does not
+  // perform metadata or data IO, so constructing fake engines would add
+  // unrelated lifetime state to the scenario.
   swordfs::volume::VolumeImpl::Initialize();
-  auto &vol = swordfs::volume::VolumeImpl::Instance();
-  vol.set_meta_engine(std::make_unique<MockMetaEngine>());
-  vol.set_data_engine(std::make_unique<NoopDataEngine>());
 
   std::shared_ptr<swordfs::vfs::InodeHandle> stale_handle;
   swordfs::test::RunInTestFiber([&] {
@@ -806,7 +806,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, OpenDirPermissionDenied) {
 
   uint64_t fh = 0;
   auto status = VfsImpl::OpenDir(1, &fh);
-  EXPECT_TRUE(status.IsPermission()) << status.message();
+  EXPECT_TRUE(status.ToErrno() == EACCES) << status.message();
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, ReadDir) {
@@ -820,7 +820,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDir) {
 
 FIBER_TEST_F(VfsImplIntegrationTest, ReadDirRejectsUnknownHandle) {
   std::string buf;
-  EXPECT_EQ(VfsImpl::ReadDir(nullptr, 1, 4096, 0, 999999, &buf).code(), Status::kInvalidArgument);
+  EXPECT_EQ(VfsImpl::ReadDir(nullptr, 1, 4096, 0, 999999, &buf).ToErrno(), EINVAL);
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlus) {
@@ -834,7 +834,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlus) {
 
 FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusRejectsUnknownHandle) {
   std::string buf;
-  EXPECT_EQ(VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, 999999, &buf).code(), Status::kInvalidArgument);
+  EXPECT_EQ(VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, 999999, &buf).ToErrno(), EINVAL);
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusAcceptsZeroSizeWithoutMetadataLookup) {
@@ -854,7 +854,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusPropagatesInitialSeekFailure) {
 
   std::string buf;
   const auto status = VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf);
-  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_TRUE(buf.empty());
   EXPECT_EQ(mock_meta_->get_inodes_calls(), 0);
   EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
@@ -867,7 +867,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusPropagatesIteratorPeekFailure) {
 
   std::string buf;
   const auto status = VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf);
-  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_TRUE(buf.empty());
   EXPECT_EQ(mock_meta_->get_inodes_calls(), 0);
   EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
@@ -892,7 +892,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusRejectsEntryThatCannotFitEmptyRe
 
   std::string buf;
   const auto status = VfsImpl::ReadDirPlus(nullptr, 1, 1, 0, fh, &buf);
-  EXPECT_EQ(status.code(), Status::kNoMemory);
+  EXPECT_EQ(status.ToErrno(), ENOMEM);
   EXPECT_TRUE(buf.empty());
   EXPECT_EQ(mock_meta_->get_inodes_calls(), 0);
   EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
@@ -905,7 +905,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusPropagatesBatchMetadataFailure) 
 
   std::string buf;
   const auto status = VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf);
-  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_TRUE(buf.empty());
   EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
   EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
@@ -923,7 +923,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusRejectsInodeIdentityMismatch) {
   uint64_t fh = 0;
   ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
   std::string buf;
-  EXPECT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf).IsMalformed());
+  EXPECT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, fh, &buf).ToErrno() == EIO);
   EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
 }
 
@@ -1210,7 +1210,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusPropagatesReseekFailureAfterMiss
   ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
   std::string buf;
   const auto status = VfsImpl::ReadDirPlus(nullptr, 1, one_entry_size, 0, fh, &buf);
-  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_TRUE(buf.empty());
   EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
   EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
@@ -1228,7 +1228,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusRejectsOversizedEntryAfterSkippe
   ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
   std::string buf;
   const auto status = VfsImpl::ReadDirPlus(nullptr, 1, first_entry_size, 0, fh, &buf);
-  EXPECT_EQ(status.code(), Status::kNoMemory);
+  EXPECT_EQ(status.ToErrno(), ENOMEM);
   EXPECT_TRUE(buf.empty());
   EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
   EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
@@ -1364,7 +1364,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, OpenPermissionDenied) {
 
   struct fuse_file_info fi = {};
   auto status = VfsImpl::Open(42, &fi);
-  EXPECT_TRUE(status.IsPermission()) << status.message();
+  EXPECT_TRUE(status.ToErrno() == EACCES) << status.message();
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, CreateEstablishesHandleWithoutReopeningNewInode) {
@@ -1401,9 +1401,9 @@ FIBER_TEST_F(VfsImplIntegrationTest, MknodReturnsAuthoritativeEntry) {
 
 FIBER_TEST_F(VfsImplIntegrationTest, MknodRejectsDirectorySymlinkAndUnknownTypesBeforeMetadata) {
   fuse_entry_param entry{};
-  EXPECT_EQ(VfsImpl::MkNod(1, "directory", S_IFDIR | 0700, 0, &entry).code(), Status::kInvalidArgument);
-  EXPECT_EQ(VfsImpl::MkNod(1, "symlink", S_IFLNK | 0700, 0, &entry).code(), Status::kInvalidArgument);
-  EXPECT_EQ(VfsImpl::MkNod(1, "unknown", 0700, 0, &entry).code(), Status::kInvalidArgument);
+  EXPECT_EQ(VfsImpl::MkNod(1, "directory", S_IFDIR | 0700, 0, &entry).ToErrno(), EINVAL);
+  EXPECT_EQ(VfsImpl::MkNod(1, "symlink", S_IFLNK | 0700, 0, &entry).ToErrno(), EINVAL);
+  EXPECT_EQ(VfsImpl::MkNod(1, "unknown", 0700, 0, &entry).ToErrno(), EINVAL);
   EXPECT_EQ(mock_meta_->mknod_calls(), 0);
 }
 
@@ -1416,7 +1416,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, FtruncateRejectsReadOnlyFileHandle) {
   requested.st_size = 17;
   auto status = VfsImpl::SetAttr(42, &requested, FUSE_SET_ATTR_SIZE, fi.fh, nullptr);
 
-  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+  EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
   ASSERT_TRUE(VfsImpl::Release(42, fi.fh).ok());
 }
 
@@ -1426,7 +1426,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, FtruncateRejectsUnknownFileHandle) {
 
   auto status = VfsImpl::SetAttr(42, &requested, FUSE_SET_ATTR_SIZE, 999999, nullptr);
 
-  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+  EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, FtruncateAcceptsWritableFileHandle) {
@@ -1472,7 +1472,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, GetattrDoesNotHideAuthoritativeMetadataErro
   struct stat attr{};
   const auto status = VfsImpl::GetAttr(entry.ino, &attr);
 
-  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_EQ(status.message(), "injected metadata failure");
 }
 
@@ -1518,7 +1518,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, LookupPropagatesTrackedInodeAttributeRefres
   fuse_entry_param entry{};
   auto status = VfsImpl::Lookup(1, "file", &entry);
 
-  EXPECT_EQ(status.code(), Status::kIOError);
+  EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_EQ(status.message(), "injected lookup attribute refresh failure");
 
   mock_meta_->set_get_inode_status(Status::OK());
@@ -1612,21 +1612,17 @@ class RecordingDataEngine : public swordfs::storage::IDataEngine {
 class VfsLastLinkCleanupTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    // Volume lifecycle is control-plane work: initialize it on the gtest POSIX
-    // thread, then reset the fiber-owned handle registry from a fiber.
-    swordfs::volume::VolumeImpl::Initialize();
+    auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<swordfs::metadata::MemMetaImpl>>();
+    auto data = std::make_unique<RecordingDataEngine>();
+    meta_ = meta.get();
+    data_ = data.get();
+    swordfs::metadata::SwordFsVolume config;
+    const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
+    ASSERT_TRUE(status.ok()) << status.message();
     swordfs::test::RunInTestFiber([&] {
       swordfs::vfs::InodeHandleManager::Instance().Initialize();
       swordfs::vfs::FuseInodeCache::Instance().Initialize();
     });
-
-    auto meta = std::make_unique<swordfs::metadata::MemMetaImpl>();
-    auto data = std::make_unique<RecordingDataEngine>();
-    meta_ = meta.get();
-    data_ = data.get();
-    auto &vol = swordfs::volume::VolumeImpl::Instance();
-    vol.set_meta_engine(std::move(meta));
-    vol.set_data_engine(std::move(data));
   }
 
   void TearDown() override {
@@ -1966,7 +1962,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkPublishesBackgroundCleanupAndOpenDesc
   EXPECT_TRUE(PendingReclaims().empty());
   auto inode_handle = swordfs::vfs::InodeHandleManager::Instance().Get(ino, false);
   ASSERT_NE(inode_handle, nullptr);
-  EXPECT_EQ(inode_handle->open_count(), 1U);
+  EXPECT_FALSE(inode_handle->TryStartReclaim()) << "the live descriptor must hold the local reclaim fence open";
 
   // A worker pass while the descriptor is live must leave the durable orphan
   // untouched rather than crossing the metadata point of no return.
@@ -2006,7 +2002,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkReturnsBeforeBackgroundCleanupAndRetr
 
   // The worker prepares the inode, then the injected object-delete failure
   // leaves the frozen record durable for retry.
-  EXPECT_EQ(swordfs::vfs::Reclaimer::Instance().Reconcile().code(), Status::kIOError);
+  EXPECT_EQ(swordfs::vfs::Reclaimer::Instance().Reconcile().ToErrno(), EIO);
   EXPECT_TRUE(meta_->GetInode(ino, nullptr).IsNotFound());
   EXPECT_EQ(PendingReclaims(), (std::vector<InodeID>{ino}));
   EXPECT_TRUE(OrphanCandidates().empty());
@@ -2134,7 +2130,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, RenameReturnsBeforeBackgroundCleanupAndRetr
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{victim}));
   EXPECT_TRUE(PendingReclaims().empty());
 
-  EXPECT_EQ(swordfs::vfs::Reclaimer::Instance().Reconcile().code(), Status::kIOError);
+  EXPECT_EQ(swordfs::vfs::Reclaimer::Instance().Reconcile().ToErrno(), EIO);
   EXPECT_EQ(PendingReclaims(), (std::vector<InodeID>{victim}));
 
   data_->fail_keys.clear();

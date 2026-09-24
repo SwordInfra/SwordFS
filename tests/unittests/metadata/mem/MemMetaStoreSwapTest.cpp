@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <barrier>
+#include <cerrno>
 #include <thread>
 #include <vector>
 
@@ -317,11 +318,11 @@ FIBER_TEST_F(MemMetaStoreSwapTest, SwapDirectoryIntoOwnSubtreeFails) {
 
   // Swapping dir_b into dir_a's slot puts dir_b inside its own subtree.
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.SwapEntries(kRoot, "b", dir_x.ino, "a"); });
-  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+  EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
 
   // Same cycle from the other direction.
   status = store_->Transact([&](MemMetaTxn &txn) { return txn.SwapEntries(dir_x.ino, "a", kRoot, "b"); });
-  EXPECT_EQ(status.code(), Status::kInvalidArgument) << status.message();
+  EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
 
   // The tree must be left untouched.
   SwordFsInode found;

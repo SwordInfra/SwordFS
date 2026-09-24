@@ -1,0 +1,5 @@
+# Patch coverage is a gate for production code. Test sources are execution
+# drivers and assertions; requiring tests to cover their own gtest control
+# flow would measure the harness rather than SwordFS production behavior.
+ignore:
+  - "tests/**/*"

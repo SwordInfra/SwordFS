@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <barrier>
+#include <cerrno>
 #include <set>
 #include <string>
 #include <thread>
@@ -110,7 +111,7 @@ FIBER_TEST_F(MemMetaStoreConcurrencyTest, ConcurrentAddEntrySameName) {
     if (status.ok()) {
       success_count.fetch_add(1, std::memory_order_relaxed);
       winner_ino.store(child.ino, std::memory_order_relaxed);
-    } else if (status.IsAlreadyExists()) {
+    } else if (status.ToErrno() == EEXIST) {
       exists_count.fetch_add(1, std::memory_order_relaxed);
     }
   };
@@ -160,7 +161,7 @@ FIBER_TEST_F(MemMetaStoreConcurrencyTest, ConcurrentMoveEntryAtomicity) {
       moved_count.fetch_add(1, std::memory_order_relaxed);
     } else if (status.IsNotFound()) {
       notfound_count.fetch_add(1, std::memory_order_relaxed);
-    } else if (status.IsAlreadyExists()) {
+    } else if (status.ToErrno() == EEXIST) {
       exists_count.fetch_add(1, std::memory_order_relaxed);
     }
   };

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <barrier>
+#include <cerrno>
 #include <limits>
 #include <thread>
 
@@ -165,7 +166,7 @@ FIBER_TEST_F(MemMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) {
   EXPECT_EQ(first, 1U);
   EXPECT_EQ(second, 2U);
   EXPECT_EQ(third, 3U);
-  EXPECT_EQ(impl_->AllocateChunkRevision(nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->AllocateChunkRevision(nullptr).ToErrno(), EINVAL);
 }
 
 FIBER_TEST_F(MemMetaImplTest, NamespaceOperationsRejectOverlongNameComponents) {
@@ -176,16 +177,16 @@ FIBER_TEST_F(MemMetaImplTest, NamespaceOperationsRejectOverlongNameComponents) {
   ASSERT_TRUE(impl_->Create(kRoot, "file", 0644, &file).ok());
 
   SwordFsInode found;
-  EXPECT_TRUE(impl_->Lookup(kRoot, long_name, &found).IsNameTooLong());
-  EXPECT_TRUE(impl_->Unlink(kRoot, long_name).IsNameTooLong());
-  EXPECT_TRUE(impl_->RmDir(kRoot, long_name).IsNameTooLong());
-  EXPECT_TRUE(impl_->Rename(kRoot, long_name, kRoot, "moved", RenameFlag::kNone).IsNameTooLong());
-  EXPECT_TRUE(impl_->Rename(kRoot, "file", kRoot, long_name, RenameFlag::kNone).IsNameTooLong());
+  EXPECT_TRUE(impl_->Lookup(kRoot, long_name, &found).ToErrno() == ENAMETOOLONG);
+  EXPECT_TRUE(impl_->Unlink(kRoot, long_name).ToErrno() == ENAMETOOLONG);
+  EXPECT_TRUE(impl_->RmDir(kRoot, long_name).ToErrno() == ENAMETOOLONG);
+  EXPECT_TRUE(impl_->Rename(kRoot, long_name, kRoot, "moved", RenameFlag::kNone).ToErrno() == ENAMETOOLONG);
+  EXPECT_TRUE(impl_->Rename(kRoot, "file", kRoot, long_name, RenameFlag::kNone).ToErrno() == ENAMETOOLONG);
 
-  EXPECT_TRUE(impl_->Create(kRoot, long_name, 0644, nullptr).IsNameTooLong());
-  EXPECT_TRUE(impl_->MkDir(kRoot, long_name, 0755, nullptr).IsNameTooLong());
-  EXPECT_TRUE(impl_->Symlink(kRoot, long_name, "target", nullptr).IsNameTooLong());
-  EXPECT_TRUE(impl_->Link(file.ino, kRoot, long_name, nullptr).IsNameTooLong());
+  EXPECT_TRUE(impl_->Create(kRoot, long_name, 0644, nullptr).ToErrno() == ENAMETOOLONG);
+  EXPECT_TRUE(impl_->MkDir(kRoot, long_name, 0755, nullptr).ToErrno() == ENAMETOOLONG);
+  EXPECT_TRUE(impl_->Symlink(kRoot, long_name, "target", nullptr).ToErrno() == ENAMETOOLONG);
+  EXPECT_TRUE(impl_->Link(file.ino, kRoot, long_name, nullptr).ToErrno() == ENAMETOOLONG);
 }
 
 FIBER_TEST_F(MemMetaImplTest, MknodPersistsSupportedTypesModeAndDeviceIdentity) {
@@ -282,18 +283,18 @@ FIBER_TEST_F(MemMetaImplTest, CreateOwnershipInheritsGidAndDirectorySgidFromPare
 
 FIBER_TEST_F(MemMetaImplTest, MknodReusesNamespaceValidationAndRejectsNonMknodTypes) {
   const std::string long_name(impl_->GetLimits().max_name_length + 1, 'x');
-  EXPECT_TRUE(impl_->MkNod(kRoot, long_name, S_IFIFO | 0600, 0, nullptr).IsNameTooLong());
-  EXPECT_EQ(impl_->MkNod(kRoot, "directory", S_IFDIR | 0700, 0, nullptr).code(), Status::kInvalidArgument);
-  EXPECT_EQ(impl_->MkNod(kRoot, "symlink", S_IFLNK | 0700, 0, nullptr).code(), Status::kInvalidArgument);
-  EXPECT_EQ(impl_->MkNod(kRoot, "unknown", 0700, 0, nullptr).code(), Status::kInvalidArgument);
+  EXPECT_TRUE(impl_->MkNod(kRoot, long_name, S_IFIFO | 0600, 0, nullptr).ToErrno() == ENAMETOOLONG);
+  EXPECT_EQ(impl_->MkNod(kRoot, "directory", S_IFDIR | 0700, 0, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->MkNod(kRoot, "symlink", S_IFLNK | 0700, 0, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->MkNod(kRoot, "unknown", 0700, 0, nullptr).ToErrno(), EINVAL);
 
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "parent-file", 0644, &file).ok());
-  EXPECT_TRUE(impl_->MkNod(file.ino, "child", S_IFIFO | 0600, 0, nullptr).IsNotDirectory());
+  EXPECT_TRUE(impl_->MkNod(file.ino, "child", S_IFIFO | 0600, 0, nullptr).ToErrno() == ENOTDIR);
   EXPECT_TRUE(impl_->MkNod(999999, "missing-parent", S_IFIFO | 0600, 0, nullptr).IsNotFound());
 
   ASSERT_TRUE(impl_->MkNod(kRoot, "duplicate", S_IFIFO | 0600, 0, nullptr).ok());
-  EXPECT_TRUE(impl_->MkNod(kRoot, "duplicate", S_IFIFO | 0600, 0, nullptr).IsAlreadyExists());
+  EXPECT_TRUE(impl_->MkNod(kRoot, "duplicate", S_IFIFO | 0600, 0, nullptr).ToErrno() == EEXIST);
 }
 
 FIBER_TEST_F(MemMetaImplTest, MknodSpecialNodesUseOrdinaryNamespaceLifecycle) {
@@ -372,10 +373,12 @@ FIBER_TEST_F(MemMetaImplTest, StickyDirectoryOwnershipSafetyRemainsInMetadata) {
   ASSERT_TRUE(impl_->Create(sticky_dest_ino, "target", 0644, nullptr).ok());
 
   SetContext(kOther, kOtherGroup);
-  EXPECT_TRUE(impl_->Unlink(sticky_unlink_ino, "file").IsPermission());
-  EXPECT_TRUE(impl_->RmDir(sticky_rmdir_ino, "subdir").IsPermission());
-  EXPECT_TRUE(impl_->Rename(sticky_source_ino, "source", plain_dest_ino, "moved", RenameFlag::kNone).IsPermission());
-  EXPECT_TRUE(impl_->Rename(plain_source_ino, "source", sticky_dest_ino, "target", RenameFlag::kNone).IsPermission());
+  EXPECT_TRUE(impl_->Unlink(sticky_unlink_ino, "file").ToErrno() == EACCES);
+  EXPECT_TRUE(impl_->RmDir(sticky_rmdir_ino, "subdir").ToErrno() == EACCES);
+  EXPECT_TRUE(impl_->Rename(sticky_source_ino, "source", plain_dest_ino, "moved", RenameFlag::kNone).ToErrno() ==
+              EACCES);
+  EXPECT_TRUE(impl_->Rename(plain_source_ino, "source", sticky_dest_ino, "target", RenameFlag::kNone).ToErrno() ==
+              EACCES);
 }
 
 FIBER_TEST_F(MemMetaImplTest, StickyDirectoryOwnerCanUnlinkEntry) {
@@ -445,7 +448,7 @@ FIBER_TEST_F(MemMetaImplTest, RenameNoReplaceFailsWhenTargetExists) {
 
   // RenameFlag::kNoReplace: target "f" under dst EXISTS → EEXIST.
   Status st = impl_->Rename(src_ino, "f", dst_ino, "f", RenameFlag::kNoReplace);
-  EXPECT_TRUE(st.IsAlreadyExists()) << st.message();
+  EXPECT_TRUE(st.ToErrno() == EEXIST) << st.message();
 
   // Verify source file was NOT moved (still under src).
   SwordFsInode found;
@@ -496,7 +499,7 @@ FIBER_TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
 
   // RenameFlag::kExchange: file ↔ dir → EINVAL.
   Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
-  EXPECT_EQ(st.code(), swordfs::utils::Status::kInvalidArgument) << st.message();
+  EXPECT_EQ(st.ToErrno(), EINVAL) << st.message();
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -591,7 +594,7 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSizeM
 
   auto conflicting = first;
   conflicting.revision = 3;
-  EXPECT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, conflicting).IsAlreadyExists());
+  EXPECT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, conflicting).ToErrno() == EEXIST);
 
   SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
@@ -609,11 +612,11 @@ FIBER_TEST_F(MemMetaImplTest, LoadChunkViewReturnsPublishedHeadAndWholeObjectSna
   EXPECT_EQ(view.head, head);
   EXPECT_TRUE(view.private_snapshot.empty());
   EXPECT_TRUE(impl_->LoadChunkView(file.ino, 1, &view).IsNotFound());
-  EXPECT_EQ(impl_->LoadChunkView(file.ino, 0, nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->LoadChunkView(file.ino, 0, nullptr).ToErrno(), EINVAL);
 
   const SwordFsChunk replacement{.index = 0, .start_offset = 0, .revision = 2, .size = 128};
   const swordfs::metadata::ChunkPublishIntent unexpected{.payload = "not-whole-object"};
-  EXPECT_EQ(impl_->CommitChunk(file.ino, head, replacement, unexpected).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(file.ino, head, replacement, unexpected).ToErrno(), EINVAL);
   ASSERT_TRUE(impl_->LoadChunkView(file.ino, 0, &view).ok());
   EXPECT_EQ(view.head, head);
 }
@@ -648,7 +651,7 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempoten
 
   auto stale_replacement = replacement;
   stale_replacement.revision = 3;
-  EXPECT_TRUE(impl_->CommitChunk(file.ino, first, stale_replacement).IsAlreadyExists());
+  EXPECT_TRUE(impl_->CommitChunk(file.ino, first, stale_replacement).ToErrno() == EEXIST);
   EXPECT_EQ(PendingDeletes(),
             (std::vector<std::string>{
                 swordfs::chunk::FormatChunkObjectKey(file.ino, first.index, first.revision),
@@ -669,25 +672,25 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) {
 
   auto invalid_revision = expected;
   invalid_revision.revision = swordfs::metadata::kInvalidChunkRevision;
-  EXPECT_EQ(impl_->CommitChunk(999999, invalid_revision, replacement).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(999999, invalid_revision, replacement).ToErrno(), EINVAL);
 
   auto invalid_replacement = replacement;
   invalid_replacement.revision = swordfs::metadata::kInvalidChunkRevision;
-  EXPECT_EQ(impl_->CommitChunk(999999, expected, invalid_replacement).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(999999, expected, invalid_replacement).ToErrno(), EINVAL);
 
   auto non_canonical_replacement = replacement;
   non_canonical_replacement.start_offset = 1;
-  EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, non_canonical_replacement).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, non_canonical_replacement).ToErrno(), EINVAL);
 
   auto oversized_replacement = replacement;
   oversized_replacement.size = kChunkSize + 1;
-  EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, oversized_replacement).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, oversized_replacement).ToErrno(), EINVAL);
 
   EXPECT_TRUE(impl_->CommitChunk(999999, expected, replacement).IsNotFound());
 
   SwordFsInode dir;
   ASSERT_TRUE(impl_->MkDir(kRoot, "replace-dir", 0755, &dir).ok());
-  EXPECT_EQ(impl_->CommitChunk(dir.ino, expected, replacement).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(dir.ino, expected, replacement).ToErrno(), EINVAL);
 
   SwordFsInode empty_file;
   ASSERT_TRUE(impl_->Create(kRoot, "replace-empty", 0644, &empty_file).ok());
@@ -695,22 +698,22 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) {
 
   auto mismatched = replacement;
   mismatched.index = 1;
-  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, expected, mismatched).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, expected, mismatched).ToErrno(), EINVAL);
 
   auto stale_revision = replacement;
   stale_revision.revision = expected.revision;
-  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, expected, stale_revision).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, expected, stale_revision).ToErrno(), EINVAL);
 
   mismatched = replacement;
   mismatched.start_offset = 1;
-  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, expected, mismatched).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, expected, mismatched).ToErrno(), EINVAL);
 
   auto overflowing_expected = expected;
   overflowing_expected.start_offset = 1;
   auto overflowing = replacement;
   overflowing.start_offset = 1;
   overflowing.size = std::numeric_limits<uint64_t>::max();
-  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, overflowing_expected, overflowing).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, overflowing_expected, overflowing).ToErrno(), EINVAL);
 
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "replace-missing-index", 0644, &file).ok());
@@ -723,7 +726,7 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) {
 
 FIBER_TEST_F(MemMetaImplTest, ChunkMutationsRejectInvalidRevision) {
   SwordFsChunk invalid{.index = 0, .start_offset = 0, .revision = swordfs::metadata::kInvalidChunkRevision, .size = 64};
-  EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, invalid).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, invalid).ToErrno(), EINVAL);
 }
 
 FIBER_TEST_F(MemMetaImplTest, PrepareReclaimMissingInodeIsNoOp) {
@@ -1214,18 +1217,18 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentReclaimAndLinkAreAtomic) {
 FIBER_TEST_F(MemMetaImplTest, VisitorAndOutputArgumentsAreValidated) {
   SetContext(0, 0);
 
-  EXPECT_EQ(impl_->VisitOrphanCandidates(swordfs::metadata::InodeVisitorFn{}).code(), Status::kInvalidArgument);
-  EXPECT_EQ(impl_->VisitPendingReclaims(swordfs::metadata::ReclaimVisitorFn{}).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->VisitOrphanCandidates(swordfs::metadata::InodeVisitorFn{}).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->VisitPendingReclaims(swordfs::metadata::ReclaimVisitorFn{}).ToErrno(), EINVAL);
   bool has_more = false;
-  EXPECT_EQ(impl_->VisitPendingDeletesBatch(1, swordfs::metadata::PendingDeleteVisitorFn{}, &has_more).code(),
-            Status::kInvalidArgument);
+  EXPECT_EQ(impl_->VisitPendingDeletesBatch(1, swordfs::metadata::PendingDeleteVisitorFn{}, &has_more).ToErrno(),
+            EINVAL);
 
   // A null frozen-work output is refused before anything is mutated.
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
   const InodeID f_ino = file.ino;
   ASSERT_TRUE(impl_->Unlink(kRoot, "f").ok());
-  EXPECT_EQ(impl_->PrepareReclaim(f_ino, nullptr).code(), Status::kInvalidArgument);
+  EXPECT_EQ(impl_->PrepareReclaim(f_ino, nullptr).ToErrno(), EINVAL);
   EXPECT_EQ(OrphanCandidates(), std::vector<InodeID>{f_ino});
   EXPECT_TRUE(PendingReclaims().empty());
 }
@@ -1252,7 +1255,7 @@ FIBER_TEST_F(MemMetaImplTest, VisitorAbortStopsTheScanAndIsPropagated) {
     visited.push_back(ino);
     return Status::IOError("abort the orphan scan");
   });
-  EXPECT_EQ(orphan_status.code(), Status::kIOError);
+  EXPECT_EQ(orphan_status.ToErrno(), EIO);
   EXPECT_EQ(orphan_status.message(), "abort the orphan scan");
   EXPECT_EQ(visited, (std::vector<InodeID>{first}));
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{first, second}));
@@ -1268,7 +1271,7 @@ FIBER_TEST_F(MemMetaImplTest, VisitorAbortStopsTheScanAndIsPropagated) {
     visited.push_back(work.ino);
     return Status::Busy("abort the pending scan");
   });
-  EXPECT_EQ(pending_status.code(), Status::kBusy);
+  EXPECT_EQ(pending_status.ToErrno(), EBUSY);
   EXPECT_EQ(pending_status.message(), "abort the pending scan");
   EXPECT_EQ(visited, (std::vector<InodeID>{second}));
 }
@@ -1293,7 +1296,7 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchVisitorAbortIsPropagated) {
         return Status::Busy("abort the pending delete scan");
       },
       &has_more);
-  EXPECT_EQ(status.code(), Status::kBusy);
+  EXPECT_EQ(status.ToErrno(), EBUSY);
   EXPECT_EQ(status.message(), "abort the pending delete scan");
   EXPECT_EQ(visits, 1U);
   EXPECT_FALSE(has_more);
@@ -1335,21 +1338,15 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchBoundsVisitsAndValidatesArgument
         return Status::Busy("abort bounded pending delete scan");
       },
       &has_more);
-  EXPECT_TRUE(status.IsBusy()) << status.message();
+  EXPECT_TRUE(status.ToErrno() == EBUSY) << status.message();
   EXPECT_EQ(status.message(), "abort bounded pending delete scan");
   EXPECT_EQ(visits, 1U);
   EXPECT_FALSE(has_more);
 
-  EXPECT_EQ(impl_->VisitPendingDeletesBatch(
-                     0, [](const auto &) { return Status::OK(); }, &has_more)
-                .code(),
-            Status::kInvalidArgument);
-  EXPECT_EQ(impl_->VisitPendingDeletesBatch(1, swordfs::metadata::PendingDeleteVisitorFn{}, &has_more).code(),
-            Status::kInvalidArgument);
-  EXPECT_EQ(impl_->VisitPendingDeletesBatch(
-                     1, [](const auto &) { return Status::OK(); }, nullptr)
-                .code(),
-            Status::kInvalidArgument);
+  EXPECT_EQ(impl_->VisitPendingDeletesBatch(0, [](const auto &) { return Status::OK(); }, &has_more).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->VisitPendingDeletesBatch(1, swordfs::metadata::PendingDeleteVisitorFn{}, &has_more).ToErrno(),
+            EINVAL);
+  EXPECT_EQ(impl_->VisitPendingDeletesBatch(1, [](const auto &) { return Status::OK(); }, nullptr).ToErrno(), EINVAL);
 }
 
 FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchMakesProgressWithoutQueueMutation) {

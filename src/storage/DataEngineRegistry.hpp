@@ -13,14 +13,15 @@
 namespace swordfs::storage {
 
 class IDataEngine;
-}
+struct DataEngineOptions;
+}  // namespace swordfs::storage
 
 namespace swordfs::storage {
 
 /// Registry of data engines available in this build.
 class DataEngineRegistry {
  public:
-  using Factory = utils::Status (*)(std::unique_ptr<IDataEngine> *out);
+  using Factory = utils::Status (*)(const DataEngineOptions &options, std::unique_ptr<IDataEngine> *out);
 
   static DataEngineRegistry &Instance();
 
@@ -31,7 +32,8 @@ class DataEngineRegistry {
   bool Available(std::string_view name) const;
 
   /// Create a data engine instance using its registered factory.
-  utils::Status CreateInstance(std::string_view name, std::unique_ptr<IDataEngine> *out) const;
+  utils::Status CreateInstance(std::string_view name, const DataEngineOptions &options,
+                               std::unique_ptr<IDataEngine> *out) const;
 
  private:
   DataEngineRegistry() = default;
