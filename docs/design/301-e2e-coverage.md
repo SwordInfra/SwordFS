@@ -23,6 +23,13 @@ This does not add a second E2E execution and does not replace the Debug unit
 coverage session. Codecov combines the independently collected execution
 signals for production sources.
 
+Coverage instrumentation also makes daemon process teardown slightly slower because the
+process flushes runtime counters during normal exit. The E2E fixture therefore treats
+filesystem unmount and daemon termination as distinct lifecycle events: after a
+successful `fusermount3 -u`, it waits on the recorded daemon PID with a bounded poll
+before declaring teardown complete. This is a synchronization invariant, not a sleep
+used to mask failure; a daemon that remains alive after the bound still fails teardown.
+
 The E2E fixture already supplies the meaningful contracts behind the trace:
 
 - `Fixture::FormatVolume()` shells out to the real `swordfs format` command;
