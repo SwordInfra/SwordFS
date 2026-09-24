@@ -32,6 +32,12 @@ Pinned release assets are accepted only when their SHA256 matches:
 
 No third-party MinIO image is introduced.
 
+## E2E process-identity interaction
+
+Running MinIO directly exposes its `/tmp/swordfs-minio-test-*` runtime path in the MinIO process command line. The historical `StaleMountTest` helper treated any `/proc/<pid>/cmdline` containing the substring `swordfs` as a SwordFS daemon, so it incorrectly counted the MinIO process and failed two daemon-exit assertions even though the fixture-owned SwordFS daemon had already exited.
+
+The stale-mount shutdown assertion therefore uses the existing `Fixture::IsDaemonGone()` contract, which tracks the exact daemon PID created by that fixture and waits boundedly for that process to disappear. Global substring-based process discovery is removed. This is a test synchronization correction required by the runner-owned MinIO topology; production mount behavior is unchanged.
+
 ## Verification
 
 Local verification covers shell/YAML/pre-commit, Redis-only Compose rendering, and helper structure. GitHub CI is authoritative for GitHub Release asset retrieval, MinIO startup, bucket creation, and the real Debug/E2E/pjdfstest/fstests execution surfaces.
