@@ -139,6 +139,10 @@ jobs:
       - name: Build
         run: cmake --build build --target swordfs swordfs_test
 
+      - name: Build focused Debug E2E coverage target
+        if: matrix.build_type == 'Debug'
+        run: cmake --build build --target swordfs_e2e_test
+
       - name: Run clang-tidy (changed files only)
         if: matrix.build_type == 'Debug'
         run: |
@@ -166,6 +170,13 @@ jobs:
             grep '<skipped' unit-test-results.xml
             exit 1
           fi
+
+      - name: Run MinIO-backed S3 coverage scenarios
+        if: matrix.build_type == 'Debug'
+        run: |
+          bash scripts/testing/run-e2e.sh \
+            --gtest_filter='S3DataEngineE2ETest.*' \
+            --gtest_color=no
 
       - name: Generate coverage report
         if: matrix.build_type == 'Debug'

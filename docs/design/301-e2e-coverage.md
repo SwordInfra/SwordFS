@@ -104,6 +104,26 @@ Debug per-file patch-coverage gate verifies the production fix independently of
 the service-backed E2E session. The post-response content-length check remains necessary for
 zero-length/remainder requests whose response size is not known before IO.
 
+## Debug service-backed coverage refinement
+
+The two-session report exposed a coverage-fidelity limitation in the Release
+E2E trace: the MinIO contract test executes the S3 Put/Get/Delete paths, but
+optimization causes many executed source lines in `S3DataEngine.cpp` to remain
+reported as missed/partial. Adding more assertions to the same Release binary
+would therefore optimize for instrumentation artifacts rather than behavior.
+
+Keep the full Release E2E coverage upload because it provides useful real-process
+coverage for command/FUSE paths. In addition, the existing instrumented Debug
+coverage job builds `swordfs_e2e_test` and runs only
+`S3DataEngineE2ETest.*` through `run-e2e.sh` before the normal Debug `lcov`
+capture. This reuses the real Redis + MinIO dependency lifecycle but does not
+duplicate the full E2E suite. The focused service-backed contract therefore
+contributes accurate Debug line coverage to the same authoritative unit/Debug
+trace.
+
+This remains a real production boundary: no AWS client is mocked, no S3 private
+helper is exposed, and the test assertions are unchanged.
+
 ## Non-goals
 
 - no fake AWS client or test-only storage API;
