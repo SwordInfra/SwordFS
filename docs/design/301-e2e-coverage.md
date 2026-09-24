@@ -73,6 +73,21 @@ The residual tests use two legitimate boundaries:
 No AWS client is mocked and no private helper or production test hook is
 exposed. Service-backed execution remains GitHub-CI-only.
 
+## Defect discovered by residual coverage
+
+The MinIO-backed bounded-read contract test produced a genuine RED on PR #308
+(run `35977094178`): requesting four bytes into a caller buffer with only three
+bytes of tailroom returned `EIO` instead of `EINVAL`. The existing capacity
+check ran only after `GetObject()` succeeded, but the AWS SDK failed first while
+flushing the response stream into the undersized buffer, making the intended
+validation unreachable for this case.
+
+The production fix rejects a bounded request when `size > out->tailroom()`
+before issuing S3 IO. This preserves the `IDataEngine::Get` caller-capacity
+contract, returns the correct argument error, and avoids an unnecessary network
+request. The post-response content-length check remains necessary for
+zero-length/remainder requests whose response size is not known before IO.
+
 ## Non-goals
 
 - no fake AWS client or test-only storage API;
