@@ -27,8 +27,10 @@ Coverage instrumentation also makes daemon process teardown slightly slower beca
 process flushes runtime counters during normal exit. The E2E fixture therefore treats
 filesystem unmount and daemon termination as distinct lifecycle events: after a
 successful `fusermount3 -u`, it waits on the recorded daemon PID with a bounded poll
-before declaring teardown complete. This is a synchronization invariant, not a sleep
-used to mask failure; a daemon that remains alive after the bound still fails teardown.
+before declaring teardown complete. The last daemon PID remains recorded after exit so
+existing post-teardown assertions can verify that exact process is gone. This is a
+synchronization invariant, not a sleep used to mask failure; a daemon that remains alive
+after the bound still fails teardown.
 
 The E2E fixture already supplies the meaningful contracts behind the trace:
 

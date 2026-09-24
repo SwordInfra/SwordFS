@@ -242,7 +242,6 @@ bool Fixture::StopMount() {
     std::fprintf(stderr, "E2E: daemon %d did not exit after unmount\n", daemon_pid_);
     return false;
   }
-  daemon_pid_ = 0;
   return true;
 }
 
