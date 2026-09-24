@@ -17,6 +17,7 @@ MOUNT_CONFIG="/tmp/swordfs-fstests-mount.env"
 OUTPUT_DIR="${PROJECT_DIR}/build/fstests-conformance"
 TESTS_FILE=""
 SHARD_NAME=""
+SUITE_TIMEOUT_OVERRIDE=""
 VERIFY_SELECTION=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,6 +31,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --shard-name)
       SHARD_NAME="$2"
+      shift 2
+      ;;
+    --suite-timeout)
+      SUITE_TIMEOUT_OVERRIDE="$2"
       shift 2
       ;;
     --verify-selection)
@@ -63,6 +68,9 @@ fi
 
 # shellcheck disable=SC1090
 source "${VERSION_FILE}"
+if [[ -n "${SUITE_TIMEOUT_OVERRIDE}" ]]; then
+  FSTESTS_SUITE_TIMEOUT="${SUITE_TIMEOUT_OVERRIDE}"
+fi
 : "${FSTESTS_REPOSITORY:?FSTESTS_REPOSITORY must be set}"
 : "${FSTESTS_COMMIT:?FSTESTS_COMMIT must be set}"
 : "${FSTESTS_GROUP:?FSTESTS_GROUP must be set}"

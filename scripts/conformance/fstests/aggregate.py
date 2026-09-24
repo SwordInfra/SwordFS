@@ -238,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--supported", type=pathlib.Path, default=pathlib.Path("conformance/fstests/supported.txt"))
     parser.add_argument("--deferred", type=pathlib.Path, default=pathlib.Path("conformance/fstests/deferred-ci.tsv"))
     parser.add_argument("--runtime", type=pathlib.Path, default=pathlib.Path("conformance/fstests/runtime.tsv"))
+    parser.add_argument("--bounded", type=pathlib.Path, default=pathlib.Path("conformance/fstests/bounded-ci.tsv"))
     parser.add_argument("--version", type=pathlib.Path, default=pathlib.Path("conformance/fstests/version.env"))
     args = parser.parse_args(argv)
 
@@ -248,7 +249,8 @@ def main(argv: list[str] | None = None) -> int:
         supported = fstests_plan.load_supported(args.supported)
         deferred = fstests_plan.load_deferred(args.deferred)
         runtime = fstests_plan.load_runtime(args.runtime)
-        plan = fstests_plan.build_plan(selected, supported, deferred, runtime)
+        bounded = fstests_plan.load_bounded(args.bounded)
+        plan = fstests_plan.build_plan(selected, supported, deferred, runtime, bounded)
         errors = aggregate(
             args.shards_dir,
             args.output_dir,
