@@ -85,7 +85,9 @@ validation unreachable for this case.
 The production fix rejects a bounded request when `size > out->tailroom()`
 before issuing S3 IO. This preserves the `IDataEngine::Get` caller-capacity
 contract, returns the correct argument error, and avoids an unnecessary network
-request. The post-response content-length check remains necessary for
+request. The same precondition is covered by a deterministic unit test so the
+Debug per-file patch-coverage gate verifies the production fix independently of
+the service-backed E2E session. The post-response content-length check remains necessary for
 zero-length/remainder requests whose response size is not known before IO.
 
 ## Non-goals
