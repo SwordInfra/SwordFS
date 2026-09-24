@@ -720,6 +720,53 @@ TEST(RedisMetaClientTest, RejectsFiberDomainCalls) {
 }
 #endif
 
+TEST(RedisBackendContextTest, RequiresOwnerShutdownBeforeDestruction) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.retry_attempts = 1;
+
+  EXPECT_DEATH(
+      {
+        RedisBackendContext backend(config, 1);
+        (void)backend.client();
+      },
+      "must be shut down by its thread-domain owner");
+}
+
+TEST(RedisBackendContextTest, ShutdownIsIdempotent) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.retry_attempts = 1;
+
+  RedisBackendContext backend(config, 1);
+  EXPECT_NE(&backend.client(), nullptr);
+  EXPECT_NE(&backend.executor(), nullptr);
+  backend.Shutdown();
+  backend.Shutdown();
+}
+
+TEST(RedisBackendContextTest, RejectsAccessAfterShutdown) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.retry_attempts = 1;
+
+  EXPECT_DEATH(
+      {
+        RedisBackendContext backend(config, 1);
+        backend.Shutdown();
+        (void)backend.client();
+      },
+      "Redis backend is shut down");
+
+  EXPECT_DEATH(
+      {
+        RedisBackendContext backend(config, 1);
+        backend.Shutdown();
+        (void)backend.executor();
+      },
+      "Redis backend is shut down");
+}
+
 TEST(RedisMetaOpsTest, TransactionCallbackRunsInThreadDomain) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
@@ -1022,6 +1069,60 @@ TEST(RedisMetaTxnTest, AddEntryRejectsExistingNameWithoutPersistingChild) {
   EXPECT_EQ(redis.get(key.InodeCount()).value_or(""), "2");
 }
 
+TEST(RedisMetaTxnTest, AddEntryFailsClosedOnDanglingExistingEntry) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("add-entry-dangling"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
+  SwordFsInode root(kRootInodeId, root_attr, kRootInodeId);
+  ASSERT_TRUE(SeedInode(redis, key, root).ok());
+  ASSERT_TRUE(SeedEntry(redis, key, root.ino, SwordFsEntry{"child", DT_REG, 99}).ok());
+
+  SwordFsAttr child_attr(8, S_IFREG | 0644);
+  SwordFsInode child(8, child_attr, root.ino);
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.AddEntry(root.ino, "child", child, &root);
+  });
+
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
+  EXPECT_TRUE(redis.hexists(key.Directory(root.ino), "child"));
+  EXPECT_FALSE(redis.exists(key.Inode(child.ino)));
+}
+
+TEST(RedisMetaTxnTest, AddEntryPropagatesCorruptDirectoryBackendWithoutMutation) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("add-entry-wrong-type"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
+  SwordFsInode root(kRootInodeId, root_attr, kRootInodeId);
+  ASSERT_TRUE(SeedInode(redis, key, root).ok());
+  redis.set(key.Directory(root.ino), "not-a-directory-hash");
+
+  SwordFsAttr child_attr(8, S_IFREG | 0644);
+  SwordFsInode child(8, child_attr, root.ino);
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.AddEntry(root.ino, "child", child, &root);
+  });
+
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
+  EXPECT_EQ(redis.get(key.Directory(root.ino)).value_or(""), "not-a-directory-hash");
+  EXPECT_FALSE(redis.exists(key.Inode(child.ino)));
+}
+
 TEST(RedisMetaTxnTest, MoveEntryPersistsExplicitState) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
@@ -1085,6 +1186,37 @@ TEST(RedisMetaTxnTest, RemoveDirectoryPersistsLifecycleState) {
   EXPECT_EQ(persisted_root.attr.nlink, 2U);
 }
 
+TEST(RedisMetaTxnTest, RemoveDirectoryPropagatesCorruptChildDirectoryWithoutMutation) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("remove-directory-wrong-type"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
+  root_attr.nlink = 3;
+  SwordFsInode root(kRootInodeId, root_attr, kRootInodeId);
+  SwordFsAttr dir_attr(2, S_IFDIR | 0755);
+  SwordFsInode dir(2, dir_attr, root.ino);
+  ASSERT_TRUE(SeedInode(redis, key, root).ok());
+  ASSERT_TRUE(SeedInode(redis, key, dir).ok());
+  ASSERT_TRUE(SeedEntry(redis, key, root.ino, SwordFsEntry{"dir", DT_DIR, dir.ino}).ok());
+  redis.set(key.Directory(dir.ino), "not-a-directory-hash");
+
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.RemoveDirectory(root.ino, "dir", &root, dir);
+  });
+
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
+  EXPECT_TRUE(redis.hexists(key.Directory(root.ino), "dir"));
+  EXPECT_TRUE(redis.exists(key.Inode(dir.ino)));
+  EXPECT_EQ(redis.get(key.Directory(dir.ino)).value_or(""), "not-a-directory-hash");
+}
+
 TEST(RedisMetaTxnTest, ReadPrimitivesValidateOutputs) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
@@ -1111,6 +1243,235 @@ TEST(RedisMetaTxnTest, ReadPrimitivesValidateOutputs) {
     return utils::Status::OK();
   });
   EXPECT_TRUE(status.ok()) << status.message();
+}
+
+TEST(RedisMetaTxnTest, NamespaceMutationPrimitivesValidateStateContracts) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("namespace-validation"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  SwordFsAttr dir_attr(10, S_IFDIR | 0755);
+  dir_attr.nlink = 2;
+  SwordFsInode dir(10, dir_attr, kRootInodeId);
+  SwordFsAttr other_dir_attr(11, S_IFDIR | 0755);
+  other_dir_attr.nlink = 2;
+  SwordFsInode other_dir(11, other_dir_attr, kRootInodeId);
+  SwordFsAttr file_attr(20, S_IFREG | 0644);
+  file_attr.nlink = 1;
+  SwordFsInode file(20, file_attr, dir.ino);
+  SwordFsAttr other_file_attr(21, S_IFREG | 0644);
+  other_file_attr.nlink = 1;
+  SwordFsInode other_file(21, other_file_attr, dir.ino);
+
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+
+    EXPECT_EQ(txn.LookupEntry(dir, "entry", nullptr).ToErrno(), EINVAL);
+
+    EXPECT_EQ(txn.AddEntry(dir.ino, "entry", file, nullptr).ToErrno(), EINVAL);
+    auto wrong_child_parent = file;
+    wrong_child_parent.parent_ino = other_dir.ino;
+    EXPECT_EQ(txn.AddEntry(dir.ino, "entry", wrong_child_parent, &dir).ToErrno(), EINVAL);
+    auto wrong_parent = dir;
+    wrong_parent.ino = other_dir.ino;
+    EXPECT_EQ(txn.AddEntry(dir.ino, "entry", file, &wrong_parent).ToErrno(), EINVAL);
+
+    EXPECT_EQ(txn.UnlinkFile(dir.ino, "entry", nullptr, &file).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.UnlinkFile(dir.ino, "entry", &dir, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.UnlinkFile(other_dir.ino, "entry", &dir, &file).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.UnlinkFile(dir.ino, "entry", &dir, &other_dir).ToErrno(), EINVAL);
+
+    EXPECT_EQ(txn.RemoveDirectory(dir.ino, "entry", nullptr, other_dir).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.RemoveDirectory(other_dir.ino, "entry", &dir, other_dir).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.RemoveDirectory(dir.ino, "entry", &dir, file).ToErrno(), ENOTDIR);
+
+    EXPECT_EQ(txn.MoveEntry(dir.ino, "old", dir.ino, "new", nullptr, &dir, &file, nullptr, false).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.MoveEntry(dir.ino, "old", dir.ino, "new", &dir, nullptr, &file, nullptr, false).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.MoveEntry(dir.ino, "old", dir.ino, "new", &dir, &dir, nullptr, nullptr, false).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.MoveEntry(other_dir.ino, "old", dir.ino, "new", &dir, &dir, &file, nullptr, false).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.MoveEntry(dir.ino, "old", other_dir.ino, "new", &dir, &dir, &file, nullptr, false).ToErrno(), EINVAL);
+    auto same_id_parent = dir;
+    EXPECT_EQ(txn.MoveEntry(dir.ino, "old", dir.ino, "new", &dir, &same_id_parent, &file, nullptr, false).ToErrno(),
+              EINVAL);
+    EXPECT_EQ(txn.MoveEntry(file.ino, "old", file.ino, "new", &file, &file, &other_file, nullptr, false).ToErrno(),
+              ENOTDIR);
+    EXPECT_EQ(txn.MoveEntry(dir.ino, "old", dir.ino, "new", &dir, &dir, &file, &other_file, false).ToErrno(), EEXIST);
+    auto same_file = file;
+    EXPECT_TRUE(txn.MoveEntry(dir.ino, "old", dir.ino, "new", &dir, &dir, &file, &same_file, true).ok());
+
+    EXPECT_EQ(txn.ExchangeEntries(dir.ino, "old", dir.ino, "new", nullptr, &dir, &file, &other_file).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.ExchangeEntries(dir.ino, "old", dir.ino, "new", &dir, nullptr, &file, &other_file).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.ExchangeEntries(dir.ino, "old", dir.ino, "new", &dir, &dir, nullptr, &other_file).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.ExchangeEntries(dir.ino, "old", dir.ino, "new", &dir, &dir, &file, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.ExchangeEntries(other_dir.ino, "old", dir.ino, "new", &dir, &dir, &file, &other_file).ToErrno(),
+              EINVAL);
+    EXPECT_EQ(txn.ExchangeEntries(dir.ino, "old", other_dir.ino, "new", &dir, &dir, &file, &other_file).ToErrno(),
+              EINVAL);
+    EXPECT_EQ(txn.ExchangeEntries(dir.ino, "old", dir.ino, "new", &dir, &same_id_parent, &file, &other_file).ToErrno(),
+              EINVAL);
+    EXPECT_EQ(txn.ExchangeEntries(file.ino, "old", file.ino, "new", &file, &file, &file, &other_file).ToErrno(),
+              ENOTDIR);
+    auto exchange_same_file = file;
+    EXPECT_TRUE(txn.ExchangeEntries(dir.ino, "old", dir.ino, "new", &dir, &dir, &file, &exchange_same_file).ok());
+
+    EXPECT_EQ(txn.LinkExistingEntry(dir.ino, "link", nullptr, &file).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.LinkExistingEntry(dir.ino, "link", &dir, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.LinkExistingEntry(other_dir.ino, "link", &dir, &file).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.LinkExistingEntry(file.ino, "link", &file, &other_file).ToErrno(), ENOTDIR);
+    EXPECT_EQ(txn.LinkExistingEntry(dir.ino, "link", &dir, &other_dir).ToErrno(), EPERM);
+
+    return utils::Status::OK();
+  });
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(redis.hlen(key.Directory(dir.ino)), 0);
+  EXPECT_EQ(redis.hlen(key.Directory(other_dir.ino)), 0);
+  EXPECT_FALSE(redis.exists(key.Inode(dir.ino)));
+  EXPECT_FALSE(redis.exists(key.Inode(other_dir.ino)));
+  EXPECT_FALSE(redis.exists(key.Inode(file.ino)));
+  EXPECT_FALSE(redis.exists(key.Inode(other_file.ino)));
+}
+
+TEST(RedisMetaTxnTest, AddEntryRejectsInvalidInodeIdentityWithoutMutation) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("invalid-inode-identity"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  SwordFsAttr parent_attr(kRootInodeId, S_IFDIR | 0755);
+  parent_attr.nlink = 2;
+  SwordFsInode parent(kRootInodeId, parent_attr, kRootInodeId);
+
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+
+    SwordFsAttr zero_attr(0, S_IFREG | 0644);
+    SwordFsInode zero_ino(0, zero_attr, parent.ino);
+    EXPECT_EQ(txn.AddEntry(parent.ino, "zero", zero_ino, &parent).ToErrno(), EINVAL);
+
+    SwordFsAttr mismatched_attr(31, S_IFREG | 0644);
+    SwordFsInode mismatched(30, mismatched_attr, parent.ino);
+    EXPECT_EQ(txn.AddEntry(parent.ino, "mismatch", mismatched, &parent).ToErrno(), EINVAL);
+    return utils::Status::OK();
+  });
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(redis.hlen(key.Directory(parent.ino)), 0);
+  EXPECT_FALSE(redis.exists(key.Inode(30)));
+  EXPECT_FALSE(redis.exists(key.Inode(31)));
+}
+
+TEST(RedisMetaTxnTest, ChunkPublicContractsRejectInvalidDescriptorsAndViews) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("chunk-contract-validation"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+  RecordingRedisStrategy strategy;
+  constexpr InodeID kFileIno = 40;
+
+  const auto validation_status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    utils::Status publication_result;
+    std::optional<PendingDelete> cleanup_candidate;
+
+    const SwordFsChunk invalid_replacement{.index = 0, .start_offset = 1, .revision = 1, .size = 64};
+    EXPECT_EQ(
+        txn.CommitChunk(kFileIno, std::nullopt, invalid_replacement, publication_result, cleanup_candidate).ToErrno(),
+        EINVAL);
+
+    const SwordFsChunk replacement{.index = 0, .start_offset = 0, .revision = 2, .size = 64};
+    const SwordFsChunk invalid_expected{.index = 0, .start_offset = 1, .revision = 1, .size = 64};
+    EXPECT_EQ(txn.CommitChunk(kFileIno, invalid_expected, replacement, publication_result, cleanup_candidate).ToErrno(),
+              EINVAL);
+
+    const SwordFsChunk same_revision{.index = 0, .start_offset = 0, .revision = 2, .size = 64};
+    EXPECT_EQ(txn.CommitChunk(kFileIno, same_revision, replacement, publication_result, cleanup_candidate).ToErrno(),
+              EINVAL);
+
+    const SwordFsChunk expected{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+    const SwordFsChunk different_identity{.index = 1, .start_offset = 4096, .revision = 2, .size = 64};
+    EXPECT_EQ(txn.CommitChunk(kFileIno, expected, different_identity, publication_result, cleanup_candidate).ToErrno(),
+              EINVAL);
+
+    EXPECT_EQ(txn.LoadChunkView(kFileIno, 0, nullptr).ToErrno(), EINVAL);
+    return utils::Status::OK();
+  });
+  ASSERT_TRUE(validation_status.ok()) << validation_status.message();
+
+  SwordFsChunk wrong_identity{.index = 0, .start_offset = 0, .revision = 3, .size = 64};
+  std::string encoded;
+  ASSERT_TRUE(wrong_identity.SerializeTo(&encoded).ok());
+  redis.hset(key.Chunk(kFileIno), "1", encoded);
+  const auto malformed_status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    ChunkView view;
+    return txn.LoadChunkView(kFileIno, 1, &view);
+  });
+  EXPECT_EQ(malformed_status.ToErrno(), EIO) << malformed_status.message();
+
+  redis.del(key.Chunk(kFileIno));
+  SwordFsChunk head{.index = 0, .start_offset = 0, .revision = 4, .size = 64};
+  ASSERT_TRUE(head.SerializeTo(&encoded).ok());
+  redis.hset(key.Chunk(kFileIno), "0", encoded);
+  const auto private_state_status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    ChunkView view;
+    return txn.LoadChunkView(kFileIno, 0, &view);
+  });
+  EXPECT_TRUE(private_state_status.IsNotFound()) << private_state_status.message();
+}
+
+TEST(RedisMetaTxnTest, TouchInodePropagatesMissingInode) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("touch-missing-inode"));
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.TouchInode(424242, SetAttrField::kCtime);
+  });
+
+  EXPECT_TRUE(status.IsNotFound()) << status.message();
+}
+
+TEST(RedisMetaTxnTest, LoadChunkViewRejectsNoncanonicalDescriptor) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("chunk-view-noncanonical"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+  RecordingRedisStrategy strategy;
+  constexpr InodeID kFileIno = 41;
+
+  SwordFsChunk noncanonical{.index = 0, .start_offset = 1, .revision = 1, .size = 64};
+  std::string encoded;
+  ASSERT_TRUE(noncanonical.SerializeTo(&encoded).ok());
+  redis.hset(key.Chunk(kFileIno), "0", encoded);
+
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    ChunkView view;
+    return txn.LoadChunkView(kFileIno, 0, &view);
+  });
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
 }
 
 TEST(RedisMetaTxnTest, PrivateChunkIndexPrimitivesValidateTheirPublicContract) {
@@ -1227,6 +1588,42 @@ TEST(RedisMetaTxnTest, MoveEntryRejectsCorruptDirectoryAncestryWithoutMutation) 
   EXPECT_EQ(status.ToErrno(), EIO) << status.message();
   EXPECT_TRUE(redis.hexists(key.Directory(root.ino), "source"));
   EXPECT_FALSE(redis.hexists(key.Directory(first_cycle.ino), "moved"));
+  EXPECT_TRUE(redis.get(key.Inode(source.ino)).has_value());
+}
+
+TEST(RedisMetaTxnTest, MoveEntryRejectsMissingDirectoryAncestryWithoutMutation) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("rename-missing-parent"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+
+  SwordFsAttr root_attr(kRootInodeId, S_IFDIR | 0755);
+  root_attr.nlink = 3;
+  SwordFsInode root(kRootInodeId, root_attr, kRootInodeId);
+  SwordFsAttr source_attr(2, S_IFDIR | 0755);
+  source_attr.nlink = 2;
+  SwordFsInode source(2, source_attr, root.ino);
+  SwordFsAttr destination_attr(3, S_IFDIR | 0755);
+  SwordFsInode destination(3, destination_attr, 999);
+
+  ASSERT_TRUE(SeedInode(redis, key, root).ok());
+  ASSERT_TRUE(SeedInode(redis, key, source).ok());
+  ASSERT_TRUE(SeedInode(redis, key, destination).ok());
+  ASSERT_TRUE(SeedEntry(redis, key, root.ino, SwordFsEntry{"source", DT_DIR, source.ino}).ok());
+
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096);
+    return txn.MoveEntry(root.ino, "source", destination.ino, "moved", &root, &destination, &source, nullptr,
+                         /*overwrite=*/false);
+  });
+
+  EXPECT_TRUE(status.IsNotFound()) << status.message();
+  EXPECT_TRUE(redis.hexists(key.Directory(root.ino), "source"));
+  EXPECT_FALSE(redis.hexists(key.Directory(destination.ino), "moved"));
   EXPECT_TRUE(redis.get(key.Inode(source.ino)).has_value());
 }
 

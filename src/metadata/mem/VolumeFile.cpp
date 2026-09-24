@@ -25,15 +25,6 @@ std::string FilePath(std::string_view volume_name) {
 utils::Status VolumeFile::Write(const SwordFsVolume &volume) {
   std::error_code ec;
   const std::string directory = std::string(kConfigRoot) + "/" + volume_name_;
-  if (!folly::fs::exists(kConfigRoot, ec)) {
-    if (ec) {
-      return utils::Status::IOError("failed to access config root: " + std::string(kConfigRoot) + ": " + ec.message());
-    }
-    folly::fs::create_directories(kConfigRoot, ec);
-    if (ec) {
-      return utils::Status::IOError("failed to create config root: " + std::string(kConfigRoot) + ": " + ec.message());
-    }
-  }
   if (!folly::fs::exists(directory, ec)) {
     if (ec) {
       return utils::Status::IOError("failed to access volume directory: " + directory + ": " + ec.message());
