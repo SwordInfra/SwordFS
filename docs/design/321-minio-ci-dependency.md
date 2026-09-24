@@ -41,3 +41,8 @@ The stale-mount shutdown assertion therefore uses the existing `Fixture::IsDaemo
 ## Verification
 
 Local verification covers shell/YAML/pre-commit, Redis-only Compose rendering, and helper structure. GitHub CI is authoritative for GitHub Release asset retrieval, MinIO startup, bucket creation, and the real Debug/E2E/pjdfstest/fstests execution surfaces.
+
+
+## Startup readiness
+
+The helper must wait on `/minio/health/ready`, not only `/minio/health/live`. CI evidence from fstests showed that the liveness endpoint can succeed before the object layer is initialized, allowing the first `mc alias set` request to race startup with `Server not initialized yet`. Readiness is therefore the contract for handing MinIO to callers.

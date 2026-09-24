@@ -93,7 +93,10 @@ minio_test_start() {
       cat "${MINIO_TEST_LOG}" >&2 || true
       return 2
     fi
-    if curl --max-time 2 -fsS "http://127.0.0.1:${MINIO_PORT}/minio/health/live" >/dev/null 2>&1; then
+    # Liveness can turn green before MinIO has finished initializing its
+    # object layer. Wait for readiness so the first mc/S3 request cannot race
+    # startup and fail with "Server not initialized yet".
+    if curl --max-time 2 -fsS "http://127.0.0.1:${MINIO_PORT}/minio/health/ready" >/dev/null 2>&1; then
       ready=1
       break
     fi
