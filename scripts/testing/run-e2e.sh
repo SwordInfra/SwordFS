@@ -2,7 +2,7 @@
 # ────────────────────────────────────────────────────────────────
 # run-e2e.sh — Run SwordFS end-to-end tests.
 #
-# Starts the Redis and MinIO dependencies with Docker Compose,
+# Starts Redis with Docker Compose and pinned MinIO directly on the runner,
 # creates the test bucket, and runs the pre-built E2E suite.
 # All extra arguments are forwarded to the test binary.
 # ────────────────────────────────────────────────────────────────
