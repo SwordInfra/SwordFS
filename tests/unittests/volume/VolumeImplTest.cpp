@@ -191,6 +191,24 @@ TEST_F(VolumeImplTest, CreateFromSucceeds) {
   EXPECT_EQ(vol.config().chunk_index_format_version, 1U);
 }
 
+TEST_F(VolumeImplTest, CreateFromRejectsInvalidBucketUrl) {
+  auto options = makeFormatOptions("memory://local", "testvol", "not-a-storage-url");
+  VolumeImpl volume;
+
+  const auto status = volume.CreateFrom(options);
+
+  EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
+}
+
+TEST_F(VolumeImplTest, CreateFromRejectsInvalidMetadataUrl) {
+  auto options = makeFormatOptions("not-a-metadata-url");
+  VolumeImpl volume;
+
+  const auto status = volume.CreateFrom(options);
+
+  EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
+}
+
 TEST_F(VolumeImplTest, FormatRejectsUnimplementedStrategy) {
   auto options = makeFormatOptions("memory://local", "testvol", "s3://endpoint.example.com/bucket", "", "redis_cache");
   VolumeImpl vol;

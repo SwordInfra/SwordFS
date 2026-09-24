@@ -974,6 +974,36 @@ TEST_F(VfsImplIntegrationTest, FuseNamespaceMutationHooksTranslateCompletionStat
   EXPECT_EQ(*unlink_failure.error, EACCES);
 }
 
+TEST_F(VfsImplIntegrationTest, FuseEntryProducingHooksTranslateMetadataFailures) {
+  mock_meta_->set_status(Status::Permission("denied"));
+
+  FuseReplyCapture mkdir_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsMkdir(reinterpret_cast<fuse_req_t>(&mkdir_capture), 1, "denied-dir", 0755);
+  ASSERT_TRUE(mkdir_capture.Wait());
+  ASSERT_TRUE(mkdir_capture.error.has_value());
+  EXPECT_EQ(*mkdir_capture.error, EACCES);
+  EXPECT_FALSE(mkdir_capture.entry.has_value());
+
+  FuseReplyCapture symlink_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsSymlink(reinterpret_cast<fuse_req_t>(&symlink_capture), "/target", 1,
+                                                "denied-link");
+  ASSERT_TRUE(symlink_capture.Wait());
+  ASSERT_TRUE(symlink_capture.error.has_value());
+  EXPECT_EQ(*symlink_capture.error, EACCES);
+  EXPECT_FALSE(symlink_capture.entry.has_value());
+}
+
+TEST_F(VfsImplIntegrationTest, FuseFsyncdirReportsUnsupportedOperation) {
+  fuse_file_info fi{};
+  FuseReplyCapture capture;
+
+  swordfs::fuse::VfsHookFactory::SwordFsFsyncdir(reinterpret_cast<fuse_req_t>(&capture), 1, 0, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, ENOSYS);
+}
+
 TEST_F(VfsImplIntegrationTest, FuseOpenRejectsMetadataFailure) {
   mock_meta_->set_open_status(Status::Permission("denied"));
   fuse_file_info fi{};
