@@ -67,14 +67,16 @@ minio_test_start() {
   : "${MINIO_ROOT_PASSWORD:=minioadmin}"
 
   minio_test_ensure_tools
+  mkdir -p "${state_dir}"
   MINIO_TEST_STATE_DIR="${state_dir}"
-  MINIO_TEST_PIDFILE="${state_dir}/minio.pid"
+  MINIO_TEST_RUNTIME_DIR="$(mktemp -d /tmp/swordfs-minio-test-XXXXXX)"
+  MINIO_TEST_PIDFILE="${MINIO_TEST_RUNTIME_DIR}/minio.pid"
   MINIO_TEST_LOG="${state_dir}/minio.log"
-  MINIO_TEST_DATA="${state_dir}/data"
-  export MINIO_TEST_STATE_DIR MINIO_TEST_PIDFILE MINIO_TEST_LOG MINIO_TEST_DATA
+  MINIO_TEST_DATA="${MINIO_TEST_RUNTIME_DIR}/data"
+  MINIO_TEST_MC_CONFIG="${MINIO_TEST_RUNTIME_DIR}/mc"
+  export MINIO_TEST_STATE_DIR MINIO_TEST_RUNTIME_DIR MINIO_TEST_PIDFILE MINIO_TEST_LOG MINIO_TEST_DATA MINIO_TEST_MC_CONFIG
 
-  rm -rf "${MINIO_TEST_DATA}"
-  mkdir -p "${MINIO_TEST_DATA}" "${state_dir}/mc"
+  mkdir -p "${MINIO_TEST_DATA}" "${MINIO_TEST_MC_CONFIG}"
   : >"${MINIO_TEST_LOG}"
 
   MINIO_ROOT_USER="${MINIO_ROOT_USER}" \
@@ -106,10 +108,16 @@ minio_test_start() {
 
 minio_test_create_bucket() {
   local bucket="$1"
-  local config_dir="${MINIO_TEST_STATE_DIR:?minio_test_start must run first}/mc"
+  local config_dir="${MINIO_TEST_MC_CONFIG:?minio_test_start must run first}"
   "${MC_BIN}" --config-dir "${config_dir}" alias set local "http://127.0.0.1:${MINIO_PORT}" \
     "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}"
   "${MC_BIN}" --config-dir "${config_dir}" mb "local/${bucket}" --ignore-existing
+}
+
+_minio_test_remove_runtime() {
+  if [[ -n "${MINIO_TEST_RUNTIME_DIR:-}" && "${MINIO_TEST_RUNTIME_DIR}" == /tmp/swordfs-minio-test-* ]]; then
+    rm -rf "${MINIO_TEST_RUNTIME_DIR}"
+  fi
 }
 
 minio_test_stop() {
@@ -118,20 +126,21 @@ minio_test_stop() {
     pid="$(cat "${MINIO_TEST_PIDFILE}" 2>/dev/null || true)"
   fi
   if [[ ! "${pid}" =~ ^[0-9]+$ ]]; then
+    _minio_test_remove_runtime
     return 0
   fi
 
   kill -TERM "${pid}" 2>/dev/null || true
   for _ in $(seq 1 80); do
     if ! kill -0 "${pid}" 2>/dev/null; then
-      rm -f "${MINIO_TEST_PIDFILE}"
+      _minio_test_remove_runtime
       return 0
     fi
     sleep 0.05
   done
   kill -KILL "${pid}" 2>/dev/null || true
   wait "${pid}" 2>/dev/null || true
-  rm -f "${MINIO_TEST_PIDFILE}"
+  _minio_test_remove_runtime
 }
 
 minio_test_print_versions() {

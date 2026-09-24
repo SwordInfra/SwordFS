@@ -1,4 +1,4 @@
-# Issue #321: Pin the shared MinIO CI dependency
+# Issue #321: Make the shared MinIO CI dependency reproducible
 
 ## Problem
 
@@ -14,6 +14,8 @@ Use official MinIO GitHub Release assets instead of a container registry:
 - client (`mc`): `RELEASE.2025-08-13T08-35-41Z`.
 
 `scripts/testing/minio-test.sh` owns the shared lifecycle. It selects the amd64/arm64 release asset, verifies a pinned SHA256 from GitHub release metadata, starts MinIO directly on the runner, waits for the live-health endpoint, creates buckets through the pinned `mc`, and performs bounded shutdown.
+
+Ephemeral MinIO object data, PID state, and `mc` configuration live under a private `/tmp/swordfs-minio-test-*` runtime directory. Evidence directories retain only `minio.log`, so a cancelled root-run conformance job cannot make artifact collection fail on unreadable runtime state.
 
 The CI workflow has one `minio-test-tools` job that downloads and verifies the two binaries once and publishes them as a short-lived workflow artifact. Debug service-backed coverage, E2E, pjdfstest, and fstests download that artifact instead of hitting the external release endpoint independently. The helper retains the same verified-download path as a fallback for developer runs outside CI.
 
