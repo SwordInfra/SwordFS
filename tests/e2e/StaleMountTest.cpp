@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -38,12 +39,23 @@ int CountSwordfsDaemons() {
       }
     }
   }
-  // Scan /proc for swordfs processes that are not our test binary.
-  for (int pid = 2; pid < 32768; ++pid) {
+  // Enumerating /proc yields process leaders only. Do not probe every numeric
+  // /proc/<id> path: Linux also exposes /proc/<tid> for non-leader threads,
+  // which would count one multithreaded swordfs daemon multiple times.
+  std::error_code ec;
+  for (const auto &entry : std::filesystem::directory_iterator("/proc", ec)) {
+    if (ec) {
+      break;
+    }
+    const auto name = entry.path().filename().string();
+    if (name.empty() || name.find_first_not_of("0123456789") != std::string::npos) {
+      continue;
+    }
+    const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
     if (pid == my_pid || pid == my_ppid) {
       continue;
     }
-    std::ifstream cmdline("/proc/" + std::to_string(pid) + "/cmdline");
+    std::ifstream cmdline(entry.path() / "cmdline");
     if (!cmdline.is_open()) {
       continue;
     }

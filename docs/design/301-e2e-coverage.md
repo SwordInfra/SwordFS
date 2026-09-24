@@ -32,6 +32,11 @@ existing post-teardown assertions can verify that exact process is gone. This is
 synchronization invariant, not a sleep used to mask failure; a daemon that remains alive
 after the bound still fails teardown.
 
+The stale-daemon assertion also enumerates only actual `/proc` process entries.
+Directly probing arbitrary `/proc/<id>/cmdline` paths is incorrect on Linux because
+non-leader thread IDs are addressable there too and would make one multithreaded daemon
+appear as several processes.
+
 The E2E fixture already supplies the meaningful contracts behind the trace:
 
 - `Fixture::FormatVolume()` shells out to the real `swordfs format` command;
