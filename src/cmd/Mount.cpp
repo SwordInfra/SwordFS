@@ -237,11 +237,6 @@ int RunMount() {
     return 1;
   }
 
-  auto sub_command = ConfigCenter::Instance().SelectedSubCommand();
-  if (!sub_command) {
-    return 1;
-  }
-
   // Mount via libfuse low-level API
   //
   // Signal handling is managed by fuse_set_signal_handlers() inside Mount().

@@ -171,11 +171,11 @@ jobs:
             exit 1
           fi
 
-      - name: Run MinIO-backed S3 coverage scenarios
+      - name: Run focused Debug service-backed coverage scenarios
         if: matrix.build_type == 'Debug'
         run: |
           bash scripts/testing/run-e2e.sh \
-            --gtest_filter='S3DataEngineE2ETest.*' \
+            --gtest_filter='S3DataEngineE2ETest.*:CommandCoverageE2ETest.*' \
             --gtest_color=no
 
       - name: Generate coverage report
