@@ -60,13 +60,14 @@ trace upload as success.
 
 The residual tests use two legitimate boundaries:
 
-- deterministic unit tests validate invalid bucket locations and the
-  preallocated response-stream contract (bounded writes, current position,
-  flush, unsupported seek, and overflow);
+- deterministic unit tests validate invalid bucket locations, object-key
+  identity without a configured prefix, and the preallocated response-stream
+  contract (bounded writes, current position, flush, unsupported seek, and
+  overflow);
 - a MinIO-backed E2E test exercises `S3DataEngine` directly through its public
   `IDataEngine` contract: prefixed object identity, complete Put/Get, bounded and
-  remainder range reads, missing-object translation, Delete, and idempotent
-  repeated Delete. Runtime operations execute from a real Folly fiber, matching
+  remainder range reads, undersized caller-buffer rejection, missing-object
+  translation, Delete, and idempotent repeated Delete. Runtime operations execute from a real Folly fiber, matching
   the production execution-domain contract.
 
 No AWS client is mocked and no private helper or production test hook is

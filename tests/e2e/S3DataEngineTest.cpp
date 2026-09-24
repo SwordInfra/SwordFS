@@ -82,6 +82,10 @@ TEST_F(S3DataEngineE2ETest, RoundTripsRangesMissingObjectsAndIdempotentDelete) {
   ASSERT_TRUE(Get(kKey, 6, 0, suffix.get()).ok());
   EXPECT_EQ(std::string(reinterpret_cast<const char *>(suffix->data()), suffix->length()), "6789");
 
+  auto too_small = folly::IOBuf::create(3);
+  EXPECT_EQ(Get(kKey, 0, 4, too_small.get()).ToErrno(), EINVAL);
+  EXPECT_EQ(too_small->length(), 0);
+
   auto missing = folly::IOBuf::create(8);
   EXPECT_TRUE(Get("missing-object", 0, 0, missing.get()).IsNotFound());
 

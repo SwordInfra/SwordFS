@@ -18,5 +18,11 @@ TEST(S3DataEngineTest, RejectsInvalidBucketLocations) {
   EXPECT_EQ(missing_bucket.Initialize().ToErrno(), EINVAL);
 }
 
+TEST(S3DataEngineTest, ObjectKeyPreservesKeyWithoutPrefix) {
+  S3DataEngine engine(DataEngineOptions{.location = "s3://endpoint.example.com/bucket"});
+
+  EXPECT_EQ(engine.ObjectKey("chunk-42"), "chunk-42");
+}
+
 }  // namespace
 }  // namespace swordfs::storage
