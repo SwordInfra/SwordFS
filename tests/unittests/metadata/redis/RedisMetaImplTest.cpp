@@ -192,9 +192,12 @@ FIBER_TEST_F(RedisMetaImplTest, OpenDirReturnsIndependentIteratorsAndSupportsSee
 
   SwordFsEntry entry;
   uint64_t next_offset = 0;
+  EXPECT_EQ(first_iterator->Peek(nullptr, &next_offset).ToErrno(), EINVAL);
+  EXPECT_EQ(first_iterator->Peek(&entry, nullptr).ToErrno(), EINVAL);
   ASSERT_TRUE(first_iterator->Peek(&entry, &next_offset).ok());
   EXPECT_EQ(entry.name, ".");
   EXPECT_EQ(next_offset, 1);
+  EXPECT_EQ(first_iterator->Peek(&entry, &next_offset).ToErrno(), EINVAL);
   first_iterator->Advance();
   ASSERT_TRUE(first_iterator->Peek(&entry, &next_offset).ok());
   EXPECT_EQ(entry.name, "..");

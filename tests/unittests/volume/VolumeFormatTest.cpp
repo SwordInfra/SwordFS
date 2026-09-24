@@ -3,12 +3,14 @@
 
 // Unit tests for SwordFsVolume and memory volume file persistence.
 
+#include <folly/ScopeGuard.h>
 #include <gtest/gtest.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "metadata/mem/VolumeFile.hpp"
@@ -30,6 +32,10 @@ class VolumeFileTest : public ::testing::Test {
     std::filesystem::remove_all("/etc/swordfs/volume-file-round-trip", ec);
     std::filesystem::remove_all("/etc/swordfs/volume-file-parent-dir", ec);
     std::filesystem::remove_all("/etc/swordfs/volume-file-exists", ec);
+    std::filesystem::remove_all("/etc/swordfs/volume-file-existing-dir", ec);
+    std::filesystem::remove_all("/etc/swordfs/volume-file-not-dir", ec);
+    std::filesystem::remove_all("/etc/swordfs/volume-file-write-failure", ec);
+    std::filesystem::remove_all("/etc/swordfs/volume-file-lookup-error", ec);
   }
 
   void TearDown() override {
@@ -37,6 +43,10 @@ class VolumeFileTest : public ::testing::Test {
     std::filesystem::remove_all("/etc/swordfs/volume-file-round-trip", ec);
     std::filesystem::remove_all("/etc/swordfs/volume-file-parent-dir", ec);
     std::filesystem::remove_all("/etc/swordfs/volume-file-exists", ec);
+    std::filesystem::remove_all("/etc/swordfs/volume-file-existing-dir", ec);
+    std::filesystem::remove_all("/etc/swordfs/volume-file-not-dir", ec);
+    std::filesystem::remove_all("/etc/swordfs/volume-file-write-failure", ec);
+    std::filesystem::remove("/etc/swordfs/volume-file-lookup-error", ec);
   }
 };
 
@@ -170,4 +180,54 @@ TEST_F(VolumeFileTest, Exists) {
   EXPECT_FALSE(file.Exists());
   ASSERT_TRUE(file.Write(v).ok());
   EXPECT_TRUE(file.Exists());
+}
+
+TEST_F(VolumeFileTest, ReadRejectsNullOutput) {
+  swordfs::metadata::mem::VolumeFile file{"volume-file-null-output"};
+  EXPECT_EQ(file.Read(nullptr).ToErrno(), EINVAL);
+}
+
+TEST_F(VolumeFileTest, WriteReusesExistingVolumeDirectory) {
+  SwordFsVolume volume = MakeVolume();
+  volume.name = "volume-file-existing-dir";
+  swordfs::metadata::mem::VolumeFile file{volume.name};
+
+  ASSERT_TRUE(file.Write(volume).ok());
+  volume.region = "eu-west-1";
+  ASSERT_TRUE(file.Write(volume).ok());
+
+  SwordFsVolume restored;
+  ASSERT_TRUE(file.Read(&restored).ok());
+  EXPECT_EQ(restored.region, "eu-west-1");
+}
+
+TEST_F(VolumeFileTest, WriteRejectsNonDirectoryVolumePath) {
+  const std::string path = "/etc/swordfs/volume-file-not-dir";
+  ASSERT_TRUE(std::filesystem::is_directory("/etc/swordfs"));
+  ASSERT_TRUE(std::ofstream(path).put('x').good());
+
+  SwordFsVolume volume = MakeVolume();
+  volume.name = "volume-file-not-dir";
+  swordfs::metadata::mem::VolumeFile file{volume.name};
+  EXPECT_EQ(file.Write(volume).ToErrno(), EINVAL);
+}
+
+TEST_F(VolumeFileTest, WriteReportsVolumeDirectoryLookupFailure) {
+  const std::string path = "/etc/swordfs/volume-file-lookup-error";
+  ASSERT_EQ(::symlink(path.c_str(), path.c_str()), 0) << strerror(errno);
+
+  SwordFsVolume volume = MakeVolume();
+  volume.name = "volume-file-lookup-error";
+  swordfs::metadata::mem::VolumeFile file{volume.name};
+  EXPECT_EQ(file.Write(volume).ToErrno(), EIO);
+}
+
+TEST_F(VolumeFileTest, WriteReportsConfigFileWriteFailure) {
+  const std::string directory = "/etc/swordfs/volume-file-write-failure";
+  ASSERT_TRUE(std::filesystem::create_directories(directory + "/volume.fmt"));
+
+  SwordFsVolume volume = MakeVolume();
+  volume.name = "volume-file-write-failure";
+  swordfs::metadata::mem::VolumeFile file{volume.name};
+  EXPECT_EQ(file.Write(volume).ToErrno(), EIO);
 }

@@ -116,3 +116,57 @@ instead of weakening the test or encoding the crash as expected behavior.
 The project-level coverage percentage must not regress during this work. The
 existing per-file patch coverage gate remains independently required for any
 changed C/C++ production file.
+
+## Production source coverage floor
+
+Issue #302 extends the coverage program from an aggregate project signal to a
+per-source baseline: every production `src/**/*.cpp` file should reach at least
+80% line coverage unless a concrete file-specific exception is justified. The
+floor does not change the test-construction contract above. A source file is
+not considered remediated by tests that merely execute uncovered lines, encode
+an implementation accident as expected behavior, or introduce production
+surfaces whose only consumer is a test.
+
+The first bounded slice under this floor is Issue #303 for metadata backends.
+Its baseline on `c39a82d` is 52.77% for `mem/VolumeFile.cpp`, 69.88% for
+`redis/RedisMetaTxn.cpp`, 73.68% for `redis/RedisBackendContext.cpp`, and
+76.47% for `redis/RedisDirIterator.cpp`.
+
+The metadata slice treats the remaining lines as missing contract evidence,
+not as a list of statements to execute. In particular:
+
+- `VolumeFile` tests cover persistence input/error behavior through the real
+  filesystem boundary, including null output, invalid volume paths, overwrite
+  behavior, and write failures, without replacing filesystem calls with test
+  doubles;
+- `RedisMetaTxn` tests exercise public transaction preconditions and metadata
+  invariants such as parent identity, inode type, rename/exchange state,
+  hard-link restrictions, and chunk descriptor identity through the existing
+  Redis-backed transaction boundary;
+- `RedisDirIterator` tests validate output arguments and the Peek/Advance state
+  machine rather than reaching into its private cache;
+- `RedisBackendContext` tests validate its explicit lifecycle contract: the
+  thread-domain owner must shut the backend down before destruction, and
+  clients/executors are unavailable after shutdown.
+
+Review of the `VolumeFile` coverage gap removed a redundant production state
+machine rather than adding a test seam: creating the complete per-volume
+directory already creates the config root when necessary, so separately
+probing/creating `/etc/swordfs` duplicated filesystem behavior and introduced
+extra host-permission-only branches. The implementation now has one directory
+creation path with the same success/failure contract.
+
+`RedisBackendContext.cpp` has a narrow instrumentation limitation around
+fatal ownership guards. The destructor and post-shutdown access contracts are
+validated with death tests, while normal access, idempotent shutdown, and
+successful owner shutdown are validated in-process. Because fatal `CHECK`
+branches terminate the death-test subprocess before gcov data is flushed,
+Codecov can retain those guard lines as partial/missed even though the behavior
+is explicitly verified. No test-only escape hatch or weaker ownership contract
+should be added merely to make those fatal branches count as fully covered.
+
+Service-backed Redis behavior remains GitHub-CI authoritative. Deterministic
+filesystem/unit behavior may be run locally. If these tests expose a contract
+violation in production code, the defect is handled as a normal C++ bug fix
+with test-first RED/GREEN evidence instead of changing the assertion to match
+the faulty behavior.
