@@ -64,7 +64,12 @@ struct FuseReplyCapture {
   bool replied = false;
   std::optional<int> error;
   std::optional<fuse_entry_param> entry;
+  std::optional<struct stat> attr;
+  std::optional<double> attr_timeout;
   std::optional<uint64_t> fh;
+  std::optional<size_t> write_count;
+  std::optional<struct statvfs> statfs;
+  std::optional<std::string> readlink;
   std::string buffer;
   bool none = false;
   int reply_result = 0;
@@ -107,6 +112,62 @@ extern "C" int fuse_reply_entry(fuse_req_t req, const fuse_entry_param *entry) {
   }
   capture->cv.notify_one();
   return reply_result;
+}
+
+extern "C" int fuse_reply_attr(fuse_req_t req, const struct stat *attr, double attr_timeout) {
+  auto *capture = CaptureFor(req);
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->attr = *attr;
+    capture->attr_timeout = attr_timeout;
+    capture->replied = true;
+  }
+  capture->cv.notify_one();
+  return 0;
+}
+
+extern "C" int fuse_reply_readlink(fuse_req_t req, const char *link) {
+  auto *capture = CaptureFor(req);
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->readlink = std::string(link);
+    capture->replied = true;
+  }
+  capture->cv.notify_one();
+  return 0;
+}
+
+extern "C" int fuse_reply_open(fuse_req_t req, const fuse_file_info *fi) {
+  auto *capture = CaptureFor(req);
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->fh = fi->fh;
+    capture->replied = true;
+  }
+  capture->cv.notify_one();
+  return 0;
+}
+
+extern "C" int fuse_reply_write(fuse_req_t req, size_t count) {
+  auto *capture = CaptureFor(req);
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->write_count = count;
+    capture->replied = true;
+  }
+  capture->cv.notify_one();
+  return 0;
+}
+
+extern "C" int fuse_reply_statfs(fuse_req_t req, const struct statvfs *statfs) {
+  auto *capture = CaptureFor(req);
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->statfs = *statfs;
+    capture->replied = true;
+  }
+  capture->cv.notify_one();
+  return 0;
 }
 
 extern "C" int fuse_reply_create(fuse_req_t req, const fuse_entry_param *entry, const fuse_file_info *fi) {
@@ -365,10 +426,12 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     *out = std::move(result);
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, uint32_t, SwordFsInode *out) override {
+  Status Create(InodeID, std::string_view, uint32_t mode, SwordFsInode *out) override {
     if (out) {
       *out = {};
       out->ino = 100;
+      out->attr.ino = 100;
+      out->attr.mode = S_IFREG | (mode & 07777);
     }
     return call_status_;
   }
@@ -387,17 +450,19 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     if (out) {
       *out = {};
       out->ino = 101;
+      out->attr.ino = 101;
+      out->attr.mode = S_IFDIR | 0755;
     }
-    return Status::OK();
+    return call_status_;
   }
   Status Unlink(InodeID, std::string_view) override {
-    return Status::OK();
+    return call_status_;
   }
   Status RmDir(InodeID, std::string_view) override {
-    return Status::OK();
+    return call_status_;
   }
   Status Rename(InodeID, std::string_view, InodeID, std::string_view, RenameFlag) override {
-    return Status::OK();
+    return call_status_;
   }
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override {
     auto it = inodes_.find(ino);
@@ -416,7 +481,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
         }
       }
     }
-    return Status::OK();
+    return call_status_;
   }
   Status StatFs(SwordFsStatFs *stbuf) override {
     *stbuf = {};
@@ -429,8 +494,10 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     if (out) {
       *out = {};
       out->ino = 102;
+      out->attr.ino = 102;
+      out->attr.mode = S_IFLNK | 0777;
     }
-    return Status::OK();
+    return call_status_;
   }
   Status Link(InodeID, InodeID, std::string_view, SwordFsInode *out) override {
     if (out) {
@@ -439,9 +506,15 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
       out->attr.ino = 2;
       out->attr.nlink = 2;
     }
-    return Status::OK();
+    return call_status_;
   }
-  Status Readlink(InodeID, std::string *) override {
+  Status Readlink(InodeID, std::string *target) override {
+    if (!readlink_status_.ok()) {
+      return readlink_status_;
+    }
+    if (target != nullptr) {
+      *target = readlink_target_;
+    }
     return Status::OK();
   }
   Status Open(InodeID, uint64_t *size = nullptr) override {
@@ -506,6 +579,11 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     open_status_ = std::move(status);
   }
 
+  void set_readlink_result(std::string target, Status status = Status::OK()) {
+    readlink_target_ = std::move(target);
+    readlink_status_ = std::move(status);
+  }
+
   int open_calls() const {
     return open_calls_;
   }
@@ -567,7 +645,9 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
  private:
   Status call_status_{Status::OK()};
   Status open_status_{Status::OK()};
+  Status readlink_status_{Status::OK()};
   Status get_inode_status_{Status::OK()};
+  std::string readlink_target_;
   int lookup_calls_ = 0;
   int open_calls_ = 0;
   int mknod_calls_ = 0;
@@ -784,6 +864,239 @@ TEST_F(VfsImplIntegrationTest, FuseStatxAcceptsNonNullFileInfo) {
   ASSERT_TRUE(capture.Wait());
   ASSERT_TRUE(capture.error.has_value());
   EXPECT_EQ(*capture.error, ENOSYS);
+}
+
+TEST_F(VfsImplIntegrationTest, FuseGetattrRepliesWithAuthoritativeAttributesAndErrors) {
+  SwordFsInode inode;
+  inode.ino = 7;
+  inode.attr.ino = 7;
+  inode.attr.mode = S_IFREG | 0640;
+  inode.attr.size = 1234;
+  mock_meta_->set_inode(inode);
+
+  FuseReplyCapture success;
+  swordfs::fuse::VfsHookFactory::SwordFsGetattr(reinterpret_cast<fuse_req_t>(&success), inode.ino, nullptr);
+
+  ASSERT_TRUE(success.Wait());
+  ASSERT_TRUE(success.attr.has_value());
+  ASSERT_TRUE(success.attr_timeout.has_value());
+  EXPECT_EQ(success.attr->st_ino, inode.ino);
+  EXPECT_EQ(success.attr->st_mode, static_cast<mode_t>(S_IFREG | 0640));
+  EXPECT_EQ(success.attr->st_size, 1234);
+  EXPECT_DOUBLE_EQ(*success.attr_timeout, 1.0);
+  EXPECT_FALSE(success.error.has_value());
+
+  mock_meta_->set_get_inode_status(Status::NotFound("missing inode"));
+  FuseReplyCapture failure;
+  swordfs::fuse::VfsHookFactory::SwordFsGetattr(reinterpret_cast<fuse_req_t>(&failure), 999, nullptr);
+
+  ASSERT_TRUE(failure.Wait());
+  ASSERT_TRUE(failure.error.has_value());
+  EXPECT_EQ(*failure.error, ENOENT);
+  EXPECT_FALSE(failure.attr.has_value());
+}
+
+TEST_F(VfsImplIntegrationTest, FuseSetattrRepliesWithUpdatedAttributesAndRejectsUnknownHandle) {
+  SwordFsInode inode;
+  inode.ino = 8;
+  inode.attr.ino = 8;
+  inode.attr.mode = S_IFREG | 0644;
+  inode.attr.size = 10;
+  mock_meta_->set_inode(inode);
+
+  struct stat requested{};
+  requested.st_size = 4096;
+  FuseReplyCapture success;
+  swordfs::fuse::VfsHookFactory::SwordFsSetattr(reinterpret_cast<fuse_req_t>(&success), inode.ino, &requested,
+                                                FUSE_SET_ATTR_SIZE, nullptr);
+
+  ASSERT_TRUE(success.Wait());
+  ASSERT_TRUE(success.attr.has_value());
+  EXPECT_EQ(success.attr->st_size, 4096);
+  EXPECT_FALSE(success.error.has_value());
+
+  fuse_file_info unknown_file{};
+  unknown_file.fh = 0xdeadbeef;
+  FuseReplyCapture failure;
+  swordfs::fuse::VfsHookFactory::SwordFsSetattr(reinterpret_cast<fuse_req_t>(&failure), inode.ino, &requested,
+                                                FUSE_SET_ATTR_SIZE, &unknown_file);
+
+  ASSERT_TRUE(failure.Wait());
+  ASSERT_TRUE(failure.error.has_value());
+  EXPECT_EQ(*failure.error, EINVAL);
+  EXPECT_FALSE(failure.attr.has_value());
+}
+
+TEST_F(VfsImplIntegrationTest, FuseReadlinkRepliesWithTargetAndErrors) {
+  mock_meta_->set_readlink_result("../target");
+  FuseReplyCapture success;
+  swordfs::fuse::VfsHookFactory::SwordFsReadlink(reinterpret_cast<fuse_req_t>(&success), 11);
+
+  ASSERT_TRUE(success.Wait());
+  ASSERT_TRUE(success.readlink.has_value());
+  EXPECT_EQ(*success.readlink, "../target");
+  EXPECT_FALSE(success.error.has_value());
+
+  mock_meta_->set_readlink_result("", Status::NotFound("missing symlink"));
+  FuseReplyCapture failure;
+  swordfs::fuse::VfsHookFactory::SwordFsReadlink(reinterpret_cast<fuse_req_t>(&failure), 12);
+
+  ASSERT_TRUE(failure.Wait());
+  ASSERT_TRUE(failure.error.has_value());
+  EXPECT_EQ(*failure.error, ENOENT);
+  EXPECT_FALSE(failure.readlink.has_value());
+}
+
+TEST_F(VfsImplIntegrationTest, FuseNamespaceMutationHooksTranslateCompletionStatus) {
+  FuseReplyCapture unlink_success;
+  swordfs::fuse::VfsHookFactory::SwordFsUnlink(reinterpret_cast<fuse_req_t>(&unlink_success), 1, "file");
+  ASSERT_TRUE(unlink_success.Wait());
+  ASSERT_TRUE(unlink_success.error.has_value());
+  EXPECT_EQ(*unlink_success.error, 0);
+
+  FuseReplyCapture rmdir_success;
+  swordfs::fuse::VfsHookFactory::SwordFsRmdir(reinterpret_cast<fuse_req_t>(&rmdir_success), 1, "dir");
+  ASSERT_TRUE(rmdir_success.Wait());
+  ASSERT_TRUE(rmdir_success.error.has_value());
+  EXPECT_EQ(*rmdir_success.error, 0);
+
+  FuseReplyCapture rename_success;
+  swordfs::fuse::VfsHookFactory::SwordFsRename(reinterpret_cast<fuse_req_t>(&rename_success), 1, "old", 1, "new", 0);
+  ASSERT_TRUE(rename_success.Wait());
+  ASSERT_TRUE(rename_success.error.has_value());
+  EXPECT_EQ(*rename_success.error, 0);
+
+  mock_meta_->set_status(Status::Permission("denied"));
+  FuseReplyCapture unlink_failure;
+  swordfs::fuse::VfsHookFactory::SwordFsUnlink(reinterpret_cast<fuse_req_t>(&unlink_failure), 1, "denied");
+  ASSERT_TRUE(unlink_failure.Wait());
+  ASSERT_TRUE(unlink_failure.error.has_value());
+  EXPECT_EQ(*unlink_failure.error, EACCES);
+}
+
+TEST_F(VfsImplIntegrationTest, FuseOpenRejectsMetadataFailure) {
+  mock_meta_->set_open_status(Status::Permission("denied"));
+  fuse_file_info fi{};
+  fi.flags = O_RDONLY;
+  FuseReplyCapture capture;
+
+  swordfs::fuse::VfsHookFactory::SwordFsOpen(reinterpret_cast<fuse_req_t>(&capture), 2, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, EACCES);
+  EXPECT_FALSE(capture.fh.has_value());
+}
+
+TEST_F(VfsImplIntegrationTest, FuseFileLifecycleRoundTripsBufferedData) {
+  fuse_file_info create_info{};
+  create_info.flags = O_RDWR;
+  FuseReplyCapture create_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsCreate(reinterpret_cast<fuse_req_t>(&create_capture), 1, "file", 0644,
+                                               &create_info);
+  ASSERT_TRUE(create_capture.Wait());
+  ASSERT_TRUE(create_capture.entry.has_value());
+  ASSERT_TRUE(create_capture.fh.has_value());
+
+  fuse_file_info file_info{};
+  file_info.fh = *create_capture.fh;
+  constexpr std::string_view kPayload = "swordfs";
+
+  FuseReplyCapture write_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsWrite(reinterpret_cast<fuse_req_t>(&write_capture), create_capture.entry->ino,
+                                              kPayload.data(), kPayload.size(), 0, &file_info);
+  ASSERT_TRUE(write_capture.Wait());
+  ASSERT_TRUE(write_capture.write_count.has_value());
+  EXPECT_EQ(*write_capture.write_count, kPayload.size());
+  EXPECT_FALSE(write_capture.error.has_value());
+
+  FuseReplyCapture read_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsRead(reinterpret_cast<fuse_req_t>(&read_capture), create_capture.entry->ino,
+                                             kPayload.size(), 0, &file_info);
+  ASSERT_TRUE(read_capture.Wait());
+  EXPECT_EQ(read_capture.buffer, kPayload);
+  EXPECT_FALSE(read_capture.error.has_value());
+
+  FuseReplyCapture fsync_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsFsync(reinterpret_cast<fuse_req_t>(&fsync_capture), create_capture.entry->ino,
+                                              0, &file_info);
+  ASSERT_TRUE(fsync_capture.Wait());
+  ASSERT_TRUE(fsync_capture.error.has_value());
+  EXPECT_EQ(*fsync_capture.error, 0);
+
+  FuseReplyCapture flush_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsFlush(reinterpret_cast<fuse_req_t>(&flush_capture), create_capture.entry->ino,
+                                              &file_info);
+  ASSERT_TRUE(flush_capture.Wait());
+  ASSERT_TRUE(flush_capture.error.has_value());
+  EXPECT_EQ(*flush_capture.error, 0);
+
+  FuseReplyCapture release_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsRelease(reinterpret_cast<fuse_req_t>(&release_capture),
+                                                create_capture.entry->ino, &file_info);
+  ASSERT_TRUE(release_capture.Wait());
+  ASSERT_TRUE(release_capture.error.has_value());
+  EXPECT_EQ(*release_capture.error, 0);
+}
+
+TEST_F(VfsImplIntegrationTest, FuseDirectoryAndStatfsHooksReturnStructuredReplies) {
+  fuse_file_info dir_info{};
+  FuseReplyCapture open_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsOpendir(reinterpret_cast<fuse_req_t>(&open_capture), 1, &dir_info);
+  ASSERT_TRUE(open_capture.Wait());
+  ASSERT_TRUE(open_capture.fh.has_value());
+
+  dir_info.fh = *open_capture.fh;
+  FuseReplyCapture read_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsReaddir(reinterpret_cast<fuse_req_t>(&read_capture), 1, 4096, 0, &dir_info);
+  ASSERT_TRUE(read_capture.Wait());
+  EXPECT_FALSE(read_capture.buffer.empty());
+  EXPECT_FALSE(read_capture.error.has_value());
+
+  FuseReplyCapture release_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsReleasedir(reinterpret_cast<fuse_req_t>(&release_capture), 1, &dir_info);
+  ASSERT_TRUE(release_capture.Wait());
+  ASSERT_TRUE(release_capture.error.has_value());
+  EXPECT_EQ(*release_capture.error, 0);
+
+  FuseReplyCapture statfs_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsStatfs(reinterpret_cast<fuse_req_t>(&statfs_capture), 1);
+  ASSERT_TRUE(statfs_capture.Wait());
+  ASSERT_TRUE(statfs_capture.statfs.has_value());
+  EXPECT_EQ(statfs_capture.statfs->f_namemax, 255U);
+  EXPECT_EQ(statfs_capture.statfs->f_frsize, 4096U);
+  EXPECT_EQ(statfs_capture.statfs->f_bsize, 4096U);
+}
+
+TEST_F(VfsImplIntegrationTest, FuseUnsupportedHooksReplyWithEnosys) {
+  auto expect_enosys = [](auto &&invoke) {
+    FuseReplyCapture capture;
+    invoke(reinterpret_cast<fuse_req_t>(&capture));
+    EXPECT_TRUE(capture.Wait());
+    ASSERT_TRUE(capture.error.has_value());
+    EXPECT_EQ(*capture.error, ENOSYS);
+  };
+
+  fuse_file_info fi{};
+  struct flock lock{};
+  expect_enosys([](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsSetxattr(req, 1, "user.key", "v", 1, 0); });
+  expect_enosys([](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsGetxattr(req, 1, "user.key", 128); });
+  expect_enosys([](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsListxattr(req, 1, 128); });
+  expect_enosys([](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsRemovexattr(req, 1, "user.key"); });
+  expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsGetlk(req, 1, &fi, &lock); });
+  expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsSetlk(req, 1, &fi, &lock, 0); });
+  expect_enosys([](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsBmap(req, 1, 4096, 0); });
+  expect_enosys(
+      [&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsIoctl(req, 1, 0, nullptr, &fi, 0, nullptr, 0, 0); });
+  expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsPoll(req, 1, &fi, nullptr); });
+  expect_enosys(
+      [](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsRetrieveReply(req, nullptr, 1, 0, nullptr); });
+  expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsFlock(req, 1, &fi, 0); });
+  expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsFallocate(req, 1, 0, 0, 4096, &fi); });
+  expect_enosys(
+      [&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsCopyFileRange(req, 1, 0, &fi, 2, 0, &fi, 4096, 0); });
+  expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsLseek(req, 1, 0, SEEK_SET, &fi); });
+  expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsTmpfile(req, 1, 0644, &fi); });
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, UnlinkDoesNotPerformASeparateLookup) {
