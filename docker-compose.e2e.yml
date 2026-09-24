@@ -8,22 +8,3 @@ services:
       interval: 1s
       timeout: 2s
       retries: 30
-
-  minio:
-    image: ${MINIO_IMAGE:-minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e}
-    ports:
-      - "${MINIO_PORT:-9000}:9000"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    command: server /data --address ":9000"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
-    volumes:
-      - minio-data:/data
-
-volumes:
-  minio-data:
