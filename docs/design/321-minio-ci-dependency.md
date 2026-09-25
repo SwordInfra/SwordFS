@@ -13,7 +13,7 @@ Use official MinIO GitHub Release assets instead of a container registry:
 - server: `RELEASE.2025-09-07T16-13-09Z`;
 - client (`mc`): `RELEASE.2025-08-13T08-35-41Z`.
 
-`scripts/testing/minio-test.sh` owns the shared lifecycle. It selects the amd64/arm64 release asset, verifies a pinned SHA256 from GitHub release metadata, starts MinIO directly on the runner, waits for the live-health endpoint, creates buckets through the pinned `mc`, and performs bounded shutdown.
+`scripts/testing/minio-test.sh` owns the shared lifecycle. It selects the amd64/arm64 release asset, verifies a pinned SHA256 from GitHub release metadata, starts MinIO directly on the runner, waits for the readiness endpoint, creates buckets through the pinned `mc`, and performs bounded shutdown.
 
 Ephemeral MinIO object data, PID state, and `mc` configuration live under a private `/tmp/swordfs-minio-test-*` runtime directory. Evidence directories retain only `minio.log`, so a cancelled root-run conformance job cannot make artifact collection fail on unreadable runtime state.
 
