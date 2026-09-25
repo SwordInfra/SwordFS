@@ -42,8 +42,11 @@ _minio_test_download_verified() {
   fi
 
   rm -f "${tmp}"
-  curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 \
-    --output "${tmp}" "${url}"
+  if ! curl --fail --location --retry 10 --retry-all-errors --retry-delay 2 \
+    --retry-max-time 120 --connect-timeout 15 --output "${tmp}" "${url}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
   printf '%s  %s\n' "${expected_sha}" "${tmp}" | sha256sum -c - >/dev/null
   chmod +x "${tmp}"
   mv "${tmp}" "${destination}"

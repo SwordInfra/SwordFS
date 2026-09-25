@@ -38,6 +38,12 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
           fetch-depth: 1
 
+      - name: Restore pinned MinIO tools cache
+        uses: actions/cache@v4
+        with:
+          path: .deps/minio
+          key: swordfs-minio-tools-v1-${{ runner.os }}-${{ runner.arch }}-2025-09-07-2025-08-13
+
       - name: Fetch and verify pinned MinIO tools
         run: |
           source scripts/testing/minio-test.sh

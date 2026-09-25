@@ -17,7 +17,7 @@ Use official MinIO GitHub Release assets instead of a container registry:
 
 Ephemeral MinIO object data, PID state, and `mc` configuration live under a private `/tmp/swordfs-minio-test-*` runtime directory. Evidence directories retain only `minio.log`, so a cancelled root-run conformance job cannot make artifact collection fail on unreadable runtime state.
 
-The CI workflow has one `minio-test-tools` job that downloads and verifies the two binaries once and publishes them as a short-lived workflow artifact. Debug service-backed coverage, E2E, pjdfstest, and fstests download that artifact instead of hitting the external release endpoint independently. The helper retains the same verified-download path as a fallback for developer runs outside CI.
+The CI workflow has one `minio-test-tools` job that restores a version/architecture-keyed Actions cache when available, otherwise downloads the pinned release binaries with bounded HTTP retries, verifies both SHA256 values, and publishes the verified tools as a short-lived workflow artifact. Debug service-backed coverage, E2E, pjdfstest, and fstests consume that artifact instead of hitting the external release endpoint independently. The helper retains the same verified-download path as a fallback for developer runs outside CI. Cache contents are never trusted blindly: `minio_test_ensure_tools()` re-verifies the pinned SHA before reuse.
 
 Docker Compose now owns Redis only. The tested SwordFS topology remains Redis metadata plus MinIO-compatible S3 on `127.0.0.1:9000`; only dependency distribution and process lifecycle change.
 
@@ -48,3 +48,8 @@ Local verification covers shell/YAML/pre-commit, Redis-only Compose rendering, a
 HTTP readiness is necessary but not sufficient for the test handoff. CI first showed that `/minio/health/live` can succeed before the object layer is initialized. A later Debug run proved that even `/minio/health/ready` can briefly succeed while an authenticated `mc alias set` still returns `Server not initialized yet`.
 
 `minio_test_start()` therefore uses two bounded gates: wait for `/minio/health/ready`, then retry a real authenticated `mc alias set` with the pinned client and configured test credentials. The helper returns only after both gates pass. All callers inherit that stronger boundary, and `minio_test_create_bucket()` can focus solely on bucket creation rather than duplicating startup probing.
+
+
+## Release asset availability
+
+The official GitHub Release endpoint remains an external availability dependency on a cache miss. CI observed repeated HTTP 500 responses for the pinned `mc` asset even though earlier runs downloaded the same immutable asset successfully. The tool job therefore uses a persistent Actions cache keyed by runner OS/architecture and the pinned release pair, and the downloader uses a bounded 120-second retry window on cache miss. This reduces transient release-CDN failures without accepting an alternate binary: restored and freshly downloaded files must both match the same pinned SHA256 before they are artifacted or executed.
