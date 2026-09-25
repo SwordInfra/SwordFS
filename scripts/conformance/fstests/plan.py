@@ -17,8 +17,9 @@ SUPPORTED_SHARD_COUNT = 4
 SUPPORTED_SHARDS = tuple(f"supported-{index}" for index in range(SUPPORTED_SHARD_COUNT))
 REST_SHARD_COUNT = 2
 REST_SHARDS = tuple(f"baseline-rest-{index}" for index in range(REST_SHARD_COUNT))
-SHARD_NAMES = (*SUPPORTED_SHARDS, *REST_SHARDS)
+BASE_SHARD_NAMES = (*SUPPORTED_SHARDS, *REST_SHARDS)
 DEFAULT_RUNTIME_SECONDS = 1.0
+BOUNDED_SHARD_RE = re.compile(r"^bounded-[a-z0-9_-]+$")
 
 
 class PlanError(ValueError):
@@ -119,6 +120,31 @@ def load_deferred(path: pathlib.Path) -> set[str]:
     return tests
 
 
+
+
+def load_bounded(path: pathlib.Path) -> dict[str, str]:
+    reader = _dict_reader_without_comments(path)
+    if reader.fieldnames != ["test", "shard"]:
+        raise PlanError(f"{path}: expected TSV header ['test', 'shard'], got {reader.fieldnames}")
+    bounded: dict[str, str] = {}
+    shards: set[str] = set()
+    for line_number, row in enumerate(reader, 2):
+        test = row["test"].strip()
+        shard = row["shard"].strip()
+        if not test:
+            continue
+        validate_test(test, f"{path}:{line_number}")
+        if test in bounded:
+            raise PlanError(f"{path}:{line_number}: duplicate testcase {test}")
+        if not BOUNDED_SHARD_RE.fullmatch(shard):
+            raise PlanError(f"{path}:{line_number}: invalid bounded shard name {shard!r}")
+        if shard in shards:
+            raise PlanError(f"{path}:{line_number}: bounded shard {shard!r} must identify exactly one testcase")
+        bounded[test] = shard
+        shards.add(shard)
+    return bounded
+
+
 def load_runtime(path: pathlib.Path) -> dict[str, float]:
     reader = _dict_reader_without_comments(path)
     if reader.fieldnames != ["test", "seconds"]:
@@ -142,7 +168,11 @@ def load_runtime(path: pathlib.Path) -> dict[str, float]:
 
 
 def build_plan(
-    selected: list[str], supported: set[str], deferred: set[str], runtime: dict[str, float]
+    selected: list[str],
+    supported: set[str],
+    deferred: set[str],
+    runtime: dict[str, float],
+    bounded: dict[str, str] | None = None,
 ) -> dict[str, list[str]]:
     selected_set = set(selected)
     unknown_supported = supported - selected_set
@@ -154,11 +184,23 @@ def build_plan(
     overlap = supported & deferred
     if overlap:
         raise PlanError("supported and deferred testcases overlap: " + ", ".join(sorted(overlap)))
+    bounded = bounded or {}
+    bounded_tests = set(bounded)
+    unknown_bounded = bounded_tests - selected_set
+    if unknown_bounded:
+        raise PlanError("bounded testcases are outside the pinned selection: " + ", ".join(sorted(unknown_bounded)))
+    deferred_bounded = bounded_tests & deferred
+    if deferred_bounded:
+        raise PlanError("bounded testcases cannot remain deferred: " + ", ".join(sorted(deferred_bounded)))
 
-    plan: dict[str, list[str]] = {name: [] for name in SHARD_NAMES}
+    bounded_shards = tuple(sorted(set(bounded.values())))
+    shard_names = (*BASE_SHARD_NAMES, *bounded_shards)
+    plan: dict[str, list[str]] = {name: [] for name in shard_names}
+    for test, shard in bounded.items():
+        plan[shard].append(test)
     loads = [0.0] * SUPPORTED_SHARD_COUNT
     supported_selected = sorted(
-        supported,
+        supported - bounded_tests,
         key=lambda test: (-max(runtime.get(test, DEFAULT_RUNTIME_SECONDS), DEFAULT_RUNTIME_SECONDS), test),
     )
     for test in supported_selected:
@@ -169,13 +211,13 @@ def build_plan(
         plan[SUPPORTED_SHARDS[shard_index]].append(test)
         loads[shard_index] += max(runtime.get(test, DEFAULT_RUNTIME_SECONDS), DEFAULT_RUNTIME_SECONDS)
 
-    rest_tests = sorted(selected_set - deferred - supported)
+    rest_tests = sorted(selected_set - deferred - supported - bounded_tests)
     for index, test in enumerate(rest_tests):
         plan[REST_SHARDS[index % REST_SHARD_COUNT]].append(test)
     for shard in SUPPORTED_SHARDS:
         plan[shard].sort()
 
-    planned = [test for shard in SHARD_NAMES for test in plan[shard]]
+    planned = [test for shard in shard_names for test in plan[shard]]
     expected = selected_set - deferred
     if len(planned) != len(set(planned)):
         raise PlanError("generated shard plan contains duplicate testcase IDs")
@@ -210,7 +252,7 @@ def verify_selection_xml(path: pathlib.Path, selected: list[str]) -> None:
 
 def plan_summary(plan: dict[str, list[str]], runtime: dict[str, float]) -> dict[str, object]:
     shards = {}
-    for name in SHARD_NAMES:
+    for name in plan:
         tests = plan[name]
         shards[name] = {
             "count": len(tests),
@@ -227,8 +269,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--supported", type=pathlib.Path, default=pathlib.Path("conformance/fstests/supported.txt"))
     parser.add_argument("--deferred", type=pathlib.Path, default=pathlib.Path("conformance/fstests/deferred-ci.tsv"))
     parser.add_argument("--runtime", type=pathlib.Path, default=pathlib.Path("conformance/fstests/runtime.tsv"))
+    parser.add_argument("--bounded", type=pathlib.Path, default=pathlib.Path("conformance/fstests/bounded-ci.tsv"))
     parser.add_argument("--version", type=pathlib.Path, default=pathlib.Path("conformance/fstests/version.env"))
-    parser.add_argument("--shard", choices=SHARD_NAMES)
+    parser.add_argument("--shard")
     parser.add_argument("--list-shards", action="store_true")
     parser.add_argument("--summary-json", action="store_true")
     parser.add_argument("--verify-selection-xml", type=pathlib.Path)
@@ -241,7 +284,8 @@ def main(argv: list[str] | None = None) -> int:
         supported = load_supported(args.supported)
         deferred = load_deferred(args.deferred)
         runtime = load_runtime(args.runtime)
-        plan = build_plan(selected, supported, deferred, runtime)
+        bounded = load_bounded(args.bounded)
+        plan = build_plan(selected, supported, deferred, runtime, bounded)
         if args.verify_selection_xml:
             verify_selection_xml(args.verify_selection_xml, selected)
     except (OSError, PlanError) as exc:
@@ -249,8 +293,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.list_shards:
-        print("\n".join(SHARD_NAMES))
+        print("\n".join(plan))
     elif args.shard:
+        if args.shard not in plan:
+            parser.error(f"unknown shard: {args.shard}")
         print("".join(f"{test}\n" for test in plan[args.shard]), end="")
     elif args.summary_json:
         print(json.dumps(plan_summary(plan, runtime), indent=2, sort_keys=True))

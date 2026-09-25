@@ -15,6 +15,7 @@ generic/028
 generic/029
 generic/030
 generic/035
+generic/069
 generic/075
 generic/080
 generic/084
@@ -76,6 +77,7 @@ generic/448
 generic/451
 generic/460
 generic/465
+generic/471
 generic/490
 generic/519
 generic/524

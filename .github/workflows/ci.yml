@@ -464,19 +464,40 @@ jobs:
     needs: [clang-format, minio-test-tools]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.job_timeout }}
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        shard:
-          - supported-0
-          - supported-1
-          - supported-2
-          - supported-3
-          - baseline-rest-0
-          - baseline-rest-1
+        include:
+          - shard: supported-0
+            job_timeout: 90
+            suite_timeout: 75m
+          - shard: supported-1
+            job_timeout: 90
+            suite_timeout: 75m
+          - shard: supported-2
+            job_timeout: 90
+            suite_timeout: 75m
+          - shard: supported-3
+            job_timeout: 90
+            suite_timeout: 75m
+          - shard: baseline-rest-0
+            job_timeout: 90
+            suite_timeout: 75m
+          - shard: baseline-rest-1
+            job_timeout: 90
+            suite_timeout: 75m
+          - shard: bounded-069
+            job_timeout: 35
+            suite_timeout: 15m
+          - shard: bounded-471
+            job_timeout: 35
+            suite_timeout: 15m
+          - shard: bounded-478
+            job_timeout: 35
+            suite_timeout: 15m
     steps:
       - uses: actions/checkout@v4
         with:
@@ -552,6 +573,7 @@ jobs:
             bash scripts/conformance/fstests/run.sh \
               --tests-file "${RUNNER_TEMP}/fstests-tests.txt" \
               --shard-name "${FSTESTS_SHARD}" \
+              --suite-timeout "${{ matrix.suite_timeout }}" \
               --output-dir "${{ github.workspace }}/build/fstests-conformance" \
               "${verify_args[@]}"
           status=$?

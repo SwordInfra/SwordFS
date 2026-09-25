@@ -293,6 +293,7 @@ generic/470	environment	-	NOTRUN	This test requires a valid $LOGWRITES_DEV	The h
 generic/472	upstream_not_applicable	-	NOTRUN	swapfiles are not supported	Swapfile semantics are not applicable to the SwordFS FUSE/distributed storage model.
 generic/474	upstream_not_applicable	-	NOTRUN	fuse does not support shutdown	Pinned fstests excludes this local-filesystem shutdown/freeze operation for FUSE.
 generic/477	known_unsupported	#255	FAIL	- output mismatch (see <FSTESTS_RESULT_DIR>/generic/477.out.bad)	SwordFS does not enable FUSE export/open-by-handle support; tracked by #255.
+generic/478	known_unsupported	#255	FAIL	- output mismatch (see <FSTESTS_RESULT_DIR>/generic/478.out.bad)	SwordFS POSIX/OFD setlk/getlk FUSE hooks return ENOSYS; tracked by #255.
 generic/479	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/480	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/481	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.

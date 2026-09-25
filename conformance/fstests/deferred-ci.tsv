@@ -1,4 +1,1 @@
 test	reason
-generic/069	Tracked by #248; observed by ZeroFS to take about 16 minutes on FUSE, so O_APPEND correctness remains unclaimed until moved into bounded executed coverage.
-generic/471	Tracked by #248; FUSE rewinddir/readdir case reported by ZeroFS/fuser as CI-prohibitive, so defer from PR gate without counting it as supported.
-generic/478	Tracked by #248; OFD-lock test can hang in the blocking-lock path on FUSE, so defer until lock behavior is exercised in bounded executed coverage.
