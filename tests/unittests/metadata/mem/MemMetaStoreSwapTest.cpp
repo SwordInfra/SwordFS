@@ -96,8 +96,8 @@ FIBER_TEST_F(MemMetaStoreSwapTest, SameDirectorySwapDifferentNames) {
 }
 
 // ────────────────────────────────────────────────────────────────
-// Swap file and directory (should succeed at the store level —
-// type checking is done at the MemMetaImpl layer)
+// Swap file and directory. RENAME_EXCHANGE permits cross-type namespace
+// bindings, so the store primitive intentionally supports this directly.
 // ────────────────────────────────────────────────
 
 FIBER_TEST_F(MemMetaStoreSwapTest, SwapFileWithDirectory) {

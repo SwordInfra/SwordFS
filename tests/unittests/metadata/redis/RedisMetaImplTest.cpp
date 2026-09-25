@@ -681,7 +681,7 @@ FIBER_TEST_F(RedisMetaImplTest, RenameCoversMoveOverwriteNoReplaceAndExchange) {
                   .IsNotFound());
 }
 
-FIBER_TEST_F(RedisMetaImplTest, RenameRejectsTypeMismatchAndDirectoryCycles) {
+FIBER_TEST_F(RedisMetaImplTest, RenameRejectsOrdinaryTypeMismatchAndDirectoryCycles) {
   SwordFsInode dir;
   SwordFsInode file;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
@@ -693,14 +693,168 @@ FIBER_TEST_F(RedisMetaImplTest, RenameRejectsTypeMismatchAndDirectoryCycles) {
   EXPECT_TRUE(
       impl_->Rename(kRootInodeId, "dir", kRootInodeId, "file", swordfs::metadata::RenameFlag::kNone).ToErrno() ==
       ENOTDIR);
-  EXPECT_EQ(
-      impl_->Rename(kRootInodeId, "dir", kRootInodeId, "file", swordfs::metadata::RenameFlag::kExchange).ToErrno(),
-      EINVAL);
 
   SwordFsInode child;
   ASSERT_TRUE(impl_->MkDir(dir.ino, "child", 0755, &child).ok());
   EXPECT_EQ(impl_->Rename(kRootInodeId, "dir", child.ino, "moved", swordfs::metadata::RenameFlag::kNone).ToErrno(),
             EINVAL);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, RenameExchangeDirectoryAndFileSupportsBothDirections) {
+  SwordFsInode dir;
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+
+  ASSERT_TRUE(impl_->Rename(kRootInodeId, "dir", kRootInodeId, "file", swordfs::metadata::RenameFlag::kExchange).ok());
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(kRootInodeId, "dir", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+  ASSERT_TRUE(impl_->Lookup(kRootInodeId, "file", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+
+  ASSERT_TRUE(impl_->Rename(kRootInodeId, "dir", kRootInodeId, "file", swordfs::metadata::RenameFlag::kExchange).ok());
+  ASSERT_TRUE(impl_->Lookup(kRootInodeId, "dir", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+  ASSERT_TRUE(impl_->Lookup(kRootInodeId, "file", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, RenameExchangeDirectoryAndFileAcrossParentsUpdatesTopology) {
+  SwordFsInode left;
+  SwordFsInode right;
+  SwordFsInode dir;
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "left", 0755, &left).ok());
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "right", 0755, &right).ok());
+  ASSERT_TRUE(impl_->MkDir(left.ino, "dir", 0755, &dir).ok());
+  ASSERT_TRUE(impl_->Create(right.ino, "file", 0644, &file).ok());
+
+  SwordFsInode left_before;
+  SwordFsInode right_before;
+  ASSERT_TRUE(impl_->GetInode(left.ino, &left_before).ok());
+  ASSERT_TRUE(impl_->GetInode(right.ino, &right_before).ok());
+
+  ASSERT_TRUE(impl_->Rename(left.ino, "dir", right.ino, "file", swordfs::metadata::RenameFlag::kExchange).ok());
+
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(left.ino, "dir", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+  ASSERT_TRUE(impl_->Lookup(right.ino, "file", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+  EXPECT_EQ(found.parent_ino, right.ino);
+
+  SwordFsInode left_after;
+  SwordFsInode right_after;
+  ASSERT_TRUE(impl_->GetInode(left.ino, &left_after).ok());
+  ASSERT_TRUE(impl_->GetInode(right.ino, &right_after).ok());
+  EXPECT_EQ(left_after.attr.nlink, left_before.attr.nlink - 1);
+  EXPECT_EQ(right_after.attr.nlink, right_before.attr.nlink + 1);
+
+  ASSERT_TRUE(impl_->Rename(left.ino, "dir", right.ino, "file", swordfs::metadata::RenameFlag::kExchange).ok());
+  ASSERT_TRUE(impl_->Lookup(left.ino, "dir", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+  EXPECT_EQ(found.parent_ino, left.ino);
+
+  SwordFsInode left_restored;
+  SwordFsInode right_restored;
+  ASSERT_TRUE(impl_->GetInode(left.ino, &left_restored).ok());
+  ASSERT_TRUE(impl_->GetInode(right.ino, &right_restored).ok());
+  EXPECT_EQ(left_restored.attr.nlink, left_before.attr.nlink);
+  EXPECT_EQ(right_restored.attr.nlink, right_before.attr.nlink);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, RenameExchangeRejectsCycleWhenOnlySourceIsDirectory) {
+  SwordFsInode dir;
+  SwordFsInode descendant;
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
+  ASSERT_TRUE(impl_->MkDir(dir.ino, "descendant", 0755, &descendant).ok());
+  ASSERT_TRUE(impl_->Create(descendant.ino, "file", 0644, &file).ok());
+
+  EXPECT_EQ(
+      impl_->Rename(kRootInodeId, "dir", descendant.ino, "file", swordfs::metadata::RenameFlag::kExchange).ToErrno(),
+      EINVAL);
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(kRootInodeId, "dir", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+  ASSERT_TRUE(impl_->Lookup(descendant.ino, "file", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, RenameExchangeRejectsCycleWhenOnlyTargetIsDirectory) {
+  SwordFsInode dir;
+  SwordFsInode descendant;
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir", 0755, &dir).ok());
+  ASSERT_TRUE(impl_->MkDir(dir.ino, "descendant", 0755, &descendant).ok());
+  ASSERT_TRUE(impl_->Create(descendant.ino, "file", 0644, &file).ok());
+
+  EXPECT_EQ(
+      impl_->Rename(descendant.ino, "file", kRootInodeId, "dir", swordfs::metadata::RenameFlag::kExchange).ToErrno(),
+      EINVAL);
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(descendant.ino, "file", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+  ASSERT_TRUE(impl_->Lookup(kRootInodeId, "dir", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, RenameExchangeNlinkFailureDoesNotPartiallyCommitNamespace) {
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  auto set_persisted_nlink = [&](InodeID ino, uint64_t nlink) {
+    RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
+      auto encoded = redis.get(key.Inode(ino));
+      ASSERT_TRUE(encoded.has_value());
+      SwordFsInode inode;
+      ASSERT_TRUE(inode.ParseFrom(*encoded).ok());
+      inode.attr.nlink = nlink;
+      std::string updated;
+      ASSERT_TRUE(inode.SerializeTo(&updated).ok());
+      redis.set(key.Inode(ino), updated);
+    });
+  };
+
+  SwordFsInode left;
+  SwordFsInode right;
+  SwordFsInode dir;
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "left", 0755, &left).ok());
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "right", 0755, &right).ok());
+  ASSERT_TRUE(impl_->MkDir(left.ino, "dir", 0755, &dir).ok());
+  ASSERT_TRUE(impl_->Create(right.ino, "file", 0644, &file).ok());
+
+  set_persisted_nlink(left.ino, 0);
+  EXPECT_EQ(impl_->Rename(left.ino, "dir", right.ino, "file", swordfs::metadata::RenameFlag::kExchange).ToErrno(), EIO);
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(left.ino, "dir", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+  ASSERT_TRUE(impl_->Lookup(right.ino, "file", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+
+  SwordFsInode file_parent;
+  SwordFsInode dir_parent;
+  SwordFsInode file2;
+  SwordFsInode dir2;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "file-parent", 0755, &file_parent).ok());
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "dir-parent", 0755, &dir_parent).ok());
+  ASSERT_TRUE(impl_->Create(file_parent.ino, "file", 0644, &file2).ok());
+  ASSERT_TRUE(impl_->MkDir(dir_parent.ino, "dir", 0755, &dir2).ok());
+
+  SwordFsInode file_parent_before;
+  ASSERT_TRUE(impl_->GetInode(file_parent.ino, &file_parent_before).ok());
+  set_persisted_nlink(dir_parent.ino, 0);
+  EXPECT_EQ(
+      impl_->Rename(file_parent.ino, "file", dir_parent.ino, "dir", swordfs::metadata::RenameFlag::kExchange).ToErrno(),
+      EIO);
+  ASSERT_TRUE(impl_->Lookup(file_parent.ino, "file", &found).ok());
+  EXPECT_EQ(found.ino, file2.ino);
+  ASSERT_TRUE(impl_->Lookup(dir_parent.ino, "dir", &found).ok());
+  EXPECT_EQ(found.ino, dir2.ino);
+
+  SwordFsInode file_parent_after;
+  ASSERT_TRUE(impl_->GetInode(file_parent.ino, &file_parent_after).ok());
+  EXPECT_EQ(file_parent_after.attr.nlink, file_parent_before.attr.nlink);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, SetAttrAndStatFsCoverCommonFields) {

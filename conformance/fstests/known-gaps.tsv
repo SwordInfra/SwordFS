@@ -10,7 +10,6 @@ generic/018	upstream_not_applicable	-	NOTRUN	defragmentation not supported for f
 generic/020	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/021	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong fs?)	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/022	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong fs?)	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
-generic/025	known_semantic_defect	#256	FAIL	- output mismatch (see <FSTESTS_RESULT_DIR>/generic/025.out.bad)	RENAME_EXCHANGE cross-type namespace semantics differ from Linux; tracked by #256.
 generic/026	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem type: fuse	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/031	known_unsupported	#255	NOTRUN	xfs_io fcollapse failed (old kernel/wrong fs?)	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/032	known_unsupported	#255	NOTRUN	xfs_io falloc failed (old kernel/wrong fs?)	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.

@@ -196,8 +196,33 @@ Rename illustrates why watching only the source name is insufficient:
    object-store deletion is outside this transaction.
 
 No-replace and exchange change validation and the write set, while preserving
-the same atomic boundary. An ambiguous result is returned as an error rather
-than being treated as a definite rollback.
+the same atomic boundary. `RENAME_EXCHANGE` is a namespace-binding swap, not
+two overwrite renames: both names and both inodes survive, so exchange never
+creates an overwrite victim, orphan marker, or reclaim transition. The two
+operands may have different inode types. If both names already reference the
+same inode, exchange is a successful no-op and does not rewrite topology or
+timestamps.
+
+For exchange, every directory operand is cycle-checked independently against
+its destination parent. A cross-parent swap rewrites both inode `parent_ino`
+values; this is also the source of the synthetic `..` relationship for a
+directory. Parent directory link counts change only by the net number of
+directory children exchanged across that parent. If A moves from `old_parent`
+to `new_parent` and B moves in the opposite direction, the deltas are:
+
+```text
+old_parent: is_dir(B) - is_dir(A)
+new_parent: is_dir(A) - is_dir(B)
+```
+
+Thus file↔file and dir↔dir exchanges have zero parent-link delta, while a
+cross-parent dir↔file exchange transfers one directory link from one parent to
+the other. Both directory mappings, both inode parent relationships and ctime,
+and both parent nlink/mtime/ctime updates are queued in the same Redis
+transaction. A WATCH conflict retries the whole decision from fresh state.
+Ordinary non-exchange rename keeps its directory/non-directory replacement
+compatibility checks. An ambiguous result is returned as an error rather than
+being treated as a definite rollback.
 
 ### Object cleanup registration and delete authority
 
