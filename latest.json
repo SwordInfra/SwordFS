@@ -7,7 +7,7 @@
       "runner": "Linux"
     },
     "pjdfstest_commit": "85a8aea9e685999ef0540392fd80535f873d7ff7",
-    "swordfs_commit": "485132b5d9bdc6e4092371b95e57ccc8017636bc"
+    "swordfs_commit": "4d6b98cd4c8b5c8942db51f73b057cfbd8ffc3f5"
   },
   "summary": {
     "blocking_count": 0,
