@@ -10,15 +10,15 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "4d6b98cd4c8b5c8942db51f73b057cfbd8ffc3f5"
+    "swordfs_commit": "33aa7f676b8daa65fb9c21820a5de8cd335cf158"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "ENVIRONMENT": 7,
-      "KNOWN_SEMANTIC_DEFECT": 5,
+      "KNOWN_SEMANTIC_DEFECT": 4,
       "KNOWN_UNSUPPORTED": 142,
-      "PASS": 109,
+      "PASS": 110,
       "UPSTREAM_NOT_APPLICABLE": 382
     },
     "classified_count": 645,
@@ -26,17 +26,17 @@
     "deferred_count": 0,
     "executed_classified_percent": 100.0,
     "executed_count": 645,
-    "known_gap_count": 536,
-    "overall_support_percent": 16.9,
+    "known_gap_count": 535,
+    "overall_support_percent": 17.05,
     "raw_results": {
-      "FAIL": 21,
+      "FAIL": 20,
       "NOTRUN": 515,
-      "PASS": 109
+      "PASS": 110
     },
     "selected_count": 645,
-    "supported_count": 109,
+    "supported_count": 110,
     "supported_gate_percent": 100.0,
-    "supported_pass_count": 109
+    "supported_pass_count": 110
   },
   "tests": [
     {
@@ -1232,11 +1232,11 @@
       "test": "generic/191"
     },
     {
-      "classification": "KNOWN_SEMANTIC_DEFECT",
-      "issue": "#256",
-      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/193.out.bad)",
-      "reason": "setuid/setgid clearing after ownership or size changes differs from Linux semantics; tracked by #256.",
-      "result": "FAIL",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/193"
     },
     {
