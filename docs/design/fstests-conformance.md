@@ -255,10 +255,17 @@ is still checked when an abnormal raw fstests outcome must be distinguished from
 infrastructure failure, and teardown captures Redis/MinIO state, INFO, and logs
 for post-failure diagnosis.
 
-Each shard has a bounded suite deadline derived from the pinned timeout. The
-parallel layout reduces wall-clock latency but does not impose a new arbitrary
-short per-test timeout: an individual upstream testcase can still consume the
-remaining shard deadline.
+Each shard has two nested runtime bounds. The shard-wide suite deadline remains
+the final outer budget, while every multi-test shard also applies a 10-minute
+per-test deadline and executes each testcase with the smaller of that deadline
+and the shard time remaining. This prevents an early hung testcase from
+consuming almost the entire 75-minute shard budget. The 10-minute bound is above
+the longest reviewed SwordFS testcase runtime weight in the pinned quick
+selection (459 seconds); known intentionally long cases can use an explicit
+single-test bounded shard with a larger per-test limit. Timeout evidence records
+the testcase, whether the per-test or suite budget fired, the applied seconds,
+and the timeout exit status. Forced FUSE unmounts used by post-test isolation
+are also time-bounded so timeout recovery cannot become a second unbounded wait.
 
 ## Baseline model
 
@@ -442,12 +449,14 @@ The initial deferral exists because `generic/quick` contains 645 tests at the
 pinned revision and "quick" is calibrated for conventional local filesystems,
 not necessarily FUSE. ZeroFS documents `generic/069` at roughly 16 minutes on
 its FUSE path and identifies `generic/471` as long-running and `generic/478`
-as capable of hanging in its locking path. A blanket
-three-minute per-test timeout would still add tens of minutes when several such
-tests hit the bound and would change every testcase's execution environment.
-Explicit temporary deferral is therefore simpler and more honest for the PR
-gate. These tests should later be restored through a dedicated slow/FUSE job or
-after their applicability/runtime behavior is independently characterized.
+as capable of hanging in its locking path. A blanket three-minute timeout was
+therefore rejected as too short for the observed FUSE runtime distribution. The
+current 10-minute multi-test-shard bound is deliberately above the longest reviewed SwordFS runtime while still making a
+hung testcase fail fast; single-test bounded shards retain explicit longer
+limits where needed. Explicit temporary deferral remains appropriate only when
+a testcase cannot yet run as a bounded, representative gate. These tests should
+later be restored through a dedicated slow/FUSE job or after their
+applicability/runtime behavior is independently characterized.
 
 Discovery also exposed a separate SwordFS stability defect: the
 `generic/006` directory-entry workload can leave an existing Redis-backed

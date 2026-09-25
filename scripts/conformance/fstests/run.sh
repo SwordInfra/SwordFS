@@ -14,10 +14,37 @@ MOUNT_HELPER_TARGET="/sbin/mount.fuse.swordfs"
 XUNIT_MERGER="${SCRIPT_DIR}/xunit_merge.py"
 MOUNT_CONFIG="/tmp/swordfs-fstests-mount.env"
 
+parse_timeout_seconds() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^([1-9][0-9]*)([smh])$ ]]; then
+    echo "ERROR: unsupported ${name}: ${value}" >&2
+    return 2
+  fi
+  local amount="${BASH_REMATCH[1]}"
+  local unit="${BASH_REMATCH[2]}"
+  local scale
+  case "${unit}" in
+    s) scale=1 ;;
+    m) scale=60 ;;
+    h) scale=3600 ;;
+  esac
+  echo $((amount * scale))
+}
+
+# A stuck FUSE request can also stall unmount. Keep recovery bounded so the
+# per-test deadline cannot turn into another unbounded wait in isolation.
+bounded_fusermount() {
+  local mode="$1"
+  local mountpoint="$2"
+  timeout --foreground --kill-after=5s 10s fusermount3 "${mode}" "${mountpoint}" >/dev/null 2>&1
+}
+
 OUTPUT_DIR="${PROJECT_DIR}/build/fstests-conformance"
 TESTS_FILE=""
 SHARD_NAME=""
 SUITE_TIMEOUT_OVERRIDE=""
+TEST_TIMEOUT_OVERRIDE=""
 VERIFY_SELECTION=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,6 +62,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --suite-timeout)
       SUITE_TIMEOUT_OVERRIDE="$2"
+      shift 2
+      ;;
+    --test-timeout)
+      TEST_TIMEOUT_OVERRIDE="$2"
       shift 2
       ;;
     --verify-selection)
@@ -71,10 +102,14 @@ source "${VERSION_FILE}"
 if [[ -n "${SUITE_TIMEOUT_OVERRIDE}" ]]; then
   FSTESTS_SUITE_TIMEOUT="${SUITE_TIMEOUT_OVERRIDE}"
 fi
+if [[ -n "${TEST_TIMEOUT_OVERRIDE}" ]]; then
+  FSTESTS_TEST_TIMEOUT="${TEST_TIMEOUT_OVERRIDE}"
+fi
 : "${FSTESTS_REPOSITORY:?FSTESTS_REPOSITORY must be set}"
 : "${FSTESTS_COMMIT:?FSTESTS_COMMIT must be set}"
 : "${FSTESTS_GROUP:?FSTESTS_GROUP must be set}"
 : "${FSTESTS_SUITE_TIMEOUT:?FSTESTS_SUITE_TIMEOUT must be set}"
+: "${FSTESTS_TEST_TIMEOUT:?FSTESTS_TEST_TIMEOUT must be set}"
 : "${LIBURING_REPOSITORY:?LIBURING_REPOSITORY must be set}"
 : "${LIBURING_COMMIT:?LIBURING_COMMIT must be set}"
 
@@ -150,6 +185,8 @@ pathlib.Path("${OUTPUT_DIR}/environment.json").write_text(
             "backend": "redis+minio-s3",
             "fstests_repository": "${FSTESTS_REPOSITORY}",
             "fstests_selector": "${FSTESTS_GROUP}",
+            "fstests_suite_timeout": "${FSTESTS_SUITE_TIMEOUT}",
+            "fstests_test_timeout": "${FSTESTS_TEST_TIMEOUT}",
             "liburing_commit": "${LIBURING_COMMIT}",
             "shard": "${SHARD_NAME}",
         },
@@ -242,8 +279,8 @@ cleanup() {
   capture_backend_diagnostics
   for mountpoint in "${TEST_DIR}" "${SCRATCH_MNT}"; do
     if findmnt -T "${mountpoint}" -n -o FSTYPE 2>/dev/null | grep -qi fuse; then
-      fusermount3 -u "${mountpoint}" >/dev/null 2>&1 || \
-        fusermount3 -uz "${mountpoint}" >/dev/null 2>&1 || true
+      bounded_fusermount -u "${mountpoint}" || \
+        bounded_fusermount -uz "${mountpoint}" || true
     fi
   done
   minio_test_stop
@@ -521,8 +558,8 @@ isolate_after_test() {
   for mountpoint in "${TEST_DIR}" "${SCRATCH_MNT}"; do
     if findmnt -rn -M "${mountpoint}" -o TARGET >/dev/null 2>&1; then
       intervened=1
-      fusermount3 -u "${mountpoint}" >/dev/null 2>&1 || \
-        fusermount3 -uz "${mountpoint}" >/dev/null 2>&1 || true
+      bounded_fusermount -u "${mountpoint}" || \
+        bounded_fusermount -uz "${mountpoint}" || true
     fi
   done
   wait_pidfile "${test}" "${OUTPUT_DIR}/swordfs-test.pid" || return 1
@@ -544,23 +581,14 @@ backend_healthy() {
     curl --max-time 5 -fsS "http://127.0.0.1:${MINIO_PORT}/minio/health/live" >/dev/null 2>&1
 }
 
-suite_seconds="$(python3 - "${FSTESTS_SUITE_TIMEOUT}" <<'PY'
-import re
-import sys
-
-value = sys.argv[1]
-match = re.fullmatch(r"([1-9][0-9]*)([smh])", value)
-if not match:
-    raise SystemExit(f"unsupported FSTESTS_SUITE_TIMEOUT: {value}")
-amount = int(match.group(1))
-scale = {"s": 1, "m": 60, "h": 3600}[match.group(2)]
-print(amount * scale)
-PY
-)"
+suite_seconds="$(parse_timeout_seconds FSTESTS_SUITE_TIMEOUT "${FSTESTS_SUITE_TIMEOUT}")"
+test_seconds="$(parse_timeout_seconds FSTESTS_TEST_TIMEOUT "${FSTESTS_TEST_TIMEOUT}")"
 suite_deadline=$(( $(date +%s) + suite_seconds ))
 check_status=0
+timeout_reason=""
 : >"${RAW_DIR}/check.log"
 : >"${RAW_DIR}/check-status.tsv"
+: >"${RAW_DIR}/timeout-status.tsv"
 
 while IFS= read -r test <&3; do
   [[ -n "${test}" ]] || continue
@@ -568,7 +596,15 @@ while IFS= read -r test <&3; do
   remaining=$((suite_deadline - now))
   if ((remaining <= 0)); then
     check_status=124
+    timeout_reason="suite"
     break
+  fi
+
+  test_budget="${test_seconds}"
+  test_timeout_reason="per-test"
+  if ((remaining <= test_seconds)); then
+    test_budget="${remaining}"
+    test_timeout_reason="suite"
   fi
 
   echo "=== ${test} ===" >>"${RAW_DIR}/check.log"
@@ -576,7 +612,7 @@ while IFS= read -r test <&3; do
   set +e
   (
     cd "${FSTESTS_DIR}"
-    RESULT_BASE="${RUN_RESULTS}" timeout --foreground --kill-after=30s "${remaining}s" \
+    RESULT_BASE="${RUN_RESULTS}" timeout --foreground --kill-after=30s "${test_budget}s" \
       ./check -R xunit-quiet -fuse "${test}" </dev/null
   ) >>"${RAW_DIR}/check.log" 2>&1
   test_status=$?
@@ -588,6 +624,11 @@ while IFS= read -r test <&3; do
   fi
   if [[ "${test_status}" -eq 124 || "${test_status}" -eq 137 ]]; then
     check_status="${test_status}"
+    timeout_reason="${test_timeout_reason}"
+    printf '%s\t%s\t%s\t%s\n' \
+      "${test}" "${test_timeout_reason}" "${test_budget}" "${test_status}" >>"${RAW_DIR}/timeout-status.tsv"
+    echo "ERROR: fstests testcase ${test} exceeded ${test_timeout_reason} timeout after ${test_budget}s" | \
+      tee -a "${RAW_DIR}/check.log" >&2
     isolate_after_test "${test}" || true
     break
   fi
@@ -618,7 +659,11 @@ python3 "${XUNIT_MERGER}" --parts-dir "${XUNIT_PARTS}" --output "${RUN_RESULTS}/
 printf '%s\n' "${check_status}" >"${RAW_DIR}/check.exit"
 
 if [[ "${check_status}" -eq 124 || "${check_status}" -eq 137 ]]; then
-  echo "ERROR: fstests shard exceeded ${FSTESTS_SUITE_TIMEOUT}" >&2
+  if [[ "${timeout_reason}" == "per-test" ]]; then
+    echo "ERROR: fstests testcase exceeded per-test timeout ${FSTESTS_TEST_TIMEOUT}" >&2
+  else
+    echo "ERROR: fstests shard exceeded suite timeout ${FSTESTS_SUITE_TIMEOUT}" >&2
+  fi
   exit 2
 fi
 if [[ "${check_status}" -eq 2 ]]; then
