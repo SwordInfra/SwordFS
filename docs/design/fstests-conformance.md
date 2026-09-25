@@ -264,8 +264,17 @@ the longest reviewed SwordFS testcase runtime weight in the pinned quick
 selection (459 seconds); known intentionally long cases can use an explicit
 single-test bounded shard with a larger per-test limit. Timeout evidence records
 the testcase, whether the per-test or suite budget fired, the applied seconds,
-and the timeout exit status. Forced FUSE unmounts used by post-test isolation
-are also time-bounded so timeout recovery cannot become a second unbounded wait.
+and the timeout exit status. The deadline is applied to the testcase process
+group rather than only the top-level `./check` process, so child test scripts,
+`fsstress`, and cleanup commands do not inherit an unlimited parent deadline.
+Because xfstests may place a testcase in a transient systemd scope and workloads
+such as `fsstress` create their own process groups, timeout handling also sends
+bounded termination signals to the complete testcase cgroup before FUSE
+isolation. A task stuck in uninterruptible FUSE I/O therefore exits as soon as
+forced unmount releases it instead of continuing against the underlying
+directory after the mount disappears. Forced FUSE unmounts used by post-test
+isolation are also time-bounded so timeout recovery cannot become a second
+unbounded wait.
 
 ## Baseline model
 
