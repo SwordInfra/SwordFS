@@ -14,9 +14,10 @@ namespace swordfs::metadata {
 
 utils::Status CalculateChunkStartOffset(ChunkIndex index, uint64_t chunk_size, uint64_t *out);
 
-/// Common head for one logical chunk. The selected overwrite mechanism owns
-/// the representation behind this head; revision is a publication generation
-/// used for compare-and-swap, not a physical object identifier.
+/// Common head for one logical chunk. In the current whole-object path,
+/// revision is both the publication/CAS generation and the immutable physical
+/// object revision. That mechanism-specific meaning is transitional under
+/// #312; it is not part of the target mechanism-neutral common contract.
 struct SwordFsChunk {
   ChunkIndex index = 0;
   ChunkRevision revision = kInvalidChunkRevision;

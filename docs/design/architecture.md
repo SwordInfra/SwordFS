@@ -238,7 +238,7 @@ The main logical records are:
 
 - **`SwordFsInode`** — inode ID, POSIX-like attributes, parent inode, optional symlink target;
 - **directory entry** — name/type/inode mapping owned by a directory;
-- **`SwordFsChunk`** — the shared file-to-logical-chunk head, containing index, start offset, publication generation, and logical size;
+- **`SwordFsChunk`** — the shared file-to-logical-chunk head, currently containing index, publication generation, and logical size; the logical start offset is derived from `index * chunk_size` rather than persisted;
 - **volume configuration** — storage/backend configuration and chunk size;
 - **orphan candidate** — inode whose last namespace link disappeared but which has not crossed the reclaim point of no return;
 - **`ReclaimWork`** — a frozen, versioned, opaque strategy payload for an inode already removed from live metadata and awaiting/undergoing data deletion.
@@ -247,8 +247,10 @@ Directory entries, inodes, and logical chunk heads are common to every
 overwrite strategy. Chunk-internal fragment indexes belong to the selected
 strategy, under its own metadata key space and encoding. Metadata does
 **not** store mutable object bytes. In the current `whole_object` strategy,
-the head's generation also identifies an immutable object revision; common
-metadata and reclaim code do not derive physical keys from it.
+the head's generation also identifies the immutable physical object revision.
+That second meaning is specific to the transitional whole-object common head;
+#312 removes it from the final mechanism-neutral `SwordFsChunk` contract after
+the mechanism-private authority cutover.
 
 For relationships between these records, handles, and write buffers, see
 [Data structures and ownership](data-structures.md).
@@ -448,10 +450,13 @@ fixed-layout identity. During the staged #312 refactor, `revision` and `size`
 remain transitional common fields until whole-object publication, truncate,
 and cleanup consumers have moved to mechanism-private authoritative state.
 
-`revision` is a volume-wide monotonically allocated, non-zero publication
-generation for the shared head. Allocated generations may have gaps after
-failures, but one must not be reused while the volume's metadata remains
-authoritative. Its physical meaning is strategy-private.
+`revision` is currently a volume-wide monotonically allocated, non-zero
+publication generation for the shared head. Allocated generations may have
+gaps after failures, but one must not be reused while the volume's metadata
+remains authoritative. For the current `whole_object` implementation, that
+same value also identifies the immutable physical object revision. This
+mechanism-specific physical meaning is transitional and is not part of the
+target common `SwordFsChunk` contract under #312.
 
 For the current `whole_object` implementation using S3/object storage, the
 physical object key is:
