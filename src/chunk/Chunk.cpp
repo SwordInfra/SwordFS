@@ -234,7 +234,6 @@ off_t Chunk::DataEnd() const {
 metadata::SwordFsChunk Chunk::BuildMeta(metadata::ChunkRevision revision, size_t size) const {
   metadata::SwordFsChunk chunk;
   chunk.index = index_;
-  chunk.start_offset = static_cast<uint64_t>(StartOffset());
   chunk.revision = revision;
   chunk.size = size;
   return chunk;

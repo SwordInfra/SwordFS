@@ -28,8 +28,7 @@ using swordfs::utils::Status;
 constexpr uint64_t kChunkSize = 128;
 
 SwordFsChunk Head(ChunkIndex index, ChunkRevision revision, uint64_t size = 64) {
-  return SwordFsChunk{
-      .index = index, .start_offset = static_cast<uint64_t>(index) * kChunkSize, .revision = revision, .size = size};
+  return SwordFsChunk{.index = index, .revision = revision, .size = size};
 }
 
 ReclaimWork MakeWork(InodeID ino = 42) {
@@ -59,7 +58,6 @@ std::string EncodePrivateRefs(InodeID ino, const std::vector<chunk::WholeObjectR
   enc.U32(static_cast<uint32_t>(refs.size()));
   for (const auto &ref : refs) {
     enc.U32(ref.descriptor.index);
-    enc.U64(ref.descriptor.start_offset);
     enc.U64(ref.descriptor.revision);
     enc.U64(ref.descriptor.size);
     enc.String(ref.key);
@@ -168,8 +166,7 @@ TEST(ReclaimWorkTest, WholeObjectCodecRejectsInvalidArgumentsAndTruncatedPayload
   EXPECT_EQ(chunk::FreezeWholeObjectReclaim(0, {}, kChunkSize, &work).ToErrno(), EINVAL);
   EXPECT_EQ(chunk::FreezeWholeObjectReclaim(42, {}, kChunkSize, nullptr).ToErrno(), EINVAL);
 
-  auto invalid = Head(1, 2);
-  invalid.start_offset = 0;
+  auto invalid = Head(1, 2, kChunkSize + 1);
   EXPECT_EQ(chunk::FreezeWholeObjectReclaim(42, {invalid}, kChunkSize, &work).ToErrno(), EINVAL);
 
   work = MakeWork();

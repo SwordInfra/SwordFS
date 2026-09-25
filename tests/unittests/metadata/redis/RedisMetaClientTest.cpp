@@ -162,8 +162,8 @@ class RecordingRedisStrategy final : public chunk::IChunkOverwriteStrategy {
  public:
   RecordingRedisIndex index;
 
-  std::string_view name() const override {
-    return "recording_redis";
+  metadata::ChunkOverwriteMechanism mechanism() const override {
+    return metadata::ChunkOverwriteMechanism::kRedisCache;
   }
   uint32_t index_format_version() const override {
     return 1;
@@ -964,9 +964,9 @@ TEST(RedisMetaTxnTest, PrivateIndexPublicationCommitsAndRejectsWithLogicalHead) 
     return status.ok() ? publication_result : status;
   };
 
-  const SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+  const SwordFsChunk first{.index = 0, .revision = 1, .size = 64};
   ASSERT_TRUE(publish(std::nullopt, first, ChunkPublishIntent{.payload = "manifest-one"}).ok());
-  const auto private_hash = key.PrivateChunkIndex(strategy.name(), "fragments:" + std::to_string(file.ino));
+  const auto private_hash = key.PrivateChunkIndex(strategy.mechanism(), "fragments:" + std::to_string(file.ino));
   EXPECT_EQ(redis.hget(private_hash, "1"), std::optional<std::string>{"manifest-one"});
   std::string private_value;
   std::vector<std::pair<std::string, std::string>> fields;
@@ -994,7 +994,7 @@ TEST(RedisMetaTxnTest, PrivateIndexPublicationCommitsAndRejectsWithLogicalHead) 
   EXPECT_EQ(private_value, "manifest-one");
   EXPECT_EQ(fields, (std::vector<std::pair<std::string, std::string>>{{"1", "manifest-one"}}));
 
-  const SwordFsChunk replacement{.index = 0, .start_offset = 0, .revision = 2, .size = 96};
+  const SwordFsChunk replacement{.index = 0, .revision = 2, .size = 96};
   strategy.index.reject_publish = true;
   EXPECT_EQ(publish(first, replacement, ChunkPublishIntent{.payload = "manifest-two"}).ToErrno(), EIO);
   ASSERT_TRUE(last_cleanup.has_value());
@@ -1386,22 +1386,14 @@ TEST(RedisMetaTxnTest, ChunkPublicContractsRejectInvalidDescriptorsAndViews) {
     utils::Status publication_result;
     std::optional<PendingDelete> cleanup_candidate;
 
-    const SwordFsChunk invalid_replacement{.index = 0, .start_offset = 1, .revision = 1, .size = 64};
-    EXPECT_EQ(
-        txn.CommitChunk(kFileIno, std::nullopt, invalid_replacement, publication_result, cleanup_candidate).ToErrno(),
-        EINVAL);
+    const SwordFsChunk replacement{.index = 0, .revision = 2, .size = 64};
 
-    const SwordFsChunk replacement{.index = 0, .start_offset = 0, .revision = 2, .size = 64};
-    const SwordFsChunk invalid_expected{.index = 0, .start_offset = 1, .revision = 1, .size = 64};
-    EXPECT_EQ(txn.CommitChunk(kFileIno, invalid_expected, replacement, publication_result, cleanup_candidate).ToErrno(),
-              EINVAL);
-
-    const SwordFsChunk same_revision{.index = 0, .start_offset = 0, .revision = 2, .size = 64};
+    const SwordFsChunk same_revision{.index = 0, .revision = 2, .size = 64};
     EXPECT_EQ(txn.CommitChunk(kFileIno, same_revision, replacement, publication_result, cleanup_candidate).ToErrno(),
               EINVAL);
 
-    const SwordFsChunk expected{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
-    const SwordFsChunk different_identity{.index = 1, .start_offset = 4096, .revision = 2, .size = 64};
+    const SwordFsChunk expected{.index = 0, .revision = 1, .size = 64};
+    const SwordFsChunk different_identity{.index = 1, .revision = 2, .size = 64};
     EXPECT_EQ(txn.CommitChunk(kFileIno, expected, different_identity, publication_result, cleanup_candidate).ToErrno(),
               EINVAL);
 
@@ -1410,7 +1402,7 @@ TEST(RedisMetaTxnTest, ChunkPublicContractsRejectInvalidDescriptorsAndViews) {
   });
   ASSERT_TRUE(validation_status.ok()) << validation_status.message();
 
-  SwordFsChunk wrong_identity{.index = 0, .start_offset = 0, .revision = 3, .size = 64};
+  SwordFsChunk wrong_identity{.index = 0, .revision = 3, .size = 64};
   std::string encoded;
   ASSERT_TRUE(wrong_identity.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(kFileIno), "1", encoded);
@@ -1422,7 +1414,7 @@ TEST(RedisMetaTxnTest, ChunkPublicContractsRejectInvalidDescriptorsAndViews) {
   EXPECT_EQ(malformed_status.ToErrno(), EIO) << malformed_status.message();
 
   redis.del(key.Chunk(kFileIno));
-  SwordFsChunk head{.index = 0, .start_offset = 0, .revision = 4, .size = 64};
+  SwordFsChunk head{.index = 0, .revision = 4, .size = 64};
   ASSERT_TRUE(head.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(kFileIno), "0", encoded);
   const auto private_state_status = store.Transact([&](RedisKvTxn &kv_txn) {
@@ -1447,31 +1439,6 @@ TEST(RedisMetaTxnTest, TouchInodePropagatesMissingInode) {
   });
 
   EXPECT_TRUE(status.IsNotFound()) << status.message();
-}
-
-TEST(RedisMetaTxnTest, LoadChunkViewRejectsNoncanonicalDescriptor) {
-  RedisMetaConfig config;
-  if (!ParseTestConfig(&config)) {
-    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
-  }
-
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueRedisName("chunk-view-noncanonical"));
-  sw::redis::Redis redis(ConnectionOptions(config));
-  RecordingRedisStrategy strategy;
-  constexpr InodeID kFileIno = 41;
-
-  SwordFsChunk noncanonical{.index = 0, .start_offset = 1, .revision = 1, .size = 64};
-  std::string encoded;
-  ASSERT_TRUE(noncanonical.SerializeTo(&encoded).ok());
-  redis.hset(key.Chunk(kFileIno), "0", encoded);
-
-  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
-    ChunkView view;
-    return txn.LoadChunkView(kFileIno, 0, &view);
-  });
-  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
 }
 
 TEST(RedisMetaTxnTest, PrivateChunkIndexPrimitivesValidateTheirPublicContract) {
@@ -1504,7 +1471,7 @@ TEST(RedisMetaTxnTest, PrivateChunkIndexPrimitivesValidateTheirPublicContract) {
     return txn.Put("manifest", "b", "two");
   });
   ASSERT_TRUE(put_status.ok()) << put_status.message();
-  redis.hset(key.PrivateChunkIndex(strategy.name(), "manifest"), "a", "one");
+  redis.hset(key.PrivateChunkIndex(strategy.mechanism(), "manifest"), "a", "one");
 
   const auto read_status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
@@ -1526,8 +1493,8 @@ TEST(RedisMetaTxnTest, PrivateChunkIndexPrimitivesValidateTheirPublicContract) {
     return txn.Erase("manifest", "a");
   });
   ASSERT_TRUE(erase_status.ok()) << erase_status.message();
-  EXPECT_FALSE(redis.hexists(key.PrivateChunkIndex(strategy.name(), "manifest"), "a"));
-  EXPECT_EQ(redis.hget(key.PrivateChunkIndex(strategy.name(), "manifest"), "b").value_or(""), "two");
+  EXPECT_FALSE(redis.hexists(key.PrivateChunkIndex(strategy.mechanism(), "manifest"), "a"));
+  EXPECT_EQ(redis.hget(key.PrivateChunkIndex(strategy.mechanism(), "manifest"), "b").value_or(""), "two");
 }
 
 TEST(RedisMetaTxnTest, PrivateChunkIndexScanFailsClosedOnCorruptBackendType) {
@@ -1540,7 +1507,7 @@ TEST(RedisMetaTxnTest, PrivateChunkIndexScanFailsClosedOnCorruptBackendType) {
   const redis::RedisKey key(config.db, UniqueRedisName("private-index-wrong-type"));
   sw::redis::Redis redis(ConnectionOptions(config));
   RecordingRedisStrategy strategy;
-  redis.set(key.PrivateChunkIndex(strategy.name(), "manifest"), "not-a-hash");
+  redis.set(key.PrivateChunkIndex(strategy.mechanism(), "manifest"), "not-a-hash");
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
@@ -1549,7 +1516,7 @@ TEST(RedisMetaTxnTest, PrivateChunkIndexScanFailsClosedOnCorruptBackendType) {
   });
 
   EXPECT_EQ(status.ToErrno(), EIO) << status.message();
-  EXPECT_EQ(redis.get(key.PrivateChunkIndex(strategy.name(), "manifest")).value_or(""), "not-a-hash");
+  EXPECT_EQ(redis.get(key.PrivateChunkIndex(strategy.mechanism(), "manifest")).value_or(""), "not-a-hash");
 }
 
 TEST(RedisMetaTxnTest, MoveEntryRejectsCorruptDirectoryAncestryWithoutMutation) {
@@ -1665,8 +1632,8 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk first_chunk{0, 0, 1, 4096};
-  SwordFsChunk second_chunk{1, 4096, 2, 4096};
+  SwordFsChunk first_chunk{0, 1, 4096};
+  SwordFsChunk second_chunk{1, 2, 4096};
   std::string first_data;
   std::string second_data;
   ASSERT_TRUE(first_chunk.SerializeTo(&first_data).ok());
@@ -1717,7 +1684,7 @@ TEST(RedisMetaTxnTest, SetAttrShrinkWorksWithoutDetachedChunkOutput) {
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 1, .size = 4096};
+  SwordFsChunk chunk{.index = 0, .revision = 1, .size = 4096};
   std::string encoded;
   ASSERT_TRUE(chunk.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(file.ino), "0", encoded);
@@ -1770,7 +1737,7 @@ TEST(RedisMetaTxnTest, TruncateDoesNotDependOnPendingDeleteState) {
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk chunk{0, 0, 1, 4096};
+  SwordFsChunk chunk{0, 1, 4096};
   std::string encoded;
   ASSERT_TRUE(chunk.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(file.ino), "0", encoded);
@@ -1809,7 +1776,7 @@ TEST(RedisMetaTxnTest, TruncateScansMultipleChunkHashPagesAndCollectsDetachedChu
 
   for (uint32_t index = 0; index < kChunkCount; ++index) {
     SwordFsChunk chunk{.index = index,
-                       .start_offset = static_cast<uint64_t>(index) * kChunkSize,
+
                        .revision = static_cast<uint64_t>(index) + 1,
                        .size = kChunkSize};
     std::string encoded;
@@ -1827,7 +1794,7 @@ TEST(RedisMetaTxnTest, TruncateScansMultipleChunkHashPagesAndCollectsDetachedChu
   EXPECT_EQ(redis.hlen(key.Chunk(file.ino)), 0);
 }
 
-TEST(RedisMetaTxnTest, TruncateRejectsInvalidChunkIdentity) {
+TEST(RedisMetaTxnTest, TruncateRejectsInvalidChunkMetadata) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
@@ -1842,7 +1809,7 @@ TEST(RedisMetaTxnTest, TruncateRejectsInvalidChunkIdentity) {
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk wrong{.index = 0, .start_offset = 1, .revision = 1, .size = 64};
+  SwordFsChunk wrong{.index = 0, .revision = 1, .size = 4097};
   std::string encoded;
   ASSERT_TRUE(wrong.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(file.ino), "0", encoded);
@@ -1855,7 +1822,7 @@ TEST(RedisMetaTxnTest, TruncateRejectsInvalidChunkIdentity) {
   EXPECT_TRUE(redis.hexists(key.Chunk(file.ino), "0"));
 
   redis.del(key.Chunk(file.ino));
-  SwordFsChunk canonical{.index = 0, .start_offset = 0, .revision = 2, .size = 64};
+  SwordFsChunk canonical{.index = 0, .revision = 2, .size = 64};
   ASSERT_TRUE(canonical.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(file.ino), "1", encoded);
   const auto field_mismatch_status = store.Transact([&](RedisKvTxn &kv_txn) {
@@ -1906,12 +1873,12 @@ TEST(RedisMetaTxnTest, CommitChunkRejectsCorruptPersistedDescriptor) {
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk corrupt{.index = 0, .start_offset = 1, .revision = 1, .size = 64};
+  SwordFsChunk corrupt{.index = 0, .revision = 1, .size = 4097};
   std::string encoded;
   ASSERT_TRUE(corrupt.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(file.ino), "0", encoded);
 
-  SwordFsChunk replacement{.index = 0, .start_offset = 0, .revision = 2, .size = 64};
+  SwordFsChunk replacement{.index = 0, .revision = 2, .size = 64};
   const auto status = CommitChunkTxn(store, key, 4096, file.ino, std::nullopt, replacement);
   EXPECT_TRUE(status.ToErrno() == EIO) << status.message();
 }
@@ -1931,7 +1898,7 @@ TEST(RedisMetaTxnTest, CommitChunkReturnsCleanupCandidateWithoutPendingDeleteDep
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk expected{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+  SwordFsChunk expected{.index = 0, .revision = 1, .size = 64};
   std::string encoded;
   ASSERT_TRUE(expected.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(file.ino), "0", encoded);
@@ -1974,7 +1941,7 @@ TEST(RedisMetaTxnTest, CommitChunkDefiniteRejectionReturnsReplacementAsCleanupCa
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk current{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+  SwordFsChunk current{.index = 0, .revision = 1, .size = 64};
   std::string encoded;
   ASSERT_TRUE(current.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(file.ino), "0", encoded);
@@ -2011,7 +1978,7 @@ TEST(RedisMetaTxnTest, CommitChunkRejectsConflictingInitialPublication) {
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk chunk{0, 0, 1, 4096};
+  SwordFsChunk chunk{0, 1, 4096};
   const auto first_status = CommitChunkTxn(store, key, 4096, 9, std::nullopt, chunk);
   ASSERT_TRUE(first_status.ok()) << first_status.message();
 
@@ -2041,7 +2008,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimScansAuthoritativeChunksInsideTransaction) 
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk chunk{0, 0, 1, 4096};
+  SwordFsChunk chunk{0, 1, 4096};
   std::string chunk_data;
   ASSERT_TRUE(chunk.SerializeTo(&chunk_data).ok());
   redis.hset(key.Chunk(file.ino), "0", chunk_data);
@@ -2169,7 +2136,7 @@ TEST(RedisMetaTxnTest, LinkCommitInvalidatesConcurrentReclaimSnapshot) {
   file_attr.nlink = 0;
   ASSERT_TRUE(SeedInode(redis, key, SwordFsInode(kIno, file_attr, kRootInodeId)).ok());
   redis.hset(key.Orphans(), std::to_string(kIno), "1");
-  const SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+  const SwordFsChunk chunk{.index = 0, .revision = 1, .size = 64};
   std::string encoded_chunk;
   ASSERT_TRUE(chunk.SerializeTo(&encoded_chunk).ok());
   redis.hset(key.Chunk(kIno), "0", encoded_chunk);
@@ -2228,7 +2195,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimConvergesAfterAmbiguousExec) {
   file_attr.nlink = 0;
   ASSERT_TRUE(SeedInode(control, key, SwordFsInode(kIno, file_attr, kRootInodeId)).ok());
   control.hset(key.Orphans(), std::to_string(kIno), "1");
-  const SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 7, .size = 128};
+  const SwordFsChunk chunk{.index = 0, .revision = 7, .size = 128};
   std::string encoded_chunk;
   ASSERT_TRUE(chunk.SerializeTo(&encoded_chunk).ok());
   control.hset(key.Chunk(kIno), "0", encoded_chunk);

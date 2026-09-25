@@ -26,7 +26,7 @@ namespace swordfs::metadata {
 std::string MemMetaTxn::PrivateHash(std::string_view hash) const {
   const auto &strategy =
       store_->chunk_strategy_ != nullptr ? *store_->chunk_strategy_ : chunk::DefaultChunkOverwriteStrategy();
-  return std::string(strategy.name()) + "/" + std::string(hash);
+  return ChunkOverwriteMechanismKey(strategy.mechanism()) + "/" + std::string(hash);
 }
 
 Status MemMetaTxn::Read(std::string_view hash, std::string_view field, std::string *value) {
@@ -602,9 +602,8 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
   if (expected.has_value() && replacement.revision <= expected->revision) {
     return Status::InvalidArgument("replacement revision must increase");
   }
-  if (expected.has_value() &&
-      (expected->index != replacement.index || expected->start_offset != replacement.start_offset)) {
-    return Status::InvalidArgument("replacement must preserve chunk index and start offset");
+  if (expected.has_value() && expected->index != replacement.index) {
+    return Status::InvalidArgument("replacement must preserve chunk index");
   }
   const auto &strategy =
       store_->chunk_strategy_ != nullptr ? *store_->chunk_strategy_ : chunk::DefaultChunkOverwriteStrategy();
@@ -624,8 +623,10 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
   if (!inode->IsRegular()) {
     return Status::InvalidArgument("not a regular file");
   }
-  if (replacement.size > std::numeric_limits<uint64_t>::max() - replacement.start_offset) {
-    return Status::InvalidArgument("chunk end offset overflows");
+  uint64_t start_offset = 0;
+  auto status = CalculateChunkStartOffset(replacement.index, store_->chunk_size_, &start_offset);
+  if (!status.ok() || replacement.size > std::numeric_limits<uint64_t>::max() - start_offset) {
+    return Status::InvalidArgument("replacement chunk extent is invalid");
   }
 
   auto &chunk_map = store_->chunks_[ino];
@@ -656,7 +657,7 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
     return Status::NotFound("chunk not found at index " + std::to_string(replacement.index));
   }
 
-  auto status = strategy.index_participant().Publish(*this, ino, expected, replacement, intent);
+  status = strategy.index_participant().Publish(*this, ino, expected, replacement, intent);
   if (!status.ok()) {
     queue_pending_delete(replacement);
     return status;
@@ -669,7 +670,7 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
     chunk_map[replacement.index] = replacement;
   }
 
-  const uint64_t chunk_end = replacement.start_offset + replacement.size;
+  const uint64_t chunk_end = start_offset + replacement.size;
   if (chunk_end > inode->attr.size) {
     inode->attr.size = chunk_end;
   }
@@ -731,7 +732,11 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
   std::vector<PendingDelete> detached;
   for (const auto &[index, head] : cmap) {
     (void)index;
-    if (head.start_offset >= new_size) {
+    // Stored chunks have already passed CommitChunk's derived-offset
+    // validation for this volume-fixed chunk size, so the multiplication is
+    // safe here and truncate does not need a second validation state.
+    const uint64_t start_offset = static_cast<uint64_t>(head.index) * store_->chunk_size_;
+    if (start_offset >= new_size) {
       PendingDelete pending;
       auto status = strategy.FreezePendingDelete(*this, ino, head, store_->chunk_size_, &pending);
       if (!status.ok()) {
@@ -740,7 +745,7 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
       detached.push_back(std::move(pending));
       changes.push_back({head, std::nullopt});
     } else {
-      const uint64_t surviving_size = new_size - head.start_offset;
+      const uint64_t surviving_size = new_size - start_offset;
       if (head.size > surviving_size) {
         auto clamped = head;
         clamped.size = surviving_size;

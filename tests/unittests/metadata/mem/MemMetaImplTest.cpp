@@ -613,7 +613,6 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSizeM
 
   SwordFsChunk first{};
   first.index = 0;
-  first.start_offset = 0;
   first.revision = 1;
   first.size = 128;
   ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
@@ -625,7 +624,6 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSizeM
 
   SwordFsChunk later{};
   later.index = 2;
-  later.start_offset = 2 * kChunkSize;
   later.revision = 2;
   later.size = 64;
   ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, later).ok());
@@ -645,7 +643,7 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSizeM
 FIBER_TEST_F(MemMetaImplTest, LoadChunkViewReturnsPublishedHeadAndWholeObjectSnapshot) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "chunk-view", 0644, &file).ok());
-  const SwordFsChunk head{.index = 0, .start_offset = 0, .revision = 1, .size = 128};
+  const SwordFsChunk head{.index = 0, .revision = 1, .size = 128};
   ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, head).ok());
 
   swordfs::metadata::ChunkView view;
@@ -655,7 +653,7 @@ FIBER_TEST_F(MemMetaImplTest, LoadChunkViewReturnsPublishedHeadAndWholeObjectSna
   EXPECT_TRUE(impl_->LoadChunkView(file.ino, 1, &view).IsNotFound());
   EXPECT_EQ(impl_->LoadChunkView(file.ino, 0, nullptr).ToErrno(), EINVAL);
 
-  const SwordFsChunk replacement{.index = 0, .start_offset = 0, .revision = 2, .size = 128};
+  const SwordFsChunk replacement{.index = 0, .revision = 2, .size = 128};
   const swordfs::metadata::ChunkPublishIntent unexpected{.payload = "not-whole-object"};
   EXPECT_EQ(impl_->CommitChunk(file.ino, head, replacement, unexpected).ToErrno(), EINVAL);
   ASSERT_TRUE(impl_->LoadChunkView(file.ino, 0, &view).ok());
@@ -666,7 +664,7 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempoten
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "replace", 0644, &file).ok());
 
-  SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 128};
+  SwordFsChunk first{.index = 0, .revision = 1, .size = 128};
   ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, first).ok());
 
   SwordFsAttr mode;
@@ -707,7 +705,7 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempoten
 }
 
 FIBER_TEST_F(MemMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) {
-  SwordFsChunk expected{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+  SwordFsChunk expected{.index = 0, .revision = 1, .size = 64};
   auto replacement = expected;
   replacement.revision = 2;
 
@@ -718,10 +716,6 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) {
   auto invalid_replacement = replacement;
   invalid_replacement.revision = swordfs::metadata::kInvalidChunkRevision;
   EXPECT_EQ(impl_->CommitChunk(999999, expected, invalid_replacement).ToErrno(), EINVAL);
-
-  auto non_canonical_replacement = replacement;
-  non_canonical_replacement.start_offset = 1;
-  EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, non_canonical_replacement).ToErrno(), EINVAL);
 
   auto oversized_replacement = replacement;
   oversized_replacement.size = kChunkSize + 1;
@@ -745,28 +739,17 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRejectsInvalidTargetsAndDescriptors) {
   stale_revision.revision = expected.revision;
   EXPECT_EQ(impl_->CommitChunk(empty_file.ino, expected, stale_revision).ToErrno(), EINVAL);
 
-  mismatched = replacement;
-  mismatched.start_offset = 1;
-  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, expected, mismatched).ToErrno(), EINVAL);
-
-  auto overflowing_expected = expected;
-  overflowing_expected.start_offset = 1;
-  auto overflowing = replacement;
-  overflowing.start_offset = 1;
-  overflowing.size = std::numeric_limits<uint64_t>::max();
-  EXPECT_EQ(impl_->CommitChunk(empty_file.ino, overflowing_expected, overflowing).ToErrno(), EINVAL);
-
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "replace-missing-index", 0644, &file).ok());
   ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, expected).ok());
-  SwordFsChunk missing{.index = 1, .start_offset = kChunkSize, .revision = 3, .size = 64};
+  SwordFsChunk missing{.index = 1, .revision = 3, .size = 64};
   auto missing_replacement = missing;
   missing_replacement.revision = 4;
   EXPECT_TRUE(impl_->CommitChunk(file.ino, missing, missing_replacement).IsNotFound());
 }
 
 FIBER_TEST_F(MemMetaImplTest, ChunkMutationsRejectInvalidRevision) {
-  SwordFsChunk invalid{.index = 0, .start_offset = 0, .revision = swordfs::metadata::kInvalidChunkRevision, .size = 64};
+  SwordFsChunk invalid{.index = 0, .revision = swordfs::metadata::kInvalidChunkRevision, .size = 64};
   EXPECT_EQ(impl_->CommitChunk(999999, std::nullopt, invalid).ToErrno(), EINVAL);
 }
 
@@ -971,7 +954,7 @@ FIBER_TEST_F(MemMetaImplTest, UnlinkPublishesOrphanCandidateForLastLink) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
   const InodeID f_ino = file.ino;
-  SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+  SwordFsChunk chunk{.index = 0, .revision = 1, .size = 64};
   ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, chunk).ok());
 
   ASSERT_TRUE(impl_->Unlink(kRoot, "f").ok());
@@ -1021,9 +1004,7 @@ FIBER_TEST_F(MemMetaImplTest, RenameOverwritePublishesOrphanCandidate) {
   ASSERT_TRUE(impl_->Create(kRoot, "src", 0644, &src).ok());
   const InodeID dst_ino = dst.ino;
   const InodeID src_ino = src.ino;
-  ASSERT_TRUE(
-      impl_->CommitChunk(dst_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 32})
-          .ok());
+  ASSERT_TRUE(impl_->CommitChunk(dst_ino, std::nullopt, SwordFsChunk{.index = 0, .revision = 1, .size = 32}).ok());
 
   // Renaming src onto dst overwrites dst exactly like unlink(2) would.
   ASSERT_TRUE(impl_->Rename(kRoot, "src", kRoot, "dst", RenameFlag::kNone).ok());
@@ -1045,9 +1026,7 @@ FIBER_TEST_F(MemMetaImplTest, LinkCancelsOrphanCandidate) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
   const InodeID f_ino = file.ino;
-  ASSERT_TRUE(
-      impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 16})
-          .ok());
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .revision = 1, .size = 16}).ok());
   ASSERT_TRUE(impl_->Unlink(kRoot, "f").ok());
   ASSERT_EQ(OrphanCandidates(), std::vector<InodeID>{f_ino});
 
@@ -1076,13 +1055,8 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFence
   // Publish two chunks out of index order: the frozen work must be complete
   // and ordered, and every key must be the revisioned identity of the
   // authoritative descriptor.
-  ASSERT_TRUE(impl_
-                  ->CommitChunk(f_ino, std::nullopt,
-                                SwordFsChunk{.index = 1, .start_offset = kChunkSize, .revision = 2, .size = 128})
-                  .ok());
-  ASSERT_TRUE(
-      impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 4096})
-          .ok());
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 1, .revision = 2, .size = 128}).ok());
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .revision = 1, .size = 4096}).ok());
   ASSERT_TRUE(impl_->Unlink(kRoot, "f").ok());
 
   std::optional<ReclaimWork> work;
@@ -1125,9 +1099,7 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimUsesCurrentRevisionAfterRewrite) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
   const InodeID f_ino = file.ino;
-  ASSERT_TRUE(
-      impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
-          .ok());
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .revision = 1, .size = 64}).ok());
 
   SwordFsChunk first;
   ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &first).ok());
@@ -1153,9 +1125,7 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimRejectsLinkedInode) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
   const InodeID f_ino = file.ino;
-  ASSERT_TRUE(
-      impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 8})
-          .ok());
+  ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .revision = 1, .size = 8}).ok());
 
   std::optional<ReclaimWork> work;
   EXPECT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
@@ -1189,9 +1159,7 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentReclaimAndLinkAreAtomic) {
     SwordFsInode file;
     ASSERT_TRUE(impl_->Create(kRoot, "race", 0644, &file).ok());
     const InodeID f_ino = file.ino;
-    ASSERT_TRUE(
-        impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
-            .ok());
+    ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .revision = 1, .size = 64}).ok());
     ASSERT_TRUE(impl_->Unlink(kRoot, "race").ok());
 
     std::barrier gate(3);
@@ -1323,9 +1291,7 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchVisitorAbortIsPropagated) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "truncate-pending", 0644, &file).ok());
   const InodeID ino = file.ino;
-  ASSERT_TRUE(
-      impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
-          .ok());
+  ASSERT_TRUE(impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 0, .revision = 1, .size = 64}).ok());
   ASSERT_TRUE(impl_->Truncate(ino, 0).ok());
 
   size_t visits = 0;
@@ -1349,13 +1315,8 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchBoundsVisitsAndValidatesArgument
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "truncate-pending-batch", 0644, &file).ok());
   const InodeID ino = file.ino;
-  ASSERT_TRUE(
-      impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
-          .ok());
-  ASSERT_TRUE(impl_
-                  ->CommitChunk(ino, std::nullopt,
-                                SwordFsChunk{.index = 1, .start_offset = kChunkSize, .revision = 2, .size = 64})
-                  .ok());
+  ASSERT_TRUE(impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 0, .revision = 1, .size = 64}).ok());
+  ASSERT_TRUE(impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 1, .revision = 2, .size = 64}).ok());
   ASSERT_TRUE(impl_->Truncate(ino, 0).ok());
 
   bool has_more = false;
@@ -1396,13 +1357,8 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchMakesProgressWithoutQueueMutatio
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "truncate-pending-progress", 0644, &file).ok());
   const InodeID ino = file.ino;
-  ASSERT_TRUE(
-      impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64})
-          .ok());
-  ASSERT_TRUE(impl_
-                  ->CommitChunk(ino, std::nullopt,
-                                SwordFsChunk{.index = 1, .start_offset = kChunkSize, .revision = 2, .size = 64})
-                  .ok());
+  ASSERT_TRUE(impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 0, .revision = 1, .size = 64}).ok());
+  ASSERT_TRUE(impl_->CommitChunk(ino, std::nullopt, SwordFsChunk{.index = 1, .revision = 2, .size = 64}).ok());
   ASSERT_TRUE(impl_->Truncate(ino, 0).ok());
 
   std::vector<std::string> visited;

@@ -16,9 +16,10 @@ TEST(RedisKeyTest, UsesDatabaseScopedPrefix) {
   EXPECT_EQ(key.Inode(42), "{3:volume}:inode:42");
   EXPECT_EQ(key.Directory(7), "{3:volume}:dir:7");
   EXPECT_EQ(key.Chunk(42), "{3:volume}:chunk:42");
-  EXPECT_EQ(key.PrivateChunkIndex("chunk_slice", "fragments:42"),
-            "{3:volume}:private_chunk_index:chunk_slice:fragments:42");
-  EXPECT_NE(key.PrivateChunkIndex("chunk_slice", "fragments:42"), key.PrivateChunkIndex("redis_cache", "fragments:42"));
+  EXPECT_EQ(key.PrivateChunkIndex(ChunkOverwriteMechanism::kChunkSlice, "fragments:42"),
+            "{3:volume}:private_chunk_index:2:fragments:42");
+  EXPECT_NE(key.PrivateChunkIndex(ChunkOverwriteMechanism::kChunkSlice, "fragments:42"),
+            key.PrivateChunkIndex(ChunkOverwriteMechanism::kRedisCache, "fragments:42"));
   EXPECT_EQ(key.InodeCount(), "{3:volume}:inode_count");
   EXPECT_EQ(key.PendingDeletes(), "{3:volume}:pending_deletes");
 }

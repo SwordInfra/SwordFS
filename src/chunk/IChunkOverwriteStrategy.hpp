@@ -15,6 +15,7 @@
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Reclaim.hpp"
+#include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
 
 namespace folly {
@@ -52,7 +53,7 @@ class IChunkSession {
 class IChunkOverwriteStrategy {
  public:
   virtual ~IChunkOverwriteStrategy() = default;
-  virtual std::string_view name() const = 0;
+  virtual metadata::ChunkOverwriteMechanism mechanism() const = 0;
   virtual uint32_t index_format_version() const = 0;
   virtual std::shared_ptr<IChunkSession> OpenSession(metadata::InodeID ino, metadata::ChunkIndex index) const = 0;
   virtual const metadata::IChunkIndexParticipant &index_participant() const = 0;
@@ -81,7 +82,7 @@ class IChunkOverwriteStrategy {
                                      metadata::IMetaEngine *meta, storage::IDataEngine *data) const = 0;
 };
 
-utils::Status CreateChunkOverwriteStrategy(std::string_view name, uint32_t index_format_version,
+utils::Status CreateChunkOverwriteStrategy(metadata::ChunkOverwriteMechanism mechanism, uint32_t index_format_version,
                                            std::unique_ptr<IChunkOverwriteStrategy> *out);
 const IChunkOverwriteStrategy &DefaultChunkOverwriteStrategy();
 

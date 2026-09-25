@@ -1991,7 +1991,7 @@ class VfsLastLinkCleanupTest : public ::testing::Test {
     swordfs::metadata::SwordFsInode file;
     const auto created = meta_->Create(swordfs::metadata::kRootInodeId, name, 0644, &file);
     EXPECT_TRUE(created.ok()) << created.message();
-    const swordfs::metadata::SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+    const swordfs::metadata::SwordFsChunk chunk{.index = 0, .revision = 1, .size = 64};
     const auto committed = meta_->CommitChunk(file.ino, std::nullopt, chunk);
     EXPECT_TRUE(committed.ok()) << committed.message();
     data_->Seed(swordfs::chunk::FormatChunkObjectKey(file.ino, 0, 1));
