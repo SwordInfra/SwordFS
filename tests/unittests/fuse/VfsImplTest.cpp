@@ -689,6 +689,32 @@ class VfsImplIntegrationTest : public ::testing::Test {
 
 }  // namespace
 
+TEST(FuseSetAttrFieldTest, KillSuidgidProtocolBitMapsToSemanticIntent) {
+  const auto fields = swordfs::metadata::FromFuseSetAttrFields(FUSE_SET_ATTR_KILL_SUID);
+
+  EXPECT_TRUE(swordfs::metadata::HasSetAttrField(fields, swordfs::metadata::SetAttrField::kKillSuidGid));
+}
+
+TEST(VfsHookFactoryTest, InitDisablesUserspaceKillprivAndAtomicOTrunc) {
+  swordfs::volume::VolumeImpl::Initialize();
+
+  struct fuse_conn_info conn{};
+  // libfuse may carry mount-option/default wants into init. SwordFS cannot
+  // safely retain either capability while its public low-level callbacks do
+  // not expose OPEN/WRITE KILL_SUIDGID protocol flags.
+  constexpr uint64_t kUserspaceKillprivCaps =
+      FUSE_CAP_ATOMIC_O_TRUNC | FUSE_CAP_HANDLE_KILLPRIV | FUSE_CAP_HANDLE_KILLPRIV_V2;
+  conn.want = kUserspaceKillprivCaps;
+  conn.want_ext = kUserspaceKillprivCaps;
+  swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &conn);
+
+  EXPECT_EQ(conn.want & kUserspaceKillprivCaps, 0U);
+  EXPECT_EQ(conn.want_ext & kUserspaceKillprivCaps, 0U);
+
+  swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
+  swordfs::volume::VolumeImpl::Initialize();
+}
+
 TEST(VfsHookFactoryTest, InitResetsInodeHandleRegistryBeforeReturning) {
   // This test exercises only mount-local handle-registry reset. It does not
   // perform metadata or data IO, so constructing fake engines would add

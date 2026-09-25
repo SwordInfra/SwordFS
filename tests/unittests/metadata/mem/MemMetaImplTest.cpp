@@ -41,6 +41,7 @@ static constexpr uid_t kOther = 2000;
 static constexpr gid_t kGroup = 100;
 static constexpr gid_t kOtherGroup = 200;
 static constexpr uint64_t kChunkSize = 64ULL * 1024 * 1024;
+static constexpr SetAttrField kKillSuidGidField = SetAttrField::kKillSuidGid;
 
 #ifndef NDEBUG
 TEST(MemMetaImplDomainTest, RuntimeApiRejectsThreadCaller) {
@@ -570,7 +571,7 @@ FIBER_TEST_F(MemMetaImplTest, TruncateNotFound) {
   EXPECT_TRUE(status.IsNotFound());
 }
 
-FIBER_TEST_F(MemMetaImplTest, TruncateUpdatesSizeAndClearsSuidSgid) {
+FIBER_TEST_F(MemMetaImplTest, TruncateUpdatesSizeWithoutImplicitSetidClearing) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
 
@@ -584,8 +585,8 @@ FIBER_TEST_F(MemMetaImplTest, TruncateUpdatesSizeAndClearsSuidSgid) {
   SwordFsInode inode;
   ASSERT_TRUE(impl_->GetInode(file.ino, &inode).ok());
   EXPECT_EQ(inode.attr.size, 1024U);
-  EXPECT_EQ(inode.attr.mode & S_ISUID, 0u);
-  EXPECT_EQ(inode.attr.mode & S_ISGID, 0u);
+  EXPECT_NE(inode.attr.mode & S_ISUID, 0u);
+  EXPECT_NE(inode.attr.mode & S_ISGID, 0u);
 }
 
 FIBER_TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
@@ -608,7 +609,7 @@ FIBER_TEST_F(MemMetaImplTest, TruncateSameSizeKeepsSuidSgid) {
 // SetAttr size change → Truncate
 // ────────────────────────────────────────────────────────────────
 
-FIBER_TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
+FIBER_TEST_F(MemMetaImplTest, SetAttrSizeChangeDoesNotInventKillpriv) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
 
@@ -621,8 +622,93 @@ FIBER_TEST_F(MemMetaImplTest, SetAttrSizeChangeDelegatesToTruncate) {
   SwordFsInode out;
   ASSERT_TRUE(impl_->SetAttr(file.ino, attr, SetAttrField::kSize, &out).ok());
   EXPECT_EQ(out.attr.size, 2048);
+  EXPECT_NE(out.attr.mode & S_ISUID, 0u);
+  EXPECT_NE(out.attr.mode & S_ISGID, 0u);
+}
+
+FIBER_TEST_F(MemMetaImplTest, SetAttrOwnerChangeDoesNotInventKillpriv) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "owner", 0644, &file).ok());
+
+  SwordFsAttr mode;
+  mode.mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, mode, SetAttrField::kMode, nullptr).ok());
+
+  SwordFsAttr owner;
+  owner.uid = 1234;
+  owner.gid = 5678;
+  SwordFsInode out;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, owner, SetAttrField::kUid | SetAttrField::kGid, &out).ok());
+  EXPECT_NE(out.attr.mode & S_ISUID, 0u);
+  EXPECT_NE(out.attr.mode & S_ISGID, 0u);
+}
+
+FIBER_TEST_F(MemMetaImplTest, SetAttrExplicitKillprivPreservesNonExecutableSgid) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "kill-no-gx", 0644, &file).ok());
+
+  SwordFsAttr mode;
+  mode.mode = S_IFREG | 0644 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, mode, SetAttrField::kMode, nullptr).ok());
+
+  SwordFsInode out;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, SwordFsAttr{}, kKillSuidGidField, &out).ok());
+  EXPECT_EQ(out.attr.mode & S_ISUID, 0u);
+  EXPECT_NE(out.attr.mode & S_ISGID, 0u);
+}
+
+FIBER_TEST_F(MemMetaImplTest, SetAttrExplicitKillprivClearsExecutableSgid) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "kill-gx", 0654, &file).ok());
+
+  SwordFsAttr mode;
+  mode.mode = S_IFREG | 0654 | S_ISUID | S_ISGID;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, mode, SetAttrField::kMode, nullptr).ok());
+
+  SwordFsInode out;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, SwordFsAttr{}, kKillSuidGidField, &out).ok());
   EXPECT_EQ(out.attr.mode & S_ISUID, 0u);
   EXPECT_EQ(out.attr.mode & S_ISGID, 0u);
+}
+
+FIBER_TEST_F(MemMetaImplTest, SetAttrExplicitKillprivLeavesOrdinaryModeUnchanged) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "kill-no-setid", 0644, &file).ok());
+
+  SwordFsInode out;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, SwordFsAttr{}, kKillSuidGidField, &out).ok());
+  EXPECT_EQ(out.attr.mode, file.attr.mode);
+}
+
+FIBER_TEST_F(MemMetaImplTest, SetAttrCombinedModeOwnerAndKillprivUsesFinalRequestedMode) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "combined-kill", 0600, &file).ok());
+
+  SwordFsAttr requested;
+  requested.mode = S_IFREG | 0654 | S_ISUID | S_ISGID;
+  requested.uid = 1234;
+  requested.gid = 5678;
+  SwordFsInode out;
+  ASSERT_TRUE(impl_
+                  ->SetAttr(file.ino, requested,
+                            SetAttrField::kMode | SetAttrField::kUid | SetAttrField::kGid | kKillSuidGidField, &out)
+                  .ok());
+  EXPECT_EQ(out.attr.uid, requested.uid);
+  EXPECT_EQ(out.attr.gid, requested.gid);
+  EXPECT_EQ(out.attr.mode & 0777, 0654U);
+  EXPECT_EQ(out.attr.mode & S_ISUID, 0u);
+  EXPECT_EQ(out.attr.mode & S_ISGID, 0u);
+}
+
+FIBER_TEST_F(MemMetaImplTest, SetAttrLegacyExplicitModeIsNotSecondGuessed) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "legacy-mode", 0644, &file).ok());
+
+  SwordFsAttr requested;
+  requested.mode = S_IFREG | 0644 | S_ISGID;
+  SwordFsInode out;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kMode, &out).ok());
+  EXPECT_EQ(out.attr.mode, static_cast<uint32_t>(requested.mode));
 }
 
 FIBER_TEST_F(MemMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSizeMonotonically) {
@@ -704,7 +790,7 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempoten
   SwordFsInode inode;
   ASSERT_TRUE(impl_->GetInode(file.ino, &inode).ok());
   EXPECT_EQ(inode.attr.size, 128U);
-  EXPECT_EQ(inode.attr.mode & (S_ISUID | S_ISGID), 0U);
+  EXPECT_EQ(inode.attr.mode & (S_ISUID | S_ISGID), static_cast<uint32_t>(S_ISUID | S_ISGID));
 
   auto stale_replacement = replacement;
   stale_replacement.revision = 3;

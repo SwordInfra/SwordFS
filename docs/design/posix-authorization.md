@@ -146,6 +146,46 @@ persistent/data-state changes. It should not add a second uid/gid permission
 decision solely because FUSE SETATTR contains an inode number rather than a
 pathname.
 
+### setid / killpriv boundary
+
+Linux VFS owns the decision whether a metadata or data mutation must clear
+set-user-ID/set-group-ID privilege. SwordFS must not reconstruct that decision
+from uid/gid changes, size changes, request credentials, supplementary groups,
+or capability guesses.
+
+When FUSE delivers an explicit kill-suid/sgid SETATTR signal, SwordFS applies
+one mode transformation to authoritative metadata:
+
+```text
+clear S_ISUID
+clear S_ISGID only when S_IXGRP is set
+```
+
+This distinction matters because SGID on a non-group-executable regular file
+is not the executable setgid privilege bit and must be preserved.
+
+The current libfuse 3.18.2 public low-level API exposes the SETATTR kill bit,
+but does not expose the protocol's `FUSE_OPEN_KILL_SUIDGID` or
+`FUSE_WRITE_KILL_SUIDGID` bits to OPEN/CREATE/WRITE callbacks. Therefore
+SwordFS must not advertise userspace killpriv handling through either
+`FUSE_CAP_HANDLE_KILLPRIV` or `FUSE_CAP_HANDLE_KILLPRIV_V2`. Until the callback
+API can carry all V2 signals, SwordFS uses the kernel's legacy killpriv
+path:
+
+- leave both `FUSE_CAP_HANDLE_KILLPRIV` and
+  `FUSE_CAP_HANDLE_KILLPRIV_V2` disabled;
+- leave `FUSE_CAP_ATOMIC_O_TRUNC` disabled so truncate privilege changes are
+  expressed through kernel SETATTR/MODE handling rather than hidden inside
+  OPEN;
+- treat metadata `Truncate()` as size/chunk mutation only;
+- treat WRITE and `CommitChunk()` as data/publication operations only, never as
+  delayed privilege-decision boundaries.
+
+The kernel's explicit MODE adjustment in the legacy path remains authoritative
+and is applied like any other authorized SETATTR. A future switch to V2 is
+valid only when SwordFS can consume SETATTR, OPEN/O_TRUNC, and WRITE kill
+signals consistently before acknowledging the corresponding request.
+
 Live file-size composition remains governed by `live-inode-state.md`; truncate
 replaces the logical size rather than behaving as a write high-water mark.
 

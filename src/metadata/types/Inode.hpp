@@ -38,7 +38,7 @@ struct SwordFsAttr {
   SwordFsAttr(uint64_t ino, uint32_t mode);
   SwordFsAttr(uint64_t ino, uint32_t mode, uint64_t uid, uint64_t gid);
 
-  void KillSUID();
+  void ClearSetidForKillPriv();
 
   void ToPosixStat(struct stat *st) const;
   static SwordFsAttr FromPosixStat(const struct stat &st);

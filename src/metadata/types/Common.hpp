@@ -41,6 +41,9 @@ enum class SetAttrField : uint32_t {
   kAtimeNow = 1u << 7,
   kMtimeNow = 1u << 8,
   kCtime = 1u << 10,
+  // FATTR_KILL_SUIDGID is carried in the low-level FUSE setattr mask as bit 11.
+  // This is an explicit kernel policy decision, not an ordinary mode value.
+  kKillSuidGid = 1u << 11,
 };
 
 enum class RenameFlag : uint32_t {
