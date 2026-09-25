@@ -41,15 +41,15 @@ Latest run: **PASS**
 
 ## Baseline metadata
 
-- SwordFS commit: `d7a44b696245d3b950a84af420fab66d341e64e8`
+- SwordFS commit: `4ca168d27b2cf47cc044df3561470fb3b5e6d613`
 - pjdfstest commit: `85a8aea9e685999ef0540392fd80535f873d7ff7`
 - kernel: `6.17.0-1022-azure`
 - libfuse: `fusermount3 version: 3.18.2`
 - os: `Linux-6.17.0-1022-azure-x86_64-with-glibc2.43`
 - runner: `Linux`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36084379987
-Recorded at: 2026-09-25T02:07:20+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36089395252
+Recorded at: 2026-09-25T03:24:09+00:00
 
 ## Historical main-branch trend
 
@@ -61,4 +61,4 @@ Recorded at: 2026-09-25T02:07:20+00:00
 | 2026-09-21T08:03:26+00:00 | `a2eeba4b9d3c` | PASS | 59.05% | 100.00% | 100.00% |
 | 2026-09-21T09:39:49+00:00 | `7bc62e977b35` | PASS | 100.00% | 100.00% | 100.00% |
 
-Last fully healthy baseline: `d7a44b696245d3b950a84af420fab66d341e64e8`
+Last fully healthy baseline: `4ca168d27b2cf47cc044df3561470fb3b5e6d613`
