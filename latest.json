@@ -9,62 +9,36 @@
     "libfuse": "fusermount3 version: 3.18.2",
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
-    "runner": "GitHub Actions (6 fstests shards)",
-    "swordfs_commit": "0869664d6f63735f272a7c83c8887f485a09287d"
+    "runner": "GitHub Actions (9 fstests shards)",
+    "swordfs_commit": "d7a44b696245d3b950a84af420fab66d341e64e8"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
-      "DEFERRED_CI": 3,
       "ENVIRONMENT": 7,
       "KNOWN_SEMANTIC_DEFECT": 6,
-      "KNOWN_UNSUPPORTED": 141,
-      "PASS": 106,
+      "KNOWN_UNSUPPORTED": 142,
+      "PASS": 108,
       "UPSTREAM_NOT_APPLICABLE": 382
     },
-    "classified_count": 642,
-    "classified_percent": 99.53,
-    "deferred_count": 3,
+    "classified_count": 645,
+    "classified_percent": 100.0,
+    "deferred_count": 0,
     "executed_classified_percent": 100.0,
-    "executed_count": 642,
-    "known_gap_count": 536,
-    "overall_support_percent": 16.43,
+    "executed_count": 645,
+    "known_gap_count": 537,
+    "overall_support_percent": 16.74,
     "raw_results": {
-      "DEFERRED": 3,
-      "FAIL": 21,
+      "FAIL": 22,
       "NOTRUN": 515,
-      "PASS": 106
+      "PASS": 108
     },
     "selected_count": 645,
-    "supported_count": 106,
+    "supported_count": 108,
     "supported_gate_percent": 100.0,
-    "supported_pass_count": 106
+    "supported_pass_count": 108
   },
   "tests": [
-    {
-      "classification": "DEFERRED_CI",
-      "issue": "",
-      "message": "",
-      "reason": "Tracked by #248; observed by ZeroFS to take about 16 minutes on FUSE, so O_APPEND correctness remains unclaimed until moved into bounded executed coverage.",
-      "result": "DEFERRED",
-      "test": "generic/069"
-    },
-    {
-      "classification": "DEFERRED_CI",
-      "issue": "",
-      "message": "",
-      "reason": "Tracked by #248; FUSE rewinddir/readdir case reported by ZeroFS/fuser as CI-prohibitive, so defer from PR gate without counting it as supported.",
-      "result": "DEFERRED",
-      "test": "generic/471"
-    },
-    {
-      "classification": "DEFERRED_CI",
-      "issue": "",
-      "message": "",
-      "reason": "Tracked by #248; OFD-lock test can hang in the blocking-lock path on FUSE, so defer until lock behavior is exercised in bounded executed coverage.",
-      "result": "DEFERRED",
-      "test": "generic/478"
-    },
     {
       "classification": "PASS",
       "issue": "",
@@ -472,6 +446,14 @@
       "reason": "The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.",
       "result": "NOTRUN",
       "test": "generic/067"
+    },
+    {
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
+      "test": "generic/069"
     },
     {
       "classification": "KNOWN_UNSUPPORTED",
@@ -2994,6 +2976,14 @@
       "test": "generic/470"
     },
     {
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
+      "test": "generic/471"
+    },
+    {
       "classification": "UPSTREAM_NOT_APPLICABLE",
       "issue": "-",
       "message": "swapfiles are not supported",
@@ -3016,6 +3006,14 @@
       "reason": "SwordFS does not enable FUSE export/open-by-handle support; tracked by #255.",
       "result": "FAIL",
       "test": "generic/477"
+    },
+    {
+      "classification": "KNOWN_UNSUPPORTED",
+      "issue": "#255",
+      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/478.out.bad)",
+      "reason": "SwordFS POSIX/OFD setlk/getlk FUSE hooks return ENOSYS; tracked by #255.",
+      "result": "FAIL",
+      "test": "generic/478"
     },
     {
       "classification": "UPSTREAM_NOT_APPLICABLE",
