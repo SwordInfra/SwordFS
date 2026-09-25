@@ -18,6 +18,7 @@
 #include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
 
+using swordfs::metadata::ChunkOverwriteMechanism;
 using swordfs::metadata::SwordFsVolume;
 using swordfs::utils::Status;
 
@@ -74,24 +75,44 @@ TEST(SwordFsVolumeTest, SerializeToAndParseFromRoundTrip) {
   EXPECT_EQ(parsed.bucket, original.bucket);
   EXPECT_EQ(parsed.region, original.region);
   EXPECT_EQ(parsed.chunk_size, original.chunk_size);
-  EXPECT_EQ(parsed.chunk_overwrite_strategy, "whole_object");
+  EXPECT_EQ(parsed.chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
   EXPECT_EQ(parsed.chunk_index_format_version, 1U);
 }
 
-TEST(SwordFsVolumeTest, PersistsStrategyAndRejectsMissingOrZeroVersion) {
+TEST(SwordFsVolumeTest, PersistsMechanismAndRejectsUnknownOrZeroVersion) {
   SwordFsVolume volume = MakeVolume();
-  volume.chunk_overwrite_strategy = "redis_cache";
+  volume.chunk_overwrite_mechanism = ChunkOverwriteMechanism::kRedisCache;
   volume.chunk_index_format_version = 7;
   SwordFsVolume parsed;
   ASSERT_TRUE(parsed.ParseFrom(volume.SerializeTo()).ok());
-  EXPECT_EQ(parsed.chunk_overwrite_strategy, "redis_cache");
+  EXPECT_EQ(parsed.chunk_overwrite_mechanism, ChunkOverwriteMechanism::kRedisCache);
   EXPECT_EQ(parsed.chunk_index_format_version, 7U);
 
-  volume.chunk_overwrite_strategy.clear();
+  volume.chunk_overwrite_mechanism = static_cast<ChunkOverwriteMechanism>(99);
   EXPECT_TRUE(parsed.ParseFrom(volume.SerializeTo()).ToErrno() == EIO);
-  volume.chunk_overwrite_strategy = "whole_object";
+  volume.chunk_overwrite_mechanism = ChunkOverwriteMechanism::kWholeObject;
   volume.chunk_index_format_version = 0;
   EXPECT_TRUE(parsed.ParseFrom(volume.SerializeTo()).ToErrno() == EIO);
+}
+
+TEST(SwordFsVolumeTest, ParsesCanonicalMechanismNames) {
+  ChunkOverwriteMechanism mechanism;
+  EXPECT_TRUE(swordfs::metadata::ParseChunkOverwriteMechanism("whole_object", &mechanism).ok());
+  EXPECT_EQ(mechanism, ChunkOverwriteMechanism::kWholeObject);
+  EXPECT_TRUE(swordfs::metadata::ParseChunkOverwriteMechanism("chunk_slice", &mechanism).ok());
+  EXPECT_EQ(mechanism, ChunkOverwriteMechanism::kChunkSlice);
+  EXPECT_TRUE(swordfs::metadata::ParseChunkOverwriteMechanism("redis_cache", &mechanism).ok());
+  EXPECT_EQ(mechanism, ChunkOverwriteMechanism::kRedisCache);
+  EXPECT_EQ(swordfs::metadata::ParseChunkOverwriteMechanism("unknown", &mechanism).ToErrno(), EINVAL);
+  EXPECT_EQ(swordfs::metadata::ParseChunkOverwriteMechanism("whole_object", nullptr).ToErrno(), EINVAL);
+
+  EXPECT_EQ(swordfs::metadata::ChunkOverwriteMechanismName(ChunkOverwriteMechanism::kWholeObject), "whole_object");
+  EXPECT_EQ(swordfs::metadata::ChunkOverwriteMechanismName(ChunkOverwriteMechanism::kChunkSlice), "chunk_slice");
+  EXPECT_EQ(swordfs::metadata::ChunkOverwriteMechanismName(ChunkOverwriteMechanism::kRedisCache), "redis_cache");
+  EXPECT_TRUE(swordfs::metadata::ChunkOverwriteMechanismName(static_cast<ChunkOverwriteMechanism>(99)).empty());
+  EXPECT_EQ(swordfs::metadata::ChunkOverwriteMechanismKey(ChunkOverwriteMechanism::kWholeObject), "1");
+  EXPECT_EQ(swordfs::metadata::ChunkOverwriteMechanismKey(ChunkOverwriteMechanism::kChunkSlice), "2");
+  EXPECT_EQ(swordfs::metadata::ChunkOverwriteMechanismKey(ChunkOverwriteMechanism::kRedisCache), "3");
 }
 
 TEST(SwordFsVolumeTest, ParseFromRejectsMalformedData) {

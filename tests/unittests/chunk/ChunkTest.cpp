@@ -23,6 +23,7 @@
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/Chunk.hpp"
 #include "chunk/ChunkObjectKey.hpp"
+#include "chunk/IChunkOverwriteStrategy.hpp"
 #include "chunk/WriteBuf.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
@@ -242,7 +243,7 @@ TEST(ChunkObjectKeyTest, IncludesInodeIndexAndRevision) {
 
 TEST(SwordFsChunkDescriptorTest, ValidatesCanonicalFixedSizeIdentity) {
   constexpr uint64_t kChunkSize = 64;
-  const SwordFsChunk valid{.index = 1, .start_offset = kChunkSize, .revision = 1, .size = kChunkSize};
+  const SwordFsChunk valid{.index = 1, .revision = 1, .size = kChunkSize};
   EXPECT_TRUE(valid.IsValidForChunkSize(kChunkSize));
 
   auto invalid = valid;
@@ -260,12 +261,34 @@ TEST(SwordFsChunkDescriptorTest, ValidatesCanonicalFixedSizeIdentity) {
   invalid.index = 2;
   EXPECT_FALSE(invalid.IsValidForChunkSize(std::numeric_limits<uint64_t>::max()));
 
-  invalid = valid;
-  invalid.start_offset = 0;
-  EXPECT_FALSE(invalid.IsValidForChunkSize(kChunkSize));
+  uint64_t start_offset = 0;
+  EXPECT_TRUE(swordfs::metadata::CalculateChunkStartOffset(1, kChunkSize, &start_offset).ok());
+  EXPECT_EQ(start_offset, kChunkSize);
+  EXPECT_FALSE(
+      swordfs::metadata::CalculateChunkStartOffset(2, std::numeric_limits<uint64_t>::max(), &start_offset).ok());
+  EXPECT_EQ(swordfs::metadata::CalculateChunkStartOffset(0, kChunkSize, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(swordfs::metadata::CalculateChunkStartOffset(0, 0, &start_offset).ToErrno(), EINVAL);
+}
 
-  invalid = SwordFsChunk{.index = 1, .start_offset = std::numeric_limits<uint64_t>::max(), .revision = 1, .size = 1};
-  EXPECT_FALSE(invalid.IsValidForChunkSize(std::numeric_limits<uint64_t>::max()));
+TEST(ChunkOverwriteStrategyTest, FactoryUsesTypedMechanismSelection) {
+  using swordfs::metadata::ChunkOverwriteMechanism;
+
+  std::unique_ptr<swordfs::chunk::IChunkOverwriteStrategy> strategy;
+  auto status = swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, 1, &strategy);
+  ASSERT_TRUE(status.ok()) << status.message();
+  ASSERT_NE(strategy, nullptr);
+  EXPECT_EQ(strategy->mechanism(), ChunkOverwriteMechanism::kWholeObject);
+
+  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kChunkSlice, 1, &strategy).ToErrno(),
+            ENOSYS);
+  EXPECT_EQ(strategy, nullptr);
+  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, 2, &strategy).ToErrno(),
+            ENOSYS);
+  EXPECT_EQ(
+      swordfs::chunk::CreateChunkOverwriteStrategy(static_cast<ChunkOverwriteMechanism>(99), 1, &strategy).ToErrno(),
+      ENOSYS);
+  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, 1, nullptr).ToErrno(),
+            EINVAL);
 }
 
 // Regression: an uninitialised max_chunk_size_ used to make chunk

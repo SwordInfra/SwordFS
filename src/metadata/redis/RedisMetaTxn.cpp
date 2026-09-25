@@ -8,7 +8,6 @@
 #include <sys/stat.h>
 
 #include <algorithm>
-#include <limits>
 #include <map>
 #include <string>
 #include <utility>
@@ -29,7 +28,7 @@ RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t
 }
 
 std::string RedisMetaTxn::PrivateHash(std::string_view hash) const {
-  return key_.PrivateChunkIndex(strategy_->name(), hash);
+  return key_.PrivateChunkIndex(strategy_->mechanism(), hash);
 }
 
 utils::Status RedisMetaTxn::Read(std::string_view hash, std::string_view field, std::string *value) {
@@ -895,13 +894,13 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
   if (expected.has_value() && replacement.revision <= expected->revision) {
     return utils::Status::InvalidArgument("replacement revision must increase");
   }
-  if (expected.has_value() &&
-      (expected->index != replacement.index || expected->start_offset != replacement.start_offset)) {
-    return utils::Status::InvalidArgument("replacement must preserve chunk index and start offset");
+  if (expected.has_value() && expected->index != replacement.index) {
+    return utils::Status::InvalidArgument("replacement must preserve chunk index");
   }
-  if (replacement.size > std::numeric_limits<uint64_t>::max() - replacement.start_offset) {
-    return utils::Status::InvalidArgument("chunk end offset overflows");
-  }
+  // IsValidForChunkSize() above already proves both multiplication and extent
+  // arithmetic are safe, so do not carry a second unreachable validation
+  // branch inside the transaction.
+  const uint64_t start_offset = static_cast<uint64_t>(replacement.index) * chunk_size_;
 
   auto reject_publication = [&](utils::Status rejection) -> utils::Status {
     // A known logical rejection proves this uploaded replacement is not the
@@ -983,7 +982,7 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
   // command fails at execution time. Re-applying the inode side effects when
   // the replacement descriptor is already present lets a retry converge from
   // a partial EXEC where SetChunk succeeded but SetInode did not.
-  const uint64_t chunk_end = replacement.start_offset + replacement.size;
+  const uint64_t chunk_end = start_offset + replacement.size;
   if (chunk_end > inode.attr.size) {
     inode.attr.size = chunk_end;
   }
@@ -1047,7 +1046,10 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
   std::vector<ChunkIndexChange> changes;
   for (const auto &[field, head] : chunks) {
     (void)field;
-    if (head.start_offset >= new_size) {
+    // ScanChunks() validated every descriptor against this volume-fixed chunk
+    // size, so the derived offset cannot overflow here.
+    const uint64_t start_offset = static_cast<uint64_t>(head.index) * chunk_size_;
+    if (start_offset >= new_size) {
       if (detached_chunks != nullptr) {
         PendingDelete pending;
         status = strategy_->FreezePendingDelete(*this, ino, head, chunk_size_, &pending);
@@ -1058,7 +1060,7 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
       }
       changes.push_back({head, std::nullopt});
     } else {
-      const uint64_t surviving_size = new_size - head.start_offset;
+      const uint64_t surviving_size = new_size - start_offset;
       if (head.size > surviving_size) {
         auto clamped = head;
         clamped.size = surviving_size;

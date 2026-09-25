@@ -20,6 +20,7 @@
 #include "storage/IDataEngine.hpp"
 #include "volume/VolumeImpl.hpp"
 
+using swordfs::metadata::ChunkOverwriteMechanism;
 using swordfs::metadata::SwordFsVolume;
 using swordfs::metadata::mem::VolumeFile;
 using swordfs::utils::Status;
@@ -75,7 +76,7 @@ TEST(VolumeImplConfigAdapterTest, CreateFromUsesParsedFormatConfiguration) {
       "--chunk-size",
       "4096",
       "--chunk-overwrite-strategy",
-      "unsupported-strategy",
+      "redis_cache",
   });
 
   VolumeImpl volume;
@@ -85,7 +86,7 @@ TEST(VolumeImplConfigAdapterTest, CreateFromUsesParsedFormatConfiguration) {
   EXPECT_EQ(volume.config().bucket, "swordfs-test-data://endpoint/bucket");
   EXPECT_EQ(volume.config().region, "adapter-region");
   EXPECT_EQ(volume.config().chunk_size, 4096U);
-  EXPECT_EQ(volume.config().chunk_overwrite_strategy, "unsupported-strategy");
+  EXPECT_EQ(volume.config().chunk_overwrite_mechanism, ChunkOverwriteMechanism::kRedisCache);
 }
 
 TEST(VolumeImplConfigAdapterTest, LoadFromUsesParsedMountRuntimeConfiguration) {
@@ -117,6 +118,25 @@ TEST(VolumeImplConfigAdapterTest, LoadFromUsesParsedMountRuntimeConfiguration) {
   EXPECT_EQ(swordfs::test::pending_data_options.location, "opaque://endpoint/bucket");
   EXPECT_EQ(swordfs::test::pending_data_options.region, "persisted-region");
   EXPECT_EQ(swordfs::test::pending_data_options.worker_count, 7U);
+}
+
+TEST(VolumeImplConfigAdapterTest, CreateFromRejectsUnknownMechanismName) {
+  swordfs::test::RegisterTestVolumeEngines();
+  ParseConfig({
+      "swordfs",
+      "format",
+      "--volume",
+      "unknownmechanism",
+      "--meta",
+      "swordfs-test-meta://local",
+      "--bucket",
+      "swordfs-test-data://endpoint/bucket",
+      "--chunk-overwrite-strategy",
+      "unknown-mechanism",
+  });
+
+  VolumeImpl volume;
+  EXPECT_EQ(volume.CreateFrom(swordfs::config::ConfigCenter::Instance()).ToErrno(), EINVAL);
 }
 
 class VolumeImplTest : public ::testing::Test {
@@ -152,13 +172,13 @@ class VolumeImplTest : public ::testing::Test {
 
   FormatOptions makeFormatOptions(const std::string &meta_url, const std::string &vol_name = "testvol",
                                   const std::string &bucket_url = "", const std::string &storage_region = "",
-                                  const std::string &strategy = "whole_object") const {
+                                  ChunkOverwriteMechanism mechanism = ChunkOverwriteMechanism::kWholeObject) const {
     return FormatOptions{
         .name = makeVolumeName(vol_name),
         .meta_url = meta_url,
         .bucket = bucket_url,
         .region = storage_region,
-        .chunk_overwrite_strategy = strategy,
+        .chunk_overwrite_mechanism = mechanism,
     };
   }
 
@@ -187,7 +207,7 @@ TEST_F(VolumeImplTest, CreateFromSucceeds) {
   VolumeImpl vol;
   const auto status = vol.CreateFrom(options);
   EXPECT_TRUE(status.ok()) << status.message();
-  EXPECT_EQ(vol.config().chunk_overwrite_strategy, "whole_object");
+  EXPECT_EQ(vol.config().chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
   EXPECT_EQ(vol.config().chunk_index_format_version, 1U);
 }
 
@@ -210,7 +230,8 @@ TEST_F(VolumeImplTest, CreateFromRejectsInvalidMetadataUrl) {
 }
 
 TEST_F(VolumeImplTest, FormatRejectsUnimplementedStrategy) {
-  auto options = makeFormatOptions("memory://local", "testvol", "s3://endpoint.example.com/bucket", "", "redis_cache");
+  auto options = makeFormatOptions("memory://local", "testvol", "s3://endpoint.example.com/bucket", "",
+                                   ChunkOverwriteMechanism::kRedisCache);
   VolumeImpl vol;
   const auto status = vol.CreateFrom(options);
   EXPECT_TRUE(status.ToErrno() == ENOSYS) << status.message();
@@ -227,7 +248,7 @@ TEST_F(VolumeImplTest, MountUsesPersistedStrategyAndRejectsUnsupportedVersion) {
   auto mount_options = makeMountOptions("memory://local");
   ASSERT_TRUE(mounted.LoadFrom(mount_options).ok());
   ASSERT_NE(mounted.chunk_overwrite_strategy(), nullptr);
-  EXPECT_EQ(mounted.config().chunk_overwrite_strategy, "whole_object");
+  EXPECT_EQ(mounted.config().chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
 
   SwordFsVolume stored = mounted.config();
   stored.chunk_index_format_version = 2;

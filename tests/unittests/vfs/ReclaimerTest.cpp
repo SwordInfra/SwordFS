@@ -229,7 +229,7 @@ class ReclaimerTest : public ::testing::Test {
     SwordFsInode file;
     auto status = meta_->Create(kRootInodeId, name, 0644, &file);
     EXPECT_TRUE(status.ok()) << status.message();
-    SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = revision, .size = 64};
+    SwordFsChunk chunk{.index = 0, .revision = revision, .size = 64};
     status = meta_->CommitChunk(file.ino, std::nullopt, chunk);
     EXPECT_TRUE(status.ok()) << status.message();
     data_->Seed(chunk::FormatChunkObjectKey(file.ino, 0, revision));
@@ -332,7 +332,7 @@ FIBER_TEST_F(ReclaimerTest, FrozenWorkDoesNotAuthorizeDeletingALiveInode) {
 
 TEST_F(ReclaimerTest, PendingReclaimContinuesDirectlyToDeletion) {
   constexpr InodeID kFileIno = 42;
-  const SwordFsChunk head{.index = 0, .start_offset = 0, .revision = 7, .size = 64};
+  const SwordFsChunk head{.index = 0, .revision = 7, .size = 64};
   metadata::ReclaimWork frozen;
   ASSERT_TRUE(chunk::FreezeWholeObjectReclaim(kFileIno, {head}, 0, &frozen).ok());
   auto replacement = std::make_unique<swordfs::test::ConfiguredMetaEngine<PendingReclaimMetaEngine>>(frozen);
@@ -432,7 +432,7 @@ FIBER_TEST_F(ReclaimerTest, RewriteCleanupDeletesOnlySupersededRevision) {
 
 FIBER_TEST_F(ReclaimerTest, PendingDeleteCandidateDoesNotDeleteStillAuthoritativeObject) {
   constexpr InodeID kIno = 42;
-  SwordFsChunk descriptor{.index = 0, .start_offset = 0, .revision = 7, .size = 64};
+  SwordFsChunk descriptor{.index = 0, .revision = 7, .size = 64};
   const auto key = chunk::FormatChunkObjectKey(kIno, descriptor.index, descriptor.revision);
   metadata::PendingDelete pending = MakePendingDelete(kIno, descriptor);
 
@@ -471,7 +471,7 @@ FIBER_TEST_F(ReclaimerTest, PendingDeleteCandidateDoesNotDeleteStillAuthoritativ
 
 FIBER_TEST_F(ReclaimerTest, PendingDeleteFailsClosedWhenAuthoritativeChunkLookupFails) {
   constexpr InodeID kIno = 42;
-  SwordFsChunk descriptor{.index = 0, .start_offset = 0, .revision = 7, .size = 64};
+  SwordFsChunk descriptor{.index = 0, .revision = 7, .size = 64};
   const auto key = chunk::FormatChunkObjectKey(kIno, descriptor.index, descriptor.revision);
   metadata::PendingDelete pending = MakePendingDelete(kIno, descriptor);
 
@@ -498,7 +498,7 @@ FIBER_TEST_F(ReclaimerTest, PendingDeleteFailsClosedWhenAuthoritativeChunkLookup
 
 FIBER_TEST_F(ReclaimerTest, PendingDeleteRemovesSupersededRevisionWhileNewRevisionStaysAuthoritative) {
   constexpr InodeID kIno = 42;
-  SwordFsChunk old_descriptor{.index = 0, .start_offset = 0, .revision = 7, .size = 64};
+  SwordFsChunk old_descriptor{.index = 0, .revision = 7, .size = 64};
   const auto old_key = chunk::FormatChunkObjectKey(kIno, old_descriptor.index, old_descriptor.revision);
   metadata::PendingDelete pending = MakePendingDelete(kIno, old_descriptor);
 
@@ -506,7 +506,7 @@ FIBER_TEST_F(ReclaimerTest, PendingDeleteRemovesSupersededRevisionWhileNewRevisi
   swordfs::test::RunInTestThreadFromFiber([&] {
     auto staged_meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<StagedIntentMetaEngine>>(pending);
     staged = staged_meta.get();
-    staged->SetCurrent(SwordFsChunk{.index = 0, .start_offset = 0, .revision = 8, .size = 64});
+    staged->SetCurrent(SwordFsChunk{.index = 0, .revision = 8, .size = 64});
     auto data = std::make_unique<RecordingDataEngine>();
     data_ = data.get();
     SwordFsVolume config;
@@ -904,7 +904,7 @@ FIBER_TEST_F(ReclaimerTest, WorkerSelfWakesUntilLargePendingDeleteBacklogIsDrain
   ASSERT_TRUE(meta_->Create(kRootInodeId, "pending-delete-backlog", 0644, &file).ok());
   for (size_t i = 0; i < kChunkCount; ++i) {
     SwordFsChunk chunk{.index = static_cast<metadata::ChunkIndex>(i),
-                       .start_offset = static_cast<uint64_t>(i) * chunk_size,
+
                        .revision = i + 1,
                        .size = 64};
     ASSERT_TRUE(meta_->CommitChunk(file.ino, std::nullopt, chunk).ok());

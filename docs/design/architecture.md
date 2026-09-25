@@ -417,9 +417,12 @@ provisional implementation detail rather than a coherence guarantee.
 
 Files are divided into fixed-size logical chunks. The default configured chunk size is 64 MiB, but the value is part of the volume configuration.
 
-The volume format selects one overwrite strategy. `whole_object` is the only
-selectable implementation today; `chunk_slice` and `redis_cache` are reserved
-for later implementations and are rejected at format/mount until available.
+The volume format persists one stable `ChunkOverwriteMechanism` value.
+Human-readable names are parsed only at the format/configuration boundary;
+runtime strategy selection and private-index namespacing use the typed value.
+`whole_object` is the only selectable implementation today; `chunk_slice` and
+`redis_cache` are reserved values and are rejected at strategy construction
+until their implementations are available.
 All implementations share directory, inode, and file-to-logical-chunk metadata.
 `IChunkSession` owns per-chunk runtime reads, writes, and publication. The
 strategy owns the chunk-internal index, physical mapping, and cleanup codec.
@@ -434,11 +437,16 @@ Each published chunk has a metadata descriptor:
 ```text
 SwordFsChunk {
     index
-    start_offset
     revision
     size
 }
 ```
+
+The logical chunk start is derived from `index * chunk_size`; duplicating it
+in persisted chunk metadata would create a second representation of the same
+fixed-layout identity. During the staged #312 refactor, `revision` and `size`
+remain transitional common fields until whole-object publication, truncate,
+and cleanup consumers have moved to mechanism-private authoritative state.
 
 `revision` is a volume-wide monotonically allocated, non-zero publication
 generation for the shared head. Allocated generations may have gaps after

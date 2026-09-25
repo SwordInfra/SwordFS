@@ -31,7 +31,6 @@ utils::Status EncodeRefs(metadata::InodeID ino, const std::vector<WholeObjectRef
       return utils::Status::InvalidArgument("whole-object cleanup reference identity mismatch");
     }
     enc.U32(ref.descriptor.index);
-    enc.U64(ref.descriptor.start_offset);
     enc.U64(ref.descriptor.revision);
     enc.U64(ref.descriptor.size);
     enc.String(ref.key);
@@ -59,7 +58,6 @@ utils::Status DecodeRefs(std::string_view payload, metadata::InodeID expected_in
     WholeObjectRef ref;
     ref.ino = ino;
     dec.U32(&ref.descriptor.index);
-    dec.U64(&ref.descriptor.start_offset);
     dec.U64(&ref.descriptor.revision);
     dec.U64(&ref.descriptor.size);
     dec.String(&ref.key);

@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 
 #include <cerrno>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -40,6 +41,7 @@ class MemMetaStoreTest : public ::testing::Test {
  protected:
   void SetUp() override {
     store_ = new MemMetaStore();
+    store_->SetChunkSize(100);
   }
   void TearDown() override {
     delete store_;
@@ -447,10 +449,9 @@ FIBER_TEST_F(MemMetaStoreTest, IsDescendantOfSelf) {
 // ────────────────────────────────────────────────────────────────
 
 namespace {
-SwordFsChunk MakeChunk(ChunkIndex index, uint64_t start_offset, size_t size) {
+SwordFsChunk MakeChunk(ChunkIndex index, size_t size) {
   SwordFsChunk chunk;
   chunk.index = index;
-  chunk.start_offset = start_offset;
   chunk.revision = static_cast<uint64_t>(index) + 1;
   chunk.size = size;
   return chunk;
@@ -462,14 +463,13 @@ FIBER_TEST_F(MemMetaStoreTest, CommitChunkAndFindChunk) {
   Add(kRoot, "chunk-file", kRegFile, &file);
 
   Status status =
-      store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(file.ino, std::nullopt, MakeChunk(0, 0, 100)); });
+      store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(file.ino, std::nullopt, MakeChunk(0, 100)); });
   ASSERT_TRUE(status.ok());
 
   SwordFsChunk out;
   status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(file.ino, 0, &out); });
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(out.index, 0);
-  EXPECT_EQ(out.start_offset, 0);
   EXPECT_EQ(out.revision, 1U);
   EXPECT_EQ(out.size, 100);
 }
@@ -478,12 +478,29 @@ FIBER_TEST_F(MemMetaStoreTest, CommitChunkConflictingInitialPublicationFails) {
   SwordFsInode file;
   Add(kRoot, "conflicting-chunk-file", kRegFile, &file);
 
-  SwordFsChunk chunk = MakeChunk(0, 0, 100);
+  SwordFsChunk chunk = MakeChunk(0, 100);
   Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(file.ino, std::nullopt, chunk); });
   ASSERT_TRUE(status.ok());
   chunk.revision++;
   status = store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(file.ino, std::nullopt, chunk); });
   EXPECT_TRUE(status.ToErrno() == EEXIST);
+}
+
+FIBER_TEST_F(MemMetaStoreTest, CommitChunkRejectsDerivedOffsetOverflow) {
+  SwordFsInode file;
+  Add(kRoot, "overflowing-chunk-file", kRegFile, &file);
+
+  store_->SetChunkSize(std::numeric_limits<uint64_t>::max());
+  const SwordFsChunk overflowing_start{.index = 2, .revision = 1, .size = 1};
+  auto status =
+      store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(file.ino, std::nullopt, overflowing_start); });
+  EXPECT_EQ(status.ToErrno(), EINVAL);
+
+  constexpr uint64_t kHalfRangePlusOne = (std::numeric_limits<uint64_t>::max() / 2) + 1;
+  store_->SetChunkSize(kHalfRangePlusOne);
+  const SwordFsChunk overflowing_end{.index = 1, .revision = 2, .size = kHalfRangePlusOne};
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(file.ino, std::nullopt, overflowing_end); });
+  EXPECT_EQ(status.ToErrno(), EINVAL);
 }
 
 FIBER_TEST_F(MemMetaStoreTest, FindChunkNotFound) {
@@ -507,11 +524,11 @@ FIBER_TEST_F(MemMetaStoreTest, TruncateChunksToZeroRemovesAllChunks) {
   SwordFsInode file;
   Add(kRoot, "truncate-zero", kRegFile, &file);
   Status status = store_->Transact([&](MemMetaTxn &txn) -> Status {
-    Status status = txn.CommitChunk(file.ino, std::nullopt, MakeChunk(0, 0, 100));
+    Status status = txn.CommitChunk(file.ino, std::nullopt, MakeChunk(0, 100));
     if (!status.ok()) {
       return status;
     }
-    return txn.CommitChunk(file.ino, std::nullopt, MakeChunk(1, 100, 100));
+    return txn.CommitChunk(file.ino, std::nullopt, MakeChunk(1, 100));
   });
   ASSERT_TRUE(status.ok());
 
@@ -528,11 +545,11 @@ FIBER_TEST_F(MemMetaStoreTest, TruncateChunksDropsChunksBeyondNewSize) {
   SwordFsInode file;
   Add(kRoot, "truncate-drop", kRegFile, &file);
   Status status = store_->Transact([&](MemMetaTxn &txn) -> Status {
-    Status status = txn.CommitChunk(file.ino, std::nullopt, MakeChunk(0, 0, 100));
+    Status status = txn.CommitChunk(file.ino, std::nullopt, MakeChunk(0, 100));
     if (!status.ok()) {
       return status;
     }
-    return txn.CommitChunk(file.ino, std::nullopt, MakeChunk(1, 100, 100));
+    return txn.CommitChunk(file.ino, std::nullopt, MakeChunk(1, 100));
   });
   ASSERT_TRUE(status.ok());
 
@@ -552,11 +569,11 @@ FIBER_TEST_F(MemMetaStoreTest, TruncateChunksClampsStraddlingChunk) {
   SwordFsInode file;
   Add(kRoot, "truncate-clamp", kRegFile, &file);
   Status status = store_->Transact([&](MemMetaTxn &txn) -> Status {
-    Status status = txn.CommitChunk(file.ino, std::nullopt, MakeChunk(0, 0, 100));
+    Status status = txn.CommitChunk(file.ino, std::nullopt, MakeChunk(0, 100));
     if (!status.ok()) {
       return status;
     }
-    return txn.CommitChunk(file.ino, std::nullopt, MakeChunk(1, 100, 100));
+    return txn.CommitChunk(file.ino, std::nullopt, MakeChunk(1, 100));
   });
   ASSERT_TRUE(status.ok());
 
@@ -606,7 +623,7 @@ FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimFreezesWorkAndDropsOrphanedInode) {
   InodeID ino = f.ino;
 
   Status status =
-      store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(ino, std::nullopt, MakeChunk(0, 0, 100)); });
+      store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(ino, std::nullopt, MakeChunk(0, 100)); });
   ASSERT_TRUE(status.ok());
 
   // Unlink detaches the entry, drops nlink to 0 and publishes the inode as an
@@ -629,7 +646,7 @@ FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimFreezesWorkAndDropsOrphanedInode) {
   std::vector<swordfs::chunk::WholeObjectRef> refs;
   ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, 0, &refs).ok());
   ASSERT_EQ(refs.size(), 1U);
-  EXPECT_EQ(refs[0].descriptor, MakeChunk(0, 0, 100));
+  EXPECT_EQ(refs[0].descriptor, MakeChunk(0, 100));
   EXPECT_EQ(refs[0].key, swordfs::chunk::FormatChunkObjectKey(ino, 0, 1));
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 

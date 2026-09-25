@@ -390,9 +390,8 @@ utils::Status RedisMetaOps::CommitChunk(InodeID ino, const std::optional<SwordFs
   if (expected.has_value() && replacement.revision <= expected->revision) {
     return utils::Status::InvalidArgument("replacement revision must increase");
   }
-  if (expected.has_value() &&
-      (expected->index != replacement.index || expected->start_offset != replacement.start_offset)) {
-    return utils::Status::InvalidArgument("replacement must preserve chunk index and start offset");
+  if (expected.has_value() && expected->index != replacement.index) {
+    return utils::Status::InvalidArgument("replacement must preserve chunk index");
   }
 
   utils::Status publication_result;

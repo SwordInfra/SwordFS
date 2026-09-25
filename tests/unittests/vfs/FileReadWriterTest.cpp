@@ -50,6 +50,7 @@ using swordfs::vfs::FileReadWriter;
 using swordfs::vfs::InodeHandle;
 
 constexpr size_t kMaxParallelFlushes = 2;
+constexpr uint64_t kTestChunkSize = 1024;
 
 // ────────────────────────────────────────────────────────────────
 // Helpers
@@ -425,7 +426,8 @@ class MockMetaEngine : public IMetaEngine {
       } else {
         chunk_map.emplace(replacement.index, replacement);
       }
-      file_size_ = std::max(file_size_, static_cast<off_t>(replacement.start_offset + replacement.size));
+      file_size_ = std::max(
+          file_size_, static_cast<off_t>(static_cast<uint64_t>(replacement.index) * kTestChunkSize + replacement.size));
       return publish_chunk_status;
     }
 
@@ -444,7 +446,8 @@ class MockMetaEngine : public IMetaEngine {
     }
     if (it->second == replacement) {
       QueuePendingDelete(ino, *expected);
-      file_size_ = std::max(file_size_, static_cast<off_t>(replacement.start_offset + replacement.size));
+      file_size_ = std::max(
+          file_size_, static_cast<off_t>(static_cast<uint64_t>(replacement.index) * kTestChunkSize + replacement.size));
       return replace_chunk_status;
     }
     if (!(it->second == *expected)) {
@@ -454,7 +457,8 @@ class MockMetaEngine : public IMetaEngine {
     QueuePendingDelete(ino, *expected);
     it->second = replacement;
     if (!replace_chunk_descriptor_only_on_error) {
-      file_size_ = std::max(file_size_, static_cast<off_t>(replacement.start_offset + replacement.size));
+      file_size_ = std::max(
+          file_size_, static_cast<off_t>(static_cast<uint64_t>(replacement.index) * kTestChunkSize + replacement.size));
     }
     return replace_chunk_status;
   }
@@ -572,12 +576,13 @@ class MockMetaEngine : public IMetaEngine {
     }
     for (auto it = ino_it->second.begin(); it != ino_it->second.end();) {
       auto &chunk = it->second;
-      if (chunk.start_offset >= size) {
+      const uint64_t start_offset = static_cast<uint64_t>(chunk.index) * kTestChunkSize;
+      if (start_offset >= size) {
         QueuePendingDelete(ino, chunk);
         it = ino_it->second.erase(it);
         continue;
       }
-      const uint64_t max_size = size - chunk.start_offset;
+      const uint64_t max_size = size - start_offset;
       if (chunk.size > max_size) {
         chunk.size = max_size;
       }
@@ -621,7 +626,7 @@ class FileReadWriterTest : public ::testing::Test {
     return FileReadWriter(kIno, kMaxParallelFlushes);
   }
 
-  static constexpr size_t kChunkSize = 1024;
+  static constexpr size_t kChunkSize = kTestChunkSize;
   static constexpr InodeID kIno = 42;
   MockDataEngine *mock_data_ = nullptr;
   MockMetaEngine *mock_meta_ = nullptr;
@@ -666,7 +671,6 @@ TEST_F(FileReadWriterTest, PersistedPartialChunkAtEOFReturnsShortRead) {
   RunInTestFiber([&] {
     SwordFsChunk chunk{};
     chunk.index = 0;
-    chunk.start_offset = 0;
     chunk.revision = 7;
     chunk.size = 300;
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
@@ -878,7 +882,6 @@ TEST_F(FileReadWriterTest, PersistedChunkShortReadFailsClosed) {
   RunInTestFiber([&] {
     SwordFsChunk chunk{};
     chunk.index = 0;
-    chunk.start_offset = 0;
     chunk.revision = 17;
     chunk.size = 64;
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
@@ -901,7 +904,6 @@ TEST_F(FileReadWriterTest, PersistedChunkReadErrorRollsBackPartialOutput) {
   RunInTestFiber([&] {
     SwordFsChunk published{};
     published.index = 0;
-    published.start_offset = 0;
     published.revision = 18;
     published.size = 64;
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, published).ok());
@@ -927,7 +929,6 @@ TEST_F(FileReadWriterTest, PersistedChunkZeroLengthReadIsNoOp) {
   RunInTestFiber([&] {
     SwordFsChunk published{};
     published.index = 0;
-    published.start_offset = 0;
     published.revision = 19;
     published.size = 64;
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, published).ok());
@@ -988,7 +989,6 @@ TEST_F(FileReadWriterTest, ChunkMetadataIOErrorPropagatesFromWrite) {
 TEST_F(FileReadWriterTest, CrossChunkMetadataErrorDrainsSubmittedReadBeforeReturning) {
   SwordFsChunk first{};
   first.index = 0;
-  first.start_offset = 0;
   first.revision = 17;
   first.size = kChunkSize;
   ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, first).ok());
@@ -1234,7 +1234,6 @@ TEST_F(FileReadWriterTest, FlushRebasesChangedAuthoritativeChunkAndPublishesLate
 
     SwordFsChunk conflicting{};
     conflicting.index = 0;
-    conflicting.start_offset = 0;
     conflicting.revision = 999;
     conflicting.size = payload.size();
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, conflicting).ok());
@@ -1821,7 +1820,7 @@ TEST_F(FileReadWriterTest, RewriteRebasesChangedDescriptorWithoutForegroundDelet
 
 TEST_F(FileReadWriterTest, RewriteHydrationPropagatesBackendReadFailure) {
   RunInTestFiber([&] {
-    SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 77, .size = 11};
+    SwordFsChunk chunk{.index = 0, .revision = 77, .size = 11};
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
     auto data = std::make_unique<folly::IOBuf>(Buf("hello world"));
     ASSERT_TRUE(
@@ -1837,7 +1836,7 @@ TEST_F(FileReadWriterTest, RewriteHydrationPropagatesBackendReadFailure) {
 
 TEST_F(FileReadWriterTest, RewriteHydrationRejectsObjectShorterThanDescriptor) {
   RunInTestFiber([&] {
-    SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 77, .size = 11};
+    SwordFsChunk chunk{.index = 0, .revision = 77, .size = 11};
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
     auto data = std::make_unique<folly::IOBuf>(Buf("short"));
     ASSERT_TRUE(
@@ -1852,7 +1851,7 @@ TEST_F(FileReadWriterTest, RewriteHydrationRejectsObjectShorterThanDescriptor) {
 
 TEST_F(FileReadWriterTest, RewriteHydrationRejectsDescriptorLargerThanChunk) {
   RunInTestFiber([&] {
-    SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 77, .size = kChunkSize + 1};
+    SwordFsChunk chunk{.index = 0, .revision = 77, .size = kChunkSize + 1};
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
     auto rw = Make(kChunkSize + 1);
     const auto status = rw.Write(Buf("H"), 0);
@@ -1862,7 +1861,7 @@ TEST_F(FileReadWriterTest, RewriteHydrationRejectsDescriptorLargerThanChunk) {
 
 TEST_F(FileReadWriterTest, RewriteHydratesZeroLengthPublishedChunkWithoutBackendRead) {
   RunInTestFiber([&] {
-    SwordFsChunk chunk{.index = 0, .start_offset = 0, .revision = 77, .size = 0};
+    SwordFsChunk chunk{.index = 0, .revision = 77, .size = 0};
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
 
     auto rw = Make();
@@ -2341,7 +2340,6 @@ TEST_F(FileReadWriterTest, TruncateQueuesDroppedChunkObjectsWithoutForegroundDel
     for (ChunkIndex i = 0; i < 3; ++i) {
       SwordFsChunk chunk{};
       chunk.index = i;
-      chunk.start_offset = i * kChunkSize;
       chunk.revision = static_cast<uint64_t>(i) + 1;
       chunk.size = kChunkSize;
       ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
@@ -2376,7 +2374,6 @@ TEST_F(FileReadWriterTest, TruncateQueuesDroppedChunkObjectsWithoutForegroundDel
 TEST_F(FileReadWriterTest, ConcurrentReadsProceedWhileAnotherReadWaitsForBackend) {
   SwordFsChunk chunk{};
   chunk.index = 0;
-  chunk.start_offset = 0;
   chunk.revision = 17;
   chunk.size = kChunkSize;
   ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
@@ -2428,7 +2425,6 @@ TEST_F(FileReadWriterTest, IndependentChunkOverwriteHydrationDoesNotSerializeOnI
   for (ChunkIndex index = 0; index < 2; ++index) {
     SwordFsChunk chunk{};
     chunk.index = index;
-    chunk.start_offset = static_cast<uint64_t>(index) * kChunkSize;
     chunk.revision = 17 + index;
     chunk.size = kChunkSize;
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
@@ -2841,7 +2837,6 @@ TEST_F(FileReadWriterTest, TruncateWaitsForBlockedFlushPublication) {
 TEST_F(FileReadWriterTest, TruncateWaitsForBlockedReadWithoutBlockingEventBase) {
   SwordFsChunk chunk{};
   chunk.index = 0;
-  chunk.start_offset = 0;
   chunk.revision = 17;
   chunk.size = kChunkSize;
   ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());

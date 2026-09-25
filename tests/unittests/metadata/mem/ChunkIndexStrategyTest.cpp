@@ -111,8 +111,8 @@ class RecordingStrategy final : public chunk::IChunkOverwriteStrategy {
  public:
   RecordingIndexParticipant participant;
 
-  std::string_view name() const override {
-    return "recording_private_index";
+  metadata::ChunkOverwriteMechanism mechanism() const override {
+    return metadata::ChunkOverwriteMechanism::kChunkSlice;
   }
   uint32_t index_format_version() const override {
     return 1;
@@ -200,7 +200,7 @@ class ChunkIndexStrategyTest : public ::testing::Test {
 FIBER_TEST_F(ChunkIndexStrategyTest, PublishStagesMultiplePrivateRecordsWithPublicHead) {
   SwordFsInode file;
   ASSERT_TRUE(AddFile("file", &file).ok());
-  const SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+  const SwordFsChunk first{.index = 0, .revision = 1, .size = 64};
   ASSERT_TRUE(Publish(file.ino, std::nullopt, first).ok());
 
   SwordFsChunk head;
@@ -220,7 +220,7 @@ FIBER_TEST_F(ChunkIndexStrategyTest, PublishStagesMultiplePrivateRecordsWithPubl
   EXPECT_EQ(view.head, first);
   EXPECT_EQ(view.private_snapshot, "first,second");
 
-  const SwordFsChunk replacement{.index = 0, .start_offset = 0, .revision = 2, .size = 96};
+  const SwordFsChunk replacement{.index = 0, .revision = 2, .size = 96};
   const ChunkPublishIntent intent{.payload = "uploaded:r2"};
   strategy_.participant.reject_publish = true;
   EXPECT_EQ(Publish(file.ino, first, replacement, intent).ToErrno(), EIO);
@@ -253,8 +253,8 @@ FIBER_TEST_F(ChunkIndexStrategyTest, PublishStagesMultiplePrivateRecordsWithPubl
 FIBER_TEST_F(ChunkIndexStrategyTest, TruncateAndSetAttrRejectWithoutPublicOrPrivateMutation) {
   SwordFsInode file;
   ASSERT_TRUE(AddFile("file", &file).ok());
-  const SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 100};
-  const SwordFsChunk second{.index = 1, .start_offset = 128, .revision = 2, .size = 70};
+  const SwordFsChunk first{.index = 0, .revision = 1, .size = 100};
+  const SwordFsChunk second{.index = 1, .revision = 2, .size = 70};
   ASSERT_TRUE(Publish(file.ino, std::nullopt, first).ok());
   ASSERT_TRUE(Publish(file.ino, std::nullopt, second).ok());
 
@@ -311,7 +311,7 @@ FIBER_TEST_F(ChunkIndexStrategyTest, TruncateAndSetAttrRejectWithoutPublicOrPriv
 FIBER_TEST_F(ChunkIndexStrategyTest, ReclaimFreezesPrivateIndexAndRejectsBeforeInodeRemoval) {
   SwordFsInode file;
   ASSERT_TRUE(AddFile("file", &file).ok());
-  const SwordFsChunk first{.index = 0, .start_offset = 0, .revision = 1, .size = 64};
+  const SwordFsChunk first{.index = 0, .revision = 1, .size = 64};
   ASSERT_TRUE(Publish(file.ino, std::nullopt, first).ok());
   ASSERT_TRUE(store_.Transact([&](MemMetaTxn &txn) { return txn.Unlink(kRootInodeId, "file"); }).ok());
 

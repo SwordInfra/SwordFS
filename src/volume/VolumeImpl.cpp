@@ -50,7 +50,8 @@ Status CreateDataEngine(std::string_view storage, const swordfs::storage::DataEn
 VolumeImpl::VolumeImpl() {
   // Before format/load binds persisted configuration, the runtime uses the
   // current default overwrite mechanism.
-  auto status = chunk::CreateChunkOverwriteStrategy("whole_object", 1, &chunk_overwrite_strategy_);
+  auto status = chunk::CreateChunkOverwriteStrategy(metadata::ChunkOverwriteMechanism::kWholeObject, 1,
+                                                    &chunk_overwrite_strategy_);
   CHECK(status.ok());
 }
 VolumeImpl::~VolumeImpl() {
@@ -73,13 +74,18 @@ const chunk::IChunkOverwriteStrategy *VolumeImpl::chunk_overwrite_strategy() con
 }
 
 Status VolumeImpl::CreateFrom(const config::ConfigCenter &config) {
+  metadata::ChunkOverwriteMechanism mechanism;
+  auto status = metadata::ParseChunkOverwriteMechanism(config.chunk_overwrite_strategy(), &mechanism);
+  if (!status.ok()) {
+    return status;
+  }
   return CreateFrom(FormatOptions{
       .name = config.volume(),
       .meta_url = config.meta_url(),
       .bucket = config.bucket_url(),
       .region = config.storage_region(),
       .chunk_size = config.chunk_size(),
-      .chunk_overwrite_strategy = config.chunk_overwrite_strategy(),
+      .chunk_overwrite_mechanism = mechanism,
   });
 }
 
@@ -99,10 +105,10 @@ Status VolumeImpl::CreateFrom(const FormatOptions &options) {
     config_.region = "auto";
   }
   config_.chunk_size = options.chunk_size;
-  config_.chunk_overwrite_strategy = options.chunk_overwrite_strategy;
+  config_.chunk_overwrite_mechanism = options.chunk_overwrite_mechanism;
   config_.chunk_index_format_version = 1;
 
-  auto status = chunk::CreateChunkOverwriteStrategy(config_.chunk_overwrite_strategy,
+  auto status = chunk::CreateChunkOverwriteStrategy(config_.chunk_overwrite_mechanism,
                                                     config_.chunk_index_format_version, &chunk_overwrite_strategy_);
   if (!status.ok()) {
     return status;
@@ -153,7 +159,7 @@ Status VolumeImpl::LoadFrom(const MountOptions &options) {
     return status;
   }
 
-  status = chunk::CreateChunkOverwriteStrategy(config_.chunk_overwrite_strategy, config_.chunk_index_format_version,
+  status = chunk::CreateChunkOverwriteStrategy(config_.chunk_overwrite_mechanism, config_.chunk_index_format_version,
                                                &chunk_overwrite_strategy_);
   if (!status.ok()) {
     return status;

@@ -2,19 +2,28 @@
 
 ## Volume-fixed overwrite strategy
 
-The formatted volume records one overwrite strategy and its index-format
-version. Mount constructs one implementation from that persisted selection;
-there is no per-file or per-chunk strategy tag and no live switching. Until
-the chunk-slice implementation is activated by #270–#275, the existing
-immutable whole-object path is the selectable `whole_object` implementation.
-`chunk_slice` and `redis_cache` are rejected while unimplemented.
+The formatted volume records one stable `ChunkOverwriteMechanism` enum value
+and its index-format version. Human-readable names such as `whole_object` are
+accepted only at the CLI/configuration boundary and are converted there to the
+typed value. Mount constructs one implementation from the persisted enum;
+runtime strategy selection and private-index namespacing do not carry or
+compare arbitrary mechanism strings. There is no per-file or per-chunk
+mechanism tag and no live switching. Until the chunk-slice implementation is
+activated by #270–#275, the existing immutable whole-object path is the only
+selectable implementation. Known but unimplemented enum values such as
+`chunk_slice` and `redis_cache` are rejected by strategy construction.
 
-Directory entries, inodes, and the file-to-logical-chunk head are shared. The
-head states chunk existence, logical size, and a publication generation for
-conditional replacement. A generation is an authority token, not a physical
-object reference for common code to interpret. The selected strategy owns the
-chunk session, its internal index schema and operations, the translation from
-private index state to physical data, and cleanup validation/deletion.
+Directory entries, inodes, and the file-to-logical-chunk head are shared. A
+logical chunk's file offset is derived from its fixed-layout identity as
+`chunk_index * chunk_size`; `start_offset` is not persisted in the common
+record. During the staged #312 refactor, the common head still temporarily
+carries logical size and a publication revision because existing publication,
+truncate, and cleanup code consumes them. Those fields are transitional rather
+than part of the target common contract and will be removed only after the
+corresponding mechanism-private state becomes authoritative. The selected
+mechanism owns the chunk session, its internal index schema and operations,
+the translation from private index state to physical data, and cleanup
+validation/deletion.
 
 The metadata backend supplies a transaction-scoped `IChunkIndexTxn` with
 private hash read, scan, put, and erase operations. The strategy's
@@ -25,9 +34,9 @@ freeze callbacks can read that private index through the same transaction to
 capture the exact physical references being detached. A strategy can use
 multiple private records per chunk; the common head and transaction protocol
 do not prescribe a fragment list or one physical reference. Private index
-keys are namespaced by strategy and interpreted only by that implementation;
-a future Redis-cache implementation does not reuse or interpret the
-chunk-slice index.
+keys are namespaced by the typed mechanism selection and interpreted only by
+that implementation; a future Redis-cache implementation does not reuse or
+interpret the chunk-slice index.
 
 A chunk session supplies an opaque `ChunkPublishIntent` after making its new
 data durable. `CommitChunk` passes those bytes unchanged to the selected

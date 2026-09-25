@@ -46,8 +46,8 @@ class WholeObjectIndexParticipant final : public metadata::IChunkIndexParticipan
 
 class WholeObjectStrategy final : public IChunkOverwriteStrategy {
  public:
-  std::string_view name() const override {
-    return "whole_object";
+  metadata::ChunkOverwriteMechanism mechanism() const override {
+    return metadata::ChunkOverwriteMechanism::kWholeObject;
   }
   uint32_t index_format_version() const override {
     return 1;
@@ -140,17 +140,20 @@ class WholeObjectStrategy final : public IChunkOverwriteStrategy {
 
 }  // namespace
 
-utils::Status CreateChunkOverwriteStrategy(std::string_view name, uint32_t index_format_version,
+utils::Status CreateChunkOverwriteStrategy(metadata::ChunkOverwriteMechanism mechanism, uint32_t index_format_version,
                                            std::unique_ptr<IChunkOverwriteStrategy> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("chunk strategy output is null");
   }
   out->reset();
-  if (name == "whole_object" && index_format_version == 1) {
+  if (mechanism == metadata::ChunkOverwriteMechanism::kWholeObject && index_format_version == 1) {
     *out = std::make_unique<WholeObjectStrategy>();
     return utils::Status::OK();
   }
-  return utils::Status::NotSupported("unsupported chunk overwrite strategy/index format: " + std::string(name) + "/" +
+  const auto name = metadata::ChunkOverwriteMechanismName(mechanism);
+  const auto mechanism_id = static_cast<uint32_t>(mechanism);
+  const std::string mechanism_label = name.empty() ? std::to_string(mechanism_id) : std::string(name);
+  return utils::Status::NotSupported("unsupported chunk overwrite mechanism/index format: " + mechanism_label + "/" +
                                      std::to_string(index_format_version));
 }
 
