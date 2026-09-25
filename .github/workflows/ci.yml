@@ -554,6 +554,9 @@ jobs:
       - name: Build SwordFS
         run: cmake --build build --target swordfs
 
+      - name: Install fstests timeout diagnostics
+        run: sudo apt-get install -y -qq gdb strace
+
       - name: Build deterministic fstests shard
         run: |
           python3 scripts/conformance/fstests/plan.py \
