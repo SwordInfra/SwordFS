@@ -10,7 +10,7 @@ logical records for the process lifetime, except for saved volume configuration.
 flowchart LR
     D[Directory] -->|name maps to type and inode ID| I[SwordFsInode]
     I -->|inode ID and chunk index| S[SwordFsChunk]
-    S -->|inode / index / revision| O[Immutable data object]
+    S -->|current whole_object: inode / index / revision| O[Immutable data object]
     I -->|last link removed| A[Orphan candidate]
     A -->|PrepareReclaim replaces live metadata| R[ReclaimWork]
     R -->|frozen descriptors and object keys| O
@@ -21,7 +21,7 @@ flowchart LR
 | `SwordFsVolume` | Volume identity, data-engine identity, bucket/location, region, chunk size | Defines how a mounted volume interprets its storage |
 | Directory entry | Name, child inode ID, child type | Namespace mapping; multiple entries may name one regular-file inode |
 | `SwordFsInode` | ID, attributes including size and `nlink`, parent ID, symlink target | Canonical inode attributes; removing a name need not remove the inode |
-| `SwordFsChunk` | Index, start offset, revision, size | Currently published bytes for one logical chunk |
+| `SwordFsChunk` | Index, revision, size; start offset is derived from `index * chunk_size` | Current shared publication head for one logical chunk; `revision`/`size` remain transitional under #312 |
 | Orphan candidate | Inode ID and cleanup marker | Last-link removal recorded while the live inode still exists |
 | `ReclaimWork` | Inode ID and vector of `ReclaimChunk` | Replaces live inode/chunk metadata atomically at reclaim preparation |
 | `ReclaimChunk` | Frozen descriptor and exact object key | Deletion target independent of mutable live state |
@@ -34,9 +34,14 @@ For chunk size `C`, file offset `x` maps to index `x / C` and offset `x % C`
 within the chunk. Descriptor size may be smaller than `C`. Missing descriptors
 and gaps after chunk data represent holes, filled with zeroes by the read path.
 
-The object key is `<inode>/<chunk-index>/<revision>`. Revisions are volume-wide,
-monotonic, non-zero identities; gaps are valid. Each volume needs an isolated
-bucket/prefix because the derived key does not include a volume name.
+For the current `whole_object` mechanism, the object key is
+`<inode>/<chunk-index>/<revision>`. The common-head `revision` is therefore
+currently both a volume-wide monotonic publication/CAS generation and the
+immutable physical object revision; gaps are valid. That physical meaning is
+specific to the transitional whole-object model and is not part of #312's
+target mechanism-neutral common contract. Each volume needs an isolated
+bucket/prefix because the current derived object key does not include a volume
+name.
 
 `SwordFsVolume` persists data-engine identity separately from the engine-specific
 bucket/location string. Format derives the identity from the current CLI input;

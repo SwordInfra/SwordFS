@@ -19,7 +19,7 @@ not by itself establish support for every Cluster deployment configuration.
 | `inode:<ino>` | String | Canonical serialized `SwordFsInode` |
 | `dir:<parent_ino>` | Hash | Name → child type and inode ID |
 | `chunk:<ino>` | Hash | Chunk index → shared published logical `SwordFsChunk` head |
-| `private_chunk_index:<strategy>:<hash>` | Hash | Strategy-owned chunk-internal fields; schema and field layout belong only to that strategy |
+| `private_chunk_index:<mechanism-key>:<hash>` | Hash | Mechanism-owned chunk-internal fields; `<mechanism-key>` is the stable typed `ChunkOverwriteMechanism` key, and field layout belongs only to that mechanism |
 | `orphans` | Hash | Inode ID → orphan marker |
 | `reclaims` | Hash | Inode ID → serialized frozen opaque `ReclaimWork` |
 | `pending_deletes` | Hash | Opaque strategy-defined queue ID → serialized frozen opaque `PendingDelete` |
@@ -40,6 +40,13 @@ interprets those fields. For the currently selectable `whole_object` strategy,
 the head generation is also the immutable object revision and the physical
 key derives from inode, index, and revision. That strategy has no additional
 durable private fragment records.
+
+Private-index Redis keys do not embed the human-readable mechanism name.
+`RedisKey::PrivateChunkIndex()` derives `<mechanism-key>` from the persisted
+`ChunkOverwriteMechanism` through `ChunkOverwriteMechanismKey()`; in the
+current beta layout the stable enum values are encoded as decimal strings
+(`1` = `whole_object`, `2` = `chunk_slice`, `3` = `redis_cache`). The trailing
+`<hash>` and its fields remain mechanism-owned schema.
 
 Frozen reclaim and pending-delete records carry versioned opaque payloads.
 The common queue validates its envelope and Hash field identity; only the
