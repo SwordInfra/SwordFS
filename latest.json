@@ -7,7 +7,7 @@
       "runner": "Linux"
     },
     "pjdfstest_commit": "85a8aea9e685999ef0540392fd80535f873d7ff7",
-    "swordfs_commit": "4d6b98cd4c8b5c8942db51f73b057cfbd8ffc3f5"
+    "swordfs_commit": "33aa7f676b8daa65fb9c21820a5de8cd335cf158"
   },
   "summary": {
     "blocking_count": 0,
@@ -12990,7 +12990,7 @@
       "message": "",
       "number": 650,
       "reason": "",
-      "result": "pass",
+      "result": "fail",
       "test_path": "tests/chown/00.t"
     },
     {
@@ -13042,7 +13042,7 @@
       "message": "",
       "number": 654,
       "reason": "",
-      "result": "pass",
+      "result": "fail",
       "test_path": "tests/chown/00.t"
     },
     {
@@ -13185,7 +13185,7 @@
       "message": "",
       "number": 665,
       "reason": "",
-      "result": "pass",
+      "result": "fail",
       "test_path": "tests/chown/00.t"
     },
     {
@@ -13198,7 +13198,7 @@
       "message": "",
       "number": 666,
       "reason": "",
-      "result": "pass",
+      "result": "fail",
       "test_path": "tests/chown/00.t"
     },
     {
@@ -13263,7 +13263,7 @@
       "message": "",
       "number": 671,
       "reason": "",
-      "result": "pass",
+      "result": "fail",
       "test_path": "tests/chown/00.t"
     },
     {
@@ -13276,7 +13276,7 @@
       "message": "",
       "number": 672,
       "reason": "",
-      "result": "pass",
+      "result": "fail",
       "test_path": "tests/chown/00.t"
     },
     {
@@ -13458,7 +13458,7 @@
       "message": "",
       "number": 686,
       "reason": "",
-      "result": "pass",
+      "result": "fail",
       "test_path": "tests/chown/00.t"
     },
     {
@@ -13510,7 +13510,7 @@
       "message": "",
       "number": 690,
       "reason": "",
-      "result": "pass",
+      "result": "fail",
       "test_path": "tests/chown/00.t"
     },
     {
