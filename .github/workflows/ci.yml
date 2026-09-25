@@ -25,6 +25,39 @@ jobs:
       - name: Check formatting
         run: pre-commit run --all-files
 
+  minio-test-tools:
+    name: minio-test-tools
+    needs: clang-format
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 1
+
+      - name: Restore pinned MinIO tools cache
+        uses: actions/cache@v4
+        with:
+          path: .deps/minio
+          key: swordfs-minio-tools-v1-${{ runner.os }}-${{ runner.arch }}-2025-09-07-2025-08-13
+
+      - name: Fetch and verify pinned MinIO tools
+        run: |
+          source scripts/testing/minio-test.sh
+          minio_test_ensure_tools
+          minio_test_print_versions
+
+      - name: Upload pinned MinIO tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: minio-test-tools
+          path: .deps/minio
+          if-no-files-found: error
+          retention-days: 1
+
   dead-code-audit:
     name: dead-code-audit
     needs: clang-format
@@ -89,7 +122,7 @@ jobs:
 
   build-and-test:
     name: build-and-test (${{ matrix.build_type }})
-    needs: clang-format
+    needs: [clang-format, minio-test-tools]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     strategy:
@@ -104,6 +137,13 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
           fetch-depth: 0
           submodules: false
+
+      - name: Download pinned MinIO tools
+        if: matrix.build_type == 'Debug'
+        uses: actions/download-artifact@v4
+        with:
+          name: minio-test-tools
+          path: .deps/minio
 
       - name: Restore native dependency cache
         uses: actions/cache@v4
@@ -231,7 +271,7 @@ jobs:
 
   e2e-test:
     name: e2e-test (Release)
-    needs: clang-format
+    needs: [clang-format, minio-test-tools]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -242,6 +282,12 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
           fetch-depth: 2
           submodules: false
+
+      - name: Download pinned MinIO tools
+        uses: actions/download-artifact@v4
+        with:
+          name: minio-test-tools
+          path: .deps/minio
 
       - name: Restore native dependency cache
         uses: actions/cache@v4
@@ -304,7 +350,7 @@ jobs:
 
   pjdfstest-conformance:
     name: pjdfstest-conformance (Release)
-    needs: clang-format
+    needs: [clang-format, minio-test-tools]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -315,6 +361,12 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
           fetch-depth: 0
           submodules: false
+
+      - name: Download pinned MinIO tools
+        uses: actions/download-artifact@v4
+        with:
+          name: minio-test-tools
+          path: .deps/minio
 
       - name: Restore native dependency cache
         uses: actions/cache@v4
@@ -409,7 +461,7 @@ jobs:
 
   fstests-conformance-shard:
     name: fstests-shard (${{ matrix.shard }})
-    needs: clang-format
+    needs: [clang-format, minio-test-tools]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -431,6 +483,12 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
           fetch-depth: 0
           submodules: false
+
+      - name: Download pinned MinIO tools
+        uses: actions/download-artifact@v4
+        with:
+          name: minio-test-tools
+          path: .deps/minio
 
       - name: Restore native dependency cache
         uses: actions/cache@v4

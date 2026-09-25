@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 VERSION_FILE="${PROJECT_DIR}/conformance/pjdfstest/version.env"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.e2e.yml"
+# shellcheck source=scripts/testing/minio-test.sh
+source "${PROJECT_DIR}/scripts/testing/minio-test.sh"
 
 OUTPUT_DIR="${PROJECT_DIR}/build/pjdfstest-conformance"
 while [[ $# -gt 0 ]]; do
@@ -76,6 +78,7 @@ cleanup() {
   if command -v findmnt >/dev/null 2>&1 && findmnt -T "${MOUNTPOINT}" >/dev/null 2>&1; then
     fusermount3 -u "${MOUNTPOINT}" >/dev/null 2>&1 || fusermount3 -uz "${MOUNTPOINT}" >/dev/null 2>&1 || true
   fi
+  minio_test_stop
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   rm -rf "${WORK_DIR}"
 }
@@ -101,10 +104,10 @@ echo "=== Building pjdfstest ==="
 ) >"${OUTPUT_DIR}/pjdfstest-build.log" 2>&1
 
 echo "=== Starting Redis and MinIO ==="
-compose up -d --wait >"${OUTPUT_DIR}/dependencies.log" 2>&1
-compose exec -T minio mc alias set local http://localhost:9000 \
-  "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" >>"${OUTPUT_DIR}/dependencies.log" 2>&1
-compose exec -T minio mc mb "local/${S3_BUCKET}" --ignore-existing >>"${OUTPUT_DIR}/dependencies.log" 2>&1
+compose up -d --wait redis >"${OUTPUT_DIR}/dependencies.log" 2>&1
+minio_test_start "${OUTPUT_DIR}/minio"
+minio_test_create_bucket "${S3_BUCKET}" >>"${OUTPUT_DIR}/dependencies.log" 2>&1
+minio_test_print_versions >>"${OUTPUT_DIR}/dependencies.log" 2>&1
 
 mkdir -p "${MOUNTPOINT}"
 echo "=== Formatting SwordFS conformance volume ==="

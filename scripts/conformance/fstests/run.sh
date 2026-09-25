@@ -7,6 +7,8 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 VERSION_FILE="${PROJECT_DIR}/conformance/fstests/version.env"
 PLAN_SCRIPT="${SCRIPT_DIR}/plan.py"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.e2e.yml"
+# shellcheck source=scripts/testing/minio-test.sh
+source "${PROJECT_DIR}/scripts/testing/minio-test.sh"
 MOUNT_HELPER_SOURCE="${SCRIPT_DIR}/mount-helper.sh"
 MOUNT_HELPER_TARGET="/sbin/mount.fuse.swordfs"
 XUNIT_MERGER="${SCRIPT_DIR}/xunit_merge.py"
@@ -203,7 +205,7 @@ capture_backend_diagnostics() {
   {
     echo "=== Backend runtime state ==="
     compose ps -a
-    for service in redis minio; do
+    for service in redis; do
       container_id="$(compose ps -a -q "${service}" 2>/dev/null)"
       if [[ -n "${container_id}" ]]; then
         echo "=== ${service} container state ==="
@@ -219,8 +221,10 @@ capture_backend_diagnostics() {
     timeout 10s "${DOCKER_COMPOSE[@]}" -f "${COMPOSE_FILE}" exec -T redis redis-cli CONFIG GET tcp-keepalive || true
     timeout 10s "${DOCKER_COMPOSE[@]}" -f "${COMPOSE_FILE}" exec -T redis redis-cli CONFIG GET maxclients || true
     timeout 10s "${DOCKER_COMPOSE[@]}" -f "${COMPOSE_FILE}" exec -T redis redis-cli CONFIG GET client-output-buffer-limit || true
-    echo "=== Redis / MinIO logs ==="
-    timeout 20s "${DOCKER_COMPOSE[@]}" -f "${COMPOSE_FILE}" logs --no-color redis minio || true
+    echo "=== Redis logs ==="
+    timeout 20s "${DOCKER_COMPOSE[@]}" -f "${COMPOSE_FILE}" logs --no-color redis || true
+    echo "=== MinIO log ==="
+    cat "${MINIO_TEST_LOG:-/dev/null}" 2>/dev/null || true
   } >"${OUTPUT_DIR}/dependencies-runtime.log" 2>&1
 }
 
@@ -234,6 +238,7 @@ cleanup() {
         fusermount3 -uz "${mountpoint}" >/dev/null 2>&1 || true
     fi
   done
+  minio_test_stop
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   if [[ -L "${MOUNT_HELPER_TARGET}" ]] && \
      [[ "$(readlink -f "${MOUNT_HELPER_TARGET}")" == "$(readlink -f "${MOUNT_HELPER_SOURCE}")" ]]; then
@@ -322,18 +327,16 @@ if ! runuser -u fsgqa -- test -x "${WORK_DIR}"; then
 fi
 
 echo "=== Starting Redis and MinIO ==="
-compose up -d --wait >"${OUTPUT_DIR}/dependencies.log" 2>&1
-compose exec -T minio mc alias set local http://localhost:9000 \
-  "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" >>"${OUTPUT_DIR}/dependencies.log" 2>&1
-compose exec -T minio mc mb "local/${S3_BUCKET}" --ignore-existing >>"${OUTPUT_DIR}/dependencies.log" 2>&1
+compose up -d --wait redis >"${OUTPUT_DIR}/dependencies.log" 2>&1
+minio_test_start "${OUTPUT_DIR}/minio"
+minio_test_create_bucket "${S3_BUCKET}" >>"${OUTPUT_DIR}/dependencies.log" 2>&1
 
-# The shared E2E compose file intentionally remains the project-wide backend
-# definition. Preserve the concrete images/versions used by this run so a
-# conformance result stays diagnosable even when a mutable image tag advances.
+# Preserve the concrete Redis image and pinned MinIO tool versions used by this
+# run so conformance evidence remains diagnosable across dependency changes.
 {
   echo "=== Backend image identities ==="
   compose images
-  for service in redis minio; do
+  for service in redis; do
     container_id="$(compose ps -q "${service}")"
     if [[ -n "${container_id}" ]]; then
       printf '%s image-id: ' "${service}"
@@ -342,7 +345,7 @@ compose exec -T minio mc mb "local/${S3_BUCKET}" --ignore-existing >>"${OUTPUT_D
   done
   echo "=== Backend versions ==="
   compose exec -T redis redis-server --version || true
-  compose exec -T minio minio --version || true
+  minio_test_print_versions || true
 } >>"${OUTPUT_DIR}/dependencies.log" 2>&1
 
 format_volume() {

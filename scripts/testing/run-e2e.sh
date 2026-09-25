@@ -2,7 +2,7 @@
 # ────────────────────────────────────────────────────────────────
 # run-e2e.sh — Run SwordFS end-to-end tests.
 #
-# Starts the Redis and MinIO dependencies with Docker Compose,
+# Starts Redis with Docker Compose and pinned MinIO directly on the runner,
 # creates the test bucket, and runs the pre-built E2E suite.
 # All extra arguments are forwarded to the test binary.
 # ────────────────────────────────────────────────────────────────
@@ -11,6 +11,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.e2e.yml"
+# shellcheck source=scripts/testing/minio-test.sh
+source "${PROJECT_DIR}/scripts/testing/minio-test.sh"
 
 SWORDFS_BIN="${SWORDFS_BIN:-${PROJECT_DIR}/build/swordfs}"
 E2E_BIN="${E2E_BIN:-${PROJECT_DIR}/build/swordfs_e2e_test}"
@@ -47,20 +49,18 @@ setup_fuse() {
 
 start_dependencies() {
   echo "=== Starting E2E dependencies ==="
-  compose up -d --wait
+  compose up -d --wait redis
+  minio_test_start "${PROJECT_DIR}/build/minio-e2e"
 }
 
 create_bucket() {
   echo "=== Creating bucket ${S3_BUCKET} ==="
-  compose exec -T minio \
-    mc alias set local http://localhost:9000 \
-      "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}"
-  compose exec -T minio \
-    mc mb "local/${S3_BUCKET}" --ignore-existing
+  minio_test_create_bucket "${S3_BUCKET}"
 }
 
 cleanup() {
   echo "=== Stopping E2E dependencies ==="
+  minio_test_stop
   compose down -v --remove-orphans
 }
 trap cleanup EXIT
