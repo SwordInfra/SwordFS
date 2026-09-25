@@ -40,6 +40,36 @@ bounded_fusermount() {
   timeout --foreground --kill-after=5s 10s fusermount3 "${mode}" "${mountpoint}" >/dev/null 2>&1
 }
 
+# xfstests normally runs each testcase in a transient systemd scope. Some
+# workloads (notably fsstress) also create their own process groups, so killing
+# only ./check's process group is not sufficient to stop the full testcase
+# tree. Signal every process in the testcase cgroup before FUSE isolation; a
+# task stuck in uninterruptible FUSE I/O will consume the pending SIGKILL once
+# the forced unmount releases it, instead of continuing against the underlying
+# directory after the mount disappears.
+terminate_test_scope() {
+  local test="$1"
+  command -v systemctl >/dev/null 2>&1 || return 0
+  command -v systemd-escape >/dev/null 2>&1 || return 0
+
+  local unit
+  unit="$(systemd-escape "fs${test}").scope"
+  timeout 5s systemctl is-active --quiet "${unit}" 2>/dev/null || return 0
+  timeout 5s systemctl kill --kill-whom=cgroup --signal=TERM "${unit}" >/dev/null 2>&1 || true
+  timeout 5s systemctl kill --kill-whom=cgroup --signal=KILL "${unit}" >/dev/null 2>&1 || true
+}
+
+cleanup_test_scope() {
+  local test="$1"
+  command -v systemctl >/dev/null 2>&1 || return 0
+  command -v systemd-escape >/dev/null 2>&1 || return 0
+
+  local unit
+  unit="$(systemd-escape "fs${test}").scope"
+  timeout 5s systemctl stop "${unit}" >/dev/null 2>&1 || true
+  timeout 5s systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
+}
+
 OUTPUT_DIR="${PROJECT_DIR}/build/fstests-conformance"
 TESTS_FILE=""
 SHARD_NAME=""
@@ -612,7 +642,12 @@ while IFS= read -r test <&3; do
   set +e
   (
     cd "${FSTESTS_DIR}"
-    RESULT_BASE="${RUN_RESULTS}" timeout --foreground --kill-after=30s "${test_budget}s" \
+    # Do not use timeout --foreground here. In foreground mode GNU timeout
+    # explicitly leaves COMMAND's children outside the timeout, which lets an
+    # xfstests testcase/fsstress descendant survive after ./check is killed.
+    # The default process-group behavior makes the per-test deadline apply to
+    # the whole testcase tree before isolation starts.
+    RESULT_BASE="${RUN_RESULTS}" timeout --kill-after=30s "${test_budget}s" \
       ./check -R xunit-quiet -fuse "${test}" </dev/null
   ) >>"${RAW_DIR}/check.log" 2>&1
   test_status=$?
@@ -629,7 +664,9 @@ while IFS= read -r test <&3; do
       "${test}" "${test_timeout_reason}" "${test_budget}" "${test_status}" >>"${RAW_DIR}/timeout-status.tsv"
     echo "ERROR: fstests testcase ${test} exceeded ${test_timeout_reason} timeout after ${test_budget}s" | \
       tee -a "${RAW_DIR}/check.log" >&2
+    terminate_test_scope "${test}"
     isolate_after_test "${test}" || true
+    cleanup_test_scope "${test}"
     break
   fi
   if [[ "${test_status}" -ne 0 ]]; then
