@@ -204,9 +204,6 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
 
   SwordFsAttr attr = inode.attr;
   const uint64_t old_size = attr.size;
-  const bool size_changed = HasSetAttrField(fields, SetAttrField::kSize) && old_size != requested.size;
-  const bool owner_changed = (HasSetAttrField(fields, SetAttrField::kUid) && attr.uid != requested.uid) ||
-                             (HasSetAttrField(fields, SetAttrField::kGid) && attr.gid != requested.gid);
 
   if (HasSetAttrField(fields, SetAttrField::kSize)) {
     // Redis MULTI/EXEC can partially apply a chunk descriptor update while
@@ -257,8 +254,8 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
     attr.ctime = requested.ctime;
     attr.ctime_nsec = requested.ctime_nsec;
   }
-  if (size_changed || owner_changed) {
-    attr.KillSUID();
+  if (HasSetAttrField(fields, SetAttrField::kKillSuidGid)) {
+    attr.ClearSetidForKillPriv();
   }
   if (!HasSetAttrField(fields, SetAttrField::kCtime)) {
     inode.attr = attr;
@@ -294,7 +291,6 @@ utils::Status RedisMetaTxn::Truncate(InodeID ino, uint64_t size, std::vector<Pen
     return utils::Status::OK();
   }
   inode.attr.size = size;
-  inode.attr.KillSUID();
   inode.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
   return SetInode(inode);
 }
@@ -1007,7 +1003,6 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
   if (chunk_end > inode.attr.size) {
     inode.attr.size = chunk_end;
   }
-  inode.attr.KillSUID();
   inode.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
   return SetInode(inode);
 }

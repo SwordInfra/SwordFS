@@ -137,9 +137,13 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   if (conn->capable & FUSE_CAP_ASYNC_READ) {
     fuse_set_feature_flag(conn, FUSE_CAP_ASYNC_READ);
   }
-  if (conn->capable & FUSE_CAP_ATOMIC_O_TRUNC) {
-    fuse_set_feature_flag(conn, FUSE_CAP_ATOMIC_O_TRUNC);
-  }
+  // libfuse 3.18 does not expose OPEN/WRITE KILL_SUIDGID protocol flags to
+  // low-level callbacks. Userspace killpriv handling would therefore lose the
+  // kernel's decision. Keep the legacy SETATTR/MODE path, which also requires
+  // O_TRUNC to be handled outside OPEN.
+  fuse_unset_feature_flag(conn, FUSE_CAP_HANDLE_KILLPRIV);
+  fuse_unset_feature_flag(conn, FUSE_CAP_HANDLE_KILLPRIV_V2);
+  fuse_unset_feature_flag(conn, FUSE_CAP_ATOMIC_O_TRUNC);
 
   fuse_unset_feature_flag(conn, FUSE_CAP_SPLICE_WRITE);
 

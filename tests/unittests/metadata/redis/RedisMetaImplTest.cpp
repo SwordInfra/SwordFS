@@ -1200,7 +1200,7 @@ FIBER_TEST_F(RedisMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempot
 
   ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
   EXPECT_EQ(file.attr.size, 128U);
-  EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), 0U);
+  EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), static_cast<uint32_t>(S_ISUID | S_ISGID));
 
   auto stale_replacement = replacement;
   stale_replacement.revision = 3;
@@ -1284,7 +1284,7 @@ FIBER_TEST_F(RedisMetaImplTest, CommitChunkReplayRepairsInodeAfterPartialExec) {
 
   // Simulate an EXEC where SetChunk succeeded but the later SetInode command
   // failed. The retry sees replacement metadata already installed and must
-  // still re-apply the inode write side effects instead of returning early.
+  // still repair the inode size/timestamps instead of returning early.
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
     redis.hset(key.Chunk(file.ino), std::to_string(first.index), replacement_value);
@@ -1295,7 +1295,7 @@ FIBER_TEST_F(RedisMetaImplTest, CommitChunkReplayRepairsInodeAfterPartialExec) {
             std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(file.ino, first.index, first.revision)});
   ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
   EXPECT_EQ(file.attr.size, 128U);
-  EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), 0U);
+  EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), static_cast<uint32_t>(S_ISUID | S_ISGID));
 
   SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());

@@ -153,18 +153,15 @@ Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fi
 
   SwordFsAttr st = inode->attr;
   const SwordFsAttr &requested = attr;
-  bool owner_changed = false;
   bool size_changed = false;
 
   if (HasSetAttrField(fields, SetAttrField::kMode)) {
     st.mode = (st.mode & S_IFMT) | (requested.mode & 07777);
   }
   if (HasSetAttrField(fields, SetAttrField::kUid)) {
-    owner_changed = owner_changed || st.uid != requested.uid;
     st.uid = requested.uid;
   }
   if (HasSetAttrField(fields, SetAttrField::kGid)) {
-    owner_changed = owner_changed || st.gid != requested.gid;
     st.gid = requested.gid;
   }
   if (HasSetAttrField(fields, SetAttrField::kSize)) {
@@ -191,9 +188,8 @@ Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fi
     st.ctime = requested.ctime;
     st.ctime_nsec = requested.ctime_nsec;
   }
-
-  if (size_changed || owner_changed) {
-    st.KillSUID();
+  if (HasSetAttrField(fields, SetAttrField::kKillSuidGid)) {
+    st.ClearSetidForKillPriv();
   }
   if (size_changed && !HasSetAttrField(fields, SetAttrField::kMtime) &&
       !HasSetAttrField(fields, SetAttrField::kMtimeNow)) {
@@ -233,7 +229,6 @@ Status MemMetaTxn::Truncate(InodeID ino, uint64_t size) {
 
   SwordFsAttr st = inode->attr;
   st.size = size;
-  st.KillSUID();
   st.mtime = static_cast<int64_t>(::time(nullptr));
   st.mtime_nsec = 0;
   st.ctime = static_cast<int64_t>(::time(nullptr));
@@ -693,7 +688,6 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
   if (chunk_end > inode->attr.size) {
     inode->attr.size = chunk_end;
   }
-  inode->attr.KillSUID();
   inode->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
   return Status::OK();
 }

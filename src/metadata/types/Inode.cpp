@@ -25,8 +25,11 @@ SwordFsAttr::SwordFsAttr(uint64_t ino, uint32_t mode, uint64_t uid, uint64_t gid
   atime = mtime = ctime = static_cast<int64_t>(::time(nullptr));
 }
 
-void SwordFsAttr::KillSUID() {
-  mode &= ~(S_ISUID | S_ISGID);
+void SwordFsAttr::ClearSetidForKillPriv() {
+  mode &= ~S_ISUID;
+  if (mode & S_IXGRP) {
+    mode &= ~S_ISGID;
+  }
 }
 
 void SwordFsAttr::ToPosixStat(struct stat *st) const {
