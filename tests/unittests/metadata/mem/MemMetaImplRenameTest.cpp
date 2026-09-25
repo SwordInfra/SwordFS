@@ -206,6 +206,131 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameDirectoryOverFileFails) {
   EXPECT_EQ(st.ToErrno(), ENOTDIR) << st.message();
 }
 
+FIBER_TEST_F(MemMetaImplRenameTest, RenameExchangeFileAndDirectorySameParentSucceeds) {
+  SwordFsInode file;
+  SwordFsInode dir;
+  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
+  ASSERT_TRUE(impl_->MkDir(kRoot, "d", 0755, &dir).ok());
+
+  Status status = impl_->Rename(kRoot, "f", kRoot, "d", RenameFlag::kExchange);
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(kRoot, "f", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+  ASSERT_TRUE(impl_->Lookup(kRoot, "d", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+}
+
+FIBER_TEST_F(MemMetaImplRenameTest, RenameExchangeDirectoryAndFileAcrossParentsUpdatesTopology) {
+  SwordFsInode left;
+  SwordFsInode right;
+  SwordFsInode dir;
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "left", 0755, &left).ok());
+  ASSERT_TRUE(impl_->MkDir(kRoot, "right", 0755, &right).ok());
+  ASSERT_TRUE(impl_->MkDir(left.ino, "dir", 0755, &dir).ok());
+  ASSERT_TRUE(impl_->Create(right.ino, "file", 0644, &file).ok());
+
+  SwordFsInode left_before;
+  SwordFsInode right_before;
+  ASSERT_TRUE(impl_->GetInode(left.ino, &left_before).ok());
+  ASSERT_TRUE(impl_->GetInode(right.ino, &right_before).ok());
+
+  Status status = impl_->Rename(left.ino, "dir", right.ino, "file", RenameFlag::kExchange);
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(left.ino, "dir", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+  ASSERT_TRUE(impl_->Lookup(right.ino, "file", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+  EXPECT_EQ(found.parent_ino, right.ino);
+
+  SwordFsInode left_after;
+  SwordFsInode right_after;
+  ASSERT_TRUE(impl_->GetInode(left.ino, &left_after).ok());
+  ASSERT_TRUE(impl_->GetInode(right.ino, &right_after).ok());
+  EXPECT_EQ(left_after.attr.nlink, left_before.attr.nlink - 1);
+  EXPECT_EQ(right_after.attr.nlink, right_before.attr.nlink + 1);
+
+  status = impl_->Rename(left.ino, "dir", right.ino, "file", RenameFlag::kExchange);
+  ASSERT_TRUE(status.ok()) << status.message();
+  ASSERT_TRUE(impl_->Lookup(left.ino, "dir", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+  EXPECT_EQ(found.parent_ino, left.ino);
+
+  SwordFsInode left_restored;
+  SwordFsInode right_restored;
+  ASSERT_TRUE(impl_->GetInode(left.ino, &left_restored).ok());
+  ASSERT_TRUE(impl_->GetInode(right.ino, &right_restored).ok());
+  EXPECT_EQ(left_restored.attr.nlink, left_before.attr.nlink);
+  EXPECT_EQ(right_restored.attr.nlink, right_before.attr.nlink);
+}
+
+FIBER_TEST_F(MemMetaImplRenameTest, RenameExchangeRejectsCycleWhenSourceOnlyIsDirectory) {
+  SwordFsInode dir;
+  SwordFsInode descendant;
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "dir", 0755, &dir).ok());
+  ASSERT_TRUE(impl_->MkDir(dir.ino, "descendant", 0755, &descendant).ok());
+  ASSERT_TRUE(impl_->Create(descendant.ino, "file", 0644, &file).ok());
+
+  Status status = impl_->Rename(kRoot, "dir", descendant.ino, "file", RenameFlag::kExchange);
+  EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
+
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(kRoot, "dir", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+  ASSERT_TRUE(impl_->Lookup(descendant.ino, "file", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+}
+
+FIBER_TEST_F(MemMetaImplRenameTest, RenameExchangeRejectsCycleWhenTargetOnlyIsDirectory) {
+  SwordFsInode dir;
+  SwordFsInode descendant;
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "dir", 0755, &dir).ok());
+  ASSERT_TRUE(impl_->MkDir(dir.ino, "descendant", 0755, &descendant).ok());
+  ASSERT_TRUE(impl_->Create(descendant.ino, "file", 0644, &file).ok());
+
+  Status status = impl_->Rename(descendant.ino, "file", kRoot, "dir", RenameFlag::kExchange);
+  EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
+
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(descendant.ino, "file", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+  ASSERT_TRUE(impl_->Lookup(kRoot, "dir", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+}
+
+FIBER_TEST_F(MemMetaImplRenameTest, RenameExchangeSameInodeAcrossParentsIsNoOp) {
+  SwordFsInode left;
+  SwordFsInode right;
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "left", 0755, &left).ok());
+  ASSERT_TRUE(impl_->MkDir(kRoot, "right", 0755, &right).ok());
+  ASSERT_TRUE(impl_->Create(left.ino, "file", 0644, &file).ok());
+  ASSERT_TRUE(impl_->Link(file.ino, right.ino, "alias", nullptr).ok());
+
+  SwordFsInode before;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &before).ok());
+  ASSERT_EQ(before.parent_ino, left.ino);
+
+  Status status = impl_->Rename(right.ino, "alias", left.ino, "file", RenameFlag::kExchange);
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(right.ino, "alias", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+  ASSERT_TRUE(impl_->Lookup(left.ino, "file", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+
+  SwordFsInode after;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &after).ok());
+  EXPECT_EQ(after.parent_ino, before.parent_ino);
+}
+
 // ════════════════════════════════════════════════════════════════════
 // Rename: overwrite non-empty directory fails
 // ════════════════════════════════════════════════════════════════════

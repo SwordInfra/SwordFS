@@ -554,6 +554,15 @@ Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a, In
 
   SwordFsInode *inode_a = it_a->second;
   SwordFsInode *inode_b = it_b->second;
+  SwordFsInode *parent_a = FindInode(parent_a_ino);
+  SwordFsInode *parent_b = FindInode(parent_b_ino);
+
+  // Two names may be hard links to the same inode. Exchanging those names
+  // changes no namespace binding, so it must not rewrite parent metadata or
+  // timestamps.
+  if (inode_a == inode_b) {
+    return Status::OK();
+  }
 
   // Neither directory may end up inside its own subtree — a swap that
   // places a directory beneath itself would create a cycle.  Both
@@ -575,20 +584,30 @@ Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a, In
   dir_b_it->second[std::string(name_b)] = inode_a;
 
   // Keep parent_ino in sync with the new locations so the synthetic ".."
-  // entries produced by ListEntries point at the right parent.  (For a
-  // same-directory swap both parents are identical, so this is a no-op;
-  // for same-entry swaps inode_a == inode_b and the values match too.)
-  // No nlink adjustment is needed: each parent loses one entry and gains
-  // one.
+  // entries produced by ListEntries point at the right parent. For a
+  // same-directory swap both parents are identical, so this is a no-op.
   inode_a->parent_ino = parent_b_ino;
   inode_b->parent_ino = parent_a_ino;
+
+  // Parent nlink tracks directory children through their ".." backlinks.
+  // Only a cross-parent cross-type exchange changes the net number of
+  // directory children owned by either parent.
+  if (parent_a_ino != parent_b_ino && inode_a->IsDir() != inode_b->IsDir()) {
+    if (inode_a->IsDir()) {
+      parent_a->attr.nlink--;
+      parent_b->attr.nlink++;
+    } else {
+      parent_b->attr.nlink--;
+      parent_a->attr.nlink++;
+    }
+  }
 
   // Both entries were re-linked: bump ctime on the inodes and
   // mtime/ctime on the parent directories.
   inode_a->Touch(SetAttrField::kCtime);
   inode_b->Touch(SetAttrField::kCtime);
-  FindInode(parent_a_ino)->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
-  FindInode(parent_b_ino)->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  parent_a->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  parent_b->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
   return Status::OK();
 }

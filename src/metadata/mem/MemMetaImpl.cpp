@@ -366,14 +366,12 @@ Status MemMetaImpl::Rename(InodeID old_parent_ino, std::string_view old_name, In
     }
 
     if (HasRenameFlag(flags, RenameFlag::kExchange)) {
-      // RENAME_EXCHANGE requires the target to exist, and POSIX forbids
-      // exchanging a directory with a non-directory.  Cycle prevention
-      // is enforced by SwapEntries itself.
+      // RENAME_EXCHANGE swaps two existing namespace bindings. Unlike an
+      // overwrite rename, it does not require the two inodes to have the
+      // same type. Cycle prevention and topology bookkeeping live in the
+      // transaction primitive.
       if (!target_exists) {
         return Status::NotFound("target does not exist for RENAME_EXCHANGE");
-      }
-      if (existing.IsDir() != moved.IsDir()) {
-        return Status::InvalidArgument("cannot exchange directory with non-directory");
       }
       return txn.SwapEntries(old_parent_ino, old_name, new_parent_ino, new_name);
     }

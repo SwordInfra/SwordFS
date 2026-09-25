@@ -529,18 +529,36 @@ FIBER_TEST_F(MemMetaImplTest, RenameExchangeFailsWhenTargetMissing) {
   EXPECT_TRUE(st.IsNotFound()) << st.message();
 }
 
-FIBER_TEST_F(MemMetaImplTest, RenameExchangeFailsTypeMismatch) {
+FIBER_TEST_F(MemMetaImplTest, RenameExchangeFileAndDirectoryAcrossParentsUpdatesTopology) {
   InodeID src_ino = MakeOwnedDir(kRoot, "src", 0700);
   InodeID dst_ino = MakeOwnedDir(kRoot, "dst", 0700);
   SetContext(0, 0);
-  ASSERT_TRUE(impl_->Create(src_ino, "a", 0644, nullptr).ok());
+  SwordFsInode file;
+  SwordFsInode dir;
+  ASSERT_TRUE(impl_->Create(src_ino, "a", 0644, &file).ok());
+  ASSERT_TRUE(impl_->MkDir(dst_ino, "b", 0755, &dir).ok());
 
-  // Create a directory under dst with same name.
-  ASSERT_TRUE(impl_->MkDir(dst_ino, "b", 0755, nullptr).ok());
+  SwordFsInode src_before;
+  SwordFsInode dst_before;
+  ASSERT_TRUE(impl_->GetInode(src_ino, &src_before).ok());
+  ASSERT_TRUE(impl_->GetInode(dst_ino, &dst_before).ok());
 
-  // RenameFlag::kExchange: file ↔ dir → EINVAL.
-  Status st = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
-  EXPECT_EQ(st.ToErrno(), EINVAL) << st.message();
+  Status status = impl_->Rename(src_ino, "a", dst_ino, "b", RenameFlag::kExchange);
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(src_ino, "a", &found).ok());
+  EXPECT_EQ(found.ino, dir.ino);
+  EXPECT_EQ(found.parent_ino, src_ino);
+  ASSERT_TRUE(impl_->Lookup(dst_ino, "b", &found).ok());
+  EXPECT_EQ(found.ino, file.ino);
+
+  SwordFsInode src_after;
+  SwordFsInode dst_after;
+  ASSERT_TRUE(impl_->GetInode(src_ino, &src_after).ok());
+  ASSERT_TRUE(impl_->GetInode(dst_ino, &dst_after).ok());
+  EXPECT_EQ(src_after.attr.nlink, src_before.attr.nlink + 1);
+  EXPECT_EQ(dst_after.attr.nlink, dst_before.attr.nlink - 1);
 }
 
 // ────────────────────────────────────────────────────────────────

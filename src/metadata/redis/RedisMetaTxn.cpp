@@ -644,29 +644,50 @@ utils::Status RedisMetaTxn::ExchangeEntries(InodeID old_parent_ino, std::string_
   if (source->ino == target->ino) {
     return utils::Status::OK();
   }
-  if (source->IsDir() != target->IsDir()) {
-    return utils::Status::InvalidArgument("cannot exchange directory with non-directory");
-  }
 
-  if (source->IsDir()) {
+  auto validate_directory_destination = [&](const SwordFsInode &inode, InodeID parent_ino) -> utils::Status {
+    if (!inode.IsDir()) {
+      return utils::Status::OK();
+    }
     bool cycle = false;
-    auto status = IsDescendantOf(source->ino, new_parent_ino, &cycle);
+    auto status = IsDescendantOf(inode.ino, parent_ino, &cycle);
     if (!status.ok()) {
       return status;
     }
     if (cycle) {
       return utils::Status::InvalidArgument("cannot exchange directory into its descendant");
     }
-    status = IsDescendantOf(target->ino, old_parent_ino, &cycle);
-    if (!status.ok()) {
-      return status;
-    }
-    if (cycle) {
-      return utils::Status::InvalidArgument("cannot exchange directory into its descendant");
+    return utils::Status::OK();
+  };
+
+  auto status = validate_directory_destination(*source, new_parent_ino);
+  if (!status.ok()) {
+    return status;
+  }
+  status = validate_directory_destination(*target, old_parent_ino);
+  if (!status.ok()) {
+    return status;
+  }
+
+  // An exchange preserves both names and both inodes. Across different
+  // parents, only the net number of directory children changes each parent's
+  // link count: target-dir minus source-dir for the old parent, with the
+  // opposite delta for the new parent.
+  if (old_parent != new_parent) {
+    const int old_parent_delta = static_cast<int>(target->IsDir()) - static_cast<int>(source->IsDir());
+    if (old_parent_delta != 0) {
+      status = AdjustNlink(old_parent, old_parent_delta);
+      if (!status.ok()) {
+        return status;
+      }
+      status = AdjustNlink(new_parent, -old_parent_delta);
+      if (!status.ok()) {
+        return status;
+      }
     }
   }
 
-  auto status = ReplaceEntry(old_parent_ino, old_name, *target, old_parent);
+  status = ReplaceEntry(old_parent_ino, old_name, *target, old_parent);
   if (!status.ok()) {
     return status;
   }
