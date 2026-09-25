@@ -474,30 +474,39 @@ jobs:
           - shard: supported-0
             job_timeout: 90
             suite_timeout: 75m
+            test_timeout: 10m
           - shard: supported-1
             job_timeout: 90
             suite_timeout: 75m
+            test_timeout: 10m
           - shard: supported-2
             job_timeout: 90
             suite_timeout: 75m
+            test_timeout: 10m
           - shard: supported-3
             job_timeout: 90
             suite_timeout: 75m
+            test_timeout: 10m
           - shard: baseline-rest-0
             job_timeout: 90
             suite_timeout: 75m
+            test_timeout: 10m
           - shard: baseline-rest-1
             job_timeout: 90
             suite_timeout: 75m
+            test_timeout: 10m
           - shard: bounded-069
             job_timeout: 35
             suite_timeout: 15m
+            test_timeout: 15m
           - shard: bounded-471
             job_timeout: 35
             suite_timeout: 15m
+            test_timeout: 15m
           - shard: bounded-478
             job_timeout: 35
             suite_timeout: 15m
+            test_timeout: 15m
     steps:
       - uses: actions/checkout@v4
         with:
@@ -574,6 +583,7 @@ jobs:
               --tests-file "${RUNNER_TEMP}/fstests-tests.txt" \
               --shard-name "${FSTESTS_SHARD}" \
               --suite-timeout "${{ matrix.suite_timeout }}" \
+              --test-timeout "${{ matrix.test_timeout }}" \
               --output-dir "${{ github.workspace }}/build/fstests-conformance" \
               "${verify_args[@]}"
           status=$?
