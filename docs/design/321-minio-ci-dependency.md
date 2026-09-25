@@ -13,7 +13,7 @@ Use official MinIO GitHub Release assets instead of a container registry:
 - server: `RELEASE.2025-09-07T16-13-09Z`;
 - client (`mc`): `RELEASE.2025-08-13T08-35-41Z`.
 
-`scripts/testing/minio-test.sh` owns the shared lifecycle. It selects the amd64/arm64 release asset, verifies a pinned SHA256 from GitHub release metadata, starts MinIO directly on the runner, waits for the readiness endpoint, creates buckets through the pinned `mc`, and performs bounded shutdown.
+`scripts/testing/minio-test.sh` owns the shared lifecycle. It selects the amd64/arm64 release asset, verifies a pinned SHA256 from GitHub release metadata, starts MinIO directly on the runner, waits for the readiness endpoint **and** a successful authenticated `mc alias set`, creates buckets through the pinned `mc`, and performs bounded shutdown.
 
 Ephemeral MinIO object data, PID state, and `mc` configuration live under a private `/tmp/swordfs-minio-test-*` runtime directory. Evidence directories retain only `minio.log`, so a cancelled root-run conformance job cannot make artifact collection fail on unreadable runtime state.
 
@@ -45,4 +45,6 @@ Local verification covers shell/YAML/pre-commit, Redis-only Compose rendering, a
 
 ## Startup readiness
 
-The helper must wait on `/minio/health/ready`, not only `/minio/health/live`. CI evidence from fstests showed that the liveness endpoint can succeed before the object layer is initialized, allowing the first `mc alias set` request to race startup with `Server not initialized yet`. Readiness is therefore the contract for handing MinIO to callers.
+HTTP readiness is necessary but not sufficient for the test handoff. CI first showed that `/minio/health/live` can succeed before the object layer is initialized. A later Debug run proved that even `/minio/health/ready` can briefly succeed while an authenticated `mc alias set` still returns `Server not initialized yet`.
+
+`minio_test_start()` therefore uses two bounded gates: wait for `/minio/health/ready`, then retry a real authenticated `mc alias set` with the pinned client and configured test credentials. The helper returns only after both gates pass. All callers inherit that stronger boundary, and `minio_test_create_bucket()` can focus solely on bucket creation rather than duplicating startup probing.

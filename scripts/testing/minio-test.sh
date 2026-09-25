@@ -103,7 +103,34 @@ minio_test_start() {
     sleep 0.25
   done
   if [[ "${ready}" -ne 1 ]]; then
-    echo "ERROR: MinIO did not become ready on port ${MINIO_PORT}" >&2
+    echo "ERROR: MinIO did not become HTTP-ready on port ${MINIO_PORT}" >&2
+    cat "${MINIO_TEST_LOG}" >&2 || true
+    return 2
+  fi
+
+  # MinIO's /health/ready endpoint can become successful a short time before
+  # the authenticated object layer accepts requests. Do not hand the server to
+  # callers until the same pinned mc client can establish an authenticated
+  # alias; this is the real readiness boundary used by every test surface.
+  local alias_ready=0
+  local alias_error="${MINIO_TEST_RUNTIME_DIR}/mc-alias.err"
+  for _ in $(seq 1 120); do
+    if "${MC_BIN}" --config-dir "${MINIO_TEST_MC_CONFIG}" alias set local \
+      "http://127.0.0.1:${MINIO_PORT}" "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" \
+      >/dev/null 2>"${alias_error}"; then
+      alias_ready=1
+      break
+    fi
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      echo "ERROR: MinIO exited before authenticated readiness" >&2
+      cat "${MINIO_TEST_LOG}" >&2 || true
+      return 2
+    fi
+    sleep 0.25
+  done
+  if [[ "${alias_ready}" -ne 1 ]]; then
+    echo "ERROR: MinIO HTTP readiness succeeded but authenticated mc readiness did not" >&2
+    cat "${alias_error}" >&2 || true
     cat "${MINIO_TEST_LOG}" >&2 || true
     return 2
   fi
@@ -112,8 +139,6 @@ minio_test_start() {
 minio_test_create_bucket() {
   local bucket="$1"
   local config_dir="${MINIO_TEST_MC_CONFIG:?minio_test_start must run first}"
-  "${MC_BIN}" --config-dir "${config_dir}" alias set local "http://127.0.0.1:${MINIO_PORT}" \
-    "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}"
   "${MC_BIN}" --config-dir "${config_dir}" mb "local/${bucket}" --ignore-existing
 }
 
