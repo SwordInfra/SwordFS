@@ -282,6 +282,7 @@ TEST(RedisMetaClientTest, DetectsExecCommandErrorAndReportsPossiblePartialCommit
     return txn.Set(later_key, "applied");
   });
 
+  EXPECT_TRUE(status.IsOutcomeUnknown());
   EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_NE(status.message().find("commit may be partial"), std::string::npos);
   const auto later_value = redis.get(later_key);
@@ -490,7 +491,7 @@ TEST(RedisMetaClientTest, RejectsNonPositiveRetryAttemptsDuringConstruction) {
   }
 }
 
-TEST(RedisMetaClientTest, WatchConflictRetryLimitReturnsIOError) {
+TEST(RedisMetaClientTest, WatchConflictRetryLimitReturnsUnavailable) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
@@ -515,6 +516,7 @@ TEST(RedisMetaClientTest, WatchConflictRetryLimitReturnsIOError) {
     return transaction.Set(key, "committed");
   });
 
+  EXPECT_TRUE(status.IsUnavailable());
   EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_EQ(status.message(), "Redis transaction retry limit exceeded");
   EXPECT_EQ(attempts, 3);
@@ -551,6 +553,44 @@ TEST(RedisMetaClientTest, DoesNotRetryAmbiguousExecTimeout) {
   });
   control.command<void>("CLIENT", "UNPAUSE");
 
+  EXPECT_TRUE(status.IsOutcomeUnknown());
+  EXPECT_EQ(status.ToErrno(), EIO);
+  EXPECT_NE(status.message().find("ambiguous after EXEC"), std::string::npos);
+  EXPECT_EQ(attempts, 1);
+  control.del(key);
+}
+
+TEST(RedisMetaClientTest, DoesNotRetryAmbiguousExecConnectionClose) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  sw::redis::Redis control(ConnectionOptions(config));
+  const std::string key = UniqueRedisName("ambiguous-exec-close");
+  control.del(key);
+
+  config.retry_attempts = 3;
+  config.retry_backoff = std::chrono::milliseconds(0);
+  RedisMetaClient store(config);
+  int attempts = 0;
+  const auto status = store.Transact([&](RedisKvTxn &transaction) {
+    ++attempts;
+    auto status = transaction.Set(key, "possibly-committed");
+    if (!status.ok()) {
+      return status;
+    }
+
+    // Keep this control connection alive while closing every other normal
+    // client. The transaction's guarded connection is therefore closed before
+    // exec() can obtain an acknowledgement; Commit must conservatively treat
+    // that boundary as an unknown mutation outcome and must not replay it.
+    const auto killed = control.command<long long>("CLIENT", "KILL", "TYPE", "normal", "SKIPME", "yes");
+    EXPECT_GT(killed, 0);
+    return utils::Status::OK();
+  });
+
+  EXPECT_TRUE(status.IsOutcomeUnknown());
   EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_NE(status.message().find("ambiguous after EXEC"), std::string::npos);
   EXPECT_EQ(attempts, 1);

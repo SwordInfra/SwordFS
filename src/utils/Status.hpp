@@ -26,6 +26,8 @@ class Status {
     kMalformed,        // malformed persistent data
     kNotSupported,     // ENOSYS
     kIOError,          // EIO
+    kUnavailable,      // internal backend availability failure; maps to EIO
+    kOutcomeUnknown,   // internal ambiguous remote mutation outcome; maps to EIO
     kBusy,             // EBUSY
     kNotPermitted,     // EPERM
     kPermission,       // EACCES
@@ -48,6 +50,12 @@ class Status {
   }
   bool IsEndOfDirectory() const {
     return code_ == kEndOfDirectory;
+  }
+  bool IsUnavailable() const {
+    return code_ == kUnavailable;
+  }
+  bool IsOutcomeUnknown() const {
+    return code_ == kOutcomeUnknown;
   }
   const std::string &message() const {
     return msg_;
@@ -87,6 +95,12 @@ class Status {
   }
   static Status IOError(std::string msg) {
     return Status(kIOError, std::move(msg));
+  }
+  static Status Unavailable(std::string msg) {
+    return Status(kUnavailable, std::move(msg));
+  }
+  static Status OutcomeUnknown(std::string msg) {
+    return Status(kOutcomeUnknown, std::move(msg));
   }
   static Status Busy(std::string msg) {
     return Status(kBusy, std::move(msg));

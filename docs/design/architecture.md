@@ -211,6 +211,58 @@ The S3 engine supports:
 
 New data engines can be added through the registry without changing the VFS contract.
 
+### 5.3 Backend liveness, retry ownership, and outcome certainty
+
+External-I/O failures have two different meanings that must not be collapsed.
+A transport or admission failure explains **why progress stopped or certainty
+was lost**; it does not by itself prove whether a remote mutation executed.
+SwordFS therefore separates the low-level failure cause from the terminal
+semantic result that crosses a backend boundary.
+
+`utils::Status` carries the terminal distinction needed by upstream correctness
+logic:
+
+- `Unavailable` means the backend operation cannot currently complete and the
+  owning automatic-retry policy has stopped, with no unresolved remote mutation
+  outcome at that abstraction boundary;
+- `OutcomeUnknown` means a side effect may have changed authoritative remote
+  state and SwordFS cannot prove whether it executed.
+
+Both are internal statuses and currently map to `EIO` at the FUSE boundary.
+The errno is intentionally not an oracle for remote execution state. Timeout,
+connection reset, pool admission failure, backend exception type, retry count,
+and elapsed time remain backend-local diagnostic/observability information
+unless a future cross-layer consumer requires them. Read-only operations must
+never manufacture `OutcomeUnknown` because they have no remote mutation whose
+execution can be ambiguous.
+
+Exactly one layer owns automatic transport/protocol retry for each backend
+attempt path: the nearest layer that knows both the failure boundary and
+whether replaying the same operation identity is safe. VFS and callers must not
+add generic retry loops around `EIO`, `Unavailable`, or `OutcomeUnknown`.
+Operation classes follow these rules:
+
+| Operation class | Automatic retry rule | Terminal result when certainty cannot be obtained |
+| --- | --- | --- |
+| Read-only | May retry within the backend owner's bounded policy | `Unavailable` |
+| Idempotent mutation with stable identity | May replay the same identity within the bounded owner policy | `OutcomeUnknown` if an attempt may have applied but acknowledgement remains unknown; otherwise a known failure |
+| Conditional/reconcilable mutation | Retry only at protocol-defined safe boundaries; after ambiguity, reconcile authoritative state | `OutcomeUnknown` until reconciliation resolves it |
+| Non-idempotent, non-reconcilable mutation | Never blindly replay after execution may have occurred | `OutcomeUnknown` |
+
+Reconciliation is not a second transport retry loop. It is an operation-level
+protocol action that reads or compares authoritative state to determine what
+already happened.
+
+Backend liveness policy is likewise owned at the external-I/O boundary rather
+than by a mount-wide FUSE deadline. A backend is responsible for bounding waits
+that can otherwise prevent progress, including connection establishment, pool
+or worker admission when applicable, transport no-progress handling, and retry
+attempts/backoff. Large operations that are still making legitimate progress
+do not need to fail merely because a short absolute wall-clock interval elapsed.
+Blocking executor callbacks are not detached on timeout: returning while such a
+callback still owns caller buffers or stack state would violate lifetime safety,
+and local cancellation would not prove that a remote mutation stopped.
+
 ## 6. Metadata architecture
 
 `IMetaEngine` is the filesystem's authoritative metadata contract. It covers:
@@ -299,9 +351,9 @@ All Redis keys belonging to one SwordFS volume currently share one Redis Cluster
 - writes are queued into `MULTI/EXEC`;
 - a WATCH conflict is surfaced as a conflict so the operation can be retried at the operation layer.
 
-Redis `MULTI/EXEC` is not a rollback transaction: an individual queued command may fail after earlier commands have succeeded. The transaction wrapper therefore validates EXEC replies and treats such outcomes as possible partial commits.
+Redis `MULTI/EXEC` is not a rollback transaction: an individual queued command may fail after earlier commands have succeeded. The transaction wrapper therefore validates EXEC replies and returns `OutcomeUnknown` for such possible partial commits.
 
-Timeout or connection loss after EXEC is treated as an **ambiguous commit**, not as proof that nothing happened. Metadata operations that can face ambiguous outcomes must therefore be idempotent or able to reconcile the resulting durable state.
+Timeout or connection loss after EXEC is also returned as `OutcomeUnknown`, not as proof that nothing happened. Retryable paths already owned by `RedisMetaClient`—WATCH conflicts and timeout/close failures that escape before a write transaction reaches EXEC—remain private retry control flow; exhausting that bounded policy returns `Unavailable`. This issue does not broaden the existing retry set. Metadata operations that can face ambiguous outcomes must therefore be idempotent or able to reconcile the resulting durable state rather than blindly replaying a failed errno.
 
 Detailed Redis key layout and access patterns are documented separately in [Redis Metadata Schema and Access-Pattern Review](redis-metadata-schema.md). That document is a persistence-detail reference; this document remains the architecture entry point.
 

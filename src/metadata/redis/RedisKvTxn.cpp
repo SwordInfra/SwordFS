@@ -23,10 +23,10 @@ utils::Status ValidateWriteExecReplies(sw::redis::QueuedReplies replies) {
     } catch (const sw::redis::Error &error) {
       // Redis MULTI/EXEC does not roll back commands that succeeded before a
       // later command returned an error. Surface this explicitly so callers
-      // can reconcile/retry instead of treating a potentially partial commit
-      // as success.
-      return utils::Status::IOError("Redis transaction EXEC command failed; commit may be partial: " +
-                                    std::string(error.what()));
+      // can reconcile authoritative state instead of treating a potentially
+      // partial commit as either success or rollback.
+      return utils::Status::OutcomeUnknown("Redis transaction EXEC command failed; commit may be partial: " +
+                                           std::string(error.what()));
     }
   }
   return utils::Status::OK();
@@ -221,10 +221,12 @@ utils::Status RedisKvTxn::Commit() {
     throw WatchConflict{};
   } catch (const sw::redis::TimeoutError &error) {
     SWORDFS_LOG_WARN << "Redis transaction EXEC timed out; commit result is ambiguous: " << error.what();
-    return utils::Status::IOError("Redis transaction commit is ambiguous after EXEC: " + std::string(error.what()));
+    return utils::Status::OutcomeUnknown("Redis transaction commit is ambiguous after EXEC: " +
+                                         std::string(error.what()));
   } catch (const sw::redis::ClosedError &error) {
     SWORDFS_LOG_WARN << "Redis transaction EXEC connection closed; commit result is ambiguous: " << error.what();
-    return utils::Status::IOError("Redis transaction commit is ambiguous after EXEC: " + std::string(error.what()));
+    return utils::Status::OutcomeUnknown("Redis transaction commit is ambiguous after EXEC: " +
+                                         std::string(error.what()));
   } catch (const sw::redis::Error &error) {
     return RedisError("transaction EXEC", error);
   }

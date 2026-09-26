@@ -8,6 +8,9 @@
 namespace swordfs::utils {
 
 int Status::ToErrno() const {
+  if (IsUnavailable() || IsOutcomeUnknown()) {
+    return EIO;
+  }
   switch (code_) {
     case kOk:
       return 0;
