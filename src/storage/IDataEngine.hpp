@@ -40,7 +40,7 @@ struct DataEngineOptions {
   std::string region;
   size_t worker_count = 1;
   std::chrono::milliseconds request_timeout = std::chrono::seconds(60);
-  size_t retry_attempts = 3;
+  size_t retry_attempts = 10;
 };
 
 /// Abstract data-plane engine.

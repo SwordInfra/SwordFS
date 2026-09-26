@@ -4,6 +4,7 @@
 #include "storage/s3/S3DataEngine.hpp"
 
 #include <aws/core/Aws.h>
+#include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/utils/stream/PreallocatedStreamBuf.h>
 #include <aws/s3/S3Client.h>
 #include <aws/s3/S3ClientConfiguration.h>
@@ -90,6 +91,13 @@ Status S3DataEngine::Initialize() {
   EnsureAwsSdkInit();
   Aws::S3::S3ClientConfiguration aws_cfg;
   aws_cfg.endpointOverride = endpoint_;
+  // Low-speed detection alone is not a terminal bound: a pathological
+  // connection can keep trickling bytes while retaining a foreground FUSE
+  // request indefinitely. Apply the deadline at the actual HTTP boundary so
+  // the SDK cancels the request without detaching caller-owned state.
+  aws_cfg.httpRequestTimeoutMs = options_.request_timeout.count();
+  aws_cfg.retryStrategy = Aws::MakeShared<Aws::Client::DefaultRetryStrategy>(
+      "SwordFSS3RetryStrategy", static_cast<long>(options_.retry_attempts));
   // Use path-style addressing by default (http://<host>/<bucket>/<key>)
   // for MinIO and other S3-compatible stores.  Set
   // SWORDFS_S3_VIRTUAL_HOSTED=1 to switch to virtual-hosted style
