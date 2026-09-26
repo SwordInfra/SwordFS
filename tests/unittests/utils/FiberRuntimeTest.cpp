@@ -15,6 +15,24 @@
 
 using swordfs::utils::FiberRuntime;
 
+namespace {
+
+constexpr auto kStateTransitionWatchdog = std::chrono::seconds(5);
+
+template <typename Predicate>
+bool WaitUntil(Predicate &&predicate) {
+  const auto deadline = std::chrono::steady_clock::now() + kStateTransitionWatchdog;
+  while (!predicate()) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
+    }
+    std::this_thread::yield();
+  }
+  return true;
+}
+
+}  // namespace
+
 TEST(FiberRuntimeTest, SubmittedTaskRunsInFiberDomain) {
   FiberRuntime runtime;
   std::atomic<swordfs::utils::ExecutionDomain> domain{swordfs::utils::ExecutionDomain::kThread};
@@ -29,14 +47,27 @@ TEST(FiberRuntimeTest, SubmittedTaskRunsInFiberDomain) {
 TEST(FiberRuntimeTest, ShutdownDrainsAdmittedTasks) {
   FiberRuntime runtime;
   std::atomic<bool> ran{false};
+  std::atomic<bool> shutdown_returned{false};
+  folly::fibers::Baton task_started;
+  folly::fibers::Baton release_task;
 
   ASSERT_TRUE(runtime.Submit([&] {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    task_started.post();
+    release_task.wait();
     ran.store(true, std::memory_order_release);
   }));
+  task_started.wait();
 
-  runtime.Shutdown();
+  std::thread shutdown([&] {
+    runtime.Shutdown();
+    shutdown_returned.store(true, std::memory_order_release);
+  });
+  const bool stopped_accepting = WaitUntil([&] { return !runtime.IsAccepting(); });
+  EXPECT_TRUE(stopped_accepting) << "shutdown must stop admission within the test watchdog";
 
+  EXPECT_FALSE(shutdown_returned.load(std::memory_order_acquire));
+  release_task.post();
+  shutdown.join();
   EXPECT_TRUE(ran.load(std::memory_order_acquire));
   EXPECT_FALSE(runtime.IsAccepting());
 }
@@ -70,9 +101,8 @@ TEST(FiberRuntimeTest, SubmitIsRejectedWhileShutdownDrainsAdmittedTask) {
   task_started.wait();
 
   std::thread shutdown([&] { runtime.Shutdown(); });
-  while (runtime.IsAccepting()) {
-    std::this_thread::yield();
-  }
+  const bool stopped_accepting = WaitUntil([&] { return !runtime.IsAccepting(); });
+  EXPECT_TRUE(stopped_accepting) << "shutdown must stop admission within the test watchdog";
 
   EXPECT_FALSE(runtime.Submit([] {}, [&] { rejected.fetch_add(1, std::memory_order_relaxed); }));
   EXPECT_EQ(rejected.load(std::memory_order_relaxed), 1);
@@ -86,13 +116,16 @@ TEST(FiberRuntimeTest, ShutdownFromDriverFiberDefersJoinWithoutDeadlock) {
   FiberRuntime runtime;
   std::promise<void> shutdown_returned;
   auto shutdown_future = shutdown_returned.get_future();
+  constexpr auto kShutdownWatchdog = std::chrono::seconds(1);
 
   ASSERT_TRUE(runtime.Submit([&] {
     runtime.Shutdown();
     shutdown_returned.set_value();
   }));
 
-  EXPECT_EQ(shutdown_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  // This is a liveness watchdog, not a synchronization delay: Shutdown()
+  // invoked by the driver fiber must return without attempting to join itself.
+  EXPECT_EQ(shutdown_future.wait_for(kShutdownWatchdog), std::future_status::ready);
   runtime.Shutdown();
   EXPECT_FALSE(runtime.IsAccepting());
 }
@@ -112,9 +145,8 @@ TEST(FiberRuntimeTest, RunInFiberRejectsWhileGlobalRuntimeIsStopping) {
   task_started.wait();
 
   std::thread shutdown([] { swordfs::utils::ShutdownFiberRuntime(); });
-  while (runtime->IsAccepting()) {
-    std::this_thread::yield();
-  }
+  const bool stopped_accepting = WaitUntil([&] { return !runtime->IsAccepting(); });
+  EXPECT_TRUE(stopped_accepting) << "global shutdown must stop admission within the test watchdog";
 
   std::atomic<int> rejected{0};
   EXPECT_FALSE(swordfs::utils::RunInFiber([] {}, [&] { rejected.fetch_add(1, std::memory_order_relaxed); }));
@@ -189,9 +221,9 @@ TEST(FiberRuntimeTest, GlobalShutdownRejectsAndDrainsMultipleDriverRuntimes) {
   ASSERT_NE(first_runtime, second_runtime);
 
   std::thread shutdown([] { swordfs::utils::ShutdownFiberRuntime(); });
-  while (first_runtime->IsAccepting() || second_runtime->IsAccepting()) {
-    std::this_thread::yield();
-  }
+  const bool stopped_accepting =
+      WaitUntil([&] { return !first_runtime->IsAccepting() && !second_runtime->IsAccepting(); });
+  EXPECT_TRUE(stopped_accepting) << "global shutdown must stop admission on every runtime within the test watchdog";
 
   first.check_rejection.post();
   second.check_rejection.post();
@@ -223,14 +255,21 @@ TEST(FiberRuntimeTest, GlobalShutdownRejectsAndDrainsMultipleDriverRuntimes) {
 TEST(FiberRuntimeTest, ConcurrentShutdownCallsDrainOnce) {
   FiberRuntime runtime;
   std::atomic<bool> ran{false};
+  folly::fibers::Baton task_started;
+  folly::fibers::Baton release_task;
 
   ASSERT_TRUE(runtime.Submit([&] {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    task_started.post();
+    release_task.wait();
     ran.store(true, std::memory_order_release);
   }));
+  task_started.wait();
 
   std::thread first([&] { runtime.Shutdown(); });
   std::thread second([&] { runtime.Shutdown(); });
+  const bool stopped_accepting = WaitUntil([&] { return !runtime.IsAccepting(); });
+  EXPECT_TRUE(stopped_accepting) << "concurrent shutdown must stop admission within the test watchdog";
+  release_task.post();
   first.join();
   second.join();
 
