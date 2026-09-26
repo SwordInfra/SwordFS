@@ -4,6 +4,7 @@
 // SwordFS mount subcommand
 
 #include <fcntl.h>
+#include <folly/String.h>
 #include <folly/portability/Filesystem.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -42,6 +43,13 @@ std::vector<std::string> detail::BuildFuseExtras(std::string_view user_opts) {
     extras.emplace_back(user_opts);
   }
   return extras;
+}
+
+runtime::ImplicitAtimePolicy detail::ParseImplicitAtimePolicy(std::string_view user_opts) {
+  std::vector<std::string> options;
+  folly::split(',', user_opts, options, true);
+  const bool noatime = std::find(options.begin(), options.end(), "noatime") != options.end();
+  return noatime ? runtime::ImplicitAtimePolicy::kDisabled : runtime::ImplicitAtimePolicy::kEnabled;
 }
 
 // Mountpoint validation
@@ -231,6 +239,7 @@ int RunMount() {
 
   // Load volume config and initialise engines (after fork).
   swordfs::volume::VolumeImpl::Initialize();
+  runtime::MountRuntimeBehavior::Instance().Initialize(detail::ParseImplicitAtimePolicy(cfg.fuse_opts()));
   auto status = swordfs::volume::VolumeImpl::Instance().LoadFrom(cfg);
   if (!status.ok()) {
     SWORDFS_PROMPT_INFO << "Error: " << status.message();

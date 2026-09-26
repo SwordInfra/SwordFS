@@ -158,8 +158,13 @@ authoritative records and allocators meet that requirement. The client cannot
 strengthen a weaker backend durability policy after the fact.
 
 Ordinary metadata reads do not become WATCH transactions merely to update
-atime. Atime updates are separate, best-effort mutations; their failure does
-not invalidate a successful access.
+atime. `Open` and `OpenDir` consult the process-global `MountRuntimeBehavior`
+singleton. When it enables implicit access-time updates they perform the
+existing separate best-effort atime mutation; failure of that mutation does not
+invalidate the successful access. With `noatime`, those implicit mutations are
+skipped entirely. Redis never parses raw FUSE mount options, and explicit
+`SetAttr` atime/atime-now mutations remain unaffected by the implicit-access
+policy.
 
 ## Atomic mutation boundaries
 

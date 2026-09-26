@@ -22,6 +22,7 @@
 #include "metadata/types/Entry.hpp"
 #include "metadata/types/Inode.hpp"
 #include "metadata/types/Volume.hpp"
+#include "runtime/MountRuntimeBehavior.hpp"
 #include "utils/ExecutionDomain.hpp"
 #include "utils/Logging.hpp"
 
@@ -434,7 +435,9 @@ Status MemMetaImpl::Open(InodeID ino, uint64_t *size) {
     }
 
     authoritative_size = inode.attr.size;
-    // Update atime on the file.
+    if (!runtime::MountRuntimeBehavior::Instance().ImplicitAtimeUpdatesEnabled()) {
+      return Status::OK();
+    }
     return txn.TouchInode(ino, SetAttrField::kAtime);
   });
 
@@ -649,6 +652,10 @@ Status MemMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
   }
 
   *iterator = std::make_shared<MemDirIterator>(std::move(snapshot));
+
+  if (!runtime::MountRuntimeBehavior::Instance().ImplicitAtimeUpdatesEnabled()) {
+    return Status::OK();
+  }
 
   // Directory atime is a best-effort side effect and must not make opening
   // the directory fail.

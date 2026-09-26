@@ -29,6 +29,7 @@
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "metadata/types/Volume.hpp"
+#include "runtime/MountRuntimeBehavior.hpp"
 #include "utils/Context.hpp"
 
 namespace {
@@ -303,6 +304,40 @@ FIBER_TEST_F(RedisMetaImplTest, ConcurrentOpenDoesNotFailOnAtimeContention) {
   for (const auto &status : statuses) {
     EXPECT_TRUE(status.ok()) << status.message();
   }
+}
+
+TEST_F(RedisMetaImplTest, NoAtimeRuntimeBehaviorSuppressesImplicitOpenUpdates) {
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kDisabled);
+
+  swordfs::test::RunInTestFiber([&] {
+    SwordFsInode file;
+    ASSERT_TRUE(impl_->Create(kRootInodeId, "noatime-file", 0644, &file).ok());
+    SwordFsInode dir;
+    ASSERT_TRUE(impl_->MkDir(kRootInodeId, "noatime-dir", 0755, &dir).ok());
+
+    SwordFsAttr requested;
+    requested.atime = 11;
+    ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kAtime, nullptr).ok());
+    ASSERT_TRUE(impl_->Open(file.ino).ok());
+    SwordFsInode actual;
+    ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+    EXPECT_EQ(actual.attr.atime, 11);
+
+    requested.atime = 21;
+    ASSERT_TRUE(impl_->SetAttr(dir.ino, requested, SetAttrField::kAtime, nullptr).ok());
+    swordfs::metadata::DirIteratorPtr iterator;
+    ASSERT_TRUE(impl_->OpenDir(dir.ino, &iterator).ok());
+    ASSERT_NE(iterator, nullptr);
+    ASSERT_TRUE(impl_->GetInode(dir.ino, &actual).ok());
+    EXPECT_EQ(actual.attr.atime, 21);
+
+    requested.atime = 31;
+    ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kAtime, nullptr).ok());
+    ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+    EXPECT_EQ(actual.attr.atime, 31);
+  });
+
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, SetAttrPreservesExplicitCtime) {

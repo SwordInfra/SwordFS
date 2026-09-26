@@ -117,6 +117,23 @@ The mount sequence is intentionally ordered so thread-owning components are crea
 7. create the libfuse low-level session and enter the multi-threaded FUSE loop;
 8. initialize the first fiber runtime and the background reclaim worker from the FUSE init hook; other threads that submit filesystem work create their thread-local `FiberRuntime` lazily through `RunInFiber`.
 
+FUSE mount options that affect SwordFS userspace semantics are normalized once
+at the mount boundary into the process-global `MountRuntimeBehavior` singleton.
+The original option string is still passed to libfuse unchanged. This runtime
+behavior is not persistent volume metadata. `RunMount` initializes the
+singleton before request processing begins, and runtime components read the
+normalized policy directly. `VolumeImpl`, metadata factories, and operation
+interfaces do not carry mount-policy arguments. Memory and Redis therefore
+consume typed runtime policy without parsing raw FUSE options or reaching back
+into `ConfigCenter`.
+
+`noatime` currently controls only SwordFS's existing implicit access-time side
+effects on file `Open` and directory `OpenDir`. The normal `VfsImpl`, handle,
+and `IMetaEngine::Open`/`OpenDir` operation contracts do not carry mount-policy
+arguments because the policy is fixed for the lifetime of the mounted daemon.
+Explicit timestamp changes requested through `SETATTR` remain independent of
+this implicit-access policy.
+
 At unmount, the reclaimer stops before the fiber runtime and storage engines are destroyed. This ordering prevents a background worker from borrowing an engine or fiber runtime after its lifetime has ended.
 
 ## 4. FUSE and VFS request path
