@@ -70,6 +70,107 @@ cleanup_test_scope() {
   timeout 5s systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
 }
 
+capture_daemon_timeout_diagnostics() {
+  local test="$1"
+  local diagnostic_dir="${RAW_DIR}/timeout-diagnostics/${test//\//-}"
+  mkdir -p "${diagnostic_dir}"
+
+  ps -eo pid,ppid,pgid,sid,stat,wchan:32,comm,args >"${diagnostic_dir}/processes.txt" 2>&1 || true
+  pstree -alp >"${diagnostic_dir}/process-tree.txt" 2>&1 || true
+  if command -v ss >/dev/null 2>&1; then
+    ss -tanop >"${diagnostic_dir}/tcp-sockets.txt" 2>&1 || true
+  fi
+  {
+    local connection_dir
+    for connection_dir in /sys/fs/fuse/connections/*; do
+      [[ -d "${connection_dir}" ]] || continue
+      echo "== ${connection_dir} =="
+      local field
+      for field in waiting max_background congestion_threshold; do
+        if [[ -r "${connection_dir}/${field}" ]]; then
+          printf '%s=' "${field}"
+          cat "${connection_dir}/${field}" 2>/dev/null || true
+        fi
+      done
+    done
+  } >"${diagnostic_dir}/fuse-connections.txt" 2>&1
+
+  local client_pid
+  while read -r client_pid; do
+    [[ "${client_pid}" =~ ^[0-9]+$ ]] || continue
+    {
+      echo "== cmdline =="
+      tr '\0' ' ' <"/proc/${client_pid}/cmdline" 2>/dev/null || true
+      echo
+      echo "== status =="
+      cat "/proc/${client_pid}/status" 2>/dev/null || true
+      echo "== wchan =="
+      cat "/proc/${client_pid}/wchan" 2>/dev/null || true
+      echo
+      echo "== kernel stack =="
+      cat "/proc/${client_pid}/stack" 2>/dev/null || true
+    } >"${diagnostic_dir}/client-${client_pid}.txt"
+  done < <(pgrep -x fsstress || true; pgrep -x rm || true; pgrep -x check || true)
+
+  local role
+  for role in test scratch; do
+    local pidfile="${OUTPUT_DIR}/swordfs-${role}.pid"
+    [[ -s "${pidfile}" ]] || continue
+
+    local pid
+    pid="$(cat "${pidfile}" 2>/dev/null || true)"
+    [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+    kill -0 "${pid}" 2>/dev/null || continue
+
+    local role_dir="${diagnostic_dir}/${role}"
+    mkdir -p "${role_dir}"
+    ps -T -p "${pid}" -o pid,tid,stat,wchan:32,comm,args >"${role_dir}/threads.txt" 2>&1 || true
+
+    local task_dir
+    for task_dir in /proc/"${pid}"/task/*; do
+      [[ -d "${task_dir}" ]] || continue
+      local tid="${task_dir##*/}"
+      {
+        echo "== status =="
+        cat "${task_dir}/status" 2>/dev/null || true
+        echo "== wchan =="
+        cat "${task_dir}/wchan" 2>/dev/null || true
+        echo
+        echo "== syscall =="
+        cat "${task_dir}/syscall" 2>/dev/null || true
+        echo
+        echo "== kernel stack =="
+        cat "${task_dir}/stack" 2>/dev/null || true
+      } >"${role_dir}/task-${tid}.txt"
+    done
+
+    ls -l "/proc/${pid}/fd" >"${role_dir}/fds.txt" 2>&1 || true
+    {
+      local fd
+      for fd in /proc/"${pid}"/fdinfo/*; do
+        [[ -r "${fd}" ]] || continue
+        echo "== ${fd##*/} =="
+        cat "${fd}" 2>/dev/null || true
+      done
+    } >"${role_dir}/fdinfo.txt" 2>&1
+
+    if command -v strace >/dev/null 2>&1; then
+      timeout --foreground --kill-after=2s 5s \
+        strace -ff -tt -T -p "${pid}" \
+          -e trace=network,poll,ppoll,select,pselect6,read,write \
+          -o "${role_dir}/strace" >/dev/null 2>&1 || true
+    fi
+
+    if command -v gdb >/dev/null 2>&1; then
+      timeout --foreground --kill-after=5s 20s \
+        gdb -q -n -batch \
+          -ex 'set pagination off' \
+          -ex 'thread apply all bt' \
+          -p "${pid}" >"${role_dir}/gdb-backtrace.txt" 2>&1 || true
+    fi
+  done
+}
+
 OUTPUT_DIR="${PROJECT_DIR}/build/fstests-conformance"
 TESTS_FILE=""
 SHARD_NAME=""
@@ -664,6 +765,7 @@ while IFS= read -r test <&3; do
       "${test}" "${test_timeout_reason}" "${test_budget}" "${test_status}" >>"${RAW_DIR}/timeout-status.tsv"
     echo "ERROR: fstests testcase ${test} exceeded ${test_timeout_reason} timeout after ${test_budget}s" | \
       tee -a "${RAW_DIR}/check.log" >&2
+    capture_daemon_timeout_diagnostics "${test}"
     terminate_test_scope "${test}"
     isolate_after_test "${test}" || true
     cleanup_test_scope "${test}"
