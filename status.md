@@ -9,9 +9,9 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | Selected upstream testcases | 645 |
 | Executed testcases | 645 |
 | Deferred from CI | 0 |
-| Explicitly supported | 110 |
-| Known gaps | 535 |
-| Overall support | 17.05% |
+| Explicitly supported | 111 |
+| Known gaps | 534 |
+| Overall support | 17.21% |
 | Supported gate | 100.00% |
 | Executed population classified | 100.00% |
 | Full selected population classified | 100.00% |
@@ -21,8 +21,8 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 
 | Result | Count |
 | --- | ---: |
-| `PASS` | 110 |
-| `FAIL` | 20 |
+| `PASS` | 111 |
+| `FAIL` | 19 |
 | `NOTRUN` | 515 |
 
 ## Outcome counts
@@ -30,27 +30,27 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | Classification | Count |
 | --- | ---: |
 | `ENVIRONMENT` | 7 |
-| `KNOWN_SEMANTIC_DEFECT` | 4 |
+| `KNOWN_SEMANTIC_DEFECT` | 3 |
 | `KNOWN_UNSUPPORTED` | 142 |
-| `PASS` | 110 |
+| `PASS` | 111 |
 | `UPSTREAM_NOT_APPLICABLE` | 382 |
 
 ## Known-gap Issues
 
 - [#255](https://github.com/SwordInfra/SwordFS/issues/255): 142 testcase(s), KNOWN_UNSUPPORTED
-- [#256](https://github.com/SwordInfra/SwordFS/issues/256): 4 testcase(s), KNOWN_SEMANTIC_DEFECT
+- [#256](https://github.com/SwordInfra/SwordFS/issues/256): 3 testcase(s), KNOWN_SEMANTIC_DEFECT
 
 ## Execution metadata
 
-- SwordFS commit: `b2c7f76ccf8208654b0599207ee21e580b965617`
+- SwordFS commit: `6f426b5ac78cc0cb8cd891518f23397e8ec68bd8`
 - fstests commit: `a370dcbed43563f0462801e889e0eceb93c7cfad`
 - fstests selector: `generic/quick`
 - Kernel: `6.17.0-1022-azure`
 - libfuse: `fusermount3 version: 3.18.2`
 - Runner: `GitHub Actions (9 fstests shards)`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36237378663
-Recorded at: 2026-09-26T11:16:39+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36241976489
+Recorded at: 2026-09-26T12:49:23+00:00
 
 ## Historical main-branch progress
 
@@ -64,5 +64,6 @@ Recorded at: 2026-09-26T11:16:39+00:00
 | 2026-09-25T05:26:32+00:00 | `1970dcdcd2de` | BLOCKED | 12.56% | 109 | 81 | 21 | 515 | 0 | 536 |
 | 2026-09-25T07:48:50+00:00 | `485132b5d9bd` | PASS | 16.90% | 109 | 109 | 21 | 515 | 0 | 536 |
 | 2026-09-25T14:54:21+00:00 | `33aa7f676b8d` | PASS | 17.05% | 110 | 110 | 20 | 515 | 0 | 535 |
+| 2026-09-26T12:49:23+00:00 | `6f426b5ac78c` | PASS | 17.21% | 111 | 111 | 19 | 515 | 0 | 534 |
 
-Last fully healthy baseline: `b2c7f76ccf8208654b0599207ee21e580b965617`
+Last fully healthy baseline: `6f426b5ac78cc0cb8cd891518f23397e8ec68bd8`

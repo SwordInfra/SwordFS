@@ -10,15 +10,15 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "b2c7f76ccf8208654b0599207ee21e580b965617"
+    "swordfs_commit": "6f426b5ac78cc0cb8cd891518f23397e8ec68bd8"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "ENVIRONMENT": 7,
-      "KNOWN_SEMANTIC_DEFECT": 4,
+      "KNOWN_SEMANTIC_DEFECT": 3,
       "KNOWN_UNSUPPORTED": 142,
-      "PASS": 110,
+      "PASS": 111,
       "UPSTREAM_NOT_APPLICABLE": 382
     },
     "classified_count": 645,
@@ -26,17 +26,17 @@
     "deferred_count": 0,
     "executed_classified_percent": 100.0,
     "executed_count": 645,
-    "known_gap_count": 535,
-    "overall_support_percent": 17.05,
+    "known_gap_count": 534,
+    "overall_support_percent": 17.21,
     "raw_results": {
-      "FAIL": 20,
+      "FAIL": 19,
       "NOTRUN": 515,
-      "PASS": 110
+      "PASS": 111
     },
     "selected_count": 645,
-    "supported_count": 110,
+    "supported_count": 111,
     "supported_gate_percent": 100.0,
-    "supported_pass_count": 110
+    "supported_pass_count": 111
   },
   "tests": [
     {
@@ -776,11 +776,11 @@
       "test": "generic/119"
     },
     {
-      "classification": "KNOWN_SEMANTIC_DEFECT",
-      "issue": "#256",
-      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/120.out.bad)",
-      "reason": "SwordFS metadata atime updates do not honor noatime mount semantics; tracked by #256.",
-      "result": "FAIL",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/120"
     },
     {
