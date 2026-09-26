@@ -19,6 +19,7 @@ GAP_CATEGORIES = {
     "known_semantic_defect": "KNOWN_SEMANTIC_DEFECT",
     "known_unsupported": "KNOWN_UNSUPPORTED",
     "upstream_not_applicable": "UPSTREAM_NOT_APPLICABLE",
+    "upstream_test_defect": "UPSTREAM_TEST_DEFECT",
     "environment": "ENVIRONMENT",
 }
 BLOCKING = {

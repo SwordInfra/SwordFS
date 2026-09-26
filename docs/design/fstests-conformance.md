@@ -302,8 +302,18 @@ Issue. Known-gap categories are:
   implemented yet;
 - `upstream_not_applicable` — the testcase fundamentally cannot apply to the
   SwordFS FUSE/distributed model for a concrete upstream capability reason;
+- `upstream_test_defect` — the tested semantic applies, but the pinned upstream
+  testcase itself has a demonstrated defect that reproduces independently of
+  SwordFS;
 - `environment` — a stable limitation of the supported CI environment rather
   than a SwordFS semantic result.
+
+`UPSTREAM_TEST_DEFECT` is deliberately narrow. It requires concrete evidence
+that the failure mechanism is invalid in the upstream testcase itself, such as
+reproducing the same failure against a native control filesystem. It must not
+be used merely because an upstream assertion is inconvenient or currently
+fails on SwordFS. The semantic remains in scope and should move to
+`supported.txt` once a corrected pinned upstream testcase can validate it.
 
 ### Current admitted baseline
 
@@ -358,7 +368,7 @@ supported + PASS       -> PASS
 supported + FAIL       -> REGRESSION                 (blocking)
 supported + NOTRUN     -> BASELINE_NOT_APPLICABLE    (blocking)
 
-known gap + expected observed result -> KNOWN_* / ENVIRONMENT
+known gap + expected observed result -> KNOWN_* / ENVIRONMENT / UPSTREAM_TEST_DEFECT
 known gap + PASS                    -> XPASS          (blocking)
 known gap + different FAIL/NOTRUN   -> BASELINE_RESULT_MISMATCH
 known NOTRUN + changed skip reason  -> BASELINE_REASON_MISMATCH
