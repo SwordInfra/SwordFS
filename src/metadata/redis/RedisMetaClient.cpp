@@ -17,6 +17,8 @@
 namespace swordfs::metadata {
 namespace {
 
+constexpr auto kMaxRetryBackoff = std::chrono::milliseconds(1000);
+
 sw::redis::ConnectionOptions MakeConnectionOptions(const RedisMetaConfig &config) {
   sw::redis::ConnectionOptions options;
   options.host = config.host;
@@ -34,9 +36,10 @@ sw::redis::ConnectionOptions MakeConnectionOptions(const RedisMetaConfig &config
 }
 
 void Backoff(int attempt, std::chrono::milliseconds base_delay) {
-  constexpr int kMaxDelayMs = 1000;
   const int exponent = std::min(attempt, 10);
-  const auto max_delay = std::min(base_delay * (1 << exponent), std::chrono::milliseconds(kMaxDelayMs));
+  const int multiplier = 1 << exponent;
+  const auto max_base_delay = kMaxRetryBackoff / multiplier;
+  const auto max_delay = std::min(base_delay, max_base_delay) * multiplier;
   const auto delay = std::chrono::milliseconds(folly::Random::rand64(max_delay.count() + 1));
   std::this_thread::sleep_for(delay);
 }

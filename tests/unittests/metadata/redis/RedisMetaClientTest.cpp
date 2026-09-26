@@ -614,6 +614,14 @@ TEST(RedisMetaClientTest, RejectsConfigurationThatCanCreateUnboundedRedisWaits) 
   EXPECT_THROW({ RedisMetaClient client(invalid); }, std::invalid_argument);
 }
 
+TEST(RedisMetaClientTest, AllowsRetryBackoffAboveRuntimeCap) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.retry_backoff = std::chrono::seconds(2);
+
+  EXPECT_NO_THROW({ RedisMetaClient client(config); });
+}
+
 TEST(RedisMetaClientTest, RetriesPreExecProtocolFailureAndReturnsUnavailable) {
   ScriptedRedisServer server(RedisFaultScenario::kPreExecProtocolFailure, 3);
   auto config = ScriptedConfig(server);

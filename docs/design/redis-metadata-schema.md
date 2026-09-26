@@ -185,7 +185,9 @@ supplies positive `connect_timeout`, `socket_timeout`, and connection-pool
 `wait_timeout` values, plus a positive transaction retry-attempt limit and a
 bounded backoff. `RedisMetaClient` validates direct programmatic
 configuration as well as URL-parsed configuration so a zero pool wait cannot
-silently restore redis++'s wait-forever behavior. Every foreground,
+silently restore redis++'s wait-forever behavior. Retry backoff configuration
+may exceed the runtime's 1s per-attempt cap; the exponential backoff calculation
+saturates at that cap before multiplication can overflow. Every foreground,
 initialization, directory-iteration, reclaim, and shutdown Redis operation
 uses this same client/pool policy; there is no bypass client in the metadata
 backend.
