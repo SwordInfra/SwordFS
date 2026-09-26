@@ -470,6 +470,17 @@ allows metadata publication to change independently from an already-written
 object. Future strategies may use a different physical layout under the same
 logical head.
 
+S3 requests that can block a foreground filesystem operation also require a
+finite terminal-completion policy owned by SwordFS. Transport low-speed
+detection is not sufficient by itself: a pathological connection may continue
+to transfer a small amount of data and therefore remain above the low-speed
+threshold while retaining a FUSE request indefinitely. Runtime data-engine
+options therefore carry an absolute request deadline and a finite retry budget;
+the S3 client must apply both at the actual HTTP request boundary rather than
+detaching work behind a FUSE- or executor-level timer. A timeout bounds how
+long SwordFS waits for the backend result; for mutations it does not by itself
+prove that the remote operation was not applied.
+
 Within one inode, `FileReadWriter` uses a fiber read/write lock around file operations. Reads take the shared side, while write/flush/truncate-style state changes take the exclusive side. This allows concurrent reads without allowing local chunk publication/truncation state to race incompatible mutations on the same inode runtime object.
 
 ## 9. Write and publication path
