@@ -13,6 +13,7 @@
 #include <folly/io/IOBuf.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <barrier>
 #include <cerrno>
@@ -897,8 +898,9 @@ FIBER_TEST_F(ReclaimerTest, WorkerCompletesAPendingReclaimImmediatelyAtStartup) 
 }
 
 FIBER_TEST_F(ReclaimerTest, WorkerSelfWakesUntilLargePendingDeleteBacklogIsDrained) {
-  constexpr size_t kBatchSize = 128;
-  constexpr size_t kChunkCount = kBatchSize + 2;
+  // Keep the scenario substantially larger than the normal bounded batch,
+  // but do not encode the implementation's current batch width in the test.
+  constexpr size_t kChunkCount = 1024;
   const uint64_t chunk_size = metadata::SwordFsVolume{}.chunk_size;
   SwordFsInode file;
   ASSERT_TRUE(meta_->Create(kRootInodeId, "pending-delete-backlog", 0644, &file).ok());
@@ -933,8 +935,12 @@ FIBER_TEST_F(ReclaimerTest, WorkerSelfWakesUntilLargePendingDeleteBacklogIsDrain
 
   EXPECT_TRUE(completed) << "worker must self-wake for the second bounded pending-delete pass";
   ASSERT_EQ(data_->delete_calls.size(), kChunkCount + 1);
-  EXPECT_EQ(data_->delete_calls[kBatchSize], orphan_key)
-      << "orphan work must run after the first 128-item pending-delete batch and before its continuation";
+  const auto orphan_it = std::find(data_->delete_calls.begin(), data_->delete_calls.end(), orphan_key);
+  ASSERT_NE(orphan_it, data_->delete_calls.end());
+  const auto orphan_position = static_cast<size_t>(orphan_it - data_->delete_calls.begin());
+  EXPECT_GT(orphan_position, 0U);
+  EXPECT_LT(orphan_position, kChunkCount)
+      << "orphan work must run between bounded pending-delete passes, before the backlog is fully drained";
 }
 
 FIBER_TEST_F(ReclaimerTest, WorkerSurvivesAFailedPassAndRecoversOnWake) {
