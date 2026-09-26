@@ -1,0 +1,99 @@
+name: Dev Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: CMake build type
+        required: true
+        default: Debug
+        type: choice
+        options:
+          - Debug
+          - Release
+      target:
+        description: CMake target to build
+        required: true
+        default: swordfs_test
+        type: choice
+        options:
+          - swordfs
+          - swordfs_test
+          - swordfs_e2e_test
+      run_unit_tests:
+        description: Run swordfs_test after building it
+        required: true
+        default: false
+        type: boolean
+      gtest_filter:
+        description: Optional GTest filter when run_unit_tests is enabled
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: dev-build-${{ github.ref }}-${{ inputs.build_type }}-${{ inputs.target }}
+  cancel-in-progress: true
+
+jobs:
+  dev-build:
+    name: dev-build (${{ inputs.build_type }}, ${{ inputs.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Validate inputs
+        if: ${{ inputs.run_unit_tests && inputs.target != 'swordfs_test' }}
+        run: |
+          echo "run_unit_tests requires target=swordfs_test"
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Restore native dependency cache
+        uses: actions/cache@v4
+        with:
+          path: .deps/install
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
+
+      - name: Install dependencies
+        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
+
+      - name: Unit test setup
+        if: ${{ inputs.run_unit_tests }}
+        run: |
+          sudo mkdir -p /etc/swordfs
+          sudo chown "$(id -u):$(id -g)" /etc/swordfs
+
+      - name: Configure
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+        run: |
+          if [ "$BUILD_TYPE" = "Debug" ]; then
+            cmake --preset default \
+              -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install"
+          else
+            cmake --preset release \
+              -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install"
+          fi
+
+      - name: Build requested target
+        env:
+          BUILD_TARGET: ${{ inputs.target }}
+        run: cmake --build build --target "$BUILD_TARGET"
+
+      - name: Run focused unit tests
+        if: ${{ inputs.run_unit_tests }}
+        env:
+          GTEST_FILTER: ${{ inputs.gtest_filter }}
+        run: |
+          args=(--gtest_color=no)
+          if [ -n "$GTEST_FILTER" ]; then
+            args+=("--gtest_filter=$GTEST_FILTER")
+          fi
+          bash scripts/testing/run-ut.sh "${args[@]}"
