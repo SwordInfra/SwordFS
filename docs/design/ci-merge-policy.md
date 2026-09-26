@@ -56,6 +56,48 @@ authoritative `main` run so they can update `pjdfstest-status` and
 `fstests-status`. Combining these responsibilities would grant write permission
 to conformance jobs on PR validation runs without improving the regression gate.
 
+## Development-only CI
+
+Developer feedback that replaces local SwordFS compilation is intentionally
+separate from the formal merge gate.
+
+The development workflow is manually dispatched and may accept narrow inputs
+such as CMake build type, build target, and an optional unit-test filter. Its
+purpose is to let a developer push a task branch and compile or run only the
+focused target needed for the current iteration without starting the complete
+PR/main CI matrix.
+
+Development-only jobs:
+
+- run only from an explicit manual dispatch;
+- do not run from normal `push`, `pull_request`, or `main` CI events;
+- are not listed in the `CI-Must-Pass` required-status checks;
+- are not merge-readiness evidence by themselves;
+- should reuse the same dependency installation/cache paths and CMake presets
+  as formal CI where practical, so the two execution paths do not drift.
+
+The formal jobs in `.github/workflows/ci.yml` remain authoritative for pull
+request readiness, full Debug/Release verification, coverage, E2E, pjdfstest,
+fstests, and the protected-branch merge gate. A successful development-only
+build never substitutes for those checks.
+
+After `.github/workflows/dev-build.yml` exists on the default branch, run it
+against a task branch with GitHub CLI. For example, a focused Debug unit-test
+iteration can use:
+
+```bash
+gh workflow run dev-build.yml \
+  --ref <task-branch> \
+  -f build_type=Debug \
+  -f target=swordfs_test \
+  -f run_unit_tests=true \
+  -f gtest_filter='SuiteName.TestName'
+```
+
+Omit `run_unit_tests` and `gtest_filter` when only compilation is needed.
+Selecting `swordfs` or `swordfs_e2e_test` builds that target without running
+the corresponding integration/E2E workload.
+
 ## Check identity and maintenance
 
 Required status checks are identified by their reported GitHub context names.
