@@ -16,6 +16,7 @@ API signatures and routine implementation details belong in source comments.
 | [CI merge policy](design/ci-merge-policy.md) | Which CI results are mandatory before merge, and how is the repository merge gate enforced? |
 | [POSIX conformance](design/posix-conformance.md) | How does pjdfstest define the supported regression contract, known semantic debt, and public conformance status? |
 | [fstests conformance](design/fstests-conformance.md) | How does the broader Linux/FUSE fstests baseline select upstream tests, classify known gaps, and prevent silent coverage loss? |
+| [generic/591 splice-read investigation](design/328-splice-read-conformance.md) | Why is the current `generic/591` failure an upstream testcase defect rather than a SwordFS splice semantic defect, and what regression contract replaces it? |
 
 ## Documentation scope
 
