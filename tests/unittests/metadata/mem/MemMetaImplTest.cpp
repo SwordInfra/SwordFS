@@ -21,6 +21,7 @@
 #include "chunk/WholeObjectCleanup.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "metadata/types/Reclaim.hpp"
+#include "runtime/MountRuntimeBehavior.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
 
@@ -156,6 +157,53 @@ class MemMetaImplTest : public ::testing::Test {
 
   MemMetaImpl *impl_;
 };
+
+class MemMetaNoAtimeTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kDisabled);
+    impl_ = new MemMetaImpl();
+    folly::fibers::local<SwordFsContext>() = SwordFsContext{};
+  }
+
+  void TearDown() override {
+    delete impl_;
+    swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled);
+  }
+
+  MemMetaImpl *impl_ = nullptr;
+};
+
+FIBER_TEST_F(MemMetaNoAtimeTest, OpenAndOpenDirSuppressOnlyImplicitAtimeUpdates) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "atime-file", 0644, &file).ok());
+  SwordFsInode dir;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "atime-dir", 0755, &dir).ok());
+
+  SwordFsAttr requested;
+  requested.atime = 11;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kAtime, nullptr).ok());
+
+  uint64_t size = 1;
+  ASSERT_TRUE(impl_->Open(file.ino, &size).ok());
+  EXPECT_EQ(size, 0U);
+  SwordFsInode actual;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_EQ(actual.attr.atime, 11);
+
+  requested.atime = 21;
+  ASSERT_TRUE(impl_->SetAttr(dir.ino, requested, SetAttrField::kAtime, nullptr).ok());
+  swordfs::metadata::DirIteratorPtr iterator;
+  ASSERT_TRUE(impl_->OpenDir(dir.ino, &iterator).ok());
+  ASSERT_NE(iterator, nullptr);
+  ASSERT_TRUE(impl_->GetInode(dir.ino, &actual).ok());
+  EXPECT_EQ(actual.attr.atime, 21);
+
+  requested.atime = 31;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kAtime, nullptr).ok());
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_EQ(actual.attr.atime, 31);
+}
 
 FIBER_TEST_F(MemMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) {
   swordfs::metadata::ChunkRevision first = 0;

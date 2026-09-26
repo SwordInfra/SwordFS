@@ -25,6 +25,7 @@
 #include "metadata/types/Entry.hpp"
 #include "metadata/types/Inode.hpp"
 #include "metadata/types/Volume.hpp"
+#include "runtime/MountRuntimeBehavior.hpp"
 #include "utils/Context.hpp"
 #include "utils/ExecutionDomain.hpp"
 #include "utils/Logging.hpp"
@@ -140,7 +141,9 @@ Status RedisMetaImpl::OpenDir(InodeID ino, DirIteratorPtr *iterator) {
     return status;
   }
 
-  UpdateAtimeBestEffort(ino);
+  if (runtime::MountRuntimeBehavior::Instance().ImplicitAtimeUpdatesEnabled()) {
+    UpdateAtimeBestEffort(ino);
+  }
   return Status::OK();
 }
 
@@ -481,7 +484,9 @@ Status RedisMetaImpl::Open(InodeID ino, uint64_t *size) {
   if (size != nullptr) {
     *size = inode.attr.size;
   }
-  UpdateAtimeBestEffort(ino);
+  if (runtime::MountRuntimeBehavior::Instance().ImplicitAtimeUpdatesEnabled()) {
+    UpdateAtimeBestEffort(ino);
+  }
   return Status::OK();
 }
 

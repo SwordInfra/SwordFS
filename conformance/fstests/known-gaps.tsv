@@ -65,7 +65,6 @@ generic/116	upstream_not_applicable	-	NOTRUN	Reflink not supported by test files
 generic/117	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/118	upstream_not_applicable	-	NOTRUN	Reflink not supported by test filesystem type: fuse	Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/119	upstream_not_applicable	-	NOTRUN	Reflink not supported by test filesystem type: fuse	Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
-generic/120	known_semantic_defect	#256	FAIL	- output mismatch (see <FSTESTS_RESULT_DIR>/generic/120.out.bad)	SwordFS metadata atime updates do not honor noatime mount semantics; tracked by #256.
 generic/121	upstream_not_applicable	-	NOTRUN	Dedupe not supported by test filesystem type: fuse	Pinned fstests classifies dedupe as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/122	upstream_not_applicable	-	NOTRUN	Dedupe not supported by test filesystem type: fuse	Pinned fstests classifies dedupe as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/131	known_unsupported	#255	FAIL	- output mismatch (see <FSTESTS_RESULT_DIR>/generic/131.out.bad)	SwordFS POSIX lock hooks return ENOSYS; tracked by #255.

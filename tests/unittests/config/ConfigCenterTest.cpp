@@ -134,6 +134,24 @@ TEST(MountParamsTest, MandatoryDefaultPermissionsArePreservedWithUserOptions) {
             (std::vector<std::string>{"-o", "default_permissions", "-o", "allow_other,ro"}));
 }
 
+TEST(MountParamsTest, NoAtimeRuntimeBehaviorUsesExactFuseOptionToken) {
+  using swordfs::runtime::ImplicitAtimePolicy;
+
+  EXPECT_EQ(swordfs::cmd::detail::ParseImplicitAtimePolicy("noatime"), ImplicitAtimePolicy::kDisabled);
+  EXPECT_EQ(swordfs::cmd::detail::ParseImplicitAtimePolicy("allow_other,noatime,ro"), ImplicitAtimePolicy::kDisabled);
+  EXPECT_EQ(swordfs::cmd::detail::ParseImplicitAtimePolicy(""), ImplicitAtimePolicy::kEnabled);
+  EXPECT_EQ(swordfs::cmd::detail::ParseImplicitAtimePolicy("allow_other,ro"), ImplicitAtimePolicy::kEnabled);
+  EXPECT_EQ(swordfs::cmd::detail::ParseImplicitAtimePolicy("xnoatime"), ImplicitAtimePolicy::kEnabled);
+  EXPECT_EQ(swordfs::cmd::detail::ParseImplicitAtimePolicy("noatime_extra"), ImplicitAtimePolicy::kEnabled);
+}
+
+TEST(MountParamsTest, NoAtimeRuntimeBehaviorDoesNotRewriteFuseOptionForwarding) {
+  EXPECT_EQ(swordfs::cmd::detail::ParseImplicitAtimePolicy("allow_other,noatime,ro"),
+            swordfs::runtime::ImplicitAtimePolicy::kDisabled);
+  EXPECT_EQ(swordfs::cmd::detail::BuildFuseExtras("allow_other,noatime,ro"),
+            (std::vector<std::string>{"-o", "default_permissions", "-o", "allow_other,noatime,ro"}));
+}
+
 // ================================================================
 // format — invalid parameter combinations
 // ================================================================
