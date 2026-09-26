@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -33,11 +34,13 @@ namespace swordfs::storage {
 
 /// Configuration supplied by the owning mounted volume when constructing a
 /// data engine. `location` and `region` come from persisted volume metadata;
-/// `worker_count` is a runtime mount setting and is not persisted.
+/// the remaining fields are runtime settings and are not persisted.
 struct DataEngineOptions {
   std::string location;
   std::string region;
   size_t worker_count = 1;
+  std::chrono::milliseconds request_timeout = std::chrono::seconds(60);
+  size_t retry_attempts = 3;
 };
 
 /// Abstract data-plane engine.
