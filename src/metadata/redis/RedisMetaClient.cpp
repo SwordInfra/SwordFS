@@ -186,7 +186,7 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisK
     }
   }
 
-  return utils::Status::IOError("Redis transaction retry limit exceeded");
+  return utils::Status::Unavailable("Redis transaction retry limit exceeded");
 }
 
 }  // namespace swordfs::metadata

@@ -41,6 +41,9 @@ class RedisMetaClient {
   // WATCH, reads, MULTI, queued writes and EXEC share one Redis connection.
   // Only Redis WATCH conflicts and pre-commit connection failures are
   // retried; callback statuses, including filesystem Busy, are returned.
+  // Exhausting that safe retry policy returns Unavailable. Post-EXEC
+  // ambiguity is classified by RedisKvTxn as OutcomeUnknown and is never
+  // automatically replayed here.
   utils::Status Transact(const std::function<utils::Status(RedisKvTxn &)> &callback);
 
  private:
