@@ -16,6 +16,10 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
   return utils::Status::IOError("Redis " + std::string(operation) + " failed: " + error.what());
 }
 
+utils::Status RedisUnavailable(const char *operation, const sw::redis::Error &error) {
+  return utils::Status::Unavailable("Redis " + std::string(operation) + " unavailable: " + error.what());
+}
+
 utils::Status ValidateWriteExecReplies(sw::redis::QueuedReplies replies) {
   for (std::size_t i = 0; i < replies.size(); ++i) {
     try {
@@ -38,16 +42,20 @@ sw::redis::Transaction CreateTransaction(sw::redis::Redis &redis) {
 }
 
 template <typename Fn>
-utils::Status RunRedisCommand(const char *operation, Fn &&fn) {
+utils::Status RunRedisCommand(const char *operation, bool *retryable_pre_exec_failure, Fn &&fn) {
   utils::ExpectInThreadDomain();
   try {
     return fn();
-  } catch (const sw::redis::TimeoutError &) {
-    throw;
-  } catch (const sw::redis::ClosedError &) {
-    throw;
-  } catch (const sw::redis::Error &error) {
+  } catch (const sw::redis::ReplyError &error) {
+    // A valid Redis error reply is a known terminal command result. It is not
+    // a transport failure and must not be blindly replayed.
     return RedisError(operation, error);
+  } catch (const sw::redis::Error &error) {
+    // MULTI queues writes; none of them can execute until EXEC. Therefore an
+    // opaque transport/protocol failure while WATCHing, reading, or queuing a
+    // command is safe for RedisMetaClient to retry from a fresh transaction.
+    *retryable_pre_exec_failure = true;
+    throw;
   }
 }
 
@@ -65,7 +73,7 @@ utils::Status RedisKvTxn::Get(std::string_view key, std::string *value) {
   if (has_writes_) {
     return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
   }
-  return RunRedisCommand("GET", [&] {
+  return RunRedisCommand("GET", &retryable_pre_exec_failure_, [&] {
     redis_->watch(key);
     auto result = redis_->get(key);
     if (!result.has_value()) {
@@ -83,7 +91,7 @@ utils::Status RedisKvTxn::HGet(std::string_view key, std::string_view field, std
   if (has_writes_) {
     return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
   }
-  return RunRedisCommand("HGET", [&] {
+  return RunRedisCommand("HGET", &retryable_pre_exec_failure_, [&] {
     if (mode == ReadMode::kWatched) {
       redis_->watch(key);
     }
@@ -103,7 +111,7 @@ utils::Status RedisKvTxn::HLen(std::string_view key, uint64_t *length) {
   if (has_writes_) {
     return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
   }
-  return RunRedisCommand("HLEN", [&] {
+  return RunRedisCommand("HLEN", &retryable_pre_exec_failure_, [&] {
     redis_->watch(key);
     *length = redis_->hlen(std::string(key));
     return utils::Status::OK();
@@ -118,7 +126,7 @@ utils::Status RedisKvTxn::HScan(std::string_view key, uint64_t cursor, size_t co
   if (has_writes_) {
     return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
   }
-  return RunRedisCommand("HSCAN", [&] {
+  return RunRedisCommand("HSCAN", &retryable_pre_exec_failure_, [&] {
     redis_->watch(key);
     values->clear();
     *next_cursor = cursor;
@@ -129,7 +137,7 @@ utils::Status RedisKvTxn::HScan(std::string_view key, uint64_t cursor, size_t co
 }
 
 utils::Status RedisKvTxn::Set(std::string_view key, std::string_view value) {
-  return RunRedisCommand("SET", [&] {
+  return RunRedisCommand("SET", &retryable_pre_exec_failure_, [&] {
     transaction_->set(std::string(key), std::string(value));
     has_writes_ = true;
     return utils::Status::OK();
@@ -137,7 +145,7 @@ utils::Status RedisKvTxn::Set(std::string_view key, std::string_view value) {
 }
 
 utils::Status RedisKvTxn::HSet(std::string_view key, std::string_view field, std::string_view value) {
-  return RunRedisCommand("HSET", [&] {
+  return RunRedisCommand("HSET", &retryable_pre_exec_failure_, [&] {
     transaction_->hset(std::string(key), std::string(field), std::string(value));
     has_writes_ = true;
     return utils::Status::OK();
@@ -145,7 +153,7 @@ utils::Status RedisKvTxn::HSet(std::string_view key, std::string_view field, std
 }
 
 utils::Status RedisKvTxn::HDel(std::string_view key, std::string_view field) {
-  return RunRedisCommand("HDEL", [&] {
+  return RunRedisCommand("HDEL", &retryable_pre_exec_failure_, [&] {
     transaction_->hdel(std::string(key), std::string(field));
     has_writes_ = true;
     return utils::Status::OK();
@@ -153,7 +161,7 @@ utils::Status RedisKvTxn::HDel(std::string_view key, std::string_view field) {
 }
 
 utils::Status RedisKvTxn::IncrBy(std::string_view key, int64_t delta) {
-  return RunRedisCommand("INCRBY", [&] {
+  return RunRedisCommand("INCRBY", &retryable_pre_exec_failure_, [&] {
     transaction_->incrby(std::string(key), delta);
     has_writes_ = true;
     return utils::Status::OK();
@@ -161,7 +169,7 @@ utils::Status RedisKvTxn::IncrBy(std::string_view key, int64_t delta) {
 }
 
 utils::Status RedisKvTxn::Del(std::string_view key) {
-  return RunRedisCommand("DEL", [&] {
+  return RunRedisCommand("DEL", &retryable_pre_exec_failure_, [&] {
     transaction_->del(std::string(key));
     has_writes_ = true;
     return utils::Status::OK();
@@ -172,16 +180,26 @@ utils::Status RedisKvTxn::ReleaseConnection() {
   utils::ExpectInThreadDomain();
   try {
     transaction_->ping();
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError("read-only transaction PING", error);
+  } catch (const sw::redis::Error &) {
+    // PING is only queued here. No EXEC has been issued, so a transport or
+    // protocol failure remains safe for RedisMetaClient's bounded retry.
+    retryable_pre_exec_failure_ = true;
+    throw;
+  }
+
+  try {
     transaction_->exec();
     return utils::Status::OK();
   } catch (const sw::redis::WatchError &) {
     throw WatchConflict{};
-  } catch (const sw::redis::TimeoutError &error) {
-    return utils::Status::IOError("Redis read-only transaction timed out: " + std::string(error.what()));
-  } catch (const sw::redis::ClosedError &error) {
-    return utils::Status::IOError("Redis read-only transaction connection closed: " + std::string(error.what()));
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError("read-only transaction EXEC", error);
   } catch (const sw::redis::Error &error) {
-    return RedisError("read-only transaction", error);
+    // No mutation can become ambiguous in a read-only transaction. Once EXEC
+    // is issued, failure to obtain a reliable reply is terminal unavailability.
+    return RedisUnavailable("read-only transaction EXEC", error);
   }
 }
 
@@ -219,16 +237,17 @@ utils::Status RedisKvTxn::Commit() {
   } catch (const sw::redis::WatchError &) {
     (void)ReleaseConnection();
     throw WatchConflict{};
-  } catch (const sw::redis::TimeoutError &error) {
-    SWORDFS_LOG_WARN << "Redis transaction EXEC timed out; commit result is ambiguous: " << error.what();
-    return utils::Status::OutcomeUnknown("Redis transaction commit is ambiguous after EXEC: " +
-                                         std::string(error.what()));
-  } catch (const sw::redis::ClosedError &error) {
-    SWORDFS_LOG_WARN << "Redis transaction EXEC connection closed; commit result is ambiguous: " << error.what();
-    return utils::Status::OutcomeUnknown("Redis transaction commit is ambiguous after EXEC: " +
-                                         std::string(error.what()));
-  } catch (const sw::redis::Error &error) {
+  } catch (const sw::redis::ReplyError &error) {
+    // A top-level Redis error reply (for example EXECABORT) is a reliable
+    // server result, unlike an error while receiving/decoding the EXEC reply.
     return RedisError("transaction EXEC", error);
+  } catch (const sw::redis::Error &error) {
+    // redis++'s exec() call contains both sending EXEC and receiving/parsing
+    // its reply. Once this boundary is entered, an opaque I/O/protocol error
+    // cannot prove whether Redis executed the queued mutations.
+    SWORDFS_LOG_WARN << "Redis transaction EXEC result is ambiguous: " << error.what();
+    return utils::Status::OutcomeUnknown("Redis transaction commit is ambiguous after EXEC: " +
+                                         std::string(error.what()));
   }
 }
 

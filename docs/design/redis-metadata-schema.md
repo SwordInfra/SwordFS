@@ -92,15 +92,15 @@ stateDiagram-v2
     QueueWrites --> Exec
     Exec --> Committed: replies confirm success
     Exec --> Retry: WATCH conflict
-    ReadAndWatch --> Retry: retryable timeout or closed connection
-    QueueWrites --> Retry: retryable failure before EXEC
+    ReadAndWatch --> Retry: retryable transport/protocol failure
+    QueueWrites --> Retry: retryable transport/protocol failure before EXEC
     Retry --> ReadAndWatch: backoff; attempts remain
-    Retry --> Failed: retry budget exhausted
-    Exec --> Uncertain: timeout or connection closes
-    Exec --> Failed: command error; commit may be partial
+    Retry --> Unavailable: retry budget exhausted
+    Exec --> Uncertain: no reliable terminal EXEC result
+    Exec --> Uncertain: command error; commit may be partial
     Committed --> [*]
     Rejected --> [*]
-    Failed --> [*]
+    Unavailable --> [*]
     Uncertain --> [*]
 ```
 
@@ -139,16 +139,56 @@ causes redis++ destruction cleanup to invalidate an otherwise healthy
 connection, turning successful metadata transactions into reconnect churn.
 
 `RedisMetaClient::Transact` bounds retries and uses randomized exponential
-backoff. It reruns the callback after WATCH conflicts or retryable pre-EXEC
-connection failures. The callback must reconstruct its decisions from newly
-read state, without performing external object-store side effects.
+backoff. It is the only automatic retry owner for Redis metadata
+transactions. It reruns the callback after WATCH conflicts or transport and
+protocol failures that are known to have occurred before `EXEC`. The callback
+must reconstruct its decisions from newly read state, without performing
+external object-store side effects. A valid Redis command-error reply is a
+known failure, not a transport retry signal. Exhausting the safe retry budget
+returns `Unavailable`.
 
-A timeout after EXEC is not evidence of rollback. The transaction wrapper
-returns an ambiguous error instead of automatically replaying the mutation.
-Likewise, an error in an EXEC command may leave successful commands applied;
-the wrapper checks replies and reports this as potentially partial. The
-filesystem atomicity contract therefore depends on valid record types and
-successful transaction commands, not on a general rollback facility.
+Failure classification follows the protocol boundary where outcome certainty
+is lost rather than the redis++ exception class. With the pinned redis++
+implementation, queued transaction commands run under `MULTI` and only take
+effect when `EXEC` executes. A connection, timeout, or protocol failure during
+WATCH/read/queue processing is therefore safe to retry: any queued mutation
+has not executed. In contrast, `Transaction::exec()` encapsulates sending
+`EXEC` and receiving/parsing its reply. Once that call begins, a returned
+`TimeoutError`, `ClosedError`, `IoError`, `ProtoError`, or other redis++ error
+cannot prove that Redis did not execute the transaction. Except for an
+explicit WATCH abort, every such terminal failure is `OutcomeUnknown` and is
+never automatically replayed.
+
+An error in one EXEC command is also `OutcomeUnknown`: Redis does not roll
+back commands in the same EXEC that already succeeded. The wrapper validates
+every queued reply and reports a possibly partial commit. The filesystem
+atomicity contract therefore depends on valid record types and successful
+transaction commands, not on a general rollback facility.
+
+Read-only operations have no remote mutation whose durable outcome can become
+ambiguous. Standalone `PING`, `GET`, `MGET`, `HGET`, and `HSCAN`, as well as
+read-only transaction completion, map transport/protocol/backend-availability
+failures to `Unavailable`; logical results such as `NotFound` and valid Redis
+error replies remain distinct known outcomes. They never return
+`OutcomeUnknown` merely because the reply was lost.
+
+The allocator counters (`next_ino` and `next_chunk_revision`) are different:
+their standalone `INCR` is itself a mutation. A valid Redis reply provides a
+known result (including a valid command-error reply), but once `INCR` may have
+been sent, losing or being unable to parse its acknowledgement is
+`OutcomeUnknown`. Allocator gaps are allowed, so reconciliation never guesses
+or reuses the lost value; the caller allocates a fresh identity on a later
+operation instead of blindly replaying the ambiguous command.
+
+All blocking Redis waits are finite. The metadata URL/runtime configuration
+supplies positive `connect_timeout`, `socket_timeout`, and connection-pool
+`wait_timeout` values, plus a positive transaction retry-attempt limit and a
+bounded backoff. `RedisMetaClient` validates direct programmatic
+configuration as well as URL-parsed configuration so a zero pool wait cannot
+silently restore redis++'s wait-forever behavior. Every foreground,
+initialization, directory-iteration, reclaim, and shutdown Redis operation
+uses this same client/pool policy; there is no bypass client in the metadata
+backend.
 
 SwordFS treats an acknowledged Redis transaction as the metadata-service
 completion boundary. It does not issue an additional Redis disk or replica
