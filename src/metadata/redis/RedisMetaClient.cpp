@@ -45,14 +45,48 @@ utils::Status RedisError(const char *operation, const sw::redis::Error &error) {
   return utils::Status::IOError("Redis " + std::string(operation) + " failed: " + error.what());
 }
 
+utils::Status RedisUnavailable(const char *operation, const sw::redis::Error &error) {
+  return utils::Status::Unavailable("Redis " + std::string(operation) + " unavailable: " + error.what());
+}
+
+template <typename Fn>
+utils::Status RunReadOnlyCommand(const char *operation, Fn &&fn) {
+  try {
+    return fn();
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError(operation, error);
+  } catch (const sw::redis::Error &error) {
+    return RedisUnavailable(operation, error);
+  }
+}
+
+void ValidateConfig(const RedisMetaConfig &config) {
+  if (config.connect_timeout <= std::chrono::milliseconds(0)) {
+    throw std::invalid_argument("connect_timeout must be positive");
+  }
+  if (config.socket_timeout <= std::chrono::milliseconds(0)) {
+    throw std::invalid_argument("socket_timeout must be positive");
+  }
+  if (config.pool_size == 0) {
+    throw std::invalid_argument("pool_size must be positive");
+  }
+  if (config.pool_wait_timeout <= std::chrono::milliseconds(0)) {
+    throw std::invalid_argument("pool_wait_timeout must be positive");
+  }
+  if (config.retry_attempts <= 0) {
+    throw std::invalid_argument("retry_attempts must be positive");
+  }
+  if (config.retry_backoff < std::chrono::milliseconds(0)) {
+    throw std::invalid_argument("retry_backoff must not be negative");
+  }
+}
+
 }  // namespace
 
 RedisMetaClient::RedisMetaClient(const RedisMetaConfig &config)
     : retry_attempts_(config.retry_attempts), retry_backoff_(config.retry_backoff) {
   utils::ExpectInThreadDomain();
-  if (retry_attempts_ <= 0) {
-    throw std::invalid_argument("retry_attempts must be positive");
-  }
+  ValidateConfig(config);
   sw::redis::ConnectionPoolOptions pool_options;
   pool_options.size = config.pool_size;
   pool_options.wait_timeout = config.pool_wait_timeout;
@@ -65,12 +99,10 @@ RedisMetaClient::~RedisMetaClient() {
 
 utils::Status RedisMetaClient::Ping() {
   utils::ExpectInThreadDomain();
-  try {
+  return RunReadOnlyCommand("PING", [&] {
     redis_->ping();
     return utils::Status::OK();
-  } catch (const sw::redis::Error &error) {
-    return RedisError("PING", error);
-  }
+  });
 }
 
 utils::Status RedisMetaClient::Get(std::string_view key, std::string *value) {
@@ -78,16 +110,14 @@ utils::Status RedisMetaClient::Get(std::string_view key, std::string *value) {
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis GET output is null");
   }
-  try {
+  return RunReadOnlyCommand("GET", [&] {
     auto result = redis_->get(std::string(key));
     if (!result.has_value()) {
       return utils::Status::NotFound("Redis key not found");
     }
     *value = std::move(*result);
     return utils::Status::OK();
-  } catch (const sw::redis::Error &error) {
-    return RedisError("GET", error);
-  }
+  });
 }
 
 utils::Status RedisMetaClient::MGet(const std::vector<std::string> &keys,
@@ -100,12 +130,10 @@ utils::Status RedisMetaClient::MGet(const std::vector<std::string> &keys,
   if (keys.empty()) {
     return utils::Status::OK();
   }
-  try {
+  return RunReadOnlyCommand("MGET", [&] {
     redis_->mget(keys.begin(), keys.end(), std::back_inserter(*values));
     return utils::Status::OK();
-  } catch (const sw::redis::Error &error) {
-    return RedisError("MGET", error);
-  }
+  });
 }
 
 utils::Status RedisMetaClient::HGet(std::string_view key, std::string_view field, std::string *value) {
@@ -113,16 +141,14 @@ utils::Status RedisMetaClient::HGet(std::string_view key, std::string_view field
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis HGET output is null");
   }
-  try {
+  return RunReadOnlyCommand("HGET", [&] {
     auto result = redis_->hget(std::string(key), std::string(field));
     if (!result.has_value()) {
       return utils::Status::NotFound("Redis hash field not found");
     }
     *value = std::move(*result);
     return utils::Status::OK();
-  } catch (const sw::redis::Error &error) {
-    return RedisError("HGET", error);
-  }
+  });
 }
 
 utils::Status RedisMetaClient::HScan(std::string_view key, uint64_t cursor, size_t count,
@@ -131,15 +157,13 @@ utils::Status RedisMetaClient::HScan(std::string_view key, uint64_t cursor, size
   if (values == nullptr || next_cursor == nullptr) {
     return utils::Status::InvalidArgument("Redis HSCAN output is null");
   }
-  try {
+  return RunReadOnlyCommand("HSCAN", [&] {
     values->clear();
     *next_cursor = cursor;
     *next_cursor =
         redis_->hscan(std::string(key), *next_cursor, static_cast<long long>(count), std::back_inserter(*values));
     return utils::Status::OK();
-  } catch (const sw::redis::Error &error) {
-    return RedisError("HSCAN", error);
-  }
+  });
 }
 
 utils::Status RedisMetaClient::Incr(std::string_view key, uint64_t *value) {
@@ -150,38 +174,58 @@ utils::Status RedisMetaClient::Incr(std::string_view key, uint64_t *value) {
   try {
     *value = redis_->incr(std::string(key));
     return utils::Status::OK();
-  } catch (const sw::redis::Error &error) {
+  } catch (const sw::redis::ReplyError &error) {
+    // A valid Redis error reply is a known command result, so the caller does
+    // not need to reconcile a possibly lost allocation identity.
     return RedisError("INCR", error);
+  } catch (const sw::redis::Error &error) {
+    // redis++ combines command send and acknowledgement receive in one call.
+    // An opaque I/O/protocol failure cannot prove whether the counter advanced.
+    return utils::Status::OutcomeUnknown("Redis INCR outcome is ambiguous: " + std::string(error.what()));
   }
 }
 
 utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisKvTxn &)> &callback) {
   utils::ExpectInThreadDomain();
   for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
+    bool retry = false;
     try {
       RedisKvTxn transaction(*redis_);
-      auto status = callback(transaction);
-      if (!status.ok()) {
-        transaction.Discard();
-        return status;
-      }
+      try {
+        auto status = callback(transaction);
+        if (!status.ok()) {
+          transaction.Discard();
+          return status;
+        }
 
-      status = transaction.Commit();
-      return status;
-    } catch (const RedisKvTxn::WatchConflict &) {  // NOLINT(bugprone-empty-catch)
-      // Retry policy is shared below so every retryable failure observes the
-      // same attempt limit and backoff rule.
-    } catch (const sw::redis::TimeoutError &) {  // NOLINT(bugprone-empty-catch)
-      // A timeout before EXEC is retryable; Commit converts timeouts after
-      // EXEC into a terminal ambiguous-commit Status before reaching here.
-    } catch (const sw::redis::ClosedError &) {  // NOLINT(bugprone-empty-catch)
-      // A close before EXEC is retryable; Commit similarly contains closes
-      // after EXEC because their commit result is ambiguous.
-    } catch (const sw::redis::Error &error) {
+        status = transaction.Commit();
+        return status;
+      } catch (const RedisKvTxn::WatchConflict &) {
+        retry = true;
+      } catch (const sw::redis::ReplyError &error) {
+        return RedisError("transaction", error);
+      } catch (const sw::redis::Error &error) {
+        // Only exceptions raised by RedisKvTxn at a known pre-EXEC boundary
+        // are retry control flow. Exceptions escaping callback code remain
+        // ordinary failures and are never promoted into a blind replay.
+        if (!transaction.retryable_pre_exec_failure_) {
+          return RedisError("transaction", error);
+        }
+        retry = true;
+      }
+    } catch (const sw::redis::ReplyError &error) {
+      // Construction may acquire/connect a pooled connection but cannot have
+      // executed metadata mutations. A valid Redis reply is still a known
+      // terminal failure rather than a transport retry condition.
       return RedisError("transaction", error);
+    } catch (const sw::redis::Error &error) {
+      // RedisKvTxn construction occurs before MULTI/EXEC, so opaque transport
+      // or protocol failures here are safe to retry within the same budget.
+      (void)error;
+      retry = true;
     }
 
-    if (attempt + 1 < retry_attempts_) {
+    if (retry && attempt + 1 < retry_attempts_) {
       Backoff(attempt, retry_backoff_);
     }
   }

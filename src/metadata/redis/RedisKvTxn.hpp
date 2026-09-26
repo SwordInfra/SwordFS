@@ -62,6 +62,7 @@ class RedisKvTxn {
   std::unique_ptr<sw::redis::Transaction> transaction_;
   std::unique_ptr<sw::redis::Redis> redis_;
   bool has_writes_ = false;
+  bool retryable_pre_exec_failure_ = false;
 };
 
 }  // namespace swordfs::metadata
