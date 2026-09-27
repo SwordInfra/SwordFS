@@ -70,6 +70,14 @@ bool Fixture::SetUp() {
   InitPaths();
 
   std::error_code ec;
+  std::filesystem::create_directories(diagnostics_dir_, ec);
+  if (ec) {
+    std::fprintf(stderr, "E2E: failed to create diagnostics directory %s: %s\n", diagnostics_dir_.c_str(),
+                 ec.message().c_str());
+    return false;
+  }
+
+  ec.clear();
   std::filesystem::create_directories(work_dir_, ec);
   if (ec) {
     std::fprintf(stderr, "E2E: failed to create %s: %s\n", work_dir_.c_str(), ec.message().c_str());
@@ -97,17 +105,22 @@ bool Fixture::SetUp() {
 }
 
 void Fixture::TearDown() {
-  StopMount();
-  RemoveVolumeConfig();
-
-  if (!std::getenv("SWORDFS_E2E_KEEP_WORKDIR")) {
-    std::string cmd = "rm -rf " + work_dir_;
-    std::system(cmd.c_str());
+  const bool daemon_missing = DaemonMissingBeforeTeardown();
+  const bool mount_stopped = CleanupRuntimeState();
+  if (daemon_missing) {
+    ADD_FAILURE() << "SwordFS daemon disappeared before fixture teardown";
+  }
+  if (!mount_stopped) {
+    ADD_FAILURE() << "SwordFS daemon/mount cleanup did not complete";
   }
 }
 
 bool Fixture::Remount() {
-  TearDown();
+  if (DaemonMissingBeforeTeardown()) {
+    std::fprintf(stderr, "E2E: daemon disappeared before clean remount\n");
+    return false;
+  }
+  CleanupRuntimeState();
   if (!IsDaemonGone()) {
     std::fprintf(stderr, "E2E: previous daemon did not exit before remount\n");
     if (daemon_pid_ > 0) {
@@ -132,7 +145,7 @@ bool Fixture::CrashAndRemount() {
   constexpr int kMaxRetries = 40;
   for (int i = 0; i < kMaxRetries; ++i) {
     if (::kill(daemon_pid_, 0) != 0 && errno == ESRCH) {
-      TearDown();
+      CleanupRuntimeState();
       return SetUp();
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -156,8 +169,8 @@ bool Fixture::FormatVolume() {
   // Shell out to the `swordfs format` binary to exercise the real
   // CLI path end-to-end.
   std::ostringstream cmd;
-  cmd << FindSwordfsBin() << " --log-file " << LogPath() << " format" << " --volume " << volume_name_ << " --meta "
-      << metadata_url << " --bucket " << bucket_url_ << " 2>&1";
+  cmd << FindSwordfsBin() << " --log-file " << FormatLogPath() << " format" << " --volume " << volume_name_
+      << " --meta " << metadata_url << " --bucket " << bucket_url_ << " 2>&1";
 
   int ret = std::system(cmd.str().c_str());
   if (ret != 0) {
@@ -185,8 +198,9 @@ bool Fixture::StartMount() {
     return false;
   }
 
+  const std::string log_path = NextMountLogPath();
   std::ostringstream cmd;
-  cmd << FindSwordfsBin() << " --log-file " << LogPath() << " mount " << " --volume " << volume_name_ << " --meta "
+  cmd << FindSwordfsBin() << " --log-file " << log_path << " mount " << " --volume " << volume_name_ << " --meta "
       << metadata_url << " --fuse-threads 2" << " --storage-thread-count 2" << " --pidfile " << work_dir_
       << "/swordfs.pid" << " " << mountpoint_ << " 2>&1";
 
@@ -259,6 +273,31 @@ bool Fixture::IsDaemonGone() const {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
   return false;
+}
+
+bool Fixture::CleanupRuntimeState() {
+  const bool mount_stopped = StopMount();
+  RemoveVolumeConfig();
+  CleanupWorkDir();
+  return mount_stopped;
+}
+
+void Fixture::CleanupWorkDir() {
+  if (std::getenv("SWORDFS_E2E_KEEP_WORKDIR")) {
+    return;
+  }
+  std::string cmd = "rm -rf " + work_dir_;
+  std::system(cmd.c_str());
+}
+
+bool Fixture::DaemonMissingBeforeTeardown() const {
+  if (!mounted_) {
+    return false;
+  }
+  if (daemon_pid_ <= 0) {
+    return true;
+  }
+  return ::kill(daemon_pid_, 0) != 0 && errno == ESRCH;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -535,9 +574,13 @@ std::string Fixture::FindSwordfsBin() const {
   return "./swordfs";
 }
 
-std::string Fixture::LogPath() const {
-  const char *log = std::getenv("SWORDFS_E2E_LOG");
-  return log ? log : work_dir_ + "/swordfs.log";
+std::string Fixture::FormatLogPath() const {
+  return diagnostics_dir_ + "/format.log";
+}
+
+std::string Fixture::NextMountLogPath() {
+  ++mount_generation_;
+  return diagnostics_dir_ + "/mount-" + std::to_string(mount_generation_) + ".log";
 }
 
 void Fixture::RemoveVolumeConfig() {
@@ -564,6 +607,21 @@ void Fixture::InitPaths() {
   volume_name_ += std::to_string(folly::hash::SpookyHashV2::Hash64(test_name.data(), test_name.size(), 0));
   work_dir_ = "/tmp/swordfs_e2e_" + test_name;
   mountpoint_ = work_dir_ + "/mnt";
+  if (diagnostics_dir_.empty()) {
+    const char *diagnostics_root = std::getenv("SWORDFS_E2E_DIAGNOSTICS_DIR");
+    const std::filesystem::path root =
+        diagnostics_root && diagnostics_root[0] != '\0' ? diagnostics_root : "/tmp/swordfs-e2e-diagnostics";
+    diagnostics_dir_ = (root / test_name).string();
+
+    // A new Fixture owns a fresh diagnostics namespace. Remounts reuse the
+    // same Fixture and therefore retain earlier generation logs.
+    std::error_code ec;
+    std::filesystem::remove_all(diagnostics_dir_, ec);
+    if (ec) {
+      std::fprintf(stderr, "E2E: failed to reset diagnostics directory %s: %s\n", diagnostics_dir_.c_str(),
+                   ec.message().c_str());
+    }
+  }
   // Restore base URL and append test-specific prefix.
   bucket_url_ = base_bucket_url_ + volume_name_;
 }

@@ -37,6 +37,42 @@ Directly probing arbitrary `/proc/<id>/cmdline` paths is incorrect on Linux beca
 non-leader thread IDs are addressable there too and would make one multithreaded daemon
 appear as several processes.
 
+### Failure diagnostics lifecycle
+
+E2E daemon diagnostics have a longer lifetime than the disposable mount work directory.
+Each test owns a directory under `SWORDFS_E2E_DIAGNOSTICS_DIR`; format output goes to
+`format.log`, while each daemon generation writes to a distinct `mount-<generation>.log`.
+This separation is required because persistence and recovery tests can remount several
+times before their final assertion. Internal remount cleanup removes mount/config/workdir
+state but deliberately retains every daemon-generation log, so a later disconnect cannot
+erase the log from the daemon that caused it.
+
+`Fixture::TearDown()` is not necessarily the final GTest teardown: mount-lifecycle tests
+also call it explicitly inside one test body before mounting again. The fixture therefore
+never deletes its diagnostics directory. It takes a non-blocking liveness snapshot before
+cleanup and turns an already-missing daemon or an incomplete mount shutdown into a GTest
+failure, ensuring an unexpected daemon disappearance cannot look like a successful test.
+Likewise, `Remount()` is the clean-restart contract and rejects a daemon that has already
+disappeared before cleanup; only `CrashAndRemount()` intentionally accepts a killed daemon.
+
+The suite wrapper owns invocation-level diagnostics cleanup instead. `run-e2e.sh` exports
+one diagnostics root, clears any stale evidence before starting dependencies, and removes
+the root after a successful E2E binary unless `SWORDFS_E2E_KEEP_WORKDIR` explicitly asks
+to retain test state. A failed assertion, client-visible FUSE disconnect, teardown
+failure, or daemon disappearance makes the binary non-zero and preserves all
+per-test/generation logs. The GitHub E2E job uploads that diagnostics root only on
+failure, so successful CI runs retain neither per-test diagnostics nor a persistent
+artifact.
+
+CI also runs one disabled diagnostics-contract case explicitly before the normal suite.
+That case performs a remount and then deliberately fails; its wrapper expects the non-zero
+result and verifies that both daemon-generation log files survived final teardown before
+removing the controlled evidence. The wrapper also deletes `.gcda` counters produced by
+this intentionally failing smoke case before the normal suite, so diagnostics verification
+does not inflate the E2E Codecov session. This provides executable proof of the
+failure-retention and multi-generation contracts without making the required E2E suite
+intentionally red or contaminating coverage evidence.
+
 The E2E fixture already supplies the meaningful contracts behind the trace:
 
 - `Fixture::FormatVolume()` shells out to the real `swordfs format` command;

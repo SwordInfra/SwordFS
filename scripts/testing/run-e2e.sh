@@ -22,7 +22,10 @@ S3_BUCKET="${S3_BUCKET:-swordfs-e2e}"
 MINIO_ROOT_USER="${MINIO_ROOT_USER:-minioadmin}"
 MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-minioadmin}"
 SWORDFS_METADATA_URL="redis://127.0.0.1:6379/15"
-export MINIO_PORT S3_BUCKET MINIO_ROOT_USER MINIO_ROOT_PASSWORD
+SWORDFS_E2E_DIAGNOSTICS_DIR="${SWORDFS_E2E_DIAGNOSTICS_DIR:-/tmp/swordfs-e2e-diagnostics}"
+export MINIO_PORT S3_BUCKET MINIO_ROOT_USER MINIO_ROOT_PASSWORD SWORDFS_E2E_DIAGNOSTICS_DIR
+
+rm -rf "${SWORDFS_E2E_DIAGNOSTICS_DIR}"
 
 if docker compose version >/dev/null 2>&1; then
   DOCKER_COMPOSE=(docker compose)
@@ -79,4 +82,10 @@ SWORDFS_BIN="${SWORDFS_BIN}" \
 AWS_DEFAULT_REGION=auto \
 AWS_ACCESS_KEY_ID="${MINIO_ROOT_USER}" \
 AWS_SECRET_ACCESS_KEY="${MINIO_ROOT_PASSWORD}" \
-"${E2E_BIN}" "$@"
+"${E2E_BIN}" "$@" || test_status=$?
+
+test_status="${test_status:-0}"
+if [ "${test_status}" -eq 0 ] && [ -z "${SWORDFS_E2E_KEEP_WORKDIR:-}" ]; then
+  rm -rf "${SWORDFS_E2E_DIAGNOSTICS_DIR}"
+fi
+exit "${test_status}"
