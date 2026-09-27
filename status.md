@@ -30,27 +30,28 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | Classification | Count |
 | --- | ---: |
 | `ENVIRONMENT` | 7 |
-| `KNOWN_SEMANTIC_DEFECT` | 3 |
+| `KNOWN_SEMANTIC_DEFECT` | 2 |
 | `KNOWN_UNSUPPORTED` | 142 |
 | `PASS` | 111 |
 | `UPSTREAM_NOT_APPLICABLE` | 382 |
+| `UPSTREAM_TEST_DEFECT` | 1 |
 
 ## Known-gap Issues
 
 - [#255](https://github.com/SwordInfra/SwordFS/issues/255): 142 testcase(s), KNOWN_UNSUPPORTED
-- [#256](https://github.com/SwordInfra/SwordFS/issues/256): 3 testcase(s), KNOWN_SEMANTIC_DEFECT
+- [#256](https://github.com/SwordInfra/SwordFS/issues/256): 2 testcase(s), KNOWN_SEMANTIC_DEFECT
 
 ## Execution metadata
 
-- SwordFS commit: `007ad1d24e2622dee7583b38de844a569c2e8799`
+- SwordFS commit: `31b8ea4011225758ca5162e947c3e794643a8e44`
 - fstests commit: `a370dcbed43563f0462801e889e0eceb93c7cfad`
 - fstests selector: `generic/quick`
 - Kernel: `6.17.0-1022-azure`
 - libfuse: `fusermount3 version: 3.18.2`
 - Runner: `GitHub Actions (9 fstests shards)`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36284389442
-Recorded at: 2026-09-27T01:19:32+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36285558920
+Recorded at: 2026-09-27T01:41:37+00:00
 
 ## Historical main-branch progress
 
@@ -66,4 +67,4 @@ Recorded at: 2026-09-27T01:19:32+00:00
 | 2026-09-25T14:54:21+00:00 | `33aa7f676b8d` | PASS | 17.05% | 110 | 110 | 20 | 515 | 0 | 535 |
 | 2026-09-26T12:49:23+00:00 | `6f426b5ac78c` | PASS | 17.21% | 111 | 111 | 19 | 515 | 0 | 534 |
 
-Last fully healthy baseline: `007ad1d24e2622dee7583b38de844a569c2e8799`
+Last fully healthy baseline: `31b8ea4011225758ca5162e947c3e794643a8e44`

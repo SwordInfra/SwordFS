@@ -10,16 +10,17 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "007ad1d24e2622dee7583b38de844a569c2e8799"
+    "swordfs_commit": "31b8ea4011225758ca5162e947c3e794643a8e44"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "ENVIRONMENT": 7,
-      "KNOWN_SEMANTIC_DEFECT": 3,
+      "KNOWN_SEMANTIC_DEFECT": 2,
       "KNOWN_UNSUPPORTED": 142,
       "PASS": 111,
-      "UPSTREAM_NOT_APPLICABLE": 382
+      "UPSTREAM_NOT_APPLICABLE": 382,
+      "UPSTREAM_TEST_DEFECT": 1
     },
     "classified_count": 645,
     "classified_percent": 100.0,
@@ -3800,10 +3801,10 @@
       "test": "generic/588"
     },
     {
-      "classification": "KNOWN_SEMANTIC_DEFECT",
-      "issue": "#256",
+      "classification": "UPSTREAM_TEST_DEFECT",
+      "issue": "-",
       "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/591.out.bad)",
-      "reason": "The advertised FUSE splice-read path fails the upstream concurrent splice semantics; tracked by #256.",
+      "reason": "Pinned splice-test decrements remaining pipe bytes by requested read size rather than actual read return; the concurrent O_DIRECT SIGPIPE reproduces on native ext4/tmpfs, so this FAIL is not SwordFS semantic evidence (see #328 design record).",
       "result": "FAIL",
       "test": "generic/591"
     },
