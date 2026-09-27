@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 UNIT_TEST_BIN="${UNIT_TEST_BIN:-${PROJECT_DIR}/build/swordfs_test}"
+UNIT_TEST_TIMEOUT="${UNIT_TEST_TIMEOUT:-10m}"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.e2e.yml"
 SWORDFS_REDIS_TEST_URL="redis://127.0.0.1:6379"
 
@@ -40,4 +41,4 @@ compose up -d --wait redis
 echo "=== Running unit tests ==="
 cd "${PROJECT_DIR}"
 SWORDFS_REDIS_TEST_URL="${SWORDFS_REDIS_TEST_URL}" \
-  "${UNIT_TEST_BIN}" "$@"
+  timeout --signal=TERM --kill-after=30s "${UNIT_TEST_TIMEOUT}" "${UNIT_TEST_BIN}" "$@"

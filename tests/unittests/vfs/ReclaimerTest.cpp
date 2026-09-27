@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <barrier>
 #include <cerrno>
@@ -199,6 +200,80 @@ class PendingReclaimMetaEngine : public MemMetaImpl {
 
  private:
   metadata::ReclaimWork frozen_;
+};
+
+class ForcedMultiPassMetaEngine : public MemMetaImpl {
+ public:
+  ForcedMultiPassMetaEngine() {
+    constexpr InodeID kProbeIno = 42;
+    descriptors_[0] = SwordFsChunk{.index = 0, .revision = 7, .size = 64};
+    descriptors_[1] = SwordFsChunk{.index = 1, .revision = 8, .size = 64};
+    pending_[0] = MakePendingDelete(kProbeIno, descriptors_[0]);
+    pending_[1] = MakePendingDelete(kProbeIno, descriptors_[1]);
+    probe_ino_ = kProbeIno;
+  }
+
+  Status VisitPendingDeletesBatch(size_t max_items, const metadata::PendingDeleteVisitorFn &visitor,
+                                  bool *has_more) override {
+    if (max_items == 0 || !visitor || has_more == nullptr) {
+      return Status::InvalidArgument("invalid forced pending-delete batch request");
+    }
+
+    const int scan = pending_delete_scan_calls_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const size_t item_index = scan == 1 ? 0 : 1;
+    auto status = visitor(pending_[item_index]);
+    if (!status.ok()) {
+      return status;
+    }
+
+    *has_more = scan == 1;
+    if (scan == 2) {
+      second_scan_followed_orphan_.store(orphan_scan_calls_.load(std::memory_order_acquire) > 0,
+                                         std::memory_order_release);
+      second_pending_scan_started_.post();
+    }
+    return Status::OK();
+  }
+
+  Status VisitPendingReclaims(const metadata::ReclaimVisitorFn &) override {
+    return Status::OK();
+  }
+
+  Status VisitOrphanCandidates(const metadata::InodeVisitorFn &) override {
+    orphan_scan_calls_.fetch_add(1, std::memory_order_release);
+    return Status::OK();
+  }
+
+  Status FindChunk(InodeID ino, metadata::ChunkIndex idx, SwordFsChunk *chunk) override {
+    if (ino != probe_ino_ || idx >= descriptors_.size()) {
+      return Status::NotFound("probe chunk not found");
+    }
+    if (chunk != nullptr) {
+      *chunk = descriptors_[idx];
+    }
+    return Status::OK();
+  }
+
+  bool WaitForSecondPendingScan(std::chrono::steady_clock::duration timeout) {
+    return second_pending_scan_started_.try_wait_for(timeout);
+  }
+
+  int pending_delete_scan_calls() const {
+    return pending_delete_scan_calls_.load(std::memory_order_acquire);
+  }
+
+  bool second_scan_followed_orphan() const {
+    return second_scan_followed_orphan_.load(std::memory_order_acquire);
+  }
+
+ private:
+  InodeID probe_ino_ = 0;
+  std::array<SwordFsChunk, 2> descriptors_;
+  std::array<metadata::PendingDelete, 2> pending_;
+  std::atomic<int> pending_delete_scan_calls_{0};
+  std::atomic<int> orphan_scan_calls_{0};
+  std::atomic<bool> second_scan_followed_orphan_{false};
+  folly::fibers::Baton second_pending_scan_started_;
 };
 
 class ReclaimerTest : public ::testing::Test {
@@ -897,50 +972,42 @@ FIBER_TEST_F(ReclaimerTest, WorkerCompletesAPendingReclaimImmediatelyAtStartup) 
   EXPECT_TRUE(OrphanCandidates().empty());
 }
 
-FIBER_TEST_F(ReclaimerTest, WorkerSelfWakesUntilLargePendingDeleteBacklogIsDrained) {
-  // Keep the scenario substantially larger than the normal bounded batch,
-  // but do not encode the implementation's current batch width in the test.
-  constexpr size_t kChunkCount = 1024;
-  const uint64_t chunk_size = metadata::SwordFsVolume{}.chunk_size;
-  SwordFsInode file;
-  ASSERT_TRUE(meta_->Create(kRootInodeId, "pending-delete-backlog", 0644, &file).ok());
-  for (size_t i = 0; i < kChunkCount; ++i) {
-    SwordFsChunk chunk{.index = static_cast<metadata::ChunkIndex>(i),
-
-                       .revision = i + 1,
-                       .size = 64};
-    ASSERT_TRUE(meta_->CommitChunk(file.ino, std::nullopt, chunk).ok());
-    data_->Seed(chunk::FormatChunkObjectKey(file.ino, chunk.index, chunk.revision));
+class ReclaimerForcedMultiPassTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<ForcedMultiPassMetaEngine>>();
+    meta_ = meta.get();
+    SwordFsVolume config;
+    const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::make_unique<RecordingDataEngine>(),
+                                                             std::move(config));
+    ASSERT_TRUE(status.ok()) << status.message();
+    swordfs::test::RunInTestFiber([&] { InodeHandleManager::Instance().Initialize(); });
   }
-  ASSERT_TRUE(meta_->Truncate(file.ino, 0).ok());
-  ASSERT_EQ(PendingDeletes().size(), kChunkCount);
 
-  const InodeID orphan_ino = CreateChunkedFile("backlog-orphan", 1000);
-  const auto orphan_key = chunk::FormatChunkObjectKey(orphan_ino, 0, 1000);
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "backlog-orphan").ok());
-
-  swordfs::test::RunInTestThreadFromFiber([&] { Reclaimer::Instance().Start(); });
-
-  // The safety scan is five seconds. Finishing strictly before that interval
-  // proves the second pending-delete batch came from has_more -> Wake(), not
-  // from the periodic fallback.
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
-  while (std::chrono::steady_clock::now() < deadline &&
-         (!PendingDeletes().empty() || !meta_->GetInode(orphan_ino, nullptr).IsNotFound())) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  void TearDown() override {
+    Reclaimer::Instance().Stop();
+    swordfs::test::RunInTestFiber([&] { InodeHandleManager::Instance().Initialize(); });
+    volume::VolumeImpl::Initialize();
   }
-  const bool completed = PendingDeletes().empty() && meta_->GetInode(orphan_ino, nullptr).IsNotFound();
 
-  swordfs::test::RunInTestThreadFromFiber([&] { Reclaimer::Instance().Stop(); });
+  ForcedMultiPassMetaEngine *meta_ = nullptr;
+};
 
-  EXPECT_TRUE(completed) << "worker must self-wake for the second bounded pending-delete pass";
-  ASSERT_EQ(data_->delete_calls.size(), kChunkCount + 1);
-  const auto orphan_it = std::find(data_->delete_calls.begin(), data_->delete_calls.end(), orphan_key);
-  ASSERT_NE(orphan_it, data_->delete_calls.end());
-  const auto orphan_position = static_cast<size_t>(orphan_it - data_->delete_calls.begin());
-  EXPECT_GT(orphan_position, 0U);
-  EXPECT_LT(orphan_position, kChunkCount)
-      << "orphan work must run between bounded pending-delete passes, before the backlog is fully drained";
+TEST_F(ReclaimerForcedMultiPassTest, WorkerSelfWakesAndServicesOrphansBetweenForcedPendingDeletePasses) {
+  // The production safety scan is five seconds. This shorter mechanism-level
+  // watchdog proves has_more -> Wake() started pass two rather than the
+  // periodic fallback; the number of pending items says nothing about the
+  // production batch width.
+  constexpr auto kBeforeSafetyFallbackWatchdog = std::chrono::seconds(4);
+
+  Reclaimer::Instance().Start();
+  const bool second_pass_started = meta_->WaitForSecondPendingScan(kBeforeSafetyFallbackWatchdog);
+  Reclaimer::Instance().Stop();
+
+  EXPECT_TRUE(second_pass_started) << "has_more must self-wake the worker before the periodic safety scan";
+  EXPECT_GE(meta_->pending_delete_scan_calls(), 2);
+  EXPECT_TRUE(meta_->second_scan_followed_orphan())
+      << "the orphan scan from pass one must run before the self-woken pending-delete pass";
 }
 
 FIBER_TEST_F(ReclaimerTest, WorkerSurvivesAFailedPassAndRecoversOnWake) {

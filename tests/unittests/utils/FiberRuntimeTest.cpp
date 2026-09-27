@@ -5,19 +5,22 @@
 
 #include <folly/fibers/Baton.h>
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <future>
 #include <thread>
 
+#include "TestWatchdog.hpp"
 #include "utils/FiberRuntime.hpp"
 
 using swordfs::utils::FiberRuntime;
 
 namespace {
 
-constexpr auto kStateTransitionWatchdog = std::chrono::seconds(5);
+constexpr auto kStateTransitionWatchdog = swordfs::test::kAsyncCompletionWatchdog;
 
 template <typename Predicate>
 bool WaitUntil(Predicate &&predicate) {
@@ -56,7 +59,13 @@ TEST(FiberRuntimeTest, ShutdownDrainsAdmittedTasks) {
     release_task.wait();
     ran.store(true, std::memory_order_release);
   }));
-  task_started.wait();
+  const bool task_started_in_time = swordfs::test::WaitForBaton(task_started);
+  EXPECT_TRUE(task_started_in_time) << "admitted task must start within the test watchdog";
+  if (!task_started_in_time) {
+    // Release first so cleanup cannot strand a late-starting task on the same
+    // missing observation this assertion is reporting.
+    release_task.post();
+  }
 
   std::thread shutdown([&] {
     runtime.Shutdown();
@@ -98,7 +107,11 @@ TEST(FiberRuntimeTest, SubmitIsRejectedWhileShutdownDrainsAdmittedTask) {
     task_started.post();
     release_task.wait();
   }));
-  task_started.wait();
+  const bool task_started_in_time = swordfs::test::WaitForBaton(task_started);
+  EXPECT_TRUE(task_started_in_time) << "admitted task must start within the test watchdog";
+  if (!task_started_in_time) {
+    release_task.post();
+  }
 
   std::thread shutdown([&] { runtime.Shutdown(); });
   const bool stopped_accepting = WaitUntil([&] { return !runtime.IsAccepting(); });
@@ -113,21 +126,35 @@ TEST(FiberRuntimeTest, SubmitIsRejectedWhileShutdownDrainsAdmittedTask) {
 
 #ifdef NDEBUG
 TEST(FiberRuntimeTest, ShutdownFromDriverFiberDefersJoinWithoutDeadlock) {
-  FiberRuntime runtime;
-  std::promise<void> shutdown_returned;
-  auto shutdown_future = shutdown_returned.get_future();
-  constexpr auto kShutdownWatchdog = std::chrono::seconds(1);
+  // Keep failure cleanup outside the runtime under test. If the driver fiber
+  // deadlocks in Shutdown(), destroying or shutting down that same runtime in
+  // the parent test path can repeat the deadlock and hide the actual failure.
+  EXPECT_EXIT(
+      {
+        constexpr auto kShutdownWatchdog = std::chrono::seconds(1);
+        constexpr unsigned int kChildAlarmSeconds = 5;
+        ::alarm(kChildAlarmSeconds);
 
-  ASSERT_TRUE(runtime.Submit([&] {
-    runtime.Shutdown();
-    shutdown_returned.set_value();
-  }));
+        FiberRuntime runtime;
+        std::promise<void> shutdown_returned;
+        auto shutdown_future = shutdown_returned.get_future();
+        if (!runtime.Submit([&] {
+              runtime.Shutdown();
+              shutdown_returned.set_value();
+            })) {
+          std::_Exit(2);
+        }
 
-  // This is a liveness watchdog, not a synchronization delay: Shutdown()
-  // invoked by the driver fiber must return without attempting to join itself.
-  EXPECT_EQ(shutdown_future.wait_for(kShutdownWatchdog), std::future_status::ready);
-  runtime.Shutdown();
-  EXPECT_FALSE(runtime.IsAccepting());
+        if (shutdown_future.wait_for(kShutdownWatchdog) != std::future_status::ready) {
+          std::_Exit(3);
+        }
+        runtime.Shutdown();
+        if (runtime.IsAccepting()) {
+          std::_Exit(4);
+        }
+        std::_Exit(0);
+      },
+      ::testing::ExitedWithCode(0), "");
 }
 #endif
 
@@ -142,7 +169,11 @@ TEST(FiberRuntimeTest, RunInFiberRejectsWhileGlobalRuntimeIsStopping) {
     task_started.post();
     release_task.wait();
   }));
-  task_started.wait();
+  const bool task_started_in_time = swordfs::test::WaitForBaton(task_started);
+  EXPECT_TRUE(task_started_in_time) << "global runtime task must start within the test watchdog";
+  if (!task_started_in_time) {
+    release_task.post();
+  }
 
   std::thread shutdown([] { swordfs::utils::ShutdownFiberRuntime(); });
   const bool stopped_accepting = WaitUntil([&] { return !runtime->IsAccepting(); });
@@ -205,20 +236,60 @@ TEST(FiberRuntimeTest, GlobalShutdownRejectsAndDrainsMultipleDriverRuntimes) {
   std::thread first_worker(worker, &first);
   std::thread second_worker(worker, &second);
 
-  first.initialized.wait();
-  second.initialized.wait();
-  first.task_started.wait();
-  second.task_started.wait();
-  ASSERT_TRUE(first.init_ok.load(std::memory_order_acquire));
-  ASSERT_TRUE(second.init_ok.load(std::memory_order_acquire));
-  ASSERT_TRUE(first.submit_ok.load(std::memory_order_acquire));
-  ASSERT_TRUE(second.submit_ok.load(std::memory_order_acquire));
+  const bool first_initialized = swordfs::test::WaitForBaton(first.initialized);
+  const bool second_initialized = swordfs::test::WaitForBaton(second.initialized);
+  const bool first_task_started = swordfs::test::WaitForBaton(first.task_started);
+  const bool second_task_started = swordfs::test::WaitForBaton(second.task_started);
+  EXPECT_TRUE(first_initialized) << "first driver must initialize within the test watchdog";
+  EXPECT_TRUE(second_initialized) << "second driver must initialize within the test watchdog";
+  EXPECT_TRUE(first_task_started) << "first driver task must start within the test watchdog";
+  EXPECT_TRUE(second_task_started) << "second driver task must start within the test watchdog";
+
+  const bool setup_ok =
+      first_initialized && second_initialized && first_task_started && second_task_started &&
+      first.init_ok.load(std::memory_order_acquire) && second.init_ok.load(std::memory_order_acquire) &&
+      first.submit_ok.load(std::memory_order_acquire) && second.submit_ok.load(std::memory_order_acquire);
+  EXPECT_TRUE(first.init_ok.load(std::memory_order_acquire));
+  EXPECT_TRUE(second.init_ok.load(std::memory_order_acquire));
+  EXPECT_TRUE(first.submit_ok.load(std::memory_order_acquire));
+  EXPECT_TRUE(second.submit_ok.load(std::memory_order_acquire));
+  if (!setup_ok) {
+    // Every worker-side control wait is deliberately latched. Posting all of
+    // them first makes timeout cleanup independent of which stage a slow
+    // worker eventually reaches.
+    first.release_task.post();
+    second.release_task.post();
+    first.check_rejection.post();
+    second.check_rejection.post();
+    first.restart.post();
+    second.restart.post();
+    first.finish.post();
+    second.finish.post();
+    swordfs::utils::ShutdownFiberRuntime();
+    first_worker.join();
+    second_worker.join();
+    return;
+  }
 
   auto *first_runtime = first.runtime.load(std::memory_order_acquire);
   auto *second_runtime = second.runtime.load(std::memory_order_acquire);
-  ASSERT_NE(first_runtime, nullptr);
-  ASSERT_NE(second_runtime, nullptr);
-  ASSERT_NE(first_runtime, second_runtime);
+  EXPECT_NE(first_runtime, nullptr);
+  EXPECT_NE(second_runtime, nullptr);
+  EXPECT_NE(first_runtime, second_runtime);
+  if (first_runtime == nullptr || second_runtime == nullptr || first_runtime == second_runtime) {
+    first.release_task.post();
+    second.release_task.post();
+    first.check_rejection.post();
+    second.check_rejection.post();
+    first.restart.post();
+    second.restart.post();
+    first.finish.post();
+    second.finish.post();
+    swordfs::utils::ShutdownFiberRuntime();
+    first_worker.join();
+    second_worker.join();
+    return;
+  }
 
   std::thread shutdown([] { swordfs::utils::ShutdownFiberRuntime(); });
   const bool stopped_accepting =
@@ -227,8 +298,10 @@ TEST(FiberRuntimeTest, GlobalShutdownRejectsAndDrainsMultipleDriverRuntimes) {
 
   first.check_rejection.post();
   second.check_rejection.post();
-  first.checked_rejection.wait();
-  second.checked_rejection.wait();
+  EXPECT_TRUE(swordfs::test::WaitForBaton(first.checked_rejection))
+      << "first rejection check must complete within the test watchdog";
+  EXPECT_TRUE(swordfs::test::WaitForBaton(second.checked_rejection))
+      << "second rejection check must complete within the test watchdog";
   EXPECT_TRUE(first.rejected_during_shutdown.load(std::memory_order_acquire));
   EXPECT_TRUE(second.rejected_during_shutdown.load(std::memory_order_acquire));
 
@@ -238,8 +311,8 @@ TEST(FiberRuntimeTest, GlobalShutdownRejectsAndDrainsMultipleDriverRuntimes) {
 
   first.restart.post();
   second.restart.post();
-  first.restarted.wait();
-  second.restarted.wait();
+  EXPECT_TRUE(swordfs::test::WaitForBaton(first.restarted)) << "first driver must restart within the test watchdog";
+  EXPECT_TRUE(swordfs::test::WaitForBaton(second.restarted)) << "second driver must restart within the test watchdog";
   EXPECT_TRUE(first.restart_ok.load(std::memory_order_acquire));
   EXPECT_TRUE(second.restart_ok.load(std::memory_order_acquire));
   EXPECT_NE(first.restarted_runtime.load(std::memory_order_acquire), nullptr);
@@ -263,7 +336,11 @@ TEST(FiberRuntimeTest, ConcurrentShutdownCallsDrainOnce) {
     release_task.wait();
     ran.store(true, std::memory_order_release);
   }));
-  task_started.wait();
+  const bool task_started_in_time = swordfs::test::WaitForBaton(task_started);
+  EXPECT_TRUE(task_started_in_time) << "admitted task must start within the test watchdog";
+  if (!task_started_in_time) {
+    release_task.post();
+  }
 
   std::thread first([&] { runtime.Shutdown(); });
   std::thread second([&] { runtime.Shutdown(); });
