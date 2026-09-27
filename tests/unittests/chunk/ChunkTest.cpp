@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "FiberTest.hpp"
+#include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/Chunk.hpp"
 #include "chunk/ChunkObjectKey.hpp"
@@ -44,6 +46,7 @@ using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
 using swordfs::storage::IDataEngine;
+using swordfs::test::RunInTestFiber;
 using swordfs::utils::Status;
 
 namespace {
@@ -210,20 +213,6 @@ NullDataEngine *InitializeRuntime() {
   const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
   EXPECT_TRUE(status.ok()) << status.message();
   return raw;
-}
-
-template <typename Fn>
-void RunInTestFiber(Fn &&fn) {
-  folly::EventBase evb;
-  auto &fm = folly::fibers::getFiberManager(evb);
-  folly::fibers::Baton done;
-  fm.addTask([&] {
-    fn();
-    done.post();
-  });
-  while (!done.try_wait()) {
-    evb.loopOnce();
-  }
 }
 
 }  // namespace
@@ -407,14 +396,18 @@ TEST_F(ChunkTest, ConcurrentFlushOnSameChunkReturnsBusy) {
     second_done.post();
   });
 
-  while (!second_done.try_wait()) {
-    evb.loopOnce();
+  const bool second_completed = swordfs::test::DriveEventBaseUntil(evb, [&] { return second_done.try_wait(); });
+  EXPECT_TRUE(second_completed) << "concurrent Flush must report EBUSY within the test watchdog";
+  if (!second_completed) {
+    release_put.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return first_done.try_wait() && second_done.try_wait(); }, "Chunk concurrent-flush timeout cleanup");
+    return;
   }
   EXPECT_EQ(second_status.ToErrno(), EBUSY);
   release_put.post();
-  while (!first_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return first_done.try_wait(); }, "Chunk first Flush completion after release");
   EXPECT_TRUE(first_status.ok());
   RunInTestFiber([&] { EXPECT_TRUE(c.IsClean()); });
 }

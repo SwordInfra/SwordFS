@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/ChunkObjectKey.hpp"
 #include "chunk/WholeObjectCleanup.hpp"
@@ -397,6 +398,9 @@ FIBER_TEST_F(FileHandleTest, ConcurrentOpenAndFind) {
     }));
   }
   for (auto &th : threads) {
+    // These workers have a finite loop and no test-controlled blocking
+    // barrier. #361 only bounds joins whose completion depends on a deliberate
+    // deadlock/ordering scenario.
     th.join();
   }
 }
@@ -1094,19 +1098,31 @@ FIBER_TEST_F(FileHandleTest, ConcurrentOpenSucceedsWhileLastCloseFlushesLinkedIn
 
   folly::fibers::Baton put_entered;
   folly::fibers::Baton put_release;
+  folly::fibers::Baton closing_thread_done;
   data->BlockNextPut(&put_entered, &put_release);
 
   std::atomic<bool> close_ok{false};
-  auto closing_thread = swordfs::test::StartFiberTestThread([&] { close_ok.store(closing_handle->Release().ok()); });
-  put_entered.wait();  // the last close is now blocked inside Flush/Put
+  std::thread closing_thread([&] {
+    swordfs::test::RunInTestFiber([&] { close_ok.store(closing_handle->Release().ok()); });
+    closing_thread_done.post();
+  });
+  const bool put_was_entered = swordfs::test::WaitForBaton(put_entered);
+  EXPECT_TRUE(put_was_entered) << "last close must reach the controlled Flush/Put blocker";
+  if (!put_was_entered) {
+    put_release.post();
+    swordfs::test::WaitForBatonOrAbort(closing_thread_done, "FileHandle closing-thread timeout cleanup");
+    closing_thread.join();
+    return;
+  }
 
   std::shared_ptr<FileHandle> reopened;
   const auto open_status = FileHandle::Open(7, O_RDONLY, &reopened);
   EXPECT_TRUE(open_status.ok()) << open_status.message();
-  ASSERT_NE(reopened, nullptr);
 
   put_release.post();
+  swordfs::test::WaitForBatonOrAbort(closing_thread_done, "FileHandle closing-thread completion after Put release");
   closing_thread.join();
+  ASSERT_NE(reopened, nullptr);
   EXPECT_TRUE(close_ok.load());
 
   auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/false);
@@ -1190,26 +1206,44 @@ FIBER_TEST_F(FileHandleTest, OpenInProgressBlocksReclaimAndFailedOpenReleasesIts
 
   folly::fibers::Baton open_entered;
   folly::fibers::Baton open_release;
+  folly::fibers::Baton opening_thread_done;
   meta->open_status = Status::Permission("denied");
   meta->BlockNextOpen(&open_entered, &open_release);
 
   std::atomic<int> open_code{0};
-  auto opening_thread = swordfs::test::StartFiberTestThread([&] {
-    std::shared_ptr<FileHandle> handle;
-    const auto status = FileHandle::Open(7, O_RDONLY, &handle);
-    open_code.store(status.ToErrno());
+  std::thread opening_thread([&] {
+    swordfs::test::RunInTestFiber([&] {
+      std::shared_ptr<FileHandle> handle;
+      const auto status = FileHandle::Open(7, O_RDONLY, &handle);
+      open_code.store(status.ToErrno());
+    });
+    opening_thread_done.post();
   });
 
   // The opening operation already owns a temporary descriptor reference while
   // parked in the metadata check, so background reclaim must defer.
-  open_entered.wait();
+  const bool open_was_entered = swordfs::test::WaitForBaton(open_entered);
+  EXPECT_TRUE(open_was_entered) << "Open must reach the controlled metadata blocker";
+  if (!open_was_entered) {
+    open_release.post();
+    swordfs::test::WaitForBatonOrAbort(opening_thread_done, "FileHandle opening-thread timeout cleanup");
+    opening_thread.join();
+    return;
+  }
   auto inode_handle = InodeHandleManager::Instance().Get(7, /*create_if_missing=*/false);
-  ASSERT_NE(inode_handle, nullptr);
+  EXPECT_NE(inode_handle, nullptr);
+  if (inode_handle == nullptr) {
+    open_release.post();
+    swordfs::test::WaitForBatonOrAbort(opening_thread_done, "FileHandle opening-thread missing-inode cleanup");
+    opening_thread.join();
+    return;
+  }
   EXPECT_FALSE(inode_handle->TryStartReclaim());
 
   // When the metadata check fails, Open releases only its temporary reference;
   // the durable orphan remains entirely a Reclaimer concern.
   open_release.post();
+  swordfs::test::WaitForBatonOrAbort(opening_thread_done, "FileHandle opening-thread completion after Open release");
   opening_thread.join();
   EXPECT_EQ(open_code.load(), EACCES);
   ASSERT_TRUE(inode_handle->TryStartReclaim()) << "failed Open must not leak a descriptor reference";
