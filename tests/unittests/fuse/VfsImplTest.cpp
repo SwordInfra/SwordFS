@@ -20,6 +20,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -29,6 +30,7 @@
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/ChunkObjectKey.hpp"
 #include "fuse/Vfs.hpp"
@@ -378,6 +380,34 @@ class TestDirIterator final : public swordfs::metadata::DirIterator {
   Status peek_status_{Status::OK()};
 };
 
+class BatchProbeDirIterator final : public swordfs::metadata::DirIterator {
+ public:
+  Status Seek(uint64_t cookie) override {
+    position_ = cookie;
+    return Status::OK();
+  }
+
+  Status Peek(swordfs::metadata::SwordFsEntry *entry, uint64_t *next_cookie) override {
+    // This guard is deliberately far above a normal metadata batch. It is a
+    // resource watchdog for a regression that removes batching, not a
+    // production upper-bound assertion.
+    constexpr uint64_t kResourceGuardEntries = 64 * 1024;
+    if (position_ >= kResourceGuardEntries) {
+      return Status::IOError("batch probe iterator resource guard reached before metadata fetch");
+    }
+    *entry = {"entry", DT_REG, 1000 + position_};
+    *next_cookie = position_ + 1;
+    return Status::OK();
+  }
+
+  void Advance() override {
+    ++position_;
+  }
+
+ private:
+  uint64_t position_ = 0;
+};
+
 class MockMetaEngine : public swordfs::metadata::IMetaEngine {
  public:
   Status Initialize() override {
@@ -573,8 +603,12 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *iterator) override {
     if (call_status_.ok() && iterator != nullptr) {
-      *iterator =
-          std::make_shared<TestDirIterator>(dir_entries_, fail_dir_seek_call_, dir_seek_failure_, dir_peek_status_);
+      if (dir_iterator_ != nullptr) {
+        *iterator = dir_iterator_;
+      } else {
+        *iterator =
+            std::make_shared<TestDirIterator>(dir_entries_, fail_dir_seek_call_, dir_seek_failure_, dir_peek_status_);
+      }
     }
     return call_status_;
   }
@@ -646,6 +680,10 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     dir_entries_ = std::move(entries);
   }
 
+  void set_dir_iterator(swordfs::metadata::DirIteratorPtr iterator) {
+    dir_iterator_ = std::move(iterator);
+  }
+
   void BlockNextGetInodes(folly::fibers::Baton *captured, folly::fibers::Baton *release) {
     get_inodes_captured_ = captured;
     get_inodes_release_ = release;
@@ -681,6 +719,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   swordfs::metadata::ChunkRevision next_revision_ = 1;
   std::unordered_map<InodeID, SwordFsInode> inodes_;
   std::vector<swordfs::metadata::SwordFsEntry> dir_entries_{{".", DT_DIR, 1}};
+  swordfs::metadata::DirIteratorPtr dir_iterator_;
 };
 
 class VfsImplIntegrationTest : public ::testing::Test {
@@ -1506,8 +1545,16 @@ TEST_F(VfsImplIntegrationTest, ReadDirPlusKeepsMetadataSnapshotAndLiveOverlaySyn
     readdir_status = VfsImpl::ReadDirPlus(nullptr, 1, 4096, 0, dir_fh, &buf);
     readdir_done.post();
   });
+
+  const bool snapshot_ready = swordfs::test::DriveEventBaseUntil(evb, [&] { return snapshot_captured.try_wait(); });
+  EXPECT_TRUE(snapshot_ready) << "READDIRPLUS must reach the metadata snapshot within the test watchdog";
+  if (!snapshot_ready) {
+    release_snapshot.post();
+    (void)swordfs::test::DriveEventBaseUntil(evb, [&] { return readdir_done.try_wait(); });
+    return;
+  }
+
   fm.addTask([&] {
-    snapshot_captured.wait();
     setattr_started.post();
     struct stat requested{};
     requested.st_size = 1;
@@ -1515,8 +1562,12 @@ TEST_F(VfsImplIntegrationTest, ReadDirPlusKeepsMetadataSnapshotAndLiveOverlaySyn
     setattr_done.post();
   });
 
-  while (!snapshot_captured.try_wait() || !setattr_started.try_wait()) {
-    evb.loopOnce();
+  const bool setattr_ready = swordfs::test::DriveEventBaseUntil(evb, [&] { return setattr_started.try_wait(); });
+  EXPECT_TRUE(setattr_ready) << "concurrent SetAttr must start within the test watchdog";
+  if (!setattr_ready) {
+    release_snapshot.post();
+    (void)swordfs::test::DriveEventBaseUntil(evb, [&] { return readdir_done.try_wait() && setattr_done.try_wait(); });
+    return;
   }
   // #212 requires authoritative metadata and the local size overlay to be one
   // coherent visible-attribute read. The size mutation must wait until this
@@ -1524,9 +1575,9 @@ TEST_F(VfsImplIntegrationTest, ReadDirPlusKeepsMetadataSnapshotAndLiveOverlaySyn
   EXPECT_FALSE(setattr_done.try_wait());
 
   release_snapshot.post();
-  while (!readdir_done.try_wait() || !setattr_done.try_wait()) {
-    evb.loopOnce();
-  }
+  ASSERT_TRUE(swordfs::test::DriveEventBaseUntil(evb, [&] {
+    return readdir_done.try_wait() && setattr_done.try_wait();
+  })) << "READDIRPLUS and SetAttr must complete after the snapshot blocker is released";
   ASSERT_TRUE(readdir_status.ok()) << readdir_status.message();
   ASSERT_TRUE(setattr_status.ok()) << setattr_status.message();
   ASSERT_GE(buf.size(), sizeof(fuse_direntplus));
@@ -1719,30 +1770,21 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusHandlesTrackedHardlinksAndUntrac
   EXPECT_TRUE(VfsImpl::Release(kTrackedIno, tracked_fi.fh).ok());
 }
 
-FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusBoundsAttributeBatchSizeForLargeDirectories) {
-  constexpr size_t kEntryCount = 1024;
-  std::vector<swordfs::metadata::SwordFsEntry> entries;
-  entries.reserve(kEntryCount);
-  for (size_t i = 0; i < kEntryCount; ++i) {
-    const InodeID entry_ino = 1000 + i;
-    entries.push_back({"entry-" + std::to_string(i), DT_REG, entry_ino});
-    SwordFsInode inode;
-    inode.ino = entry_ino;
-    inode.attr = SwordFsAttr(entry_ino, S_IFREG | 0644, 100, 200);
-    inode.attr.nlink = 1;
-    mock_meta_->set_inode(std::move(inode));
-  }
-  mock_meta_->set_dir_entries(std::move(entries));
+FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusIssuesFiniteMetadataBatchesWithoutDependingOnBatchWidth) {
+  constexpr std::string_view kBatchObserved = "metadata batch observed";
+  mock_meta_->set_dir_iterator(std::make_shared<BatchProbeDirIterator>());
+  mock_meta_->set_get_inode_status(Status::IOError(std::string(kBatchObserved)));
 
   uint64_t fh = 0;
   ASSERT_TRUE(VfsImpl::OpenDir(1, &fh).ok());
   std::string buf;
-  ASSERT_TRUE(VfsImpl::ReadDirPlus(nullptr, 1, 1 << 20, 0, fh, &buf).ok());
-  // Batching is the invariant. The exact batch width is an internal tuning
-  // policy and may change without changing READDIRPLUS semantics.
-  EXPECT_GT(mock_meta_->get_inodes_calls(), 1);
+  const auto status = VfsImpl::ReadDirPlus(nullptr, 1, std::numeric_limits<size_t>::max(), 0, fh, &buf);
+  // The iterator never reaches EOF naturally. Reaching the sentinel backend
+  // error proves READDIRPLUS voluntarily emitted a finite metadata batch;
+  // no scenario cardinality has to exceed the current production width.
+  EXPECT_EQ(status.message(), kBatchObserved);
+  EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
   EXPECT_GT(mock_meta_->max_get_inodes_batch_size(), 0u);
-  EXPECT_LT(mock_meta_->max_get_inodes_batch_size(), kEntryCount);
 
   EXPECT_TRUE(VfsImpl::ReleaseDir(1, fh).ok());
 }

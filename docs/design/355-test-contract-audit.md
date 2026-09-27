@@ -75,8 +75,8 @@ This change touches test code and this design document only, so C++ production p
 
 Verification requires:
 
-1. build the affected unit-test targets with local compile parallelism limited to half of logical CPUs;
-2. run the focused `BlockingExecutor`, `FiberRuntime`, FUSE/VFS, and reclaimer unit tests locally;
+1. use the GitHub Dev Build path to compile the affected unit-test target; do not compile SwordFS on the local development server;
+2. run the focused unit tests through GitHub Dev Build; integration/E2E/FUSE-service-backed/recovery/privilege-sensitive execution remains formal GitHub-CI-only;
 3. run repository formatting/pre-commit and `git diff --check` after all files are tracked;
 4. use GitHub CI as the authoritative full-suite verification, including service-backed and E2E coverage;
 5. perform a final readability/test-quality review to ensure no retained exact count lacks a semantic reason and no production test seam was introduced.
