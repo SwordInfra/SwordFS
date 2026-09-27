@@ -171,9 +171,13 @@ std::vector<std::shared_ptr<chunk::IChunkSession>> FileChunkManager::GetFlushabl
 }
 
 void FileChunkManager::TruncateToSize(size_t size, size_t chunk_size) {
+  CHECK(size <= metadata::kMaxSupportedFileSize) << "cached truncate exceeds supported file size: " << size;
+  metadata::ChunkPosition boundary;
+  const auto status = metadata::CalculateChunkPosition(static_cast<off_t>(size), chunk_size, &boundary);
+  CHECK(status.ok()) << "invalid cached truncate boundary: size=" << size << " chunk_size=" << chunk_size;
   std::lock_guard<utils::FiberMutex> lock(mutex_);
-  const auto boundary_idx = static_cast<metadata::ChunkIndex>(size / chunk_size);
-  const size_t boundary_size = size % chunk_size;
+  const auto boundary_idx = boundary.index;
+  const auto boundary_size = static_cast<size_t>(boundary.offset_in_chunk);
   for (auto it = chunks_.begin(); it != chunks_.end();) {
     if (it->first > boundary_idx || (it->first == boundary_idx && boundary_size == 0)) {
       it = chunks_.erase(it);
@@ -206,14 +210,23 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
   std::shared_lock<utils::FiberRWMutex> operation_lock(operation_mutex_);
   SWORDFS_LOG_DEBUG << "FileReadWriter::Write: ino=" << ino_ << " size=" << buf.length() << " off=" << off;
   const size_t write_size = buf.length();
+  uint64_t write_end = 0;
+  auto status = metadata::CalculateFileRangeEnd(off, write_size, &write_end);
+  if (!status.ok()) {
+    return status;
+  }
   size_t remaining = buf.length();
-  off_t cur_off = off;
+  uint64_t cursor = static_cast<uint64_t>(off);
 
   while (remaining > 0) {
-    metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(cur_off / static_cast<off_t>(chunk_size_));
+    metadata::ChunkPosition position;
+    status = metadata::CalculateChunkPosition(static_cast<off_t>(cursor), chunk_size_, &position);
+    if (!status.ok()) {
+      return status;
+    }
 
     std::shared_ptr<chunk::IChunkSession> c;
-    auto status = chunks_.Get(idx, /*create_if_missing=*/true, &c);
+    status = chunks_.Get(position.index, /*create_if_missing=*/true, &c);
     if (!status.ok()) {
       return status;
     }
@@ -221,21 +234,21 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
       return utils::Status::Internal("FileReadWriter::Write: chunk lookup succeeded without a chunk");
     }
 
-    size_t room = chunk_size_ - (cur_off % chunk_size_);
+    const size_t room = chunk_size_ - static_cast<size_t>(position.offset_in_chunk);
     size_t n = std::min(remaining, room);
     auto slice = folly::IOBuf::takeOwnership(
-        const_cast<uint8_t *>(buf.data()) + (cur_off - off), n, n, +[](void *, void *) {}, nullptr, false);
-    status = c->Write(cur_off, *slice);
+        const_cast<uint8_t *>(buf.data()) + static_cast<size_t>(cursor - static_cast<uint64_t>(off)), n, n,
+        +[](void *, void *) {}, nullptr, false);
+    status = c->Write(static_cast<off_t>(cursor), *slice);
     if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "FileReadWriter::Write FAILED: ino=" << ino_ << " off=" << cur_off << " chunk=" << c->index()
+      SWORDFS_LOG_ERROR << "FileReadWriter::Write FAILED: ino=" << ino_ << " off=" << cursor << " chunk=" << c->index()
                         << " — " << status.message();
       return status;
     }
     remaining -= n;
-    cur_off += static_cast<off_t>(n);
+    cursor += n;
   }
   if (write_size != 0) {
-    const auto write_end = static_cast<uint64_t>(cur_off);
     std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
     live_size_ = std::max(live_size_.value_or(0), write_end);
     ++size_state_epoch_;
@@ -250,17 +263,20 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
 
 utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   std::shared_lock<utils::FiberRWMutex> operation_lock(operation_mutex_);
-  if (size == 0) {
-    return utils::Status::OK();
-  }
   if (off < 0) {
     return utils::Status::InvalidArgument("FileReadWriter::Read: negative offset");
+  }
+  if (size == 0) {
+    return utils::Status::OK();
   }
 
   uint64_t visible_size = 0;
   auto status = GetVisibleSize(&visible_size);
   if (!status.ok()) {
     return status;
+  }
+  if (visible_size > metadata::kMaxSupportedFileSize) {
+    return utils::Status::Malformed("FileReadWriter::Read: file size exceeds supported range");
   }
   const auto read_start = static_cast<uint64_t>(off);
   if (read_start >= visible_size) {
@@ -271,48 +287,52 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   const size_t read_size = static_cast<size_t>(std::min<uint64_t>(static_cast<uint64_t>(size), available));
   MultiChunkReadWriter multi;
   size_t remaining = read_size;
-  off_t cur_off = off;
+  uint64_t cursor = read_start;
   auto *const write_start = out->writableData();
 
   while (remaining > 0) {
     // 1) Try the unified chunk map (dirty + flushed).
-    metadata::ChunkIndex idx = static_cast<metadata::ChunkIndex>(cur_off / static_cast<off_t>(chunk_size_));
+    metadata::ChunkPosition position;
+    status = metadata::CalculateChunkPosition(static_cast<off_t>(cursor), chunk_size_, &position);
+    if (!status.ok()) {
+      multi.Drain();
+      return status;
+    }
     std::shared_ptr<chunk::IChunkSession> c;
-    status = chunks_.Get(idx, /*create_if_missing=*/false, &c);
+    status = chunks_.Get(position.index, /*create_if_missing=*/false, &c);
     if (!status.ok()) {
       multi.Drain();
       return status;
     }
 
-    // cur_off may fall within the chunk's index range (e.g. a 64 MiB
+    // cursor may fall within the chunk's index range (e.g. a 64 MiB
     // chunk that only has 500 bytes of data — offsets [500, 64 MiB)
-    // are holes that still map to the same idx).  We must guard with
-    // DataEnd() because `static_cast<size_t>(DataEnd - cur_off)`
-    // would overflow to a huge value when cur_off ≥ DataEnd, leading
+    // are holes that still map to the same index). We must guard with
+    // DataEnd() because converting `DataEnd - cursor` to size_t would
+    // overflow to a huge value when cursor >= DataEnd, leading
     // to a bogus window_cap and an infinite loop.
-    bool has_data = (c != nullptr) && (cur_off < c->DataEnd());
+    const off_t data_end = c != nullptr ? c->DataEnd() : 0;
+    const bool has_data = c != nullptr && cursor < static_cast<uint64_t>(data_end);
 
     if (has_data) {
-      off_t chunk_off = cur_off - c->StartOffset();
-      size_t window_cap = std::min(remaining, static_cast<size_t>(c->DataEnd() - cur_off));
-      CHECK(window_cap > 0) << "window_cap=0: cur_off=" << cur_off << " DataEnd=" << c->DataEnd()
-                            << " remaining=" << remaining;
+      const auto chunk_off = static_cast<off_t>(position.offset_in_chunk);
+      size_t window_cap = std::min(remaining, static_cast<size_t>(static_cast<uint64_t>(data_end) - cursor));
 
       auto window = folly::IOBuf::takeOwnership(
-          write_start + static_cast<size_t>(cur_off - off), window_cap, static_cast<std::size_t>(0),
+          write_start + static_cast<size_t>(cursor - read_start), window_cap, static_cast<std::size_t>(0),
           +[](void *, void *) {}, nullptr, false);
 
       multi.SubmitRead(c, chunk_off, window_cap, std::move(window));
       remaining -= window_cap;
-      cur_off += static_cast<off_t>(window_cap);
+      cursor += window_cap;
       continue;
     }
 
     // 2) Hole — fill with zeros up to the next chunk boundary.
-    size_t hole = std::min(remaining, chunk_size_ - static_cast<size_t>(cur_off % chunk_size_));
-    std::memset(write_start + static_cast<size_t>(cur_off - off), 0, hole);
+    size_t hole = std::min(remaining, chunk_size_ - static_cast<size_t>(position.offset_in_chunk));
+    std::memset(write_start + static_cast<size_t>(cursor - read_start), 0, hole);
     remaining -= hole;
-    cur_off += static_cast<off_t>(hole);
+    cursor += hole;
   }
 
   status = multi.Collect();
@@ -450,6 +470,9 @@ utils::Status FileReadWriter::Flush() {
 
 utils::Status FileReadWriter::Truncate(size_t size) {
   std::lock_guard<utils::FiberRWMutex> operation_lock(operation_mutex_);
+  if (size > metadata::kMaxSupportedFileSize) {
+    return utils::Status::InvalidArgument("FileReadWriter::Truncate: size exceeds supported range");
+  }
   auto status = meta_->Truncate(ino_, size);
   if (!status.ok()) {
     return status;
@@ -470,6 +493,9 @@ utils::Status FileReadWriter::Truncate(size_t size) {
 utils::Status FileReadWriter::SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields,
                                       metadata::SwordFsInode *out) {
   std::lock_guard<utils::FiberRWMutex> operation_lock(operation_mutex_);
+  if (metadata::HasSetAttrField(fields, metadata::SetAttrField::kSize) && attr.size > metadata::kMaxSupportedFileSize) {
+    return utils::Status::InvalidArgument("FileReadWriter::SetAttr: size exceeds supported range");
+  }
   auto status = meta_->SetAttr(ino_, attr, fields, out);
   if (!status.ok()) {
     return status;

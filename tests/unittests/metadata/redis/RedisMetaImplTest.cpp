@@ -619,18 +619,21 @@ FIBER_TEST_F(RedisMetaImplTest, SetAttrShrinkQueuesOnlyMaterializedSparseObjects
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "sparse-cleanup", 0644, &file).ok());
 
-  constexpr swordfs::metadata::ChunkIndex kFarIndex = 1000000000U;
+  constexpr swordfs::metadata::ChunkIndex kFarIndex = (uint64_t{1} << 32) + 1000000000ULL;
   constexpr uint64_t kChunkSize = 4096;
   SwordFsChunk head{.index = 0, .revision = 1, .size = 128};
   SwordFsChunk far{.index = kFarIndex, .revision = 2, .size = 128};
   ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, head).ok());
   ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, far).ok());
 
+  SwordFsChunk stored;
+  ASSERT_TRUE(impl_->FindChunk(file.ino, kFarIndex, &stored).ok());
+  EXPECT_EQ(stored, far);
+
   SwordFsAttr requested = file.attr;
   requested.size = 1;
   ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kSize, nullptr).ok());
 
-  SwordFsChunk stored;
   ASSERT_TRUE(impl_->FindChunk(file.ino, 0, &stored).ok());
   EXPECT_EQ(stored.size, 1U);
   EXPECT_TRUE(impl_->FindChunk(file.ino, kFarIndex, &stored).IsNotFound());

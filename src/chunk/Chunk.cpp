@@ -23,6 +23,10 @@ Chunk::Chunk(metadata::InodeID ino, metadata::ChunkIndex index)
       index_(index),
       data_(volume::VolumeImpl::Instance().data_engine()),
       meta_(volume::VolumeImpl::Instance().meta_engine()) {
+  uint64_t start_offset = 0;
+  const auto status = metadata::CalculateChunkStartOffset(index_, max_chunk_size_, &start_offset);
+  CHECK(status.ok()) << "invalid chunk identity: index=" << index_ << " chunk_size=" << max_chunk_size_;
+  start_offset_ = static_cast<off_t>(start_offset);
 }
 
 utils::Status Chunk::Initialize() {
@@ -42,11 +46,25 @@ utils::Status Chunk::Initialize() {
 }
 
 utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf &data) {
+  metadata::ChunkPosition position;
+  auto status = metadata::CalculateChunkPosition(write_offset, max_chunk_size_, &position);
+  if (!status.ok() || position.index != index_) {
+    return utils::Status::InvalidArgument("Chunk::Write: offset does not belong to chunk");
+  }
+  uint64_t write_end = 0;
+  status = metadata::CalculateFileRangeEnd(write_offset, data.length(), &write_end);
+  if (!status.ok()) {
+    return status;
+  }
+  if (write_end - position.start_offset > max_chunk_size_) {
+    return utils::Status::InvalidArgument("Chunk::Write: write crosses chunk boundary");
+  }
+
   std::unique_lock<utils::FiberRWMutex> lock(mutex_);
   if (state_ == State::kClean) {
     CHECK(published_chunk_.has_value());
     std::shared_ptr<WriteBuf> hydrated;
-    auto status = HydrateForWrite(*published_chunk_, &hydrated);
+    status = HydrateForWrite(*published_chunk_, &hydrated);
     if (!status.ok()) {
       return status;
     }
@@ -61,7 +79,7 @@ utils::Status Chunk::Write(off_t write_offset, const folly::IOBuf &data) {
     CHECK(copy_status.ok()) << "same-capacity COW copy must fit the destination buffer";
     wb_ = std::move(next);
   }
-  auto status = wb_->Write(write_offset - StartOffset(), data);
+  status = wb_->Write(static_cast<off_t>(position.offset_in_chunk), data);
   if (!status.ok()) {
     SWORDFS_LOG_ERROR << "Chunk::Write FAILED: ino=" << ino_ << " index=" << index_ << " write_offset=" << write_offset
                       << " data_size=" << data.length() << " — " << status.message();
@@ -219,6 +237,10 @@ bool Chunk::IsClean() const {
 bool Chunk::Flushable() const {
   std::shared_lock<utils::FiberRWMutex> lock(mutex_);
   return state_ == State::kDirty && wb_ != nullptr && wb_->size() > 0;
+}
+
+off_t Chunk::StartOffset() const {
+  return start_offset_;
 }
 
 off_t Chunk::DataEnd() const {

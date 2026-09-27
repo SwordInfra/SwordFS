@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <sys/types.h>
+
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -12,6 +15,16 @@
 
 namespace swordfs::metadata {
 
+inline constexpr uint64_t kMaxSupportedFileSize = static_cast<uint64_t>(std::numeric_limits<off_t>::max());
+
+struct ChunkPosition {
+  ChunkIndex index = 0;
+  uint64_t start_offset = 0;
+  uint64_t offset_in_chunk = 0;
+};
+
+utils::Status CalculateChunkPosition(off_t file_offset, uint64_t chunk_size, ChunkPosition *out);
+utils::Status CalculateFileRangeEnd(off_t file_offset, uint64_t length, uint64_t *out);
 utils::Status CalculateChunkStartOffset(ChunkIndex index, uint64_t chunk_size, uint64_t *out);
 
 /// Common head for one logical chunk. In the current whole-object path,

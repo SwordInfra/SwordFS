@@ -639,7 +639,7 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
   }
   uint64_t start_offset = 0;
   auto status = CalculateChunkStartOffset(replacement.index, store_->chunk_size_, &start_offset);
-  if (!status.ok() || replacement.size > std::numeric_limits<uint64_t>::max() - start_offset) {
+  if (!status.ok() || replacement.size > kMaxSupportedFileSize - start_offset) {
     return Status::InvalidArgument("replacement chunk extent is invalid");
   }
 

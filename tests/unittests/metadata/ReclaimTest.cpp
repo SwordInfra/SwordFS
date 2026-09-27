@@ -57,7 +57,7 @@ std::string EncodePrivateRefs(InodeID ino, const std::vector<chunk::WholeObjectR
   enc.U64(ino);
   enc.U32(static_cast<uint32_t>(refs.size()));
   for (const auto &ref : refs) {
-    enc.U32(ref.descriptor.index);
+    enc.U64(ref.descriptor.index);
     enc.U64(ref.descriptor.revision);
     enc.U64(ref.descriptor.size);
     enc.String(ref.key);
@@ -76,7 +76,7 @@ TEST(ReclaimWorkTest, RoundTripsOpaqueEnvelopeAndPrivateFrozenIdentities) {
   ASSERT_TRUE(parsed.ParseFrom(SerializeOrDie(original)).ok());
   EXPECT_EQ(parsed, original);
   EXPECT_EQ(parsed.ino, 42U);
-  EXPECT_EQ(parsed.index_format_version, 1U);
+  EXPECT_EQ(parsed.index_format_version, 2U);
 
   std::vector<chunk::WholeObjectRef> refs;
   ASSERT_TRUE(chunk::DecodeWholeObjectReclaim(parsed, kChunkSize, &refs).ok());
@@ -85,6 +85,29 @@ TEST(ReclaimWorkTest, RoundTripsOpaqueEnvelopeAndPrivateFrozenIdentities) {
   EXPECT_EQ(refs[0].key, chunk::FormatChunkObjectKey(42, 0, 1));
   EXPECT_EQ(refs[1].key, chunk::FormatChunkObjectKey(42, 1, 2));
   EXPECT_EQ(refs[1].descriptor.size, 128U);
+}
+
+TEST(ReclaimWorkTest, WholeObjectFrozenIdentitiesPreserveIndexAboveUint32Max) {
+  constexpr uint64_t kHighIndex = (uint64_t{1} << 32) + 9;
+  const SwordFsChunk high = Head(static_cast<ChunkIndex>(kHighIndex), 17);
+  ASSERT_EQ(static_cast<uint64_t>(high.index), kHighIndex);
+
+  ReclaimWork reclaim;
+  ASSERT_TRUE(chunk::FreezeWholeObjectReclaim(42, {high}, kChunkSize, &reclaim).ok());
+  EXPECT_EQ(reclaim.index_format_version, 2U);
+  std::vector<chunk::WholeObjectRef> refs;
+  ASSERT_TRUE(chunk::DecodeWholeObjectReclaim(reclaim, kChunkSize, &refs).ok());
+  ASSERT_EQ(refs.size(), 1U);
+  EXPECT_EQ(static_cast<uint64_t>(refs[0].descriptor.index), kHighIndex);
+  EXPECT_EQ(refs[0].key, "42/" + std::to_string(kHighIndex) + "/17");
+
+  PendingDelete pending;
+  ASSERT_TRUE(chunk::FreezeWholeObjectDelete(42, high, kChunkSize, &pending).ok());
+  EXPECT_EQ(pending.index_format_version, 2U);
+  chunk::WholeObjectRef ref;
+  ASSERT_TRUE(chunk::DecodeWholeObjectDelete(pending, kChunkSize, &ref).ok());
+  EXPECT_EQ(static_cast<uint64_t>(ref.descriptor.index), kHighIndex);
+  EXPECT_EQ(ref.key, "42/" + std::to_string(kHighIndex) + "/17");
 }
 
 TEST(ReclaimWorkTest, EmptyInodeStillHasDecodablePrivatePayload) {
@@ -145,6 +168,10 @@ TEST(ReclaimWorkTest, RejectsInvalidEnvelopeOnWriteAndRead) {
 TEST(ReclaimWorkTest, PrivateDecoderRejectsTamperedIdentitiesAndUnknownVersion) {
   ReclaimWork work = MakeWork();
   std::vector<chunk::WholeObjectRef> refs;
+  work.index_format_version = 1;
+  EXPECT_EQ(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno(), ENOSYS);
+
+  work = MakeWork();
   work.index_format_version = 99;
   EXPECT_EQ(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno(), ENOSYS);
 
@@ -218,6 +245,10 @@ TEST(PendingDeleteTest, RejectsInvalidEnvelopeOnWriteAndRead) {
 TEST(PendingDeleteTest, PrivateDecoderRejectsTamperingBeforeDeletion) {
   PendingDelete work = MakePendingDelete();
   chunk::WholeObjectRef ref;
+  work.index_format_version = 1;
+  EXPECT_EQ(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).ToErrno(), ENOSYS);
+
+  work = MakePendingDelete();
   work.index_format_version = 99;
   EXPECT_EQ(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).ToErrno(), ENOSYS);
 

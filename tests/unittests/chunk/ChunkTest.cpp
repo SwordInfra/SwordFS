@@ -51,6 +51,8 @@ using swordfs::utils::Status;
 
 namespace {
 
+constexpr uint64_t kChunkTestSize = 1024;
+
 auto Buf(const std::string &value) {
   return *folly::IOBuf::copyBuffer(value.data(), value.size());
 }
@@ -206,7 +208,7 @@ class NullDataEngine final : public IDataEngine {
 
 NullDataEngine *InitializeRuntime() {
   SwordFsVolume config;
-  config.chunk_size = 1024;
+  config.chunk_size = kChunkTestSize;
   auto data = std::make_unique<NullDataEngine>();
   auto *raw = data.get();
   auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<MissingMetaEngine>>();
@@ -259,25 +261,100 @@ TEST(SwordFsChunkDescriptorTest, ValidatesCanonicalFixedSizeIdentity) {
   EXPECT_EQ(swordfs::metadata::CalculateChunkStartOffset(0, 0, &start_offset).ToErrno(), EINVAL);
 }
 
+TEST(SwordFsChunkDescriptorTest, ChunkIndexCoversSupportedOffTRangeAtMinimumChunkSize) {
+  constexpr uint64_t kMinimumSupportedChunkSize = 4ULL * 1024;
+  const uint64_t max_supported_index =
+      static_cast<uint64_t>(std::numeric_limits<off_t>::max()) / kMinimumSupportedChunkSize;
+
+  EXPECT_GE(static_cast<uint64_t>(std::numeric_limits<ChunkIndex>::max()), max_supported_index);
+}
+
+TEST(SwordFsChunkDescriptorTest, MapsHighOffsetsWithoutNarrowingAndChecksFileRange) {
+  constexpr uint64_t kChunkSize = 64ULL * 1024 * 1024;
+  constexpr off_t kGeneric525Offset = std::numeric_limits<off_t>::max() - 1;
+
+  swordfs::metadata::ChunkPosition position;
+  ASSERT_TRUE(swordfs::metadata::CalculateChunkPosition(kGeneric525Offset, kChunkSize, &position).ok());
+  EXPECT_EQ(position.index, 137438953471ULL);
+  EXPECT_EQ(position.start_offset, 9223372036787666944ULL);
+  EXPECT_EQ(position.offset_in_chunk, 67108862ULL);
+
+  constexpr uint64_t kLastUint32Index = std::numeric_limits<uint32_t>::max();
+  const auto last_uint32_offset = static_cast<off_t>(kLastUint32Index * kChunkSize);
+  ASSERT_TRUE(swordfs::metadata::CalculateChunkPosition(last_uint32_offset, kChunkSize, &position).ok());
+  EXPECT_EQ(position.index, kLastUint32Index);
+  EXPECT_EQ(position.offset_in_chunk, 0U);
+
+  constexpr uint64_t kFirstIndexAboveUint32 = uint64_t{1} << 32;
+  const auto old_boundary_offset = static_cast<off_t>(kFirstIndexAboveUint32 * kChunkSize);
+  ASSERT_TRUE(swordfs::metadata::CalculateChunkPosition(old_boundary_offset, kChunkSize, &position).ok());
+  EXPECT_EQ(position.index, kFirstIndexAboveUint32);
+  EXPECT_EQ(position.offset_in_chunk, 0U);
+
+  EXPECT_EQ(swordfs::metadata::CalculateChunkPosition(-1, kChunkSize, &position).ToErrno(), EINVAL);
+  EXPECT_EQ(swordfs::metadata::CalculateChunkPosition(0, 0, &position).ToErrno(), EINVAL);
+  EXPECT_EQ(swordfs::metadata::CalculateChunkPosition(0, kChunkSize, nullptr).ToErrno(), EINVAL);
+
+  uint64_t range_end = 0;
+  ASSERT_TRUE(swordfs::metadata::CalculateFileRangeEnd(kGeneric525Offset, 1, &range_end).ok());
+  EXPECT_EQ(range_end, swordfs::metadata::kMaxSupportedFileSize);
+  EXPECT_EQ(swordfs::metadata::CalculateFileRangeEnd(kGeneric525Offset, 2, &range_end).ToErrno(), EINVAL);
+}
+
+TEST(SwordFsChunkDescriptorTest, ExtentEndingAtOffTMaxIsValidAndBeyondIsRejected) {
+  constexpr uint64_t kChunkSize = 4096;
+  constexpr ChunkIndex kLastIndex = swordfs::metadata::kMaxSupportedFileSize / kChunkSize;
+  constexpr uint64_t kLastStart = kLastIndex * kChunkSize;
+  constexpr uint64_t kExactSize = swordfs::metadata::kMaxSupportedFileSize - kLastStart;
+
+  const SwordFsChunk exact{.index = kLastIndex, .revision = 1, .size = kExactSize};
+  EXPECT_TRUE(exact.IsValidForChunkSize(kChunkSize));
+
+  const SwordFsChunk beyond{.index = kLastIndex, .revision = 1, .size = kExactSize + 1};
+  EXPECT_FALSE(beyond.IsValidForChunkSize(kChunkSize));
+}
+
 TEST(ChunkOverwriteStrategyTest, FactoryUsesTypedMechanismSelection) {
   using swordfs::metadata::ChunkOverwriteMechanism;
 
   std::unique_ptr<swordfs::chunk::IChunkOverwriteStrategy> strategy;
-  auto status = swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, 1, &strategy);
+  auto status = swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, 2, &strategy);
   ASSERT_TRUE(status.ok()) << status.message();
   ASSERT_NE(strategy, nullptr);
   EXPECT_EQ(strategy->mechanism(), ChunkOverwriteMechanism::kWholeObject);
+  EXPECT_EQ(strategy->index_format_version(), swordfs::metadata::kWholeObjectChunkIndexFormatVersion);
 
   EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kChunkSlice, 1, &strategy).ToErrno(),
             ENOSYS);
   EXPECT_EQ(strategy, nullptr);
-  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, 2, &strategy).ToErrno(),
+  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, 1, &strategy).ToErrno(),
             ENOSYS);
   EXPECT_EQ(
       swordfs::chunk::CreateChunkOverwriteStrategy(static_cast<ChunkOverwriteMechanism>(99), 1, &strategy).ToErrno(),
       ENOSYS);
-  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, 1, nullptr).ToErrno(),
+  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, 2, nullptr).ToErrno(),
             EINVAL);
+}
+
+TEST_F(ChunkTest, WriteRejectsOffsetsOutsideItsLogicalChunk) {
+  RunInTestFiber([&] {
+    Chunk c(/*ino=*/42, /*index=*/1);
+    ASSERT_TRUE(c.Initialize().ok());
+
+    EXPECT_EQ(c.Write(-1, Buf("x")).ToErrno(), EINVAL);
+    EXPECT_EQ(c.Write(0, Buf("x")).ToErrno(), EINVAL);
+  });
+}
+
+TEST_F(ChunkTest, WriteRejectsRangeBeyondSupportedFileSize) {
+  RunInTestFiber([&] {
+    constexpr off_t kLastOffset = std::numeric_limits<off_t>::max();
+    constexpr ChunkIndex kLastIndex = static_cast<uint64_t>(kLastOffset) / kChunkTestSize;
+    Chunk c(/*ino=*/42, kLastIndex);
+    ASSERT_TRUE(c.Initialize().ok());
+
+    EXPECT_EQ(c.Write(kLastOffset, Buf("x")).ToErrno(), EINVAL);
+  });
 }
 
 // Regression: an uninitialised max_chunk_size_ used to make chunk

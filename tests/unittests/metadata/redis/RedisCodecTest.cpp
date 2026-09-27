@@ -101,6 +101,21 @@ TEST(MetadataTypesTest, ChunkRoundTrip) {
   EXPECT_EQ(output.size, input.size);
 }
 
+TEST(MetadataTypesTest, ChunkRoundTripPreservesIndexAboveUint32Max) {
+  constexpr uint64_t kHighIndex = (uint64_t{1} << 32) + 17;
+  SwordFsChunk input{.index = static_cast<ChunkIndex>(kHighIndex), .revision = 9, .size = 1024};
+  ASSERT_EQ(static_cast<uint64_t>(input.index), kHighIndex);
+
+  std::string encoded;
+  ASSERT_TRUE(input.SerializeTo(&encoded).ok());
+
+  SwordFsChunk output;
+  ASSERT_TRUE(output.ParseFrom(encoded).ok());
+  EXPECT_EQ(static_cast<uint64_t>(output.index), kHighIndex);
+  EXPECT_EQ(output.revision, input.revision);
+  EXPECT_EQ(output.size, input.size);
+}
+
 TEST(MetadataTypesTest, ChunkRejectsInvalidRevision) {
   SwordFsChunk chunk{.index = 3, .revision = swordfs::metadata::kInvalidChunkRevision, .size = 1024};
   std::string encoded;
@@ -108,7 +123,7 @@ TEST(MetadataTypesTest, ChunkRejectsInvalidRevision) {
 
   swordfs::metadata::BufEncoder enc;
   enc.Header(swordfs::metadata::RecordType::kChunk);
-  enc.U32(3);
+  enc.U64(3);
   enc.U64(swordfs::metadata::kInvalidChunkRevision);
   enc.U64(1024);
   enc.Finish(&encoded);
@@ -123,7 +138,7 @@ TEST(MetadataTypesTest, ChunkRejectsNonCurrentSchemaVersion) {
     enc.String("SWFSMETA");
     enc.U32(schema_version);
     enc.U32(static_cast<uint32_t>(RecordType::kChunk));
-    enc.U32(3);
+    enc.U64(3);
     enc.U64(7);
     enc.U64(1024);
 

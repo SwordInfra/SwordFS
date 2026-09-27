@@ -10,13 +10,30 @@ runtime strategy selection and private-index namespacing do not carry or
 compare arbitrary mechanism strings. There is no per-file or per-chunk
 mechanism tag and no live switching. Until the chunk-slice implementation is
 activated by #270–#275, the existing immutable whole-object path is the only
-selectable implementation. Known but unimplemented enum values such as
+selectable implementation. Its current chunk-index format is **v2**. Version 2
+stores logical chunk indexes as 64-bit values in the common descriptor and in
+whole-object cleanup/reclaim payloads. Whole-object v1 is an incompatible beta
+format and is rejected at strategy construction/mount rather than migrated or
+dual-decoded. Known but unimplemented enum values such as
 `chunk_slice` and `redis_cache` are rejected by strategy construction.
 
 Directory entries, inodes, and the file-to-logical-chunk head are shared. A
 logical chunk's file offset is derived from its fixed-layout identity as
 `chunk_index * chunk_size`; `start_offset` is not persisted in the common
-record. During the staged #312 refactor, the common head still temporarily
+record. `ChunkIndex` is a 64-bit unsigned logical coordinate. On the current
+Linux target, the supported regular-file address space is the non-negative
+range representable by `off_t`, through `2^63 - 1`; internal unsigned inode
+fields do not extend that external contract. The 64-bit coordinate therefore
+losslessly covers every logical chunk reachable by any supported chunk size,
+including the minimum 4 KiB configuration.
+
+File-offset mapping is checked before a chunk session is created: negative
+offsets and a zero chunk size are invalid, the logical index is derived without
+narrowing, and the derived chunk start must remain within the supported
+`off_t` address space. Non-empty writes also validate their complete logical
+range before mutating local chunk/cache state, so a write whose end would
+exceed `off_t` max cannot partially update the file. During the staged #312
+refactor, the common head still temporarily
 carries logical size and a publication revision because existing publication,
 truncate, and cleanup code consumes them. Those fields are transitional rather
 than part of the target common contract and will be removed only after the
@@ -91,6 +108,10 @@ the publication protocol.
 4. A bounded successful `Chunk::Read()` returns exactly the requested bytes.
    It validates the bytes appended by `IDataEngine::Get()`; short data is an
    I/O error, never a successful chunk read.
+5. A persisted chunk descriptor describes only the supported file address
+   space. `index * chunk_size` and `start_offset + size` are checked without
+   signed/unsigned wrap. An extent ending exactly at `off_t` max is valid; an
+   extent beyond that boundary is invalid.
 
 The resulting publication order is:
 

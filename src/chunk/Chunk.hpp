@@ -74,9 +74,7 @@ class Chunk final : public IChunkSession {
   }
 
   /// File-offset range: [StartOffset(), EndOffset()).
-  off_t StartOffset() const override {
-    return static_cast<off_t>(index_) * static_cast<off_t>(max_chunk_size_);
-  }
+  off_t StartOffset() const override;
   off_t DataEnd() const override;
 
  private:
@@ -87,6 +85,7 @@ class Chunk final : public IChunkSession {
  private:
   metadata::InodeID ino_;
   size_t max_chunk_size_;
+  off_t start_offset_ = 0;
   mutable utils::FiberRWMutex mutex_;
   std::shared_ptr<WriteBuf> wb_;
   std::shared_ptr<WriteBuf> flushing_wb_;

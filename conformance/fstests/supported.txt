@@ -84,6 +84,7 @@ generic/471
 generic/490
 generic/519
 generic/524
+generic/525
 generic/532
 generic/565
 generic/571

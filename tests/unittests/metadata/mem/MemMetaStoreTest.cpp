@@ -474,6 +474,21 @@ FIBER_TEST_F(MemMetaStoreTest, CommitChunkAndFindChunk) {
   EXPECT_EQ(out.size, 100);
 }
 
+FIBER_TEST_F(MemMetaStoreTest, CommitChunkAndFindChunkPreserveIndexAboveUint32Max) {
+  SwordFsInode file;
+  Add(kRoot, "high-index-chunk-file", kRegFile, &file);
+  constexpr ChunkIndex kHighIndex = (uint64_t{1} << 32) + 17;
+
+  const SwordFsChunk high = MakeChunk(kHighIndex, 100);
+  Status status = store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(file.ino, std::nullopt, high); });
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  SwordFsChunk out;
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.FindChunk(file.ino, kHighIndex, &out); });
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(out, high);
+}
+
 FIBER_TEST_F(MemMetaStoreTest, CommitChunkConflictingInitialPublicationFails) {
   SwordFsInode file;
   Add(kRoot, "conflicting-chunk-file", kRegFile, &file);
@@ -500,6 +515,26 @@ FIBER_TEST_F(MemMetaStoreTest, CommitChunkRejectsDerivedOffsetOverflow) {
   store_->SetChunkSize(kHalfRangePlusOne);
   const SwordFsChunk overflowing_end{.index = 1, .revision = 2, .size = kHalfRangePlusOne};
   status = store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(file.ino, std::nullopt, overflowing_end); });
+  EXPECT_EQ(status.ToErrno(), EINVAL);
+}
+
+FIBER_TEST_F(MemMetaStoreTest, CommitChunkAcceptsExtentAtOffTMaxAndRejectsBeyond) {
+  constexpr uint64_t kChunkSize = 4096;
+  constexpr ChunkIndex kLastIndex = swordfs::metadata::kMaxSupportedFileSize / kChunkSize;
+  constexpr uint64_t kLastStart = kLastIndex * kChunkSize;
+  constexpr uint64_t kExactSize = swordfs::metadata::kMaxSupportedFileSize - kLastStart;
+  store_->SetChunkSize(kChunkSize);
+
+  SwordFsInode exact_file;
+  Add(kRoot, "exact-off-max", kRegFile, &exact_file);
+  const SwordFsChunk exact{.index = kLastIndex, .revision = 1, .size = kExactSize};
+  auto status = store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(exact_file.ino, std::nullopt, exact); });
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  SwordFsInode beyond_file;
+  Add(kRoot, "beyond-off-max", kRegFile, &beyond_file);
+  const SwordFsChunk beyond{.index = kLastIndex, .revision = 2, .size = kExactSize + 1};
+  status = store_->Transact([&](MemMetaTxn &txn) { return txn.CommitChunk(beyond_file.ino, std::nullopt, beyond); });
   EXPECT_EQ(status.ToErrno(), EINVAL);
 }
 

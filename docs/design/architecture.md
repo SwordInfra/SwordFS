@@ -488,6 +488,13 @@ provisional implementation detail rather than a coherence guarantee.
 
 Files are divided into fixed-size logical chunks. The default configured chunk size is 64 MiB, but the value is part of the volume configuration.
 
+The logical `ChunkIndex` is an unsigned 64-bit coordinate. SwordFS's supported
+regular-file address space follows the current Linux/FUSE `off_t` contract:
+valid file byte positions and sizes are non-negative and no greater than
+`2^63 - 1`. Unsigned metadata fields do not imply support above that boundary.
+At the minimum supported 4 KiB chunk size, a 64-bit index still covers every
+reachable logical chunk without narrowing.
+
 The volume format persists one stable `ChunkOverwriteMechanism` value.
 Human-readable names are parsed only at the format/configuration boundary;
 runtime strategy selection and private-index namespacing use the typed value.
@@ -515,7 +522,12 @@ SwordFsChunk {
 
 The logical chunk start is derived from `index * chunk_size`; duplicating it
 in persisted chunk metadata would create a second representation of the same
-fixed-layout identity. During the staged #312 refactor, `revision` and `size`
+fixed-layout identity. Offset-to-chunk mapping uses checked arithmetic: negative
+offsets are rejected before lookup/session creation, multiplication is bounded
+by the supported `off_t` maximum, and a non-empty write validates its entire
+range before mutating local state. Descriptor validation likewise accepts an
+extent ending exactly at `off_t` max and rejects an extent beyond it. During
+the staged #312 refactor, `revision` and `size`
 remain transitional common fields until whole-object publication, truncate,
 and cleanup consumers have moved to mechanism-private authoritative state.
 
@@ -536,8 +548,11 @@ physical object key is:
 
 This gives each whole-object revision an immutable physical identity and
 allows metadata publication to change independently from an already-written
-object. Future strategies may use a different physical layout under the same
-logical head.
+object. `<chunk-index>` is the canonical unsigned decimal 64-bit logical index.
+The current whole-object index format is v2: common descriptors and frozen
+cleanup/reclaim identities persist that index at 64-bit width. Older v1
+whole-object volumes are rejected rather than migrated or dual-decoded. Future
+strategies may use a different physical layout under the same logical head.
 
 S3 requests that can block a foreground filesystem operation also require a
 finite terminal-completion policy owned by SwordFS. Transport low-speed
@@ -619,6 +634,11 @@ There is currently no slice/extent overlay or compaction layer in the open-sourc
 ## 10. Read path
 
 `FileReadWriter` maps a byte range onto logical chunk indexes.
+
+The mapping has one checked coordinate contract shared by reads, writes, and
+cached truncate bookkeeping. It never narrows through a 32-bit intermediate;
+write range validation happens before the first chunk lookup so an invalid
+range cannot leave a partially dirtied cache or live-size update.
 
 For each range:
 

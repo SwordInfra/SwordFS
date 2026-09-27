@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -218,7 +219,7 @@ class MockMetaEngine : public IMetaEngine {
     if (!get_inode_status.ok()) {
       return get_inode_status;
     }
-    const off_t snapshot_size = file_size_;
+    const uint64_t snapshot_size = reported_file_size_.value_or(static_cast<uint64_t>(file_size_));
     if (get_inode_started_ != nullptr) {
       auto *started = get_inode_started_;
       auto *release = get_inode_release_;
@@ -496,6 +497,9 @@ class MockMetaEngine : public IMetaEngine {
   void set_file_size(off_t size) {
     file_size_ = size;
   }
+  void set_reported_file_size(uint64_t size) {
+    reported_file_size_ = size;
+  }
   void set_truncate_status(Status s) {
     truncate_status_ = s;
   }
@@ -581,6 +585,7 @@ class MockMetaEngine : public IMetaEngine {
 
  private:
   off_t file_size_ = 0;
+  std::optional<uint64_t> reported_file_size_;
   Status truncate_status_ = Status::OK();
   swordfs::metadata::ChunkRevision next_revision_ = 1;
   std::unordered_map<InodeID, std::unordered_map<ChunkIndex, SwordFsChunk>> chunks_;
@@ -785,6 +790,70 @@ TEST_F(FileReadWriterTest, NegativeReadOffsetIsRejected) {
   });
 }
 
+TEST_F(FileReadWriterTest, ZeroLengthNegativeReadOffsetIsRejected) {
+  RunInTestFiber([&] {
+    auto rw = Make(64);
+    auto out = folly::IOBuf::create(1);
+
+    const auto status = rw.Read(0, -1, out.get());
+
+    EXPECT_EQ(status.ToErrno(), EINVAL);
+    EXPECT_EQ(mock_meta_->find_chunk_calls, 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, NegativeWriteOffsetIsRejectedBeforeChunkLookup) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+
+    const auto status = rw.Write(Buf("x"), -1);
+
+    EXPECT_EQ(status.ToErrno(), EINVAL);
+    EXPECT_EQ(mock_meta_->find_chunk_calls, 0);
+    EXPECT_TRUE(mock_data_->StoredKeys().empty());
+    EXPECT_EQ(mock_meta_->file_size(), 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, HighOffsetWriteFlushAndFreshReadPreserveLogicalIndex) {
+  RunInTestFiber([&] {
+    constexpr off_t kWriteOffset = std::numeric_limits<off_t>::max() - 1;
+    const uint64_t expected_index = static_cast<uint64_t>(kWriteOffset) / kChunkSize;
+    ASSERT_GT(expected_index, std::numeric_limits<uint32_t>::max());
+
+    auto rw = Make();
+    auto status = rw.Write(Buf("X"), kWriteOffset);
+    ASSERT_TRUE(status.ok()) << status.message();
+    status = rw.Flush();
+    ASSERT_TRUE(status.ok()) << status.message();
+
+    EXPECT_EQ(mock_meta_->file_size(), std::numeric_limits<off_t>::max());
+    ASSERT_EQ(mock_data_->StoredKeys(),
+              std::vector<std::string>{std::to_string(kIno) + "/" + std::to_string(expected_index) + "/1"});
+
+    FileReadWriter reopened(kIno, kMaxParallelFlushes);
+    auto out = folly::IOBuf::create(2);
+    status = reopened.Read(2, kWriteOffset - 1, out.get());
+    ASSERT_TRUE(status.ok()) << status.message();
+    ASSERT_EQ(out->length(), 2U);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), std::string("\0X", 2));
+  });
+}
+
+TEST_F(FileReadWriterTest, WritePastSupportedFileSizeIsRejectedBeforeMutation) {
+  RunInTestFiber([&] {
+    constexpr off_t kWriteOffset = std::numeric_limits<off_t>::max() - 1;
+    auto rw = Make();
+
+    const auto status = rw.Write(Buf("XX"), kWriteOffset);
+
+    EXPECT_EQ(status.ToErrno(), EINVAL);
+    EXPECT_EQ(mock_meta_->find_chunk_calls, 0);
+    EXPECT_TRUE(mock_data_->StoredKeys().empty());
+    EXPECT_EQ(mock_meta_->file_size(), 0);
+  });
+}
+
 TEST_F(FileReadWriterTest, VisibleSizeMetadataFailurePropagatesFromRead) {
   RunInTestFiber([&] {
     auto rw = Make(64);
@@ -795,6 +864,21 @@ TEST_F(FileReadWriterTest, VisibleSizeMetadataFailurePropagatesFromRead) {
 
     EXPECT_EQ(status.ToErrno(), EIO);
     EXPECT_EQ(status.message(), "injected inode-size lookup failure");
+    EXPECT_EQ(out->length(), 0);
+    EXPECT_EQ(mock_meta_->find_chunk_calls, 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, ReadRejectsPersistedSizeBeyondSupportedFileRange) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    mock_meta_->set_reported_file_size(swordfs::metadata::kMaxSupportedFileSize + 1);
+    auto out = folly::IOBuf::create(1);
+
+    const auto status = rw.Read(1, 0, out.get());
+
+    EXPECT_EQ(status.ToErrno(), EIO);
+    EXPECT_EQ(status.message(), "FileReadWriter::Read: file size exceeds supported range");
     EXPECT_EQ(out->length(), 0);
     EXPECT_EQ(mock_meta_->find_chunk_calls, 0);
   });
@@ -2305,6 +2389,32 @@ TEST_F(FileReadWriterTest, TruncateCallsMetaEngine) {
   });
 }
 
+TEST_F(FileReadWriterTest, TruncateBeyondSupportedFileSizeIsRejectedBeforeMetadataMutation) {
+  RunInTestFiber([&] {
+    auto rw = Make(64);
+    const size_t too_large = static_cast<size_t>(swordfs::metadata::kMaxSupportedFileSize) + 1;
+
+    const auto status = rw.Truncate(too_large);
+
+    EXPECT_EQ(status.ToErrno(), EINVAL);
+    EXPECT_EQ(mock_meta_->truncate_calls, 0);
+    EXPECT_EQ(mock_meta_->file_size(), 64);
+  });
+}
+
+TEST_F(FileReadWriterTest, SetAttrBeyondSupportedFileSizeIsRejectedBeforeMetadataMutation) {
+  RunInTestFiber([&] {
+    auto rw = Make(64);
+    SwordFsAttr attr;
+    attr.size = swordfs::metadata::kMaxSupportedFileSize + 1;
+
+    const auto status = rw.SetAttr(attr, SetAttrField::kSize, nullptr);
+
+    EXPECT_EQ(status.ToErrno(), EINVAL);
+    EXPECT_EQ(mock_meta_->file_size(), 64);
+  });
+}
+
 TEST_F(FileReadWriterTest, TruncatePropagatesMetaError) {
   RunInTestFiber([&] {
     mock_meta_->set_truncate_status(Status::Internal("truncate failed"));
@@ -2326,6 +2436,31 @@ TEST_F(FileReadWriterTest, TruncateDropsDirtyChunks) {
     auto out = folly::IOBuf::create(kChunkSize);
     ASSERT_TRUE(rw.Read(16, 0, out.get()).ok());
     EXPECT_EQ(out->length(), 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, HighIndexCachedTruncateDoesNotAliasLowChunk) {
+  RunInTestFiber([&] {
+    constexpr ChunkIndex kHighIndex = uint64_t{1} << 32;
+    constexpr off_t kHighStart = static_cast<off_t>(kHighIndex * kChunkSize);
+    auto rw = Make();
+
+    ASSERT_TRUE(rw.Write(Buf("L"), 0).ok());
+    ASSERT_TRUE(rw.Write(Buf("H"), kHighStart + 3).ok());
+
+    // Keep only the first two sparse bytes of the high-index chunk. The
+    // low-index dirty chunk must remain independent rather than aliasing it.
+    ASSERT_TRUE(rw.Truncate(static_cast<size_t>(kHighStart) + 2).ok());
+
+    auto low = folly::IOBuf::create(1);
+    ASSERT_TRUE(rw.Read(1, 0, low.get()).ok());
+    ASSERT_EQ(low->length(), 1U);
+    EXPECT_EQ(low->data()[0], 'L');
+
+    auto high = folly::IOBuf::create(2);
+    ASSERT_TRUE(rw.Read(2, kHighStart, high.get()).ok());
+    ASSERT_EQ(high->length(), 2U);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(high->data()), high->length()), std::string("\0\0", 2));
   });
 }
 
