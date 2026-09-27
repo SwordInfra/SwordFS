@@ -211,6 +211,24 @@ extern "C" void fuse_reply_none(fuse_req_t req) {
   capture->cv.notify_one();
 }
 
+// libfuse's feature helpers operate on an internal connection object that is
+// larger than the public fuse_conn_info prefix. Unit tests construct only the
+// public struct, so mirror the helpers' public-field semantics here rather
+// than letting the real library write into its private tail storage.
+extern "C" bool fuse_set_feature_flag(struct fuse_conn_info *conn, uint64_t flag) {
+  if ((conn->capable_ext & flag) == 0) {
+    return false;
+  }
+  conn->want_ext |= flag;
+  conn->want |= static_cast<uint32_t>(flag);
+  return true;
+}
+
+extern "C" void fuse_unset_feature_flag(struct fuse_conn_info *conn, uint64_t flag) {
+  conn->want_ext &= ~flag;
+  conn->want &= ~static_cast<uint32_t>(flag);
+}
+
 // Minimal no-op data engine. The VfsImplIntegrationTest fixture must
 // install one because every InodeHandle constructor asserts
 // CHECK(data_engine != nullptr) — the production mount path always
@@ -710,6 +728,26 @@ TEST(VfsHookFactoryTest, InitDisablesUserspaceKillprivAndAtomicOTrunc) {
 
   EXPECT_EQ(conn.want & kUserspaceKillprivCaps, 0U);
   EXPECT_EQ(conn.want_ext & kUserspaceKillprivCaps, 0U);
+
+  swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
+  swordfs::volume::VolumeImpl::Initialize();
+}
+
+TEST(VfsHookFactoryTest, InitDisablesSpliceReadWithoutWriteBufCallback) {
+  swordfs::volume::VolumeImpl::Initialize();
+
+  const auto &ops = swordfs::fuse::VfsHookFactory::get_ops();
+  ASSERT_EQ(ops.write_buf, nullptr);
+
+  struct fuse_conn_info conn{};
+  conn.capable = FUSE_CAP_SPLICE_READ;
+  conn.capable_ext = FUSE_CAP_SPLICE_READ;
+  conn.want = FUSE_CAP_SPLICE_READ;
+  conn.want_ext = FUSE_CAP_SPLICE_READ;
+  swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &conn);
+
+  EXPECT_EQ(conn.want & FUSE_CAP_SPLICE_READ, 0U);
+  EXPECT_EQ(conn.want_ext & FUSE_CAP_SPLICE_READ, 0U);
 
   swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
   swordfs::volume::VolumeImpl::Initialize();

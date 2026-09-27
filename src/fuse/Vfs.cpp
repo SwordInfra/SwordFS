@@ -128,9 +128,11 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   // semantics (e.g. rejecting writes to flushed chunks, open-unlink).
   fuse_unset_feature_flag(conn, FUSE_CAP_WRITEBACK_CACHE);
 
-  if (conn->capable & FUSE_CAP_SPLICE_READ) {
-    fuse_set_feature_flag(conn, FUSE_CAP_SPLICE_READ);
-  }
+  // FUSE_CAP_SPLICE_READ is the libfuse request-ingestion path that delivers
+  // pipe-backed data to write_buf(). SwordFS implements only .write, so keep
+  // capability negotiation consistent with the callback table even when a
+  // mount option or libfuse default pre-populates the requested feature set.
+  fuse_unset_feature_flag(conn, FUSE_CAP_SPLICE_READ);
   if (conn->capable & FUSE_CAP_READDIRPLUS) {
     fuse_set_feature_flag(conn, FUSE_CAP_READDIRPLUS);
   }
