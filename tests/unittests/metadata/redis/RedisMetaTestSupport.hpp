@@ -4,8 +4,6 @@
 #pragma once
 
 #include <folly/Conv.h>
-#include <folly/fibers/Baton.h>
-#include <folly/fibers/FiberManagerMap.h>
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -18,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "FiberTest.hpp"
 #include "chunk/IChunkOverwriteStrategy.hpp"
 #include "chunk/WholeObjectCleanup.hpp"
 #include "metadata/redis/RedisKey.hpp"
@@ -37,27 +36,12 @@ inline constexpr SetAttrField kKillSuidGidField = SetAttrField::kKillSuidGid;
 template <typename Fn>
 auto RunInFiber(Fn &&fn) -> decltype(fn()) {
   using Result = decltype(fn());
-  folly::EventBase evb;
-  auto &manager = folly::fibers::getFiberManager(evb);
-  folly::fibers::Baton done;
   if constexpr (std::is_void_v<Result>) {
-    manager.addTask([&] {
-      fn();
-      done.post();
-    });
-    while (!done.try_wait()) {
-      evb.loopOnce();
-    }
+    swordfs::test::RunInTestFiber(std::forward<Fn>(fn));
     return;
   } else {
     std::optional<Result> result;
-    manager.addTask([&] {
-      result = fn();
-      done.post();
-    });
-    while (!done.try_wait()) {
-      evb.loopOnce();
-    }
+    swordfs::test::RunInTestFiber([&] { result.emplace(fn()); });
     return std::move(*result);
   }
 }

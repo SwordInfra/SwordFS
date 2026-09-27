@@ -19,6 +19,8 @@
 #include <string_view>
 #include <unordered_map>
 
+#include "FiberTest.hpp"
+#include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/Chunk.hpp"
 #include "chunk/ChunkObjectKey.hpp"
@@ -45,6 +47,7 @@ using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
 using swordfs::storage::IDataEngine;
+using swordfs::test::RunInTestFiber;
 using swordfs::utils::Status;
 using swordfs::vfs::FileReadWriter;
 using swordfs::vfs::InodeHandle;
@@ -62,20 +65,6 @@ static std::string Repeat(char c, size_t n) {
 
 static auto Buf(const std::string &s) {
   return *folly::IOBuf::copyBuffer(s.data(), s.size());
-}
-
-template <typename Fn>
-static void RunInTestFiber(Fn &&fn) {
-  folly::EventBase evb;
-  auto &fm = folly::fibers::getFiberManager(evb);
-  folly::fibers::Baton done;
-  fm.addTask([&] {
-    fn();
-    done.post();
-  });
-  while (!done.try_wait()) {
-    evb.loopOnce();
-  }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -839,17 +828,22 @@ TEST_F(FileReadWriterTest, VisibleSizeSnapshotCannotRegressBehindCompletedFlush)
     flush_done.post();
   });
 
-  while (!flush_done.try_wait()) {
-    evb.loopOnce();
+  const bool flush_completed = swordfs::test::DriveEventBaseUntil(evb, [&] { return flush_done.try_wait(); });
+  EXPECT_TRUE(flush_completed) << "concurrent flush must complete while the read snapshot is blocked";
+  if (!flush_completed) {
+    release_get_inode.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return flush_done.try_wait() && read_done.try_wait(); },
+        "FileReadWriter visible-size timeout cleanup");
+    return;
   }
-  ASSERT_TRUE(write_status.ok()) << write_status.message();
-  ASSERT_TRUE(flush_status.ok()) << flush_status.message();
-  ASSERT_EQ(mock_meta_->file_size(), 13);
+  EXPECT_TRUE(write_status.ok()) << write_status.message();
+  EXPECT_TRUE(flush_status.ok()) << flush_status.message();
+  EXPECT_EQ(mock_meta_->file_size(), 13);
 
   release_get_inode.post();
-  while (!read_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return read_done.try_wait(); }, "FileReadWriter blocked read completion after snapshot release");
   ASSERT_TRUE(read_status.ok()) << read_status.message();
   EXPECT_EQ(out->length(), 13U);
   EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "Hello,_World!");
@@ -1014,15 +1008,19 @@ TEST_F(FileReadWriterTest, CrossChunkMetadataErrorDrainsSubmittedReadBeforeRetur
     read_done.post();
   });
 
-  while (!get_started.try_wait()) {
-    evb.loopOnce();
+  const bool get_observed = swordfs::test::DriveEventBaseUntil(evb, [&] { return get_started.try_wait(); });
+  EXPECT_TRUE(get_observed) << "first chunk Get must reach the controlled blocker";
+  if (!get_observed) {
+    release_get.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return read_done.try_wait(); }, "FileReadWriter blocked Get timeout cleanup");
+    return;
   }
   EXPECT_FALSE(read_done.try_wait());
 
   release_get.post();
-  while (!read_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return read_done.try_wait(); }, "FileReadWriter partial-read completion after Get release");
 
   EXPECT_EQ(read_status.ToErrno(), EIO);
   EXPECT_EQ(read_status.message(), "injected second-chunk metadata failure");
@@ -1376,16 +1374,21 @@ TEST_F(FileReadWriterTest, GetAttrSnapshotCannotRegressReadEOFBehindCompletedFlu
     flush_done.post();
   });
 
-  while (!flush_done.try_wait()) {
-    evb.loopOnce();
+  const bool flush_completed = swordfs::test::DriveEventBaseUntil(evb, [&] { return flush_done.try_wait(); });
+  EXPECT_TRUE(flush_completed) << "flush must complete while GetAttr's metadata snapshot is blocked";
+  if (!flush_completed) {
+    release_get_inode.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return flush_done.try_wait() && get_attr_done.try_wait(); },
+        "FileReadWriter GetAttr-snapshot timeout cleanup");
+    return;
   }
-  ASSERT_TRUE(flush_status.ok()) << flush_status.message();
-  ASSERT_EQ(mock_meta_->file_size(), 13);
+  EXPECT_TRUE(flush_status.ok()) << flush_status.message();
+  EXPECT_EQ(mock_meta_->file_size(), 13);
 
   release_get_inode.post();
-  while (!get_attr_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return get_attr_done.try_wait(); }, "FileReadWriter GetAttr completion after snapshot release");
   ASSERT_TRUE(get_attr_status.ok()) << get_attr_status.message();
   EXPECT_EQ(inode.attr.size, 13U);
 
@@ -2405,17 +2408,23 @@ TEST_F(FileReadWriterTest, ConcurrentReadsProceedWhileAnotherReadWaitsForBackend
     second_done.post();
   });
 
-  while (!second_get_started.try_wait() || !second_done.try_wait()) {
-    evb.loopOnce();
+  const bool second_read_completed =
+      swordfs::test::DriveEventBaseUntil(evb, [&] { return second_get_started.try_wait() && second_done.try_wait(); });
+  EXPECT_TRUE(second_read_completed) << "independent read must complete while the first chunk Get is blocked";
+  if (!second_read_completed) {
+    release_first_get.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return first_done.try_wait() && second_done.try_wait(); },
+        "FileReadWriter independent-read timeout cleanup");
+    return;
   }
   EXPECT_TRUE(second_status.ok());
   EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(second_out->data()), second_out->length()),
             Repeat('R', kChunkSize));
 
   release_first_get.post();
-  while (!first_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return first_done.try_wait(); }, "FileReadWriter first read completion after Get release");
   EXPECT_TRUE(first_status.ok());
   EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(first_out->data()), first_out->length()),
             Repeat('R', kChunkSize));
@@ -2455,15 +2464,21 @@ TEST_F(FileReadWriterTest, IndependentChunkOverwriteHydrationDoesNotSerializeOnI
     second_done.post();
   });
 
-  while (!second_get_started.try_wait() || !second_done.try_wait()) {
-    evb.loopOnce();
+  const bool second_write_completed =
+      swordfs::test::DriveEventBaseUntil(evb, [&] { return second_get_started.try_wait() && second_done.try_wait(); });
+  EXPECT_TRUE(second_write_completed) << "independent overwrite hydration must complete while the first Get is blocked";
+  if (!second_write_completed) {
+    release_first_get.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return first_done.try_wait() && second_done.try_wait(); },
+        "FileReadWriter independent-overwrite timeout cleanup");
+    return;
   }
   EXPECT_TRUE(second_status.ok());
 
   release_first_get.post();
-  while (!first_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return first_done.try_wait(); }, "FileReadWriter first overwrite completion after Get release");
   EXPECT_TRUE(first_status.ok());
 }
 
@@ -2501,15 +2516,21 @@ TEST_F(FileReadWriterTest, WriteDuringBlockedFlushDoesNotWaitForRemotePut) {
     probe_done.post();
   });
 
-  while (!probe_done.try_wait()) {
-    evb.loopOnce();
+  const bool probe_completed = swordfs::test::DriveEventBaseUntil(evb, [&] { return probe_done.try_wait(); });
+  EXPECT_TRUE(probe_completed) << "write-progress probe must complete while the older Put is blocked";
+  if (!probe_completed) {
+    release_put.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return flush_done.try_wait() && write_done.try_wait(); },
+        "FileReadWriter blocked-Put timeout cleanup");
+    return;
   }
   EXPECT_TRUE(write_done.try_wait()) << "foreground write waited for the older generation's remote Put";
 
   release_put.post();
-  while (!flush_done.try_wait() || !write_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return flush_done.try_wait() && write_done.try_wait(); },
+      "FileReadWriter blocked-Put completion after release");
   ASSERT_TRUE(flush_status.ok());
   ASSERT_TRUE(write_status.ok());
 
@@ -2564,15 +2585,21 @@ TEST_F(FileReadWriterTest, WriteDuringBlockedCommitDoesNotWaitForRemotePublicati
     probe_done.post();
   });
 
-  while (!probe_done.try_wait()) {
-    evb.loopOnce();
+  const bool probe_completed = swordfs::test::DriveEventBaseUntil(evb, [&] { return probe_done.try_wait(); });
+  EXPECT_TRUE(probe_completed) << "write-progress probe must complete while the older commit is blocked";
+  if (!probe_completed) {
+    release_commit.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return flush_done.try_wait() && write_done.try_wait(); },
+        "FileReadWriter blocked-commit timeout cleanup");
+    return;
   }
   EXPECT_TRUE(write_done.try_wait()) << "foreground write waited for the older generation's metadata commit";
 
   release_commit.post();
-  while (!flush_done.try_wait() || !write_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return flush_done.try_wait() && write_done.try_wait(); },
+      "FileReadWriter blocked-commit completion after release");
   ASSERT_TRUE(flush_status.ok());
   ASSERT_TRUE(write_status.ok());
 
@@ -2616,15 +2643,20 @@ TEST_F(FileReadWriterTest, FailedOlderPutPreservesRepeatedWritesDuringFlush) {
     writes_done.post();
   });
 
-  while (!writes_done.try_wait()) {
-    evb.loopOnce();
+  const bool writes_completed = swordfs::test::DriveEventBaseUntil(evb, [&] { return writes_done.try_wait(); });
+  EXPECT_TRUE(writes_completed) << "new-generation writes must complete while the old Put is blocked";
+  if (!writes_completed) {
+    release_put.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return flush_done.try_wait() && writes_done.try_wait(); },
+        "FileReadWriter failed-Put timeout cleanup");
+    return;
   }
+  release_put.post();
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return flush_done.try_wait(); }, "FileReadWriter failed-Put flush completion after release");
   ASSERT_TRUE(first_write_status.ok());
   ASSERT_TRUE(second_write_status.ok());
-  release_put.post();
-  while (!flush_done.try_wait()) {
-    evb.loopOnce();
-  }
   EXPECT_FALSE(flush_status.ok());
 
   RunInTestFiber([&] {
@@ -2667,14 +2699,19 @@ TEST_F(FileReadWriterTest, WriteDuringAmbiguousCommitPreservesLatestLocalGenerat
     write_done.post();
   });
 
-  while (!write_done.try_wait()) {
-    evb.loopOnce();
+  const bool write_completed = swordfs::test::DriveEventBaseUntil(evb, [&] { return write_done.try_wait(); });
+  EXPECT_TRUE(write_completed) << "new-generation write must complete while the ambiguous commit is blocked";
+  if (!write_completed) {
+    release_commit.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return flush_done.try_wait() && write_done.try_wait(); },
+        "FileReadWriter ambiguous-commit timeout cleanup");
+    return;
   }
-  ASSERT_TRUE(write_status.ok());
   release_commit.post();
-  while (!flush_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return flush_done.try_wait(); }, "FileReadWriter ambiguous-commit flush completion after release");
+  ASSERT_TRUE(write_status.ok());
   EXPECT_FALSE(flush_status.ok());
 
   RunInTestFiber([&] {
@@ -2733,16 +2770,22 @@ TEST_F(FileReadWriterTest, ConcurrentFlushBarriersPublishGenerationsInOrder) {
     probe_done.post();
   });
 
-  while (!probe_done.try_wait()) {
-    evb.loopOnce();
+  const bool probe_completed = swordfs::test::DriveEventBaseUntil(evb, [&] { return probe_done.try_wait(); });
+  EXPECT_TRUE(probe_completed) << "second-flush probe must run while the first Put is blocked";
+  if (!probe_completed) {
+    release_first_put.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return first_flush_done.try_wait() && second_flush_done.try_wait(); },
+        "FileReadWriter ordered-flush timeout cleanup");
+    return;
   }
-  ASSERT_TRUE(write_status.ok());
   EXPECT_EQ(mock_data_->put_calls, 1) << "a newer generation began publication before the older generation completed";
 
   release_first_put.post();
-  while (!first_flush_done.try_wait() || !second_flush_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return first_flush_done.try_wait() && second_flush_done.try_wait(); },
+      "FileReadWriter ordered flush completion after release");
+  ASSERT_TRUE(write_status.ok());
   EXPECT_TRUE(first_flush_status.ok());
   EXPECT_TRUE(second_flush_status.ok());
   EXPECT_EQ(mock_data_->put_calls, 2);
@@ -2781,15 +2824,19 @@ TEST_F(FileReadWriterTest, MultiChunkFlushStartsAnotherPutWhileFirstPutIsBlocked
     probe_done.post();
   });
 
-  while (!probe_done.try_wait()) {
-    evb.loopOnce();
+  const bool probe_completed = swordfs::test::DriveEventBaseUntil(evb, [&] { return probe_done.try_wait(); });
+  EXPECT_TRUE(probe_completed) << "multi-chunk flush probe must run while the first Put is blocked";
+  if (!probe_completed) {
+    release_first_put.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return flush_done.try_wait(); }, "FileReadWriter multi-chunk timeout cleanup");
+    return;
   }
   EXPECT_TRUE(second_put_started.try_wait()) << "one chunk's remote Put serialized every chunk in the inode";
 
   release_first_put.post();
-  while (!flush_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return flush_done.try_wait(); }, "FileReadWriter multi-chunk flush completion after release");
   EXPECT_TRUE(flush_status.ok());
   EXPECT_EQ(mock_data_->put_calls, 2);
 }
@@ -2820,15 +2867,22 @@ TEST_F(FileReadWriterTest, TruncateWaitsForBlockedFlushPublication) {
     truncate_done.post();
   });
 
-  while (!put_started.try_wait() || !truncate_started.try_wait()) {
-    evb.loopOnce();
+  const bool truncate_blocked =
+      swordfs::test::DriveEventBaseUntil(evb, [&] { return put_started.try_wait() && truncate_started.try_wait(); });
+  EXPECT_TRUE(truncate_blocked) << "truncate must reach the publication barrier within the test watchdog";
+  if (!truncate_blocked) {
+    release_put.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return flush_done.try_wait() && truncate_done.try_wait(); },
+        "FileReadWriter truncate-vs-flush timeout cleanup");
+    return;
   }
   EXPECT_EQ(mock_meta_->truncate_calls, 0) << "truncate raced an older publication and could be republished over EOF";
 
   release_put.post();
-  while (!flush_done.try_wait() || !truncate_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return flush_done.try_wait() && truncate_done.try_wait(); },
+      "FileReadWriter truncate-vs-flush completion after release");
   EXPECT_TRUE(flush_status.ok());
   EXPECT_TRUE(truncate_status.ok());
   EXPECT_EQ(mock_meta_->truncate_calls, 1);
@@ -2868,15 +2922,22 @@ TEST_F(FileReadWriterTest, TruncateWaitsForBlockedReadWithoutBlockingEventBase) 
     truncate_done.post();
   });
 
-  while (!get_started.try_wait() || !truncate_started.try_wait()) {
-    evb.loopOnce();
+  const bool truncate_blocked =
+      swordfs::test::DriveEventBaseUntil(evb, [&] { return get_started.try_wait() && truncate_started.try_wait(); });
+  EXPECT_TRUE(truncate_blocked) << "truncate must reach the read barrier within the test watchdog";
+  if (!truncate_blocked) {
+    release_get.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return read_done.try_wait() && truncate_done.try_wait(); },
+        "FileReadWriter truncate-vs-read timeout cleanup");
+    return;
   }
   EXPECT_EQ(mock_meta_->truncate_calls, 0);
 
   release_get.post();
-  while (!read_done.try_wait() || !truncate_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return read_done.try_wait() && truncate_done.try_wait(); },
+      "FileReadWriter truncate-vs-read completion after release");
 
   EXPECT_TRUE(read_status.ok());
   EXPECT_TRUE(truncate_status.ok());

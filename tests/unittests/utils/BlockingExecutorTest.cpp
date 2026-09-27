@@ -13,25 +13,14 @@
 #include <string>
 #include <thread>
 
+#include "FiberTest.hpp"
+#include "TestWatchdog.hpp"
 #include "utils/BlockingExecutor.hpp"
 #include "utils/ExecutionDomain.hpp"
 
+using swordfs::test::RunInTestFiber;
 using swordfs::utils::BlockingExecutor;
 using swordfs::utils::ExecutionDomain;
-
-template <typename Fn>
-void RunInFiber(Fn &&fn) {
-  folly::EventBase evb;
-  auto &manager = folly::fibers::getFiberManager(evb);
-  folly::fibers::Baton done;
-  manager.addTask([&] {
-    fn();
-    done.post();
-  });
-  while (!done.try_wait()) {
-    evb.loopOnce();
-  }
-}
 
 TEST(BlockingExecutorTest, RejectsZeroWorkers) {
   EXPECT_DEATH({ BlockingExecutor executor(0); }, "requires at least one worker");
@@ -52,20 +41,20 @@ TEST(BlockingExecutorTest, ShutdownIsIdempotentAndRejectsNewWork) {
 
 TEST(BlockingExecutorTest, RunFromFiberReturnsValue) {
   BlockingExecutor executor(2);
-  RunInFiber([&] { EXPECT_EQ(executor.RunFromFiber([] { return 42; }), 42); });
+  RunInTestFiber([&] { EXPECT_EQ(executor.RunFromFiber([] { return 42; }), 42); });
 }
 
 TEST(BlockingExecutorTest, WorkerRunsInThreadDomainFromBothCallDomains) {
   BlockingExecutor executor(1);
   EXPECT_EQ(executor.RunFromThread([] { return swordfs::utils::CurrentExecutionDomain(); }), ExecutionDomain::kThread);
-  RunInFiber([&] {
+  RunInTestFiber([&] {
     EXPECT_EQ(executor.RunFromFiber([] { return swordfs::utils::CurrentExecutionDomain(); }), ExecutionDomain::kThread);
   });
 }
 
 TEST(BlockingExecutorTest, RunFromFiberReturnsStringAndVoid) {
   BlockingExecutor executor(2);
-  RunInFiber([&] {
+  RunInTestFiber([&] {
     EXPECT_EQ(executor.RunFromFiber([] { return std::string("hello"); }), "hello");
     int counter = 0;
     executor.RunFromFiber([&] { ++counter; });
@@ -76,7 +65,7 @@ TEST(BlockingExecutorTest, RunFromFiberReturnsStringAndVoid) {
 TEST(BlockingExecutorTest, PropagatesException) {
   BlockingExecutor executor(1);
   EXPECT_THROW(executor.RunFromThread([] { throw std::runtime_error("thread failure"); }), std::runtime_error);
-  RunInFiber([&] {
+  RunInTestFiber([&] {
     EXPECT_THROW(executor.RunFromFiber([] { throw std::runtime_error("fiber failure"); }), std::runtime_error);
   });
 }
@@ -119,9 +108,9 @@ TEST(BlockingExecutorTest, FiberCallersRunBlockingTasksInParallel) {
       }
     });
   }
-  while (!done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return done.try_wait(); }, "BlockingExecutor parallel fiber callers completion",
+      kCoordinationWatchdog + swordfs::test::kAsyncCompletionWatchdog);
 
   EXPECT_FALSE(watchdog_expired.load(std::memory_order_acquire));
   EXPECT_EQ(max_concurrent.load(), kThreads);
@@ -156,9 +145,9 @@ TEST(BlockingExecutorTest, BlockingWorkDoesNotBlockOtherFibers) {
     release_blocking.set_value();
   });
 
-  while (!done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return done.try_wait(); }, "BlockingExecutor nonblocking-fiber completion",
+      kCoordinationWatchdog + swordfs::test::kAsyncCompletionWatchdog);
   EXPECT_FALSE(watchdog_expired.load(std::memory_order_acquire));
   EXPECT_TRUE(other_fiber_ran.load(std::memory_order_acquire));
 }
@@ -173,7 +162,7 @@ TEST(BlockingExecutorTest, RunFromFiberRejectsThreadCaller) {
 TEST(BlockingExecutorTest, RunFromThreadRejectsFiberCaller) {
   BlockingExecutor executor(1);
   EXPECT_DEATH(
-      { RunInFiber([&] { executor.RunFromThread([] {}); }); },
+      { RunInTestFiber([&] { executor.RunFromThread([] {}); }); },
       "execution-domain violation at .*expected=POSIX-thread, actual=fiber");
 }
 #endif

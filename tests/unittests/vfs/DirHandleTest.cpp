@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "TestWatchdog.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "utils/Status.hpp"
 #include "vfs/DirHandle.hpp"
@@ -200,15 +201,22 @@ TEST(DirHandleTest, ConcurrentReadDirSerializesWholeIteratorOperation) {
     second_done.post();
   });
 
-  while (!peek_entered.try_wait() || !second_started.try_wait()) {
-    evb.loopOnce();
+  const bool overlap_observed =
+      swordfs::test::DriveEventBaseUntil(evb, [&] { return peek_entered.try_wait() && second_started.try_wait(); });
+  EXPECT_TRUE(overlap_observed) << "both serialized ReadDir operations must reach the controlled overlap";
+  if (!overlap_observed) {
+    release_peek.post();
+    swordfs::test::DriveEventBaseUntilOrAbort(
+        evb, [&] { return first_done.try_wait() && second_done.try_wait(); },
+        "DirHandle concurrent ReadDir timeout cleanup");
+    return;
   }
   EXPECT_EQ(iterator->seek_calls(), 1);
 
   release_peek.post();
-  while (!first_done.try_wait() || !second_done.try_wait()) {
-    evb.loopOnce();
-  }
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return first_done.try_wait() && second_done.try_wait(); },
+      "DirHandle concurrent ReadDir completion after release");
 
   EXPECT_TRUE(first_status.ok());
   EXPECT_TRUE(second_status.ok());

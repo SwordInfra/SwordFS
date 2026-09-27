@@ -14,6 +14,7 @@
 #include <thread>
 #include <utility>
 
+#include "TestWatchdog.hpp"
 #include "utils/BlockingExecutor.hpp"
 
 namespace swordfs::test {
@@ -24,6 +25,10 @@ namespace swordfs::test {
 template <typename Fn>
 void RunInTestFiber(Fn &&fn) {
   if (folly::fibers::onFiber()) {
+    // The current fiber's driver owns the lifetime bound. In particular,
+    // FIBER_TEST bodies are already running under the bounded outer call
+    // below, so nesting another EventBase here would weaken the execution
+    // domain contract rather than add useful protection.
     std::forward<Fn>(fn)();
     return;
   }
@@ -42,9 +47,8 @@ void RunInTestFiber(Fn &&fn) {
     done.post();
   });
 
-  while (!done.try_wait()) {
-    evb.loopOnce();
-  }
+  DriveEventBaseUntilOrAbort(
+      evb, [&] { return done.try_wait(); }, "RunInTestFiber completion", kTestFiberCompletionWatchdog);
   if (exception != nullptr) {
     std::rethrow_exception(exception);
   }
