@@ -155,14 +155,19 @@ class Fixture {
   bool StartMount();
   bool WaitForMount();
   bool StopMount();
+  bool CleanupRuntimeState();
+  void CleanupWorkDir();
+  bool DaemonMissingBeforeTeardown() const;
   void InitPaths();
   void RemoveVolumeConfig();
-  std::string LogPath() const;
+  std::string FormatLogPath() const;
+  std::string NextMountLogPath();
   std::string FindSwordfsBin() const;
 
  private:
   std::string work_dir_;
   std::string mountpoint_;
+  std::string diagnostics_dir_;
   std::string volume_name_;
   // Keep the formatted Redis volume across unmount/remount cycles within a test.
   bool volume_formatted_ = false;
@@ -170,6 +175,7 @@ class Fixture {
   std::string base_bucket_url_;  // original URL (without test-name suffix)
   bool mounted_ = false;
   pid_t daemon_pid_ = 0;
+  size_t mount_generation_ = 0;
 };
 
 }  // namespace e2e

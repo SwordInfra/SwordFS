@@ -274,6 +274,8 @@ jobs:
     needs: [clang-format, minio-test-tools]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    env:
+      SWORDFS_E2E_DIAGNOSTICS_DIR: /tmp/swordfs-e2e-diagnostics
     permissions:
       contents: read
     steps:
@@ -318,8 +320,45 @@ jobs:
       - name: Build E2E
         run: cmake --build build --target swordfs swordfs_e2e_test
 
+      - name: Verify E2E failure diagnostics
+        run: |
+          set -euo pipefail
+          set +e
+          sg fuse -c "SWORDFS_E2E_DIAGNOSTICS_DIR='${SWORDFS_E2E_DIAGNOSTICS_DIR}' bash scripts/testing/run-e2e.sh --gtest_also_run_disabled_tests --gtest_filter=E2EDiagnosticsTest.DISABLED_PreservesDaemonGenerationsOnFailure --gtest_color=no"
+          status=$?
+          set -e
+
+          if [ "${status}" -eq 0 ]; then
+            echo "ERROR: controlled diagnostics test unexpectedly passed"
+            exit 1
+          fi
+
+          mapfile -t daemon_logs < <(find "${SWORDFS_E2E_DIAGNOSTICS_DIR}" -type f -name 'mount-*.log' -print | sort)
+          if [ "${#daemon_logs[@]}" -ne 2 ]; then
+            echo "ERROR: expected two daemon-generation logs after controlled failure; found ${#daemon_logs[@]}"
+            find "${SWORDFS_E2E_DIAGNOSTICS_DIR}" -maxdepth 3 -type f -print || true
+            exit 1
+          fi
+          for log in "${daemon_logs[@]}"; do
+            test -s "${log}"
+          done
+
+          rm -rf "${SWORDFS_E2E_DIAGNOSTICS_DIR}"
+          # The controlled failing case is diagnostics verification, not E2E
+          # coverage evidence. Discard its counters before the real suite.
+          find build -type f -name '*.gcda' -delete
+
       - name: Test (E2E)
         run: sg fuse -c "bash scripts/testing/run-e2e.sh --gtest_color=no"
+
+      - name: Upload E2E failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-diagnostics
+          path: ${{ env.SWORDFS_E2E_DIAGNOSTICS_DIR }}
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Generate E2E coverage report
         run: |
