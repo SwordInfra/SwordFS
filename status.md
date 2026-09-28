@@ -9,9 +9,9 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | Selected upstream testcases | 645 |
 | Executed testcases | 645 |
 | Deferred from CI | 0 |
-| Explicitly supported | 112 |
-| Known gaps | 533 |
-| Overall support | 17.36% |
+| Explicitly supported | 113 |
+| Known gaps | 532 |
+| Overall support | 17.52% |
 | Supported gate | 100.00% |
 | Executed population classified | 100.00% |
 | Full selected population classified | 100.00% |
@@ -21,8 +21,8 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 
 | Result | Count |
 | --- | ---: |
-| `PASS` | 112 |
-| `FAIL` | 18 |
+| `PASS` | 113 |
+| `FAIL` | 17 |
 | `NOTRUN` | 515 |
 
 ## Outcome counts
@@ -30,28 +30,27 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | Classification | Count |
 | --- | ---: |
 | `ENVIRONMENT` | 8 |
-| `KNOWN_SEMANTIC_DEFECT` | 1 |
 | `KNOWN_UNSUPPORTED` | 141 |
-| `PASS` | 112 |
+| `PASS` | 113 |
 | `UPSTREAM_NOT_APPLICABLE` | 382 |
 | `UPSTREAM_TEST_DEFECT` | 1 |
 
 ## Known-gap Issues
 
 - [#255](https://github.com/SwordInfra/SwordFS/issues/255): 141 testcase(s), KNOWN_UNSUPPORTED
-- [#256](https://github.com/SwordInfra/SwordFS/issues/256): 1 testcase(s), KNOWN_SEMANTIC_DEFECT
 
 ## Execution metadata
 
-- SwordFS commit: `43bda4c2c445c4d76ff623aa1674965ecc737605`
+- SwordFS commit: `20d61ea022addc8f2a0ec6d8c0353edd951e7070`
 - fstests commit: `a370dcbed43563f0462801e889e0eceb93c7cfad`
+- fstests patchset: `conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19`
 - fstests selector: `generic/quick`
 - Kernel: `6.17.0-1022-azure`
 - libfuse: `fusermount3 version: 3.18.2`
 - Runner: `GitHub Actions (9 fstests shards)`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36384979037
-Recorded at: 2026-09-28T06:24:24+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36391061792
+Recorded at: 2026-09-28T07:37:50+00:00
 
 ## Historical main-branch progress
 
@@ -67,5 +66,6 @@ Recorded at: 2026-09-28T06:24:24+00:00
 | 2026-09-25T14:54:21+00:00 | `33aa7f676b8d` | PASS | 17.05% | 110 | 110 | 20 | 515 | 0 | 535 |
 | 2026-09-26T12:49:23+00:00 | `6f426b5ac78c` | PASS | 17.21% | 111 | 111 | 19 | 515 | 0 | 534 |
 | 2026-09-28T02:46:14+00:00 | `b2024540db14` | PASS | 17.36% | 112 | 112 | 18 | 515 | 0 | 533 |
+| 2026-09-28T07:37:50+00:00 | `20d61ea022ad` | PASS | 17.52% | 113 | 113 | 17 | 515 | 0 | 532 |
 
-Last fully healthy baseline: `43bda4c2c445c4d76ff623aa1674965ecc737605`
+Last fully healthy baseline: `20d61ea022addc8f2a0ec6d8c0353edd951e7070`

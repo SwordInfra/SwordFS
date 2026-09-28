@@ -3,6 +3,7 @@
     "backend": "redis+minio-s3",
     "fstests_commit": "a370dcbed43563f0462801e889e0eceb93c7cfad",
     "fstests_group": "generic/quick",
+    "fstests_patchset": "conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19",
     "fstests_repository": "https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git",
     "fstests_selector": "generic/quick",
     "kernel": "6.17.0-1022-azure",
@@ -10,15 +11,14 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "43bda4c2c445c4d76ff623aa1674965ecc737605"
+    "swordfs_commit": "20d61ea022addc8f2a0ec6d8c0353edd951e7070"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "ENVIRONMENT": 8,
-      "KNOWN_SEMANTIC_DEFECT": 1,
       "KNOWN_UNSUPPORTED": 141,
-      "PASS": 112,
+      "PASS": 113,
       "UPSTREAM_NOT_APPLICABLE": 382,
       "UPSTREAM_TEST_DEFECT": 1
     },
@@ -27,17 +27,17 @@
     "deferred_count": 0,
     "executed_classified_percent": 100.0,
     "executed_count": 645,
-    "known_gap_count": 533,
-    "overall_support_percent": 17.36,
+    "known_gap_count": 532,
+    "overall_support_percent": 17.52,
     "raw_results": {
-      "FAIL": 18,
+      "FAIL": 17,
       "NOTRUN": 515,
-      "PASS": 112
+      "PASS": 113
     },
     "selected_count": 645,
-    "supported_count": 112,
+    "supported_count": 113,
     "supported_gate_percent": 100.0,
-    "supported_pass_count": 112
+    "supported_pass_count": 113
   },
   "tests": [
     {
@@ -3993,11 +3993,11 @@
       "test": "generic/614"
     },
     {
-      "classification": "KNOWN_SEMANTIC_DEFECT",
-      "issue": "#256",
-      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/615.out.bad)",
-      "reason": "stat(2) reports st_blocks=0 for a file containing allocated data; tracked by #256.",
-      "result": "FAIL",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/615"
     },
     {
