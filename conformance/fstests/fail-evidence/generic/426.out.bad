@@ -1,0 +1,8 @@
+QA output created by 426
+test_file_handles TEST_DIR/426-dir -d
+test_file_handles TEST_DIR/426-dir
+open_by_handle(<FSTESTS_WORK_DIR>/test/426-dir/file{000000..001023}) returned 116 incorrectly on a linked file! [count=1024]
+test_file_handles TEST_DIR/426-dir -l
+open_by_handle(<FSTESTS_WORK_DIR>/test/426-dir/file{000000..001023}) returned 116 incorrectly on a linked file! [count=1024]
+test_file_handles TEST_DIR/426-dir -u
+open_by_handle(<FSTESTS_WORK_DIR>/test/426-dir/file{000000..001023}) returned 116 incorrectly on a linked file! [count=1024]

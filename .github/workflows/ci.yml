@@ -25,6 +25,9 @@ jobs:
       - name: Check formatting
         run: pre-commit run --all-files
 
+      - name: Test fstests classifier tooling
+        run: python3 tests/tooling/test_fstests_classify.py
+
   minio-test-tools:
     name: minio-test-tools
     needs: clang-format
@@ -705,6 +708,7 @@ jobs:
             --result-dir build/fstests-conformance/raw/results \
             --supported-file conformance/fstests/supported.txt \
             --known-gaps-file conformance/fstests/known-gaps.tsv \
+            --known-gap-evidence-dir conformance/fstests/fail-evidence \
             --deferred-file conformance/fstests/deferred-ci.tsv \
             --output-dir build/fstests-conformance \
             --swordfs-commit "$(git rev-parse HEAD)" \

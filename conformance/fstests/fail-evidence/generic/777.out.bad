@@ -1,0 +1,37 @@
+QA output created by 777
+test_file_handles after cycle mount
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000000) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000001) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000002) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000003) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000004) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000005) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000006) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000007) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000008) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000009) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test) returned 116 incorrectly on a linked dir!
+test_file_handles after rename parent
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000000) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000001) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000002) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000003) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000004) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000005) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000006) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000007) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000008) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000009) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test) returned 116 incorrectly on a linked dir!
+test_file_handles after rename grandparent
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000000) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000001) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000002) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000003) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000004) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000005) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000006) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000007) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000008) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test/file000009) returned 116 incorrectly on a linked file!
+open_by_handle(<FSTESTS_WORK_DIR>/test) returned 116 incorrectly on a linked dir!
