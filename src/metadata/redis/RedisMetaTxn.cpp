@@ -24,11 +24,12 @@ RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t
     : txn_(txn),
       key_(key),
       chunk_size_(chunk_size),
-      strategy_(strategy != nullptr ? strategy : &chunk::DefaultChunkOverwriteStrategy()) {
+      strategy_(strategy != nullptr ? strategy : &chunk::DefaultChunkOverwriteStrategy()),
+      private_metadata_txn_(strategy_->mechanism()) {
 }
 
 std::string RedisMetaTxn::PrivateHash(std::string_view hash) const {
-  return key_.PrivateChunkIndex(strategy_->mechanism(), hash);
+  return key_.PrivateChunkIndex(private_metadata_txn_.mechanism(), hash);
 }
 
 utils::Status RedisMetaTxn::Read(std::string_view hash, std::string_view field, std::string *value) {

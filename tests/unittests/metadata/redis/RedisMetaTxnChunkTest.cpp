@@ -37,6 +37,7 @@ TEST(RedisMetaTxnTest, PrivateIndexPublicationCommitsAndRejectsWithLogicalHead) 
     std::optional<PendingDelete> cleanup_candidate;
     auto status = store.Transact([&](RedisKvTxn &kv_txn) {
       RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+      EXPECT_EQ(txn.PrivateMetadata().mechanism(), strategy.mechanism());
       return txn.CommitChunk(file.ino, expected, replacement, publication_result, cleanup_candidate, intent);
     });
     last_cleanup = std::move(cleanup_candidate);

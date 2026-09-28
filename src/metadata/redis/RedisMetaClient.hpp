@@ -34,6 +34,11 @@ class RedisMetaClient {
   utils::Status MGet(const std::vector<std::string> &keys, std::vector<std::optional<std::string>> *values);
   utils::Status HGet(std::string_view key, std::string_view field, std::string *value);
   utils::Status Incr(std::string_view key, uint64_t *value);
+  // Atomically increment a missing/non-negative integer counter. Negative,
+  // malformed, and overflowed state is a known failure and is not mutated.
+  // Transport/protocol loss after the script may have executed is
+  // OutcomeUnknown, matching standalone INCR allocation semantics.
+  utils::Status IncrNonNegative(std::string_view key, uint64_t *value);
   utils::Status HScan(std::string_view key, uint64_t cursor, size_t count,
                       std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor);
 

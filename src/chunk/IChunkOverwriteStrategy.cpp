@@ -49,6 +49,13 @@ class WholeObjectStrategy final : public IChunkOverwriteStrategy {
   metadata::ChunkOverwriteMechanism mechanism() const override {
     return metadata::ChunkOverwriteMechanism::kWholeObject;
   }
+  utils::Status BindPrivateMetadata(metadata::MechanismPrivateStorePtr store) override {
+    if (store == nullptr || store->mechanism() != mechanism()) {
+      return utils::Status::InvalidArgument("private metadata mechanism does not match whole-object strategy");
+    }
+    private_metadata_ = std::move(store);
+    return utils::Status::OK();
+  }
   std::shared_ptr<IChunkSession> OpenSession(metadata::InodeID ino, metadata::ChunkIndex index) const override {
     return std::make_shared<Chunk>(ino, index);
   }
@@ -133,6 +140,12 @@ class WholeObjectStrategy final : public IChunkOverwriteStrategy {
     }
     return utils::Status::OK();
   }
+
+ private:
+  // #315 establishes lifetime/ownership only. #316 wraps this capability in
+  // the typed whole-object store and injects that typed dependency into
+  // sessions; the current common descriptor remains authoritative here.
+  metadata::MechanismPrivateStorePtr private_metadata_;
 };
 
 }  // namespace

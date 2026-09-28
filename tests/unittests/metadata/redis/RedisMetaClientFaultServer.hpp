@@ -35,6 +35,7 @@ enum class RedisFaultScenario {
   kReadOnlyExecProtocolFailure,
   kIncrProtocolFailureApplied,
   kIncrDisconnectNotApplied,
+  kIncrProtocolFailureAppliedThenFreshValue,
 };
 
 class ScriptedRedisServer {
@@ -222,6 +223,19 @@ class ScriptedRedisServer {
     return true;
   }
 
+  bool ReadExpectedIncrMutation(RespReader *reader) {
+    std::vector<std::string> command;
+    if (!reader->ReadCommand(&command)) {
+      error_ = "failed to read RESP increment command";
+      return false;
+    }
+    if (command.empty() || (command.front() != "INCR" && command.front() != "EVAL")) {
+      error_ = "expected Redis INCR or EVAL command";
+      return false;
+    }
+    return true;
+  }
+
   bool Reply(int fd, std::string_view reply) {
     if (!SendAll(fd, reply)) {
       error_ = "failed to send scripted Redis reply";
@@ -346,7 +360,7 @@ class ScriptedRedisServer {
     }
     connection_count_.fetch_add(1, std::memory_order_relaxed);
     RespReader reader(client);
-    if (!ReadExpected(&reader, "INCR")) {
+    if (!ReadExpectedIncrMutation(&reader)) {
       ::close(client);
       return;
     }
@@ -357,6 +371,37 @@ class ScriptedRedisServer {
     } else {
       ResetAndClose(client);
     }
+  }
+
+  void ServeIncrProtocolFailureAppliedThenFreshValue() {
+    const int first_client = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+    if (first_client < 0) {
+      error_ = "accept failed";
+      return;
+    }
+    connection_count_.fetch_add(1, std::memory_order_relaxed);
+    RespReader first_reader(first_client);
+    if (!ReadExpectedIncrMutation(&first_reader)) {
+      ::close(first_client);
+      return;
+    }
+    mutation_applied_.store(true, std::memory_order_relaxed);
+    (void)Reply(first_client, "x\r\n");
+    ::close(first_client);
+
+    const int second_client = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+    if (second_client < 0) {
+      error_ = "accept failed";
+      return;
+    }
+    connection_count_.fetch_add(1, std::memory_order_relaxed);
+    RespReader second_reader(second_client);
+    if (!ReadExpectedIncrMutation(&second_reader)) {
+      ::close(second_client);
+      return;
+    }
+    (void)Reply(second_client, ":2\r\n");
+    ::close(second_client);
   }
 
   void Serve() {
@@ -390,6 +435,9 @@ class ScriptedRedisServer {
         break;
       case RedisFaultScenario::kIncrDisconnectNotApplied:
         ServeIncr(false, false);
+        break;
+      case RedisFaultScenario::kIncrProtocolFailureAppliedThenFreshValue:
+        ServeIncrProtocolFailureAppliedThenFreshValue();
         break;
     }
   }

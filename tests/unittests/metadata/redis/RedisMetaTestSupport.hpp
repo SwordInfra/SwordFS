@@ -149,9 +149,22 @@ class RecordingRedisIndex final : public IChunkIndexParticipant {
 class RecordingRedisStrategy final : public chunk::IChunkOverwriteStrategy {
  public:
   RecordingRedisIndex index;
+  MechanismPrivateStorePtr private_metadata;
+  bool reject_private_metadata_binding = false;
 
   metadata::ChunkOverwriteMechanism mechanism() const override {
     return metadata::ChunkOverwriteMechanism::kRedisCache;
+  }
+
+  utils::Status BindPrivateMetadata(MechanismPrivateStorePtr store) override {
+    if (store == nullptr || store->mechanism() != mechanism()) {
+      return utils::Status::InvalidArgument("private metadata mechanism does not match recording Redis strategy");
+    }
+    if (reject_private_metadata_binding) {
+      return utils::Status::IOError("reject private metadata binding");
+    }
+    private_metadata = std::move(store);
+    return utils::Status::OK();
   }
 
   std::shared_ptr<chunk::IChunkSession> OpenSession(InodeID file_ino, ChunkIndex chunk_index) const override {

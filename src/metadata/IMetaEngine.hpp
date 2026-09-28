@@ -77,7 +77,7 @@ class IMetaEngine {
   virtual ~IMetaEngine() = default;
 
   /// Bind the volume-selected strategy before runtime metadata operations.
-  virtual Status BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *) {
+  virtual Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *) {
     return Status::NotSupported("metadata backend does not support chunk strategies");
   }
 

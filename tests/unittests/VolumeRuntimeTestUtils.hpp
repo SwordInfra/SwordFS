@@ -79,7 +79,7 @@ class ConfiguredMetaEngine final : public Base {
     return LoadConfiguredTestVolume(out);
   }
 
-  utils::Status BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) override {
+  utils::Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) override {
     auto status = Base::BindChunkOverwriteStrategy(strategy);
     return status.ToErrno() == ENOSYS ? utils::Status::OK() : status;
   }

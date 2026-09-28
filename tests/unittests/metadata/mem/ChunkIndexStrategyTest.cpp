@@ -31,6 +31,32 @@ std::string FragmentField(const SwordFsChunk &head, unsigned part) {
   return std::to_string(head.index) + ":" + std::to_string(head.revision) + ":" + std::to_string(part);
 }
 
+class RecordingTypedTxn final : public IMechanismPrivateTxn {
+ public:
+  static constexpr ChunkOverwriteMechanism kMechanism = ChunkOverwriteMechanism::kChunkSlice;
+
+  void Stage(uint64_t value) {
+    staged_ = value;
+  }
+  size_t commit_count() const {
+    return commit_count_;
+  }
+  const std::optional<uint64_t> &committed() const {
+    return committed_;
+  }
+
+ private:
+  void Commit() noexcept override {
+    ++commit_count_;
+    committed_ = staged_;
+  }
+
+ private:
+  std::optional<uint64_t> staged_;
+  std::optional<uint64_t> committed_;
+  size_t commit_count_ = 0;
+};
+
 class RecordingIndexParticipant final : public IChunkIndexParticipant {
  public:
   bool reject_publish = false;
@@ -110,9 +136,21 @@ class RecordingIndexParticipant final : public IChunkIndexParticipant {
 class RecordingStrategy final : public chunk::IChunkOverwriteStrategy {
  public:
   RecordingIndexParticipant participant;
+  MechanismPrivateStorePtr private_metadata;
+  bool reject_private_metadata_binding = false;
 
   metadata::ChunkOverwriteMechanism mechanism() const override {
     return metadata::ChunkOverwriteMechanism::kChunkSlice;
+  }
+  utils::Status BindPrivateMetadata(MechanismPrivateStorePtr store) override {
+    if (store == nullptr || store->mechanism() != mechanism()) {
+      return utils::Status::InvalidArgument("private metadata mechanism does not match recording strategy");
+    }
+    if (reject_private_metadata_binding) {
+      return utils::Status::IOError("reject private metadata binding");
+    }
+    private_metadata = std::move(store);
+    return utils::Status::OK();
   }
   std::shared_ptr<chunk::IChunkSession> OpenSession(InodeID file_ino, ChunkIndex index) const override {
     return chunk::DefaultChunkOverwriteStrategy().OpenSession(file_ino, index);
@@ -159,7 +197,7 @@ class RecordingStrategy final : public chunk::IChunkOverwriteStrategy {
 class ChunkIndexStrategyTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    store_.BindChunkOverwriteStrategy(&strategy_);
+    ASSERT_TRUE(store_.BindChunkOverwriteStrategy(&strategy_).ok());
     store_.SetChunkSize(128);
   }
 
@@ -191,6 +229,72 @@ class ChunkIndexStrategyTest : public ::testing::Test {
   RecordingStrategy strategy_;
   MemMetaStore store_;
 };
+
+FIBER_TEST_F(ChunkIndexStrategyTest, BindingProvidesMechanismScopedRuntimeAndTransactionCapabilities) {
+  ASSERT_NE(strategy_.private_metadata, nullptr);
+  EXPECT_EQ(strategy_.private_metadata->mechanism(), ChunkOverwriteMechanism::kChunkSlice);
+
+  uint64_t private_revision = 0;
+  ASSERT_TRUE(strategy_.private_metadata
+                  ->AllocateSequence(PrivateSequenceTag<ChunkOverwriteMechanism::kChunkSlice, 31>{}, &private_revision)
+                  .ok());
+  EXPECT_EQ(private_revision, 1U);
+
+  ChunkRevision legacy_revision = 0;
+  ASSERT_TRUE(store_
+                  .Transact([&](MemMetaTxn &txn) {
+                    EXPECT_EQ(txn.PrivateMetadata().mechanism(), ChunkOverwriteMechanism::kChunkSlice);
+                    return txn.AllocateChunkRevision(&legacy_revision);
+                  })
+                  .ok());
+  EXPECT_EQ(legacy_revision, 1U);
+
+  ASSERT_TRUE(strategy_.private_metadata
+                  ->AllocateSequence(PrivateSequenceTag<ChunkOverwriteMechanism::kChunkSlice, 31>{}, &private_revision)
+                  .ok());
+  EXPECT_EQ(private_revision, 2U);
+  ASSERT_TRUE(store_.Transact([&](MemMetaTxn &txn) { return txn.AllocateChunkRevision(&legacy_revision); }).ok());
+  EXPECT_EQ(legacy_revision, 2U);
+}
+
+FIBER_TEST_F(ChunkIndexStrategyTest, TypedPrivateTransactionCommitsOnlyAfterSuccessfulOuterTransaction) {
+  RecordingTypedTxn accepted;
+  auto status = store_.Transact([&](MemMetaTxn &txn) {
+    auto status = txn.PrivateMetadata().Bind(&accepted);
+    if (!status.ok()) {
+      return status;
+    }
+    EXPECT_EQ(txn.PrivateMetadata().Get<RecordingTypedTxn>(), &accepted);
+    accepted.Stage(41);
+    return utils::Status::OK();
+  });
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(accepted.commit_count(), 1U);
+  EXPECT_EQ(accepted.committed(), std::optional<uint64_t>{41});
+
+  RecordingTypedTxn rejected;
+  status = store_.Transact([&](MemMetaTxn &txn) {
+    auto status = txn.PrivateMetadata().Bind(&rejected);
+    if (!status.ok()) {
+      return status;
+    }
+    rejected.Stage(42);
+    return utils::Status::IOError("reject typed private mutation");
+  });
+  EXPECT_EQ(status.ToErrno(), EIO);
+  EXPECT_EQ(rejected.commit_count(), 0U);
+  EXPECT_FALSE(rejected.committed().has_value());
+}
+
+TEST(MemMetaStoreBindingTest, RejectsInvalidOrRejectedPrivateCapabilityBinding) {
+  MemMetaStore store;
+  EXPECT_EQ(store.BindChunkOverwriteStrategy(nullptr).ToErrno(), EINVAL);
+
+  RecordingStrategy strategy;
+  strategy.reject_private_metadata_binding = true;
+  EXPECT_EQ(store.BindChunkOverwriteStrategy(&strategy).ToErrno(), EIO);
+  EXPECT_EQ(strategy.private_metadata, nullptr);
+}
 
 FIBER_TEST_F(ChunkIndexStrategyTest, PublishStagesMultiplePrivateRecordsWithPublicHead) {
   SwordFsInode file;

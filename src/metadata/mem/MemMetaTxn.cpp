@@ -23,10 +23,14 @@ using Status = swordfs::utils::Status;
 
 namespace swordfs::metadata {
 
+MemMetaTxn::MemMetaTxn(MemMetaStore *store)
+    : store_(store),
+      private_metadata_txn_(store_->private_metadata_ != nullptr ? store_->private_metadata_->mechanism()
+                                                                 : ChunkOverwriteMechanism::kWholeObject) {
+}
+
 std::string MemMetaTxn::PrivateHash(std::string_view hash) const {
-  const auto &strategy =
-      store_->chunk_strategy_ != nullptr ? *store_->chunk_strategy_ : chunk::DefaultChunkOverwriteStrategy();
-  return ChunkOverwriteMechanismKey(strategy.mechanism()) + "/" + std::string(hash);
+  return ChunkOverwriteMechanismKey(private_metadata_txn_.mechanism()) + "/" + std::string(hash);
 }
 
 Status MemMetaTxn::Read(std::string_view hash, std::string_view field, std::string *value) {
@@ -94,7 +98,7 @@ Status MemMetaTxn::Erase(std::string_view hash, std::string_view field) {
   return Status::OK();
 }
 
-void MemMetaTxn::CommitPrivateIndex() {
+void MemMetaTxn::CommitPrivateMetadata() {
   for (auto &write : index_writes_) {
     if (write.value.has_value()) {
       store_->private_chunk_index_[write.hash].insert_or_assign(write.field, std::move(*write.value));
@@ -108,6 +112,7 @@ void MemMetaTxn::CommitPrivateIndex() {
       }
     }
   }
+  private_metadata_txn_.Commit();
 }
 
 // ────────────────────────────────────────────────────────────────

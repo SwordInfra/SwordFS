@@ -18,6 +18,13 @@ namespace swordfs::metadata {
 namespace {
 
 constexpr auto kMaxRetryBackoff = std::chrono::milliseconds(1000);
+constexpr std::string_view kIncrNonNegativeScript = R"lua(
+local current = redis.call('GET', KEYS[1])
+if current and string.sub(current, 1, 1) == '-' then
+  return redis.error_reply('ERR counter must be non-negative')
+end
+return redis.call('INCR', KEYS[1])
+)lua";
 
 sw::redis::ConnectionOptions MakeConnectionOptions(const RedisMetaConfig &config) {
   sw::redis::ConnectionOptions options;
@@ -185,6 +192,22 @@ utils::Status RedisMetaClient::Incr(std::string_view key, uint64_t *value) {
     // redis++ combines command send and acknowledgement receive in one call.
     // An opaque I/O/protocol failure cannot prove whether the counter advanced.
     return utils::Status::OutcomeUnknown("Redis INCR outcome is ambiguous: " + std::string(error.what()));
+  }
+}
+
+utils::Status RedisMetaClient::IncrNonNegative(std::string_view key, uint64_t *value) {
+  utils::ExpectInThreadDomain();
+  if (value == nullptr) {
+    return utils::Status::InvalidArgument("Redis validated INCR output is null");
+  }
+  try {
+    const auto result = redis_->eval<long long>(kIncrNonNegativeScript, {key}, {});
+    *value = static_cast<uint64_t>(result);
+    return utils::Status::OK();
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError("validated INCR", error);
+  } catch (const sw::redis::Error &error) {
+    return utils::Status::OutcomeUnknown("Redis validated INCR outcome is ambiguous: " + std::string(error.what()));
   }
 }
 

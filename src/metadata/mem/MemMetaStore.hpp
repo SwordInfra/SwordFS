@@ -55,9 +55,7 @@ class MemMetaStore {
   }
   ~MemMetaStore() = default;
 
-  void BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) {
-    chunk_strategy_ = strategy;
-  }
+  utils::Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy);
   void SetChunkSize(uint64_t chunk_size) {
     chunk_size_ = chunk_size;
   }
@@ -78,15 +76,15 @@ class MemMetaStore {
     using Result = std::invoke_result_t<F, MemMetaTxn &>;
     if constexpr (std::is_void_v<Result>) {
       std::forward<F>(f)(txn);
-      txn.CommitPrivateIndex();
+      txn.CommitPrivateMetadata();
     } else {
       auto result = std::forward<F>(f)(txn);
       if constexpr (std::is_same_v<std::remove_cvref_t<Result>, Status>) {
         if (result.ok()) {
-          txn.CommitPrivateIndex();
+          txn.CommitPrivateMetadata();
         }
       } else {
-        txn.CommitPrivateIndex();
+        txn.CommitPrivateMetadata();
       }
       return result;
     }
@@ -101,6 +99,7 @@ class MemMetaStore {
   std::atomic<InodeID> next_ino_;
   ChunkRevision next_chunk_revision_ = 1;
   const chunk::IChunkOverwriteStrategy *chunk_strategy_ = nullptr;
+  MechanismPrivateStorePtr private_metadata_;
   uint64_t chunk_size_ = 0;
 
   folly::F14FastMap<InodeID, std::unique_ptr<SwordFsInode>> inodes_;

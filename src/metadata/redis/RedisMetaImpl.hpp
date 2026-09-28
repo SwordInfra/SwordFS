@@ -29,7 +29,7 @@ class RedisMetaImpl : public IMetaEngine {
   RedisMetaImpl &operator=(const RedisMetaImpl &) = delete;
 
   utils::Status Initialize() override;
-  Status BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) override;
+  Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) override;
   utils::Status FormatVolume(const SwordFsVolume &config) override;
   utils::Status LoadVolume(SwordFsVolume *config) override;
   Limits GetLimits() const override;
