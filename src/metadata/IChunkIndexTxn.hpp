@@ -56,25 +56,4 @@ struct ChunkIndexChange {
   std::optional<SwordFsChunk> current;
 };
 
-// Called before the public head/inode writes in the same backend transaction.
-// Callbacks may prepare private index mutations and reject the whole mutation.
-// Redis implementations must perform all reads before their first queued
-// write, matching RedisKvTxn's WATCH/MULTI discipline. Redis EXEC can report
-// per-command failures without rolling earlier commands back. A participant
-// must not erase private data still reachable from the old public head, and
-// a new head must refer only to already durable data or immutable private
-// records whose creation cannot depend on a later public-head command.
-class IChunkIndexParticipant {
- public:
-  virtual ~IChunkIndexParticipant() = default;
-  virtual utils::Status LoadPublished(IChunkIndexReader &reader, InodeID ino, const SwordFsChunk &head,
-                                      std::string *private_snapshot) const = 0;
-  virtual utils::Status Publish(IChunkIndexTxn &txn, InodeID ino, const std::optional<SwordFsChunk> &expected,
-                                const SwordFsChunk &replacement, const ChunkPublishIntent &intent) const = 0;
-  virtual utils::Status Truncate(IChunkIndexTxn &txn, InodeID ino,
-                                 const std::vector<ChunkIndexChange> &changes) const = 0;
-  virtual utils::Status PrepareReclaim(IChunkIndexTxn &txn, InodeID ino,
-                                       const std::vector<SwordFsChunk> &heads) const = 0;
-};
-
 }  // namespace swordfs::metadata

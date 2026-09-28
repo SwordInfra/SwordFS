@@ -25,6 +25,7 @@
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/Chunk.hpp"
 #include "chunk/ChunkObjectKey.hpp"
+#include "chunk/WholeObjectChunk.hpp"
 #include "chunk/WholeObjectCleanup.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
@@ -299,8 +300,7 @@ class MockMetaEngine : public IMetaEngine {
     }
     return Status::OK();
   }
-  Status PrepareReclaim(InodeID, std::optional<swordfs::metadata::ReclaimWork> *work) override {
-    work->reset();
+  Status PrepareReclaim(InodeID) override {
     return Status::OK();
   }
   Status CompleteReclaim(InodeID) override {
@@ -956,6 +956,32 @@ TEST_F(FileReadWriterTest, MissingChunkMetadataReadsAsSparseZeros) {
   });
 }
 
+TEST_F(FileReadWriterTest, MaterializedPublishedChunkZeroFillsItsUncoveredTail) {
+  RunInTestFiber([&] {
+    SwordFsChunk chunk{};
+    chunk.index = 0;
+    chunk.revision = 16;
+    chunk.size = 5;
+    ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
+
+    auto persisted = std::make_unique<folly::IOBuf>(Buf("hello"));
+    ASSERT_TRUE(
+        mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(persisted))
+            .ok());
+
+    auto rw = Make(/*size=*/8);
+    auto out = folly::IOBuf::create(8);
+    const auto status = rw.Read(8, 0, out.get());
+
+    ASSERT_TRUE(status.ok()) << status.message();
+    ASSERT_EQ(out->length(), 8U);
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), 5), "hello");
+    EXPECT_EQ(out->data()[5], 0U);
+    EXPECT_EQ(out->data()[6], 0U);
+    EXPECT_EQ(out->data()[7], 0U);
+  });
+}
+
 TEST_F(FileReadWriterTest, PersistedChunkShortReadFailsClosed) {
   RunInTestFiber([&] {
     SwordFsChunk chunk{};
@@ -989,8 +1015,7 @@ TEST_F(FileReadWriterTest, PersistedChunkReadErrorRollsBackPartialOutput) {
     mock_data_->get_error_payload = "partial";
     mock_data_->get_status = Status::IOError("injected data read failure");
 
-    swordfs::chunk::Chunk chunk(kIno, 0);
-    ASSERT_TRUE(chunk.Initialize().ok());
+    swordfs::chunk::WholeObjectChunk chunk(kIno, 0, kTestChunkSize, mock_meta_, mock_data_, published);
 
     auto out = folly::IOBuf::create(68);
     std::memcpy(out->writableTail(), "keep", 4);
@@ -1011,8 +1036,7 @@ TEST_F(FileReadWriterTest, PersistedChunkZeroLengthReadIsNoOp) {
     published.size = 64;
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, published).ok());
 
-    swordfs::chunk::Chunk chunk(kIno, 0);
-    ASSERT_TRUE(chunk.Initialize().ok());
+    swordfs::chunk::WholeObjectChunk chunk(kIno, 0, kTestChunkSize, mock_meta_, mock_data_, published);
 
     auto out = folly::IOBuf::copyBuffer("keep");
     ASSERT_TRUE(chunk.Read(16, 0, out.get()).ok());
@@ -2509,7 +2533,7 @@ TEST_F(FileReadWriterTest, HighIndexCachedTruncateDoesNotAliasLowChunk) {
 
 TEST_F(FileReadWriterTest, TruncateQueuesDroppedChunkObjectsWithoutForegroundDelete) {
   // Truncate publishes cleanup candidates but never physically deletes from
-  // the producer path. Reclaimer owns the authoritative revalidation gate.
+  // the producer path. the private ChunkGcWorker owns the authoritative revalidation gate.
   //
   // The fixture loads a test volume with a small persisted chunk size through
   // the normal VolumeImpl::LoadFrom path, so multi-chunk behavior stays cheap

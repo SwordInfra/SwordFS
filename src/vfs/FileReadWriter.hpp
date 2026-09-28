@@ -19,7 +19,7 @@
 #include <shared_mutex>
 #include <vector>
 
-#include "chunk/IChunkOverwriteStrategy.hpp"
+#include "chunk/Chunk.hpp"
 #include "metadata/Types.hpp"
 #include "utils/Status.hpp"
 #include "utils/Synchronization.hpp"
@@ -29,6 +29,10 @@ class IOBuf;
 }
 
 namespace swordfs {
+
+namespace chunk {
+class ChunkFactory;
+}
 
 namespace metadata {
 class IMetaEngine;
@@ -47,9 +51,9 @@ class LiveAttrGuard;
 
 class FileChunkManager {
  public:
-  using Map = folly::F14FastMap<metadata::ChunkIndex, std::shared_ptr<chunk::IChunkSession>>;
+  using Map = folly::F14FastMap<metadata::ChunkIndex, std::shared_ptr<chunk::Chunk>>;
 
-  explicit FileChunkManager(metadata::InodeID ino) : ino_(ino) {
+  FileChunkManager(metadata::InodeID ino, const chunk::ChunkFactory *factory) : ino_(ino), factory_(factory) {
   }
 
   /// Get the chunk at |idx|. If not in the map, creates and initializes it.
@@ -57,12 +61,12 @@ class FileChunkManager {
   /// exists and |create_if_missing| is false. Initialization failures are
   /// returned as Status and are never encoded as a null chunk.
   /// The shared pointer keeps the chunk alive if the map is changed.
-  utils::Status Get(metadata::ChunkIndex idx, bool create_if_missing, std::shared_ptr<chunk::IChunkSession> *out);
+  utils::Status Get(metadata::ChunkIndex idx, bool create_if_missing, std::shared_ptr<chunk::Chunk> *out);
 
   /// Snapshot chunks with pending data, including sealed chunks from a
   /// previous failed flush. The caller may attempt each snapshot entry once
   /// without repeatedly selecting the same failed chunk.
-  std::vector<std::shared_ptr<chunk::IChunkSession>> GetFlushable();
+  std::vector<std::shared_ptr<chunk::Chunk>> GetPendingWrites();
 
   /// Apply a file-size change to cached chunks. A partial boundary chunk keeps
   /// only its surviving prefix; chunks wholly beyond EOF are dropped locally.
@@ -71,6 +75,7 @@ class FileChunkManager {
 
  private:
   metadata::InodeID ino_;
+  const chunk::ChunkFactory *factory_;
   mutable utils::FiberMutex mutex_;
   Map chunks_;
 };

@@ -12,7 +12,7 @@
 #include <map>
 #include <utility>
 
-#include "chunk/IChunkOverwriteStrategy.hpp"
+#include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/Types.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
@@ -381,7 +381,7 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view old_name, 
     // Unlink detaches the victim. Empty directories are reclaimed by
     // Unlink itself (which frees the inode record, so the victim pointer must
     // not be dereferenced afterwards); file inodes survive when their last
-    // name disappears so the background Reclaimer can apply the local open-fd
+    // name disappears so the background OrphanReclaimer can apply the local open-fd
     // fence before crossing the metadata point of no return.
     Status status = Unlink(new_parent_ino, new_name);
     if (!status.ok()) {
@@ -421,7 +421,7 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name) {
 
   // Remove the directory entry. Decrement nlink to track the hard-link count.
   // The inode (and its chunks) survive here; durable orphan state tells the
-  // background Reclaimer when it may later attempt open-fd-aware preparation.
+  // background OrphanReclaimer when it may later attempt open-fd-aware preparation.
   UnlinkEntry(parent_ino, name);
   parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
@@ -435,7 +435,7 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name) {
   }
 
   // File: decrement nlink only. If no names remain, the inode stays alive
-  // until the background Reclaimer confirms no local fd is open and prepares
+  // until the background OrphanReclaimer confirms no local fd is open and prepares
   // the durable reclaim.
   child->attr.nlink--;
   if (child->attr.nlink == 0) {
@@ -624,11 +624,13 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
   if (expected.has_value() && expected->index != replacement.index) {
     return Status::InvalidArgument("replacement must preserve chunk index");
   }
-  const auto &strategy =
-      store_->chunk_strategy_ != nullptr ? *store_->chunk_strategy_ : chunk::DefaultChunkOverwriteStrategy();
+  if (store_->chunk_metadata_bridge_ == nullptr) {
+    return Status::Internal("chunk metadata bridge is not bound");
+  }
+  const auto &bridge = *store_->chunk_metadata_bridge_;
   auto queue_pending_delete = [&](const SwordFsChunk &head) {
     PendingDelete pending;
-    auto status = strategy.FreezeRejectedPublication(ino, head, intent, store_->chunk_size_, &pending);
+    auto status = bridge.FreezeRejectedPublication(ino, head, intent, store_->chunk_size_, &pending);
     if (status.ok()) {
       store_->pending_deletes_.insert_or_assign(pending.id, std::move(pending));
     }
@@ -665,7 +667,7 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
       // Persistent backends may register the candidate after a known metadata
       // outcome because cleanup completeness is not publication correctness.
       PendingDelete pending;
-      auto status = strategy.FreezePendingDelete(*this, ino, *expected, store_->chunk_size_, &pending);
+      auto status = bridge.FreezePendingDelete(*this, ino, *expected, store_->chunk_size_, &pending);
       if (!status.ok()) {
         return status;
       }
@@ -676,7 +678,7 @@ Status MemMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &e
     return Status::NotFound("chunk not found at index " + std::to_string(replacement.index));
   }
 
-  status = strategy.index_participant().Publish(*this, ino, expected, replacement, intent);
+  status = bridge.Publish(*this, ino, expected, replacement, intent);
   if (!status.ok()) {
     queue_pending_delete(replacement);
     return status;
@@ -728,9 +730,10 @@ Status MemMetaTxn::LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out) {
   if (!view.head.IsValidForChunkSize(store_->chunk_size_)) {
     return Status::Malformed("persisted chunk descriptor is invalid");
   }
-  const auto &strategy =
-      store_->chunk_strategy_ != nullptr ? *store_->chunk_strategy_ : chunk::DefaultChunkOverwriteStrategy();
-  status = strategy.index_participant().LoadPublished(*this, ino, view.head, &view.private_snapshot);
+  // A chunk can only enter the store through CommitChunk(), which fails
+  // closed until the mount-time bridge has been bound.
+  const auto &bridge = *store_->chunk_metadata_bridge_;
+  status = bridge.LoadPublished(*this, ino, view.head, &view.private_snapshot);
   if (!status.ok()) {
     return status;
   }
@@ -744,8 +747,9 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
     return Status::OK();
   }
   auto &cmap = ino_it->second;
-  const auto &strategy =
-      store_->chunk_strategy_ != nullptr ? *store_->chunk_strategy_ : chunk::DefaultChunkOverwriteStrategy();
+  // Non-empty chunk maps imply a successful CommitChunk(), and therefore
+  // an already-bound mount-time bridge.
+  const auto &bridge = *store_->chunk_metadata_bridge_;
   std::vector<ChunkIndexChange> changes;
   std::vector<PendingDelete> detached;
   for (const auto &[index, head] : cmap) {
@@ -756,7 +760,7 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
     const uint64_t start_offset = static_cast<uint64_t>(head.index) * store_->chunk_size_;
     if (start_offset >= new_size) {
       PendingDelete pending;
-      auto status = strategy.FreezePendingDelete(*this, ino, head, store_->chunk_size_, &pending);
+      auto status = bridge.FreezePendingDelete(*this, ino, head, store_->chunk_size_, &pending);
       if (!status.ok()) {
         return status;
       }
@@ -771,7 +775,7 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
       }
     }
   }
-  auto status = strategy.index_participant().Truncate(*this, ino, changes);
+  auto status = bridge.Truncate(*this, ino, changes);
   if (!status.ok()) {
     return status;
   }
@@ -828,14 +832,16 @@ Status MemMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work)
     std::sort(heads.begin(), heads.end(),
               [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
   }
-  const auto &strategy =
-      store_->chunk_strategy_ != nullptr ? *store_->chunk_strategy_ : chunk::DefaultChunkOverwriteStrategy();
+  if (store_->chunk_metadata_bridge_ == nullptr) {
+    return Status::Internal("chunk metadata bridge is not bound");
+  }
+  const auto &bridge = *store_->chunk_metadata_bridge_;
   ReclaimWork frozen;
-  auto status = strategy.FreezeReclaim(*this, ino, heads, store_->chunk_size_, &frozen);
+  auto status = bridge.FreezeReclaim(*this, ino, heads, store_->chunk_size_, &frozen);
   if (!status.ok()) {
     return status;
   }
-  status = strategy.index_participant().PrepareReclaim(*this, ino, heads);
+  status = bridge.PrepareReclaim(*this, ino, heads);
   if (!status.ok()) {
     return status;
   }

@@ -35,19 +35,18 @@ FIBER_TEST_F(RedisMetaImplTest, ReclaimKeepsLinkedInodesAndRemovesOrphans) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   // A linked inode is never reclaimable: preparation must change nothing.
-  std::optional<ReclaimWork> work;
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
-  EXPECT_FALSE(work.has_value());
+  EXPECT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  EXPECT_FALSE(PendingReclaim(file.ino).has_value());
   ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
 
   ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
-  ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
-  ASSERT_TRUE(work.has_value());
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  ASSERT_TRUE(PendingReclaim(file.ino).has_value());
   ASSERT_TRUE(impl_->CompleteReclaim(file.ino).ok());
   EXPECT_TRUE(impl_->GetInode(file.ino, &file).IsNotFound());
   // Both steps are idempotent: repeating them is a no-op, not an error.
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
-  EXPECT_FALSE(work.has_value());
+  EXPECT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  EXPECT_FALSE(PendingReclaim(file.ino).has_value());
   EXPECT_TRUE(impl_->CompleteReclaim(file.ino).ok());
 }
 
@@ -138,8 +137,8 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimFreezesRecordAndRemovesLiveMetadat
   ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk).ok());
   ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
 
-  std::optional<ReclaimWork> work;
-  ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  auto work = PendingReclaim(file.ino);
   ASSERT_TRUE(work.has_value());
   std::vector<swordfs::chunk::WholeObjectRef> refs;
   ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, kTestChunkSize, &refs).ok());
@@ -161,9 +160,8 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimFreezesRecordAndRemovesLiveMetadat
 
   // Replaying preparation returns the same frozen work without changing it:
   // that is exactly the crash-recovery path a later mount takes.
-  std::optional<ReclaimWork> replay;
-  ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &replay).ok());
-  EXPECT_EQ(replay, work);
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  EXPECT_EQ(PendingReclaim(file.ino), work);
 
   std::vector<InodeID> pending;
   ASSERT_TRUE(impl_
@@ -206,9 +204,9 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimIgnoresAdvisoryInodeCountState) {
       }
     });
 
-    std::optional<ReclaimWork> work;
-    const auto status = impl_->PrepareReclaim(file.ino, &work);
+    const auto status = impl_->PrepareReclaim(file.ino);
     ASSERT_TRUE(status.ok()) << counter_state << ": " << status.message();
+    auto work = PendingReclaim(file.ino);
     ASSERT_TRUE(work.has_value()) << counter_state;
     EXPECT_EQ(work->ino, file.ino) << counter_state;
     EXPECT_TRUE(impl_->GetInode(file.ino, &file).IsNotFound()) << counter_state;
@@ -235,8 +233,8 @@ FIBER_TEST_F(RedisMetaImplTest, CrashLeftPendingReclaimIsRetriedFromPersistedSta
   ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk).ok());
   ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
 
-  std::optional<ReclaimWork> prepared;
-  ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &prepared).ok());
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  auto prepared = PendingReclaim(file.ino);
   ASSERT_TRUE(prepared.has_value());
   // (crash here — the deletes never run)
 
@@ -253,8 +251,8 @@ FIBER_TEST_F(RedisMetaImplTest, CrashLeftPendingReclaimIsRetriedFromPersistedSta
                   .ok());
   EXPECT_EQ(pending, std::vector<InodeID>{file.ino});
 
-  std::optional<ReclaimWork> retried;
-  ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &retried).ok());
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  auto retried = PendingReclaim(file.ino);
   EXPECT_EQ(retried, prepared);
   ASSERT_TRUE(retried.has_value());
   std::vector<swordfs::chunk::WholeObjectRef> refs;
@@ -287,9 +285,7 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimRejectsFrozenRecordWithLiveInode) 
     EXPECT_TRUE(redis.exists(key.Chunk(file.ino)));
   });
 
-  std::optional<ReclaimWork> replay;
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &replay).ToErrno() == EBUSY);
-  EXPECT_FALSE(replay.has_value());
+  EXPECT_TRUE(impl_->PrepareReclaim(file.ino).ToErrno() == EBUSY);
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
     EXPECT_TRUE(redis.exists(key.Inode(file.ino)));
     EXPECT_TRUE(redis.exists(key.Chunk(file.ino)));
@@ -320,11 +316,9 @@ FIBER_TEST_F(RedisMetaImplTest, LinkRevivesOrphanCandidateAndClearsMarker) {
   RunWithRawRedisFromFiber(
       [&](sw::redis::Redis &redis) { redis.hset(key.Reclaims(), std::to_string(file.ino), encoded); });
 
-  std::optional<ReclaimWork> work;
   // A frozen record alongside a live inode is outside the current one-stage
   // protocol. Never reinterpret or cancel it while the inode is live.
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).ToErrno() == EBUSY);
-  EXPECT_FALSE(work.has_value());
+  EXPECT_TRUE(impl_->PrepareReclaim(file.ino).ToErrno() == EBUSY);
   RunWithRawRedisFromFiber(
       [&](sw::redis::Redis &redis) { EXPECT_TRUE(redis.hexists(key.Reclaims(), std::to_string(file.ino))); });
   SwordFsInode stored;
@@ -346,9 +340,7 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedPendingReclaimRecordIsRejected) {
   // PrepareReclaim replays an existing frozen record before consulting live
   // inode state. A corrupt pending record must therefore fail closed here too
   // rather than being treated as a fresh reclaim.
-  std::optional<ReclaimWork> replay;
-  EXPECT_TRUE(impl_->PrepareReclaim(4242, &replay).ToErrno() == EIO);
-  EXPECT_FALSE(replay.has_value());
+  EXPECT_TRUE(impl_->PrepareReclaim(4242).ToErrno() == EIO);
 
   // A decodable record whose serialized inode disagrees with its hash field
   // is corrupt too: acting on it could delete another inode's objects.
@@ -394,9 +386,7 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimRejectsPendingRecordForAnotherInod
   RunWithRawRedisFromFiber(
       [&](sw::redis::Redis &redis) { redis.hset(key.Reclaims(), std::to_string(file.ino), serialized); });
 
-  std::optional<ReclaimWork> work;
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).ToErrno() == EIO);
-  EXPECT_FALSE(work.has_value());
+  EXPECT_TRUE(impl_->PrepareReclaim(file.ino).ToErrno() == EIO);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, MalformedChunkMetadataIsRejectedByPrepareReclaim) {
@@ -408,11 +398,7 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedChunkMetadataIsRejectedByPrepareReclaim
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.hset(key.Chunk(file.ino), "0", "malformed"); });
   ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
 
-  ReclaimWork stale_output;
-  stale_output.ino = 9999;
-  std::optional<ReclaimWork> work = stale_output;
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &work).ToErrno() == EIO);
-  EXPECT_FALSE(work.has_value()) << "failed preparation must not leave stale caller-visible work";
+  EXPECT_TRUE(impl_->PrepareReclaim(file.ino).ToErrno() == EIO);
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
     EXPECT_FALSE(redis.hexists(key.Reclaims(), std::to_string(file.ino)));
     EXPECT_TRUE(redis.exists(key.Inode(file.ino)));
@@ -432,11 +418,8 @@ FIBER_TEST_F(RedisMetaImplTest, VisitorArgumentsAreValidated) {
   EXPECT_EQ(impl_->VisitPendingDeletesBatch(1, swordfs::metadata::PendingDeleteVisitorFn{}, &has_more).ToErrno(),
             EINVAL);
   EXPECT_EQ(impl_->VisitPendingDeletesBatch(1, [](const auto &) { return Status::OK(); }, nullptr).ToErrno(), EINVAL);
-  EXPECT_EQ(impl_->PrepareReclaim(kRootInodeId, nullptr).ToErrno(), EINVAL);
-
-  std::optional<ReclaimWork> work;
-  EXPECT_TRUE(impl_->PrepareReclaim(kRootInodeId, &work).ok());
-  EXPECT_FALSE(work.has_value());
+  EXPECT_TRUE(impl_->PrepareReclaim(kRootInodeId).ok());
+  EXPECT_FALSE(PendingReclaim(kRootInodeId).has_value());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, ReclaimVisitorsReturnSnapshotsAndPropagateAbort) {
@@ -464,9 +447,8 @@ FIBER_TEST_F(RedisMetaImplTest, ReclaimVisitorsReturnSnapshotsAndPropagateAbort)
   EXPECT_EQ(orphan_abort.ToErrno(), EBUSY);
   EXPECT_EQ(visited, (std::vector<InodeID>{first.ino}));
 
-  std::optional<ReclaimWork> frozen;
-  ASSERT_TRUE(impl_->PrepareReclaim(second.ino, &frozen).ok());
-  ASSERT_TRUE(frozen.has_value());
+  ASSERT_TRUE(impl_->PrepareReclaim(second.ino).ok());
+  ASSERT_TRUE(PendingReclaim(second.ino).has_value());
 
   visited.clear();
   ASSERT_TRUE(impl_

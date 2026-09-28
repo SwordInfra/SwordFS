@@ -1,100 +1,41 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// Chunk — one logical chunk of a file. Persisted object revisions are
-// immutable; rewriting a flushed chunk hydrates its current contents into a
-// WriteBuf and publishes a new object revision.
-
 #pragma once
 
-#include <cstdint>
-#include <memory>
-#include <optional>
-#include <vector>
+#include <cstddef>
 
-#include "chunk/IChunkOverwriteStrategy.hpp"
-#include "chunk/WriteBuf.hpp"
-#include "metadata/Types.hpp"
+#include "metadata/types/Common.hpp"
 #include "utils/Status.hpp"
-#include "utils/Synchronization.hpp"
 
-namespace swordfs {
-namespace metadata {
-class IMetaEngine;
+namespace folly {
+class IOBuf;
 }
-namespace storage {
-class IDataEngine;
-}
-}  // namespace swordfs
 
 namespace swordfs::chunk {
 
-class Chunk final : public IChunkSession {
+// One mount-local logical chunk. Mechanism-specific publication, private
+// metadata and cleanup details stay behind concrete implementations.
+class Chunk {
  public:
-  enum class State : uint8_t {
-    kDirty,     // latest complete local data is not yet confirmed authoritative
-    kFlushing,  // one immutable generation is being published remotely
-    kClean,     // authoritative publication is explicitly confirmed
-  };
+  virtual ~Chunk() = default;
 
-  /// Create a chunk ready to accept writes.
-  Chunk(metadata::InodeID ino, metadata::ChunkIndex index);
-
-  /// Query VolumeImpl's meta engine for existing published metadata at
-  /// this chunk's start offset. If found, transition to kClean; otherwise
-  /// stay in kDirty so the caller can write into the local buffer.
-  utils::Status Initialize() override;
-
-  /// Write |size| bytes from |data| at the given chunk-relative offset.
-  /// Returns InvalidArgument if the write would exceed chunk bounds.
-  utils::Status Write(off_t write_offset, const folly::IOBuf &data) override;
-
-  /// Read exactly |len| bytes starting at chunk-relative |off| into |out|.
-  /// A zero-length read is a no-op. On failure, leaves |out| unchanged.
-  utils::Status Read(off_t off, size_t len, folly::IOBuf *out) const override;
-
-  /// Publish the latest dirty buffer. A publication attempt is transient:
-  /// every non-successful outcome returns the chunk to kDirty with the local
-  /// data retained and writable.
-  utils::Status Flush() override;
-
-  /// Discard bytes at or beyond |size| within this chunk while preserving
-  /// the surviving prefix for a later flush/read.
-  void Truncate(size_t size) override;
-
-  bool IsClean() const override;
-  bool Flushable() const override;
-
-  // ──────────────────────────────────────────────────────────────
-  // Accessors
-  // ──────────────────────────────────────────────────────────────
-
-  metadata::ChunkIndex index() const override {
+  metadata::ChunkIndex Index() const {
     return index_;
   }
 
-  /// File-offset range: [StartOffset(), EndOffset()).
-  off_t StartOffset() const override;
-  off_t DataEnd() const override;
+  virtual utils::Status Read(size_t offset, size_t len, folly::IOBuf *out) const = 0;
+  virtual utils::Status Write(size_t offset, const folly::IOBuf &data) = 0;
+  virtual utils::Status Flush() = 0;
+  virtual void TruncateLocal(size_t size) = 0;
+  virtual bool HasPendingWrites() const = 0;
+
+ protected:
+  explicit Chunk(metadata::ChunkIndex index) : index_(index) {
+  }
 
  private:
-  metadata::SwordFsChunk BuildMeta(metadata::ChunkRevision revision, size_t size) const;
-  utils::Status LoadPublicationBaseline(std::optional<metadata::SwordFsChunk> *out) const;
-  utils::Status HydrateForWrite(const metadata::SwordFsChunk &published, std::shared_ptr<WriteBuf> *out) const;
-
- private:
-  metadata::InodeID ino_;
-  size_t max_chunk_size_;
-  off_t start_offset_ = 0;
-  mutable utils::FiberRWMutex mutex_;
-  std::shared_ptr<WriteBuf> wb_;
-  std::shared_ptr<WriteBuf> flushing_wb_;
-  State state_ = State::kDirty;
   metadata::ChunkIndex index_;
-  storage::IDataEngine *data_;
-  metadata::IMetaEngine *meta_;
-  std::optional<metadata::SwordFsChunk> published_chunk_;
-  bool refresh_publication_baseline_ = false;
 };
 
 }  // namespace swordfs::chunk

@@ -13,12 +13,14 @@
 #include <atomic>
 #include <barrier>
 #include <cerrno>
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 #include "utils/Status.hpp"
 
@@ -41,11 +43,20 @@ class MemMetaStoreConcurrencyTest : public ::testing::Test {
  protected:
   void SetUp() override {
     store_ = new MemMetaStore();
+    swordfs::metadata::MechanismPrivateStorePtr private_metadata;
+    ASSERT_TRUE(
+        store_->OpenPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, &private_metadata)
+            .ok());
+    ASSERT_TRUE(swordfs::chunk::internal::CreateChunkMetadataBridge(
+                    swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, private_metadata, &bridge_)
+                    .ok());
+    ASSERT_TRUE(store_->BindChunkMetadataBridge(bridge_.get()).ok());
   }
   void TearDown() override {
     delete store_;
   }
 
+  std::unique_ptr<swordfs::chunk::internal::ChunkMetadataBridge> bridge_;
   MemMetaStore *store_;
 };
 

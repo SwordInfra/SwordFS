@@ -7,7 +7,9 @@
 
 #include <algorithm>
 
-#include "chunk/IChunkOverwriteStrategy.hpp"
+#include "chunk/ChunkFactory.hpp"
+#include "chunk/internal/ChunkGcWorker.hpp"
+#include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
@@ -47,13 +49,7 @@ Status CreateDataEngine(std::string_view storage, const swordfs::storage::DataEn
 
 }  // namespace
 
-VolumeImpl::VolumeImpl() {
-  // Before format/load binds persisted configuration, the runtime uses the
-  // current default overwrite mechanism.
-  auto status =
-      chunk::CreateChunkOverwriteStrategy(metadata::ChunkOverwriteMechanism::kWholeObject, &chunk_overwrite_strategy_);
-  CHECK(status.ok());
-}
+VolumeImpl::VolumeImpl() = default;
 VolumeImpl::~VolumeImpl() {
   utils::ExpectInThreadDomain();
 }
@@ -69,8 +65,34 @@ VolumeImpl &VolumeImpl::Instance() {
   return *instance_;
 }
 
-const chunk::IChunkOverwriteStrategy *VolumeImpl::chunk_overwrite_strategy() const {
-  return chunk_overwrite_strategy_.get();
+Status VolumeImpl::ComposeChunkMetadata() {
+  private_metadata_.reset();
+  chunk_metadata_bridge_.reset();
+  auto status = meta_engine_->OpenPrivateMetadataStore(config_.chunk_overwrite_mechanism, &private_metadata_);
+  if (!status.ok()) {
+    return status;
+  }
+  status = chunk::internal::CreateChunkMetadataBridge(config_.chunk_overwrite_mechanism, private_metadata_,
+                                                      &chunk_metadata_bridge_);
+  if (!status.ok()) {
+    return status;
+  }
+  return meta_engine_->BindChunkMetadataBridge(chunk_metadata_bridge_.get());
+}
+
+Status VolumeImpl::ComposeChunkRuntime() {
+  chunk_factory_.reset();
+  chunk_gc_worker_.reset();
+  if (meta_engine_ == nullptr || private_metadata_ == nullptr || chunk_metadata_bridge_ == nullptr) {
+    return Status::Internal("chunk runtime requires composed metadata capabilities");
+  }
+  chunk_factory_ = std::make_unique<chunk::ChunkFactory>(config_.chunk_overwrite_mechanism, private_metadata_,
+                                                         meta_engine_.get(), data_engine_.get(), config_.chunk_size);
+  if (data_engine_ != nullptr) {
+    chunk_gc_worker_ = std::make_unique<chunk::internal::ChunkGcWorker>(
+        config_.chunk_overwrite_mechanism, config_.chunk_size, meta_engine_.get(), data_engine_.get());
+  }
+  return Status::OK();
 }
 
 Status VolumeImpl::CreateFrom(const config::ConfigCenter &config) {
@@ -107,20 +129,19 @@ Status VolumeImpl::CreateFrom(const FormatOptions &options) {
   config_.chunk_size = options.chunk_size;
   config_.chunk_overwrite_mechanism = options.chunk_overwrite_mechanism;
 
-  auto status = chunk::CreateChunkOverwriteStrategy(config_.chunk_overwrite_mechanism, &chunk_overwrite_strategy_);
-  if (!status.ok()) {
-    return status;
+  if (config_.chunk_overwrite_mechanism != metadata::ChunkOverwriteMechanism::kWholeObject) {
+    return Status::NotSupported("selected chunk overwrite mechanism is not implemented");
   }
 
-  status = CreateMetaEngine(options.meta_url, config_.name, &meta_engine_);
-  if (!status.ok()) {
-    return status;
-  }
-  status = meta_engine_->BindChunkOverwriteStrategy(chunk_overwrite_strategy_.get());
+  auto status = CreateMetaEngine(options.meta_url, config_.name, &meta_engine_);
   if (!status.ok()) {
     return status;
   }
   status = meta_engine_->Initialize();
+  if (!status.ok()) {
+    return status;
+  }
+  status = ComposeChunkMetadata();
   if (!status.ok()) {
     return status;
   }
@@ -157,11 +178,7 @@ Status VolumeImpl::LoadFrom(const MountOptions &options) {
     return status;
   }
 
-  status = chunk::CreateChunkOverwriteStrategy(config_.chunk_overwrite_mechanism, &chunk_overwrite_strategy_);
-  if (!status.ok()) {
-    return status;
-  }
-  status = meta_engine_->BindChunkOverwriteStrategy(chunk_overwrite_strategy_.get());
+  status = ComposeChunkMetadata();
   if (!status.ok()) {
     return status;
   }
@@ -183,14 +200,32 @@ Status VolumeImpl::LoadFrom(const MountOptions &options) {
     }
   }
 
-  return Status::OK();
+  return ComposeChunkRuntime();
 }
 
 void VolumeImpl::Shutdown() {
   utils::ExpectInThreadDomain();
+  StopRuntimeServices();
+  chunk_factory_.reset();
+  chunk_gc_worker_.reset();
   data_engine_.reset();
   meta_engine_.reset();
-  chunk_overwrite_strategy_.reset();
+  chunk_metadata_bridge_.reset();
+  private_metadata_.reset();
+}
+
+void VolumeImpl::StartRuntimeServices() {
+  utils::ExpectInThreadDomain();
+  if (chunk_gc_worker_ != nullptr) {
+    chunk_gc_worker_->Start();
+  }
+}
+
+void VolumeImpl::StopRuntimeServices() {
+  utils::ExpectInThreadDomain();
+  if (chunk_gc_worker_ != nullptr) {
+    chunk_gc_worker_->Stop();
+  }
 }
 
 }  // namespace swordfs::volume

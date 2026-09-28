@@ -44,7 +44,7 @@ class RedisKey {
 
   // Pending immutable-object deletes: hash of object key -> serialized
   // PendingDelete. Producers best-effort register obsolete identities after a
-  // known metadata outcome. The Reclaimer removes a field only after
+  // known metadata outcome. Private chunk GC removes a field only after
   // revalidating authoritative metadata and deleting the object.
   std::string PendingDeletes() const;
 

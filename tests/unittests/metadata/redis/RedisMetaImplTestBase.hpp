@@ -19,6 +19,8 @@
 #include "FiberTest.hpp"
 #include "chunk/ChunkObjectKey.hpp"
 #include "chunk/WholeObjectCleanup.hpp"
+#include "chunk/internal/ChunkMetadataBridge.hpp"
+#include "metadata/IPrivateMetadata.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/redis/RedisMetaImpl.hpp"
@@ -89,6 +91,15 @@ class RedisMetaImplTest : public ::testing::Test {
     volume.chunk_size = 4096;
     status = impl_->FormatVolume(volume);
     ASSERT_TRUE(status.ok()) << status.message();
+    swordfs::metadata::MechanismPrivateStorePtr private_metadata;
+    status =
+        impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, &private_metadata);
+    ASSERT_TRUE(status.ok()) << status.message();
+    status = swordfs::chunk::internal::CreateChunkMetadataBridge(
+        swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, std::move(private_metadata), &bridge_);
+    ASSERT_TRUE(status.ok()) << status.message();
+    status = impl_->BindChunkMetadataBridge(bridge_.get());
+    ASSERT_TRUE(status.ok()) << status.message();
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
 
@@ -136,6 +147,19 @@ class RedisMetaImplTest : public ::testing::Test {
     return out;
   }
 
+  std::optional<ReclaimWork> PendingReclaim(InodeID ino, RedisMetaImpl *impl = nullptr) const {
+    std::optional<ReclaimWork> out;
+    auto *target = impl != nullptr ? impl : impl_.get();
+    auto status = target->VisitPendingReclaims([&](const ReclaimWork &work) {
+      if (work.ino == ino) {
+        out = work;
+      }
+      return Status::OK();
+    });
+    EXPECT_TRUE(status.ok()) << status.message();
+    return out;
+  }
+
   void SeedPendingDelete(const metadata::PendingDelete &pending) const {
     const metadata::redis::RedisKey key(config_.db, volume_name_);
     std::string encoded;
@@ -143,6 +167,7 @@ class RedisMetaImplTest : public ::testing::Test {
     RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.hset(key.PendingDeletes(), pending.id, encoded); });
   }
 
+  std::unique_ptr<chunk::internal::ChunkMetadataBridge> bridge_;
   std::unique_ptr<RedisMetaImpl> impl_;
   RedisMetaConfig config_;
   std::string volume_name_;

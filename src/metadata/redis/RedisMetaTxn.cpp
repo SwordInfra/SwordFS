@@ -13,19 +13,15 @@
 #include <utility>
 #include <vector>
 
-#include "chunk/IChunkOverwriteStrategy.hpp"
+#include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 
 namespace swordfs::metadata {
 
 RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size,
-                           const chunk::IChunkOverwriteStrategy *strategy)
-    : txn_(txn),
-      key_(key),
-      chunk_size_(chunk_size),
-      strategy_(strategy != nullptr ? strategy : &chunk::DefaultChunkOverwriteStrategy()),
-      private_metadata_txn_(strategy_->mechanism()) {
+                           ChunkOverwriteMechanism mechanism, const chunk::internal::ChunkMetadataBridge *bridge)
+    : txn_(txn), key_(key), chunk_size_(chunk_size), chunk_metadata_bridge_(bridge), private_metadata_txn_(mechanism) {
 }
 
 std::string RedisMetaTxn::PrivateHash(std::string_view hash) const {
@@ -378,12 +374,15 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     heads.push_back(descriptor);
   }
   std::sort(heads.begin(), heads.end(), [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
+  if (chunk_metadata_bridge_ == nullptr) {
+    return utils::Status::Internal("chunk metadata bridge is not bound");
+  }
   ReclaimWork pending;
-  status = strategy_->FreezeReclaim(*this, ino, heads, chunk_size_, &pending);
+  status = chunk_metadata_bridge_->FreezeReclaim(*this, ino, heads, chunk_size_, &pending);
   if (!status.ok()) {
     return status;
   }
-  status = strategy_->index_participant().PrepareReclaim(*this, ino, heads);
+  status = chunk_metadata_bridge_->PrepareReclaim(*this, ino, heads);
   if (!status.ok()) {
     return status;
   }
@@ -919,13 +918,16 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
   // arithmetic are safe, so do not carry a second unreachable validation
   // branch inside the transaction.
   const uint64_t start_offset = static_cast<uint64_t>(replacement.index) * chunk_size_;
+  if (chunk_metadata_bridge_ == nullptr) {
+    return utils::Status::Internal("chunk metadata bridge is not bound");
+  }
 
   auto reject_publication = [&](utils::Status rejection) -> utils::Status {
     // A known logical rejection proves this uploaded replacement is not the
     // authoritative descriptor. Cleanup registration happens after this
     // transaction has a known outcome and is intentionally best effort.
     PendingDelete pending;
-    auto status = strategy_->FreezeRejectedPublication(ino, replacement, intent, chunk_size_, &pending);
+    auto status = chunk_metadata_bridge_->FreezeRejectedPublication(ino, replacement, intent, chunk_size_, &pending);
     if (!status.ok()) {
       return status;
     }
@@ -961,7 +963,7 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
     }
     if (expected.has_value()) {
       PendingDelete pending;
-      status = strategy_->FreezePendingDelete(*this, ino, *expected, chunk_size_, &pending);
+      status = chunk_metadata_bridge_->FreezePendingDelete(*this, ino, *expected, chunk_size_, &pending);
       if (!status.ok()) {
         return status;
       }
@@ -975,13 +977,14 @@ utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFs
     return status;
   }
 
-  status = strategy_->index_participant().Publish(*this, ino, expected, replacement, intent);
+  status = chunk_metadata_bridge_->Publish(*this, ino, expected, replacement, intent);
   if (!status.ok()) {
     // Returning a non-OK callback status discards any private writes already
     // queued by the participant. Keep the candidate cleanup for the caller's
     // best-effort registration after that definite rejection.
     PendingDelete pending;
-    auto cleanup_status = strategy_->FreezeRejectedPublication(ino, replacement, intent, chunk_size_, &pending);
+    auto cleanup_status =
+        chunk_metadata_bridge_->FreezeRejectedPublication(ino, replacement, intent, chunk_size_, &pending);
     if (cleanup_status.ok()) {
       cleanup_candidate = std::move(pending);
       publication_result = status;
@@ -1020,7 +1023,10 @@ utils::Status RedisMetaTxn::LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView
   if (view.head.index != idx || !view.head.IsValidForChunkSize(chunk_size_)) {
     return utils::Status::Malformed("persisted chunk descriptor does not match its canonical identity");
   }
-  status = strategy_->index_participant().LoadPublished(*this, ino, view.head, &view.private_snapshot);
+  if (chunk_metadata_bridge_ == nullptr) {
+    return utils::Status::Internal("chunk metadata bridge is not bound");
+  }
+  status = chunk_metadata_bridge_->LoadPublished(*this, ino, view.head, &view.private_snapshot);
   if (!status.ok()) {
     return status;
   }
@@ -1060,6 +1066,10 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
     return status;
   }
 
+  if (chunk_metadata_bridge_ == nullptr) {
+    return utils::Status::Internal("chunk metadata bridge is not bound");
+  }
+
   std::vector<ChunkIndexChange> changes;
   for (const auto &[field, head] : chunks) {
     (void)field;
@@ -1069,7 +1079,7 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
     if (start_offset >= new_size) {
       if (detached_chunks != nullptr) {
         PendingDelete pending;
-        status = strategy_->FreezePendingDelete(*this, ino, head, chunk_size_, &pending);
+        status = chunk_metadata_bridge_->FreezePendingDelete(*this, ino, head, chunk_size_, &pending);
         if (!status.ok()) {
           return status;
         }
@@ -1085,7 +1095,7 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
       }
     }
   }
-  status = strategy_->index_participant().Truncate(*this, ino, changes);
+  status = chunk_metadata_bridge_->Truncate(*this, ino, changes);
   if (!status.ok()) {
     return status;
   }

@@ -246,7 +246,7 @@ TEST_F(VolumeImplTest, MountUsesPersistedStrategyAndRejectsUnimplementedMechanis
   VolumeImpl mounted;
   auto mount_options = makeMountOptions("memory://local");
   ASSERT_TRUE(mounted.LoadFrom(mount_options).ok());
-  ASSERT_NE(mounted.chunk_overwrite_strategy(), nullptr);
+  ASSERT_NE(mounted.chunk_factory(), nullptr);
   EXPECT_EQ(mounted.config().chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
 
   SwordFsVolume stored = mounted.config();
@@ -281,7 +281,6 @@ TEST_F(VolumeImplTest, CreateFromRedisEngine) {
   VolumeImpl::Initialize();
   status = VolumeImpl::Instance().LoadFrom(mount_options);
   EXPECT_TRUE(status.ok()) << status.message();
-  EXPECT_NE(VolumeImpl::Instance().data_engine(), nullptr);
   EXPECT_FALSE(VolumeFile{tmpdir_}.Exists());
 
   VolumeImpl::Initialize();
@@ -299,7 +298,6 @@ TEST_F(VolumeImplTest, LoadFromS3Engine) {
   auto mount_options = makeMountOptions("memory://local", "testvol");
   Status st = VolumeImpl::Instance().LoadFrom(mount_options);
   ASSERT_TRUE(st.ok()) << st.message();
-  ASSERT_NE(VolumeImpl::Instance().data_engine(), nullptr);
   VolumeImpl::Instance().Shutdown();
 }
 

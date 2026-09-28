@@ -27,8 +27,9 @@
 #include "utils/Logging.hpp"
 #include "vfs/FuseInodeCache.hpp"
 #include "vfs/InodeHandle.hpp"
-#include "vfs/Reclaimer.hpp"
+#include "vfs/OrphanReclaimer.hpp"
 #include "vfs/VfsImpl.hpp"
+#include "volume/VolumeImpl.hpp"
 
 using swordfs::vfs::VfsImpl;
 
@@ -121,7 +122,8 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   // The reclaim worker runs one pass immediately, then on foreground wakeups
   // and periodic safety scans. Durable metadata remains the restart authority;
   // there is no separate startup-reconciliation path racing the worker.
-  ::swordfs::vfs::Reclaimer::Instance().Start();
+  ::swordfs::vfs::OrphanReclaimer::Instance().Start();
+  ::swordfs::volume::VolumeImpl::Instance().StartRuntimeServices();
 
   // Writeback cache is intentionally disabled: with it enabled the kernel
   // answers writes from its own page cache, which masks daemon-side
@@ -157,7 +159,8 @@ void VfsHookFactory::SwordFsDestroy(void *userdata) {
   SWORDFS_LOG_INFO << "SwordFS filesystem unmounted";
   // Stop the reclaim worker before the fiber runtime it borrows is torn
   // down (and before the engines go away in VolumeImpl::Shutdown).
-  ::swordfs::vfs::Reclaimer::Instance().Stop();
+  ::swordfs::vfs::OrphanReclaimer::Instance().Stop();
+  ::swordfs::volume::VolumeImpl::Instance().StopRuntimeServices();
   ::swordfs::utils::ShutdownFiberRuntime();
 }
 

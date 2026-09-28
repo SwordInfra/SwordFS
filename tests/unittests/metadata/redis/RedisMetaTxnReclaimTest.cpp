@@ -39,7 +39,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimScansAuthoritativeChunksInsideTransaction) 
 
   std::optional<ReclaimWork> work;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.PrepareReclaim(file.ino, work);
   });
 
@@ -78,7 +78,7 @@ TEST(RedisMetaTxnTest, LinkIgnoresUnrelatedFrozenWorkChanges) {
   int attempts = 0;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     SwordFsInode parent;
     auto status = txn.LookupInode(kRootInodeId, &parent);
     if (!status.ok()) {
@@ -129,7 +129,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimIgnoresUnrelatedFrozenWorkChanges) {
   std::optional<ReclaimWork> work;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     auto status = txn.PrepareReclaim(kIno, work);
     if (!status.ok()) {
       return status;
@@ -175,7 +175,7 @@ TEST(RedisMetaTxnTest, LinkCommitInvalidatesConcurrentReclaimSnapshot) {
   std::optional<ReclaimWork> work;
   const auto status = reclaim_store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     auto status = txn.PrepareReclaim(kIno, work);
     if (!status.ok()) {
       return status;
@@ -185,7 +185,7 @@ TEST(RedisMetaTxnTest, LinkCommitInvalidatesConcurrentReclaimSnapshot) {
     }
 
     return link_store.Transact([&](RedisKvTxn &link_kv_txn) {
-      RedisMetaTxn link_txn(link_kv_txn, key, 4096);
+      RedisMetaTxn link_txn(link_kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
       SwordFsInode parent;
       auto status = link_txn.LookupInode(kRootInodeId, &parent);
       if (!status.ok()) {
@@ -239,7 +239,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimConvergesAfterAmbiguousExec) {
   std::optional<ReclaimWork> first_work;
   const auto first_status = first_store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     auto status = txn.PrepareReclaim(kIno, first_work);
     if (!status.ok()) {
       return status;
@@ -258,7 +258,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimConvergesAfterAmbiguousExec) {
   RedisMetaClient retry_store(retry_config);
   std::optional<ReclaimWork> replay;
   const auto retry_status = retry_store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.PrepareReclaim(kIno, replay);
   });
 

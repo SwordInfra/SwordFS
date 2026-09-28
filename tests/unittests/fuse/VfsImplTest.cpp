@@ -33,6 +33,7 @@
 #include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/ChunkObjectKey.hpp"
+#include "chunk/internal/ChunkGcWorker.hpp"
 #include "fuse/Vfs.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
@@ -41,7 +42,7 @@
 #include "vfs/FileHandle.hpp"
 #include "vfs/FuseInodeCache.hpp"
 #include "vfs/InodeHandle.hpp"
-#include "vfs/Reclaimer.hpp"
+#include "vfs/OrphanReclaimer.hpp"
 #include "vfs/VfsImpl.hpp"
 #include "volume/VolumeImpl.hpp"
 
@@ -84,6 +85,17 @@ struct FuseReplyCapture {
 
 FuseReplyCapture *CaptureFor(fuse_req_t req) {
   return reinterpret_cast<FuseReplyCapture *>(req);
+}
+
+swordfs::utils::Status ReconcileBackgroundCleanup(swordfs::storage::IDataEngine *data) {
+  auto status = swordfs::vfs::OrphanReclaimer::Instance().Reconcile();
+  if (!status.ok()) {
+    return status;
+  }
+  auto &volume = swordfs::volume::VolumeImpl::Instance();
+  swordfs::chunk::internal::ChunkGcWorker worker(volume.config().chunk_overwrite_mechanism, volume.chunk_size(),
+                                                 volume.meta_engine(), data);
+  return worker.Reconcile();
 }
 
 }  // namespace
@@ -572,8 +584,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return open_status_;
   }
-  Status PrepareReclaim(InodeID, std::optional<swordfs::metadata::ReclaimWork> *work) override {
-    work->reset();
+  Status PrepareReclaim(InodeID) override {
     return Status::OK();
   }
   Status CompleteReclaim(InodeID) override {
@@ -2446,7 +2457,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkPublishesBackgroundCleanupAndOpenDesc
 
   // A worker pass while the descriptor is live must leave the durable orphan
   // untouched rather than crossing the metadata point of no return.
-  ASSERT_TRUE(swordfs::vfs::Reclaimer::Instance().Reconcile().ok());
+  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
   EXPECT_TRUE(data_->delete_calls.empty());
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{ino}));
 
@@ -2455,7 +2466,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkPublishesBackgroundCleanupAndOpenDesc
   EXPECT_TRUE(data_->delete_calls.empty());
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{ino}));
 
-  ASSERT_TRUE(swordfs::vfs::Reclaimer::Instance().Reconcile().ok());
+  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
   EXPECT_EQ(data_->delete_calls, (std::vector<std::string>{key}));
   EXPECT_FALSE(data_->Contains(key));
   EXPECT_TRUE(meta_->GetInode(ino, nullptr).IsNotFound());
@@ -2482,14 +2493,14 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkReturnsBeforeBackgroundCleanupAndRetr
 
   // The worker prepares the inode, then the injected object-delete failure
   // leaves the frozen record durable for retry.
-  EXPECT_EQ(swordfs::vfs::Reclaimer::Instance().Reconcile().ToErrno(), EIO);
+  EXPECT_EQ(ReconcileBackgroundCleanup(data_).ToErrno(), EIO);
   EXPECT_TRUE(meta_->GetInode(ino, nullptr).IsNotFound());
   EXPECT_EQ(PendingReclaims(), (std::vector<InodeID>{ino}));
   EXPECT_TRUE(OrphanCandidates().empty());
 
   // Reconciliation retries the idempotent delete and completes the reclaim.
   data_->fail_keys.clear();
-  ASSERT_TRUE(swordfs::vfs::Reclaimer::Instance().Reconcile().ok());
+  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
   EXPECT_FALSE(data_->Contains(key));
   EXPECT_TRUE(PendingReclaims().empty());
 }
@@ -2519,7 +2530,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkOfAHardlinkedNameDeletesNothing) {
   EXPECT_TRUE(data_->delete_calls.empty());
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{ino}));
 
-  ASSERT_TRUE(swordfs::vfs::Reclaimer::Instance().Reconcile().ok());
+  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
   EXPECT_FALSE(data_->Contains(key));
   EXPECT_TRUE(meta_->GetInode(ino, nullptr).IsNotFound());
 }
@@ -2541,7 +2552,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwritePublishesBackgroundCleanupFo
   EXPECT_TRUE(data_->Contains(moved_key));
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{victim}));
 
-  ASSERT_TRUE(swordfs::vfs::Reclaimer::Instance().Reconcile().ok());
+  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
   EXPECT_EQ(data_->delete_calls, (std::vector<std::string>{victim_key}));
   EXPECT_FALSE(data_->Contains(victim_key));
   EXPECT_TRUE(data_->Contains(moved_key));
@@ -2575,7 +2586,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwritePublishesBackgroundCleanupAn
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{victim}));
 
   // A worker pass while the victim descriptor is live must defer cleanup.
-  ASSERT_TRUE(swordfs::vfs::Reclaimer::Instance().Reconcile().ok());
+  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
   EXPECT_TRUE(data_->delete_calls.empty());
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{victim}));
 
@@ -2583,7 +2594,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwritePublishesBackgroundCleanupAn
   // the actual reclaim.
   ASSERT_TRUE(handle->Release().ok());
   EXPECT_TRUE(data_->delete_calls.empty());
-  ASSERT_TRUE(swordfs::vfs::Reclaimer::Instance().Reconcile().ok());
+  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
   EXPECT_EQ(data_->delete_calls, (std::vector<std::string>{victim_key}));
   EXPECT_FALSE(data_->Contains(victim_key));
   EXPECT_TRUE(meta_->GetInode(victim, nullptr).IsNotFound());
@@ -2610,11 +2621,11 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, RenameReturnsBeforeBackgroundCleanupAndRetr
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{victim}));
   EXPECT_TRUE(PendingReclaims().empty());
 
-  EXPECT_EQ(swordfs::vfs::Reclaimer::Instance().Reconcile().ToErrno(), EIO);
+  EXPECT_EQ(ReconcileBackgroundCleanup(data_).ToErrno(), EIO);
   EXPECT_EQ(PendingReclaims(), (std::vector<InodeID>{victim}));
 
   data_->fail_keys.clear();
-  ASSERT_TRUE(swordfs::vfs::Reclaimer::Instance().Reconcile().ok());
+  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
   EXPECT_FALSE(data_->Contains(victim_key));
   EXPECT_TRUE(PendingReclaims().empty());
 }

@@ -40,8 +40,8 @@
 #include "metadata/types/Reclaim.hpp"
 #include "utils/Synchronization.hpp"
 
-namespace swordfs::chunk {
-class IChunkOverwriteStrategy;
+namespace swordfs::chunk::internal {
+class ChunkMetadataBridge;
 }
 
 namespace swordfs::metadata {
@@ -55,7 +55,8 @@ class MemMetaStore {
   }
   ~MemMetaStore() = default;
 
-  utils::Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy);
+  utils::Status OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out);
+  utils::Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge);
   void SetChunkSize(uint64_t chunk_size) {
     chunk_size_ = chunk_size;
   }
@@ -98,7 +99,7 @@ class MemMetaStore {
   mutable utils::FiberMutex mutex_;
   std::atomic<InodeID> next_ino_;
   ChunkRevision next_chunk_revision_ = 1;
-  const chunk::IChunkOverwriteStrategy *chunk_strategy_ = nullptr;
+  const chunk::internal::ChunkMetadataBridge *chunk_metadata_bridge_ = nullptr;
   MechanismPrivateStorePtr private_metadata_;
   uint64_t chunk_size_ = 0;
 
@@ -107,7 +108,7 @@ class MemMetaStore {
 
   // Chunk metadata: inode → (index → SwordFsChunk).
   folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, SwordFsChunk>> chunks_;
-  // Private hash names and fields are supplied by the selected strategy.
+  // Private hash names and fields are supplied by the selected chunk mechanism.
   folly::F14FastMap<std::string, folly::F14FastMap<std::string, std::string>> private_chunk_index_;
 
   // Orphan candidates: inodes whose nlink dropped to zero. Published by the
@@ -123,7 +124,7 @@ class MemMetaStore {
   folly::F14FastMap<InodeID, ReclaimWork> pending_reclaims_;
 
   // Mechanism-private work made obsolete by truncate or publication. The
-  // background Reclaimer asks the selected mechanism to validate/delete it;
+  // private chunk GC validates reachability and deletes it;
   // opaque ids only provide stable acknowledgement and retry identity.
   folly::F14FastMap<std::string, PendingDelete> pending_deletes_;
 };

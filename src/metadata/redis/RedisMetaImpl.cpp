@@ -65,9 +65,14 @@ RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view vol
 
 RedisMetaImpl::~RedisMetaImpl() = default;
 
-Status RedisMetaImpl::BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) {
+Status RedisMetaImpl::OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out) {
   utils::ExpectInThreadDomain();
-  return ops_.BindChunkOverwriteStrategy(strategy);
+  return ops_.OpenPrivateMetadataStore(mechanism, out);
+}
+
+Status RedisMetaImpl::BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) {
+  utils::ExpectInThreadDomain();
+  return ops_.BindChunkMetadataBridge(bridge);
 }
 
 utils::Status RedisMetaImpl::Initialize() {
@@ -490,12 +495,9 @@ Status RedisMetaImpl::Open(InodeID ino, uint64_t *size) {
   return Status::OK();
 }
 
-Status RedisMetaImpl::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) {
+Status RedisMetaImpl::PrepareReclaim(InodeID ino) {
   utils::ExpectInFiberDomain();
-  if (work == nullptr) {
-    return Status::InvalidArgument("reclaim work output is null");
-  }
-  return ops_.PrepareReclaim(ino, work);
+  return ops_.PrepareReclaim(ino);
 }
 
 Status RedisMetaImpl::CompleteReclaim(InodeID ino) {

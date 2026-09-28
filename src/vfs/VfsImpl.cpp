@@ -20,7 +20,7 @@
 #include "vfs/FuseInodeCache.hpp"
 #include "vfs/Handle.hpp"
 #include "vfs/InodeHandle.hpp"
-#include "vfs/Reclaimer.hpp"
+#include "vfs/OrphanReclaimer.hpp"
 #include "volume/VolumeImpl.hpp"
 
 #define FUSE_USE_VERSION 312
@@ -168,12 +168,12 @@ utils::Status VfsImpl::MkDir(fuse_ino_t parent, const char *name, mode_t mode, f
 utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
   // The metadata mutation owns last-link detection and publishes durable
   // orphan work atomically. Foreground unlink never performs object-store
-  // deletion; it only nudges the background reclaimer after commit.
+  // deletion; it only nudges OrphanReclaimer after commit.
   auto status = VolumeImpl::Instance().meta_engine()->Unlink(parent, name);
   if (!status.ok()) {
     return status;
   }
-  Reclaimer::Instance().Wake();
+  OrphanReclaimer::Instance().Wake();
   return utils::Status::OK();
 }
 
@@ -205,7 +205,7 @@ utils::Status VfsImpl::Rename(fuse_ino_t parent, const char *name, fuse_ino_t ne
   }
   // A non-overwriting rename creates no orphan, but Wake() is deliberately
   // cheap/coalesced and keeps VFS independent of metadata link-count details.
-  Reclaimer::Instance().Wake();
+  OrphanReclaimer::Instance().Wake();
   return utils::Status::OK();
 }
 
@@ -289,7 +289,7 @@ utils::Status VfsImpl::Release(fuse_ino_t ino, uint64_t fh) {
   // A close may have released the last local reference of a durable orphan.
   // Wake is cheap/coalesced and deliberately does not ask InodeHandle whether
   // this inode is orphaned; durable metadata remains the sole work authority.
-  Reclaimer::Instance().Wake();
+  OrphanReclaimer::Instance().Wake();
   return status;
 }
 

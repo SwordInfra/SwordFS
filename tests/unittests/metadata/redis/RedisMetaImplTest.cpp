@@ -63,16 +63,23 @@ FIBER_TEST_F(RedisMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) 
 }
 
 FIBER_TEST_F(RedisMetaImplTest, PrivateSequenceBindingCoexistsWithLegacyChunkRevisionAllocator) {
-  swordfs::metadata::RecordingRedisStrategy strategy;
+  swordfs::metadata::RecordingRedisBridge bridge;
+  swordfs::metadata::MechanismPrivateStorePtr private_metadata;
   Status bind_status;
-  swordfs::test::RunInTestThreadFromFiber([&] { bind_status = impl_->BindChunkOverwriteStrategy(&strategy); });
+  swordfs::test::RunInTestThreadFromFiber([&] {
+    bind_status =
+        impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism::kRedisCache, &private_metadata);
+    if (bind_status.ok()) {
+      bind_status = impl_->BindChunkMetadataBridge(&bridge);
+    }
+  });
   ASSERT_TRUE(bind_status.ok()) << bind_status.message();
-  ASSERT_NE(strategy.private_metadata, nullptr);
-  EXPECT_EQ(strategy.private_metadata->mechanism(), swordfs::metadata::ChunkOverwriteMechanism::kRedisCache);
+  ASSERT_NE(private_metadata, nullptr);
+  EXPECT_EQ(private_metadata->mechanism(), swordfs::metadata::ChunkOverwriteMechanism::kRedisCache);
 
   uint64_t private_revision = 0;
   ASSERT_TRUE(
-      strategy.private_metadata
+      private_metadata
           ->AllocateSequence(
               swordfs::metadata::PrivateSequenceTag<swordfs::metadata::ChunkOverwriteMechanism::kRedisCache, 33>{},
               &private_revision)
@@ -84,19 +91,17 @@ FIBER_TEST_F(RedisMetaImplTest, PrivateSequenceBindingCoexistsWithLegacyChunkRev
   EXPECT_EQ(legacy_revision, 1U);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, PrivateCapabilityBindingRejectsInvalidOrRejectedStrategy) {
-  Status null_status;
-  Status rejected_status;
-  swordfs::metadata::RecordingRedisStrategy rejecting_strategy;
-  rejecting_strategy.reject_private_metadata_binding = true;
+FIBER_TEST_F(RedisMetaImplTest, PrivateCapabilityCompositionRejectsNullOutputsAndBridge) {
+  Status null_store_status;
+  Status null_bridge_status;
   swordfs::test::RunInTestThreadFromFiber([&] {
-    null_status = impl_->BindChunkOverwriteStrategy(nullptr);
-    rejected_status = impl_->BindChunkOverwriteStrategy(&rejecting_strategy);
+    null_store_status =
+        impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism::kRedisCache, nullptr);
+    null_bridge_status = impl_->BindChunkMetadataBridge(nullptr);
   });
 
-  EXPECT_EQ(null_status.ToErrno(), EINVAL);
-  EXPECT_EQ(rejected_status.ToErrno(), EIO);
-  EXPECT_EQ(rejecting_strategy.private_metadata, nullptr);
+  EXPECT_EQ(null_store_status.ToErrno(), EINVAL);
+  EXPECT_EQ(null_bridge_status.ToErrno(), EINVAL);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, OpenDirReturnsIndependentIteratorsAndSupportsSeek) {
@@ -490,8 +495,8 @@ FIBER_TEST_F(RedisMetaImplTest, MknodSpecialNodesUseOrdinaryNamespaceLifecycle) 
                   .ok());
   EXPECT_EQ(orphans, std::vector<InodeID>{fifo.ino});
 
-  std::optional<ReclaimWork> work;
-  ASSERT_TRUE(impl_->PrepareReclaim(fifo.ino, &work).ok());
+  ASSERT_TRUE(impl_->PrepareReclaim(fifo.ino).ok());
+  auto work = PendingReclaim(fifo.ino);
   ASSERT_TRUE(work.has_value());
   std::vector<swordfs::chunk::WholeObjectRef> refs;
   ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, kTestChunkSize, &refs).ok());
@@ -535,8 +540,8 @@ FIBER_TEST_F(RedisMetaImplTest, UnlinkAndRmdirCoverSuccessAndTypeChecks) {
                   })
                   .ok());
   EXPECT_EQ(orphans, std::vector<InodeID>{file.ino});
-  std::optional<ReclaimWork> work;
-  ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  auto work = PendingReclaim(file.ino);
   ASSERT_TRUE(work.has_value());
   EXPECT_EQ(work->ino, file.ino);
   std::vector<swordfs::chunk::WholeObjectRef> refs;
@@ -1111,7 +1116,6 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedInodeMetadataIsRejectedAcrossReadAndWri
   SwordFsInode out;
   SwordFsAttr attr;
   SwordFsChunk chunk{.index = 0, .revision = 1, .size = 1};
-  std::optional<ReclaimWork> reclaim_work;
   std::string target;
   EXPECT_TRUE(impl_->Lookup(kRootInodeId, "file", &out).ToErrno() == EIO);
   EXPECT_TRUE(impl_->GetInode(file.ino, &out).ToErrno() == EIO);
@@ -1123,8 +1127,7 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedInodeMetadataIsRejectedAcrossReadAndWri
   EXPECT_TRUE(impl_->Link(file.ino, kRootInodeId, "hard", nullptr).ToErrno() == EIO);
   EXPECT_TRUE(impl_->Readlink(file.ino, &target).ToErrno() == EIO);
   EXPECT_TRUE(impl_->Open(file.ino).ToErrno() == EIO);
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino, &reclaim_work).ToErrno() == EIO);
-  EXPECT_FALSE(reclaim_work.has_value());
+  EXPECT_TRUE(impl_->PrepareReclaim(file.ino).ToErrno() == EIO);
   EXPECT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk).ToErrno() == EIO);
   EXPECT_TRUE(impl_->Truncate(file.ino, 1).ToErrno() == EIO);
 }

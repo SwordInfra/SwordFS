@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-#include "chunk/IChunkOverwriteStrategy.hpp"
+#include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/redis/RedisBackendContext.hpp"
 #include "metadata/redis/RedisDirIterator.hpp"
@@ -54,18 +54,22 @@ RedisMetaOps::~RedisMetaOps() {
   backend_->Shutdown();
 }
 
-utils::Status RedisMetaOps::BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) {
+utils::Status RedisMetaOps::OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out) {
   utils::ExpectInThreadDomain();
-  if (strategy == nullptr) {
-    return utils::Status::InvalidArgument("chunk strategy is null");
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("private metadata store output is null");
   }
-  auto private_metadata = std::make_shared<RedisPrivateMetadataStore>(backend_, key_, strategy->mechanism());
-  auto status = strategy->BindPrivateMetadata(private_metadata);
-  if (!status.ok()) {
-    return status;
+  private_metadata_ = std::make_shared<RedisPrivateMetadataStore>(backend_, key_, mechanism);
+  *out = private_metadata_;
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaOps::BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) {
+  utils::ExpectInThreadDomain();
+  if (bridge == nullptr) {
+    return utils::Status::InvalidArgument("chunk metadata bridge is null");
   }
-  chunk_strategy_ = strategy;
-  private_metadata_ = std::move(private_metadata);
+  chunk_metadata_bridge_ = bridge;
   return utils::Status::OK();
 }
 
@@ -262,13 +266,10 @@ utils::Status RedisMetaOps::TouchInode(InodeID ino, SetAttrField fields) {
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.TouchInode(ino, fields); });
 }
 
-utils::Status RedisMetaOps::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) {
+utils::Status RedisMetaOps::PrepareReclaim(InodeID ino) {
   utils::ExpectInFiberDomain();
-  if (work == nullptr) {
-    return utils::Status::InvalidArgument("reclaim work output is null");
-  }
-  work->reset();
-  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PrepareReclaim(ino, *work); });
+  std::optional<ReclaimWork> work;
+  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PrepareReclaim(ino, work); });
 }
 
 utils::Status RedisMetaOps::CompleteReclaim(InodeID ino) {
@@ -584,7 +585,9 @@ utils::Status RedisMetaOps::TransactFromFiber(const std::function<utils::Status(
   return backend_->executor().RunFromFiber([&] {
     return backend_->client().Transact([&](RedisKvTxn &kv_txn) {
       utils::ExpectInThreadDomain();
-      RedisMetaTxn txn(kv_txn, key_, chunk_size_, chunk_strategy_);
+      const auto mechanism =
+          private_metadata_ != nullptr ? private_metadata_->mechanism() : ChunkOverwriteMechanism::kWholeObject;
+      RedisMetaTxn txn(kv_txn, key_, chunk_size_, mechanism, chunk_metadata_bridge_);
       return callback(txn);
     });
   });

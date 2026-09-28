@@ -11,10 +11,9 @@
 #include <shared_mutex>
 #include <vector>
 
-#include "chunk/IChunkOverwriteStrategy.hpp"
+#include "chunk/ChunkFactory.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "utils/Logging.hpp"
-#include "vfs/Reclaimer.hpp"
 #include "volume/VolumeImpl.hpp"
 
 namespace swordfs::vfs {
@@ -34,8 +33,7 @@ class MultiChunkReadWriter {
   /// Submit a read from |c| at chunk-relative |off| for up to |len|
   /// bytes into |window|.  |window| should be a takeOwnership IOBuf
   /// pointing to the correct slice of the parent output buffer.
-  void SubmitRead(std::shared_ptr<chunk::IChunkSession> c, off_t off, size_t len,
-                  std::unique_ptr<folly::IOBuf> window) {
+  void SubmitRead(std::shared_ptr<chunk::Chunk> c, size_t off, size_t len, std::unique_ptr<folly::IOBuf> window) {
     auto p = std::make_unique<Pending>();
     p->window = std::move(window);
     auto &fm = folly::fibers::FiberManager::getFiberManager();
@@ -84,9 +82,9 @@ class MultiChunkFlusher {
  public:
   using Status = utils::Status;
 
-  void Submit(std::shared_ptr<chunk::IChunkSession> chunk) {
+  void Submit(std::shared_ptr<chunk::Chunk> chunk) {
     auto pending = std::make_unique<Pending>();
-    pending->index = chunk->index();
+    pending->index = chunk->Index();
     auto &fm = folly::fibers::FiberManager::getFiberManager();
     fm.addTask([chunk = std::move(chunk), raw = pending.get()] {
       raw->status = chunk->Flush();
@@ -128,7 +126,7 @@ class MultiChunkFlusher {
 // ────────────────────────────────────────────────────────────────
 
 utils::Status FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_missing,
-                                    std::shared_ptr<chunk::IChunkSession> *out) {
+                                    std::shared_ptr<chunk::Chunk> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("FileChunkManager::Get output is null");
   }
@@ -142,8 +140,11 @@ utils::Status FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_mis
     }
   }
 
-  auto session = volume::VolumeImpl::Instance().chunk_overwrite_strategy()->OpenSession(ino_, idx);
-  auto status = session->Initialize();
+  if (factory_ == nullptr) {
+    return utils::Status::Internal("FileChunkManager requires a chunk factory");
+  }
+  std::shared_ptr<chunk::Chunk> session;
+  auto status = factory_->Open(ino_, idx, create_if_missing, &session);
   if (!status.ok()) {
     return status;
   }
@@ -152,18 +153,18 @@ utils::Status FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_mis
   auto it = chunks_.find(idx);
   if (it != chunks_.end()) {
     *out = it->second;
-  } else if (session->IsClean() || create_if_missing) {
+  } else if (session != nullptr) {
     it = chunks_.try_emplace(idx, std::move(session)).first;
     *out = it->second;
   }
   return utils::Status::OK();
 }
 
-std::vector<std::shared_ptr<chunk::IChunkSession>> FileChunkManager::GetFlushable() {
+std::vector<std::shared_ptr<chunk::Chunk>> FileChunkManager::GetPendingWrites() {
   std::lock_guard<utils::FiberMutex> lock(mutex_);
-  std::vector<std::shared_ptr<chunk::IChunkSession>> flushable;
+  std::vector<std::shared_ptr<chunk::Chunk>> flushable;
   for (auto &[idx, chunk] : chunks_) {
-    if (chunk->Flushable()) {
+    if (chunk->HasPendingWrites()) {
       flushable.push_back(chunk);
     }
   }
@@ -182,7 +183,7 @@ void FileChunkManager::TruncateToSize(size_t size, size_t chunk_size) {
     if (it->first > boundary_idx || (it->first == boundary_idx && boundary_size == 0)) {
       it = chunks_.erase(it);
     } else if (it->first == boundary_idx) {
-      it->second->Truncate(boundary_size);
+      it->second->TruncateLocal(boundary_size);
       ++it;
     } else {
       ++it;
@@ -199,7 +200,7 @@ FileReadWriter::FileReadWriter(InodeID ino, size_t max_parallel_flushes)
       chunk_size_(volume::VolumeImpl::Instance().chunk_size()),
       max_parallel_flushes_(std::max<size_t>(1, max_parallel_flushes)),
       meta_(volume::VolumeImpl::Instance().meta_engine()),
-      chunks_(ino) {
+      chunks_(ino, volume::VolumeImpl::Instance().chunk_factory()) {
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -225,7 +226,7 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
       return status;
     }
 
-    std::shared_ptr<chunk::IChunkSession> c;
+    std::shared_ptr<chunk::Chunk> c;
     status = chunks_.Get(position.index, /*create_if_missing=*/true, &c);
     if (!status.ok()) {
       return status;
@@ -239,9 +240,9 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
     auto slice = folly::IOBuf::takeOwnership(
         const_cast<uint8_t *>(buf.data()) + static_cast<size_t>(cursor - static_cast<uint64_t>(off)), n, n,
         +[](void *, void *) {}, nullptr, false);
-    status = c->Write(static_cast<off_t>(cursor), *slice);
+    status = c->Write(static_cast<size_t>(position.offset_in_chunk), *slice);
     if (!status.ok()) {
-      SWORDFS_LOG_ERROR << "FileReadWriter::Write FAILED: ino=" << ino_ << " off=" << cursor << " chunk=" << c->index()
+      SWORDFS_LOG_ERROR << "FileReadWriter::Write FAILED: ino=" << ino_ << " off=" << cursor << " chunk=" << c->Index()
                         << " — " << status.message();
       return status;
     }
@@ -298,25 +299,16 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
       multi.Drain();
       return status;
     }
-    std::shared_ptr<chunk::IChunkSession> c;
+    std::shared_ptr<chunk::Chunk> c;
     status = chunks_.Get(position.index, /*create_if_missing=*/false, &c);
     if (!status.ok()) {
       multi.Drain();
       return status;
     }
 
-    // cursor may fall within the chunk's index range (e.g. a 64 MiB
-    // chunk that only has 500 bytes of data — offsets [500, 64 MiB)
-    // are holes that still map to the same index). We must guard with
-    // DataEnd() because converting `DataEnd - cursor` to size_t would
-    // overflow to a huge value when cursor >= DataEnd, leading
-    // to a bogus window_cap and an infinite loop.
-    const off_t data_end = c != nullptr ? c->DataEnd() : 0;
-    const bool has_data = c != nullptr && cursor < static_cast<uint64_t>(data_end);
-
-    if (has_data) {
-      const auto chunk_off = static_cast<off_t>(position.offset_in_chunk);
-      size_t window_cap = std::min(remaining, static_cast<size_t>(static_cast<uint64_t>(data_end) - cursor));
+    if (c != nullptr) {
+      const auto chunk_off = static_cast<size_t>(position.offset_in_chunk);
+      const size_t window_cap = std::min(remaining, chunk_size_ - chunk_off);
 
       auto window = folly::IOBuf::takeOwnership(
           write_start + static_cast<size_t>(cursor - read_start), window_cap, static_cast<std::size_t>(0),
@@ -432,7 +424,7 @@ utils::Status FileReadWriter::Flush() {
     barrier_live_size = live_size_;
   }
   utils::Status first_error;
-  auto flushable = chunks_.GetFlushable();
+  auto flushable = chunks_.GetPendingWrites();
   for (size_t begin = 0; begin < flushable.size(); begin += max_parallel_flushes_) {
     MultiChunkFlusher flusher;
     const size_t end = std::min(flushable.size(), begin + max_parallel_flushes_);
@@ -443,13 +435,6 @@ utils::Status FileReadWriter::Flush() {
     if (!status.ok() && first_error.ok()) {
       first_error = status;
     }
-  }
-
-  if (!flushable.empty()) {
-    // Rewrite success or a definite rejection may have registered best-effort
-    // cleanup. Physical deletion is centralized in the Reclaimer, whose
-    // authoritative metadata check is the delete-safety boundary.
-    Reclaimer::Instance().Wake();
   }
 
   if (first_error.ok()) {
@@ -486,7 +471,6 @@ utils::Status FileReadWriter::Truncate(size_t size) {
     live_size_.reset();
     ++size_state_epoch_;
   }
-  Reclaimer::Instance().Wake();
   return utils::Status::OK();
 }
 
@@ -509,7 +493,6 @@ utils::Status FileReadWriter::SetAttr(const metadata::SwordFsAttr &attr, metadat
       live_size_.reset();
       ++size_state_epoch_;
     }
-    Reclaimer::Instance().Wake();
   }
   ApplyLiveSize(out);
   return utils::Status::OK();

@@ -11,8 +11,11 @@
 #include <sys/stat.h>
 
 #include <cerrno>
+#include <memory>
+#include <utility>
 
 #include "FiberTest.hpp"
+#include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
@@ -30,12 +33,22 @@ class MemMetaImplRenameTest : public ::testing::Test {
  protected:
   void SetUp() override {
     impl_ = new MemMetaImpl();
+    swordfs::metadata::MechanismPrivateStorePtr private_metadata;
+    auto status =
+        impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, &private_metadata);
+    ASSERT_TRUE(status.ok()) << status.message();
+    status = swordfs::chunk::internal::CreateChunkMetadataBridge(
+        swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, std::move(private_metadata), &bridge_);
+    ASSERT_TRUE(status.ok()) << status.message();
+    status = impl_->BindChunkMetadataBridge(bridge_.get());
+    ASSERT_TRUE(status.ok()) << status.message();
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
   void TearDown() override {
     delete impl_;
   }
 
+  std::unique_ptr<swordfs::chunk::internal::ChunkMetadataBridge> bridge_;
   MemMetaImpl *impl_;
 };
 
@@ -96,9 +109,17 @@ FIBER_TEST_F(MemMetaImplRenameTest, RenameOverwriteFilePublishesVictimForReclaim
   // the VFS layer needs to decide whether an open handle still references it.
   SwordFsInode victim;
   EXPECT_TRUE(impl_->GetInode(dst.ino, &victim).ok());
-  std::optional<swordfs::metadata::ReclaimWork> reclaim_work;
-  ASSERT_TRUE(impl_->PrepareReclaim(dst.ino, &reclaim_work).ok());
-  ASSERT_TRUE(reclaim_work.has_value());
+  ASSERT_TRUE(impl_->PrepareReclaim(dst.ino).ok());
+  size_t pending_reclaims = 0;
+  ASSERT_TRUE(impl_
+                  ->VisitPendingReclaims([&](const swordfs::metadata::ReclaimWork &work) {
+                    if (work.ino == dst.ino) {
+                      ++pending_reclaims;
+                    }
+                    return Status::OK();
+                  })
+                  .ok());
+  EXPECT_EQ(pending_reclaims, 1U);
   ASSERT_TRUE(impl_->CompleteReclaim(dst.ino).ok());
   EXPECT_TRUE(impl_->GetInode(dst.ino, &victim).IsNotFound());
 }

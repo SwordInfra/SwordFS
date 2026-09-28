@@ -28,8 +28,8 @@
 using Status = swordfs::utils::Status;
 using SwordFsContext = swordfs::utils::SwordFsContext;
 
-namespace swordfs::chunk {
-class IChunkOverwriteStrategy;
+namespace swordfs::chunk::internal {
+class ChunkMetadataBridge;
 }
 
 namespace swordfs::metadata {
@@ -76,9 +76,17 @@ class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
 
-  /// Bind the volume-selected strategy before runtime metadata operations.
-  virtual Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *) {
-    return Status::NotSupported("metadata backend does not support chunk strategies");
+  /// Open the mount-selected mechanism-private backend capability. The
+  /// concrete mechanism interprets typed records; common metadata code only
+  /// owns the capability lifetime and transaction participation.
+  virtual Status OpenPrivateMetadataStore(ChunkOverwriteMechanism, MechanismPrivateStorePtr *) {
+    return Status::NotSupported("metadata backend does not support private chunk metadata");
+  }
+
+  /// Transitional #384 bridge used only by legacy common-authority chunk
+  /// transactions. VFS/runtime callers never observe this callback surface.
+  virtual Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *) {
+    return Status::NotSupported("metadata backend does not support the chunk metadata bridge");
   }
 
   /// Initialize a metadata backend connection and validate backend-specific
@@ -158,8 +166,7 @@ class IMetaEngine {
   /// metadata lookup merely to establish its local logical-EOF boundary.
   virtual Status Open(InodeID ino, uint64_t *size = nullptr) = 0;
 
-  /// Prepare the reclaim of |ino| and return the frozen object identities
-  /// that must be deleted from the data engine.
+  /// Prepare reclaim of |ino| without exposing physical cleanup work.
   ///
   /// This is the inode's reclaim point of no return. In one atomic metadata
   /// mutation the engine must:
@@ -169,23 +176,21 @@ class IMetaEngine {
   ///   - drop the live inode (and its orphan marker) so a concurrent Link
   ///     can no longer revive an inode whose objects are about to go away.
   ///
-  /// On success, |*work| contains the frozen work when the point of no return
-  /// was crossed (or was crossed by an earlier replay). An empty optional is
-  /// the ordinary no-op outcome: the inode was already reclaimed, is not a
-  /// reclaimable file, or a concurrent Link revived it. In that case no
-  /// object may be deleted. Backend failures remain Status errors rather than
-  /// being overloaded into the no-op outcome.
+  /// OK includes both crossing/replaying the point of no return and ordinary
+  /// no-op outcomes (already reclaimed, unreclaimable, or revived). Any
+  /// durable ReclaimWork remains internal and is consumed by the chunk GC
+  /// worker; callers receive no physical identities.
   ///
   /// The memory backend mirrors these semantics for the lifetime of the
   /// process; persistent backends must persist the pending record in the same
   /// metadata transition so mount-time reconciliation can finish object
   /// deletion after a crash.
-  virtual Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) = 0;
+  virtual Status PrepareReclaim(InodeID ino) = 0;
 
   /// Remove the durable pending-reclaim record for |ino| together with its
-  /// frozen chunk metadata. Called only after every object identity returned
-  /// by PrepareReclaim has been deleted. Idempotent: a missing record is not
-  /// an error.
+  /// frozen chunk metadata. Called only after every physical target in that
+  /// durable reclaim record has been safely deleted. Idempotent: a missing
+  /// record is not an error.
   virtual Status CompleteReclaim(InodeID ino) = 0;
 
   /// Visit every inode currently published as an orphan candidate — that is,

@@ -24,8 +24,8 @@
 #include "utils/Status.hpp"
 #include "utils/Synchronization.hpp"
 
-namespace swordfs::chunk {
-class IChunkOverwriteStrategy;
+namespace swordfs::chunk::internal {
+class ChunkMetadataBridge;
 }
 
 namespace swordfs::metadata {
@@ -53,7 +53,8 @@ class RedisMetaOps {
   RedisMetaOps &operator=(RedisMetaOps &&) = delete;
 
   utils::Status Initialize();
-  utils::Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy);
+  utils::Status OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out);
+  utils::Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge);
   utils::Status FormatVolume(const SwordFsVolume &config);
   utils::Status LoadVolume(SwordFsVolume *config);
   utils::Status CreateDirIterator(InodeID ino, std::vector<SwordFsEntry> prefix_entries,
@@ -67,7 +68,7 @@ class RedisMetaOps {
   utils::Status SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out = nullptr);
   utils::Status Truncate(InodeID ino, uint64_t size);
   utils::Status TouchInode(InodeID ino, SetAttrField fields);
-  utils::Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work);
+  utils::Status PrepareReclaim(InodeID ino);
   utils::Status CompleteReclaim(InodeID ino);
   utils::Status VisitOrphanCandidates(const std::function<utils::Status(InodeID)> &visitor);
   utils::Status VisitPendingReclaims(const std::function<utils::Status(const ReclaimWork &)> &visitor);
@@ -107,7 +108,7 @@ class RedisMetaOps {
 
  private:
   std::shared_ptr<RedisBackendContext> backend_;
-  const chunk::IChunkOverwriteStrategy *chunk_strategy_ = nullptr;
+  const chunk::internal::ChunkMetadataBridge *chunk_metadata_bridge_ = nullptr;
   MechanismPrivateStorePtr private_metadata_;
   redis::RedisKey key_;
   uint64_t chunk_size_ = 0;

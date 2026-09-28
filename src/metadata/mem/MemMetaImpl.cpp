@@ -50,12 +50,14 @@ MemMetaImpl::~MemMetaImpl() {
   utils::ExpectInThreadDomain();
 }
 
-Status MemMetaImpl::BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) {
+Status MemMetaImpl::OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out) {
   utils::ExpectInThreadDomain();
-  if (strategy == nullptr) {
-    return Status::InvalidArgument("chunk strategy is null");
-  }
-  return store_.BindChunkOverwriteStrategy(strategy);
+  return store_.OpenPrivateMetadataStore(mechanism, out);
+}
+
+Status MemMetaImpl::BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) {
+  utils::ExpectInThreadDomain();
+  return store_.BindChunkMetadataBridge(bridge);
 }
 
 // Transaction model: every method below runs its metadata mutation as a
@@ -450,12 +452,10 @@ Status MemMetaImpl::Open(InodeID ino, uint64_t *size) {
   return status;
 }
 
-Status MemMetaImpl::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) {
+Status MemMetaImpl::PrepareReclaim(InodeID ino) {
   utils::ExpectInFiberDomain();
-  if (work == nullptr) {
-    return Status::InvalidArgument("reclaim work output is null");
-  }
-  return store_.Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, work); });
+  std::optional<ReclaimWork> work;
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.PrepareReclaim(ino, &work); });
 }
 
 Status MemMetaImpl::CompleteReclaim(InodeID ino) {
