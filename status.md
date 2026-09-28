@@ -41,7 +41,7 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 
 ## Execution metadata
 
-- SwordFS commit: `7e6b3ca3a2a178db156546ba1d011c962b0d6b85`
+- SwordFS commit: `4629afa4b87311e779ea1c5975857c70a2f33d75`
 - fstests commit: `a370dcbed43563f0462801e889e0eceb93c7cfad`
 - fstests patchset: `conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19`
 - fstests selector: `generic/quick`
@@ -49,8 +49,8 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 - libfuse: `fusermount3 version: 3.18.2`
 - Runner: `GitHub Actions (9 fstests shards)`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36398476168
-Recorded at: 2026-09-28T08:52:54+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36402186811
+Recorded at: 2026-09-28T09:28:33+00:00
 
 ## Historical main-branch progress
 
@@ -68,4 +68,4 @@ Recorded at: 2026-09-28T08:52:54+00:00
 | 2026-09-28T02:46:14+00:00 | `b2024540db14` | PASS | 17.36% | 112 | 112 | 18 | 515 | 0 | 533 |
 | 2026-09-28T07:37:50+00:00 | `20d61ea022ad` | PASS | 17.52% | 113 | 113 | 17 | 515 | 0 | 532 |
 
-Last fully healthy baseline: `7e6b3ca3a2a178db156546ba1d011c962b0d6b85`
+Last fully healthy baseline: `4629afa4b87311e779ea1c5975857c70a2f33d75`
