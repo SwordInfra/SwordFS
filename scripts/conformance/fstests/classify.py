@@ -46,7 +46,12 @@ EVIDENCE_REF_RE = re.compile(
 STAT_TIMESTAMP_RE = re.compile(
     r"^(?P<prefix>\s*(?:Access|Modify|Change|Birth):)\s+.*?(?P<delta>\([0-9:.+-]+\))\s*$"
 )
-MOUNTFAIL_TIMESTAMP_RE = re.compile(r'^(?P<prefix>".*" failed at ).*$')
+MOUNTFAIL_TIMESTAMP_RE = re.compile(
+    r'^(?P<prefix>".*" failed at )'
+    r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) "
+    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +"
+    r"[0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC [0-9]{4}$"
+)
 FSTESTS_RUN_DMESG_RE = re.compile(
     r"^\[\s*[0-9]+\.[0-9]+\]\s+run fstests [a-z0-9_-]+/[0-9]+ at [0-9]{4}-[0-9]{2}-[0-9]{2} "
 )
@@ -326,6 +331,21 @@ def load_gaps(path: pathlib.Path) -> dict[str, Gap]:
 
 
 def load_expected_evidence(evidence_dir: pathlib.Path, gaps: dict[str, Gap]) -> dict[str, str]:
+    expected_paths = {gap.expected_evidence for gap in gaps.values() if gap.expected_evidence != "-"}
+    if not evidence_dir.is_dir():
+        raise BaselineError(f"expected FAIL evidence directory does not exist: {evidence_dir}")
+    actual_paths = {
+        path.relative_to(evidence_dir).as_posix()
+        for path in evidence_dir.rglob("*")
+        if path.is_file()
+    }
+    missing = sorted(expected_paths - actual_paths)
+    orphaned = sorted(actual_paths - expected_paths)
+    if missing:
+        raise BaselineError("missing checked-in FAIL evidence: " + ", ".join(missing))
+    if orphaned:
+        raise BaselineError("orphaned checked-in FAIL evidence: " + ", ".join(orphaned))
+
     evidence: dict[str, str] = {}
     for test, gap in gaps.items():
         if gap.expected_evidence == "-":
