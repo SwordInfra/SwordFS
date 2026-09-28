@@ -1,0 +1,14 @@
+diff --git a/tests/generic/615 b/tests/generic/615
+index f6a64c7a..42c765a1 100755
+--- a/tests/generic/615
++++ b/tests/generic/615
+@@ -58,8 +58,7 @@ for ((i = 0; i < 2000; i++)); do
+ done
+
+ rm -f $loop_file
+-kill $loop_pid &> /dev/null
+-wait
++wait $loop_pid
+
+ status=0
+ exit

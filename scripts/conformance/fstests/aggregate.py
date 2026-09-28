@@ -99,6 +99,7 @@ def _aggregate_environment(environments: list[dict[str, object]], shard_count: i
         "backend": common_value("backend"),
         "fstests_repository": common_value("fstests_repository"),
         "fstests_selector": common_value("fstests_selector"),
+        "fstests_patchset": common_value("fstests_patchset"),
         "liburing_commit": common_value("liburing_commit"),
     }
 

@@ -1488,6 +1488,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusComposesTrackedLiveSizeWithoutRe
   struct stat getattr_attr{};
   ASSERT_TRUE(VfsImpl::GetAttr(kFileIno, &getattr_attr).ok());
   ASSERT_EQ(getattr_attr.st_size, static_cast<off_t>(payload.size()));
+  ASSERT_EQ(getattr_attr.st_blocks, 1);
   const int get_inode_calls_before_plus = mock_meta_->get_inode_calls();
 
   uint64_t dir_fh = 0;
@@ -1500,10 +1501,43 @@ FIBER_TEST_F(VfsImplIntegrationTest, ReadDirPlusComposesTrackedLiveSizeWithoutRe
   std::memcpy(&result, buf.data(), sizeof(result));
   EXPECT_EQ(result.entry_out.nodeid, kFileIno);
   EXPECT_EQ(result.entry_out.attr.size, static_cast<uint64_t>(getattr_attr.st_size));
+  EXPECT_EQ(result.entry_out.attr.blocks, static_cast<uint64_t>(getattr_attr.st_blocks));
   EXPECT_EQ(mock_meta_->get_inodes_calls(), 1);
   EXPECT_EQ(mock_meta_->get_inode_calls(), get_inode_calls_before_plus);
 
   EXPECT_TRUE(VfsImpl::ReleaseDir(1, dir_fh).ok());
+  EXPECT_TRUE(VfsImpl::Release(kFileIno, fi.fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, GetAttrReportsBlocksForCachedUnflushedWrite) {
+  constexpr InodeID kFileIno = 42;
+  constexpr size_t kWriteSize = 64 * 1024;
+
+  SwordFsInode persistent;
+  persistent.ino = kFileIno;
+  persistent.attr = SwordFsAttr(kFileIno, S_IFREG | 0644, 100, 200);
+  persistent.attr.nlink = 1;
+  persistent.attr.size = 0;
+  persistent.attr.blocks = 0;
+  mock_meta_->set_inode(persistent);
+
+  struct fuse_file_info fi = {};
+  fi.flags = O_RDWR;
+  ASSERT_TRUE(VfsImpl::Open(kFileIno, &fi).ok());
+
+  auto data = folly::IOBuf::copyBuffer(std::string(kWriteSize, 'x'));
+  ASSERT_TRUE(VfsImpl::Write(kFileIno, *data, 0, fi.fh).ok());
+
+  struct stat attr{};
+  ASSERT_TRUE(VfsImpl::GetAttr(kFileIno, &attr).ok());
+  EXPECT_EQ(attr.st_size, static_cast<off_t>(kWriteSize));
+  EXPECT_EQ(attr.st_blocks, 1);
+
+  // GETATTR keeps its existing single authoritative refresh; block accounting
+  // must not add another metadata read. Publication is covered independently
+  // at the FileReadWriter layer.
+  EXPECT_EQ(mock_meta_->get_inode_calls(), 1);
+
   EXPECT_TRUE(VfsImpl::Release(kFileIno, fi.fh).ok());
 }
 

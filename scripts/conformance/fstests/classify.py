@@ -527,6 +527,7 @@ def render_markdown(payload: dict[str, object], observations: list[Observation])
             "",
             f"- SwordFS commit: `{metadata.get('swordfs_commit', 'unknown')}`",
             f"- fstests commit: `{metadata.get('fstests_commit', 'unknown')}`",
+            f"- fstests patchset: `{metadata.get('fstests_patchset', 'none')}`",
             f"- fstests selector: `{metadata.get('fstests_group', 'unknown')}`",
             f"- Kernel: `{metadata.get('kernel', 'unknown')}`",
             f"- libfuse: `{metadata.get('libfuse', 'unknown')}`",
