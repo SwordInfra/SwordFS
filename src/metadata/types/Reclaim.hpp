@@ -16,7 +16,6 @@ namespace swordfs::metadata {
 // strategy may decode payload; the common metadata engine merely persists it.
 struct ReclaimWork {
   InodeID ino = 0;
-  uint32_t index_format_version = 0;
   std::string payload;
 
   bool operator==(const ReclaimWork &) const = default;
@@ -29,7 +28,6 @@ struct ReclaimWork {
 // reachability before deleting and the common worker acknowledges by id.
 struct PendingDelete {
   std::string id;
-  uint32_t index_format_version = 0;
   std::string payload;
 
   bool operator==(const PendingDelete &) const = default;

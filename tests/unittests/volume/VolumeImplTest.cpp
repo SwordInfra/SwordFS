@@ -208,7 +208,6 @@ TEST_F(VolumeImplTest, CreateFromSucceeds) {
   const auto status = vol.CreateFrom(options);
   EXPECT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(vol.config().chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
-  EXPECT_EQ(vol.config().chunk_index_format_version, 2U);
 }
 
 TEST_F(VolumeImplTest, CreateFromRejectsInvalidBucketUrl) {
@@ -238,7 +237,7 @@ TEST_F(VolumeImplTest, FormatRejectsUnimplementedStrategy) {
   EXPECT_FALSE(VolumeFile{options.name}.Exists());
 }
 
-TEST_F(VolumeImplTest, MountUsesPersistedStrategyAndRejectsUnsupportedVersion) {
+TEST_F(VolumeImplTest, MountUsesPersistedStrategyAndRejectsUnimplementedMechanism) {
   auto format_options = makeFormatOptions("memory://local");
   VolumeImpl formatted;
   const auto format_status = formatted.CreateFrom(format_options);
@@ -251,7 +250,7 @@ TEST_F(VolumeImplTest, MountUsesPersistedStrategyAndRejectsUnsupportedVersion) {
   EXPECT_EQ(mounted.config().chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
 
   SwordFsVolume stored = mounted.config();
-  stored.chunk_index_format_version = 1;
+  stored.chunk_overwrite_mechanism = ChunkOverwriteMechanism::kRedisCache;
   const auto unsupported_options = makeMountOptions("memory://local");
   stored.name = unsupported_options.name;
   ASSERT_TRUE(VolumeFile{stored.name}.Write(stored).ok());

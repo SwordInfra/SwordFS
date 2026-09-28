@@ -154,10 +154,6 @@ class RecordingRedisStrategy final : public chunk::IChunkOverwriteStrategy {
     return metadata::ChunkOverwriteMechanism::kRedisCache;
   }
 
-  uint32_t index_format_version() const override {
-    return 1;
-  }
-
   std::shared_ptr<chunk::IChunkSession> OpenSession(InodeID file_ino, ChunkIndex chunk_index) const override {
     return chunk::DefaultChunkOverwriteStrategy().OpenSession(file_ino, chunk_index);
   }

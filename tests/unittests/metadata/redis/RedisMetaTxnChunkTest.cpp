@@ -280,7 +280,7 @@ TEST(RedisMetaTxnTest, RegisterPendingDeletesRejectsInvalidEnvelope) {
   RedisMetaClient store(config);
   const redis::RedisKey key(config.db, UniqueRedisName("register-invalid-cleanup"));
   sw::redis::Redis redis(ConnectionOptions(config));
-  const std::vector<PendingDelete> work{{.id = "", .index_format_version = 1, .payload = "opaque"}};
+  const std::vector<PendingDelete> work{{.id = "", .payload = "opaque"}};
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096);

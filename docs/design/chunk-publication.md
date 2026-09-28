@@ -2,19 +2,19 @@
 
 ## Volume-fixed overwrite strategy
 
-The formatted volume records one stable `ChunkOverwriteMechanism` enum value
-and its index-format version. Human-readable names such as `whole_object` are
+The formatted volume records one stable `ChunkOverwriteMechanism` enum value.
+Human-readable names such as `whole_object` are
 accepted only at the CLI/configuration boundary and are converted there to the
 typed value. Mount constructs one implementation from the persisted enum;
 runtime strategy selection and private-index namespacing do not carry or
 compare arbitrary mechanism strings. There is no per-file or per-chunk
 mechanism tag and no live switching. Until the chunk-slice implementation is
 activated by #270–#275, the existing immutable whole-object path is the only
-selectable implementation. Its current chunk-index format is **v2**. Version 2
-stores logical chunk indexes as 64-bit values in the common descriptor and in
-whole-object cleanup/reclaim payloads. Whole-object v1 is an incompatible beta
-format and is rejected at strategy construction/mount rather than migrated or
-dual-decoded. Known but unimplemented enum values such as
+selectable implementation. Logical chunk indexes are 64-bit values in the
+common descriptor and in whole-object cleanup/reclaim payloads. SwordFS is
+still beta, so current metadata is interpreted only by the current code and no
+historical whole-object layout number is carried through the runtime strategy
+API. Known but unimplemented enum values such as
 `chunk_slice` and `redis_cache` are rejected by strategy construction.
 
 Directory entries, inodes, and the file-to-logical-chunk head are shared. A
@@ -65,12 +65,14 @@ private snapshot in one Memory lock or validated Redis WATCH/EXEC read
 transaction. The session interprets the snapshot after that transaction;
 object-store I/O does not hold a metadata transaction open.
 
-Reclaim and pending-delete records carry versioned opaque strategy payloads.
+Reclaim and pending-delete records carry opaque strategy payloads.
 The common metadata engine persists their envelope and queue identity without
 decoding physical references. The common Reclaimer schedules, retries, and
 acknowledges those records; only the selected strategy decodes them, checks
-live reachability where applicable, and issues physical deletion. Unknown
-versions or malformed payloads fail closed and remain queued. Orphan
+live reachability where applicable, and issues physical deletion. Generic
+`BufCodec` schema and exact `RecordType` checks frame the envelopes and the
+whole-object payload; malformed payloads or identity mismatches fail closed and
+remain queued. Orphan
 preparation freezes the strategy payload in the same transaction that removes
 the live inode and chunk heads; later replay uses the frozen bytes, not a
 reconstructed target from current state.

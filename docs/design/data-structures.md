@@ -23,8 +23,8 @@ flowchart LR
 | `SwordFsInode` | ID, attributes including size and `nlink`, parent ID, symlink target | Canonical inode attributes; removing a name need not remove the inode |
 | `SwordFsChunk` | Index, revision, size; start offset is derived from `index * chunk_size` | Current shared publication head for one logical chunk; `revision`/`size` remain transitional under #312 |
 | Orphan candidate | Inode ID and cleanup marker | Last-link removal recorded while the live inode still exists |
-| `ReclaimWork` | Inode ID and vector of `ReclaimChunk` | Replaces live inode/chunk metadata atomically at reclaim preparation |
-| `ReclaimChunk` | Frozen descriptor and exact object key | Deletion target independent of mutable live state |
+| `ReclaimWork` | Inode ID and opaque strategy payload | Replaces live inode/chunk metadata atomically at reclaim preparation |
+| `PendingDelete` | Opaque queue ID and strategy payload | Best-effort cleanup candidate whose physical identity is validated by the selected strategy |
 
 A directory entry does not duplicate full inode attributes. `parent_ino` is
 not a reverse index of every hard link: namespace lookup follows directory

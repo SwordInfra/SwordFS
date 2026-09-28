@@ -318,21 +318,17 @@ TEST(ChunkOverwriteStrategyTest, FactoryUsesTypedMechanismSelection) {
   using swordfs::metadata::ChunkOverwriteMechanism;
 
   std::unique_ptr<swordfs::chunk::IChunkOverwriteStrategy> strategy;
-  auto status = swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, 2, &strategy);
+  auto status = swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, &strategy);
   ASSERT_TRUE(status.ok()) << status.message();
   ASSERT_NE(strategy, nullptr);
   EXPECT_EQ(strategy->mechanism(), ChunkOverwriteMechanism::kWholeObject);
-  EXPECT_EQ(strategy->index_format_version(), swordfs::metadata::kWholeObjectChunkIndexFormatVersion);
 
-  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kChunkSlice, 1, &strategy).ToErrno(),
+  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kChunkSlice, &strategy).ToErrno(),
             ENOSYS);
   EXPECT_EQ(strategy, nullptr);
-  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, 1, &strategy).ToErrno(),
+  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(static_cast<ChunkOverwriteMechanism>(99), &strategy).ToErrno(),
             ENOSYS);
-  EXPECT_EQ(
-      swordfs::chunk::CreateChunkOverwriteStrategy(static_cast<ChunkOverwriteMechanism>(99), 1, &strategy).ToErrno(),
-      ENOSYS);
-  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, 2, nullptr).ToErrno(),
+  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, nullptr).ToErrno(),
             EINVAL);
 }
 
