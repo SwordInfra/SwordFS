@@ -150,6 +150,10 @@ class RecordingRedisStrategy final : public chunk::IChunkOverwriteStrategy {
  public:
   RecordingRedisIndex index;
 
+  utils::Status BindPrivateMetadata(IChunkPrivateMetadataStore *store) override {
+    return store == nullptr ? utils::Status::InvalidArgument("private metadata store is null") : utils::Status::OK();
+  }
+
   metadata::ChunkOverwriteMechanism mechanism() const override {
     return metadata::ChunkOverwriteMechanism::kRedisCache;
   }

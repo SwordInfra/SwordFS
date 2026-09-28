@@ -19,6 +19,7 @@
 #include "FiberTest.hpp"
 #include "chunk/ChunkObjectKey.hpp"
 #include "chunk/WholeObjectCleanup.hpp"
+#include "metadata/IChunkPrivateMetadata.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
@@ -43,6 +44,24 @@ static constexpr gid_t kGroup = 100;
 static constexpr gid_t kOtherGroup = 200;
 static constexpr uint64_t kChunkSize = 64ULL * 1024 * 1024;
 static constexpr SetAttrField kKillSuidGidField = SetAttrField::kKillSuidGid;
+using WholeObjectSequence =
+    swordfs::metadata::ChunkPrivateSequenceTag<swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, 1>;
+using WholeObjectAuxSequence =
+    swordfs::metadata::ChunkPrivateSequenceTag<swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, 2>;
+using ChunkSliceSequence =
+    swordfs::metadata::ChunkPrivateSequenceTag<swordfs::metadata::ChunkOverwriteMechanism::kChunkSlice, 1>;
+
+TEST(ChunkPrivateSequenceTest, PortableRangeExhaustionFailsClosed) {
+  uint64_t next = 0;
+  EXPECT_TRUE(
+      swordfs::metadata::NextChunkPrivateSequenceValue(swordfs::metadata::kMaxChunkPrivateSequenceValue - 1, &next)
+          .ok());
+  EXPECT_EQ(next, swordfs::metadata::kMaxChunkPrivateSequenceValue);
+  EXPECT_EQ(swordfs::metadata::NextChunkPrivateSequenceValue(swordfs::metadata::kMaxChunkPrivateSequenceValue, &next)
+                .ToErrno(),
+            EIO);
+  EXPECT_EQ(swordfs::metadata::NextChunkPrivateSequenceValue(0, nullptr).ToErrno(), EINVAL);
+}
 
 #ifndef NDEBUG
 TEST(MemMetaImplDomainTest, RuntimeApiRejectsThreadCaller) {
@@ -216,6 +235,30 @@ FIBER_TEST_F(MemMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) {
   EXPECT_EQ(second, 2U);
   EXPECT_EQ(third, 3U);
   EXPECT_EQ(impl_->AllocateChunkRevision(nullptr).ToErrno(), EINVAL);
+}
+
+FIBER_TEST_F(MemMetaImplTest, PrivateSequencesAreTypedIsolatedAndIndependentFromLegacyRevision) {
+  uint64_t first = 0;
+  uint64_t second = 0;
+  uint64_t slice = 0;
+  uint64_t auxiliary = 0;
+  ASSERT_TRUE(impl_->AllocateSequence(WholeObjectSequence::kKey, &first).ok());
+  ASSERT_TRUE(impl_->AllocateSequence(WholeObjectSequence::kKey, &second).ok());
+  ASSERT_TRUE(impl_->AllocateSequence(ChunkSliceSequence::kKey, &slice).ok());
+  ASSERT_TRUE(impl_->AllocateSequence(WholeObjectAuxSequence::kKey, &auxiliary).ok());
+  EXPECT_EQ(first, 1U);
+  EXPECT_EQ(second, 2U);
+  EXPECT_EQ(slice, 1U);
+  EXPECT_EQ(auxiliary, 1U);
+  EXPECT_EQ(impl_->AllocateSequence(WholeObjectSequence::kKey, nullptr).ToErrno(), EINVAL);
+
+  swordfs::metadata::ChunkRevision legacy = 0;
+  ASSERT_TRUE(impl_->AllocateChunkRevision(&legacy).ok());
+  EXPECT_EQ(legacy, 1U);
+
+  uint64_t third = 0;
+  ASSERT_TRUE(impl_->AllocateSequence(WholeObjectSequence::kKey, &third).ok());
+  EXPECT_EQ(third, 3U);
 }
 
 FIBER_TEST_F(MemMetaImplTest, StatFsReportsVirtualInodeCapacity) {

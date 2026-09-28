@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -19,14 +20,15 @@
 
 namespace swordfs::metadata {
 
-class MemMetaImpl : public IMetaEngine {
+class MemMetaImpl : public IMetaEngine, public IChunkPrivateMetadataStore {
  public:
   static utils::Status CreateInstance(std::string_view meta_url, std::string_view volume_name,
                                       std::unique_ptr<IMetaEngine> *out);
 
   MemMetaImpl();
   ~MemMetaImpl() override;
-  Status BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) override;
+  Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) override;
+  Status AllocateSequence(ChunkPrivateSequenceKey key, uint64_t *value) override;
 
   // Entry operations
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
@@ -77,6 +79,8 @@ class MemMetaImpl : public IMetaEngine {
  private:
   MemMetaStore store_;
   uint64_t chunk_size_ = SwordFsVolume{}.chunk_size;
+  utils::FiberMutex private_sequence_mutex_;
+  std::map<ChunkOverwriteMechanism, std::map<uint32_t, uint64_t>> private_sequences_;
   utils::FiberMutex pending_delete_scan_mutex_;
   std::vector<PendingDelete> pending_delete_snapshot_;
   size_t pending_delete_snapshot_offset_ = 0;

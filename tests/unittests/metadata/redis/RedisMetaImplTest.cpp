@@ -34,6 +34,13 @@ using swordfs::test::redis_meta::SwordFsEntry;
 using swordfs::test::redis_meta::SwordFsInode;
 using swordfs::test::redis_meta::SwordFsVolume;
 
+using WholeObjectSequence =
+    swordfs::metadata::ChunkPrivateSequenceTag<swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, 1>;
+using WholeObjectAuxSequence =
+    swordfs::metadata::ChunkPrivateSequenceTag<swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, 2>;
+using ChunkSliceSequence =
+    swordfs::metadata::ChunkPrivateSequenceTag<swordfs::metadata::ChunkOverwriteMechanism::kChunkSlice, 1>;
+
 FIBER_TEST_F(RedisMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) {
   swordfs::metadata::ChunkRevision first = 0;
   swordfs::metadata::ChunkRevision second = 0;
@@ -59,6 +66,54 @@ FIBER_TEST_F(RedisMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) 
   ASSERT_TRUE(peer->AllocateChunkRevision(&peer_revision).ok());
   EXPECT_EQ(peer_revision, 4U);
   swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
+}
+
+FIBER_TEST_F(RedisMetaImplTest, PrivateSequencesAreTypedPersistentAndIndependentFromLegacyRevision) {
+  uint64_t first = 0;
+  uint64_t second = 0;
+  uint64_t slice = 0;
+  uint64_t auxiliary = 0;
+  ASSERT_TRUE(impl_->AllocateSequence(WholeObjectSequence::kKey, &first).ok());
+  ASSERT_TRUE(impl_->AllocateSequence(WholeObjectSequence::kKey, &second).ok());
+  ASSERT_TRUE(impl_->AllocateSequence(ChunkSliceSequence::kKey, &slice).ok());
+  ASSERT_TRUE(impl_->AllocateSequence(WholeObjectAuxSequence::kKey, &auxiliary).ok());
+  EXPECT_EQ(first, 1U);
+  EXPECT_EQ(second, 2U);
+  EXPECT_EQ(slice, 1U);
+  EXPECT_EQ(auxiliary, 1U);
+  EXPECT_EQ(impl_->AllocateSequence(WholeObjectSequence::kKey, nullptr).ToErrno(), EINVAL);
+
+  swordfs::metadata::ChunkRevision legacy = 0;
+  ASSERT_TRUE(impl_->AllocateChunkRevision(&legacy).ok());
+  EXPECT_EQ(legacy, 1U);
+
+  std::unique_ptr<RedisMetaImpl> peer;
+  swordfs::test::RunInTestThreadFromFiber([&] {
+    peer = std::make_unique<RedisMetaImpl>(config_, volume_name_);
+    ASSERT_TRUE(peer->Initialize().ok());
+  });
+  uint64_t peer_value = 0;
+  ASSERT_TRUE(peer->AllocateSequence(WholeObjectSequence::kKey, &peer_value).ok());
+  EXPECT_EQ(peer_value, 3U);
+  swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
+}
+
+FIBER_TEST_F(RedisMetaImplTest, PrivateSequenceFailsClosedForInvalidOrExhaustedRedisCounter) {
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  const auto sequence_key = key.PrivateSequence(WholeObjectSequence::kKey);
+
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(sequence_key, "-1"); });
+  uint64_t value = 0;
+  auto status = impl_->AllocateSequence(WholeObjectSequence::kKey, &value);
+  EXPECT_EQ(status.ToErrno(), EIO);
+  EXPECT_NE(status.message().find("portable signed-64-bit range"), std::string::npos);
+
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
+    redis.set(sequence_key, std::to_string(swordfs::metadata::kMaxChunkPrivateSequenceValue));
+  });
+  status = impl_->AllocateSequence(WholeObjectSequence::kKey, &value);
+  EXPECT_EQ(status.ToErrno(), EIO);
+  EXPECT_FALSE(status.IsOutcomeUnknown());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, OpenDirReturnsIndependentIteratorsAndSupportsSeek) {

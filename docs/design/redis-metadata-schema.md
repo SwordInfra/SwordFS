@@ -15,6 +15,7 @@ not by itself establish support for every Cluster deployment configuration.
 | `format` | String | Serialized volume configuration |
 | `next_ino` | Integer string | Inode allocator |
 | `next_chunk_revision` | Integer string | Volume-wide logical publication-generation allocator |
+| `private_sequence:<mechanism-key>:<discriminator>` | Integer string | Mechanism-private typed identity allocator; discriminator is a stable compile-time value within the mechanism namespace |
 | `inode_count` | Integer string | Advisory legacy inode metric; never an authoritative filesystem invariant |
 | `inode:<ino>` | String | Canonical serialized `SwordFsInode` |
 | `dir:<parent_ino>` | Hash | Name → child type and inode ID |
@@ -56,6 +57,13 @@ current beta layout the stable enum values are encoded as decimal strings
 (`1` = `whole_object`, `2` = `chunk_slice`, `3` = `redis_cache`). The trailing
 `<hash>` and its fields remain mechanism-owned schema.
 
+Mechanism-private sequence keys use the same stable mechanism key plus a
+numeric discriminator supplied by a compile-time
+`ChunkPrivateSequenceTag`. Mechanism/session code never constructs this Redis
+key and never passes arbitrary sequence-name strings. The Redis adapter alone
+maps the typed sequence key to
+`private_sequence:<mechanism-key>:<discriminator>`.
+
 Frozen reclaim and pending-delete records carry opaque payloads.
 The common queue validates its envelope and Hash field identity; only the
 selected strategy interprets physical references and checks reachability
@@ -70,9 +78,14 @@ sessions and private indexes are implemented; their different index layouts
 will remain isolated behind the same volume-fixed strategy framework.
 
 Allocators use atomic `INCR` independently of the subsequent namespace or
-publication transaction. Gaps after failure are harmless. Revision reuse is
-not: metadata recovery must preserve allocator state consistently with
-published descriptors. Volume object namespaces must also remain isolated.
+publication transaction. The legacy `next_chunk_revision` counter remains
+for the current common whole-object path; typed mechanism-private identities
+use the `private_sequence:...` namespace instead. Private counters start at
+one from a missing Redis key, accept only the portable positive
+`1..INT64_MAX` range, and fail closed on overflow or malformed non-positive
+state. Gaps after failure are harmless. Identity reuse is not: an ambiguous
+allocation is abandoned and a later caller obtains a fresh value. Volume and
+mechanism/discriminator namespaces remain isolated.
 
 ### Persistent-backend test isolation
 
@@ -121,20 +134,26 @@ the inode key remains the namespace/reclaim serialization point, while an
 unrelated inode's reclaim field must not force a retry. All reads must precede
 the first queued write; the wrapper rejects reads after writes.
 
-`IChunkIndexTxn` exposes strategy-private hash read/scan/put/erase operations
-through the same `RedisKvTxn`. Strategy freeze callbacks and index
-participants finish private-index reads during the watched read phase, before
-any write is queued. Private-index writes, the shared logical head, and inode
-updates are queued in that transaction. Since Redis can partially apply a
-failed `EXEC`, a strategy must make every manifest required to read a new head
-durable before queuing that head; a private write earlier in the same `EXEC`
-is insufficient as its only readable copy. The session passes an opaque
-publication intent to the participant and retains it for cleanup after a
-definite rejection. `LoadChunkView` watches the public head and private
-index during a read-only transaction, validating the snapshot at `EXEC` before
-the session interprets it. The current `whole_object` strategy has no extra
-private records; slice and Redis-cache implementations must satisfy these
-rules before format selection is enabled.
+`IChunkPrivateMetadataTxn` is the root of the target transaction-scoped
+typed capability. Concrete mechanism Redis adapters translate their typed
+logical operations to `RedisKvTxn` while the transaction still owns the WATCH
+snapshot and queued writes. The old `IChunkIndexTxn` raw
+hash/field/string-value API derives from that root only as a migration bridge
+for existing #312 orchestration and is not the target mechanism API.
+
+Existing strategy freeze callbacks and index participants therefore still
+finish their transitional private-index reads during the watched read phase,
+before any write is queued. Private-index writes, the shared logical head, and
+inode updates are queued in that transaction. Since Redis can partially apply
+a failed `EXEC`, a strategy must make every manifest required to read a new
+head durable before queuing that head; a private write earlier in the same
+`EXEC` is insufficient as its only readable copy. The session passes an
+opaque publication intent to the participant and retains it for cleanup after
+a definite rejection. `LoadChunkView` watches the public head and private
+index during a read-only transaction, validating the snapshot at `EXEC`
+before the session interprets it. The current `whole_object` strategy has no
+extra private records; later typed adapters replace this raw path as their
+schemas land.
 
 `RedisKvTxn` borrows its transaction connection from the shared redis++ pool
 with `transaction(false, false)`. The `Redis` view returned by
@@ -180,10 +199,11 @@ failures to `Unavailable`; logical results such as `NotFound` and valid Redis
 error replies remain distinct known outcomes. They never return
 `OutcomeUnknown` merely because the reply was lost.
 
-The allocator counters (`next_ino` and `next_chunk_revision`) are different:
-their standalone `INCR` is itself a mutation. A valid Redis reply provides a
-known result (including a valid command-error reply), but once `INCR` may have
-been sent, losing or being unable to parse its acknowledgement is
+The allocator counters (`next_ino`, legacy `next_chunk_revision`, and typed
+`private_sequence:...` keys) are different from read-only commands: their
+standalone `INCR` is itself a mutation. A valid Redis reply provides a known
+result (including a valid command-error reply), but once `INCR` may have been
+sent, losing or being unable to parse its acknowledgement is
 `OutcomeUnknown`. Allocator gaps are allowed, so reconciliation never guesses
 or reuses the lost value; the caller allocates a fresh identity on a later
 operation instead of blindly replaying the ambiguous command.

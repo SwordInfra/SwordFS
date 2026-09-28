@@ -7,12 +7,19 @@
 
 namespace swordfs::metadata::redis {
 
+using WholeObjectSequence = ChunkPrivateSequenceTag<ChunkOverwriteMechanism::kWholeObject, 1>;
+using WholeObjectAuxSequence = ChunkPrivateSequenceTag<ChunkOverwriteMechanism::kWholeObject, 2>;
+using ChunkSliceSequence = ChunkPrivateSequenceTag<ChunkOverwriteMechanism::kChunkSlice, 1>;
+
 TEST(RedisKeyTest, UsesDatabaseScopedPrefix) {
   RedisKey key(3, "volume");
 
   EXPECT_EQ(key.Format(), "{3:volume}:format");
   EXPECT_EQ(key.NextIno(), "{3:volume}:next_ino");
   EXPECT_EQ(key.NextChunkRevision(), "{3:volume}:next_chunk_revision");
+  EXPECT_EQ(key.PrivateSequence(WholeObjectSequence::kKey), "{3:volume}:private_sequence:1:1");
+  EXPECT_EQ(key.PrivateSequence(WholeObjectAuxSequence::kKey), "{3:volume}:private_sequence:1:2");
+  EXPECT_EQ(key.PrivateSequence(ChunkSliceSequence::kKey), "{3:volume}:private_sequence:2:1");
   EXPECT_EQ(key.Inode(42), "{3:volume}:inode:42");
   EXPECT_EQ(key.Directory(7), "{3:volume}:dir:7");
   EXPECT_EQ(key.Chunk(42), "{3:volume}:chunk:42");

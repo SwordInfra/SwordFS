@@ -52,7 +52,7 @@ class RedisMetaOps {
   RedisMetaOps &operator=(RedisMetaOps &&) = delete;
 
   utils::Status Initialize();
-  utils::Status BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy);
+  utils::Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy);
   utils::Status FormatVolume(const SwordFsVolume &config);
   utils::Status LoadVolume(SwordFsVolume *config);
   utils::Status CreateDirIterator(InodeID ino, std::vector<SwordFsEntry> prefix_entries,
@@ -80,6 +80,7 @@ class RedisMetaOps {
   utils::Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out);
   utils::Status AllocateInode(InodeID *ino);
   utils::Status AllocateChunkRevision(ChunkRevision *revision);
+  utils::Status AllocatePrivateSequence(ChunkPrivateSequenceKey key, uint64_t *value);
 
   // Run one optimistic metadata transaction when RedisMetaImpl must compose
   // multiple metadata primitives into one atomic POSIX operation. Standalone

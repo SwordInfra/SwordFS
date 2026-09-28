@@ -9,16 +9,17 @@
 #include <utility>
 #include <vector>
 
+#include "metadata/IChunkPrivateMetadata.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "utils/Status.hpp"
 
 namespace swordfs::metadata {
 
-// Mechanism-private hash names, fields, and encodings are opaque to metadata
-// backends. A volume-selected participant defines their meaning. A hash may
-// contain any number of records; this surface never assumes one entry or one
-// physical reference for a logical chunk.
+// Transitional raw private-index surface. New mechanism/session code must use
+// mechanism-owned typed interfaces rooted at IChunkPrivateMetadataStore /
+// IChunkPrivateMetadataTxn instead. This remains only so the already-shipped
+// publication/truncate/reclaim orchestration can migrate incrementally.
 class IChunkIndexReader {
  public:
   virtual ~IChunkIndexReader() = default;
@@ -26,7 +27,7 @@ class IChunkIndexReader {
   virtual utils::Status Scan(std::string_view hash, std::vector<std::pair<std::string, std::string>> *values) = 0;
 };
 
-class IChunkIndexTxn : public IChunkIndexReader {
+class IChunkIndexTxn : public IChunkIndexReader, public virtual IChunkPrivateMetadataTxn {
  public:
   ~IChunkIndexTxn() override = default;
   virtual utils::Status Put(std::string_view hash, std::string_view field, std::string_view value) = 0;

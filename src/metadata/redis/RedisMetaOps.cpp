@@ -53,7 +53,7 @@ RedisMetaOps::~RedisMetaOps() {
   backend_->Shutdown();
 }
 
-utils::Status RedisMetaOps::BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) {
+utils::Status RedisMetaOps::BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) {
   utils::ExpectInThreadDomain();
   if (strategy == nullptr) {
     return utils::Status::InvalidArgument("chunk strategy is null");
@@ -570,6 +570,25 @@ utils::Status RedisMetaOps::AllocateChunkRevision(ChunkRevision *revision) {
     return utils::Status::InvalidArgument("chunk revision output is null");
   }
   return backend_->executor().RunFromFiber([&] { return backend_->client().Incr(key_.NextChunkRevision(), revision); });
+}
+
+utils::Status RedisMetaOps::AllocatePrivateSequence(ChunkPrivateSequenceKey key, uint64_t *value) {
+  utils::ExpectInFiberDomain();
+  if (value == nullptr) {
+    return utils::Status::InvalidArgument("private sequence output is null");
+  }
+
+  uint64_t allocated = 0;
+  auto status =
+      backend_->executor().RunFromFiber([&] { return backend_->client().Incr(key_.PrivateSequence(key), &allocated); });
+  if (!status.ok()) {
+    return status;
+  }
+  if (allocated == 0 || allocated > kMaxChunkPrivateSequenceValue) {
+    return utils::Status::Malformed("private sequence value is outside the portable signed-64-bit range");
+  }
+  *value = allocated;
+  return utils::Status::OK();
 }
 
 utils::Status RedisMetaOps::TransactFromFiber(const std::function<utils::Status(RedisMetaTxn &)> &callback) {

@@ -42,18 +42,49 @@ mechanism owns the chunk session, its internal index schema and operations,
 the translation from private index state to physical data, and cleanup
 validation/deletion.
 
-The metadata backend supplies a transaction-scoped `IChunkIndexTxn` with
-private hash read, scan, put, and erase operations. The strategy's
-`IChunkIndexParticipant` uses that surface in the same Memory or Redis
-transaction as the common head and inode size. Publication, truncate/setattr
-size changes, and orphan preparation are the coordination points. Cleanup
-freeze callbacks can read that private index through the same transaction to
-capture the exact physical references being detached. A strategy can use
-multiple private records per chunk; the common head and transaction protocol
-do not prescribe a fragment list or one physical reference. Private index
-keys are namespaced by the typed mechanism selection and interpreted only by
-that implementation; a future Redis-cache implementation does not reuse or
-interpret the chunk-slice index.
+## Mechanism-private metadata capability boundary
+
+The target private-metadata API is typed and mechanism-owned. The metadata
+backend binds one `IChunkPrivateMetadataStore` capability into the selected
+overwrite strategy during mount/format setup. Concrete mechanisms extend that
+root beside their own record types with typed reader/store interfaces; the
+strategy keeps that capability for later explicit session dependency
+injection. The common metadata engine does not expose or rediscover a
+mechanism's records through `VolumeImpl`, global state, Redis key strings, or
+opaque field/value names.
+
+Transaction-scoped typed interfaces derive from
+`IChunkPrivateMetadataTxn`. Memory and Redis transactions remain the lifetime
+boundary for those adapters, so a mechanism's private mutation participates in
+the same commit/retry outcome as the common orchestration that invoked it.
+Concrete record transaction interfaces are introduced with the mechanism that
+owns the schema rather than in this common layer.
+
+The existing `IChunkIndexReader` / `IChunkIndexTxn`
+`hash/field/string-value` surface is transitional only. It remains while the
+already-shipped publication/truncate/reclaim code is migrated child-by-child
+under #312, but new mechanism/session code must not consume it as its semantic
+private-store API. Memory therefore does not use this raw surface as the model
+for future typed private records; those records are kept directly in typed
+containers. Redis adapters alone translate typed logical keys/records to Redis
+keys, Hash fields, and encoded values.
+
+Mechanism-private identity allocation is the one schema-neutral runtime
+operation. A mechanism defines a `ChunkPrivateSequenceTag<mechanism,
+discriminator>` beside its typed ID. Both components are compile-time/stable;
+there is no arbitrary runtime sequence name. Allocation is independent of the
+later metadata transaction and occurs before upload/publication, so abandoned
+values create harmless gaps and are never reused. Zero is invalid and the
+portable range is `1..INT64_MAX`, matching Redis `INCR`. Exhaustion fails
+closed. The legacy common `AllocateChunkRevision()` remains separate until
+later #312 children cut over whole-object identity.
+
+For the current common-head orchestration, publication, truncate/setattr size
+changes, and orphan preparation remain the coordination points. Cleanup freeze
+callbacks may still use the transitional transaction surface to capture the
+exact physical references being detached. A strategy can use multiple private
+records per chunk; neither the common head nor the new capability plumbing
+prescribes a fragment list, record schema, or one physical reference.
 
 A chunk session supplies an opaque `ChunkPublishIntent` after making its new
 data durable. `CommitChunk` passes those bytes unchanged to the selected

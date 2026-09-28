@@ -17,7 +17,7 @@ namespace swordfs::metadata {
 // RedisMetaOps exposes standalone metadata operations,
 // RedisMetaTxn owns transaction-scoped metadata semantics, and
 // RedisMetaClient/RedisKvTxn own raw Redis access and transaction mechanics.
-class RedisMetaImpl : public IMetaEngine {
+class RedisMetaImpl : public IMetaEngine, public IChunkPrivateMetadataStore {
  public:
   static utils::Status CreateInstance(std::string_view meta_url, std::string_view volume_name,
                                       std::unique_ptr<IMetaEngine> *out);
@@ -29,7 +29,8 @@ class RedisMetaImpl : public IMetaEngine {
   RedisMetaImpl &operator=(const RedisMetaImpl &) = delete;
 
   utils::Status Initialize() override;
-  Status BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) override;
+  Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) override;
+  Status AllocateSequence(ChunkPrivateSequenceKey key, uint64_t *value) override;
   utils::Status FormatVolume(const SwordFsVolume &config) override;
   utils::Status LoadVolume(SwordFsVolume *config) override;
   Limits GetLimits() const override;

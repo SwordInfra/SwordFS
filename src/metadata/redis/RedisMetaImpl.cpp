@@ -65,9 +65,17 @@ RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view vol
 
 RedisMetaImpl::~RedisMetaImpl() = default;
 
-Status RedisMetaImpl::BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) {
+Status RedisMetaImpl::BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) {
   utils::ExpectInThreadDomain();
-  return ops_.BindChunkOverwriteStrategy(strategy);
+  auto status = ops_.BindChunkOverwriteStrategy(strategy);
+  if (!status.ok()) {
+    return status;
+  }
+  return strategy->BindPrivateMetadata(this);
+}
+
+Status RedisMetaImpl::AllocateSequence(ChunkPrivateSequenceKey key, uint64_t *value) {
+  return ops_.AllocatePrivateSequence(key, value);
 }
 
 utils::Status RedisMetaImpl::Initialize() {

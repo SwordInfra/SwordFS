@@ -53,6 +53,17 @@ namespace {
 
 constexpr uint64_t kChunkTestSize = 1024;
 
+class NoopPrivateMetadataStore final : public swordfs::metadata::IChunkPrivateMetadataStore {
+ public:
+  Status AllocateSequence(swordfs::metadata::ChunkPrivateSequenceKey, uint64_t *value) override {
+    if (value == nullptr) {
+      return Status::InvalidArgument("private sequence output is null");
+    }
+    *value = 1;
+    return Status::OK();
+  }
+};
+
 auto Buf(const std::string &value) {
   return *folly::IOBuf::copyBuffer(value.data(), value.size());
 }
@@ -322,6 +333,9 @@ TEST(ChunkOverwriteStrategyTest, FactoryUsesTypedMechanismSelection) {
   ASSERT_TRUE(status.ok()) << status.message();
   ASSERT_NE(strategy, nullptr);
   EXPECT_EQ(strategy->mechanism(), ChunkOverwriteMechanism::kWholeObject);
+  EXPECT_EQ(strategy->BindPrivateMetadata(nullptr).ToErrno(), EINVAL);
+  NoopPrivateMetadataStore private_metadata;
+  EXPECT_TRUE(strategy->BindPrivateMetadata(&private_metadata).ok());
 
   EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kChunkSlice, &strategy).ToErrno(),
             ENOSYS);

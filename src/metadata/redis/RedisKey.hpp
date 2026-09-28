@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 
+#include "metadata/IChunkPrivateMetadata.hpp"
 #include "metadata/types/Volume.hpp"
 
 namespace swordfs::metadata::redis {
@@ -22,6 +23,7 @@ class RedisKey {
   std::string Format() const;
   std::string NextIno() const;
   std::string NextChunkRevision() const;
+  std::string PrivateSequence(ChunkPrivateSequenceKey key) const;
   std::string Inode(uint64_t ino) const;
   std::string Directory(uint64_t parent_ino) const;
   std::string Chunk(uint64_t ino) const;

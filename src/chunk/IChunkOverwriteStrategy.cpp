@@ -46,6 +46,14 @@ class WholeObjectIndexParticipant final : public metadata::IChunkIndexParticipan
 
 class WholeObjectStrategy final : public IChunkOverwriteStrategy {
  public:
+  utils::Status BindPrivateMetadata(metadata::IChunkPrivateMetadataStore *store) override {
+    if (store == nullptr) {
+      return utils::Status::InvalidArgument("whole-object private metadata store is null");
+    }
+    private_metadata_ = store;
+    return utils::Status::OK();
+  }
+
   metadata::ChunkOverwriteMechanism mechanism() const override {
     return metadata::ChunkOverwriteMechanism::kWholeObject;
   }
@@ -133,6 +141,12 @@ class WholeObjectStrategy final : public IChunkOverwriteStrategy {
     }
     return utils::Status::OK();
   }
+
+ private:
+  // The concrete whole-object typed store is introduced in #316. Keeping the
+  // bound capability here establishes its mount/session lifetime now without
+  // changing current common-descriptor authority.
+  metadata::IChunkPrivateMetadataStore *private_metadata_ = nullptr;
 };
 
 }  // namespace

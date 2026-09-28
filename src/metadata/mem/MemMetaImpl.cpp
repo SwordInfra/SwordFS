@@ -50,12 +50,30 @@ MemMetaImpl::~MemMetaImpl() {
   utils::ExpectInThreadDomain();
 }
 
-Status MemMetaImpl::BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) {
+Status MemMetaImpl::BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) {
   utils::ExpectInThreadDomain();
   if (strategy == nullptr) {
     return Status::InvalidArgument("chunk strategy is null");
   }
   store_.BindChunkOverwriteStrategy(strategy);
+  return strategy->BindPrivateMetadata(this);
+}
+
+Status MemMetaImpl::AllocateSequence(ChunkPrivateSequenceKey key, uint64_t *value) {
+  utils::ExpectInFiberDomain();
+  if (value == nullptr) {
+    return Status::InvalidArgument("private sequence output is null");
+  }
+
+  std::lock_guard<utils::FiberMutex> lock(private_sequence_mutex_);
+  auto &current = private_sequences_[key.mechanism()][key.discriminator()];
+  uint64_t next = 0;
+  auto status = NextChunkPrivateSequenceValue(current, &next);
+  if (!status.ok()) {
+    return status;
+  }
+  current = next;
+  *value = next;
   return Status::OK();
 }
 
