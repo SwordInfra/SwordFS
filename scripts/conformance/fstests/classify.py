@@ -32,6 +32,7 @@ BLOCKING = {
     "BASELINE_NOT_APPLICABLE",
     "BASELINE_RESULT_MISMATCH",
     "BASELINE_REASON_MISMATCH",
+    "BASELINE_EVIDENCE_MISMATCH",
     "INFRASTRUCTURE",
     "SWORD_FS_CRASH",
 }
@@ -39,6 +40,26 @@ ISSUE_RE = re.compile(r"^#[1-9][0-9]*$")
 TEST_RE = re.compile(r"^[a-z0-9_-]+/[0-9]+$")
 WORK_DIR_RE = re.compile(r"/tmp/swordfs-fstests[.-][^/\s)]+")
 RESULT_DIR_RE = re.compile(r"/(?:[^/\s)]+/)*build/fstests-conformance/raw/results")
+EVIDENCE_REF_RE = re.compile(
+    r"<FSTESTS_RESULT_DIR>/(?P<path>[a-z0-9_-]+/[0-9]+\.(?:out\.bad|mountfail))"
+)
+STAT_TIMESTAMP_RE = re.compile(
+    r"^(?P<prefix>\s*(?:Access|Modify|Change|Birth):)\s+.*?(?P<delta>\([0-9:.+-]+\))\s*$"
+)
+MOUNTFAIL_TIMESTAMP_RE = re.compile(r'^(?P<prefix>".*" failed at ).*$')
+FSTESTS_RUN_DMESG_RE = re.compile(
+    r"^\[\s*[0-9]+\.[0-9]+\]\s+run fstests [a-z0-9_-]+/[0-9]+ at [0-9]{4}-[0-9]{2}-[0-9]{2} "
+)
+FSTESTS_DROP_CACHES_DMESG_RE = re.compile(
+    r"^\[\s*[0-9]+\.[0-9]+\]\s+sh \([0-9]+\): drop_caches: [0-9]+$"
+)
+KERNEL_TIME_RE = re.compile(r"^\[\s*[0-9]+\.[0-9]+\]")
+KERNEL_PID_RE = re.compile(r"^(?P<prefix>\[<KERNEL_TIME>\]\s+\S+)\s+\([0-9]+\):")
+INDEXED_OPEN_BY_HANDLE_RE = re.compile(
+    r"^(?P<prefix>open_by_handle\(.*?/file)(?P<index>[0-9]+)"
+    r"(?P<suffix>\) returned [0-9]+ incorrectly on a (?:linked|unlinked) file!)$"
+)
+EVIDENCE_REPEAT_COMPACTION_MIN = 16
 SWORDFS_CORE_RE = re.compile(r"^\s*Message:\s+Process\s+\d+\s+\(swordfs\).*dumped core\.\s*$", re.MULTILINE)
 
 
@@ -59,6 +80,7 @@ class Gap:
     issue: str
     expected_result: str
     expected_message: str
+    expected_evidence: str
     reason: str
 
 
@@ -110,6 +132,92 @@ def normalize_message(value: str | None) -> str:
     return RESULT_DIR_RE.sub("<FSTESTS_RESULT_DIR>", normalized)
 
 
+def evidence_path_from_message(test: str, message: str) -> str | None:
+    match = EVIDENCE_REF_RE.search(message)
+    if match is None:
+        return None
+    path = match.group("path")
+    if not path.startswith(f"{test}."):
+        raise BaselineError(f"{test}: XUnit evidence reference points at another testcase: {path}")
+    return path
+
+
+def _compact_indexed_open_by_handle(lines: list[str]) -> list[str]:
+    """Compact only long, contiguous runs of identical indexed failures."""
+    compacted: list[str] = []
+    index = 0
+    while index < len(lines):
+        first = INDEXED_OPEN_BY_HANDLE_RE.fullmatch(lines[index])
+        if first is None:
+            compacted.append(lines[index])
+            index += 1
+            continue
+
+        prefix = first.group("prefix")
+        suffix = first.group("suffix")
+        width = len(first.group("index"))
+        start = int(first.group("index"))
+        last = start
+        end = index + 1
+
+        while end < len(lines):
+            current = INDEXED_OPEN_BY_HANDLE_RE.fullmatch(lines[end])
+            if current is None:
+                break
+            current_index = current.group("index")
+            if (
+                current.group("prefix") != prefix
+                or current.group("suffix") != suffix
+                or len(current_index) != width
+                or int(current_index) != last + 1
+            ):
+                break
+            last = int(current_index)
+            end += 1
+
+        count = end - index
+        if count >= EVIDENCE_REPEAT_COMPACTION_MIN:
+            compacted.append(
+                f"{prefix}{{{start:0{width}d}..{last:0{width}d}}}{suffix} [count={count}]"
+            )
+        else:
+            compacted.extend(lines[index:end])
+        index = end
+
+    return compacted
+
+
+def normalize_failure_evidence(value: str, path: str) -> str:
+    """Canonicalize only proven fstests harness noise in detailed FAIL evidence."""
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = WORK_DIR_RE.sub("<FSTESTS_WORK_DIR>", normalized)
+    normalized = RESULT_DIR_RE.sub("<FSTESTS_RESULT_DIR>", normalized)
+
+    lines: list[str] = []
+    is_mountfail = path.endswith(".mountfail")
+    for line in normalized.splitlines():
+        stat_match = STAT_TIMESTAMP_RE.fullmatch(line)
+        if stat_match is not None:
+            line = f"{stat_match.group('prefix')} <TIMESTAMP>{stat_match.group('delta')}"
+
+        if is_mountfail:
+            if FSTESTS_RUN_DMESG_RE.match(line) or FSTESTS_DROP_CACHES_DMESG_RE.match(line):
+                # mountfail appends a dmesg tail. The runner's own per-test
+                # history and cache-drop diagnostics vary with shard history
+                # and are not part of the failing mount operation's semantics.
+                continue
+            mount_match = MOUNTFAIL_TIMESTAMP_RE.fullmatch(line)
+            if mount_match is not None:
+                line = f"{mount_match.group('prefix')}<TIMESTAMP>"
+            line = KERNEL_TIME_RE.sub("[<KERNEL_TIME>]", line)
+            line = KERNEL_PID_RE.sub(r"\g<prefix> (<PID>):", line)
+
+        lines.append(line)
+
+    lines = _compact_indexed_open_by_handle(lines)
+    return "\n".join(lines) + "\n"
+
+
 def _validate_test_id(test: str, source: str) -> None:
     if not TEST_RE.fullmatch(test):
         raise BaselineError(f"{source}: invalid exact fstests testcase id: {test!r}")
@@ -148,7 +256,15 @@ def load_gaps(path: pathlib.Path) -> dict[str, Gap]:
     gaps: dict[str, Gap] = {}
     with path.open(encoding="utf-8", newline="") as stream:
         reader = csv.DictReader(stream, delimiter="\t")
-        expected_fields = ["test", "category", "issue", "expected_result", "expected_message", "reason"]
+        expected_fields = [
+            "test",
+            "category",
+            "issue",
+            "expected_result",
+            "expected_message",
+            "expected_evidence",
+            "reason",
+        ]
         if reader.fieldnames != expected_fields:
             raise BaselineError(f"{path}: expected TSV header {expected_fields}, got {reader.fieldnames}")
         for line_number, row in enumerate(reader, start=2):
@@ -165,6 +281,7 @@ def load_gaps(path: pathlib.Path) -> dict[str, Gap]:
             issue = row["issue"].strip()
             expected_result = row["expected_result"].strip().upper()
             expected_message = normalize_message(row["expected_message"])
+            expected_evidence = row["expected_evidence"].strip()
             reason = normalize_message(row["reason"])
             if not reason:
                 raise BaselineError(f"{path}:{line_number}: reason is required")
@@ -186,8 +303,59 @@ def load_gaps(path: pathlib.Path) -> dict[str, Gap]:
                     f"{path}:{line_number}: {category} FAIL entries must preserve the exact failure message"
                 )
 
-            gaps[test] = Gap(category, issue, expected_result, expected_message, reason)
+            referenced_evidence = evidence_path_from_message(test, expected_message)
+            if expected_result == "NOTRUN":
+                if expected_evidence not in {"", "-"}:
+                    raise BaselineError(f"{path}:{line_number}: NOTRUN entries must not carry FAIL evidence")
+                expected_evidence = "-"
+            elif referenced_evidence is not None:
+                if expected_evidence != referenced_evidence:
+                    raise BaselineError(
+                        f"{path}:{line_number}: detailed FAIL evidence must be {referenced_evidence!r}, "
+                        f"got {expected_evidence!r}"
+                    )
+            elif expected_evidence not in {"", "-"}:
+                raise BaselineError(
+                    f"{path}:{line_number}: expected_evidence requires a matching XUnit .out.bad/.mountfail reference"
+                )
+            else:
+                expected_evidence = "-"
+
+            gaps[test] = Gap(category, issue, expected_result, expected_message, expected_evidence, reason)
     return gaps
+
+
+def load_expected_evidence(evidence_dir: pathlib.Path, gaps: dict[str, Gap]) -> dict[str, str]:
+    evidence: dict[str, str] = {}
+    for test, gap in gaps.items():
+        if gap.expected_evidence == "-":
+            continue
+        path = evidence_dir / gap.expected_evidence
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise BaselineError(f"cannot read expected FAIL evidence {path}: {exc}") from exc
+        normalized = normalize_failure_evidence(text, gap.expected_evidence)
+        if text != normalized:
+            raise BaselineError(f"{path}: expected FAIL evidence is not in canonical normalized form")
+        evidence[test] = text
+    return evidence
+
+
+def load_actual_evidence(result_dir: pathlib.Path, gaps: dict[str, Gap]) -> dict[str, str]:
+    evidence: dict[str, str] = {}
+    for test, gap in gaps.items():
+        if gap.expected_evidence == "-":
+            continue
+        path = result_dir / gap.expected_evidence
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise BaselineError(f"cannot read observed FAIL evidence {path}: {exc}") from exc
+        evidence[test] = normalize_failure_evidence(text, gap.expected_evidence)
+    return evidence
 
 
 def validate_supported_monotonicity(current: set[str], previous: set[str], allow_removal: bool) -> None:
@@ -295,11 +463,15 @@ def classify(
     gaps: dict[str, Gap],
     deferred: dict[str, str] | None = None,
     *,
+    expected_evidence: dict[str, str] | None = None,
+    actual_evidence: dict[str, str] | None = None,
     isolation_failure_tests: set[str] | None = None,
     crash_tests: set[str] | None = None,
     infrastructure: Iterable[str] = (),
 ) -> list[Observation]:
     deferred = deferred or {}
+    expected_evidence = expected_evidence or {}
+    actual_evidence = actual_evidence or {}
     isolation_failure_tests = isolation_failure_tests or set()
     crash_tests = crash_tests or set()
     overlap = supported & gaps.keys()
@@ -365,6 +537,7 @@ def classify(
             continue
 
         if raw.result == "FAIL":
+            message = raw.message
             if test in supported:
                 classification = "REGRESSION"
             elif gap is None:
@@ -373,10 +546,16 @@ def classify(
                 classification = "BASELINE_RESULT_MISMATCH"
             elif gap.expected_message not in {"", "-"} and normalize_message(raw.message) != gap.expected_message:
                 classification = "BASELINE_REASON_MISMATCH"
+            elif gap.expected_evidence != "-" and test not in actual_evidence:
+                classification = "BASELINE_EVIDENCE_MISMATCH"
+                message = f"{raw.message}; missing detailed FAIL evidence {gap.expected_evidence}"
+            elif gap.expected_evidence != "-" and actual_evidence[test] != expected_evidence.get(test):
+                classification = "BASELINE_EVIDENCE_MISMATCH"
+                message = f"{raw.message}; detailed FAIL evidence changed: {gap.expected_evidence}"
             else:
                 classification = GAP_CATEGORIES[gap.category]
             observations.append(
-                Observation(test, raw.result, classification, raw.message, gap.issue if gap else "", gap.reason if gap else "")
+                Observation(test, raw.result, classification, message, gap.issue if gap else "", gap.reason if gap else "")
             )
             continue
 
@@ -538,13 +717,13 @@ def render_markdown(payload: dict[str, object], observations: list[Observation])
     return "\n".join(lines)
 
 
-def write_bootstrap(output_dir: pathlib.Path, observations: list[Observation]) -> None:
+def write_bootstrap(output_dir: pathlib.Path, observations: list[Observation], result_dir: pathlib.Path) -> None:
     passes = sorted(observation.test for observation in observations if observation.classification == "UNCLASSIFIED_PASS")
     (output_dir / "bootstrap-supported.txt").write_text(
         "".join(f"{test}\n" for test in passes), encoding="utf-8"
     )
 
-    rows = ["test\tcategory\tissue\texpected_result\texpected_message\treason\n"]
+    rows = ["test\tcategory\tissue\texpected_result\texpected_message\texpected_evidence\treason\n"]
     for observation in observations:
         if observation.classification not in {"UNEXPECTED_FAIL", "UNCLASSIFIED_NOTRUN"}:
             continue
@@ -553,8 +732,24 @@ def write_bootstrap(output_dir: pathlib.Path, observations: list[Observation]) -
         # a reviewer can bind a known gap to the exact failure mode instead of
         # accidentally accepting any future failure from the same testcase.
         expected_message = observation.message or "-"
+        expected_evidence = "-"
+        if observation.result == "FAIL":
+            referenced_evidence = evidence_path_from_message(observation.test, normalize_message(expected_message))
+            if referenced_evidence is not None:
+                expected_evidence = referenced_evidence
+                source = result_dir / referenced_evidence
+                if source.exists():
+                    destination = output_dir / "bootstrap-fail-evidence" / referenced_evidence
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_text(
+                        normalize_failure_evidence(
+                            source.read_text(encoding="utf-8", errors="replace"), referenced_evidence
+                        ),
+                        encoding="utf-8",
+                    )
         rows.append(
-            f"{observation.test}\tTODO\t#TODO\t{observation.result}\t{expected_message}\tclassify root cause\n"
+            f"{observation.test}\tTODO\t#TODO\t{observation.result}\t{expected_message}\t"
+            f"{expected_evidence}\tclassify root cause\n"
         )
     (output_dir / "bootstrap-gaps.tsv").write_text("".join(rows), encoding="utf-8")
 
@@ -566,6 +761,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--result-dir", type=pathlib.Path, required=True)
     parser.add_argument("--supported-file", type=pathlib.Path, required=True)
     parser.add_argument("--known-gaps-file", type=pathlib.Path, required=True)
+    parser.add_argument("--known-gap-evidence-dir", type=pathlib.Path, required=True)
     parser.add_argument("--deferred-file", type=pathlib.Path, required=True)
     parser.add_argument("--previous-supported-file", type=pathlib.Path)
     parser.add_argument("--allow-supported-removal", action="store_true")
@@ -586,6 +782,8 @@ def main(argv: list[str] | None = None) -> int:
         selected = load_selected(args.selected_file)
         supported = load_supported(args.supported_file)
         gaps = load_gaps(args.known_gaps_file)
+        expected_evidence = load_expected_evidence(args.known_gap_evidence_dir, gaps)
+        actual_evidence = load_actual_evidence(args.result_dir, gaps)
         deferred = load_deferred(args.deferred_file)
         isolation_failure_tests = load_isolation_failure_tests(args.result_dir)
         crash_tests = load_swordfs_crash_tests(args.result_dir)
@@ -615,6 +813,8 @@ def main(argv: list[str] | None = None) -> int:
         supported,
         gaps,
         deferred,
+        expected_evidence=expected_evidence,
+        actual_evidence=actual_evidence,
         isolation_failure_tests=isolation_failure_tests,
         crash_tests=crash_tests,
         infrastructure=infrastructure,
@@ -635,7 +835,7 @@ def main(argv: list[str] | None = None) -> int:
     (args.output_dir / "result.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     report = render_markdown(payload, observations)
     (args.output_dir / "report.md").write_text(report, encoding="utf-8")
-    write_bootstrap(args.output_dir, observations)
+    write_bootstrap(args.output_dir, observations, args.result_dir)
     print(report)
 
     if args.strict and summary["blocking_count"]:

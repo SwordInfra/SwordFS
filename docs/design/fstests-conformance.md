@@ -287,10 +287,16 @@ second unbounded wait.
 
 ## Baseline model
 
-The baseline has two exact testcase-level inputs:
+The baseline has two exact testcase-level manifests plus reviewed detailed FAIL
+evidence:
 
 - `conformance/fstests/supported.txt` lists behavior SwordFS claims to support;
-- `conformance/fstests/known-gaps.tsv` records evidence-backed known outcomes.
+- `conformance/fstests/known-gaps.tsv` records evidence-backed known outcomes,
+  including an `expected_evidence` path when an expected FAIL's XUnit message
+  references `.out.bad` or `.mountfail`;
+- `conformance/fstests/fail-evidence/` stores the canonical normalized text for
+  those detailed FAIL artifacts so baseline changes remain directly reviewable
+  in the PR rather than being hidden behind an opaque digest.
 
 Wildcard selectors and directory-level exclusions are not supported. A
 semantic defect or missing SwordFS capability must reference a focused GitHub
@@ -344,12 +350,22 @@ lacks the feature that caused the skip, the correct classification is
 Any known-gap entry that expects a raw FAIL must preserve the exact normalized
 XUnit failure message, regardless of category. This binds the baseline to the
 reviewed XUnit failure class/message rather than merely to the testcase ID.
-When fstests reports only a generic `output mismatch` message, the detailed
-`.out.bad` evidence remains part of the CI artifact and must be reviewed when
-establishing or changing that baseline entry. Applicability and environment
-entries may likewise preserve a reviewed raw FAIL when the upstream testcase
-does not convert that precondition into NOTRUN. A changed XUnit failure
-message blocks as `BASELINE_REASON_MISMATCH` for every FAIL baseline.
+When that message references a testcase `.out.bad` or `.mountfail`, the
+baseline must also name the same artifact in `expected_evidence` and carry its
+canonical normalized body under `fail-evidence/`. The classifier compares the
+observed normalized body after the exact result/message checks. Missing or
+changed detailed evidence blocks as `BASELINE_EVIDENCE_MISMATCH`, even when the
+XUnit message remains the same generic `output mismatch`. Applicability and
+environment entries may likewise preserve a reviewed raw FAIL when the
+upstream testcase does not convert that precondition into NOTRUN. A changed
+XUnit failure message still blocks first as `BASELINE_REASON_MISMATCH` for every
+FAIL baseline.
+
+The two hosted-runner helper-coredump FAILs whose XUnit message is the specific
+`[dumped core]` class do not use an `expected_evidence` file. Their `.full`
+diagnostics contain host/process/package/stack-address data and are not the
+generic-message ambiguity this contract is intended to close. SwordFS daemon
+core dumps remain separately detected and always blocking as described below.
 
 Message normalization removes whitespace-only variation and canonicalizes only
 the runner-owned random `/tmp/swordfs-fstests.<suffix>` work-directory prefix
@@ -360,6 +376,25 @@ remain exact baseline data. Upstream FAIL messages also embed the absolute
 `build/fstests-conformance/raw/results` artifact root; that runner/workspace
 prefix is normalized to `<FSTESTS_RESULT_DIR>` while retaining the exact
 testcase-specific `.out.bad` / `.mountfail` suffix and failure class.
+
+Detailed FAIL evidence deliberately uses a narrower, evidence-derived
+normalization policy. Both `.out.bad` and `.mountfail` canonicalize the
+harness-owned work/result roots. `stat`-style absolute wall-clock fields are
+replaced by `<TIMESTAMP>` while their parenthesized relative deltas are kept.
+For `.mountfail`, fstests also appends host diagnostics whose values depend on
+the current shard/run: the mount invocation wall-clock timestamp, kernel
+monotonic prefix, and process PID are canonicalized; `run fstests ...` dmesg
+history lines and fstests `sh (...): drop_caches: N` diagnostics are removed
+because both vary with preceding shard activity rather than the failing mount
+operation. Long `open_by_handle(.../fileNNNNNN)` runs are
+also represented losslessly as an indexed range only when at least 16 adjacent
+lines have the same path template, numeric width, errno/failure text, and
+strictly consecutive file indexes. The canonical form preserves the start/end
+indexes and count. A changed errno/text, missing index, extra index, or other
+line therefore splits the range and changes the reviewed evidence rather than
+being hidden. All other evidence text is preserved exactly. These rules were
+admitted only after comparing independent successful main CI runs; new noise
+must be demonstrated before normalization is broadened.
 
 The classifier applies this state model:
 
@@ -373,6 +408,7 @@ known gap + PASS                    -> XPASS          (blocking)
 known gap + different FAIL/NOTRUN   -> BASELINE_RESULT_MISMATCH
 known NOTRUN + changed skip reason  -> BASELINE_REASON_MISMATCH
 known FAIL + changed failure reason -> BASELINE_REASON_MISMATCH
+known FAIL + missing/changed detail -> BASELINE_EVIDENCE_MISMATCH
 
 unclassified + PASS    -> UNCLASSIFIED_PASS          (blocking baseline debt)
 unclassified + FAIL    -> UNEXPECTED_FAIL            (blocking)
@@ -409,6 +445,9 @@ classifier emits `bootstrap-supported.txt` from unclassified passes and a
 investigation aids, not an automatically accepted baseline. Failures must be
 grouped by root cause, focused Issues must be created for real SwordFS gaps,
 and NOTRUN applicability must be validated before the baseline is committed.
+When an unclassified FAIL references `.out.bad` or `.mountfail`, bootstrap also
+emits its canonical body under `bootstrap-fail-evidence/` and names that path in
+the candidate TSV so review can admit result, message, and detail together.
 
 ## Regression invariants
 
@@ -422,6 +461,8 @@ Once the baseline is established:
   `supported.txt`;
 - a known NOTRUN whose reason changes blocks until the classification is
   re-evaluated;
+- a known FAIL whose required detailed evidence disappears or changes after
+  normalization blocks until the new failure mode is explicitly reviewed;
 - a testcase that disappears from the selected or observed population is a
   baseline/infrastructure error, never an implicit success;
 - an upstream pin or selector change is a normal source change that must be

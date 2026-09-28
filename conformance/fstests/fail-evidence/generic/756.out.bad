@@ -1,0 +1,8 @@
+QA output created by 756
+test_file_handles TEST_DIR/756-dir -Md
+test_file_handles TEST_DIR/756-dir -M
+open_by_handle(<FSTESTS_WORK_DIR>/test/756-dir/file{000000..001023}) returned 116 incorrectly on a linked file! [count=1024]
+test_file_handles TEST_DIR/756-dir -Ml
+open_by_handle(<FSTESTS_WORK_DIR>/test/756-dir/file{000000..001023}) returned 116 incorrectly on a linked file! [count=1024]
+test_file_handles TEST_DIR/756-dir -Mu
+open_by_handle(<FSTESTS_WORK_DIR>/test/756-dir/file{000000..001023}) returned 116 incorrectly on a linked file! [count=1024]

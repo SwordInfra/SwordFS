@@ -1,0 +1,6 @@
+QA output created by 591
+concurrent reader with O_DIRECT
+splice-test: splice: Broken pipe
+concurrent reader without O_DIRECT
+sequential reader with O_DIRECT
+sequential reader without O_DIRECT
