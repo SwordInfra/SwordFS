@@ -332,6 +332,44 @@ TEST(ChunkOverwriteStrategyTest, FactoryUsesTypedMechanismSelection) {
             EINVAL);
 }
 
+namespace {
+
+class TestPrivateMetadataStore final : public swordfs::metadata::IMechanismPrivateStore {
+ public:
+  explicit TestPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism mechanism) : mechanism_(mechanism) {
+  }
+
+  swordfs::metadata::ChunkOverwriteMechanism mechanism() const override {
+    return mechanism_;
+  }
+
+ private:
+  swordfs::utils::Status AllocateSequenceImpl(uint32_t, uint64_t *) override {
+    return swordfs::utils::Status::NotSupported("unused test sequence");
+  }
+
+ private:
+  swordfs::metadata::ChunkOverwriteMechanism mechanism_;
+};
+
+}  // namespace
+
+TEST(ChunkOverwriteStrategyTest, PrivateMetadataBindingRejectsWrongMechanism) {
+  using swordfs::metadata::ChunkOverwriteMechanism;
+
+  std::unique_ptr<swordfs::chunk::IChunkOverwriteStrategy> strategy;
+  ASSERT_TRUE(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, &strategy).ok());
+
+  EXPECT_EQ(strategy->BindPrivateMetadata(nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(
+      strategy->BindPrivateMetadata(std::make_shared<TestPrivateMetadataStore>(ChunkOverwriteMechanism::kChunkSlice))
+          .ToErrno(),
+      EINVAL);
+  EXPECT_TRUE(
+      strategy->BindPrivateMetadata(std::make_shared<TestPrivateMetadataStore>(ChunkOverwriteMechanism::kWholeObject))
+          .ok());
+}
+
 TEST_F(ChunkTest, WriteRejectsOffsetsOutsideItsLogicalChunk) {
   RunInTestFiber([&] {
     Chunk c(/*ino=*/42, /*index=*/1);

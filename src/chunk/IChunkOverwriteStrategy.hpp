@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "metadata/IChunkIndexTxn.hpp"
+#include "metadata/IPrivateMetadata.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Reclaim.hpp"
@@ -54,6 +55,10 @@ class IChunkOverwriteStrategy {
  public:
   virtual ~IChunkOverwriteStrategy() = default;
   virtual metadata::ChunkOverwriteMechanism mechanism() const = 0;
+  // Mount-time dependency injection. The backend creates a mechanism-scoped
+  // runtime capability; concrete mechanisms retain it and later expose only
+  // their own typed facade to sessions.
+  virtual utils::Status BindPrivateMetadata(metadata::MechanismPrivateStorePtr store) = 0;
   virtual std::shared_ptr<IChunkSession> OpenSession(metadata::InodeID ino, metadata::ChunkIndex index) const = 0;
   virtual const metadata::IChunkIndexParticipant &index_participant() const = 0;
 

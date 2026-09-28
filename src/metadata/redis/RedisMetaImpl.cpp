@@ -65,7 +65,7 @@ RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view vol
 
 RedisMetaImpl::~RedisMetaImpl() = default;
 
-Status RedisMetaImpl::BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) {
+Status RedisMetaImpl::BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) {
   utils::ExpectInThreadDomain();
   return ops_.BindChunkOverwriteStrategy(strategy);
 }

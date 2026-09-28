@@ -42,18 +42,57 @@ mechanism owns the chunk session, its internal index schema and operations,
 the translation from private index state to physical data, and cleanup
 validation/deletion.
 
-The metadata backend supplies a transaction-scoped `IChunkIndexTxn` with
-private hash read, scan, put, and erase operations. The strategy's
-`IChunkIndexParticipant` uses that surface in the same Memory or Redis
-transaction as the common head and inode size. Publication, truncate/setattr
-size changes, and orphan preparation are the coordination points. Cleanup
-freeze callbacks can read that private index through the same transaction to
-capture the exact physical references being detached. A strategy can use
-multiple private records per chunk; the common head and transaction protocol
-do not prescribe a fragment list or one physical reference. Private index
-keys are namespaced by the typed mechanism selection and interpreted only by
-that implementation; a future Redis-cache implementation does not reuse or
-interpret the chunk-slice index.
+Mechanism-private metadata is exposed to chunk code as a typed capability,
+not as Redis-shaped hash/field/value strings. The common plumbing owns only
+capability lifetime, mechanism isolation, transaction participation, and
+private identity allocation. Each mechanism defines its typed reader/store and
+transaction interfaces beside the records it owns. `whole_object` adds its
+typed head interface in #316; `chunk_slice` adds its SliceID/range interface in
+#270. The transitional `IChunkIndexReader` / `IChunkIndexTxn` string surface
+remains only for the current common-authority path until those consumers are
+migrated; new mechanism code must not treat it as the semantic API.
+
+Runtime private stores are bound to exactly one `ChunkOverwriteMechanism` and
+are retained by the selected strategy so later sessions can receive their
+typed mechanism capability explicitly. Transaction-scoped code receives a
+typed capability context owned by the metadata transaction. A concrete
+mechanism adapter binds its typed transaction interface into that context;
+common code never asks the context for hash names, fields, or encoded bytes.
+The backend transaction owns that adapter for the complete transaction
+lifetime; a callback-local adapter must not be bound because Memory finalizes
+staged typed changes only after the callback has returned successfully.
+Memory typed adapters stage their native-container changes and are finalized
+only after the enclosing `MemMetaStore::Transact()` callback succeeds; a
+rejected callback therefore drops both common metadata changes and typed
+private mutations. Redis typed adapters queue their mutations into the same
+`RedisKvTxn`, so callback rejection discards the queued Redis commands and
+`EXEC` remains the single backend commit boundary. This keeps Memory free to
+store typed records directly while Redis adapters alone translate typed
+identities/records to Redis keys, fields, and encoded values.
+
+Mechanism-private identity allocation is a runtime-store operation separate
+from metadata publication transactions. The common allocator plumbing accepts
+only compile-time stable sequence tags; each tag encodes both its owning
+`ChunkOverwriteMechanism` and its stable numeric discriminator, so passing a
+tag through a different mechanism's store is rejected. Arbitrary runtime
+sequence names are not part of the contract. The pair
+`(ChunkOverwriteMechanism, stable sequence discriminator)` defines a private
+sequence namespace. Values start at 1, are positive and monotonic, may have
+gaps, are never reused, and are limited to `INT64_MAX` so Memory and Redis
+share the same portable range. Allocation exhaustion fails closed. A Redis
+`INCR` whose acknowledgement is ambiguous returns `OutcomeUnknown`; callers
+never replay that same allocation result and a later attempt obtains a fresh
+value if Redis had applied the first increment.
+
+The #315 plumbing does not define a universal private record schema and does
+not change read or publication authority. The common `SwordFsChunk` record,
+legacy `AllocateChunkRevision()`, `ChunkPublishIntent`, `ChunkView`, and the
+current whole-object publication/truncate/reclaim behavior remain authoritative
+until the later #312 stages replace their consumers. Point-read and scan
+consistency semantics are therefore owned by each future typed adapter: direct
+runtime scans are not promised to be linearizable, while correctness decisions
+that need a stable view use transaction-scoped typed iteration plus backend
+validation/retry.
 
 A chunk session supplies an opaque `ChunkPublishIntent` after making its new
 data durable. `CommitChunk` passes those bytes unchanged to the selected

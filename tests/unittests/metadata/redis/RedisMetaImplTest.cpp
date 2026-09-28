@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "metadata/redis/RedisMetaImplTestBase.hpp"
+#include "metadata/redis/RedisMetaTestSupport.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
 
 namespace {
@@ -59,6 +60,43 @@ FIBER_TEST_F(RedisMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) 
   ASSERT_TRUE(peer->AllocateChunkRevision(&peer_revision).ok());
   EXPECT_EQ(peer_revision, 4U);
   swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
+}
+
+FIBER_TEST_F(RedisMetaImplTest, PrivateSequenceBindingCoexistsWithLegacyChunkRevisionAllocator) {
+  swordfs::metadata::RecordingRedisStrategy strategy;
+  Status bind_status;
+  swordfs::test::RunInTestThreadFromFiber([&] { bind_status = impl_->BindChunkOverwriteStrategy(&strategy); });
+  ASSERT_TRUE(bind_status.ok()) << bind_status.message();
+  ASSERT_NE(strategy.private_metadata, nullptr);
+  EXPECT_EQ(strategy.private_metadata->mechanism(), swordfs::metadata::ChunkOverwriteMechanism::kRedisCache);
+
+  uint64_t private_revision = 0;
+  ASSERT_TRUE(
+      strategy.private_metadata
+          ->AllocateSequence(
+              swordfs::metadata::PrivateSequenceTag<swordfs::metadata::ChunkOverwriteMechanism::kRedisCache, 33>{},
+              &private_revision)
+          .ok());
+  EXPECT_EQ(private_revision, 1U);
+
+  swordfs::metadata::ChunkRevision legacy_revision = 0;
+  ASSERT_TRUE(impl_->AllocateChunkRevision(&legacy_revision).ok());
+  EXPECT_EQ(legacy_revision, 1U);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, PrivateCapabilityBindingRejectsInvalidOrRejectedStrategy) {
+  Status null_status;
+  Status rejected_status;
+  swordfs::metadata::RecordingRedisStrategy rejecting_strategy;
+  rejecting_strategy.reject_private_metadata_binding = true;
+  swordfs::test::RunInTestThreadFromFiber([&] {
+    null_status = impl_->BindChunkOverwriteStrategy(nullptr);
+    rejected_status = impl_->BindChunkOverwriteStrategy(&rejecting_strategy);
+  });
+
+  EXPECT_EQ(null_status.ToErrno(), EINVAL);
+  EXPECT_EQ(rejected_status.ToErrno(), EIO);
+  EXPECT_EQ(rejecting_strategy.private_metadata, nullptr);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, OpenDirReturnsIndependentIteratorsAndSupportsSeek) {

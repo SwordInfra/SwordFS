@@ -73,6 +73,9 @@ class RedisMetaTxn : public IChunkIndexTxn {
   // deletion. Missing entries are already complete.
   utils::Status CompletePendingDelete(std::string_view object_key);
 
+  MechanismPrivateTxnContext &PrivateMetadata() override {
+    return private_metadata_txn_;
+  }
   utils::Status Read(std::string_view hash, std::string_view field, std::string *value) override;
   utils::Status Scan(std::string_view hash, std::vector<std::pair<std::string, std::string>> *values) override;
   utils::Status Put(std::string_view hash, std::string_view field, std::string_view value) override;
@@ -138,6 +141,7 @@ class RedisMetaTxn : public IChunkIndexTxn {
   const redis::RedisKey &key_;
   uint64_t chunk_size_;
   const chunk::IChunkOverwriteStrategy *strategy_;
+  MechanismPrivateTxnContext private_metadata_txn_;
 };
 
 }  // namespace swordfs::metadata

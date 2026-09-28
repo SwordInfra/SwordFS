@@ -191,6 +191,9 @@ class MemMetaTxn : public IChunkIndexTxn {
 
   // Transaction-scoped, strategy-private index operations. Writes are staged
   // until MemMetaStore::Transact commits a successful callback.
+  MechanismPrivateTxnContext &PrivateMetadata() override {
+    return private_metadata_txn_;
+  }
   Status Read(std::string_view hash, std::string_view field, std::string *value) override;
   Status Scan(std::string_view hash, std::vector<std::pair<std::string, std::string>> *values) override;
   Status Put(std::string_view hash, std::string_view field, std::string_view value) override;
@@ -205,11 +208,10 @@ class MemMetaTxn : public IChunkIndexTxn {
     std::optional<std::string> value;
   };
   std::string PrivateHash(std::string_view hash) const;
-  void CommitPrivateIndex();
+  void CommitPrivateMetadata();
 
   // Only MemMetaStore::Transact() may begin a transaction.
-  explicit MemMetaTxn(MemMetaStore *store) : store_(store) {
-  }
+  explicit MemMetaTxn(MemMetaStore *store);
 
   // ────────────────────────────────────────────────────────────────
   // Private helpers — direct accessors over the store's tables.  No
@@ -226,8 +228,10 @@ class MemMetaTxn : public IChunkIndexTxn {
   SwordFsInode *UnlinkEntry(InodeID parent_ino, std::string_view name);
   bool IsDirEmpty(InodeID ino);
 
+ private:
   // Non-owning; the store outlives every transaction.
   MemMetaStore *store_;
+  MechanismPrivateTxnContext private_metadata_txn_;
   std::vector<IndexWrite> index_writes_;
 };
 

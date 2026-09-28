@@ -26,7 +26,7 @@ class MemMetaImpl : public IMetaEngine {
 
   MemMetaImpl();
   ~MemMetaImpl() override;
-  Status BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) override;
+  Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) override;
 
   // Entry operations
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
