@@ -10,15 +10,15 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "3b6e4f2b4632e14d260ee37a57ed34557b841acd"
+    "swordfs_commit": "b2024540db142698f912ecc8baf0e727c3a7e1b9"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
-      "ENVIRONMENT": 7,
-      "KNOWN_SEMANTIC_DEFECT": 2,
-      "KNOWN_UNSUPPORTED": 142,
-      "PASS": 111,
+      "ENVIRONMENT": 8,
+      "KNOWN_SEMANTIC_DEFECT": 1,
+      "KNOWN_UNSUPPORTED": 141,
+      "PASS": 112,
       "UPSTREAM_NOT_APPLICABLE": 382,
       "UPSTREAM_TEST_DEFECT": 1
     },
@@ -27,17 +27,17 @@
     "deferred_count": 0,
     "executed_classified_percent": 100.0,
     "executed_count": 645,
-    "known_gap_count": 534,
-    "overall_support_percent": 17.21,
+    "known_gap_count": 533,
+    "overall_support_percent": 17.36,
     "raw_results": {
-      "FAIL": 19,
+      "FAIL": 18,
       "NOTRUN": 515,
-      "PASS": 111
+      "PASS": 112
     },
     "selected_count": 645,
-    "supported_count": 111,
+    "supported_count": 112,
     "supported_gate_percent": 100.0,
-    "supported_pass_count": 111
+    "supported_pass_count": 112
   },
   "tests": [
     {
@@ -3353,11 +3353,11 @@
       "test": "generic/524"
     },
     {
-      "classification": "KNOWN_SEMANTIC_DEFECT",
-      "issue": "#256",
-      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/525.out.bad)",
-      "reason": "A valid high-offset one-byte write is rejected although the large file size is accepted; tracked by #256.",
-      "result": "FAIL",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/525"
     },
     {
@@ -3617,10 +3617,10 @@
       "test": "generic/563"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/564.out.bad)",
-      "reason": "SwordFS copy_file_range hook returns ENOSYS; tracked by #255.",
+      "classification": "ENVIRONMENT",
+      "issue": "-",
+      "message": "[dumped core]",
+      "reason": "Upstream intentionally triggers SIGXFSZ under RLIMIT_FSIZE; the hosted systemd-coredump environment reports the xfs_io helper termination as a dumped-core failure although SwordFS remains healthy.",
       "result": "FAIL",
       "test": "generic/564"
     },
