@@ -7,6 +7,9 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 VERSION_FILE="${PROJECT_DIR}/conformance/fstests/version.env"
 PLAN_SCRIPT="${SCRIPT_DIR}/plan.py"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.e2e.yml"
+FSTESTS_PATCH_RELATIVE="conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch"
+FSTESTS_PATCH="${PROJECT_DIR}/${FSTESTS_PATCH_RELATIVE}"
+FSTESTS_PATCH_SHA256="$(sha256sum "${FSTESTS_PATCH}" | awk '{print $1}')"
 # shellcheck source=scripts/testing/minio-test.sh
 source "${PROJECT_DIR}/scripts/testing/minio-test.sh"
 MOUNT_HELPER_SOURCE="${SCRIPT_DIR}/mount-helper.sh"
@@ -316,6 +319,7 @@ pathlib.Path("${OUTPUT_DIR}/environment.json").write_text(
             "backend": "redis+minio-s3",
             "fstests_repository": "${FSTESTS_REPOSITORY}",
             "fstests_selector": "${FSTESTS_GROUP}",
+            "fstests_patchset": "${FSTESTS_PATCH_RELATIVE}@sha256:${FSTESTS_PATCH_SHA256}",
             "fstests_suite_timeout": "${FSTESTS_SUITE_TIMEOUT}",
             "fstests_test_timeout": "${FSTESTS_TEST_TIMEOUT}",
             "liburing_commit": "${LIBURING_COMMIT}",
@@ -467,6 +471,19 @@ if [[ "${ACTUAL_FSTESTS_COMMIT}" != "${FSTESTS_COMMIT}" ]]; then
   echo "ERROR: fetched fstests ${ACTUAL_FSTESTS_COMMIT}, expected ${FSTESTS_COMMIT}" >&2
   exit 2
 fi
+
+# generic/615 stops its sentinel-controlled background stat loop by removing
+# the sentinel and immediately killing the loop shell. On FUSE the shell is
+# commonly inside `blocks=$(stat ...)` at that instant, so killing the shell
+# closes the command-substitution pipe while coreutils stat is writing and
+# deterministically contaminates the testcase output with a Broken pipe
+# diagnostic. Let the existing sentinel terminate the loop naturally instead;
+# the buffered/direct-I/O workload and zero-block assertion remain unchanged.
+echo "=== Applying fstests CI reliability patch ${FSTESTS_PATCH_RELATIVE} ==="
+git -C "${FSTESTS_DIR}" apply --check "${FSTESTS_PATCH}"
+git -C "${FSTESTS_DIR}" apply "${FSTESTS_PATCH}"
+git -C "${FSTESTS_DIR}" diff --check
+git -C "${FSTESTS_DIR}" diff -- tests/generic/615 >"${OUTPUT_DIR}/fstests-local-patches.diff"
 
 echo "=== Building fstests ==="
 (

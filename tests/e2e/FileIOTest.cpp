@@ -61,6 +61,31 @@ TEST_F(FileIOTest, MultipleWritesAccumulate) {
   EXPECT_EQ(st.st_size, 11);
 }
 
+TEST_F(FileIOTest, StatBlocksStayVisibleAcrossBufferedOverwrite) {
+  const std::string name = "stat_blocks.bin";
+  constexpr size_t kFileSize = 64 * 1024;
+  std::vector<char> payload(kFileSize, 'a');
+
+  ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR | O_TRUNC), 0);
+  int fd = fixture_.OpenFile(name, O_RDWR);
+  ASSERT_GE(fd, 0);
+  ASSERT_EQ(::write(fd, payload.data(), payload.size()), static_cast<ssize_t>(payload.size()));
+
+  struct stat attr{};
+  ASSERT_EQ(::fstat(fd, &attr), 0);
+  ASSERT_EQ(attr.st_size, static_cast<off_t>(kFileSize));
+  ASSERT_GT(attr.st_blocks, 0);
+  const auto visible_blocks = attr.st_blocks;
+
+  std::fill(payload.begin(), payload.end(), 'b');
+  ASSERT_EQ(::pwrite(fd, payload.data(), payload.size(), 0), static_cast<ssize_t>(payload.size()));
+  ASSERT_EQ(::fstat(fd, &attr), 0);
+  EXPECT_EQ(attr.st_size, static_cast<off_t>(kFileSize));
+  EXPECT_EQ(attr.st_blocks, visible_blocks);
+
+  ASSERT_EQ(::close(fd), 0);
+}
+
 TEST_F(FileIOTest, Overwrite) {
   const std::string name = "overwrite.bin";
   ASSERT_EQ(fixture_.CreateFile(name, 0644, O_CREAT | O_RDWR), 0);

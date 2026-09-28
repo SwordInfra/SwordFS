@@ -215,7 +215,7 @@ class MockMetaEngine : public IMetaEngine {
     }
     return Status::OK();
   }
-  Status GetInode(InodeID, SwordFsInode *out) override {
+  Status GetInode(InodeID ino, SwordFsInode *out) override {
     if (!get_inode_status.ok()) {
       return get_inode_status;
     }
@@ -229,7 +229,7 @@ class MockMetaEngine : public IMetaEngine {
       release->wait();
     }
     if (out) {
-      *out = {};
+      *out = SwordFsInode(ino, SwordFsAttr(ino, S_IFREG | 0644), /*parent_ino=*/1);
       out->attr.size = snapshot_size;
     }
     return Status::OK();
@@ -1500,6 +1500,46 @@ TEST_F(FileReadWriterTest, LiveAttrGuardUsesTransientSize) {
   });
 }
 
+TEST_F(FileReadWriterTest, GetAttrBlocksDoNotPublishCachedWrite) {
+  RunInTestFiber([&] {
+    constexpr size_t kWriteSize = 64 * 1024;
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf(Repeat('x', kWriteSize)), 0).ok());
+
+    SwordFsInode inode;
+    ASSERT_TRUE(rw.GetAttr(&inode).ok());
+    struct stat attr{};
+    inode.attr.ToPosixStat(&attr);
+
+    EXPECT_EQ(attr.st_size, static_cast<off_t>(kWriteSize));
+    EXPECT_EQ(attr.st_blocks, 1);
+    EXPECT_EQ(mock_data_->put_calls, 0);
+    EXPECT_EQ(mock_meta_->replace_chunk_calls, 0);
+    EXPECT_EQ(mock_meta_->file_size(), 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, SparseCachedWriteKeepsBlocksBelowLogicalSize) {
+  RunInTestFiber([&] {
+    constexpr off_t kWriteOffset = 1600 * 1024;
+    constexpr size_t kWriteSize = 50 * 1024;
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf(Repeat('x', kWriteSize)), kWriteOffset).ok());
+
+    SwordFsInode inode;
+    ASSERT_TRUE(rw.GetAttr(&inode).ok());
+    struct stat attr{};
+    inode.attr.ToPosixStat(&attr);
+
+    EXPECT_EQ(attr.st_size, kWriteOffset + static_cast<off_t>(kWriteSize));
+    EXPECT_EQ(attr.st_blocks, 1);
+    EXPECT_LT(static_cast<uint64_t>(attr.st_blocks) * 512, static_cast<uint64_t>(attr.st_size));
+    EXPECT_EQ(mock_data_->put_calls, 0);
+    EXPECT_EQ(mock_meta_->replace_chunk_calls, 0);
+    EXPECT_EQ(mock_meta_->file_size(), 0);
+  });
+}
+
 TEST_F(FileReadWriterTest, FailedFlushKeepsTransientLiveSize) {
   RunInTestFiber([&] {
     auto rw = Make();
@@ -1513,6 +1553,9 @@ TEST_F(FileReadWriterTest, FailedFlushKeepsTransientLiveSize) {
     SwordFsInode inode;
     ASSERT_TRUE(rw.GetAttr(&inode).ok());
     EXPECT_EQ(inode.attr.size, 13U);
+    struct stat attr{};
+    inode.attr.ToPosixStat(&attr);
+    EXPECT_EQ(attr.st_blocks, 1);
   });
 }
 
@@ -2633,12 +2676,19 @@ TEST_F(FileReadWriterTest, WriteDuringBlockedFlushDoesNotWaitForRemotePut) {
 
   Status flush_status;
   Status write_status;
+  Status get_attr_status;
+  struct stat blocked_flush_attr{};
   fm.addTask([&] {
     flush_status = rw.Flush();
     flush_done.post();
   });
   fm.addTask([&] {
     put_started.wait();
+    SwordFsInode inode;
+    get_attr_status = rw.GetAttr(&inode);
+    if (get_attr_status.ok()) {
+      inode.attr.ToPosixStat(&blocked_flush_attr);
+    }
     write_started.post();
     write_status = rw.Write(Buf("BBBB"), 4);
     write_done.post();
@@ -2661,6 +2711,9 @@ TEST_F(FileReadWriterTest, WriteDuringBlockedFlushDoesNotWaitForRemotePut) {
     return;
   }
   EXPECT_TRUE(write_done.try_wait()) << "foreground write waited for the older generation's remote Put";
+  ASSERT_TRUE(get_attr_status.ok()) << get_attr_status.message();
+  EXPECT_EQ(blocked_flush_attr.st_size, 4);
+  EXPECT_EQ(blocked_flush_attr.st_blocks, 1);
 
   release_put.post();
   swordfs::test::DriveEventBaseUntilOrAbort(

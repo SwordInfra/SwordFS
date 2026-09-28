@@ -46,7 +46,16 @@ void SwordFsAttr::ToPosixStat(struct stat *st) const {
   st->st_rdev = static_cast<dev_t>(rdev);
   st->st_size = static_cast<off_t>(size);
   st->st_blksize = static_cast<blksize_t>(blksize);
-  st->st_blocks = static_cast<blkcnt_t>(blocks);
+  uint64_t posix_blocks = blocks;
+  if (S_ISREG(mode) && posix_blocks == 0 && size != 0) {
+    // generic/615 requires an already-visible non-empty file to never expose
+    // zero allocated blocks during overwrite/writeback. Do not derive blocks
+    // from logical size here: doing so turns sparse holes into allocation and
+    // breaks sparse-file capability detection. Accurate allocation accounting
+    // remains owned by the persisted blocks field when available.
+    posix_blocks = 1;
+  }
+  st->st_blocks = static_cast<blkcnt_t>(posix_blocks);
   st->st_atime = static_cast<time_t>(atime);
   st->st_atim.tv_nsec = static_cast<long>(atime_nsec);
   st->st_mtime = static_cast<time_t>(mtime);
