@@ -298,6 +298,11 @@ evidence:
   those detailed FAIL artifacts so baseline changes remain directly reviewable
   in the PR rather than being hidden behind an opaque digest.
 
+The manifest and evidence directory are an exact inventory: every
+`expected_evidence` path must exist, and every checked-in file below
+`fail-evidence/` must be referenced by a current known-gap entry. Missing or
+orphaned files are baseline configuration errors.
+
 Wildcard selectors and directory-level exclusions are not supported. A
 semantic defect or missing SwordFS capability must reference a focused GitHub
 Issue. Known-gap categories are:
@@ -382,7 +387,8 @@ normalization policy. Both `.out.bad` and `.mountfail` canonicalize the
 harness-owned work/result roots. `stat`-style absolute wall-clock fields are
 replaced by `<TIMESTAMP>` while their parenthesized relative deltas are kept.
 For `.mountfail`, fstests also appends host diagnostics whose values depend on
-the current shard/run: the mount invocation wall-clock timestamp, kernel
+the current shard/run: the mount invocation wall-clock timestamp in the
+observed `Day Mon DD HH:MM:SS UTC YYYY` form, kernel
 monotonic prefix, and process PID are canonicalized; `run fstests ...` dmesg
 history lines and fstests `sh (...): drop_caches: N` diagnostics are removed
 because both vary with preceding shard activity rather than the failing mount

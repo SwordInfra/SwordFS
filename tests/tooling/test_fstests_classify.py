@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 import sys
+import tempfile
 import unittest
 
 
@@ -106,6 +107,52 @@ mount: semantic failure text
         self.assertNotIn("drop_caches", first_normalized)
         self.assertIn("mount: semantic failure text", first_normalized)
 
+    def test_mountfail_normalization_preserves_non_timestamp_failure_detail(self) -> None:
+        raw = (
+            '"/usr/bin/mount -t fuse.swordfs /tmp/swordfs-fstests-AAAAAA/scratch" '
+            "failed at Mon Sep 28 06:16:16 UTC 2026: permission denied\n"
+        )
+
+        normalized = CLASSIFY.normalize_failure_evidence(raw, "generic/294.mountfail")
+
+        self.assertEqual(
+            '"/usr/bin/mount -t fuse.swordfs <FSTESTS_WORK_DIR>/scratch" '
+            "failed at Mon Sep 28 06:16:16 UTC 2026: permission denied\n",
+            normalized,
+        )
+
+    def test_checked_in_fail_evidence_inventory_matches_baseline(self) -> None:
+        gaps = CLASSIFY.load_gaps(ROOT / "conformance/fstests/known-gaps.tsv")
+
+        evidence = CLASSIFY.load_expected_evidence(ROOT / "conformance/fstests/fail-evidence", gaps)
+
+        expected_tests = {test for test, gap in gaps.items() if gap.expected_evidence != "-"}
+        self.assertEqual(expected_tests, set(evidence))
+
+    def test_fail_evidence_inventory_rejects_missing_and_orphan_files(self) -> None:
+        gap = CLASSIFY.Gap(
+            "known_unsupported",
+            "#255",
+            "FAIL",
+            "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/131.out.bad)",
+            "generic/131.out.bad",
+            "locks are not implemented",
+        )
+        gaps = {"generic/131": gap}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            evidence_dir = pathlib.Path(temp_dir)
+            with self.assertRaisesRegex(CLASSIFY.BaselineError, "missing checked-in FAIL evidence"):
+                CLASSIFY.load_expected_evidence(evidence_dir, gaps)
+
+            expected = evidence_dir / "generic/131.out.bad"
+            expected.parent.mkdir(parents=True)
+            expected.write_text("expected evidence\n", encoding="utf-8")
+            orphan = evidence_dir / "generic/999.out.bad"
+            orphan.write_text("orphaned evidence\n", encoding="utf-8")
+            with self.assertRaisesRegex(CLASSIFY.BaselineError, "orphaned checked-in FAIL evidence"):
+                CLASSIFY.load_expected_evidence(evidence_dir, gaps)
+
     def test_generic_output_mismatch_accepts_unchanged_detailed_evidence(self) -> None:
         test = "generic/131"
         expected_message = "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/131.out.bad)"
@@ -205,6 +252,39 @@ mount: semantic failure text
 
         self.assertEqual("BASELINE_EVIDENCE_MISMATCH", observations[0].classification)
         self.assertIn("missing detailed FAIL evidence", observations[0].message)
+
+    def test_bootstrap_writes_normalized_detailed_fail_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            result_dir = root / "results"
+            output_dir = root / "output"
+            evidence_path = pathlib.Path("generic/131.out.bad")
+            source = result_dir / evidence_path
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                "QA output created by 131\n"
+                "/tmp/swordfs-fstests-ABCDEF/test/lock: Function not implemented\n",
+                encoding="utf-8",
+            )
+            output_dir.mkdir()
+            observation = CLASSIFY.Observation(
+                "generic/131",
+                "FAIL",
+                "UNEXPECTED_FAIL",
+                "- output mismatch "
+                "(see /home/runner/work/SwordFS/SwordFS/build/fstests-conformance/raw/results/generic/131.out.bad)",
+            )
+
+            CLASSIFY.write_bootstrap(output_dir, [observation], result_dir)
+
+            bootstrap = (output_dir / "bootstrap-gaps.tsv").read_text(encoding="utf-8")
+            normalized = (output_dir / "bootstrap-fail-evidence" / evidence_path).read_text(encoding="utf-8")
+            self.assertIn("\tgeneric/131.out.bad\tclassify root cause", bootstrap)
+            self.assertEqual(
+                "QA output created by 131\n"
+                "<FSTESTS_WORK_DIR>/test/lock: Function not implemented\n",
+                normalized,
+            )
 
 
 if __name__ == "__main__":
