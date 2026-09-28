@@ -15,6 +15,7 @@ not by itself establish support for every Cluster deployment configuration.
 | `format` | String | Serialized volume configuration |
 | `next_ino` | Integer string | Inode allocator |
 | `next_chunk_revision` | Integer string | Volume-wide logical publication-generation allocator |
+| `private_sequence:<mechanism-key>:<sequence-id>` | Integer string | Mechanism-private monotonic identity allocator; `<sequence-id>` is a stable compile-time discriminator |
 | `inode_count` | Integer string | Advisory legacy inode metric; never an authoritative filesystem invariant |
 | `inode:<ino>` | String | Canonical serialized `SwordFsInode` |
 | `dir:<parent_ino>` | Hash | Name → child type and inode ID |
@@ -54,7 +55,23 @@ Private-index Redis keys do not embed the human-readable mechanism name.
 `ChunkOverwriteMechanism` through `ChunkOverwriteMechanismKey()`; in the
 current beta layout the stable enum values are encoded as decimal strings
 (`1` = `whole_object`, `2` = `chunk_slice`, `3` = `redis_cache`). The trailing
-`<hash>` and its fields remain mechanism-owned schema.
+`<hash>` and its fields remain mechanism-owned schema. Those strings are a
+Redis adapter detail: mechanism/session code consumes typed private-store
+interfaces and never constructs this layout directly.
+
+Private sequence keys use the same mechanism namespace. `<sequence-id>` is a
+stable numeric discriminator chosen by the owning mechanism at compile time;
+it is not a runtime string name. The Redis adapter uses one atomic Lua command
+that rejects a negative persisted counter before mutation and otherwise
+executes Redis `INCR`. Malformed values and signed-64-bit overflow are Redis
+command errors and likewise leave the counter unchanged. SwordFS therefore
+accepts successful values only in `1..INT64_MAX`, matching the Memory backend
+without allowing repeated retries of corrupt negative state to walk back into
+the valid range. The key is created lazily on first use. A lost
+acknowledgement after the script may have executed is `OutcomeUnknown`; a
+later allocation obtains a fresh value and never tries to reconstruct/reuse
+the lost identity. The legacy `next_chunk_revision` allocator remains
+separate while the current whole-object writer still depends on it.
 
 Frozen reclaim and pending-delete records carry opaque payloads.
 The common queue validates its envelope and Hash field identity; only the
@@ -121,20 +138,27 @@ the inode key remains the namespace/reclaim serialization point, while an
 unrelated inode's reclaim field must not force a retry. All reads must precede
 the first queued write; the wrapper rejects reads after writes.
 
-`IChunkIndexTxn` exposes strategy-private hash read/scan/put/erase operations
-through the same `RedisKvTxn`. Strategy freeze callbacks and index
-participants finish private-index reads during the watched read phase, before
-any write is queued. Private-index writes, the shared logical head, and inode
-updates are queued in that transaction. Since Redis can partially apply a
-failed `EXEC`, a strategy must make every manifest required to read a new head
-durable before queuing that head; a private write earlier in the same `EXEC`
-is insufficient as its only readable copy. The session passes an opaque
-publication intent to the participant and retains it for cleanup after a
-definite rejection. `LoadChunkView` watches the public head and private
-index during a read-only transaction, validating the snapshot at `EXEC` before
-the session interprets it. The current `whole_object` strategy has no extra
-private records; slice and Redis-cache implementations must satisfy these
-rules before format selection is enabled.
+The typed private-metadata capability layer does not expose `RedisKvTxn`, Redis
+keys, fields, or encoded values to mechanism code. A Redis mechanism adapter
+binds its typed transaction interface into the metadata transaction's private
+capability context and performs the necessary `HGET`/`HSCAN`/`HSET`/`HDEL`
+operations at this boundary. Transactional private reads still finish during
+the watched read phase before the first queued write, preserving
+`RedisKvTxn`'s WATCH/MULTI discipline. The capability context itself has no
+second Redis commit step: a rejected metadata callback discards all queued
+private/common commands together, while a successful callback leaves
+`RedisKvTxn::Commit()` as the only backend commit boundary. Since Redis can
+partially apply a failed `EXEC`, typed mechanism protocols must still order
+durable authority so a later common write cannot become readable without the
+private state it needs.
+
+`IChunkIndexTxn` currently remains as a transitional string adapter for the
+existing common-authority implementation. No new production mechanism/session
+consumer should be built on it. #316 and #270 replace that transitional use
+with their own typed adapters while keeping Redis encoding here at the backend
+boundary. The current `whole_object` strategy has no additional durable
+private records in #315, so this stage changes capability plumbing only and
+does not change whole-object read/publication/truncate/reclaim authority.
 
 `RedisKvTxn` borrows its transaction connection from the shared redis++ pool
 with `transaction(false, false)`. The `Redis` view returned by

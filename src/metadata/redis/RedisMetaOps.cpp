@@ -19,6 +19,7 @@
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
 #include "metadata/redis/RedisMetaTxn.hpp"
+#include "metadata/redis/RedisPrivateMetadataStore.hpp"
 #include "utils/BlockingExecutor.hpp"
 #include "utils/ExecutionDomain.hpp"
 #include "utils/Logging.hpp"
@@ -53,12 +54,18 @@ RedisMetaOps::~RedisMetaOps() {
   backend_->Shutdown();
 }
 
-utils::Status RedisMetaOps::BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) {
+utils::Status RedisMetaOps::BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) {
   utils::ExpectInThreadDomain();
   if (strategy == nullptr) {
     return utils::Status::InvalidArgument("chunk strategy is null");
   }
+  auto private_metadata = std::make_shared<RedisPrivateMetadataStore>(backend_, key_, strategy->mechanism());
+  auto status = strategy->BindPrivateMetadata(private_metadata);
+  if (!status.ok()) {
+    return status;
+  }
   chunk_strategy_ = strategy;
+  private_metadata_ = std::move(private_metadata);
   return utils::Status::OK();
 }
 

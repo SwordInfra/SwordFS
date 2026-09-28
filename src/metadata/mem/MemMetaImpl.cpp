@@ -50,13 +50,12 @@ MemMetaImpl::~MemMetaImpl() {
   utils::ExpectInThreadDomain();
 }
 
-Status MemMetaImpl::BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy) {
+Status MemMetaImpl::BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) {
   utils::ExpectInThreadDomain();
   if (strategy == nullptr) {
     return Status::InvalidArgument("chunk strategy is null");
   }
-  store_.BindChunkOverwriteStrategy(strategy);
-  return Status::OK();
+  return store_.BindChunkOverwriteStrategy(strategy);
 }
 
 // Transaction model: every method below runs its metadata mutation as a

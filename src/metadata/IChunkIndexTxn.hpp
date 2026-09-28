@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "metadata/IPrivateMetadata.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "utils/Status.hpp"
@@ -29,6 +30,10 @@ class IChunkIndexReader {
 class IChunkIndexTxn : public IChunkIndexReader {
  public:
   ~IChunkIndexTxn() override = default;
+  // Transitional raw record operations remain below for the current
+  // common-authority path. New mechanism adapters bind their typed transaction
+  // interface into this context instead of adding new hash/field consumers.
+  virtual MechanismPrivateTxnContext &PrivateMetadata() = 0;
   virtual utils::Status Put(std::string_view hash, std::string_view field, std::string_view value) = 0;
   virtual utils::Status Erase(std::string_view hash, std::string_view field) = 0;
 };

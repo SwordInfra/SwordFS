@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "metadata/IChunkIndexTxn.hpp"
+#include "metadata/IPrivateMetadata.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/types/Chunk.hpp"
@@ -52,7 +53,7 @@ class RedisMetaOps {
   RedisMetaOps &operator=(RedisMetaOps &&) = delete;
 
   utils::Status Initialize();
-  utils::Status BindChunkOverwriteStrategy(const chunk::IChunkOverwriteStrategy *strategy);
+  utils::Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy);
   utils::Status FormatVolume(const SwordFsVolume &config);
   utils::Status LoadVolume(SwordFsVolume *config);
   utils::Status CreateDirIterator(InodeID ino, std::vector<SwordFsEntry> prefix_entries,
@@ -107,6 +108,7 @@ class RedisMetaOps {
  private:
   std::shared_ptr<RedisBackendContext> backend_;
   const chunk::IChunkOverwriteStrategy *chunk_strategy_ = nullptr;
+  MechanismPrivateStorePtr private_metadata_;
   redis::RedisKey key_;
   uint64_t chunk_size_ = 0;
   utils::FiberMutex pending_delete_scan_mutex_;
