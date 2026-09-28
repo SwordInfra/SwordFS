@@ -8,12 +8,9 @@
 
 #include "chunk/ChunkObjectKey.hpp"
 #include "metadata/types/BufCodec.hpp"
-#include "metadata/types/Volume.hpp"
 
 namespace swordfs::chunk {
 namespace {
-
-constexpr uint32_t kIndexFormatVersion = metadata::kWholeObjectChunkIndexFormatVersion;
 
 bool ValidHead(const metadata::SwordFsChunk &head, uint64_t chunk_size) {
   return chunk_size == 0 ? head.revision != metadata::kInvalidChunkRevision : head.IsValidForChunkSize(chunk_size);
@@ -85,7 +82,6 @@ utils::Status FreezeWholeObjectDelete(metadata::InodeID ino, const metadata::Swo
   const auto key = FormatChunkObjectKey(ino, chunk.index, chunk.revision);
   metadata::PendingDelete work;
   work.id = "whole_object:" + key;
-  work.index_format_version = kIndexFormatVersion;
   auto status = EncodeRefs(ino, std::vector<WholeObjectRef>{{ino, chunk, key}}, &work.payload);
   if (!status.ok()) {
     return status;
@@ -109,7 +105,6 @@ utils::Status FreezeWholeObjectReclaim(metadata::InodeID ino, const std::vector<
   }
   metadata::ReclaimWork work;
   work.ino = ino;
-  work.index_format_version = kIndexFormatVersion;
   auto status = EncodeRefs(ino, refs, &work.payload);
   if (!status.ok()) {
     return status;
@@ -121,9 +116,6 @@ utils::Status FreezeWholeObjectReclaim(metadata::InodeID ino, const std::vector<
 utils::Status DecodeWholeObjectDelete(const metadata::PendingDelete &work, uint64_t chunk_size, WholeObjectRef *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("whole-object delete output is null");
-  }
-  if (work.index_format_version != kIndexFormatVersion) {
-    return utils::Status::NotSupported("unsupported whole-object cleanup version");
   }
   std::vector<WholeObjectRef> refs;
   // The inode is carried inside the private payload, not by the generic queue.
@@ -147,9 +139,6 @@ utils::Status DecodeWholeObjectDelete(const metadata::PendingDelete &work, uint6
 
 utils::Status DecodeWholeObjectReclaim(const metadata::ReclaimWork &work, uint64_t chunk_size,
                                        std::vector<WholeObjectRef> *out) {
-  if (work.index_format_version != kIndexFormatVersion) {
-    return utils::Status::NotSupported("unsupported whole-object reclaim version");
-  }
   return DecodeRefs(work.payload, work.ino, chunk_size, out);
 }
 

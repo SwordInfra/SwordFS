@@ -90,7 +90,7 @@ The volume configuration contains, among other fields:
 - bucket/location string interpreted by that data engine;
 - region;
 - configured logical chunk size;
-- chunk overwrite strategy and its index-format version.
+- typed chunk overwrite mechanism.
 
 For Redis metadata, volume configuration is persisted in Redis. For the in-memory backend, only the volume configuration is persisted locally in `/etc/swordfs/<volume>/volume.fmt`; inode, directory, chunk, orphan, and pending-reclaim state remain process-lifetime state.
 
@@ -310,7 +310,7 @@ The main logical records are:
 - **`SwordFsChunk`** — the shared file-to-logical-chunk head, currently containing index, publication generation, and logical size; the logical start offset is derived from `index * chunk_size` rather than persisted;
 - **volume configuration** — storage/backend configuration and chunk size;
 - **orphan candidate** — inode whose last namespace link disappeared but which has not crossed the reclaim point of no return;
-- **`ReclaimWork`** — a frozen, versioned, opaque strategy payload for an inode already removed from live metadata and awaiting/undergoing data deletion.
+- **`ReclaimWork`** — a frozen opaque strategy payload for an inode already removed from live metadata and awaiting/undergoing data deletion.
 
 Directory entries, inodes, and logical chunk heads are common to every
 overwrite strategy. Chunk-internal fragment indexes belong to the selected
@@ -549,10 +549,12 @@ physical object key is:
 This gives each whole-object revision an immutable physical identity and
 allows metadata publication to change independently from an already-written
 object. `<chunk-index>` is the canonical unsigned decimal 64-bit logical index.
-The current whole-object index format is v2: common descriptors and frozen
-cleanup/reclaim identities persist that index at 64-bit width. Older v1
-whole-object volumes are rejected rather than migrated or dual-decoded. Future
-strategies may use a different physical layout under the same logical head.
+Common descriptors and frozen cleanup/reclaim identities persist that index at
+64-bit width. No independent whole-object layout number is carried in the
+volume or cleanup wrappers; SwordFS beta metadata follows only the current
+layout, while generic codec schema/type framing remains responsible for record
+integrity. Future strategies may use a different physical layout under the
+same logical head.
 
 S3 requests that can block a foreground filesystem operation also require a
 finite terminal-completion policy owned by SwordFS. Transport low-speed

@@ -45,10 +45,9 @@ durable private fragment records.
 that identify a logical chunk use `std::to_string(index)`, i.e. the canonical
 unsigned decimal representation with no parallel truncated numeric identity.
 The serialized `SwordFsChunk` value stores the index as U64. The selectable
-`whole_object` chunk-index format is v2; its frozen pending-delete/reclaim
-payloads also encode descriptor indexes as U64. V1 is not read as v2 and is
-rejected at mount/strategy construction because SwordFS is still using an
-incompatible beta metadata format rather than a migration protocol.
+`whole_object` cleanup/reclaim payloads also encode descriptor indexes as
+U64. SwordFS is still beta and does not preserve historical whole-object layout
+numbers or dual-decode older beta records.
 
 Private-index Redis keys do not embed the human-readable mechanism name.
 `RedisKey::PrivateChunkIndex()` derives `<mechanism-key>` from the persisted
@@ -57,7 +56,7 @@ current beta layout the stable enum values are encoded as decimal strings
 (`1` = `whole_object`, `2` = `chunk_slice`, `3` = `redis_cache`). The trailing
 `<hash>` and its fields remain mechanism-owned schema.
 
-Frozen reclaim and pending-delete records carry versioned opaque payloads.
+Frozen reclaim and pending-delete records carry opaque payloads.
 The common queue validates its envelope and Hash field identity; only the
 selected strategy interprets physical references and checks reachability
 before deletion. Truncate and rewrite publication use `pending_deletes` as
@@ -357,7 +356,7 @@ authoritative metadata transaction does **not** depend on `pending_deletes`:
    uploaded replacement after a definite logical rejection;
 3. after the authoritative transaction reports a **known** outcome,
    `RedisMetaOps` attempts a separate transaction that writes
-   `pending_deletes[opaque_id] = PendingDelete{opaque_id, version, payload}`;
+   `pending_deletes[opaque_id] = PendingDelete{opaque_id, payload}`;
 4. cleanup-registration failure is logged and ignored by the logical operation.
    It may leak an obsolete object, but it cannot invalidate a metadata mutation
    whose result is already known.
@@ -385,8 +384,9 @@ payload. The selected strategy validates the payload and checks authoritative
 reachability. For `whole_object`, it verifies the frozen descriptor, canonical
 layout, and derived key against the current logical head. A still-live target
 is left untouched; otherwise the strategy deletes it idempotently and the
-reclaimer removes the queue field only after success. Unknown versions and
-malformed private payloads fail closed and remain queued.
+reclaimer removes the queue field only after success. Wrong record types,
+malformed private payloads, and physical-identity mismatches fail closed and
+remain queued.
 
 Reconciliation does not snapshot the complete Hash. Redis metadata keeps a
 process-local HSCAN cursor plus at most one decoded HSCAN response and exposes

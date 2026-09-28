@@ -51,9 +51,32 @@ std::string SerializeOrDie(const Work &work) {
   return blob;
 }
 
-std::string EncodePrivateRefs(InodeID ino, const std::vector<chunk::WholeObjectRef> &refs, bool trailing = false) {
+std::string EncodeReclaimEnvelope(InodeID ino, std::string_view payload,
+                                  RecordType record_type = RecordType::kReclaim) {
   BufEncoder enc;
-  enc.Header(RecordType::kWholeObjectCleanup);
+  enc.Header(record_type);
+  enc.U64(ino);
+  enc.String(payload);
+  std::string blob;
+  enc.Finish(&blob);
+  return blob;
+}
+
+std::string EncodePendingDeleteEnvelope(std::string_view id, std::string_view payload,
+                                        RecordType record_type = RecordType::kPendingDelete) {
+  BufEncoder enc;
+  enc.Header(record_type);
+  enc.String(id);
+  enc.String(payload);
+  std::string blob;
+  enc.Finish(&blob);
+  return blob;
+}
+
+std::string EncodePrivateRefs(InodeID ino, const std::vector<chunk::WholeObjectRef> &refs, bool trailing = false,
+                              RecordType record_type = RecordType::kWholeObjectCleanup) {
+  BufEncoder enc;
+  enc.Header(record_type);
   enc.U64(ino);
   enc.U32(static_cast<uint32_t>(refs.size()));
   for (const auto &ref : refs) {
@@ -76,7 +99,6 @@ TEST(ReclaimWorkTest, RoundTripsOpaqueEnvelopeAndPrivateFrozenIdentities) {
   ASSERT_TRUE(parsed.ParseFrom(SerializeOrDie(original)).ok());
   EXPECT_EQ(parsed, original);
   EXPECT_EQ(parsed.ino, 42U);
-  EXPECT_EQ(parsed.index_format_version, 2U);
 
   std::vector<chunk::WholeObjectRef> refs;
   ASSERT_TRUE(chunk::DecodeWholeObjectReclaim(parsed, kChunkSize, &refs).ok());
@@ -94,7 +116,6 @@ TEST(ReclaimWorkTest, WholeObjectFrozenIdentitiesPreserveIndexAboveUint32Max) {
 
   ReclaimWork reclaim;
   ASSERT_TRUE(chunk::FreezeWholeObjectReclaim(42, {high}, kChunkSize, &reclaim).ok());
-  EXPECT_EQ(reclaim.index_format_version, 2U);
   std::vector<chunk::WholeObjectRef> refs;
   ASSERT_TRUE(chunk::DecodeWholeObjectReclaim(reclaim, kChunkSize, &refs).ok());
   ASSERT_EQ(refs.size(), 1U);
@@ -103,7 +124,6 @@ TEST(ReclaimWorkTest, WholeObjectFrozenIdentitiesPreserveIndexAboveUint32Max) {
 
   PendingDelete pending;
   ASSERT_TRUE(chunk::FreezeWholeObjectDelete(42, high, kChunkSize, &pending).ok());
-  EXPECT_EQ(pending.index_format_version, 2U);
   chunk::WholeObjectRef ref;
   ASSERT_TRUE(chunk::DecodeWholeObjectDelete(pending, kChunkSize, &ref).ok());
   EXPECT_EQ(static_cast<uint64_t>(ref.descriptor.index), kHighIndex);
@@ -126,9 +146,6 @@ TEST(ReclaimWorkTest, EqualityIncludesEnvelopeAndOpaquePayload) {
   changed.ino++;
   EXPECT_NE(changed, original);
   changed = original;
-  changed.index_format_version++;
-  EXPECT_NE(changed, original);
-  changed = original;
   changed.payload.push_back('x');
   EXPECT_NE(changed, original);
 }
@@ -138,9 +155,6 @@ TEST(ReclaimWorkTest, RejectsInvalidEnvelopeOnWriteAndRead) {
   EXPECT_EQ(work.SerializeTo(nullptr).ToErrno(), EINVAL);
   std::string blob;
   work.ino = 0;
-  EXPECT_EQ(work.SerializeTo(&blob).ToErrno(), EINVAL);
-  work = MakeWork();
-  work.index_format_version = 0;
   EXPECT_EQ(work.SerializeTo(&blob).ToErrno(), EINVAL);
   work = MakeWork();
   work.payload.clear();
@@ -155,26 +169,19 @@ TEST(ReclaimWorkTest, RejectsInvalidEnvelopeOnWriteAndRead) {
   EXPECT_TRUE(parsed.ParseFrom(SerializeOrDie(before) + "x").ToErrno() == EIO);
   EXPECT_EQ(parsed, before);
 
-  BufEncoder enc;
-  enc.Header(RecordType::kPendingDelete);
-  enc.String("other-record");
-  enc.U32(1);
-  enc.String("payload");
-  enc.Finish(&blob);
-  EXPECT_TRUE(parsed.ParseFrom(blob).ToErrno() == EIO);
+  EXPECT_TRUE(parsed.ParseFrom(EncodePendingDeleteEnvelope("other-record", "payload")).ToErrno() == EIO);
+  EXPECT_EQ(parsed, before);
+  EXPECT_TRUE(parsed.ParseFrom(EncodeReclaimEnvelope(0, "payload")).ToErrno() == EIO);
+  EXPECT_EQ(parsed, before);
+  EXPECT_TRUE(parsed.ParseFrom(EncodeReclaimEnvelope(42, "")).ToErrno() == EIO);
   EXPECT_EQ(parsed, before);
 }
 
-TEST(ReclaimWorkTest, PrivateDecoderRejectsTamperedIdentitiesAndUnknownVersion) {
+TEST(ReclaimWorkTest, PrivateDecoderRejectsWrongRecordTypeAndTamperedIdentities) {
   ReclaimWork work = MakeWork();
   std::vector<chunk::WholeObjectRef> refs;
-  work.index_format_version = 1;
-  EXPECT_EQ(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno(), ENOSYS);
-
-  work = MakeWork();
-  work.index_format_version = 99;
-  EXPECT_EQ(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno(), ENOSYS);
-
+  work.payload = EncodePrivateRefs(42, {}, false, RecordType::kPendingDelete);
+  EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno() == EIO);
   work = MakeWork();
   work.payload = EncodePrivateRefs(43, {{43, Head(0, 1), chunk::FormatChunkObjectKey(43, 0, 1)}});
   EXPECT_TRUE(chunk::DecodeWholeObjectReclaim(work, kChunkSize, &refs).ToErrno() == EIO);
@@ -228,9 +235,6 @@ TEST(PendingDeleteTest, RejectsInvalidEnvelopeOnWriteAndRead) {
   work.id.clear();
   EXPECT_EQ(work.SerializeTo(&blob).ToErrno(), EINVAL);
   work = MakePendingDelete();
-  work.index_format_version = 0;
-  EXPECT_EQ(work.SerializeTo(&blob).ToErrno(), EINVAL);
-  work = MakePendingDelete();
   work.payload.clear();
   EXPECT_EQ(work.SerializeTo(&blob).ToErrno(), EINVAL);
 
@@ -240,18 +244,20 @@ TEST(PendingDeleteTest, RejectsInvalidEnvelopeOnWriteAndRead) {
   EXPECT_EQ(parsed, before);
   EXPECT_TRUE(parsed.ParseFrom(SerializeOrDie(before) + "x").ToErrno() == EIO);
   EXPECT_EQ(parsed, before);
+
+  EXPECT_TRUE(parsed.ParseFrom(EncodeReclaimEnvelope(42, "payload")).ToErrno() == EIO);
+  EXPECT_EQ(parsed, before);
+  EXPECT_TRUE(parsed.ParseFrom(EncodePendingDeleteEnvelope("", "payload")).ToErrno() == EIO);
+  EXPECT_EQ(parsed, before);
+  EXPECT_TRUE(parsed.ParseFrom(EncodePendingDeleteEnvelope("whole_object:42/3/7", "")).ToErrno() == EIO);
+  EXPECT_EQ(parsed, before);
 }
 
 TEST(PendingDeleteTest, PrivateDecoderRejectsTamperingBeforeDeletion) {
   PendingDelete work = MakePendingDelete();
   chunk::WholeObjectRef ref;
-  work.index_format_version = 1;
-  EXPECT_EQ(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).ToErrno(), ENOSYS);
-
-  work = MakePendingDelete();
-  work.index_format_version = 99;
-  EXPECT_EQ(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).ToErrno(), ENOSYS);
-
+  work.payload = EncodePrivateRefs(42, {}, false, RecordType::kReclaim);
+  EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).ToErrno() == EIO);
   work = MakePendingDelete();
   work.id += "tampered";
   EXPECT_TRUE(chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref).ToErrno() == EIO);

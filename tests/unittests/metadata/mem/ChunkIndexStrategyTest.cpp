@@ -114,9 +114,6 @@ class RecordingStrategy final : public chunk::IChunkOverwriteStrategy {
   metadata::ChunkOverwriteMechanism mechanism() const override {
     return metadata::ChunkOverwriteMechanism::kChunkSlice;
   }
-  uint32_t index_format_version() const override {
-    return 1;
-  }
   std::shared_ptr<chunk::IChunkSession> OpenSession(InodeID file_ino, ChunkIndex index) const override {
     return chunk::DefaultChunkOverwriteStrategy().OpenSession(file_ino, index);
   }
@@ -128,7 +125,6 @@ class RecordingStrategy final : public chunk::IChunkOverwriteStrategy {
                                     PendingDelete *out) const override {
     *out = {.id = "candidate:" + std::to_string(file_ino) + ":" + std::to_string(head.index) + ":" +
                   std::to_string(head.revision),
-            .index_format_version = 1,
             .payload = "opaque"};
     return utils::Status::OK();
   }
@@ -137,7 +133,6 @@ class RecordingStrategy final : public chunk::IChunkOverwriteStrategy {
                                           PendingDelete *out) const override {
     *out = {.id = "candidate:" + std::to_string(file_ino) + ":" + std::to_string(replacement.index) + ":" +
                   std::to_string(replacement.revision),
-            .index_format_version = 1,
             .payload = intent.payload};
     return utils::Status::OK();
   }
@@ -148,7 +143,7 @@ class RecordingStrategy final : public chunk::IChunkOverwriteStrategy {
     if (!status.ok()) {
       return status;
     }
-    *out = {.ino = file_ino, .index_format_version = 1, .payload = std::to_string(fragments.size())};
+    *out = {.ino = file_ino, .payload = std::to_string(fragments.size())};
     return utils::Status::OK();
   }
   utils::Status DeletePending(const PendingDelete &, uint64_t, IMetaEngine *, storage::IDataEngine *,

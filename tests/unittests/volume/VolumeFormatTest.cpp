@@ -76,22 +76,16 @@ TEST(SwordFsVolumeTest, SerializeToAndParseFromRoundTrip) {
   EXPECT_EQ(parsed.region, original.region);
   EXPECT_EQ(parsed.chunk_size, original.chunk_size);
   EXPECT_EQ(parsed.chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
-  EXPECT_EQ(parsed.chunk_index_format_version, 2U);
 }
 
-TEST(SwordFsVolumeTest, PersistsMechanismAndRejectsUnknownOrZeroVersion) {
+TEST(SwordFsVolumeTest, PersistsMechanismAndRejectsUnknownMechanism) {
   SwordFsVolume volume = MakeVolume();
   volume.chunk_overwrite_mechanism = ChunkOverwriteMechanism::kRedisCache;
-  volume.chunk_index_format_version = 7;
   SwordFsVolume parsed;
   ASSERT_TRUE(parsed.ParseFrom(volume.SerializeTo()).ok());
   EXPECT_EQ(parsed.chunk_overwrite_mechanism, ChunkOverwriteMechanism::kRedisCache);
-  EXPECT_EQ(parsed.chunk_index_format_version, 7U);
 
   volume.chunk_overwrite_mechanism = static_cast<ChunkOverwriteMechanism>(99);
-  EXPECT_TRUE(parsed.ParseFrom(volume.SerializeTo()).ToErrno() == EIO);
-  volume.chunk_overwrite_mechanism = ChunkOverwriteMechanism::kWholeObject;
-  volume.chunk_index_format_version = 0;
   EXPECT_TRUE(parsed.ParseFrom(volume.SerializeTo()).ToErrno() == EIO);
 }
 
