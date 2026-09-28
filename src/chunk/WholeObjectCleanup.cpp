@@ -8,11 +8,12 @@
 
 #include "chunk/ChunkObjectKey.hpp"
 #include "metadata/types/BufCodec.hpp"
+#include "metadata/types/Volume.hpp"
 
 namespace swordfs::chunk {
 namespace {
 
-constexpr uint32_t kIndexFormatVersion = 1;
+constexpr uint32_t kIndexFormatVersion = metadata::kWholeObjectChunkIndexFormatVersion;
 
 bool ValidHead(const metadata::SwordFsChunk &head, uint64_t chunk_size) {
   return chunk_size == 0 ? head.revision != metadata::kInvalidChunkRevision : head.IsValidForChunkSize(chunk_size);
@@ -30,7 +31,7 @@ utils::Status EncodeRefs(metadata::InodeID ino, const std::vector<WholeObjectRef
     if (ref.ino != ino || ref.key != FormatChunkObjectKey(ino, ref.descriptor.index, ref.descriptor.revision)) {
       return utils::Status::InvalidArgument("whole-object cleanup reference identity mismatch");
     }
-    enc.U32(ref.descriptor.index);
+    enc.U64(ref.descriptor.index);
     enc.U64(ref.descriptor.revision);
     enc.U64(ref.descriptor.size);
     enc.String(ref.key);
@@ -57,7 +58,7 @@ utils::Status DecodeRefs(std::string_view payload, metadata::InodeID expected_in
   for (uint32_t i = 0; i < count; ++i) {
     WholeObjectRef ref;
     ref.ino = ino;
-    dec.U32(&ref.descriptor.index);
+    dec.U64(&ref.descriptor.index);
     dec.U64(&ref.descriptor.revision);
     dec.U64(&ref.descriptor.size);
     dec.String(&ref.key);

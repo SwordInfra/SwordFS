@@ -50,7 +50,7 @@ class WholeObjectStrategy final : public IChunkOverwriteStrategy {
     return metadata::ChunkOverwriteMechanism::kWholeObject;
   }
   uint32_t index_format_version() const override {
-    return 1;
+    return metadata::kWholeObjectChunkIndexFormatVersion;
   }
   std::shared_ptr<IChunkSession> OpenSession(metadata::InodeID ino, metadata::ChunkIndex index) const override {
     return std::make_shared<Chunk>(ino, index);
@@ -146,9 +146,11 @@ utils::Status CreateChunkOverwriteStrategy(metadata::ChunkOverwriteMechanism mec
     return utils::Status::InvalidArgument("chunk strategy output is null");
   }
   out->reset();
-  if (mechanism == metadata::ChunkOverwriteMechanism::kWholeObject && index_format_version == 1) {
-    *out = std::make_unique<WholeObjectStrategy>();
-    return utils::Status::OK();
+  if (mechanism == metadata::ChunkOverwriteMechanism::kWholeObject) {
+    if (index_format_version == metadata::kWholeObjectChunkIndexFormatVersion) {
+      *out = std::make_unique<WholeObjectStrategy>();
+      return utils::Status::OK();
+    }
   }
   const auto name = metadata::ChunkOverwriteMechanismName(mechanism);
   const auto mechanism_id = static_cast<uint32_t>(mechanism);

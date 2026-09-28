@@ -208,7 +208,7 @@ TEST_F(VolumeImplTest, CreateFromSucceeds) {
   const auto status = vol.CreateFrom(options);
   EXPECT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(vol.config().chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
-  EXPECT_EQ(vol.config().chunk_index_format_version, 1U);
+  EXPECT_EQ(vol.config().chunk_index_format_version, 2U);
 }
 
 TEST_F(VolumeImplTest, CreateFromRejectsInvalidBucketUrl) {
@@ -251,7 +251,7 @@ TEST_F(VolumeImplTest, MountUsesPersistedStrategyAndRejectsUnsupportedVersion) {
   EXPECT_EQ(mounted.config().chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
 
   SwordFsVolume stored = mounted.config();
-  stored.chunk_index_format_version = 2;
+  stored.chunk_index_format_version = 1;
   const auto unsupported_options = makeMountOptions("memory://local");
   stored.name = unsupported_options.name;
   ASSERT_TRUE(VolumeFile{stored.name}.Write(stored).ok());

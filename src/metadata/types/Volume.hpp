@@ -17,6 +17,8 @@ enum class ChunkOverwriteMechanism : uint32_t {
   kRedisCache = 3,
 };
 
+constexpr uint32_t kWholeObjectChunkIndexFormatVersion = 2;
+
 bool IsKnownChunkOverwriteMechanism(ChunkOverwriteMechanism mechanism);
 std::string_view ChunkOverwriteMechanismName(ChunkOverwriteMechanism mechanism);
 std::string ChunkOverwriteMechanismKey(ChunkOverwriteMechanism mechanism);
@@ -32,7 +34,7 @@ struct SwordFsVolume {
   // Chosen once at format. This is a volume-wide index schema, not a hint
   // that may be changed independently for individual chunks.
   ChunkOverwriteMechanism chunk_overwrite_mechanism = ChunkOverwriteMechanism::kWholeObject;
-  uint32_t chunk_index_format_version = 1;
+  uint32_t chunk_index_format_version = kWholeObjectChunkIndexFormatVersion;
 
   /// Serialize the volume metadata into its canonical binary representation.
   std::string SerializeTo() const;

@@ -8,7 +8,7 @@
 namespace swordfs::metadata {
 
 using InodeID = uint64_t;
-using ChunkIndex = uint32_t;
+using ChunkIndex = uint64_t;
 using ChunkRevision = uint64_t;
 
 constexpr InodeID kRootInodeId = 1;

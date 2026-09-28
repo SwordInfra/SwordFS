@@ -50,8 +50,9 @@ Status CreateDataEngine(std::string_view storage, const swordfs::storage::DataEn
 VolumeImpl::VolumeImpl() {
   // Before format/load binds persisted configuration, the runtime uses the
   // current default overwrite mechanism.
-  auto status = chunk::CreateChunkOverwriteStrategy(metadata::ChunkOverwriteMechanism::kWholeObject, 1,
-                                                    &chunk_overwrite_strategy_);
+  auto status =
+      chunk::CreateChunkOverwriteStrategy(metadata::ChunkOverwriteMechanism::kWholeObject,
+                                          metadata::kWholeObjectChunkIndexFormatVersion, &chunk_overwrite_strategy_);
   CHECK(status.ok());
 }
 VolumeImpl::~VolumeImpl() {
@@ -106,7 +107,7 @@ Status VolumeImpl::CreateFrom(const FormatOptions &options) {
   }
   config_.chunk_size = options.chunk_size;
   config_.chunk_overwrite_mechanism = options.chunk_overwrite_mechanism;
-  config_.chunk_index_format_version = 1;
+  config_.chunk_index_format_version = metadata::kWholeObjectChunkIndexFormatVersion;
 
   auto status = chunk::CreateChunkOverwriteStrategy(config_.chunk_overwrite_mechanism,
                                                     config_.chunk_index_format_version, &chunk_overwrite_strategy_);

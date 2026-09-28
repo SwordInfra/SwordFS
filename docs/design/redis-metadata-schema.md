@@ -18,8 +18,8 @@ not by itself establish support for every Cluster deployment configuration.
 | `inode_count` | Integer string | Advisory legacy inode metric; never an authoritative filesystem invariant |
 | `inode:<ino>` | String | Canonical serialized `SwordFsInode` |
 | `dir:<parent_ino>` | Hash | Name → child type and inode ID |
-| `chunk:<ino>` | Hash | Chunk index → shared published logical `SwordFsChunk` head |
-| `private_chunk_index:<mechanism-key>:<hash>` | Hash | Mechanism-owned chunk-internal fields; `<mechanism-key>` is the stable typed `ChunkOverwriteMechanism` key, and field layout belongs only to that mechanism |
+| `chunk:<ino>` | Hash | Canonical decimal 64-bit chunk index → shared published logical `SwordFsChunk` head |
+| `private_chunk_index:<mechanism-key>:<hash>` | Hash | Mechanism-owned chunk-internal fields; logical chunk-index fields use canonical decimal 64-bit indexes, `<mechanism-key>` is the stable typed `ChunkOverwriteMechanism` key, and field layout belongs only to that mechanism |
 | `orphans` | Hash | Inode ID → orphan marker |
 | `reclaims` | Hash | Inode ID → serialized frozen opaque `ReclaimWork` |
 | `pending_deletes` | Hash | Opaque strategy-defined queue ID → serialized frozen opaque `PendingDelete` |
@@ -40,6 +40,15 @@ interprets those fields. For the currently selectable `whole_object` strategy,
 the head generation is also the immutable object revision and the physical
 key derives from inode, index, and revision. That strategy has no additional
 durable private fragment records.
+
+`ChunkIndex` is a 64-bit unsigned logical coordinate. Redis Hash field names
+that identify a logical chunk use `std::to_string(index)`, i.e. the canonical
+unsigned decimal representation with no parallel truncated numeric identity.
+The serialized `SwordFsChunk` value stores the index as U64. The selectable
+`whole_object` chunk-index format is v2; its frozen pending-delete/reclaim
+payloads also encode descriptor indexes as U64. V1 is not read as v2 and is
+rejected at mount/strategy construction because SwordFS is still using an
+incompatible beta metadata format rather than a migration protocol.
 
 Private-index Redis keys do not embed the human-readable mechanism name.
 `RedisKey::PrivateChunkIndex()` derives `<mechanism-key>` from the persisted

@@ -76,7 +76,7 @@ TEST(SwordFsVolumeTest, SerializeToAndParseFromRoundTrip) {
   EXPECT_EQ(parsed.region, original.region);
   EXPECT_EQ(parsed.chunk_size, original.chunk_size);
   EXPECT_EQ(parsed.chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
-  EXPECT_EQ(parsed.chunk_index_format_version, 1U);
+  EXPECT_EQ(parsed.chunk_index_format_version, 2U);
 }
 
 TEST(SwordFsVolumeTest, PersistsMechanismAndRejectsUnknownOrZeroVersion) {
