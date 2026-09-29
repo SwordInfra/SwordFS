@@ -110,8 +110,8 @@ SwordFS because atime is mutable.
 
 The feature is verified test-first at three boundaries:
 
-- metadata type/codec tests: statx projection, birth-time round trip, malformed
-  previous beta layout rejection, and nanosecond validation;
+- metadata type/codec tests: statx projection, current-layout birth-time round
+  trip, malformed-record rejection, and nanosecond validation;
 - Memory and Redis metadata tests: inode creation assigns birth time and common
   identity/attribute mutations preserve it;
 - VFS/FUSE tests: statx observes the same live inode state as getattr, preserves
