@@ -19,12 +19,11 @@ class RedisBackendContext;
 // sequence allocation and keeps physical key construction inside Redis.
 class RedisPrivateMetadataStore : public IMechanismPrivateStore {
  public:
-  RedisPrivateMetadataStore(std::shared_ptr<RedisBackendContext> backend, redis::RedisKey key,
-                            ChunkOverwriteMechanism mechanism)
+  RedisPrivateMetadataStore(std::shared_ptr<RedisBackendContext> backend, redis::RedisKey key, ChunkType mechanism)
       : backend_(std::move(backend)), key_(std::move(key)), mechanism_(mechanism) {
   }
 
-  ChunkOverwriteMechanism mechanism() const override {
+  ChunkType mechanism() const override {
     return mechanism_;
   }
 
@@ -34,7 +33,7 @@ class RedisPrivateMetadataStore : public IMechanismPrivateStore {
  private:
   std::shared_ptr<RedisBackendContext> backend_;
   redis::RedisKey key_;
-  ChunkOverwriteMechanism mechanism_;
+  ChunkType mechanism_;
 };
 
 }  // namespace swordfs::metadata

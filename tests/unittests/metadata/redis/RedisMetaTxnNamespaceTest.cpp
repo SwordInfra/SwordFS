@@ -32,7 +32,7 @@ TEST(RedisMetaTxnTest, EntryMutationsCarryStateThroughParameters) {
   redis.set(key.InodeCount(), "1");
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
 
     SwordFsAttr child_attr(2, S_IFDIR | 0755);
     SwordFsInode child(2, child_attr, kRootInodeId);
@@ -71,7 +71,7 @@ TEST(RedisMetaTxnTest, AddEntryRejectsExistingNameWithoutPersistingChild) {
   SwordFsAttr child_attr(8, S_IFREG | 0644);
   SwordFsInode child(8, child_attr, kRootInodeId);
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.AddEntry(kRootInodeId, "child", child, &root);
   });
   EXPECT_TRUE(status.ToErrno() == EEXIST);
@@ -97,7 +97,7 @@ TEST(RedisMetaTxnTest, AddEntryFailsClosedOnDanglingExistingEntry) {
   SwordFsAttr child_attr(8, S_IFREG | 0644);
   SwordFsInode child(8, child_attr, root.ino);
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.AddEntry(root.ino, "child", child, &root);
   });
 
@@ -124,7 +124,7 @@ TEST(RedisMetaTxnTest, AddEntryPropagatesCorruptDirectoryBackendWithoutMutation)
   SwordFsAttr child_attr(8, S_IFREG | 0644);
   SwordFsInode child(8, child_attr, root.ino);
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.AddEntry(root.ino, "child", child, &root);
   });
 
@@ -152,7 +152,7 @@ TEST(RedisMetaTxnTest, MoveEntryPersistsExplicitState) {
   ASSERT_TRUE(SeedEntry(redis, key, kRootInodeId, SwordFsEntry{"file", DT_REG, child.ino}).ok());
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.MoveEntry(kRootInodeId, "file", kRootInodeId, "moved", &root, &root, &child, nullptr,
                          /*overwrite=*/true);
   });
@@ -182,7 +182,7 @@ TEST(RedisMetaTxnTest, RemoveDirectoryPersistsLifecycleState) {
   redis.set(key.InodeCount(), "2");
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.RemoveDirectory(kRootInodeId, "dir", &root, dir);
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -217,7 +217,7 @@ TEST(RedisMetaTxnTest, RemoveDirectoryPropagatesCorruptChildDirectoryWithoutMuta
   redis.set(key.Directory(dir.ino), "not-a-directory-hash");
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.RemoveDirectory(root.ino, "dir", &root, dir);
   });
 
@@ -242,7 +242,7 @@ TEST(RedisMetaTxnTest, ReadPrimitivesValidateOutputs) {
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     EXPECT_EQ(txn.LookupInode(file.ino, nullptr).ToErrno(), EINVAL);
 
     SwordFsInode missing;
@@ -279,7 +279,7 @@ TEST(RedisMetaTxnTest, NamespaceMutationPrimitivesValidateStateContracts) {
   SwordFsInode other_file(21, other_file_attr, dir.ino);
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
 
     EXPECT_EQ(txn.LookupEntry(dir, "entry", nullptr).ToErrno(), EINVAL);
 
@@ -361,7 +361,7 @@ TEST(RedisMetaTxnTest, AddEntryRejectsInvalidInodeIdentityWithoutMutation) {
   SwordFsInode parent(kRootInodeId, parent_attr, kRootInodeId);
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
 
     SwordFsAttr zero_attr(0, S_IFREG | 0644);
     SwordFsInode zero_ino(0, zero_attr, parent.ino);
@@ -388,7 +388,7 @@ TEST(RedisMetaTxnTest, TouchInodePropagatesMissingInode) {
   RedisMetaClient store(config);
   const redis::RedisKey key(config.db, UniqueRedisName("touch-missing-inode"));
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.TouchInode(424242, SetAttrField::kCtime);
   });
 
@@ -423,7 +423,7 @@ TEST(RedisMetaTxnTest, MoveEntryRejectsCorruptDirectoryAncestryWithoutMutation) 
   ASSERT_TRUE(SeedEntry(redis, key, root.ino, SwordFsEntry{"source", DT_DIR, source.ino}).ok());
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.MoveEntry(root.ino, "source", first_cycle.ino, "moved", &root, &first_cycle, &source, nullptr,
                          /*overwrite=*/false);
   });
@@ -459,7 +459,7 @@ TEST(RedisMetaTxnTest, MoveEntryRejectsMissingDirectoryAncestryWithoutMutation) 
   ASSERT_TRUE(SeedEntry(redis, key, root.ino, SwordFsEntry{"source", DT_DIR, source.ino}).ok());
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.MoveEntry(root.ino, "source", destination.ino, "moved", &root, &destination, &source, nullptr,
                          /*overwrite=*/false);
   });
@@ -486,7 +486,7 @@ TEST(RedisMetaTxnTest, LookupEntryRejectsDanglingDirectoryEntry) {
   ASSERT_TRUE(SeedEntry(redis, key, kRootInodeId, SwordFsEntry{"dangling", DT_REG, 99}).ok());
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     SwordFsInode out;
     return txn.LookupEntry(kRootInodeId, "dangling", &out);
   });

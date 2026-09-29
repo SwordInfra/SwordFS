@@ -26,11 +26,11 @@ namespace swordfs::metadata {
 MemMetaTxn::MemMetaTxn(MemMetaStore *store)
     : store_(store),
       private_metadata_txn_(store_->private_metadata_ != nullptr ? store_->private_metadata_->mechanism()
-                                                                 : ChunkOverwriteMechanism::kWholeObject) {
+                                                                 : ChunkType::kCow) {
 }
 
 std::string MemMetaTxn::PrivateHash(std::string_view hash) const {
-  return ChunkOverwriteMechanismKey(private_metadata_txn_.mechanism()) + "/" + std::string(hash);
+  return ChunkTypeKey(private_metadata_txn_.mechanism()) + "/" + std::string(hash);
 }
 
 Status MemMetaTxn::Read(std::string_view hash, std::string_view field, std::string *value) {

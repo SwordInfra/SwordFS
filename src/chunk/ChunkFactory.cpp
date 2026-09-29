@@ -5,7 +5,7 @@
 
 #include <memory>
 
-#include "chunk/WholeObjectChunk.hpp"
+#include "chunk/cow/COWChunk.hpp"
 #include "metadata/IMetaEngine.hpp"
 
 namespace swordfs::chunk {
@@ -19,11 +19,11 @@ utils::Status ChunkFactory::Open(metadata::InodeID ino, metadata::ChunkIndex ind
   if (meta_ == nullptr || data_ == nullptr || private_metadata_ == nullptr || chunk_size_ == 0) {
     return utils::Status::Internal("ChunkFactory is not fully initialized");
   }
-  if (private_metadata_->mechanism() != mechanism_) {
-    return utils::Status::Internal("ChunkFactory private metadata mechanism mismatch");
+  if (private_metadata_->mechanism() != chunk_type_) {
+    return utils::Status::Internal("ChunkFactory private metadata chunk type mismatch");
   }
-  if (mechanism_ != metadata::ChunkOverwriteMechanism::kWholeObject) {
-    return utils::Status::NotSupported("selected chunk mechanism has no runtime implementation");
+  if (chunk_type_ != metadata::ChunkType::kCow) {
+    return utils::Status::NotSupported("selected chunk type has no runtime implementation");
   }
 
   metadata::SwordFsChunk published;
@@ -32,7 +32,7 @@ utils::Status ChunkFactory::Open(metadata::InodeID ino, metadata::ChunkIndex ind
     if (published.index != index || !published.IsValidForChunkSize(chunk_size_)) {
       return utils::Status::Malformed("ChunkFactory::Open loaded an invalid chunk descriptor");
     }
-    *out = std::make_shared<WholeObjectChunk>(ino, index, chunk_size_, meta_, data_, published);
+    *out = std::make_shared<cow::COWChunk>(ino, index, chunk_size_, meta_, data_, published);
     return utils::Status::OK();
   }
   if (!status.IsNotFound()) {
@@ -41,7 +41,7 @@ utils::Status ChunkFactory::Open(metadata::InodeID ino, metadata::ChunkIndex ind
   if (!create_if_missing) {
     return utils::Status::OK();
   }
-  *out = std::make_shared<WholeObjectChunk>(ino, index, chunk_size_, meta_, data_, std::nullopt);
+  *out = std::make_shared<cow::COWChunk>(ino, index, chunk_size_, meta_, data_, std::nullopt);
   return utils::Status::OK();
 }
 

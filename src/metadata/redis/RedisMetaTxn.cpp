@@ -19,8 +19,8 @@
 
 namespace swordfs::metadata {
 
-RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size,
-                           ChunkOverwriteMechanism mechanism, const chunk::internal::ChunkMetadataBridge *bridge)
+RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size, ChunkType mechanism,
+                           const chunk::internal::ChunkMetadataBridge *bridge)
     : txn_(txn), key_(key), chunk_size_(chunk_size), chunk_metadata_bridge_(bridge), private_metadata_txn_(mechanism) {
 }
 

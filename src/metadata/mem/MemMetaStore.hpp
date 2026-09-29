@@ -55,7 +55,7 @@ class MemMetaStore {
   }
   ~MemMetaStore() = default;
 
-  utils::Status OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out);
+  utils::Status OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out);
   utils::Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge);
   void SetChunkSize(uint64_t chunk_size) {
     chunk_size_ = chunk_size;

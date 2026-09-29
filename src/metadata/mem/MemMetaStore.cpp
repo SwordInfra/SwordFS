@@ -8,7 +8,7 @@
 
 namespace swordfs::metadata {
 
-utils::Status MemMetaStore::OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out) {
+utils::Status MemMetaStore::OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("private metadata store output is null");
   }

@@ -24,9 +24,9 @@
 #include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/Chunk.hpp"
-#include "chunk/ChunkObjectKey.hpp"
-#include "chunk/WholeObjectChunk.hpp"
-#include "chunk/WholeObjectCleanup.hpp"
+#include "chunk/cow/COWChunk.hpp"
+#include "chunk/cow/COWCleanup.hpp"
+#include "chunk/cow/COWObjectKey.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "storage/IDataEngine.hpp"
@@ -534,8 +534,8 @@ class MockMetaEngine : public IMetaEngine {
     out.reserve(pending_deletes_.size());
     for (const auto &[id, pending] : pending_deletes_) {
       (void)id;
-      swordfs::chunk::WholeObjectRef ref;
-      auto status = swordfs::chunk::DecodeWholeObjectDelete(pending, 0, &ref);
+      swordfs::chunk::cow::COWRef ref;
+      auto status = swordfs::chunk::cow::DecodeCOWDelete(pending, 0, &ref);
       EXPECT_TRUE(status.ok()) << status.message();
       if (status.ok()) {
         out.push_back(ref.key);
@@ -567,7 +567,7 @@ class MockMetaEngine : public IMetaEngine {
  private:
   void QueuePendingDelete(InodeID ino, const SwordFsChunk &chunk) {
     swordfs::metadata::PendingDelete work;
-    auto status = swordfs::chunk::FreezeWholeObjectDelete(ino, chunk, 0, &work);
+    auto status = swordfs::chunk::cow::FreezeCOWDelete(ino, chunk, 0, &work);
     EXPECT_TRUE(status.ok()) << status.message();
     if (status.ok()) {
       pending_deletes_.insert_or_assign(work.id, std::move(work));
@@ -683,7 +683,8 @@ TEST_F(FileReadWriterTest, PersistedPartialChunkAtEOFReturnsShortRead) {
 
     auto persisted = std::make_unique<folly::IOBuf>(Buf(Repeat('P', chunk.size)));
     ASSERT_TRUE(
-        mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(persisted))
+        mock_data_
+            ->Put(swordfs::chunk::cow::FormatCOWObjectKey(kIno, chunk.index, chunk.revision), std::move(persisted))
             .ok());
 
     auto rw = Make(chunk.size);
@@ -978,7 +979,8 @@ TEST_F(FileReadWriterTest, MaterializedPublishedChunkZeroFillsItsUncoveredTail) 
 
     auto persisted = std::make_unique<folly::IOBuf>(Buf("hello"));
     ASSERT_TRUE(
-        mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(persisted))
+        mock_data_
+            ->Put(swordfs::chunk::cow::FormatCOWObjectKey(kIno, chunk.index, chunk.revision), std::move(persisted))
             .ok());
 
     auto rw = Make(/*size=*/8);
@@ -1004,7 +1006,8 @@ TEST_F(FileReadWriterTest, PersistedChunkShortReadFailsClosed) {
 
     auto persisted = std::make_unique<folly::IOBuf>(Buf(Repeat('S', 32)));
     ASSERT_TRUE(
-        mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(persisted))
+        mock_data_
+            ->Put(swordfs::chunk::cow::FormatCOWObjectKey(kIno, chunk.index, chunk.revision), std::move(persisted))
             .ok());
 
     auto rw = Make(chunk.size);
@@ -1027,7 +1030,7 @@ TEST_F(FileReadWriterTest, PersistedChunkReadErrorRollsBackPartialOutput) {
     mock_data_->get_error_payload = "partial";
     mock_data_->get_status = Status::IOError("injected data read failure");
 
-    swordfs::chunk::WholeObjectChunk chunk(kIno, 0, kTestChunkSize, mock_meta_, mock_data_, published);
+    swordfs::chunk::cow::COWChunk chunk(kIno, 0, kTestChunkSize, mock_meta_, mock_data_, published);
 
     auto out = folly::IOBuf::create(68);
     std::memcpy(out->writableTail(), "keep", 4);
@@ -1048,7 +1051,7 @@ TEST_F(FileReadWriterTest, PersistedChunkZeroLengthReadIsNoOp) {
     published.size = 64;
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, published).ok());
 
-    swordfs::chunk::WholeObjectChunk chunk(kIno, 0, kTestChunkSize, mock_meta_, mock_data_, published);
+    swordfs::chunk::cow::COWChunk chunk(kIno, 0, kTestChunkSize, mock_meta_, mock_data_, published);
 
     auto out = folly::IOBuf::copyBuffer("keep");
     ASSERT_TRUE(chunk.Read(16, 0, out.get()).ok());
@@ -1108,7 +1111,8 @@ TEST_F(FileReadWriterTest, CrossChunkMetadataErrorDrainsSubmittedReadBeforeRetur
   ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, first).ok());
   auto data = std::make_unique<folly::IOBuf>(Buf(Repeat('R', kChunkSize)));
   ASSERT_TRUE(
-      mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, first.index, first.revision), std::move(data)).ok());
+      mock_data_->Put(swordfs::chunk::cow::FormatCOWObjectKey(kIno, first.index, first.revision), std::move(data))
+          .ok());
 
   mock_meta_->find_chunk_status = Status::IOError("injected second-chunk metadata failure");
   mock_meta_->find_chunk_error_idx = 1;
@@ -1271,8 +1275,8 @@ TEST_F(FileReadWriterTest, CompetingInitialPublishersUseDistinctRevisionsAndObje
     EXPECT_TRUE(status.ToErrno() == EEXIST);
     EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 2);
 
-    const auto winner_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, winner.revision);
-    const auto loser_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 2);
+    const auto winner_key = swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, winner.revision);
+    const auto loser_key = swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, 2);
     EXPECT_NE(winner_key, loser_key);
     const auto stored_keys = mock_data_->StoredKeys();
     EXPECT_NE(std::find(stored_keys.begin(), stored_keys.end(), winner_key), stored_keys.end());
@@ -1362,7 +1366,7 @@ TEST_F(FileReadWriterTest, FlushRebasesChangedAuthoritativeChunkAndPublishesLate
     EXPECT_EQ(mock_data_->StoredKeys().size(), 2U);
     EXPECT_TRUE(mock_data_->delete_calls.empty());
     EXPECT_EQ(mock_meta_->PendingDeleteKeys(),
-              std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(kIno, 0, conflicting.revision)});
+              std::vector<std::string>{swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, conflicting.revision)});
     EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 2);
 
     SwordFsChunk current;
@@ -1383,7 +1387,7 @@ TEST_F(FileReadWriterTest, InitialPublishRetryNeverReusesRejectedRevision) {
     mock_meta_->publish_chunk_status = Status::AlreadyExists("winner already published");
     ASSERT_TRUE(rw.Flush().ToErrno() == EEXIST);
 
-    const auto losing_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 1);
+    const auto losing_key = swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, 1);
     ASSERT_EQ(mock_meta_->PendingDeleteKeys(), std::vector<std::string>{losing_key});
     ASSERT_EQ(mock_meta_->allocate_chunk_revision_calls, 1);
     ASSERT_TRUE(rw.Write(Buf("H"), 0).ok());
@@ -1400,7 +1404,7 @@ TEST_F(FileReadWriterTest, InitialPublishRetryNeverReusesRejectedRevision) {
     EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 2);
     EXPECT_EQ(mock_meta_->PendingDeleteKeys(), std::vector<std::string>{losing_key});
 
-    const auto current_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, current.revision);
+    const auto current_key = swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, current.revision);
     const auto stored_keys = mock_data_->StoredKeys();
     EXPECT_NE(std::find(stored_keys.begin(), stored_keys.end(), current_key), stored_keys.end());
 
@@ -1420,7 +1424,7 @@ TEST_F(FileReadWriterTest, RewriteDefiniteRejectionAllocatesFreshRevisionOnRetry
 
     mock_meta_->replace_chunk_status = Status::AlreadyExists("injected definite rejection");
     ASSERT_TRUE(rw.Flush().ToErrno() == EEXIST);
-    const auto rejected_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 2);
+    const auto rejected_key = swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, 2);
     ASSERT_EQ(mock_meta_->PendingDeleteKeys(), std::vector<std::string>{rejected_key});
 
     mock_meta_->replace_chunk_status = Status::OK();
@@ -1807,8 +1811,8 @@ TEST_F(FileReadWriterTest, RewritePublishesVersionedObjectAndQueuesOldRevisionFo
     EXPECT_EQ(first.revision, 1U);
     EXPECT_EQ(replacement.revision, 2U);
     EXPECT_EQ(replacement.size, 11U);
-    const auto first_key = swordfs::chunk::FormatChunkObjectKey(kIno, first.index, first.revision);
-    const auto replacement_key = swordfs::chunk::FormatChunkObjectKey(kIno, replacement.index, replacement.revision);
+    const auto first_key = swordfs::chunk::cow::FormatCOWObjectKey(kIno, first.index, first.revision);
+    const auto replacement_key = swordfs::chunk::cow::FormatCOWObjectKey(kIno, replacement.index, replacement.revision);
     EXPECT_EQ(mock_data_->StoredKeys(), (std::vector<std::string>{first_key, replacement_key}));
     EXPECT_TRUE(mock_data_->delete_calls.empty());
     EXPECT_EQ(mock_meta_->PendingDeleteKeys(), std::vector<std::string>{first_key});
@@ -1970,7 +1974,7 @@ TEST_F(FileReadWriterTest, RewriteRebasesChangedDescriptorWithoutForegroundDelet
 
     ASSERT_TRUE(rw.Flush().ok());
     const auto stored_keys = mock_data_->StoredKeys();
-    const auto current_key = swordfs::chunk::FormatChunkObjectKey(kIno, current.index, current.revision);
+    const auto current_key = swordfs::chunk::cow::FormatCOWObjectKey(kIno, current.index, current.revision);
     EXPECT_NE(std::find(stored_keys.begin(), stored_keys.end(), current_key), stored_keys.end());
     EXPECT_EQ(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), current_key),
               mock_data_->delete_calls.end());
@@ -1990,7 +1994,8 @@ TEST_F(FileReadWriterTest, RewriteHydrationPropagatesBackendReadFailure) {
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
     auto data = std::make_unique<folly::IOBuf>(Buf("hello world"));
     ASSERT_TRUE(
-        mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(data)).ok());
+        mock_data_->Put(swordfs::chunk::cow::FormatCOWObjectKey(kIno, chunk.index, chunk.revision), std::move(data))
+            .ok());
 
     mock_data_->get_status = Status::IOError("hydrate read failed");
     auto rw = Make(11);
@@ -2006,7 +2011,8 @@ TEST_F(FileReadWriterTest, RewriteHydrationRejectsObjectShorterThanDescriptor) {
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
     auto data = std::make_unique<folly::IOBuf>(Buf("short"));
     ASSERT_TRUE(
-        mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(data)).ok());
+        mock_data_->Put(swordfs::chunk::cow::FormatCOWObjectKey(kIno, chunk.index, chunk.revision), std::move(data))
+            .ok());
 
     auto rw = Make(11);
     const auto status = rw.Write(Buf("H"), 0);
@@ -2181,7 +2187,7 @@ TEST_F(FileReadWriterTest, RewriteRetryRebasesChangedDescriptorAndPublishesLates
 
     const auto keys = mock_data_->StoredKeys();
     ASSERT_EQ(keys.size(), 2U);
-    const auto first_key = swordfs::chunk::FormatChunkObjectKey(kIno, first.index, first.revision);
+    const auto first_key = swordfs::chunk::cow::FormatCOWObjectKey(kIno, first.index, first.revision);
     const auto pending = keys[0] == first_key ? keys[1] : keys[0];
 
     auto winner = first;
@@ -2193,7 +2199,7 @@ TEST_F(FileReadWriterTest, RewriteRetryRebasesChangedDescriptorAndPublishesLates
     EXPECT_EQ(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), pending),
               mock_data_->delete_calls.end());
     EXPECT_EQ(mock_meta_->PendingDeleteKeys(),
-              std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(kIno, 0, winner.revision)});
+              std::vector<std::string>{swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, winner.revision)});
     EXPECT_TRUE(mock_meta_->complete_pending_delete_calls.empty());
     EXPECT_EQ(mock_meta_->allocate_chunk_revision_calls, 3);
 
@@ -2222,7 +2228,7 @@ TEST_F(FileReadWriterTest, RewriteRetryMissingExpectedPublishesFreshInitialRevis
     ASSERT_EQ(rw.Flush().ToErrno(), EIO);
     ASSERT_EQ(mock_meta_->allocate_chunk_revision_calls, 2);
 
-    const auto rejected_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 2);
+    const auto rejected_key = swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, 2);
     mock_meta_->EraseChunkForTest(kIno, 0);
     mock_meta_->replace_chunk_status = Status::OK();
     ASSERT_TRUE(rw.Flush().ok());
@@ -2262,13 +2268,13 @@ TEST_F(FileReadWriterTest, RewriteRetryAfterFailedPutRebasesWithoutDeletingFaile
 
     ASSERT_TRUE(rw.Flush().ok());
     EXPECT_EQ(mock_data_->put_calls, 3);
-    const auto unuploaded_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 2);
+    const auto unuploaded_key = swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, 2);
     EXPECT_EQ(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), unuploaded_key),
               mock_data_->delete_calls.end());
     const auto stored_keys = mock_data_->StoredKeys();
     EXPECT_EQ(std::find(stored_keys.begin(), stored_keys.end(), unuploaded_key), stored_keys.end());
     EXPECT_EQ(mock_meta_->PendingDeleteKeys(),
-              std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(kIno, 0, winner.revision)});
+              std::vector<std::string>{swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, winner.revision)});
 
     SwordFsChunk current;
     ASSERT_TRUE(mock_meta_->FindChunk(kIno, 0, &current).ok());
@@ -2287,7 +2293,7 @@ TEST_F(FileReadWriterTest, RewriteDefiniteNotFoundQueuesLosingObjectWithoutForeg
     const auto status = rw.Flush();
     EXPECT_TRUE(status.IsNotFound());
 
-    const auto losing_key = swordfs::chunk::FormatChunkObjectKey(kIno, 0, 2);
+    const auto losing_key = swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, 2);
     EXPECT_EQ(std::find(mock_data_->delete_calls.begin(), mock_data_->delete_calls.end(), losing_key),
               mock_data_->delete_calls.end());
     EXPECT_TRUE(mock_meta_->complete_pending_delete_calls.empty());
@@ -2443,14 +2449,14 @@ TEST_F(FileReadWriterTest, TruncateAfterAmbiguousInitialPublicationMayLeaveUploa
     ASSERT_TRUE(rw.Write(Buf("hello"), 0).ok());
     mock_meta_->publish_chunk_status = Status::IOError("publication failed");
     ASSERT_EQ(rw.Flush().ToErrno(), EIO);
-    ASSERT_EQ(mock_data_->StoredKeys(), std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(kIno, 0, 1)});
+    ASSERT_EQ(mock_data_->StoredKeys(), std::vector<std::string>{swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, 1)});
 
     mock_meta_->publish_chunk_status = Status::OK();
     ASSERT_TRUE(rw.Truncate(0).ok());
     // The earlier publication result was ambiguous and no authoritative chunk
     // exists to classify this object. Exceptional orphan completeness is not
     // part of truncate correctness, so the object may remain as garbage.
-    EXPECT_EQ(mock_data_->StoredKeys(), std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(kIno, 0, 1)});
+    EXPECT_EQ(mock_data_->StoredKeys(), std::vector<std::string>{swordfs::chunk::cow::FormatCOWObjectKey(kIno, 0, 1)});
     EXPECT_TRUE(mock_data_->delete_calls.empty());
   });
 }
@@ -2562,7 +2568,7 @@ TEST_F(FileReadWriterTest, TruncateQueuesDroppedChunkObjectsWithoutForegroundDel
       ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
       auto buf = std::make_unique<folly::IOBuf>(Buf(Repeat('A', kChunkSize)));
       ASSERT_TRUE(
-          mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(buf))
+          mock_data_->Put(swordfs::chunk::cow::FormatCOWObjectKey(kIno, chunk.index, chunk.revision), std::move(buf))
               .ok());
     }
     // Materialise each chunk in FileChunkManager by reading it; the
@@ -2579,8 +2585,8 @@ TEST_F(FileReadWriterTest, TruncateQueuesDroppedChunkObjectsWithoutForegroundDel
     ASSERT_TRUE(rw.Truncate(1).ok());
     EXPECT_TRUE(mock_data_->delete_calls.empty());
     EXPECT_EQ(mock_meta_->PendingDeleteKeys(),
-              (std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(kIno, 1, 2),
-                                        swordfs::chunk::FormatChunkObjectKey(kIno, 2, 3)}));
+              (std::vector<std::string>{swordfs::chunk::cow::FormatCOWObjectKey(kIno, 1, 2),
+                                        swordfs::chunk::cow::FormatCOWObjectKey(kIno, 2, 3)}));
     EXPECT_EQ(mock_data_->StoredKeys().size(), 3);
 
     // Restore the production chunk size so a later test in this
@@ -2596,7 +2602,8 @@ TEST_F(FileReadWriterTest, ConcurrentReadsProceedWhileAnotherReadWaitsForBackend
   ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
   auto data = std::make_unique<folly::IOBuf>(Buf(Repeat('R', kChunkSize)));
   ASSERT_TRUE(
-      mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(data)).ok());
+      mock_data_->Put(swordfs::chunk::cow::FormatCOWObjectKey(kIno, chunk.index, chunk.revision), std::move(data))
+          .ok());
 
   auto rw = Make(kChunkSize);
   folly::EventBase evb;
@@ -2653,7 +2660,8 @@ TEST_F(FileReadWriterTest, IndependentChunkOverwriteHydrationDoesNotSerializeOnI
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
     auto data = std::make_unique<folly::IOBuf>(Buf(Repeat(index == 0 ? 'A' : 'B', kChunkSize)));
     ASSERT_TRUE(
-        mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(data)).ok());
+        mock_data_->Put(swordfs::chunk::cow::FormatCOWObjectKey(kIno, chunk.index, chunk.revision), std::move(data))
+            .ok());
   }
 
   auto rw = Make(2 * kChunkSize);
@@ -3120,7 +3128,8 @@ TEST_F(FileReadWriterTest, TruncateWaitsForBlockedReadWithoutBlockingEventBase) 
   ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, chunk).ok());
   auto data = std::make_unique<folly::IOBuf>(Buf(Repeat('R', kChunkSize)));
   ASSERT_TRUE(
-      mock_data_->Put(swordfs::chunk::FormatChunkObjectKey(kIno, chunk.index, chunk.revision), std::move(data)).ok());
+      mock_data_->Put(swordfs::chunk::cow::FormatCOWObjectKey(kIno, chunk.index, chunk.revision), std::move(data))
+          .ok());
 
   auto rw = Make(kChunkSize);
   folly::EventBase evb;

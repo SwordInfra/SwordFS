@@ -18,7 +18,7 @@ namespace folly {
 class IOBuf;
 }
 
-namespace swordfs::chunk {
+namespace swordfs::chunk::cow {
 
 /// Single-chunk write buffer backed by folly::IOBuf.
 ///
@@ -58,4 +58,4 @@ class WriteBuf {
   std::unique_ptr<folly::IOBuf> buf_;
 };
 
-}  // namespace swordfs::chunk
+}  // namespace swordfs::chunk::cow

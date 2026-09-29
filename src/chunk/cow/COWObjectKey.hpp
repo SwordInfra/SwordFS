@@ -7,11 +7,11 @@
 
 #include "metadata/types/Common.hpp"
 
-namespace swordfs::chunk {
+namespace swordfs::chunk::cow {
 
-inline std::string FormatChunkObjectKey(metadata::InodeID ino, metadata::ChunkIndex index,
-                                        metadata::ChunkRevision revision) {
+inline std::string FormatCOWObjectKey(metadata::InodeID ino, metadata::ChunkIndex index,
+                                      metadata::ChunkRevision revision) {
   return std::to_string(ino) + "/" + std::to_string(index) + "/" + std::to_string(revision);
 }
 
-}  // namespace swordfs::chunk
+}  // namespace swordfs::chunk::cow

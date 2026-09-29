@@ -53,7 +53,7 @@ class RedisMetaOps {
   RedisMetaOps &operator=(RedisMetaOps &&) = delete;
 
   utils::Status Initialize();
-  utils::Status OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out);
+  utils::Status OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out);
   utils::Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge);
   utils::Status FormatVolume(const SwordFsVolume &config);
   utils::Status LoadVolume(SwordFsVolume *config);

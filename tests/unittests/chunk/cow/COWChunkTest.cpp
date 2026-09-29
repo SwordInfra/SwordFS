@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Unit tests for the stable logical Chunk contract and the current
-// whole-object implementation behind it.
+// COW implementation behind it.
 
 #include <folly/fibers/Baton.h>
 #include <folly/fibers/FiberManagerMap.h>
@@ -21,9 +21,9 @@
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/Chunk.hpp"
 #include "chunk/ChunkFactory.hpp"
-#include "chunk/ChunkObjectKey.hpp"
-#include "chunk/WholeObjectChunk.hpp"
-#include "chunk/WriteBuf.hpp"
+#include "chunk/cow/COWChunk.hpp"
+#include "chunk/cow/COWObjectKey.hpp"
+#include "chunk/cow/WriteBuf.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "metadata/mem/MemPrivateMetadataStore.hpp"
@@ -32,7 +32,7 @@
 #include "volume/VolumeImpl.hpp"
 
 using swordfs::chunk::Chunk;
-using swordfs::chunk::WholeObjectChunk;
+using swordfs::chunk::cow::COWChunk;
 using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
@@ -256,8 +256,8 @@ class ChunkTest : public ::testing::Test {
     ASSERT_NE(meta_, nullptr);
   }
 
-  std::unique_ptr<WholeObjectChunk> MakeChunk(ChunkIndex index = 0) {
-    return std::make_unique<WholeObjectChunk>(
+  std::unique_ptr<COWChunk> MakeChunk(ChunkIndex index = 0) {
+    return std::make_unique<COWChunk>(
         /*ino=*/42, index, kChunkTestSize, swordfs::volume::VolumeImpl::Instance().meta_engine(), data_, std::nullopt);
   }
 
@@ -266,7 +266,7 @@ class ChunkTest : public ::testing::Test {
 };
 
 TEST(ChunkObjectKeyTest, IncludesInodeIndexAndRevision) {
-  EXPECT_EQ(swordfs::chunk::FormatChunkObjectKey(/*ino=*/42, /*index=*/3, /*revision=*/7), "42/3/7");
+  EXPECT_EQ(swordfs::chunk::cow::FormatCOWObjectKey(/*ino=*/42, /*index=*/3, /*revision=*/7), "42/3/7");
 }
 
 TEST(SwordFsChunkDescriptorTest, ValidatesCanonicalFixedSizeIdentity) {
@@ -379,22 +379,22 @@ TEST_F(ChunkTest, FactoryOpenDistinguishesMissingExistingAndCreate) {
 
 TEST_F(ChunkTest, FactoryRejectsInvalidRuntimeCompositionBeforeLookup) {
   std::shared_ptr<Chunk> chunk;
-  swordfs::chunk::ChunkFactory missing_private(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, nullptr, meta_,
-                                               data_, kChunkTestSize);
+  swordfs::chunk::ChunkFactory missing_private(swordfs::metadata::ChunkType::kCow, nullptr, meta_, data_,
+                                               kChunkTestSize);
   auto status = missing_private.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.message(), "ChunkFactory is not fully initialized");
 
-  auto slice_private = std::make_shared<swordfs::metadata::MemPrivateMetadataStore>(
-      swordfs::metadata::ChunkOverwriteMechanism::kChunkSlice);
-  swordfs::chunk::ChunkFactory mismatched_private(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject,
-                                                  slice_private, meta_, data_, kChunkTestSize);
+  auto slice_private =
+      std::make_shared<swordfs::metadata::MemPrivateMetadataStore>(swordfs::metadata::ChunkType::kChunkSlice);
+  swordfs::chunk::ChunkFactory mismatched_private(swordfs::metadata::ChunkType::kCow, slice_private, meta_, data_,
+                                                  kChunkTestSize);
   status = mismatched_private.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
   EXPECT_FALSE(status.ok());
-  EXPECT_EQ(status.message(), "ChunkFactory private metadata mechanism mismatch");
+  EXPECT_EQ(status.message(), "ChunkFactory private metadata chunk type mismatch");
 
-  swordfs::chunk::ChunkFactory unsupported(swordfs::metadata::ChunkOverwriteMechanism::kChunkSlice,
-                                           std::move(slice_private), meta_, data_, kChunkTestSize);
+  swordfs::chunk::ChunkFactory unsupported(swordfs::metadata::ChunkType::kChunkSlice, std::move(slice_private), meta_,
+                                           data_, kChunkTestSize);
   status = unsupported.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
   EXPECT_EQ(status.ToErrno(), ENOSYS);
 }
@@ -442,7 +442,7 @@ TEST_F(ChunkTest, ReadRejectsInvalidOutputBuffersBeforeAccessingChunkState) {
 TEST_F(ChunkTest, WriteRejectsMalformedPublishedDescriptorBeforeHydration) {
   RunInTestFiber([&] {
     const SwordFsChunk malformed{.index = 0, .revision = 1, .size = kChunkTestSize + 1};
-    WholeObjectChunk chunk(/*ino=*/42, /*index=*/0, kChunkTestSize, meta_, data_, malformed);
+    COWChunk chunk(/*ino=*/42, /*index=*/0, kChunkTestSize, meta_, data_, malformed);
     const auto status = chunk.Write(/*offset=*/0, Buf("x"));
     EXPECT_FALSE(status.ok());
     EXPECT_NE(status.message().find("published chunk exceeds configured chunk size"), std::string::npos);

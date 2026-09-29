@@ -35,7 +35,7 @@ class RedisKvTxn;
 // of the mutation's correctness contract.
 class RedisMetaTxn : public IChunkIndexTxn {
  public:
-  RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size, ChunkOverwriteMechanism mechanism,
+  RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size, ChunkType mechanism,
                const chunk::internal::ChunkMetadataBridge *bridge);
 
   // ────────────────────────────────────────────────────────────────

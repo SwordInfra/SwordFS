@@ -74,8 +74,7 @@ void ConfigCenter::RegisterFormatOptions(CLI::App &app) {
   cmd->add_option("--chunk-size", chunk_size_, "Chunk size in bytes (default: 64 MiB)")
       ->check(CLI::PositiveNumber)
       ->check(CLI::Range(4096ULL, 1024ULL * 1024 * 1024));
-  cmd->add_option("--chunk-overwrite-strategy", chunk_overwrite_strategy_,
-                  "Volume-wide chunk overwrite strategy (currently: whole_object)");
+  cmd->add_option("--chunk-type", chunk_type_, "Volume-wide chunk type (currently: cow)");
   cmd->callback([this] { selected_subcommand_ = "format"; });
 
   SubCommand sc;

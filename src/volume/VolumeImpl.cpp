@@ -68,12 +68,11 @@ VolumeImpl &VolumeImpl::Instance() {
 Status VolumeImpl::ComposeChunkMetadata() {
   private_metadata_.reset();
   chunk_metadata_bridge_.reset();
-  auto status = meta_engine_->OpenPrivateMetadataStore(config_.chunk_overwrite_mechanism, &private_metadata_);
+  auto status = meta_engine_->OpenPrivateMetadataStore(config_.chunk_type, &private_metadata_);
   if (!status.ok()) {
     return status;
   }
-  status = chunk::internal::CreateChunkMetadataBridge(config_.chunk_overwrite_mechanism, private_metadata_,
-                                                      &chunk_metadata_bridge_);
+  status = chunk::internal::CreateChunkMetadataBridge(config_.chunk_type, private_metadata_, &chunk_metadata_bridge_);
   if (!status.ok()) {
     return status;
   }
@@ -86,18 +85,18 @@ Status VolumeImpl::ComposeChunkRuntime() {
   if (meta_engine_ == nullptr || private_metadata_ == nullptr || chunk_metadata_bridge_ == nullptr) {
     return Status::Internal("chunk runtime requires composed metadata capabilities");
   }
-  chunk_factory_ = std::make_unique<chunk::ChunkFactory>(config_.chunk_overwrite_mechanism, private_metadata_,
-                                                         meta_engine_.get(), data_engine_.get(), config_.chunk_size);
+  chunk_factory_ = std::make_unique<chunk::ChunkFactory>(config_.chunk_type, private_metadata_, meta_engine_.get(),
+                                                         data_engine_.get(), config_.chunk_size);
   if (data_engine_ != nullptr) {
-    chunk_gc_worker_ = std::make_unique<chunk::internal::ChunkGcWorker>(
-        config_.chunk_overwrite_mechanism, config_.chunk_size, meta_engine_.get(), data_engine_.get());
+    chunk_gc_worker_ = std::make_unique<chunk::internal::ChunkGcWorker>(config_.chunk_type, config_.chunk_size,
+                                                                        meta_engine_.get(), data_engine_.get());
   }
   return Status::OK();
 }
 
 Status VolumeImpl::CreateFrom(const config::ConfigCenter &config) {
-  metadata::ChunkOverwriteMechanism mechanism;
-  auto status = metadata::ParseChunkOverwriteMechanism(config.chunk_overwrite_strategy(), &mechanism);
+  metadata::ChunkType chunk_type;
+  auto status = metadata::ParseChunkType(config.chunk_type(), &chunk_type);
   if (!status.ok()) {
     return status;
   }
@@ -107,7 +106,7 @@ Status VolumeImpl::CreateFrom(const config::ConfigCenter &config) {
       .bucket = config.bucket_url(),
       .region = config.storage_region(),
       .chunk_size = config.chunk_size(),
-      .chunk_overwrite_mechanism = mechanism,
+      .chunk_type = chunk_type,
   });
 }
 
@@ -127,10 +126,10 @@ Status VolumeImpl::CreateFrom(const FormatOptions &options) {
     config_.region = "auto";
   }
   config_.chunk_size = options.chunk_size;
-  config_.chunk_overwrite_mechanism = options.chunk_overwrite_mechanism;
+  config_.chunk_type = options.chunk_type;
 
-  if (config_.chunk_overwrite_mechanism != metadata::ChunkOverwriteMechanism::kWholeObject) {
-    return Status::NotSupported("selected chunk overwrite mechanism is not implemented");
+  if (config_.chunk_type != metadata::ChunkType::kCow) {
+    return Status::NotSupported("selected chunk type is not implemented");
   }
 
   auto status = CreateMetaEngine(options.meta_url, config_.name, &meta_engine_);

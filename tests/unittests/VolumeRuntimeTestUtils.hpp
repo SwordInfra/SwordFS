@@ -80,7 +80,7 @@ class ConfiguredMetaEngine final : public Base {
     return LoadConfiguredTestVolume(out);
   }
 
-  utils::Status OpenPrivateMetadataStore(metadata::ChunkOverwriteMechanism mechanism,
+  utils::Status OpenPrivateMetadataStore(metadata::ChunkType mechanism,
                                          metadata::MechanismPrivateStorePtr *out) override {
     auto status = Base::OpenPrivateMetadataStore(mechanism, out);
     if (status.ToErrno() != ENOSYS) {

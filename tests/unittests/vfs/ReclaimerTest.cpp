@@ -26,8 +26,8 @@
 
 #include "FiberTest.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
-#include "chunk/ChunkObjectKey.hpp"
-#include "chunk/WholeObjectCleanup.hpp"
+#include "chunk/cow/COWCleanup.hpp"
+#include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkGcWorker.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
@@ -53,14 +53,13 @@ using swordfs::utils::Status;
 
 metadata::PendingDelete MakePendingDelete(InodeID ino, const SwordFsChunk &descriptor) {
   metadata::PendingDelete pending;
-  EXPECT_TRUE(chunk::FreezeWholeObjectDelete(ino, descriptor, 0, &pending).ok());
+  EXPECT_TRUE(chunk::cow::FreezeCOWDelete(ino, descriptor, 0, &pending).ok());
   return pending;
 }
 
 utils::Status ReconcilePhysicalCleanup(storage::IDataEngine *data) {
   auto &volume = volume::VolumeImpl::Instance();
-  chunk::internal::ChunkGcWorker worker(volume.config().chunk_overwrite_mechanism, volume.chunk_size(),
-                                        volume.meta_engine(), data);
+  chunk::internal::ChunkGcWorker worker(volume.config().chunk_type, volume.chunk_size(), volume.meta_engine(), data);
   return worker.Reconcile();
 }
 
@@ -74,8 +73,8 @@ utils::Status ReconcileAll(storage::IDataEngine *data) {
 
 std::unique_ptr<chunk::internal::ChunkGcWorker> MakeChunkGcWorker(storage::IDataEngine *data) {
   auto &volume = volume::VolumeImpl::Instance();
-  return std::make_unique<chunk::internal::ChunkGcWorker>(volume.config().chunk_overwrite_mechanism,
-                                                          volume.chunk_size(), volume.meta_engine(), data);
+  return std::make_unique<chunk::internal::ChunkGcWorker>(volume.config().chunk_type, volume.chunk_size(),
+                                                          volume.meta_engine(), data);
 }
 
 // Data engine that records every Delete and can fail selected keys.
@@ -119,8 +118,8 @@ class RecordingDataEngine : public swordfs::storage::IDataEngine {
 class StagedIntentMetaEngine : public MemMetaImpl {
  public:
   explicit StagedIntentMetaEngine(metadata::PendingDelete pending) : pending_(std::move(pending)) {
-    chunk::WholeObjectRef ref;
-    const auto status = chunk::DecodeWholeObjectDelete(*pending_, 0, &ref);
+    chunk::cow::COWRef ref;
+    const auto status = chunk::cow::DecodeCOWDelete(*pending_, 0, &ref);
     EXPECT_TRUE(status.ok()) << status.message();
     pending_ino_ = ref.ino;
     current_ = ref.descriptor;
@@ -368,7 +367,7 @@ class ReclaimerTest : public ::testing::Test {
     SwordFsChunk chunk{.index = 0, .revision = revision, .size = 64};
     status = meta_->CommitChunk(file.ino, std::nullopt, chunk);
     EXPECT_TRUE(status.ok()) << status.message();
-    data_->Seed(chunk::FormatChunkObjectKey(file.ino, 0, revision));
+    data_->Seed(chunk::cow::FormatCOWObjectKey(file.ino, 0, revision));
     return file.ino;
   }
 
@@ -398,8 +397,8 @@ class ReclaimerTest : public ::testing::Test {
     auto status = meta_->VisitPendingDeletesBatch(
         1024,
         [&out](const metadata::PendingDelete &work) {
-          chunk::WholeObjectRef ref;
-          auto status = chunk::DecodeWholeObjectDelete(work, volume::VolumeImpl::Instance().chunk_size(), &ref);
+          chunk::cow::COWRef ref;
+          auto status = chunk::cow::DecodeCOWDelete(work, volume::VolumeImpl::Instance().chunk_size(), &ref);
           if (!status.ok()) {
             return status;
           }
@@ -433,15 +432,15 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsUnsupportedPendingDeleteMechanism) {
     ASSERT_TRUE(status.ok()) << status.message();
   });
 
-  chunk::internal::ChunkGcWorker worker(metadata::ChunkOverwriteMechanism::kChunkSlice,
-                                        volume::VolumeImpl::Instance().chunk_size(), raw_meta, data_);
+  chunk::internal::ChunkGcWorker worker(metadata::ChunkType::kChunkSlice, volume::VolumeImpl::Instance().chunk_size(),
+                                        raw_meta, data_);
   const auto status = worker.Reconcile();
   EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_TRUE(data_->delete_calls.empty());
 }
 
 FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsMalformedPendingDeleteWork) {
-  const metadata::PendingDelete malformed{.id = "malformed", .payload = "not-a-whole-object-delete"};
+  const metadata::PendingDelete malformed{.id = "malformed", .payload = "not-a-COW-delete"};
 
   RawPendingDeleteMetaEngine *raw_meta = nullptr;
   swordfs::test::RunInTestThreadFromFiber([&] {
@@ -455,8 +454,8 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsMalformedPendingDeleteWork) {
     ASSERT_TRUE(status.ok()) << status.message();
   });
 
-  chunk::internal::ChunkGcWorker worker(metadata::ChunkOverwriteMechanism::kWholeObject,
-                                        volume::VolumeImpl::Instance().chunk_size(), raw_meta, data_);
+  chunk::internal::ChunkGcWorker worker(metadata::ChunkType::kCow, volume::VolumeImpl::Instance().chunk_size(),
+                                        raw_meta, data_);
   const auto status = worker.Reconcile();
   EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_TRUE(data_->delete_calls.empty());
@@ -466,7 +465,7 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsUnsupportedReclaimMechanism) {
   constexpr InodeID kIno = 42;
   const SwordFsChunk descriptor{.index = 0, .revision = 7, .size = 64};
   metadata::ReclaimWork frozen;
-  ASSERT_TRUE(chunk::FreezeWholeObjectReclaim(kIno, {descriptor}, 0, &frozen).ok());
+  ASSERT_TRUE(chunk::cow::FreezeCOWReclaim(kIno, {descriptor}, 0, &frozen).ok());
 
   PendingReclaimMetaEngine *pending_meta = nullptr;
   swordfs::test::RunInTestThreadFromFiber([&] {
@@ -480,14 +479,14 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsUnsupportedReclaimMechanism) {
     ASSERT_TRUE(status.ok()) << status.message();
   });
 
-  chunk::internal::ChunkGcWorker worker(metadata::ChunkOverwriteMechanism::kChunkSlice,
-                                        volume::VolumeImpl::Instance().chunk_size(), pending_meta, data_);
+  chunk::internal::ChunkGcWorker worker(metadata::ChunkType::kChunkSlice, volume::VolumeImpl::Instance().chunk_size(),
+                                        pending_meta, data_);
   EXPECT_EQ(worker.Reconcile().ToErrno(), EIO);
   EXPECT_FALSE(pending_meta->completed);
 }
 
 FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsMalformedReclaimWork) {
-  const metadata::ReclaimWork malformed{.ino = 42, .payload = "not-a-whole-object-reclaim"};
+  const metadata::ReclaimWork malformed{.ino = 42, .payload = "not-a-COW-reclaim"};
 
   PendingReclaimMetaEngine *pending_meta = nullptr;
   swordfs::test::RunInTestThreadFromFiber([&] {
@@ -510,7 +509,7 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcFailsClosedWhenReclaimReachabilityLookupFails
   constexpr InodeID kIno = 42;
   const SwordFsChunk descriptor{.index = 0, .revision = 7, .size = 64};
   metadata::ReclaimWork frozen;
-  ASSERT_TRUE(chunk::FreezeWholeObjectReclaim(kIno, {descriptor}, 0, &frozen).ok());
+  ASSERT_TRUE(chunk::cow::FreezeCOWReclaim(kIno, {descriptor}, 0, &frozen).ok());
 
   PendingReclaimMetaEngine *pending_meta = nullptr;
   swordfs::test::RunInTestThreadFromFiber([&] {
@@ -536,7 +535,7 @@ FIBER_TEST_F(ReclaimerTest, ReconcileDeletesFrozenObjectsAndCompletes) {
   ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
   ASSERT_TRUE(ReconcileAll(data_).ok());
 
-  const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
+  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
   EXPECT_EQ(data_->delete_calls, std::vector<std::string>{key});
   EXPECT_FALSE(data_->Contains(key));
   EXPECT_TRUE(meta_->GetInode(f_ino, nullptr).IsNotFound());
@@ -550,7 +549,7 @@ FIBER_TEST_F(ReclaimerTest, ReconcileDeletesFrozenObjectsAndCompletes) {
   // The prepared output is optional; omitting it must not change the reclaim
   // sequence or leave the frozen record behind.
   const InodeID second = CreateChunkedFile("second", 2);
-  const auto second_key = chunk::FormatChunkObjectKey(second, 0, 2);
+  const auto second_key = chunk::cow::FormatCOWObjectKey(second, 0, 2);
   ASSERT_TRUE(meta_->Unlink(kRootInodeId, "second").ok());
   ASSERT_TRUE(ReconcileAll(data_).ok());
   EXPECT_FALSE(data_->Contains(second_key));
@@ -562,7 +561,7 @@ FIBER_TEST_F(ReclaimerTest, FrozenWorkDoesNotAuthorizeDeletingALiveInode) {
   constexpr InodeID kFileIno = 42;
   const SwordFsChunk head{.index = 0, .revision = 7, .size = 64};
   metadata::ReclaimWork frozen;
-  ASSERT_TRUE(chunk::FreezeWholeObjectReclaim(kFileIno, {head}, 0, &frozen).ok());
+  ASSERT_TRUE(chunk::cow::FreezeCOWReclaim(kFileIno, {head}, 0, &frozen).ok());
 
   PendingReclaimMetaEngine *pending_meta = nullptr;
   swordfs::test::RunInTestThreadFromFiber([&] {
@@ -577,7 +576,7 @@ FIBER_TEST_F(ReclaimerTest, FrozenWorkDoesNotAuthorizeDeletingALiveInode) {
     ASSERT_TRUE(load_status.ok()) << load_status.message();
   });
 
-  const auto key = chunk::FormatChunkObjectKey(kFileIno, 0, 7);
+  const auto key = chunk::cow::FormatCOWObjectKey(kFileIno, 0, 7);
   data_->Seed(key);
 
   const auto live_status = ReconcilePhysicalCleanup(data_);
@@ -596,7 +595,7 @@ TEST_F(ReclaimerTest, PendingReclaimContinuesDirectlyToDeletion) {
   constexpr InodeID kFileIno = 42;
   const SwordFsChunk head{.index = 0, .revision = 7, .size = 64};
   metadata::ReclaimWork frozen;
-  ASSERT_TRUE(chunk::FreezeWholeObjectReclaim(kFileIno, {head}, 0, &frozen).ok());
+  ASSERT_TRUE(chunk::cow::FreezeCOWReclaim(kFileIno, {head}, 0, &frozen).ok());
   auto replacement = std::make_unique<swordfs::test::ConfiguredMetaEngine<PendingReclaimMetaEngine>>(frozen);
   auto *pending_meta = replacement.get();
   auto data = std::make_unique<RecordingDataEngine>();
@@ -604,7 +603,7 @@ TEST_F(ReclaimerTest, PendingReclaimContinuesDirectlyToDeletion) {
   SwordFsVolume config;
   const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(replacement), std::move(data), std::move(config));
   ASSERT_TRUE(status.ok()) << status.message();
-  const auto key = chunk::FormatChunkObjectKey(kFileIno, 0, 7);
+  const auto key = chunk::cow::FormatCOWObjectKey(kFileIno, 0, 7);
   data_->Seed(key);
 
   swordfs::test::RunInTestFiber([&] { ASSERT_TRUE(ReconcileAll(data_).ok()); });
@@ -614,7 +613,7 @@ TEST_F(ReclaimerTest, PendingReclaimContinuesDirectlyToDeletion) {
 
 FIBER_TEST_F(ReclaimerTest, ReconcileRetriesFailedObjectDeletes) {
   const InodeID f_ino = CreateChunkedFile("f");
-  const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
+  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
   ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
   data_->fail_keys[key] = Status::IOError("injected delete failure");
 
@@ -637,7 +636,7 @@ FIBER_TEST_F(ReclaimerTest, ReconcileRetriesFailedObjectDeletes) {
 
 FIBER_TEST_F(ReclaimerTest, TruncateCleanupDoesNotDependOnLocalChunkCache) {
   const InodeID f_ino = CreateChunkedFile("truncate");
-  const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
+  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
 
   // Call the authoritative metadata engine directly: this deliberately skips
   // FileReadWriter/FileChunkManager, modelling a cold cache or a fresh mount.
@@ -652,7 +651,7 @@ FIBER_TEST_F(ReclaimerTest, TruncateCleanupDoesNotDependOnLocalChunkCache) {
 
 FIBER_TEST_F(ReclaimerTest, TruncateCleanupRetriesFailedDelete) {
   const InodeID f_ino = CreateChunkedFile("truncate-retry");
-  const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
+  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
   ASSERT_TRUE(meta_->Truncate(f_ino, 0).ok());
   data_->fail_keys[key] = Status::IOError("injected delete failure");
 
@@ -673,8 +672,8 @@ FIBER_TEST_F(ReclaimerTest, RewriteCleanupDeletesOnlySupersededRevision) {
 
   auto replacement = first;
   replacement.revision = first.revision + 1;
-  const auto old_key = chunk::FormatChunkObjectKey(f_ino, first.index, first.revision);
-  const auto new_key = chunk::FormatChunkObjectKey(f_ino, replacement.index, replacement.revision);
+  const auto old_key = chunk::cow::FormatCOWObjectKey(f_ino, first.index, first.revision);
+  const auto new_key = chunk::cow::FormatCOWObjectKey(f_ino, replacement.index, replacement.revision);
   data_->Seed(new_key);
 
   ASSERT_TRUE(meta_->CommitChunk(f_ino, first, replacement).ok());
@@ -695,7 +694,7 @@ FIBER_TEST_F(ReclaimerTest, RewriteCleanupDeletesOnlySupersededRevision) {
 FIBER_TEST_F(ReclaimerTest, PendingDeleteCandidateDoesNotDeleteStillAuthoritativeObject) {
   constexpr InodeID kIno = 42;
   SwordFsChunk descriptor{.index = 0, .revision = 7, .size = 64};
-  const auto key = chunk::FormatChunkObjectKey(kIno, descriptor.index, descriptor.revision);
+  const auto key = chunk::cow::FormatCOWObjectKey(kIno, descriptor.index, descriptor.revision);
   metadata::PendingDelete pending = MakePendingDelete(kIno, descriptor);
 
   StagedIntentMetaEngine *staged = nullptr;
@@ -734,7 +733,7 @@ FIBER_TEST_F(ReclaimerTest, PendingDeleteCandidateDoesNotDeleteStillAuthoritativ
 FIBER_TEST_F(ReclaimerTest, PendingDeleteFailsClosedWhenAuthoritativeChunkLookupFails) {
   constexpr InodeID kIno = 42;
   SwordFsChunk descriptor{.index = 0, .revision = 7, .size = 64};
-  const auto key = chunk::FormatChunkObjectKey(kIno, descriptor.index, descriptor.revision);
+  const auto key = chunk::cow::FormatCOWObjectKey(kIno, descriptor.index, descriptor.revision);
   metadata::PendingDelete pending = MakePendingDelete(kIno, descriptor);
 
   StagedIntentMetaEngine *staged = nullptr;
@@ -761,7 +760,7 @@ FIBER_TEST_F(ReclaimerTest, PendingDeleteFailsClosedWhenAuthoritativeChunkLookup
 FIBER_TEST_F(ReclaimerTest, PendingDeleteRemovesSupersededRevisionWhileNewRevisionStaysAuthoritative) {
   constexpr InodeID kIno = 42;
   SwordFsChunk old_descriptor{.index = 0, .revision = 7, .size = 64};
-  const auto old_key = chunk::FormatChunkObjectKey(kIno, old_descriptor.index, old_descriptor.revision);
+  const auto old_key = chunk::cow::FormatCOWObjectKey(kIno, old_descriptor.index, old_descriptor.revision);
   metadata::PendingDelete pending = MakePendingDelete(kIno, old_descriptor);
 
   StagedIntentMetaEngine *staged = nullptr;
@@ -792,7 +791,7 @@ FIBER_TEST_F(ReclaimerTest, ReconcileRecoversCrashLeftOrphan) {
   ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
   ASSERT_EQ(OrphanCandidates(), std::vector<InodeID>{f_ino});
 
-  const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
+  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
   EXPECT_TRUE(data_->Contains(key)) << "nothing may be deleted before the reclaim is prepared";
 
   ASSERT_TRUE(ReconcileAll(data_).ok());
@@ -815,7 +814,7 @@ FIBER_TEST_F(ReclaimerTest, ReconcileLeavesRevivedInodeAlone) {
 
   ASSERT_TRUE(ReconcileAll(data_).ok());
 
-  const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
+  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
   EXPECT_TRUE(data_->delete_calls.empty()) << "no object may be deleted while a name references the inode";
   EXPECT_TRUE(data_->Contains(key));
   ASSERT_TRUE(meta_->GetInode(f_ino, &revived).ok());
@@ -840,7 +839,7 @@ FIBER_TEST_F(ReclaimerTest, ReconcileDefersUntilAfterTheLastDescriptorCloses) {
   ASSERT_TRUE(handle->Release().ok());
   EXPECT_TRUE(data_->delete_calls.empty());
   ASSERT_TRUE(ReconcileAll(data_).ok());
-  const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
+  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
   EXPECT_FALSE(data_->Contains(key));
   EXPECT_TRUE(meta_->GetInode(f_ino, nullptr).IsNotFound());
 
@@ -855,7 +854,7 @@ FIBER_TEST_F(ReclaimerTest, ReconcileDefersAnUnlinkedInodeWithAnOpenDescriptor) 
   // the unlinked inode open, a full Reconcile pass may not delete the inode or
   // its objects.
   const InodeID f_ino = CreateChunkedFile("f");
-  const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
+  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
 
   std::shared_ptr<FileHandle> handle;
   ASSERT_TRUE(FileHandle::Open(f_ino, O_RDONLY, &handle).ok());
@@ -902,7 +901,7 @@ FIBER_TEST_F(ReclaimerTest, ConcurrentReclaimAndLinkNeverDeleteLiveData) {
 
   for (int round = 0; round < kRounds; ++round) {
     const InodeID f_ino = CreateChunkedFile("race");
-    const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
+    const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
     ASSERT_TRUE(meta_->Unlink(kRootInodeId, "race").ok());
 
     std::barrier gate(3);
@@ -996,9 +995,9 @@ FIBER_TEST_F(ReclaimerTest, ReconcileCountsEveryFailedCleanupItem) {
   const InodeID truncated = CreateChunkedFile("truncated");
   const InodeID orphan = CreateChunkedFile("orphan");
   const InodeID frozen = CreateChunkedFile("frozen");
-  const auto truncated_key = chunk::FormatChunkObjectKey(truncated, 0, 1);
-  const auto orphan_key = chunk::FormatChunkObjectKey(orphan, 0, 1);
-  const auto frozen_key = chunk::FormatChunkObjectKey(frozen, 0, 1);
+  const auto truncated_key = chunk::cow::FormatCOWObjectKey(truncated, 0, 1);
+  const auto orphan_key = chunk::cow::FormatCOWObjectKey(orphan, 0, 1);
+  const auto frozen_key = chunk::cow::FormatCOWObjectKey(frozen, 0, 1);
   ASSERT_TRUE(meta_->Truncate(truncated, 0).ok());
   ASSERT_TRUE(meta_->Unlink(kRootInodeId, "orphan").ok());
   ASSERT_TRUE(meta_->Unlink(kRootInodeId, "frozen").ok());
@@ -1149,7 +1148,7 @@ FIBER_TEST_F(ReclaimerScanFailureTest, ReconcileSurfacesPendingScanFailure) {
 
 FIBER_TEST_F(ReclaimerTest, WorkerCompletesAPendingReclaimImmediatelyAtStartup) {
   const InodeID f_ino = CreateChunkedFile("f");
-  const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
+  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
   ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
 
   ASSERT_TRUE(meta_->PrepareReclaim(f_ino).ok());
@@ -1217,7 +1216,7 @@ TEST_F(ReclaimerForcedMultiPassTest, ChunkGcWorkerSelfWakesWithoutScanningVfsOrp
 
 FIBER_TEST_F(ReclaimerTest, WorkerSurvivesAFailedPassAndRecoversOnWake) {
   const InodeID f_ino = CreateChunkedFile("retry-failure");
-  const auto key = chunk::FormatChunkObjectKey(f_ino, 0, 1);
+  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
   ASSERT_TRUE(meta_->Unlink(kRootInodeId, "retry-failure").ok());
 
   // Freeze the reclaim first, and keep the backend failing so the first worker

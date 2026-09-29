@@ -12,35 +12,35 @@
 namespace swordfs::metadata {
 namespace {
 
-using WholeSequenceA = PrivateSequenceTag<ChunkOverwriteMechanism::kWholeObject, 11>;
-using WholeSequenceB = PrivateSequenceTag<ChunkOverwriteMechanism::kWholeObject, 12>;
-using SliceSequenceA = PrivateSequenceTag<ChunkOverwriteMechanism::kChunkSlice, 11>;
+using COWSequenceA = PrivateSequenceTag<ChunkType::kCow, 11>;
+using COWSequenceB = PrivateSequenceTag<ChunkType::kCow, 12>;
+using SliceSequenceA = PrivateSequenceTag<ChunkType::kChunkSlice, 11>;
 
 FIBER_TEST(MemPrivateMetadataStoreTest, AllocatesMonotonicMechanismScopedIndependentSequences) {
-  MemPrivateMetadataStore whole_object(ChunkOverwriteMechanism::kWholeObject);
-  MemPrivateMetadataStore chunk_slice(ChunkOverwriteMechanism::kChunkSlice);
+  MemPrivateMetadataStore cow(ChunkType::kCow);
+  MemPrivateMetadataStore chunk_slice(ChunkType::kChunkSlice);
   uint64_t value = 0;
 
-  EXPECT_EQ(whole_object.mechanism(), ChunkOverwriteMechanism::kWholeObject);
-  ASSERT_TRUE(whole_object.AllocateSequence(WholeSequenceA{}, &value).ok());
+  EXPECT_EQ(cow.mechanism(), ChunkType::kCow);
+  ASSERT_TRUE(cow.AllocateSequence(COWSequenceA{}, &value).ok());
   EXPECT_EQ(value, 1U);
-  ASSERT_TRUE(whole_object.AllocateSequence(WholeSequenceA{}, &value).ok());
+  ASSERT_TRUE(cow.AllocateSequence(COWSequenceA{}, &value).ok());
   EXPECT_EQ(value, 2U);
-  ASSERT_TRUE(whole_object.AllocateSequence(WholeSequenceB{}, &value).ok());
+  ASSERT_TRUE(cow.AllocateSequence(COWSequenceB{}, &value).ok());
   EXPECT_EQ(value, 1U);
   ASSERT_TRUE(chunk_slice.AllocateSequence(SliceSequenceA{}, &value).ok());
   EXPECT_EQ(value, 1U);
 
-  EXPECT_EQ(whole_object.AllocateSequence(SliceSequenceA{}, &value).ToErrno(), EINVAL);
-  EXPECT_EQ(whole_object.AllocateSequence(WholeSequenceA{}, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(cow.AllocateSequence(SliceSequenceA{}, &value).ToErrno(), EINVAL);
+  EXPECT_EQ(cow.AllocateSequence(COWSequenceA{}, nullptr).ToErrno(), EINVAL);
 }
 
 #ifndef NDEBUG
 TEST(MemPrivateMetadataStoreTest, RuntimeAllocationRejectsThreadCaller) {
-  MemPrivateMetadataStore store(ChunkOverwriteMechanism::kWholeObject);
+  MemPrivateMetadataStore store(ChunkType::kCow);
   uint64_t value = 0;
   EXPECT_DEATH(
-      { (void)store.AllocateSequence(WholeSequenceA{}, &value); },
+      { (void)store.AllocateSequence(COWSequenceA{}, &value); },
       "execution-domain violation at .*expected=fiber, actual=POSIX-thread");
 }
 #endif
