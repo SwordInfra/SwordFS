@@ -4,6 +4,7 @@
 #include "metadata/types/Inode.hpp"
 
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 #include <cstring>
 #include <ctime>
@@ -12,6 +13,23 @@
 #include "metadata/types/BufCodec.hpp"
 
 namespace swordfs::metadata {
+
+namespace {
+
+uint64_t ProjectedPosixBlocks(const SwordFsAttr &attr) {
+  uint64_t posix_blocks = attr.blocks;
+  if (S_ISREG(attr.mode) && posix_blocks == 0 && attr.size != 0) {
+    // generic/615 requires an already-visible non-empty file to never expose
+    // zero allocated blocks during overwrite/writeback. Do not derive blocks
+    // from logical size here: doing so turns sparse holes into allocation and
+    // breaks sparse-file capability detection. Accurate allocation accounting
+    // remains owned by the persisted blocks field when available.
+    posix_blocks = 1;
+  }
+  return posix_blocks;
+}
+
+}  // namespace
 
 SwordFsAttr::SwordFsAttr(uint64_t ino, uint32_t mode)
     : SwordFsAttr(ino, mode, static_cast<uint64_t>(::getuid()), static_cast<uint64_t>(::getgid())) {
@@ -22,7 +40,8 @@ SwordFsAttr::SwordFsAttr(uint64_t ino, uint32_t mode, uint64_t uid, uint64_t gid
   nlink = S_ISDIR(mode) ? 2 : 1;
   size = S_ISDIR(mode) ? 4096 : 0;
   blksize = 4096;
-  atime = mtime = ctime = static_cast<int64_t>(::time(nullptr));
+  const int64_t now = static_cast<int64_t>(::time(nullptr));
+  atime = mtime = ctime = btime = now;
 }
 
 void SwordFsAttr::ClearSetidForKillPriv() {
@@ -46,22 +65,38 @@ void SwordFsAttr::ToPosixStat(struct stat *st) const {
   st->st_rdev = static_cast<dev_t>(rdev);
   st->st_size = static_cast<off_t>(size);
   st->st_blksize = static_cast<blksize_t>(blksize);
-  uint64_t posix_blocks = blocks;
-  if (S_ISREG(mode) && posix_blocks == 0 && size != 0) {
-    // generic/615 requires an already-visible non-empty file to never expose
-    // zero allocated blocks during overwrite/writeback. Do not derive blocks
-    // from logical size here: doing so turns sparse holes into allocation and
-    // breaks sparse-file capability detection. Accurate allocation accounting
-    // remains owned by the persisted blocks field when available.
-    posix_blocks = 1;
-  }
-  st->st_blocks = static_cast<blkcnt_t>(posix_blocks);
+  st->st_blocks = static_cast<blkcnt_t>(ProjectedPosixBlocks(*this));
   st->st_atime = static_cast<time_t>(atime);
   st->st_atim.tv_nsec = static_cast<long>(atime_nsec);
   st->st_mtime = static_cast<time_t>(mtime);
   st->st_mtim.tv_nsec = static_cast<long>(mtime_nsec);
   st->st_ctime = static_cast<time_t>(ctime);
   st->st_ctim.tv_nsec = static_cast<long>(ctime_nsec);
+}
+
+void SwordFsAttr::ToStatX(struct statx *stx) const {
+  std::memset(stx, 0, sizeof(*stx));
+  stx->stx_mask = STATX_BASIC_STATS | STATX_BTIME;
+  stx->stx_blksize = static_cast<uint32_t>(blksize);
+  stx->stx_nlink = static_cast<uint32_t>(nlink);
+  stx->stx_uid = static_cast<uint32_t>(uid);
+  stx->stx_gid = static_cast<uint32_t>(gid);
+  stx->stx_mode = static_cast<uint16_t>(mode);
+  stx->stx_ino = ino;
+  stx->stx_size = size;
+  stx->stx_blocks = ProjectedPosixBlocks(*this);
+  stx->stx_atime.tv_sec = atime;
+  stx->stx_atime.tv_nsec = static_cast<uint32_t>(atime_nsec);
+  stx->stx_btime.tv_sec = btime;
+  stx->stx_btime.tv_nsec = static_cast<uint32_t>(btime_nsec);
+  stx->stx_ctime.tv_sec = ctime;
+  stx->stx_ctime.tv_nsec = static_cast<uint32_t>(ctime_nsec);
+  stx->stx_mtime.tv_sec = mtime;
+  stx->stx_mtime.tv_nsec = static_cast<uint32_t>(mtime_nsec);
+  stx->stx_rdev_major = major(static_cast<dev_t>(rdev));
+  stx->stx_rdev_minor = minor(static_cast<dev_t>(rdev));
+  stx->stx_dev_major = major(static_cast<dev_t>(dev));
+  stx->stx_dev_minor = minor(static_cast<dev_t>(dev));
 }
 
 SwordFsAttr SwordFsAttr::FromPosixStat(const struct stat &st) {

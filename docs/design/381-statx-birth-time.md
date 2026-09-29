@@ -118,6 +118,11 @@ The feature is verified test-first at three boundaries:
   nullable file-info handling, replies with statx data on success, and forwards
   metadata errors.
 
-After focused unit tests and the full PR matrix are green, `generic/528` is
-run in the authoritative fstests harness. Its known-gap baseline is promoted
-only after that testcase passes.
+The first authoritative conformance discovery run was GitHub CI
+`36520707449` on implementation head `deb0fa1`. Its deterministic
+`baseline-rest-0` shard executed `generic/528` with XUnit
+`failures=0 skipped=0`, `check-status=0`, and raw output containing a
+concrete `stat.btime` value. That direct evidence satisfies the promotion
+rule, so `generic/528` moves from `known-gaps.tsv` to `supported.txt` in
+this change. The final PR head must rerun the full required matrix with the
+promoted baseline before merge.

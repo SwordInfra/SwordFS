@@ -1860,7 +1860,7 @@ FIBER_TEST_F(VfsImplIntegrationTest, StatxReportsCachedUnflushedStateAndPersiste
   auto data = folly::IOBuf::copyBuffer(std::string(kWriteSize, 'x'));
   ASSERT_TRUE(VfsImpl::Write(kFileIno, *data, 0, fi.fh).ok());
 
-  struct statx attr {};
+  struct statx attr{};
   ASSERT_TRUE(VfsImpl::StatX(kFileIno, 0, STATX_BASIC_STATS | STATX_BTIME, &fi, &attr).ok());
   EXPECT_EQ(attr.stx_size, kWriteSize);
   EXPECT_EQ(attr.stx_blocks, 1U);

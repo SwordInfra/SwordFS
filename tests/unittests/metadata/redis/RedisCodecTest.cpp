@@ -112,7 +112,7 @@ TEST(MetadataTypesTest, InodeRejectsPreviousBetaLayoutWithoutBirthTime) {
 
 TEST(MetadataTypesTest, AttrProjectsAuthoritativeStatxFields) {
   const auto input = MakeInode();
-  struct statx result {};
+  struct statx result{};
 
   input.attr.ToStatX(&result);
 
@@ -146,8 +146,8 @@ TEST(MetadataTypesTest, StatxSharesRegularFileBlockProjectionWithStat) {
   attr.size = 4096;
   attr.blocks = 0;
 
-  struct stat posix {};
-  struct statx extended {};
+  struct stat posix{};
+  struct statx extended{};
   attr.ToPosixStat(&posix);
   attr.ToStatX(&extended);
 
@@ -387,13 +387,15 @@ TEST(MetadataTypesTest, RejectsMalformedHeaderAndString) {
   SwordFsAttr decoded;
   EXPECT_FALSE(attr_dec.Attr(&decoded));
 
-  BufEncoder bad_btime_enc;
-  attr = {};
-  attr.btime_nsec = 1000000000;
-  bad_btime_enc.Attr(attr);
-  bad_btime_enc.Finish(&attr_data);
-  BufDecoder btime_dec(attr_data);
-  EXPECT_FALSE(btime_dec.Attr(&decoded));
+  for (const int64_t invalid_btime_nsec : {-1LL, 1000000000LL}) {
+    BufEncoder bad_btime_enc;
+    attr = {};
+    attr.btime_nsec = invalid_btime_nsec;
+    bad_btime_enc.Attr(attr);
+    bad_btime_enc.Finish(&attr_data);
+    BufDecoder btime_dec(attr_data);
+    EXPECT_FALSE(btime_dec.Attr(&decoded));
+  }
 }
 
 TEST(MetadataTypesTest, RejectsWrongTypeAndMalformedRecords) {

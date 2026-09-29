@@ -324,7 +324,6 @@ generic/518	upstream_not_applicable	-	NOTRUN	Reflink not supported by scratch fi
 generic/520	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/526	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/527	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
-generic/528	known_unsupported	#255	NOTRUN	inode creation time not supported by this filesystem	-	SwordFS VfsImpl::StatX remains NotSupported, including creation-time reporting; tracked by #255.
 generic/529	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/530	upstream_not_applicable	-	NOTRUN	fuse does not support shutdown	-	Pinned fstests excludes this local-filesystem shutdown/freeze operation for FUSE.
 generic/531	known_unsupported	#255	NOTRUN	O_TMPFILE is not supported	-	SwordFS VfsImpl::TmpFile returns NotSupported; tracked by #255.
