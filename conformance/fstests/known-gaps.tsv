@@ -7,7 +7,6 @@ generic/012	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong
 generic/015	upstream_not_applicable	-	NOTRUN	Filesystem fuse not supported in _scratch_mkfs_sized	-	The testcase requires sizing/formatting a local scratch filesystem, which is not applicable to FUSE.
 generic/016	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/018	upstream_not_applicable	-	NOTRUN	"defragmentation not supported for fstype ""fuse"""	-	Pinned fstests excludes filesystem defragmentation for FUSE.
-generic/020	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/021	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/022	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/026	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
@@ -15,7 +14,6 @@ generic/031	known_unsupported	#255	NOTRUN	xfs_io fcollapse failed (old kernel/wr
 generic/032	known_unsupported	#255	NOTRUN	xfs_io falloc failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/033	known_unsupported	#255	NOTRUN	xfs_io fzero failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/034	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
-generic/037	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/039	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/040	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/041	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
@@ -29,13 +27,12 @@ generic/058	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong
 generic/059	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/060	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/061	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
-generic/062	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
+generic/062	known_unsupported	#255	NOTRUN	attr namespace trusted not supported by this filesystem type: fuse	-	The raw xattr foundation supports only user.*; trusted.* credential/capability semantics remain unsupported and tracked by #255.
 generic/063	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/064	known_unsupported	#255	NOTRUN	xfs_io fiemap failed (old kernel/wrong fs?)	-	SwordFS does not provide the block-mapping/fiemap capability required by this testcase; tracked by #255.
 generic/065	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/066	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/067	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
-generic/070	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/071	known_unsupported	#255	NOTRUN	xfs_io falloc -k failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/073	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/076	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be local device	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
@@ -48,10 +45,10 @@ generic/090	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch 
 generic/092	known_unsupported	#255	NOTRUN	xfs_io falloc failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/094	known_unsupported	#255	NOTRUN	xfs_io fiemap failed (old kernel/wrong fs?)	-	SwordFS does not provide the block-mapping/fiemap capability required by this testcase; tracked by #255.
 generic/096	known_unsupported	#255	NOTRUN	xfs_io fzero failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
-generic/097	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
+generic/097	known_unsupported	#255	NOTRUN	attr namespace trusted not supported by this filesystem type: fuse	-	The raw xattr foundation supports only user.*; trusted.* credential/capability semantics remain unsupported and tracked by #255.
 generic/099	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/101	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
-generic/103	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
+generic/103	known_unsupported	#255	NOTRUN	xfs_io falloc failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/104	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/105	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/106	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
@@ -62,7 +59,6 @@ generic/111	upstream_not_applicable	-	NOTRUN	Reflink not supported by test files
 generic/114	upstream_not_applicable	-	NOTRUN	device block size: 4096 greater than 512	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/115	upstream_not_applicable	-	NOTRUN	Reflink not supported by test filesystem type: fuse	-	Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/116	upstream_not_applicable	-	NOTRUN	Reflink not supported by test filesystem type: fuse	-	Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
-generic/117	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/118	upstream_not_applicable	-	NOTRUN	Reflink not supported by test filesystem type: fuse	-	Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/119	upstream_not_applicable	-	NOTRUN	Reflink not supported by test filesystem type: fuse	-	Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/121	upstream_not_applicable	-	NOTRUN	Dedupe not supported by test filesystem type: fuse	-	Pinned fstests classifies dedupe as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
@@ -204,7 +200,6 @@ generic/331	upstream_not_applicable	-	NOTRUN	Reflink not supported by scratch fi
 generic/332	upstream_not_applicable	-	NOTRUN	Reflink not supported by scratch filesystem type: fuse	-	Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/335	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/336	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
-generic/337	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/338	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/341	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/342	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
@@ -228,7 +223,6 @@ generic/373	upstream_not_applicable	-	NOTRUN	Reflink not supported by scratch fi
 generic/374	upstream_not_applicable	-	NOTRUN	Dedupe not supported by scratch filesystem type: fuse	-	Pinned fstests classifies dedupe as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/375	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/376	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
-generic/377	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/379	upstream_not_applicable	-	NOTRUN	disk quotas not supported by this filesystem type: fuse	-	Pinned fstests classifies disk quota testing as unsupported for filesystem type fuse.
 generic/380	upstream_not_applicable	-	NOTRUN	disk quotas not supported by this filesystem type: fuse	-	Pinned fstests classifies disk quota testing as unsupported for filesystem type fuse.
 generic/381	upstream_not_applicable	-	NOTRUN	disk quotas not supported by this filesystem type: fuse	-	Pinned fstests classifies disk quota testing as unsupported for filesystem type fuse.
@@ -262,7 +256,7 @@ generic/420	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong
 generic/421	upstream_not_applicable	-	NOTRUN	No encryption support for fuse	-	The testcase requires local-filesystem encryption/inlinecrypt semantics that pinned fstests does not support for FUSE.
 generic/422	known_unsupported	#255	NOTRUN	xfs_io falloc -k failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/424	known_unsupported	#255	NOTRUN	file system doesn't support any of /usr/bin/chattr +a/+c/+d/+i	-	SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.
-generic/425	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
+generic/425	known_unsupported	#255	NOTRUN	xfs_io fiemap -a failed (old kernel/wrong fs?)	-	SwordFS does not provide the block-mapping/fiemap capability required by this testcase; tracked by #255.
 generic/426	known_unsupported	#255	FAIL	- output mismatch (see <FSTESTS_RESULT_DIR>/generic/426.out.bad)	generic/426.out.bad	SwordFS does not enable FUSE export/open-by-handle support; tracked by #255.
 generic/427	upstream_not_applicable	-	NOTRUN	Filesystem fuse not supported in _scratch_mkfs_sized	-	The testcase requires sizing/formatting a local scratch filesystem, which is not applicable to FUSE.
 generic/434	known_unsupported	#255	FAIL	- output mismatch (see <FSTESTS_RESULT_DIR>/generic/434.out.bad)	generic/434.out.bad	SwordFS copy_file_range hook returns ENOSYS; tracked by #255.
@@ -277,7 +271,7 @@ generic/449	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem 
 generic/450	upstream_not_applicable	-	NOTRUN	Only test on sector size < half of block size	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/452	upstream_not_applicable	-	FAIL	check: possible mount failures (see <FSTESTS_RESULT_DIR>/generic/452.mountfail)	generic/452.mountfail	The testcase requires remounting a FUSE scratch mount read-only with local-filesystem mount semantics.
 generic/453	upstream_not_applicable	-	NOTRUN	fuse does not allow unrestricted byte streams for names	-	The testcase requires filename byte-stream behavior excluded by the FUSE protocol/model.
-generic/454	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
+generic/454	upstream_not_applicable	-	NOTRUN	fuse does not allow unrestricted byte streams for names	-	The testcase requires filename byte-stream behavior excluded by the FUSE protocol/model.
 generic/456	known_unsupported	#255	NOTRUN	xfs_io falloc failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/458	upstream_not_applicable	-	NOTRUN	Reflink not supported by scratch filesystem type: fuse	-	Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/462	upstream_not_applicable	-	NOTRUN	mount <FSTESTS_WORK_DIR>/scratch with dax failed	-	DAX is a local persistent-memory/block-filesystem mount feature and is not applicable to SwordFS FUSE.
@@ -297,7 +291,6 @@ generic/481	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch 
 generic/483	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/484	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/485	known_unsupported	#255	NOTRUN	xfs_io falloc -k failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
-generic/486	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/487	environment	-	NOTRUN	This test requires a valid $SCRATCH_LOGDEV	-	The hosted CI environment does not provision the extra log-writes/log device required by this testcase.
 generic/488	upstream_not_applicable	-	NOTRUN	Filesystem fuse not supported in _scratch_mkfs_sized	-	The testcase requires sizing/formatting a local scratch filesystem, which is not applicable to FUSE.
 generic/489	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
@@ -329,14 +322,12 @@ generic/516	upstream_not_applicable	-	NOTRUN	Dedupe not supported by test filesy
 generic/517	upstream_not_applicable	-	NOTRUN	Dedupe not supported by scratch filesystem type: fuse	-	Pinned fstests classifies dedupe as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/518	upstream_not_applicable	-	NOTRUN	Reflink not supported by scratch filesystem type: fuse	-	Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/520	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
-generic/523	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/526	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/527	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/528	known_unsupported	#255	NOTRUN	inode creation time not supported by this filesystem	-	SwordFS VfsImpl::StatX remains NotSupported, including creation-time reporting; tracked by #255.
 generic/529	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/530	upstream_not_applicable	-	NOTRUN	fuse does not support shutdown	-	Pinned fstests excludes this local-filesystem shutdown/freeze operation for FUSE.
 generic/531	known_unsupported	#255	NOTRUN	O_TMPFILE is not supported	-	SwordFS VfsImpl::TmpFile returns NotSupported; tracked by #255.
-generic/533	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/534	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/535	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/536	upstream_not_applicable	-	NOTRUN	fuse does not support shutdown	-	Pinned fstests excludes this local-filesystem shutdown/freeze operation for FUSE.
@@ -398,11 +389,9 @@ generic/606	upstream_not_applicable	-	NOTRUN	mount <FSTESTS_WORK_DIR>/scratch wi
 generic/607	known_unsupported	#255	NOTRUN	xfs_io chattr +x failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.
 generic/608	upstream_not_applicable	-	NOTRUN	mount <FSTESTS_WORK_DIR>/scratch with dax=always failed	-	DAX is a local persistent-memory/block-filesystem mount feature and is not applicable to SwordFS FUSE.
 generic/610	known_unsupported	#255	NOTRUN	xfs_io fzero failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
-generic/611	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/612	upstream_not_applicable	-	NOTRUN	Reflink not supported by test filesystem type: fuse	-	Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/613	upstream_not_applicable	-	NOTRUN	No encryption support for fuse	-	The testcase requires local-filesystem encryption/inlinecrypt semantics that pinned fstests does not support for FUSE.
 generic/614	upstream_not_applicable	-	NOTRUN	test requires delayed allocation buffered writes	-	The testcase requires local delayed-allocation page-cache behavior that is not applicable to the SwordFS FUSE data path.
-generic/618	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/620	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/621	upstream_not_applicable	-	NOTRUN	No encryption support for fuse	-	The testcase requires local-filesystem encryption/inlinecrypt semantics that pinned fstests does not support for FUSE.
 generic/623	known_unsupported	#255	NOTRUN	xfs_io shutdown failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.
@@ -459,7 +448,7 @@ generic/695	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch 
 generic/697	known_unsupported	#255	NOTRUN	ACLs not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/698	upstream_not_applicable	-	NOTRUN	idmapped mounts not support by fuse	-	Pinned fstests excludes idmapped-mount coverage for FUSE.
 generic/699	upstream_not_applicable	-	NOTRUN	idmapped mounts not support by fuse	-	Pinned fstests excludes idmapped-mount coverage for FUSE.
-generic/700	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
+generic/700	known_unsupported	#255	NOTRUN	kernel doesn't support renameat2 syscall	-	The upstream probe exercises RENAME_WHITEOUT, which SwordFS does not currently support; tracked by #255.
 generic/702	upstream_not_applicable	-	NOTRUN	Reflink not supported by scratch filesystem type: fuse	-	Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
 generic/703	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/704	environment	-	NOTRUN	scsi_debug module not found	-	The hosted CI kernel does not provide the scsi_debug module required by this testcase.
@@ -482,7 +471,6 @@ generic/724	upstream_not_applicable	-	NOTRUN	xfs_io exchangerange not supported 
 generic/725	upstream_not_applicable	-	NOTRUN	xfs_io exchangerange not supported on fuse	-	Pinned fstests/xfs_io explicitly does not expose this range/exchange operation for FUSE.
 generic/726	upstream_not_applicable	-	NOTRUN	xfs_io exchangerange not supported on fuse	-	Pinned fstests/xfs_io explicitly does not expose this range/exchange operation for FUSE.
 generic/727	upstream_not_applicable	-	NOTRUN	xfs_io exchangerange not supported on fuse	-	Pinned fstests/xfs_io explicitly does not expose this range/exchange operation for FUSE.
-generic/728	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
 generic/730	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/test to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/731	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/test to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/734	upstream_not_applicable	-	NOTRUN	Reflink not supported by test filesystem type: fuse	-	Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.
@@ -494,7 +482,7 @@ generic/740	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch 
 generic/741	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/742	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/745	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
-generic/748	known_unsupported	#255	NOTRUN	attr namespace user not supported by this filesystem type: fuse	-	SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.
+generic/748	known_unsupported	#255	NOTRUN	xfs_io falloc -k failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/749	known_unsupported	#255	NOTRUN	xfs_io falloc failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/752	upstream_not_applicable	-	NOTRUN	xfs_io exchangerange not supported on fuse	-	Pinned fstests/xfs_io explicitly does not expose this range/exchange operation for FUSE.
 generic/756	known_unsupported	#255	FAIL	- output mismatch (see <FSTESTS_RESULT_DIR>/generic/756.out.bad)	generic/756.out.bad	SwordFS does not enable FUSE export/open-by-handle support; tracked by #255.

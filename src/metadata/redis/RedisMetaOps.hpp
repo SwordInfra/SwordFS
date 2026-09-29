@@ -66,6 +66,10 @@ class RedisMetaOps {
   utils::Status GetInodes(const std::vector<InodeID> &inode_ids, std::vector<std::optional<SwordFsInode>> *out);
   utils::Status LookupEntry(InodeID parent_ino, std::string_view name, SwordFsInode *out);
   utils::Status SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out = nullptr);
+  utils::Status SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode);
+  utils::Status GetXAttr(InodeID ino, std::string_view name, std::string *value);
+  utils::Status ListXAttrs(InodeID ino, std::vector<std::string> *names);
+  utils::Status RemoveXAttr(InodeID ino, std::string_view name);
   utils::Status Truncate(InodeID ino, uint64_t size);
   utils::Status TouchInode(InodeID ino, SetAttrField fields);
   utils::Status PrepareReclaim(InodeID ino);

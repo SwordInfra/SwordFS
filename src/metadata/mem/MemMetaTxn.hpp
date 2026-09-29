@@ -66,6 +66,11 @@ class MemMetaTxn : public IChunkIndexTxn {
   // update chunk metadata and apply the killpriv/ctime rules.
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out = nullptr);
 
+  Status SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode);
+  Status GetXAttr(InodeID ino, std::string_view name, std::string *value);
+  Status ListXAttrs(InodeID ino, std::vector<std::string> *names);
+  Status RemoveXAttr(InodeID ino, std::string_view name);
+
   // Truncate an inode atomically: update st_size, apply killpriv/ctime,
   // and drop or clamp chunk metadata beyond the new size.
   Status Truncate(InodeID ino, uint64_t size);

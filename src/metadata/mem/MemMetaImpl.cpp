@@ -411,6 +411,26 @@ Status MemMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField f
   return Status::OK();
 }
 
+Status MemMetaImpl::SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.SetXAttr(ino, name, value, mode); });
+}
+
+Status MemMetaImpl::GetXAttr(InodeID ino, std::string_view name, std::string *value) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.GetXAttr(ino, name, value); });
+}
+
+Status MemMetaImpl::ListXAttrs(InodeID ino, std::vector<std::string> *names) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.ListXAttrs(ino, names); });
+}
+
+Status MemMetaImpl::RemoveXAttr(InodeID ino, std::string_view name) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.RemoveXAttr(ino, name); });
+}
+
 Status MemMetaImpl::Open(InodeID ino, uint64_t *size) {
   utils::ExpectInFiberDomain();
   uint64_t authoritative_size = 0;

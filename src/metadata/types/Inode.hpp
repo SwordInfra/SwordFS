@@ -4,8 +4,10 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "metadata/types/Common.hpp"
 #include "utils/Status.hpp"
@@ -50,11 +52,17 @@ struct SwordFsInode {
   SwordFsAttr attr{};
   InodeID parent_ino = 0;
   std::string symlink_target;
+  std::map<std::string, std::string> xattrs;
 
   SwordFsInode() = default;
   SwordFsInode(InodeID ino, SwordFsAttr attr, InodeID parent_ino, std::string symlink_target = std::string{});
 
   void Touch(SetAttrField fields);
+
+  utils::Status SetXAttr(std::string_view name, std::string_view value, XAttrSetMode mode);
+  utils::Status GetXAttr(std::string_view name, std::string *value) const;
+  utils::Status ListXAttrs(std::vector<std::string> *names) const;
+  utils::Status RemoveXAttr(std::string_view name);
 
   bool IsDir() const;
   bool IsRegular() const;

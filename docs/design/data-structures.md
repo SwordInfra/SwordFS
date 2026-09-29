@@ -20,7 +20,7 @@ flowchart LR
 | --- | --- | --- |
 | `SwordFsVolume` | Volume identity, data-engine identity, bucket/location, region, chunk size | Defines how a mounted volume interprets its storage |
 | Directory entry | Name, child inode ID, child type | Namespace mapping; multiple entries may name one regular-file inode |
-| `SwordFsInode` | ID, attributes including size and `nlink`, parent ID, symlink target | Canonical inode attributes; removing a name need not remove the inode |
+| `SwordFsInode` | ID, attributes including size and `nlink`, parent ID, symlink target, ordered raw xattrs | Canonical inode attributes and raw xattrs; removing a name need not remove the inode |
 | `SwordFsChunk` | Index, revision, size; start offset is derived from `index * chunk_size` | Current shared publication head for one logical chunk; `revision`/`size` remain transitional under #312 |
 | Orphan candidate | Inode ID and cleanup marker | Last-link removal recorded while the live inode still exists |
 | `ReclaimWork` | Inode ID and opaque strategy payload | Replaces live inode/chunk metadata atomically at reclaim preparation |
@@ -49,8 +49,10 @@ mount uses the persisted identity to select the engine and then gives that
 engine its persisted location/configuration. The two fields are a persisted
 record invariant: both must be present for a configured data plane, or both
 absent when no data engine is configured; decoding rejects one-sided records.
-Persistent metadata records use schema version 1 and require an
-exact match as a current-format integrity rule.
+Persistent metadata records use schema version 1 and require an exact match as
+a current-format integrity rule. SwordFS is beta, so metadata layouts may
+change in place without introducing schema-version transitions or compatibility
+decoders for superseded development formats.
 
 ## Runtime ownership
 

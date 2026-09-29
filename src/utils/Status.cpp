@@ -26,6 +26,10 @@ int Status::ToErrno() const {
       return EINVAL;
     case kNotSupported:
       return ENOSYS;
+    case kOperationNotSupported:
+      return EOPNOTSUPP;
+    case kNoData:
+      return ENODATA;
     case kBusy:
       return EBUSY;
     case kNotEmpty:
@@ -38,6 +42,8 @@ int Status::ToErrno() const {
       return ENOMEM;
     case kNameTooLong:
       return ENAMETOOLONG;
+    case kRange:
+      return ERANGE;
     default:
       return EIO;
   }

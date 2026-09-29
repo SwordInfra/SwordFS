@@ -223,6 +223,38 @@ Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fi
   return Status::OK();
 }
 
+Status MemMetaTxn::SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) {
+  SwordFsInode *inode = FindInode(ino);
+  if (inode == nullptr) {
+    return Status::NotFound("inode not found");
+  }
+  return inode->SetXAttr(name, value, mode);
+}
+
+Status MemMetaTxn::GetXAttr(InodeID ino, std::string_view name, std::string *value) {
+  SwordFsInode *inode = FindInode(ino);
+  if (inode == nullptr) {
+    return Status::NotFound("inode not found");
+  }
+  return inode->GetXAttr(name, value);
+}
+
+Status MemMetaTxn::ListXAttrs(InodeID ino, std::vector<std::string> *names) {
+  SwordFsInode *inode = FindInode(ino);
+  if (inode == nullptr) {
+    return Status::NotFound("inode not found");
+  }
+  return inode->ListXAttrs(names);
+}
+
+Status MemMetaTxn::RemoveXAttr(InodeID ino, std::string_view name) {
+  SwordFsInode *inode = FindInode(ino);
+  if (inode == nullptr) {
+    return Status::NotFound("inode not found");
+  }
+  return inode->RemoveXAttr(name);
+}
+
 Status MemMetaTxn::Truncate(InodeID ino, uint64_t size) {
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {

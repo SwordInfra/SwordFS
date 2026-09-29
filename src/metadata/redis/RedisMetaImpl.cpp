@@ -371,6 +371,26 @@ Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttr
   return ops_.SetAttr(ino, requested, fields, out);
 }
 
+Status RedisMetaImpl::SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) {
+  utils::ExpectInFiberDomain();
+  return ops_.SetXAttr(ino, name, value, mode);
+}
+
+Status RedisMetaImpl::GetXAttr(InodeID ino, std::string_view name, std::string *value) {
+  utils::ExpectInFiberDomain();
+  return ops_.GetXAttr(ino, name, value);
+}
+
+Status RedisMetaImpl::ListXAttrs(InodeID ino, std::vector<std::string> *names) {
+  utils::ExpectInFiberDomain();
+  return ops_.ListXAttrs(ino, names);
+}
+
+Status RedisMetaImpl::RemoveXAttr(InodeID ino, std::string_view name) {
+  utils::ExpectInFiberDomain();
+  return ops_.RemoveXAttr(ino, name);
+}
+
 Status RedisMetaImpl::StatFs(SwordFsStatFs *stbuf) {
   utils::ExpectInFiberDomain();
   if (!stbuf) {

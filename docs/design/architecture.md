@@ -107,7 +107,8 @@ populated or neither; volume decoding rejects a one-sided record. Mount then
 selects the data engine solely from the validated persisted identity instead of
 inferring it from the location or silently omitting the data plane. Persistent
 metadata uses schema version 1; decoders require an exact match as part of
-current-format validation.
+current-format validation. Beta metadata layouts may change in place without
+introducing schema-version transitions or compatibility decoders.
 
 ### 3.2 Mount
 
@@ -1001,7 +1002,6 @@ These costs should be treated as design constraints for future work, not hidden 
 
 The architecture described above covers the implemented open-source path. Several FUSE operations are currently explicit `NotSupported` paths, including:
 
-- extended attributes (`setxattr`, `getxattr`, `listxattr`, `removexattr`);
 - `flock`;
 - `fallocate`;
 - `tmpfile`;
@@ -1024,6 +1024,11 @@ The current open-source backend set is also intentionally narrower than possible
 - data: S3-compatible object storage.
 
 Additional metadata/data engines are extension opportunities through the registries, not current capabilities unless present in the repository.
+
+Raw `user.*` extended attributes are persisted in `SwordFsInode` and exposed
+through the low-level FUSE xattr callbacks. Other namespaces, including POSIX
+ACL xattrs, remain unsupported by this raw foundation; see
+[Persistent extended attributes](378-persistent-xattrs.md).
 
 ## 18. Architectural invariants for future changes
 

@@ -115,6 +115,18 @@ class MissingMetaEngine : public IMetaEngine {
   Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField, SwordFsInode *) override {
     return Status::OK();
   }
+  Status SetXAttr(InodeID, std::string_view, std::string_view, swordfs::metadata::XAttrSetMode) override {
+    return Status::NotSupported("xattr");
+  }
+  Status GetXAttr(InodeID, std::string_view, std::string *) override {
+    return Status::NotSupported("xattr");
+  }
+  Status ListXAttrs(InodeID, std::vector<std::string> *) override {
+    return Status::NotSupported("xattr");
+  }
+  Status RemoveXAttr(InodeID, std::string_view) override {
+    return Status::NotSupported("xattr");
+  }
   Status StatFs(SwordFsStatFs *) override {
     return Status::OK();
   }

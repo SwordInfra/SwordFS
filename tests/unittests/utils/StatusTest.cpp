@@ -24,5 +24,10 @@ TEST(StatusTest, BackendTerminalStatusesRemainMachineReadableAndMapToEio) {
   EXPECT_EQ(outcome_unknown.message(), "remote mutation acknowledgement lost");
 }
 
+TEST(StatusTest, XAttrStatusesMapToLinuxErrnos) {
+  EXPECT_EQ(Status::OperationNotSupported("unsupported xattr namespace").ToErrno(), EOPNOTSUPP);
+  EXPECT_EQ(Status::NoData("missing xattr").ToErrno(), ENODATA);
+}
+
 }  // namespace
 }  // namespace swordfs::utils

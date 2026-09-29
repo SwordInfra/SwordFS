@@ -147,6 +147,18 @@ class IMetaEngine {
   /// |attr| and applied to the inode.
   virtual Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) = 0;
 
+  /// Set an opaque extended attribute using backend-neutral create/replace semantics.
+  virtual Status SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) = 0;
+
+  /// Return the complete opaque value of an extended attribute.
+  virtual Status GetXAttr(InodeID ino, std::string_view name, std::string *value) = 0;
+
+  /// Return all extended-attribute names in deterministic order.
+  virtual Status ListXAttrs(InodeID ino, std::vector<std::string> *names) = 0;
+
+  /// Remove an extended attribute.
+  virtual Status RemoveXAttr(InodeID ino, std::string_view name) = 0;
+
   /// Get file system statistics.
   virtual Status StatFs(SwordFsStatFs *stbuf) = 0;
 
