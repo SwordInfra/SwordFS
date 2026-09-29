@@ -397,6 +397,35 @@ FIBER_TEST_F(MemMetaImplTest, CreateOwnershipInheritsGidAndDirectorySgidFromPare
   EXPECT_EQ(symlink.attr.gid, kParentGid);
 }
 
+FIBER_TEST_F(MemMetaImplTest, BirthTimeSurvivesInodeIdentityAndAttributeMutations) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "birth", 0644, &file).ok());
+  ASSERT_GT(file.attr.btime, 0);
+  const auto btime = file.attr.btime;
+  const auto btime_nsec = file.attr.btime_nsec;
+
+  SwordFsAttr requested = file.attr;
+  requested.ctime = 123;
+  requested.ctime_nsec = 456;
+  requested.btime = btime + 100;
+  requested.btime_nsec = 789;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kCtime, &file).ok());
+  EXPECT_EQ(file.attr.btime, btime);
+  EXPECT_EQ(file.attr.btime_nsec, btime_nsec);
+
+  ASSERT_TRUE(impl_->Link(file.ino, kRoot, "birth-link", &file).ok());
+  EXPECT_EQ(file.attr.btime, btime);
+  EXPECT_EQ(file.attr.btime_nsec, btime_nsec);
+
+  ASSERT_TRUE(impl_->Rename(kRoot, "birth", kRoot, "birth-renamed", RenameFlag::kNone).ok());
+  ASSERT_TRUE(impl_->Truncate(file.ino, 4096).ok());
+
+  SwordFsInode actual;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_EQ(actual.attr.btime, btime);
+  EXPECT_EQ(actual.attr.btime_nsec, btime_nsec);
+}
+
 FIBER_TEST_F(MemMetaImplTest, MknodReusesNamespaceValidationAndRejectsNonMknodTypes) {
   const std::string long_name(impl_->GetLimits().max_name_length + 1, 'x');
   EXPECT_TRUE(impl_->MkNod(kRoot, long_name, S_IFIFO | 0600, 0, nullptr).ToErrno() == ENAMETOOLONG);

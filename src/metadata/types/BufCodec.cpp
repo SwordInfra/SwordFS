@@ -72,6 +72,8 @@ void BufEncoder::Attr(const SwordFsAttr &attr) {
   I64(attr.mtime_nsec);
   I64(attr.ctime);
   I64(attr.ctime_nsec);
+  I64(attr.btime);
+  I64(attr.btime_nsec);
 }
 
 void BufEncoder::Header(RecordType type) {
@@ -144,11 +146,12 @@ bool BufDecoder::Attr(SwordFsAttr *attr) {
   if (!U64(&attr->dev) || !U64(&attr->ino) || !U32(&attr->mode) || !U64(&attr->nlink) || !U64(&attr->uid) ||
       !U64(&attr->gid) || !U64(&attr->rdev) || !U64(&attr->size) || !U64(&attr->blksize) || !U64(&attr->blocks) ||
       !I64(&attr->atime) || !I64(&attr->atime_nsec) || !I64(&attr->mtime) || !I64(&attr->mtime_nsec) ||
-      !I64(&attr->ctime) || !I64(&attr->ctime_nsec)) {
+      !I64(&attr->ctime) || !I64(&attr->ctime_nsec) || !I64(&attr->btime) || !I64(&attr->btime_nsec)) {
     return false;
   }
   if (attr->atime_nsec < 0 || attr->atime_nsec >= 1000000000 || attr->mtime_nsec < 0 ||
-      attr->mtime_nsec >= 1000000000 || attr->ctime_nsec < 0 || attr->ctime_nsec >= 1000000000) {
+      attr->mtime_nsec >= 1000000000 || attr->ctime_nsec < 0 || attr->ctime_nsec >= 1000000000 ||
+      attr->btime_nsec < 0 || attr->btime_nsec >= 1000000000) {
     impl_->failed_ = true;
     return false;
   }

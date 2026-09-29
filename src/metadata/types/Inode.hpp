@@ -13,6 +13,7 @@
 #include "utils/Status.hpp"
 
 struct stat;
+struct statx;
 
 namespace swordfs::metadata {
 
@@ -35,6 +36,8 @@ struct SwordFsAttr {
   int64_t mtime_nsec = 0;
   int64_t ctime = 0;
   int64_t ctime_nsec = 0;
+  int64_t btime = 0;
+  int64_t btime_nsec = 0;
 
   SwordFsAttr() = default;
   SwordFsAttr(uint64_t ino, uint32_t mode);
@@ -43,6 +46,7 @@ struct SwordFsAttr {
   void ClearSetidForKillPriv();
 
   void ToPosixStat(struct stat *st) const;
+  void ToStatX(struct statx *stx) const;
   static SwordFsAttr FromPosixStat(const struct stat &st);
 };
 

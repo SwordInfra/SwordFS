@@ -13,6 +13,7 @@
 #include <folly/io/async/EventBase.h>
 #include <gtest/gtest.h>
 #include <linux/fuse.h>
+#include <sys/stat.h>
 #include <sys/xattr.h>
 
 #include <algorithm>
@@ -70,6 +71,8 @@ struct FuseReplyCapture {
   std::optional<int> error;
   std::optional<fuse_entry_param> entry;
   std::optional<struct stat> attr;
+  std::optional<struct statx> statx_attr;
+  std::optional<int> statx_flags;
   std::optional<double> attr_timeout;
   std::optional<uint64_t> fh;
   std::optional<size_t> write_count;
@@ -136,6 +139,19 @@ extern "C" int fuse_reply_attr(fuse_req_t req, const struct stat *attr, double a
   {
     std::lock_guard lock(capture->mutex);
     capture->attr = *attr;
+    capture->attr_timeout = attr_timeout;
+    capture->replied = true;
+  }
+  capture->cv.notify_one();
+  return 0;
+}
+
+extern "C" int fuse_reply_statx(fuse_req_t req, int flags, struct statx *attr, double attr_timeout) {
+  auto *capture = CaptureFor(req);
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->statx_attr = *attr;
+    capture->statx_flags = flags;
     capture->attr_timeout = attr_timeout;
     capture->replied = true;
   }
@@ -314,10 +330,6 @@ TEST(VfsImplTest, Lseek) {
 
 TEST(VfsImplTest, Tmpfile) {
   EXPECT_NOT_SUPPORTED(VfsImpl::TmpFile(1, 0644, nullptr));
-}
-
-TEST(VfsImplTest, Statx) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::StatX(1, 0, 0, nullptr));
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1032,16 +1044,37 @@ TEST_F(VfsImplIntegrationTest, EntryProducingHooksPublishLookupReferences) {
 }
 
 TEST_F(VfsImplIntegrationTest, FuseStatxAcceptsNullFileInfo) {
+  SwordFsInode inode;
+  inode.ino = 1;
+  inode.attr = SwordFsAttr(1, S_IFREG | 0640, 123, 456);
+  inode.attr.btime = 111;
+  inode.attr.btime_nsec = 222;
+  mock_meta_->set_inode(inode);
   FuseReplyCapture capture;
 
-  swordfs::fuse::VfsHookFactory::SwordFsStatx(reinterpret_cast<fuse_req_t>(&capture), 1, 0, STATX_BASIC_STATS, nullptr);
+  swordfs::fuse::VfsHookFactory::SwordFsStatx(reinterpret_cast<fuse_req_t>(&capture), 1, 0,
+                                              STATX_BASIC_STATS | STATX_BTIME, nullptr);
 
   ASSERT_TRUE(capture.Wait());
-  ASSERT_TRUE(capture.error.has_value());
-  EXPECT_EQ(*capture.error, ENOSYS);
+  EXPECT_FALSE(capture.error.has_value());
+  ASSERT_TRUE(capture.statx_attr.has_value());
+  ASSERT_TRUE(capture.statx_flags.has_value());
+  ASSERT_TRUE(capture.attr_timeout.has_value());
+  EXPECT_EQ(*capture.statx_flags, 0);
+  EXPECT_DOUBLE_EQ(*capture.attr_timeout, 1.0);
+  EXPECT_EQ(capture.statx_attr->stx_mask, STATX_BASIC_STATS | STATX_BTIME);
+  EXPECT_EQ(capture.statx_attr->stx_ino, inode.ino);
+  EXPECT_EQ(capture.statx_attr->stx_btime.tv_sec, inode.attr.btime);
+  EXPECT_EQ(capture.statx_attr->stx_btime.tv_nsec, inode.attr.btime_nsec);
 }
 
 TEST_F(VfsImplIntegrationTest, FuseStatxAcceptsNonNullFileInfo) {
+  SwordFsInode inode;
+  inode.ino = 1;
+  inode.attr = SwordFsAttr(1, S_IFREG | 0640, 123, 456);
+  inode.attr.btime = 333;
+  inode.attr.btime_nsec = 444;
+  mock_meta_->set_inode(inode);
   FuseReplyCapture capture;
   fuse_file_info file_info{};
   file_info.fh = 123;
@@ -1050,8 +1083,22 @@ TEST_F(VfsImplIntegrationTest, FuseStatxAcceptsNonNullFileInfo) {
                                               &file_info);
 
   ASSERT_TRUE(capture.Wait());
+  EXPECT_FALSE(capture.error.has_value());
+  ASSERT_TRUE(capture.statx_attr.has_value());
+  EXPECT_EQ(capture.statx_attr->stx_btime.tv_sec, inode.attr.btime);
+  EXPECT_EQ(capture.statx_attr->stx_btime.tv_nsec, inode.attr.btime_nsec);
+}
+
+TEST_F(VfsImplIntegrationTest, FuseStatxForwardsMetadataFailure) {
+  mock_meta_->set_get_inode_status(Status::NotFound("missing"));
+  FuseReplyCapture capture;
+
+  swordfs::fuse::VfsHookFactory::SwordFsStatx(reinterpret_cast<fuse_req_t>(&capture), 404, 0, STATX_BTIME, nullptr);
+
+  ASSERT_TRUE(capture.Wait());
   ASSERT_TRUE(capture.error.has_value());
-  EXPECT_EQ(*capture.error, ENOSYS);
+  EXPECT_EQ(*capture.error, ENOENT);
+  EXPECT_FALSE(capture.statx_attr.has_value());
 }
 
 TEST_F(VfsImplIntegrationTest, FuseGetattrRepliesWithAuthoritativeAttributesAndErrors) {
@@ -1789,6 +1836,36 @@ FIBER_TEST_F(VfsImplIntegrationTest, GetAttrReportsBlocksForCachedUnflushedWrite
   // must not add another metadata read. Publication is covered independently
   // at the FileReadWriter layer.
   EXPECT_EQ(mock_meta_->get_inode_calls(), 1);
+
+  EXPECT_TRUE(VfsImpl::Release(kFileIno, fi.fh).ok());
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, StatxReportsCachedUnflushedStateAndPersistentBirthTime) {
+  constexpr InodeID kFileIno = 42;
+  constexpr size_t kWriteSize = 64 * 1024;
+
+  SwordFsInode persistent;
+  persistent.ino = kFileIno;
+  persistent.attr = SwordFsAttr(kFileIno, S_IFREG | 0644, 100, 200);
+  persistent.attr.nlink = 1;
+  persistent.attr.size = 0;
+  persistent.attr.blocks = 0;
+  persistent.attr.btime = 123456;
+  persistent.attr.btime_nsec = 789;
+  mock_meta_->set_inode(persistent);
+
+  struct fuse_file_info fi = {};
+  fi.flags = O_RDWR;
+  ASSERT_TRUE(VfsImpl::Open(kFileIno, &fi).ok());
+  auto data = folly::IOBuf::copyBuffer(std::string(kWriteSize, 'x'));
+  ASSERT_TRUE(VfsImpl::Write(kFileIno, *data, 0, fi.fh).ok());
+
+  struct statx attr{};
+  ASSERT_TRUE(VfsImpl::StatX(kFileIno, 0, STATX_BASIC_STATS | STATX_BTIME, &fi, &attr).ok());
+  EXPECT_EQ(attr.stx_size, kWriteSize);
+  EXPECT_EQ(attr.stx_blocks, 1U);
+  EXPECT_EQ(attr.stx_btime.tv_sec, persistent.attr.btime);
+  EXPECT_EQ(attr.stx_btime.tv_nsec, persistent.attr.btime_nsec);
 
   EXPECT_TRUE(VfsImpl::Release(kFileIno, fi.fh).ok());
 }

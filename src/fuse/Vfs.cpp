@@ -678,8 +678,13 @@ void VfsHookFactory::SwordFsStatx(fuse_req_t req, fuse_ino_t ino, int flags, int
     if (file_info.has_value()) {
       file_info_ptr = &file_info.value();
     }
-    auto status = VfsImpl::StatX(ino, flags, mask, file_info_ptr);
-    fuse_reply_err(req, status.ToErrno());
+    struct statx attr{};
+    auto status = VfsImpl::StatX(ino, flags, mask, file_info_ptr, &attr);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    fuse_reply_statx(req, 0, &attr, 1.0);
   });
 }
 

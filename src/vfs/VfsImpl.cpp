@@ -65,6 +65,18 @@ utils::Status RefreshTrackedInode(metadata::SwordFsInode *inode) {
   return utils::Status::OK();
 }
 
+utils::Status ResolveLiveInode(fuse_ino_t ino, metadata::SwordFsInode *inode) {
+  auto handle = InodeHandleManager::Instance().Get(ino, false);
+  Status status = handle ? handle->GetAttr(inode) : VolumeImpl::Instance().meta_engine()->GetInode(ino, inode);
+  if (status.IsNotFound() && FuseInodeCache::Instance().ResolveDetachedAfterNotFound(ino, inode)) {
+    status = Status::OK();
+  }
+  if (status.ok()) {
+    FuseInodeCache::Instance().RefreshIfRetained(*inode);
+  }
+  return status;
+}
+
 utils::Status ValidateUserXAttrName(const char *name) {
   if (name == nullptr || name[0] == '\0') {
     return utils::Status::InvalidArgument("xattr name is empty");
@@ -122,13 +134,8 @@ utils::Status VfsImpl::Lookup(fuse_ino_t parent, const char *name, fuse_entry_pa
 
 utils::Status VfsImpl::GetAttr(fuse_ino_t ino, struct stat *attr) {
   SwordFsInode inode;
-  auto handle = InodeHandleManager::Instance().Get(ino, false);
-  Status status = handle ? handle->GetAttr(&inode) : VolumeImpl::Instance().meta_engine()->GetInode(ino, &inode);
-  if (status.IsNotFound() && FuseInodeCache::Instance().ResolveDetachedAfterNotFound(ino, &inode)) {
-    status = Status::OK();
-  }
+  Status status = ResolveLiveInode(ino, &inode);
   if (status.ok()) {
-    FuseInodeCache::Instance().RefreshIfRetained(inode);
     inode.attr.ToPosixStat(attr);
   }
   return status;
@@ -613,12 +620,16 @@ utils::Status VfsImpl::TmpFile(fuse_ino_t parent, mode_t mode, struct fuse_file_
   return Status::NotSupported("tmpfile");
 }
 
-utils::Status VfsImpl::StatX(fuse_ino_t ino, int flags, int mask, struct fuse_file_info *fi) {
-  (void)ino;
+utils::Status VfsImpl::StatX(fuse_ino_t ino, int flags, int mask, struct fuse_file_info *fi, struct statx *attr) {
   (void)flags;
   (void)mask;
   (void)fi;
-  return Status::NotSupported("statx");
+  SwordFsInode inode;
+  Status status = ResolveLiveInode(ino, &inode);
+  if (status.ok()) {
+    inode.attr.ToStatX(attr);
+  }
+  return status;
 }
 
 }  // namespace swordfs::vfs
