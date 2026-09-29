@@ -11,14 +11,14 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "4cd5aae0a0b30c858660fd32ef0fa449c78e63ef"
+    "swordfs_commit": "9494348d536783ba93eab8ac1a3e688f94b14a1d"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "ENVIRONMENT": 8,
-      "KNOWN_UNSUPPORTED": 112,
-      "PASS": 125,
+      "KNOWN_UNSUPPORTED": 111,
+      "PASS": 126,
       "UPSTREAM_NOT_APPLICABLE": 399,
       "UPSTREAM_TEST_DEFECT": 1
     },
@@ -27,17 +27,17 @@
     "deferred_count": 0,
     "executed_classified_percent": 100.0,
     "executed_count": 645,
-    "known_gap_count": 520,
-    "overall_support_percent": 19.38,
+    "known_gap_count": 519,
+    "overall_support_percent": 19.53,
     "raw_results": {
       "FAIL": 17,
-      "NOTRUN": 503,
-      "PASS": 125
+      "NOTRUN": 502,
+      "PASS": 126
     },
     "selected_count": 645,
-    "supported_count": 125,
+    "supported_count": 126,
     "supported_gate_percent": 100.0,
-    "supported_pass_count": 125
+    "supported_pass_count": 126
   },
   "tests": [
     {
@@ -3377,11 +3377,11 @@
       "test": "generic/527"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "inode creation time not supported by this filesystem",
-      "reason": "SwordFS VfsImpl::StatX remains NotSupported, including creation-time reporting; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/528"
     },
     {
