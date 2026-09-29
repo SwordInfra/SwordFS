@@ -13,13 +13,14 @@ the execution domain.
 | FiberRuntime driver | Advance EventBase and FiberManager | Suspended fibers allow other work to run |
 | Redis worker pool | Blocking calls, transactions, retry backoff | May block a POSIX worker |
 | S3 worker pool | Blocking object-store calls | May block a POSIX worker |
-| Reclaimer control thread | Schedule startup, wake-triggered, and periodic passes | Waits for its fiber pass to complete |
+| Orphan-reclaimer control thread | Schedule startup, namespace/final-close wake, and periodic orphan passes | Waits for its fiber pass to complete |
+| Chunk-GC control thread | Schedule startup, bounded-scan self-wake, and periodic physical-cleanup passes | Waits for its fiber pass to complete |
 | Mount/shutdown control thread | Initialize and stop components | Waits for workers and admitted tasks to drain |
 
 Each submitting thread lazily obtains a thread-local `FiberRuntime` with a
 separate background driver. Fibers do not run on the FUSE callback's stack.
-The reclaimer also submits through its own runtime. Fibers on different
-drivers can therefore reach shared inode state concurrently.
+The two background workers also submit through their own runtimes. Fibers on
+different drivers can therefore reach shared inode state concurrently.
 
 ## Blocking-I/O handoff
 
@@ -76,13 +77,18 @@ of the I/O handoff.
 The reclaim fence protects metadata preparation and is released before object
 deletion. Durable `ReclaimWork` owns deletion targets after that transition.
 
-## Reclaimer scheduling
+## Background reclaim scheduling
 
-The control thread starts a pass immediately, then on coalesced wakeups or the
-five-second safety interval. It submits each pass as a fiber and waits on a
-completion baton. Both completion and submission rejection signal the baton.
-The fiber retries pending work before visiting orphan candidates, using the
-same blocking executors as foreground requests.
+`OrphanReclaimer` and private `ChunkGcWorker` each start a pass immediately and
+then run on coalesced wakeups or the five-second safety interval. Each control
+thread submits a pass as a fiber and waits on a completion baton. Both
+completion and submission rejection signal the baton.
+
+The orphan worker only applies the mount-local open-handle fence and calls
+metadata `PrepareReclaim(ino)`. The chunk-GC worker independently replays
+durable pending-delete/reclaim queues and performs physical deletion. A bounded
+pending-delete scan may self-wake chunk GC for another batch; VFS data-path
+flush/truncate/setattr operations do not submit physical-cleanup work.
 
 ## Admission and shutdown state machine
 
@@ -104,8 +110,8 @@ between an admission check and the shutdown drain. After admission closes,
 the last task signals the drain baton. Shutdown runs outside the driver fiber
 so it cannot wait for itself.
 
-Unmount stops and joins the reclaimer before draining runtimes, and destroys
-backend resources after their users finish. Global shutdown closes admission
+Unmount stops and joins both background workers before draining runtimes, and
+destroys backend resources after their users finish. Global shutdown closes admission
 on all registered runtimes before joining them individually. Backend executor
 shutdown drains its workers.
 
@@ -114,4 +120,5 @@ shutdown drains its workers.
 - Admission and lifetime: [`FiberRuntime.hpp`](../../src/utils/FiberRuntime.hpp)
   and [`FiberRuntime.cpp`](../../src/utils/FiberRuntime.cpp).
 - Worker handoff: [`BlockingExecutor.hpp`](../../src/utils/BlockingExecutor.hpp).
-- Background scheduling: [`Reclaimer.cpp`](../../src/vfs/Reclaimer.cpp).
+- Orphan scheduling: [`OrphanReclaimer.cpp`](../../src/vfs/OrphanReclaimer.cpp).
+- Physical chunk GC: [`ChunkGcWorker.cpp`](../../src/chunk/internal/ChunkGcWorker.cpp).

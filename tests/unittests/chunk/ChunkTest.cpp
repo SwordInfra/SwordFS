@@ -1,12 +1,8 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// Unit tests for Chunk — focused on the invariant between
-// `max_chunk_size_` (the chunk's notion of its own size, used to
-// compute StartOffset) and the write buffer's capacity. If those
-// drift, writes that cross what the buffer thinks is "beyond capacity"
-// but stay within what the chunk thinks is "in range" return EINVAL
-// even though the chunk is in kDirty state.
+// Unit tests for the stable logical Chunk contract and the current
+// whole-object implementation behind it.
 
 #include <folly/fibers/Baton.h>
 #include <folly/fibers/FiberManagerMap.h>
@@ -24,16 +20,19 @@
 #include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/Chunk.hpp"
+#include "chunk/ChunkFactory.hpp"
 #include "chunk/ChunkObjectKey.hpp"
-#include "chunk/IChunkOverwriteStrategy.hpp"
+#include "chunk/WholeObjectChunk.hpp"
 #include "chunk/WriteBuf.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
+#include "metadata/mem/MemPrivateMetadataStore.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Status.hpp"
 #include "volume/VolumeImpl.hpp"
 
 using swordfs::chunk::Chunk;
+using swordfs::chunk::WholeObjectChunk;
 using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::IMetaEngine;
 using swordfs::metadata::InodeID;
@@ -73,7 +72,16 @@ class MissingMetaEngine : public IMetaEngine {
   Limits GetLimits() const override {
     return {};
   }
-  Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
+  Status FindChunk(InodeID, ChunkIndex index, SwordFsChunk *out) override {
+    if (!find_chunk_status.ok()) {
+      return find_chunk_status;
+    }
+    if (published_.has_value() && published_->index == index) {
+      if (out != nullptr) {
+        *out = *published_;
+      }
+      return Status::OK();
+    }
     return Status::NotFound("no chunk");
   }
   // Everything else is irrelevant for these tests.
@@ -125,8 +133,7 @@ class MissingMetaEngine : public IMetaEngine {
     }
     return Status::OK();
   }
-  Status PrepareReclaim(InodeID, std::optional<swordfs::metadata::ReclaimWork> *work) override {
-    work->reset();
+  Status PrepareReclaim(InodeID) override {
     return Status::OK();
   }
   Status CompleteReclaim(InodeID) override {
@@ -157,19 +164,23 @@ class MissingMetaEngine : public IMetaEngine {
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
     return Status::OK();
   }
-  Status CommitChunk(InodeID, const std::optional<SwordFsChunk> &, const SwordFsChunk &) override {
+  Status CommitChunk(InodeID, const std::optional<SwordFsChunk> &, const SwordFsChunk &replacement) override {
+    published_ = replacement;
     return Status::OK();
   }
   Status Truncate(InodeID, uint64_t) override {
     return Status::OK();
   }
 
+  Status find_chunk_status = Status::OK();
+
  private:
   swordfs::metadata::ChunkRevision next_revision_ = 1;
+  std::optional<SwordFsChunk> published_;
 };
 
-// Minimal data engine: nothing is actually persisted; the chunk only
-// calls Put on Flush, and these tests don't reach that point.
+// Minimal data engine used to observe flush generations and inject a
+// deterministic Put failure without exposing production-only test seams.
 class NullDataEngine final : public IDataEngine {
  public:
   Status Initialize() override {
@@ -184,6 +195,11 @@ class NullDataEngine final : public IDataEngine {
       put_release_ = nullptr;
       started->post();
       release->wait();
+    }
+    if (!next_put_status.ok()) {
+      auto status = next_put_status;
+      next_put_status = Status::OK();
+      return status;
     }
     return Status::OK();
   }
@@ -200,6 +216,7 @@ class NullDataEngine final : public IDataEngine {
   }
 
   int put_calls = 0;
+  Status next_put_status = Status::OK();
 
  private:
   folly::fibers::Baton *put_started_{nullptr};
@@ -223,8 +240,16 @@ class ChunkTest : public ::testing::Test {
  protected:
   void SetUp() override {
     data_ = InitializeRuntime();
+    meta_ = dynamic_cast<MissingMetaEngine *>(swordfs::volume::VolumeImpl::Instance().meta_engine());
+    ASSERT_NE(meta_, nullptr);
   }
 
+  std::unique_ptr<WholeObjectChunk> MakeChunk(ChunkIndex index = 0) {
+    return std::make_unique<WholeObjectChunk>(
+        /*ino=*/42, index, kChunkTestSize, swordfs::volume::VolumeImpl::Instance().meta_engine(), data_, std::nullopt);
+  }
+
+  MissingMetaEngine *meta_ = nullptr;
   NullDataEngine *data_ = nullptr;
 };
 
@@ -314,178 +339,257 @@ TEST(SwordFsChunkDescriptorTest, ExtentEndingAtOffTMaxIsValidAndBeyondIsRejected
   EXPECT_FALSE(beyond.IsValidForChunkSize(kChunkSize));
 }
 
-TEST(ChunkOverwriteStrategyTest, FactoryUsesTypedMechanismSelection) {
-  using swordfs::metadata::ChunkOverwriteMechanism;
-
-  std::unique_ptr<swordfs::chunk::IChunkOverwriteStrategy> strategy;
-  auto status = swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, &strategy);
-  ASSERT_TRUE(status.ok()) << status.message();
-  ASSERT_NE(strategy, nullptr);
-  EXPECT_EQ(strategy->mechanism(), ChunkOverwriteMechanism::kWholeObject);
-
-  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kChunkSlice, &strategy).ToErrno(),
-            ENOSYS);
-  EXPECT_EQ(strategy, nullptr);
-  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(static_cast<ChunkOverwriteMechanism>(99), &strategy).ToErrno(),
-            ENOSYS);
-  EXPECT_EQ(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, nullptr).ToErrno(),
-            EINVAL);
-}
-
-namespace {
-
-class TestPrivateMetadataStore final : public swordfs::metadata::IMechanismPrivateStore {
- public:
-  explicit TestPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism mechanism) : mechanism_(mechanism) {
-  }
-
-  swordfs::metadata::ChunkOverwriteMechanism mechanism() const override {
-    return mechanism_;
-  }
-
- private:
-  swordfs::utils::Status AllocateSequenceImpl(uint32_t, uint64_t *) override {
-    return swordfs::utils::Status::NotSupported("unused test sequence");
-  }
-
- private:
-  swordfs::metadata::ChunkOverwriteMechanism mechanism_;
-};
-
-}  // namespace
-
-TEST(ChunkOverwriteStrategyTest, PrivateMetadataBindingRejectsWrongMechanism) {
-  using swordfs::metadata::ChunkOverwriteMechanism;
-
-  std::unique_ptr<swordfs::chunk::IChunkOverwriteStrategy> strategy;
-  ASSERT_TRUE(swordfs::chunk::CreateChunkOverwriteStrategy(ChunkOverwriteMechanism::kWholeObject, &strategy).ok());
-
-  EXPECT_EQ(strategy->BindPrivateMetadata(nullptr).ToErrno(), EINVAL);
-  EXPECT_EQ(
-      strategy->BindPrivateMetadata(std::make_shared<TestPrivateMetadataStore>(ChunkOverwriteMechanism::kChunkSlice))
-          .ToErrno(),
-      EINVAL);
-  EXPECT_TRUE(
-      strategy->BindPrivateMetadata(std::make_shared<TestPrivateMetadataStore>(ChunkOverwriteMechanism::kWholeObject))
-          .ok());
-}
-
-TEST_F(ChunkTest, WriteRejectsOffsetsOutsideItsLogicalChunk) {
+TEST_F(ChunkTest, FactoryOpenDistinguishesMissingExistingAndCreate) {
   RunInTestFiber([&] {
-    Chunk c(/*ino=*/42, /*index=*/1);
-    ASSERT_TRUE(c.Initialize().ok());
+    const auto *factory = swordfs::volume::VolumeImpl::Instance().chunk_factory();
+    ASSERT_NE(factory, nullptr);
 
-    EXPECT_EQ(c.Write(-1, Buf("x")).ToErrno(), EINVAL);
-    EXPECT_EQ(c.Write(0, Buf("x")).ToErrno(), EINVAL);
+    std::shared_ptr<Chunk> chunk;
+    ASSERT_TRUE(factory->Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/false, &chunk).ok());
+    EXPECT_EQ(chunk, nullptr);
+
+    ASSERT_TRUE(factory->Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk).ok());
+    ASSERT_NE(chunk, nullptr);
+    EXPECT_EQ(chunk->Index(), 0U);
+    EXPECT_FALSE(chunk->HasPendingWrites());
+    ASSERT_TRUE(chunk->Write(/*offset=*/0, Buf("hello")).ok());
+    ASSERT_TRUE(chunk->Flush().ok());
+
+    chunk.reset();
+    ASSERT_TRUE(factory->Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/false, &chunk).ok());
+    ASSERT_NE(chunk, nullptr);
+    EXPECT_EQ(chunk->Index(), 0U);
+    EXPECT_FALSE(chunk->HasPendingWrites());
+
+    EXPECT_EQ(factory->Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/false, nullptr).ToErrno(), EINVAL);
   });
 }
 
-TEST_F(ChunkTest, WriteRejectsRangeBeyondSupportedFileSize) {
-  RunInTestFiber([&] {
-    constexpr off_t kLastOffset = std::numeric_limits<off_t>::max();
-    constexpr ChunkIndex kLastIndex = static_cast<uint64_t>(kLastOffset) / kChunkTestSize;
-    Chunk c(/*ino=*/42, kLastIndex);
-    ASSERT_TRUE(c.Initialize().ok());
+TEST_F(ChunkTest, FactoryRejectsInvalidRuntimeCompositionBeforeLookup) {
+  std::shared_ptr<Chunk> chunk;
+  swordfs::chunk::ChunkFactory missing_private(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, nullptr, meta_,
+                                               data_, kChunkTestSize);
+  auto status = missing_private.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.message(), "ChunkFactory is not fully initialized");
 
-    EXPECT_EQ(c.Write(kLastOffset, Buf("x")).ToErrno(), EINVAL);
+  auto slice_private = std::make_shared<swordfs::metadata::MemPrivateMetadataStore>(
+      swordfs::metadata::ChunkOverwriteMechanism::kChunkSlice);
+  swordfs::chunk::ChunkFactory mismatched_private(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject,
+                                                  slice_private, meta_, data_, kChunkTestSize);
+  status = mismatched_private.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.message(), "ChunkFactory private metadata mechanism mismatch");
+
+  swordfs::chunk::ChunkFactory unsupported(swordfs::metadata::ChunkOverwriteMechanism::kChunkSlice,
+                                           std::move(slice_private), meta_, data_, kChunkTestSize);
+  status = unsupported.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
+  EXPECT_EQ(status.ToErrno(), ENOSYS);
+}
+
+TEST_F(ChunkTest, FactoryOpenPropagatesLookupErrorsWithoutReturningAChunk) {
+  RunInTestFiber([&] {
+    const auto *factory = swordfs::volume::VolumeImpl::Instance().chunk_factory();
+    ASSERT_NE(factory, nullptr);
+    meta_->find_chunk_status = Status::IOError("injected lookup failure");
+
+    std::shared_ptr<Chunk> chunk;
+    const auto status = factory->Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
+
+    EXPECT_EQ(status.ToErrno(), EIO);
+    EXPECT_EQ(chunk, nullptr);
   });
 }
 
-// Regression: an uninitialised max_chunk_size_ used to make chunk
-// indices > 0 write to byte 0 of their write buffer (StartOffset = 0),
-// pushing 64 MiB of file-level data at offset 0 instead of the
-// chunk-relative 0 and tripping "write exceeds capacity". The
-// fix is that Chunk's constructor must snapshot chunk_size into
-// max_chunk_size_ exactly once.
-TEST_F(ChunkTest, WriteAtChunkIndexOneStaysWithinCapacity) {
+TEST_F(ChunkTest, FactoryOpenRejectsMalformedPersistedDescriptors) {
   RunInTestFiber([&] {
-    Chunk c(/*ino=*/42, /*index=*/1);
-    ASSERT_TRUE(c.Initialize().ok());
-    auto buf = *folly::IOBuf::copyBuffer("hello", 5);
-    EXPECT_TRUE(c.Write(1024, buf).ok()) << "Chunk::Write at file offset 1024 (chunk-relative 0) "
-                                            "must succeed when chunk_size=1024";
+    const auto *factory = swordfs::volume::VolumeImpl::Instance().chunk_factory();
+    ASSERT_NE(factory, nullptr);
+    const SwordFsChunk malformed{.index = 0, .revision = 1, .size = kChunkTestSize + 1};
+    ASSERT_TRUE(meta_->CommitChunk(/*ino=*/42, std::nullopt, malformed).ok());
+
+    std::shared_ptr<Chunk> chunk;
+    const auto status = factory->Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/false, &chunk);
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(chunk, nullptr);
+  });
+}
+
+TEST_F(ChunkTest, ReadRejectsInvalidOutputBuffersBeforeAccessingChunkState) {
+  RunInTestFiber([&] {
+    auto chunk = MakeChunk();
+    EXPECT_EQ(chunk->Read(/*offset=*/0, /*len=*/1, nullptr).ToErrno(), EINVAL);
+
+    auto too_small = folly::IOBuf::create(1);
+    EXPECT_EQ(chunk->Read(/*offset=*/0, /*len=*/2, too_small.get()).ToErrno(), EINVAL);
+    EXPECT_EQ(too_small->length(), 0U);
+  });
+}
+
+TEST_F(ChunkTest, WriteRejectsMalformedPublishedDescriptorBeforeHydration) {
+  RunInTestFiber([&] {
+    const SwordFsChunk malformed{.index = 0, .revision = 1, .size = kChunkTestSize + 1};
+    WholeObjectChunk chunk(/*ino=*/42, /*index=*/0, kChunkTestSize, meta_, data_, malformed);
+    const auto status = chunk.Write(/*offset=*/0, Buf("x"));
+    EXPECT_FALSE(status.ok());
+    EXPECT_NE(status.message().find("published chunk exceeds configured chunk size"), std::string::npos);
+  });
+}
+
+TEST_F(ChunkTest, WriteUsesChunkRelativeOffsets) {
+  RunInTestFiber([&] {
+    auto chunk = MakeChunk(/*index=*/1);
+    EXPECT_TRUE(chunk->Write(/*offset=*/0, Buf("hello")).ok());
+    EXPECT_EQ(chunk->Write(kChunkTestSize, Buf("x")).ToErrno(), EINVAL);
+    EXPECT_EQ(chunk->Write(kChunkTestSize - 1, Buf("xx")).ToErrno(), EINVAL);
   });
 }
 
 TEST_F(ChunkTest, WriteBeyondChunkCapacityIsRejected) {
   RunInTestFiber([&] {
-    Chunk c(42, 0);
-    ASSERT_TRUE(c.Initialize().ok());
-    std::string too_big(1025, 'x');
+    auto chunk = MakeChunk();
+    std::string too_big(kChunkTestSize + 1, 'x');
     auto buf = *folly::IOBuf::copyBuffer(too_big.data(), too_big.size());
-    auto status = c.Write(0, buf);
-    EXPECT_FALSE(status.ok());
+    const auto status = chunk->Write(0, buf);
     EXPECT_EQ(status.ToErrno(), EINVAL);
   });
 }
 
-TEST_F(ChunkTest, EmptyDirtyChunkIsNotFlushableAndFlushIsNoOp) {
+TEST_F(ChunkTest, EmptyChunkHasNoPendingWritesAndFlushIsNoOp) {
   RunInTestFiber([&] {
-    Chunk c(42, 0);
-    ASSERT_TRUE(c.Initialize().ok());
-    EXPECT_FALSE(c.Flushable());
-    EXPECT_TRUE(c.Flush().ok());
-    EXPECT_FALSE(c.IsClean());
+    auto chunk = MakeChunk();
+    EXPECT_FALSE(chunk->HasPendingWrites());
+    EXPECT_TRUE(chunk->Flush().ok());
+    EXPECT_FALSE(chunk->HasPendingWrites());
+    EXPECT_EQ(data_->put_calls, 0);
   });
 }
 
-TEST_F(ChunkTest, TruncateToCurrentDirtySizeKeepsChunkFlushable) {
+TEST_F(ChunkTest, TruncateToCurrentDirtySizeKeepsPendingWrites) {
   RunInTestFiber([&] {
-    Chunk c(42, 0);
-    ASSERT_TRUE(c.Initialize().ok());
-    auto buf = *folly::IOBuf::copyBuffer("hello", 5);
-    ASSERT_TRUE(c.Write(0, buf).ok());
-    c.Truncate(5);
-    EXPECT_TRUE(c.Flushable());
+    auto chunk = MakeChunk();
+    ASSERT_TRUE(chunk->Write(0, Buf("hello")).ok());
+    chunk->TruncateLocal(5);
+    EXPECT_TRUE(chunk->HasPendingWrites());
   });
 }
 
-TEST_F(ChunkTest, DirtyReadRejectsNegativeOffsetWithoutAppending) {
+TEST_F(ChunkTest, DirtyReadReturnsExactRangeAndZeroFillsTail) {
   RunInTestFiber([&] {
-    Chunk c(42, 0);
-    ASSERT_TRUE(c.Initialize().ok());
-    ASSERT_TRUE(c.Write(0, Buf("hello")).ok());
+    auto chunk = MakeChunk();
+    ASSERT_TRUE(chunk->Write(0, Buf("hello")).ok());
 
     auto out = folly::IOBuf::create(8);
-    const auto status = c.Read(-1, 1, out.get());
+    const auto status = chunk->Read(0, 8, out.get());
+    ASSERT_TRUE(status.ok()) << status.message();
+    ASSERT_EQ(out->length(), 8U);
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(out->data()), 5), "hello");
+    EXPECT_EQ(out->data()[5], 0U);
+    EXPECT_EQ(out->data()[6], 0U);
+    EXPECT_EQ(out->data()[7], 0U);
+  });
+}
+
+TEST_F(ChunkTest, DirtyReadInsideMaterializedChunkZeroFillsUncoveredRange) {
+  RunInTestFiber([&] {
+    auto chunk = MakeChunk();
+    ASSERT_TRUE(chunk->Write(0, Buf("hello")).ok());
+
+    auto out = folly::IOBuf::create(4);
+    const auto status = chunk->Read(7, 4, out.get());
+    ASSERT_TRUE(status.ok()) << status.message();
+    ASSERT_EQ(out->length(), 4U);
+    for (size_t i = 0; i < out->length(); ++i) {
+      EXPECT_EQ(out->data()[i], 0U);
+    }
+  });
+}
+
+TEST_F(ChunkTest, ReadRejectsRangeCrossingChunkBoundaryWithoutAppending) {
+  RunInTestFiber([&] {
+    auto chunk = MakeChunk();
+    auto out = folly::IOBuf::create(2);
+    const auto status = chunk->Read(kChunkTestSize - 1, 2, out.get());
     EXPECT_EQ(status.ToErrno(), EINVAL);
     EXPECT_EQ(out->length(), 0U);
   });
 }
 
-TEST_F(ChunkTest, DirtyReadFailsClosedOnShortLocalRange) {
+TEST_F(ChunkTest, SuccessfulFlushClearsPendingWritesAndSecondFlushIsNoOp) {
   RunInTestFiber([&] {
-    Chunk c(42, 0);
-    ASSERT_TRUE(c.Initialize().ok());
-    ASSERT_TRUE(c.Write(0, Buf("hello")).ok());
-
-    auto out = folly::IOBuf::create(8);
-    const auto status = c.Read(0, 8, out.get());
-    EXPECT_EQ(status.ToErrno(), EIO);
-    EXPECT_EQ(out->length(), 0U);
-  });
-}
-
-TEST_F(ChunkTest, SuccessfulFlushBecomesCleanAndSecondFlushIsNoOp) {
-  RunInTestFiber([&] {
-    Chunk c(42, 0);
-    ASSERT_TRUE(c.Initialize().ok());
-    ASSERT_TRUE(c.Write(0, Buf("hello")).ok());
-    ASSERT_TRUE(c.Flush().ok());
-    EXPECT_TRUE(c.IsClean());
+    auto chunk = MakeChunk();
+    ASSERT_TRUE(chunk->Write(0, Buf("hello")).ok());
+    EXPECT_TRUE(chunk->HasPendingWrites());
+    ASSERT_TRUE(chunk->Flush().ok());
+    EXPECT_FALSE(chunk->HasPendingWrites());
     EXPECT_EQ(data_->put_calls, 1);
 
-    EXPECT_TRUE(c.Flush().ok());
+    EXPECT_TRUE(chunk->Flush().ok());
     EXPECT_EQ(data_->put_calls, 1);
   });
 }
 
-TEST_F(ChunkTest, ConcurrentFlushOnSameChunkReturnsBusy) {
-  Chunk c(42, 0);
+TEST_F(ChunkTest, FailedFlushKeepsPendingWritesUntilLaterSuccess) {
   RunInTestFiber([&] {
-    ASSERT_TRUE(c.Initialize().ok());
-    ASSERT_TRUE(c.Write(0, Buf("hello")).ok());
+    auto chunk = MakeChunk();
+    ASSERT_TRUE(chunk->Write(0, Buf("hello")).ok());
+    data_->next_put_status = Status::IOError("injected put failure");
+
+    EXPECT_EQ(chunk->Flush().ToErrno(), EIO);
+    EXPECT_TRUE(chunk->HasPendingWrites());
+
+    ASSERT_TRUE(chunk->Flush().ok());
+    EXPECT_FALSE(chunk->HasPendingWrites());
+    EXPECT_EQ(data_->put_calls, 2);
   });
+}
+
+TEST_F(ChunkTest, WriteDuringFlushRemainsPendingAfterEarlierGenerationAck) {
+  auto chunk = MakeChunk();
+  RunInTestFiber([&] { ASSERT_TRUE(chunk->Write(0, Buf("hello")).ok()); });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton put_started;
+  folly::fibers::Baton release_put;
+  folly::fibers::Baton flush_done;
+  folly::fibers::Baton write_done;
+  data_->BlockNextPut(&put_started, &release_put);
+
+  Status flush_status;
+  Status write_status;
+  fm.addTask([&] {
+    flush_status = chunk->Flush();
+    flush_done.post();
+  });
+  fm.addTask([&] {
+    put_started.wait();
+    write_status = chunk->Write(5, Buf("!"));
+    write_done.post();
+    release_put.post();
+  });
+
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return flush_done.try_wait() && write_done.try_wait(); }, "Chunk write-during-flush completion");
+
+  ASSERT_TRUE(flush_status.ok()) << flush_status.message();
+  ASSERT_TRUE(write_status.ok()) << write_status.message();
+  RunInTestFiber([&] {
+    EXPECT_TRUE(chunk->HasPendingWrites())
+        << "the first flush ack must not clear writes accepted into the next generation";
+  });
+
+  RunInTestFiber([&] {
+    ASSERT_TRUE(chunk->Flush().ok());
+    EXPECT_FALSE(chunk->HasPendingWrites());
+  });
+  EXPECT_EQ(data_->put_calls, 2);
+}
+
+TEST_F(ChunkTest, ConcurrentFlushOnSameChunkReturnsBusyAndKeepsPendingStateUntilAck) {
+  auto chunk = MakeChunk();
+  RunInTestFiber([&] { ASSERT_TRUE(chunk->Write(0, Buf("hello")).ok()); });
 
   folly::EventBase evb;
   auto &fm = folly::fibers::getFiberManager(evb);
@@ -497,13 +601,15 @@ TEST_F(ChunkTest, ConcurrentFlushOnSameChunkReturnsBusy) {
 
   Status first_status;
   Status second_status;
+  bool pending_while_flushing = false;
   fm.addTask([&] {
-    first_status = c.Flush();
+    first_status = chunk->Flush();
     first_done.post();
   });
   fm.addTask([&] {
     put_started.wait();
-    second_status = c.Flush();
+    pending_while_flushing = chunk->HasPendingWrites();
+    second_status = chunk->Flush();
     second_done.post();
   });
 
@@ -515,10 +621,11 @@ TEST_F(ChunkTest, ConcurrentFlushOnSameChunkReturnsBusy) {
         evb, [&] { return first_done.try_wait() && second_done.try_wait(); }, "Chunk concurrent-flush timeout cleanup");
     return;
   }
+  EXPECT_TRUE(pending_while_flushing);
   EXPECT_EQ(second_status.ToErrno(), EBUSY);
   release_put.post();
   swordfs::test::DriveEventBaseUntilOrAbort(
       evb, [&] { return first_done.try_wait(); }, "Chunk first Flush completion after release");
   EXPECT_TRUE(first_status.ok());
-  RunInTestFiber([&] { EXPECT_TRUE(c.IsClean()); });
+  RunInTestFiber([&] { EXPECT_FALSE(chunk->HasPendingWrites()); });
 }

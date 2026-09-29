@@ -28,7 +28,7 @@ TEST(RedisMetaTxnTest, PrivateIndexPublicationCommitsAndRejectsWithLogicalHead) 
   SwordFsAttr file_attr(9, S_IFREG | 0644);
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
-  RecordingRedisStrategy strategy;
+  RecordingRedisBridge bridge;
 
   std::optional<PendingDelete> last_cleanup;
   auto publish = [&](const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
@@ -36,8 +36,8 @@ TEST(RedisMetaTxnTest, PrivateIndexPublicationCommitsAndRejectsWithLogicalHead) 
     utils::Status publication_result;
     std::optional<PendingDelete> cleanup_candidate;
     auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-      RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
-      EXPECT_EQ(txn.PrivateMetadata().mechanism(), strategy.mechanism());
+      RedisMetaTxn txn(kv_txn, key, 4096, bridge.mechanism(), &bridge);
+      EXPECT_EQ(txn.PrivateMetadata().mechanism(), bridge.mechanism());
       return txn.CommitChunk(file.ino, expected, replacement, publication_result, cleanup_candidate, intent);
     });
     last_cleanup = std::move(cleanup_candidate);
@@ -46,13 +46,13 @@ TEST(RedisMetaTxnTest, PrivateIndexPublicationCommitsAndRejectsWithLogicalHead) 
 
   const SwordFsChunk first{.index = 0, .revision = 1, .size = 64};
   ASSERT_TRUE(publish(std::nullopt, first, ChunkPublishIntent{.payload = "manifest-one"}).ok());
-  const auto private_hash = key.PrivateChunkIndex(strategy.mechanism(), "fragments:" + std::to_string(file.ino));
+  const auto private_hash = key.PrivateChunkIndex(bridge.mechanism(), "fragments:" + std::to_string(file.ino));
   EXPECT_EQ(redis.hget(private_hash, "1"), std::optional<std::string>{"manifest-one"});
   std::string private_value;
   std::vector<std::pair<std::string, std::string>> fields;
   ASSERT_TRUE(store
                   .Transact([&](RedisKvTxn &kv_txn) {
-                    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+                    RedisMetaTxn txn(kv_txn, key, 4096, bridge.mechanism(), &bridge);
                     auto status = txn.Read("fragments:" + std::to_string(file.ino), "1", &private_value);
                     if (!status.ok()) {
                       return status;
@@ -75,7 +75,7 @@ TEST(RedisMetaTxnTest, PrivateIndexPublicationCommitsAndRejectsWithLogicalHead) 
   EXPECT_EQ(fields, (std::vector<std::pair<std::string, std::string>>{{"1", "manifest-one"}}));
 
   const SwordFsChunk replacement{.index = 0, .revision = 2, .size = 96};
-  strategy.index.reject_publish = true;
+  bridge.reject_publish = true;
   EXPECT_EQ(publish(first, replacement, ChunkPublishIntent{.payload = "manifest-two"}).ToErrno(), EIO);
   ASSERT_TRUE(last_cleanup.has_value());
   EXPECT_FALSE(redis.hget(private_hash, "2").has_value());
@@ -95,11 +95,11 @@ TEST(RedisMetaTxnTest, ChunkPublicContractsRejectInvalidDescriptorsAndViews) {
   RedisMetaClient store(config);
   const redis::RedisKey key(config.db, UniqueRedisName("chunk-contract-validation"));
   sw::redis::Redis redis(ConnectionOptions(config));
-  RecordingRedisStrategy strategy;
+  RecordingRedisBridge bridge;
   constexpr InodeID kFileIno = 40;
 
   const auto validation_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    RedisMetaTxn txn(kv_txn, key, 4096, bridge.mechanism(), &bridge);
     utils::Status publication_result;
     std::optional<PendingDelete> cleanup_candidate;
 
@@ -124,7 +124,7 @@ TEST(RedisMetaTxnTest, ChunkPublicContractsRejectInvalidDescriptorsAndViews) {
   ASSERT_TRUE(wrong_identity.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(kFileIno), "1", encoded);
   const auto malformed_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    RedisMetaTxn txn(kv_txn, key, 4096, bridge.mechanism(), &bridge);
     ChunkView view;
     return txn.LoadChunkView(kFileIno, 1, &view);
   });
@@ -135,11 +135,67 @@ TEST(RedisMetaTxnTest, ChunkPublicContractsRejectInvalidDescriptorsAndViews) {
   ASSERT_TRUE(head.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(kFileIno), "0", encoded);
   const auto private_state_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    RedisMetaTxn txn(kv_txn, key, 4096, bridge.mechanism(), &bridge);
     ChunkView view;
     return txn.LoadChunkView(kFileIno, 0, &view);
   });
   EXPECT_TRUE(private_state_status.IsNotFound()) << private_state_status.message();
+}
+
+TEST(RedisMetaTxnTest, ChunkOperationsFailClosedWithoutMetadataBridge) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("missing-chunk-bridge"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+  constexpr InodeID kFileIno = 51;
+  constexpr InodeID kOrphanIno = 52;
+
+  SwordFsAttr file_attr(kFileIno, S_IFREG | 0644);
+  file_attr.size = 64;
+  SwordFsInode file(kFileIno, file_attr, kRootInodeId);
+  ASSERT_TRUE(SeedInode(redis, key, file).ok());
+
+  const SwordFsChunk head{.index = 0, .revision = 1, .size = 64};
+  std::string encoded;
+  ASSERT_TRUE(head.SerializeTo(&encoded).ok());
+  redis.hset(key.Chunk(kFileIno), "0", encoded);
+
+  utils::Status publication_result;
+  std::optional<PendingDelete> cleanup_candidate;
+  auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, nullptr);
+    return txn.CommitChunk(kFileIno, std::nullopt, head, publication_result, cleanup_candidate);
+  });
+  EXPECT_EQ(status.message(), "chunk metadata bridge is not bound");
+
+  status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, nullptr);
+    ChunkView view;
+    return txn.LoadChunkView(kFileIno, 0, &view);
+  });
+  EXPECT_EQ(status.message(), "chunk metadata bridge is not bound");
+
+  status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, nullptr);
+    std::vector<PendingDelete> detached;
+    return txn.Truncate(kFileIno, 0, &detached);
+  });
+  EXPECT_EQ(status.message(), "chunk metadata bridge is not bound");
+
+  SwordFsAttr orphan_attr(kOrphanIno, S_IFREG | 0644);
+  orphan_attr.nlink = 0;
+  SwordFsInode orphan(kOrphanIno, orphan_attr, kRootInodeId);
+  ASSERT_TRUE(SeedInode(redis, key, orphan).ok());
+  const auto reclaim_status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, nullptr);
+    std::optional<ReclaimWork> work;
+    return txn.PrepareReclaim(kOrphanIno, work);
+  });
+  EXPECT_EQ(reclaim_status.message(), "chunk metadata bridge is not bound");
 }
 
 TEST(RedisMetaTxnTest, PrivateChunkIndexPrimitivesValidateTheirPublicContract) {
@@ -151,10 +207,10 @@ TEST(RedisMetaTxnTest, PrivateChunkIndexPrimitivesValidateTheirPublicContract) {
   RedisMetaClient store(config);
   const redis::RedisKey key(config.db, UniqueRedisName("private-index-contract"));
   sw::redis::Redis redis(ConnectionOptions(config));
-  RecordingRedisStrategy strategy;
+  RecordingRedisBridge bridge;
 
   const auto validation_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    RedisMetaTxn txn(kv_txn, key, 4096, bridge.mechanism(), &bridge);
     std::string value;
     std::vector<std::pair<std::string, std::string>> values;
     EXPECT_EQ(txn.Read("", "field", &value).ToErrno(), EINVAL);
@@ -168,14 +224,14 @@ TEST(RedisMetaTxnTest, PrivateChunkIndexPrimitivesValidateTheirPublicContract) {
   ASSERT_TRUE(validation_status.ok()) << validation_status.message();
 
   const auto put_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    RedisMetaTxn txn(kv_txn, key, 4096, bridge.mechanism(), &bridge);
     return txn.Put("manifest", "b", "two");
   });
   ASSERT_TRUE(put_status.ok()) << put_status.message();
-  redis.hset(key.PrivateChunkIndex(strategy.mechanism(), "manifest"), "a", "one");
+  redis.hset(key.PrivateChunkIndex(bridge.mechanism(), "manifest"), "a", "one");
 
   const auto read_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    RedisMetaTxn txn(kv_txn, key, 4096, bridge.mechanism(), &bridge);
     std::string value;
     auto status = txn.Read("manifest", "b", &value);
     EXPECT_TRUE(status.ok()) << status.message();
@@ -190,12 +246,12 @@ TEST(RedisMetaTxnTest, PrivateChunkIndexPrimitivesValidateTheirPublicContract) {
   ASSERT_TRUE(read_status.ok()) << read_status.message();
 
   const auto erase_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    RedisMetaTxn txn(kv_txn, key, 4096, bridge.mechanism(), &bridge);
     return txn.Erase("manifest", "a");
   });
   ASSERT_TRUE(erase_status.ok()) << erase_status.message();
-  EXPECT_FALSE(redis.hexists(key.PrivateChunkIndex(strategy.mechanism(), "manifest"), "a"));
-  EXPECT_EQ(redis.hget(key.PrivateChunkIndex(strategy.mechanism(), "manifest"), "b").value_or(""), "two");
+  EXPECT_FALSE(redis.hexists(key.PrivateChunkIndex(bridge.mechanism(), "manifest"), "a"));
+  EXPECT_EQ(redis.hget(key.PrivateChunkIndex(bridge.mechanism(), "manifest"), "b").value_or(""), "two");
 }
 
 TEST(RedisMetaTxnTest, PrivateChunkIndexScanFailsClosedOnCorruptBackendType) {
@@ -207,17 +263,17 @@ TEST(RedisMetaTxnTest, PrivateChunkIndexScanFailsClosedOnCorruptBackendType) {
   RedisMetaClient store(config);
   const redis::RedisKey key(config.db, UniqueRedisName("private-index-wrong-type"));
   sw::redis::Redis redis(ConnectionOptions(config));
-  RecordingRedisStrategy strategy;
-  redis.set(key.PrivateChunkIndex(strategy.mechanism(), "manifest"), "not-a-hash");
+  RecordingRedisBridge bridge;
+  redis.set(key.PrivateChunkIndex(bridge.mechanism(), "manifest"), "not-a-hash");
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &strategy);
+    RedisMetaTxn txn(kv_txn, key, 4096, bridge.mechanism(), &bridge);
     std::vector<std::pair<std::string, std::string>> values;
     return txn.Scan("manifest", &values);
   });
 
   EXPECT_EQ(status.ToErrno(), EIO) << status.message();
-  EXPECT_EQ(redis.get(key.PrivateChunkIndex(strategy.mechanism(), "manifest")).value_or(""), "not-a-hash");
+  EXPECT_EQ(redis.get(key.PrivateChunkIndex(bridge.mechanism(), "manifest")).value_or(""), "not-a-hash");
 }
 
 TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
@@ -246,7 +302,7 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
 
   std::vector<PendingDelete> detached;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.Truncate(9, 1024, &detached);
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -265,7 +321,7 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
   file.attr.size = 4096;
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
   const auto invalid_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 0);
+    RedisMetaTxn txn(kv_txn, key, 0, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     EXPECT_EQ(txn.Truncate(9, 1024).ToErrno(), EIO);
     return utils::Status::OK();
   });
@@ -284,7 +340,7 @@ TEST(RedisMetaTxnTest, RegisterPendingDeletesRejectsInvalidEnvelope) {
   const std::vector<PendingDelete> work{{.id = "", .payload = "opaque"}};
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.RegisterPendingDeletes(work);
   });
   EXPECT_EQ(status.ToErrno(), EINVAL);
@@ -314,7 +370,7 @@ TEST(RedisMetaTxnTest, TruncateDoesNotDependOnPendingDeleteState) {
 
   std::vector<PendingDelete> detached;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.Truncate(file.ino, 0, &detached);
   });
 
@@ -355,7 +411,7 @@ TEST(RedisMetaTxnTest, TruncateScansMultipleChunkHashPagesAndCollectsDetachedChu
 
   std::vector<PendingDelete> detached;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, kChunkSize);
+    RedisMetaTxn txn(kv_txn, key, kChunkSize, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.Truncate(file.ino, 0, &detached);
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -384,7 +440,7 @@ TEST(RedisMetaTxnTest, TruncateRejectsInvalidChunkMetadata) {
   redis.hset(key.Chunk(file.ino), "0", encoded);
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.Truncate(file.ino, 0);
   });
   EXPECT_TRUE(status.ToErrno() == EIO) << status.message();
@@ -395,7 +451,7 @@ TEST(RedisMetaTxnTest, TruncateRejectsInvalidChunkMetadata) {
   ASSERT_TRUE(canonical.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(file.ino), "1", encoded);
   const auto field_mismatch_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.Truncate(file.ino, 0);
   });
   EXPECT_TRUE(field_mismatch_status.ToErrno() == EIO) << field_mismatch_status.message();
@@ -418,7 +474,7 @@ TEST(RedisMetaTxnTest, TruncatePropagatesWrongTypeChunkMapFromDestructivePhase) 
   redis.set(key.Chunk(file.ino), "wrong-type");
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.Truncate(file.ino, 0);
   });
   EXPECT_FALSE(status.ok());
@@ -478,7 +534,7 @@ TEST(RedisMetaTxnTest, CommitChunkReturnsCleanupCandidateWithoutPendingDeleteDep
   utils::Status publication_result;
   std::optional<PendingDelete> cleanup_candidate;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.CommitChunk(file.ino, expected, replacement, publication_result, cleanup_candidate);
   });
 
@@ -521,7 +577,7 @@ TEST(RedisMetaTxnTest, CommitChunkDefiniteRejectionReturnsReplacementAsCleanupCa
   utils::Status publication_result;
   std::optional<PendingDelete> cleanup_candidate;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.CommitChunk(file.ino, std::nullopt, replacement, publication_result, cleanup_candidate);
   });
 

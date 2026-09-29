@@ -29,7 +29,8 @@ class RedisMetaImpl : public IMetaEngine {
   RedisMetaImpl &operator=(const RedisMetaImpl &) = delete;
 
   utils::Status Initialize() override;
-  Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) override;
+  Status OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out) override;
+  Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) override;
   utils::Status FormatVolume(const SwordFsVolume &config) override;
   utils::Status LoadVolume(SwordFsVolume *config) override;
   Limits GetLimits() const override;
@@ -50,7 +51,7 @@ class RedisMetaImpl : public IMetaEngine {
   Status Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) override;
   Status Readlink(InodeID ino, std::string *target) override;
   Status Open(InodeID ino, uint64_t *size = nullptr) override;
-  Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) override;
+  Status PrepareReclaim(InodeID ino) override;
   Status CompleteReclaim(InodeID ino) override;
   Status VisitOrphanCandidates(const InodeVisitorFn &visitor) override;
   Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) override;

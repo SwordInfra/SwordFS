@@ -26,7 +26,8 @@ class MemMetaImpl : public IMetaEngine {
 
   MemMetaImpl();
   ~MemMetaImpl() override;
-  Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) override;
+  Status OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out) override;
+  Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) override;
 
   // Entry operations
   Status Lookup(InodeID parent_ino, std::string_view name, SwordFsInode *out) override;
@@ -39,7 +40,7 @@ class MemMetaImpl : public IMetaEngine {
                 RenameFlag flags) override;
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override;
   Status Open(InodeID ino, uint64_t *size = nullptr) override;
-  Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work) override;
+  Status PrepareReclaim(InodeID ino) override;
   Status CompleteReclaim(InodeID ino) override;
   Status VisitOrphanCandidates(const InodeVisitorFn &visitor) override;
   Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) override;

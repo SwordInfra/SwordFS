@@ -23,7 +23,7 @@ not by itself establish support for every Cluster deployment configuration.
 | `private_chunk_index:<mechanism-key>:<hash>` | Hash | Mechanism-owned chunk-internal fields; logical chunk-index fields use canonical decimal 64-bit indexes, `<mechanism-key>` is the stable typed `ChunkOverwriteMechanism` key, and field layout belongs only to that mechanism |
 | `orphans` | Hash | Inode ID → orphan marker |
 | `reclaims` | Hash | Inode ID → serialized frozen opaque `ReclaimWork` |
-| `pending_deletes` | Hash | Opaque strategy-defined queue ID → serialized frozen opaque `PendingDelete` |
+| `pending_deletes` | Hash | Opaque mechanism-defined queue ID → serialized frozen opaque `PendingDelete` |
 
 ### Why these structures
 
@@ -33,13 +33,13 @@ child inode. Full attributes remain canonical in the inode record. A missing
 directory Hash represents an empty directory when its directory inode exists.
 
 A chunk Hash represents one authoritative logical head per index. It contains
-neither mutable write buffers nor uploading records. The selected strategy
-owns any chunk-internal index in its private key space. Its transaction
-participant may read or change multiple private fields in the same WATCH/EXEC
+neither mutable write buffers nor uploading records. The selected mechanism
+owns any chunk-internal index in its private key space. Its metadata bridge
+may read or change multiple private fields in the same WATCH/EXEC
 transaction as the logical head and inode. The common metadata engine never
-interprets those fields. For the currently selectable `whole_object` strategy,
+interprets those fields. For the currently selectable `whole_object` mechanism,
 the head generation is also the immutable object revision and the physical
-key derives from inode, index, and revision. That strategy has no additional
+key derives from inode, index, and revision. That mechanism has no additional
 durable private fragment records.
 
 `ChunkIndex` is a 64-bit unsigned logical coordinate. Redis Hash field names
@@ -75,7 +75,7 @@ separate while the current whole-object writer still depends on it.
 
 Frozen reclaim and pending-delete records carry opaque payloads.
 The common queue validates its envelope and Hash field identity; only the
-selected strategy interprets physical references and checks reachability
+selected mechanism's chunk-GC logic interprets physical references and checks reachability
 before deletion. Truncate and rewrite publication use `pending_deletes` as
 best-effort maintenance state after a known metadata outcome. Queue
 membership is not delete authority.
@@ -83,8 +83,8 @@ membership is not delete authority.
 There is no inode-to-parents reverse index. Hard links use forward directory
 mappings and the inode link count. The current data path rewrites whole chunks.
 `chunk_slice` and `redis_cache` remain unselectable until their runtime
-sessions and private indexes are implemented; their different index layouts
-will remain isolated behind the same volume-fixed strategy framework.
+`Chunk` implementations and private indexes are implemented; their different
+index layouts remain isolated behind the same volume-fixed mechanism framework.
 
 Allocators use atomic `INCR` independently of the subsequent namespace or
 publication transaction. Gaps after failure are harmless. Revision reuse is
@@ -356,7 +356,7 @@ converges from authoritative state: if the original live orphan state remains,
 preparation runs again; if the one-stage transition committed, the frozen
 record exists and the live inode is absent, so the same work is returned.
 Pending frozen work can therefore proceed directly to object deletion. Before
-physical deletion, the selected strategy independently verifies that the live
+physical deletion, private chunk GC independently verifies that the live
 inode is absent. A frozen record by itself never authorizes deletion of
 still-live data, and an inconsistent frozen+live state remains fail-closed.
 Completion removes the frozen work only after deletion succeeds.
@@ -372,7 +372,7 @@ authoritative metadata transaction does **not** depend on `pending_deletes`:
 
 1. a truncate transaction scans the authoritative `chunk:<ino>` Hash, validates
    canonical logical heads, applies removal or boundary clamp and inode-size
-   updates, coordinates the strategy-private index, and returns frozen opaque
+   updates, coordinates mechanism-private metadata through the bridge, and returns frozen opaque
    cleanup candidates for detached data;
 2. a rewrite publication transaction performs its CAS publication, private
    index, and inode side effects and returns a frozen candidate when the
@@ -402,21 +402,21 @@ before queueing writes. It validates that each field matches the descriptor's
 index and canonical fixed-size chunk layout. A concurrent chunk-map mutation
 changes the watched Hash and forces the optimistic transaction to retry.
 
-The background reclaimer scans `pending_deletes`. Common Redis metadata checks
+The private chunk-GC worker scans `pending_deletes`. Common Redis metadata checks
 that the Hash field equals the frozen opaque ID, without decoding the private
-payload. The selected strategy validates the payload and checks authoritative
+payload. The selected mechanism validates the payload and checks authoritative
 reachability. For `whole_object`, it verifies the frozen descriptor, canonical
 layout, and derived key against the current logical head. A still-live target
-is left untouched; otherwise the strategy deletes it idempotently and the
-reclaimer removes the queue field only after success. Wrong record types,
+is left untouched; otherwise chunk GC deletes it idempotently and removes the
+queue field only after success. Wrong record types,
 malformed private payloads, and physical-identity mismatches fail closed and
 remain queued.
 
 Reconciliation does not snapshot the complete Hash. Redis metadata keeps a
 process-local HSCAN cursor plus at most one decoded HSCAN response and exposes
-only a bounded number of pending-delete visitor callbacks per Reclaimer pass.
-If the response or cursor has more work, the worker finishes the other reclaim
-queues in that pass and then self-wakes for the next batch. This continuation
+only a bounded number of pending-delete visitor callbacks per chunk-GC pass.
+If the response or cursor has more work, the worker finishes pending inode
+reclaims in that pass and then self-wakes for the next batch. This continuation
 also prevents a long-lived stale/live candidate from repeatedly occupying the
 front of every scan.
 
@@ -428,10 +428,10 @@ after restart HSCAN starts at zero and rediscovery is safe because the Hash is
 durable and cleanup operations are idempotent.
 
 As with Redis SCAN generally, records added while a cursor cycle is already in
-progress are not guaranteed to appear in that same cycle. Producers still wake
-the Reclaimer, but that wake may be coalesced with an in-progress self-wake; a
-missed concurrent addition is therefore picked up by a later explicit wake or
-the periodic safety scan. This affects cleanup latency only: the durable Hash
+progress are not guaranteed to appear in that same cycle. The periodic
+chunk-GC safety scan is the correctness fallback; a missed concurrent addition
+is therefore picked up by a later scan even when no foreground VFS wake exists.
+This affects cleanup latency only: the durable Hash
 record, when registration succeeded, is never treated as completed merely
 because one cursor cycle ended.
 

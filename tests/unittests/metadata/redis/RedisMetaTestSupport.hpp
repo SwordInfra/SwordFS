@@ -17,8 +17,8 @@
 #include <vector>
 
 #include "FiberTest.hpp"
-#include "chunk/IChunkOverwriteStrategy.hpp"
 #include "chunk/WholeObjectCleanup.hpp"
+#include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
@@ -101,13 +101,15 @@ inline utils::Status SeedEntry(sw::redis::Redis &redis, const redis::RedisKey &k
   return utils::Status::OK();
 }
 
+inline const chunk::internal::ChunkMetadataBridge &WholeObjectBridgeForTest();
+
 inline utils::Status CommitChunkTxn(RedisMetaClient &store, const redis::RedisKey &key, uint64_t chunk_size,
                                     InodeID ino, const std::optional<SwordFsChunk> &expected,
                                     const SwordFsChunk &replacement) {
   utils::Status publication_result;
   std::optional<PendingDelete> cleanup_candidate;
   auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, chunk_size);
+    RedisMetaTxn txn(kv_txn, key, chunk_size, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.CommitChunk(ino, expected, replacement, publication_result, cleanup_candidate);
   });
   if (!status.ok()) {
@@ -116,9 +118,65 @@ inline utils::Status CommitChunkTxn(RedisMetaClient &store, const redis::RedisKe
   return publication_result;
 }
 
-class RecordingRedisIndex final : public IChunkIndexParticipant {
+class WholeObjectTestBridge final : public chunk::internal::ChunkMetadataBridge {
+ public:
+  utils::Status LoadPublished(IChunkIndexReader &, InodeID, const SwordFsChunk &,
+                              std::string *private_snapshot) const override {
+    if (private_snapshot == nullptr) {
+      return utils::Status::InvalidArgument("whole-object private snapshot output is null");
+    }
+    private_snapshot->clear();
+    return utils::Status::OK();
+  }
+
+  utils::Status Publish(IChunkIndexTxn &, InodeID, const std::optional<SwordFsChunk> &, const SwordFsChunk &,
+                        const ChunkPublishIntent &intent) const override {
+    if (!intent.payload.empty()) {
+      return utils::Status::InvalidArgument("whole-object publication intent must be empty");
+    }
+    return utils::Status::OK();
+  }
+
+  utils::Status Truncate(IChunkIndexTxn &, InodeID, const std::vector<ChunkIndexChange> &) const override {
+    return utils::Status::OK();
+  }
+
+  utils::Status PrepareReclaim(IChunkIndexTxn &, InodeID, const std::vector<SwordFsChunk> &) const override {
+    return utils::Status::OK();
+  }
+
+  utils::Status FreezePendingDelete(IChunkIndexTxn &, InodeID file_ino, const SwordFsChunk &head, uint64_t chunk_size,
+                                    PendingDelete *out) const override {
+    return chunk::FreezeWholeObjectDelete(file_ino, head, chunk_size, out);
+  }
+
+  utils::Status FreezeRejectedPublication(InodeID file_ino, const SwordFsChunk &replacement,
+                                          const ChunkPublishIntent &intent, uint64_t chunk_size,
+                                          PendingDelete *out) const override {
+    if (!intent.payload.empty()) {
+      return utils::Status::InvalidArgument("whole-object publication intent must be empty");
+    }
+    return chunk::FreezeWholeObjectDelete(file_ino, replacement, chunk_size, out);
+  }
+
+  utils::Status FreezeReclaim(IChunkIndexTxn &, InodeID file_ino, const std::vector<SwordFsChunk> &heads,
+                              uint64_t chunk_size, ReclaimWork *out) const override {
+    return chunk::FreezeWholeObjectReclaim(file_ino, heads, chunk_size, out);
+  }
+};
+
+inline const chunk::internal::ChunkMetadataBridge &WholeObjectBridgeForTest() {
+  static const WholeObjectTestBridge bridge;
+  return bridge;
+}
+
+class RecordingRedisBridge final : public chunk::internal::ChunkMetadataBridge {
  public:
   bool reject_publish = false;
+
+  ChunkOverwriteMechanism mechanism() const {
+    return ChunkOverwriteMechanism::kRedisCache;
+  }
 
   utils::Status LoadPublished(IChunkIndexReader &reader, InodeID file_ino, const SwordFsChunk &head,
                               std::string *private_snapshot) const override {
@@ -144,36 +202,6 @@ class RecordingRedisIndex final : public IChunkIndexParticipant {
   utils::Status PrepareReclaim(IChunkIndexTxn &, InodeID, const std::vector<SwordFsChunk> &) const override {
     return utils::Status::OK();
   }
-};
-
-class RecordingRedisStrategy final : public chunk::IChunkOverwriteStrategy {
- public:
-  RecordingRedisIndex index;
-  MechanismPrivateStorePtr private_metadata;
-  bool reject_private_metadata_binding = false;
-
-  metadata::ChunkOverwriteMechanism mechanism() const override {
-    return metadata::ChunkOverwriteMechanism::kRedisCache;
-  }
-
-  utils::Status BindPrivateMetadata(MechanismPrivateStorePtr store) override {
-    if (store == nullptr || store->mechanism() != mechanism()) {
-      return utils::Status::InvalidArgument("private metadata mechanism does not match recording Redis strategy");
-    }
-    if (reject_private_metadata_binding) {
-      return utils::Status::IOError("reject private metadata binding");
-    }
-    private_metadata = std::move(store);
-    return utils::Status::OK();
-  }
-
-  std::shared_ptr<chunk::IChunkSession> OpenSession(InodeID file_ino, ChunkIndex chunk_index) const override {
-    return chunk::DefaultChunkOverwriteStrategy().OpenSession(file_ino, chunk_index);
-  }
-
-  const IChunkIndexParticipant &index_participant() const override {
-    return index;
-  }
 
   utils::Status FreezePendingDelete(IChunkIndexTxn &, InodeID file_ino, const SwordFsChunk &head, uint64_t chunk_size,
                                     PendingDelete *out) const override {
@@ -188,16 +216,6 @@ class RecordingRedisStrategy final : public chunk::IChunkOverwriteStrategy {
   utils::Status FreezeReclaim(IChunkIndexTxn &, InodeID file_ino, const std::vector<SwordFsChunk> &heads,
                               uint64_t chunk_size, ReclaimWork *out) const override {
     return chunk::FreezeWholeObjectReclaim(file_ino, heads, chunk_size, out);
-  }
-
-  utils::Status DeletePending(const PendingDelete &work, uint64_t chunk_size, IMetaEngine *meta,
-                              storage::IDataEngine *data, bool *completed) const override {
-    return chunk::DefaultChunkOverwriteStrategy().DeletePending(work, chunk_size, meta, data, completed);
-  }
-
-  utils::Status DeleteFrozen(const ReclaimWork &work, uint64_t chunk_size, IMetaEngine *meta,
-                             storage::IDataEngine *data) const override {
-    return chunk::DefaultChunkOverwriteStrategy().DeleteFrozen(work, chunk_size, meta, data);
   }
 };
 

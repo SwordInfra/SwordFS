@@ -13,14 +13,19 @@
 #include <string>
 #include <string_view>
 
+#include "metadata/IPrivateMetadata.hpp"
 #include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
 
 namespace swordfs {
 
 namespace chunk {
-class IChunkOverwriteStrategy;
-}
+class ChunkFactory;
+namespace internal {
+class ChunkGcWorker;
+class ChunkMetadataBridge;
+}  // namespace internal
+}  // namespace chunk
 
 namespace config {
 class ConfigCenter;
@@ -88,6 +93,11 @@ class VolumeImpl {
   /// Aws::ShutdownAPI() when AWS SDK resources are still alive.
   void Shutdown();
 
+  /// Start/stop mount-private services whose implementation must not leak to
+  /// VFS. These are lifecycle hooks, not cleanup work submission APIs.
+  void StartRuntimeServices();
+  void StopRuntimeServices();
+
   const swordfs::metadata::SwordFsVolume &config() const {
     return config_;
   }
@@ -100,18 +110,27 @@ class VolumeImpl {
   swordfs::metadata::IMetaEngine *meta_engine() const {
     return meta_engine_.get();
   }
-  swordfs::storage::IDataEngine *data_engine() const {
-    return data_engine_.get();
+  const swordfs::chunk::ChunkFactory *chunk_factory() const {
+    return chunk_factory_.get();
   }
-  const swordfs::chunk::IChunkOverwriteStrategy *chunk_overwrite_strategy() const;
+
+ private:
+  Status ComposeChunkMetadata();
+  Status ComposeChunkRuntime();
 
  private:
   swordfs::metadata::SwordFsVolume config_;
-  // Metadata backends retain a non-owning pointer to this strategy. Destroy
-  // the engines first, then the selected strategy.
-  std::unique_ptr<swordfs::chunk::IChunkOverwriteStrategy> chunk_overwrite_strategy_;
+  // Metadata backends retain a non-owning pointer to the bridge. Declare the
+  // private capability and bridge before the engines so normal reverse member
+  // destruction also keeps the bridge alive through metadata-engine teardown.
+  swordfs::metadata::MechanismPrivateStorePtr private_metadata_;
+  std::unique_ptr<swordfs::chunk::internal::ChunkMetadataBridge> chunk_metadata_bridge_;
   std::unique_ptr<swordfs::metadata::IMetaEngine> meta_engine_;
   std::unique_ptr<swordfs::storage::IDataEngine> data_engine_;
+  // Runtime factory/GC borrow the engines and private store for the mounted
+  // volume lifetime, so they are destroyed first.
+  std::unique_ptr<swordfs::chunk::ChunkFactory> chunk_factory_;
+  std::unique_ptr<swordfs::chunk::internal::ChunkGcWorker> chunk_gc_worker_;
 
   static std::unique_ptr<VolumeImpl> instance_;
 };

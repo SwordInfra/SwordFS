@@ -105,7 +105,7 @@ class MemMetaTxn : public IChunkIndexTxn {
   // When true, the target is atomically replaced: a directory target
   // must be empty (NotEmpty) and is reclaimed by the unlink; a file target
   // whose nlink drops to zero becomes a durable orphan candidate for the
-  // background Reclaimer.
+  // VFS OrphanReclaimer.
   // A directory/non-directory mismatch yields IsDirectory / NotDirectory.
   //
   // Moving a directory across parents adjusts both parents' nlink;

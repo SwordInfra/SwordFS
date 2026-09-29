@@ -1,7 +1,7 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// The common reclaim envelope is opaque. Only the selected strategy may
+// The common reclaim envelope is opaque. Only the selected chunk mechanism may
 // interpret or authorize deletion of the private payload.
 
 #include <gtest/gtest.h>

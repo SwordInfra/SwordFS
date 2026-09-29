@@ -3,23 +3,25 @@
 
 #include "metadata/mem/MemMetaStore.hpp"
 
-#include "chunk/IChunkOverwriteStrategy.hpp"
+#include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/mem/MemPrivateMetadataStore.hpp"
 
 namespace swordfs::metadata {
 
-utils::Status MemMetaStore::BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) {
-  if (strategy == nullptr) {
-    return utils::Status::InvalidArgument("chunk strategy is null");
+utils::Status MemMetaStore::OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("private metadata store output is null");
   }
+  private_metadata_ = std::make_shared<MemPrivateMetadataStore>(mechanism);
+  *out = private_metadata_;
+  return utils::Status::OK();
+}
 
-  auto private_metadata = std::make_shared<MemPrivateMetadataStore>(strategy->mechanism());
-  auto status = strategy->BindPrivateMetadata(private_metadata);
-  if (!status.ok()) {
-    return status;
+utils::Status MemMetaStore::BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) {
+  if (bridge == nullptr) {
+    return utils::Status::InvalidArgument("chunk metadata bridge is null");
   }
-  chunk_strategy_ = strategy;
-  private_metadata_ = std::move(private_metadata);
+  chunk_metadata_bridge_ = bridge;
   return utils::Status::OK();
 }
 

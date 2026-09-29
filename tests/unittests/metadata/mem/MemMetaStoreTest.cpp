@@ -12,6 +12,7 @@
 
 #include <cerrno>
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,6 +20,7 @@
 #include "FiberTest.hpp"
 #include "chunk/ChunkObjectKey.hpp"
 #include "chunk/WholeObjectCleanup.hpp"
+#include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "utils/Status.hpp"
@@ -42,6 +44,14 @@ class MemMetaStoreTest : public ::testing::Test {
   void SetUp() override {
     store_ = new MemMetaStore();
     store_->SetChunkSize(100);
+    swordfs::metadata::MechanismPrivateStorePtr private_metadata;
+    ASSERT_TRUE(
+        store_->OpenPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, &private_metadata)
+            .ok());
+    ASSERT_TRUE(swordfs::chunk::internal::CreateChunkMetadataBridge(
+                    swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, private_metadata, &bridge_)
+                    .ok());
+    ASSERT_TRUE(store_->BindChunkMetadataBridge(bridge_.get()).ok());
   }
   void TearDown() override {
     delete store_;
@@ -62,6 +72,7 @@ class MemMetaStoreTest : public ::testing::Test {
     return store_->Transact([&](MemMetaTxn &txn) { return txn.ListEntries(ino, entries); });
   }
 
+  std::unique_ptr<swordfs::chunk::internal::ChunkMetadataBridge> bridge_;
   MemMetaStore *store_;
 };
 
@@ -308,7 +319,7 @@ FIBER_TEST_F(MemMetaStoreTest, MoveEntryOverwriteWorksWithoutResultOutput) {
 
 FIBER_TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   // Unlink only detaches the directory entry and decrements nlink.
-  // The inode survives until the background reclaimer crosses the metadata
+  // The inode survives until the OrphanReclaimer crosses the metadata
   // point of no return. Foreground unlink and last-close no longer execute GC.
   SwordFsInode f;
   Add(kRoot, "f", kRegFile, &f);

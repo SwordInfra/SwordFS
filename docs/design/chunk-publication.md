@@ -1,21 +1,21 @@
 # Chunk Publication Contract
 
-## Volume-fixed overwrite strategy
+## Volume-fixed chunk mechanism
 
 The formatted volume records one stable `ChunkOverwriteMechanism` enum value.
 Human-readable names such as `whole_object` are
 accepted only at the CLI/configuration boundary and are converted there to the
-typed value. Mount constructs one implementation from the persisted enum;
-runtime strategy selection and private-index namespacing do not carry or
+typed value. Mount composes one mechanism implementation from the persisted enum;
+runtime mechanism selection and private-index namespacing do not carry or
 compare arbitrary mechanism strings. There is no per-file or per-chunk
 mechanism tag and no live switching. Until the chunk-slice implementation is
 activated by #270–#275, the existing immutable whole-object path is the only
 selectable implementation. Logical chunk indexes are 64-bit values in the
 common descriptor and in whole-object cleanup/reclaim payloads. SwordFS is
 still beta, so current metadata is interpreted only by the current code and no
-historical whole-object layout number is carried through the runtime strategy
-API. Known but unimplemented enum values such as
-`chunk_slice` and `redis_cache` are rejected by strategy construction.
+historical whole-object layout number is carried through a VFS-visible
+strategy API. Known but unimplemented enum values such as
+`chunk_slice` and `redis_cache` are rejected by mount/runtime composition.
 
 Directory entries, inodes, and the file-to-logical-chunk head are shared. A
 logical chunk's file offset is derived from its fixed-layout identity as
@@ -27,7 +27,7 @@ fields do not extend that external contract. The 64-bit coordinate therefore
 losslessly covers every logical chunk reachable by any supported chunk size,
 including the minimum 4 KiB configuration.
 
-File-offset mapping is checked before a chunk session is created: negative
+File-offset mapping is checked before a chunk is opened: negative
 offsets and a zero chunk size are invalid, the logical index is derived without
 narrowing, and the derived chunk start must remain within the supported
 `off_t` address space. Non-empty writes also validate their complete logical
@@ -38,7 +38,7 @@ carries logical size and a publication revision because existing publication,
 truncate, and cleanup code consumes them. Those fields are transitional rather
 than part of the target common contract and will be removed only after the
 corresponding mechanism-private state becomes authoritative. The selected
-mechanism owns the chunk session, its internal index schema and operations,
+mechanism owns the concrete `Chunk`, its internal index schema and operations,
 the translation from private index state to physical data, and cleanup
 validation/deletion.
 
@@ -53,8 +53,8 @@ remains only for the current common-authority path until those consumers are
 migrated; new mechanism code must not treat it as the semantic API.
 
 Runtime private stores are bound to exactly one `ChunkOverwriteMechanism` and
-are retained by the selected strategy so later sessions can receive their
-typed mechanism capability explicitly. Transaction-scoped code receives a
+are retained by the mount composition root so concrete chunks can receive
+their typed mechanism capability explicitly. Transaction-scoped code receives a
 typed capability context owned by the metadata transaction. A concrete
 mechanism adapter binds its typed transaction interface into that context;
 common code never asks the context for hash names, fields, or encoded bytes.
@@ -94,40 +94,40 @@ runtime scans are not promised to be linearizable, while correctness decisions
 that need a stable view use transaction-scoped typed iteration plus backend
 validation/retry.
 
-A chunk session supplies an opaque `ChunkPublishIntent` after making its new
-data durable. `CommitChunk` passes those bytes unchanged to the selected
-participant while publishing the shared head. The strategy also uses that
-intent to freeze cleanup for a definitely rejected upload, which may never
+A concrete `Chunk` supplies an opaque `ChunkPublishIntent` after making its new
+data durable. `CommitChunk` passes those bytes unchanged to the private
+`ChunkMetadataBridge` while publishing the shared head. The bridge also uses
+that intent to freeze cleanup for a definitely rejected upload, which may never
 have appeared in the live private index. Reads use `LoadChunkView`: the
-metadata backend reads the public head and asks the participant to copy its
-private snapshot in one Memory lock or validated Redis WATCH/EXEC read
-transaction. The session interprets the snapshot after that transaction;
+metadata backend reads the public head and asks the bridge to copy its private
+snapshot in one Memory lock or validated Redis WATCH/EXEC read transaction.
+The concrete chunk interprets the snapshot after that transaction;
 object-store I/O does not hold a metadata transaction open.
 
-Reclaim and pending-delete records carry opaque strategy payloads.
+Reclaim and pending-delete records carry opaque mechanism-private payloads.
 The common metadata engine persists their envelope and queue identity without
-decoding physical references. The common Reclaimer schedules, retries, and
-acknowledges those records; only the selected strategy decodes them, checks
-live reachability where applicable, and issues physical deletion. Generic
+decoding physical references. Private `ChunkGcWorker` schedules, retries, and
+acknowledges those records; the selected mechanism's cleanup logic decodes
+them, checks live reachability where applicable, and issues physical deletion. Generic
 `BufCodec` schema and exact `RecordType` checks frame the envelopes and the
 whole-object payload; malformed payloads or identity mismatches fail closed and
 remain queued. Orphan
-preparation freezes the strategy payload in the same transaction that removes
+preparation freezes the mechanism-private payload in the same transaction that removes
 the live inode and chunk heads; later replay uses the frozen bytes, not a
 reconstructed target from current state.
-For pending inode reclaims, the worker re-enters `PrepareReclaim` under the
-open-handle fence before deletion. This finishes a partially applied Redis
-transition with an unlinked live inode. A frozen record is the point of no
-return even if a partial Redis `EXEC` left the inode visible: `Link` refuses
-to revive it, and an unexpected linked inode leaves the frozen record intact
-with an error rather than risking loss of its remaining chunk references.
+For new orphan candidates, `OrphanReclaimer` enters `PrepareReclaim` under the
+open-handle fence. `ChunkGcWorker` consumes only durable pending work and does
+not own that VFS fence. A frozen record is the point of no return even if a
+partial Redis `EXEC` left the inode visible: `Link` refuses to revive it, and
+an unexpected live inode leaves the frozen record intact with an error rather
+than risking loss of its remaining chunk references.
 
 The whole-object publication protocol below describes the transitional
 `whole_object` implementation. Its object revision and key are private to that
-implementation. The common strategy contract preserves local-write visibility,
-exact bounded reads, successful-flush acknowledgement, retryable failures,
-and generation isolation; it does not require other strategies to hydrate or
-rewrite a complete chunk.
+implementation. The stable `Chunk` contract preserves local-write visibility, chunk-relative
+offsets, exact bounded reads with hole reconstruction, successful-flush
+acknowledgement, retryable failures, and generation isolation; it does not
+require other mechanisms to hydrate or rewrite a complete chunk.
 
 SwordFS stores each flushed chunk as an immutable object and publishes a
 descriptor for that object through the metadata engine. The object and its
@@ -368,7 +368,7 @@ metadata call is never silently converted to success.
 ## Cleanup authority
 
 `pending_deletes` stores maintenance candidates, not permission to delete.
-The selected strategy validates its private payload and rechecks authoritative
+Private chunk GC validates the mechanism-private payload and rechecks authoritative
 metadata before physical deletion. For `whole_object`, it compares the frozen
 immutable key with the current logical head and skips a candidate while that
 key is still live. Last-link reclaim also checks that the live inode is absent

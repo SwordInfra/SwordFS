@@ -19,8 +19,8 @@
 #include "metadata/types/Reclaim.hpp"
 #include "utils/Status.hpp"
 
-namespace swordfs::chunk {
-class IChunkOverwriteStrategy;
+namespace swordfs::chunk::internal {
+class ChunkMetadataBridge;
 }
 
 namespace swordfs::metadata {
@@ -35,8 +35,8 @@ class RedisKvTxn;
 // of the mutation's correctness contract.
 class RedisMetaTxn : public IChunkIndexTxn {
  public:
-  RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size,
-               const chunk::IChunkOverwriteStrategy *strategy = nullptr);
+  RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size, ChunkOverwriteMechanism mechanism,
+               const chunk::internal::ChunkMetadataBridge *bridge);
 
   // ────────────────────────────────────────────────────────────────
   // Reads
@@ -82,7 +82,7 @@ class RedisMetaTxn : public IChunkIndexTxn {
   utils::Status Erase(std::string_view hash, std::string_view field) override;
 
   // Register immutable object identities as best-effort background cleanup
-  // candidates. Queue membership is never delete authority: Reclaimer must
+  // candidates. Queue membership is never delete authority: private chunk GC must
   // revalidate authoritative metadata before physical deletion.
   utils::Status RegisterPendingDeletes(const std::vector<PendingDelete> &work);
 
@@ -140,7 +140,7 @@ class RedisMetaTxn : public IChunkIndexTxn {
   RedisKvTxn &txn_;
   const redis::RedisKey &key_;
   uint64_t chunk_size_;
-  const chunk::IChunkOverwriteStrategy *strategy_;
+  const chunk::internal::ChunkMetadataBridge *chunk_metadata_bridge_;
   MechanismPrivateTxnContext private_metadata_txn_;
 };
 

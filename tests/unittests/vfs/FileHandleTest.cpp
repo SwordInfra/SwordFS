@@ -154,21 +154,10 @@ class MockMetaEngine : public IMetaEngine {
     }
     return open_status;
   }
-  Status PrepareReclaim(InodeID ino, std::optional<swordfs::metadata::ReclaimWork> *work) override {
+  Status PrepareReclaim(InodeID ino) override {
     ++prepare_reclaim_calls;
     last_reclaim_ino = ino;
-    if (!prepare_reclaim_status.ok()) {
-      return prepare_reclaim_status;
-    }
-    if (work != nullptr) {
-      swordfs::metadata::ReclaimWork frozen;
-      auto status = chunk::FreezeWholeObjectReclaim(ino, reclaim_chunks, 0, &frozen);
-      if (!status.ok()) {
-        return status;
-      }
-      *work = std::move(frozen);
-    }
-    return Status::OK();
+    return prepare_reclaim_status;
   }
   Status CompleteReclaim(InodeID ino) override {
     ++reclaim_calls;
@@ -579,7 +568,7 @@ FIBER_TEST_F(FileHandleTest, CloseOnlyReleasesItsOwnReference) {
   ASSERT_NE(inode_handle, nullptr);
 
   // Close only owns descriptor accounting. Durable orphan work and object
-  // deletion belong to Reclaimer, so no metadata reclaim call is made here.
+  // deletion belong to OrphanReclaimer / private chunk GC, so no metadata reclaim call is made here.
   ASSERT_TRUE(h1->Release().ok());
   EXPECT_FALSE(inode_handle->TryStartReclaim());
 
@@ -592,7 +581,7 @@ FIBER_TEST_F(FileHandleTest, CloseOnlyReleasesItsOwnReference) {
 // InodeHandle open-fd lifecycle
 // ────────────────────────────────────────────────────────────────
 //
-// The background Reclaimer observes descriptor liveness through
+// OrphanReclaimer observes descriptor liveness through
 // TryStartReclaim(). The case below exercises no handle -> open -> reclaim
 // blocked -> close -> reclaim allowed without exposing the internal counter.
 
@@ -795,21 +784,10 @@ class TrackingMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return open_status;
   }
-  Status PrepareReclaim(InodeID ino, std::optional<swordfs::metadata::ReclaimWork> *work) override {
+  Status PrepareReclaim(InodeID ino) override {
     ++prepare_reclaim_calls;
     last_reclaim_ino = ino;
-    if (!prepare_reclaim_status.ok()) {
-      return prepare_reclaim_status;
-    }
-    if (work != nullptr) {
-      swordfs::metadata::ReclaimWork frozen;
-      auto status = chunk::FreezeWholeObjectReclaim(ino, chunks, 0, &frozen);
-      if (!status.ok()) {
-        return status;
-      }
-      *work = std::move(frozen);
-    }
-    return Status::OK();
+    return prepare_reclaim_status;
   }
   Status CompleteReclaim(InodeID ino) override {
     ++complete_reclaim_calls;
@@ -1241,7 +1219,7 @@ FIBER_TEST_F(FileHandleTest, OpenInProgressBlocksReclaimAndFailedOpenReleasesIts
   EXPECT_FALSE(inode_handle->TryStartReclaim());
 
   // When the metadata check fails, Open releases only its temporary reference;
-  // the durable orphan remains entirely a Reclaimer concern.
+  // the durable orphan remains entirely an OrphanReclaimer concern.
   open_release.post();
   swordfs::test::WaitForBatonOrAbort(opening_thread_done, "FileHandle opening-thread completion after Open release");
   opening_thread.join();

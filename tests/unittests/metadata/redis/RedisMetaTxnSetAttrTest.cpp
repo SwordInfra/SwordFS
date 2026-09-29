@@ -39,7 +39,7 @@ TEST(RedisMetaTxnTest, SetAttrShrinkWorksWithoutDetachedChunkOutput) {
   SwordFsAttr requested = file.attr;
   requested.size = 0;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.SetAttr(file.ino, requested, SetAttrField::kSize);
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -69,7 +69,7 @@ TEST(RedisMetaTxnTest, SetAttrSizeAndOwnerChangesDoNotInventKillpriv) {
   requested.gid = 200;
   requested.size = 1024;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.SetAttr(file.ino, requested, SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kSize);
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -98,7 +98,7 @@ TEST(RedisMetaTxnTest, SetAttrExplicitKillprivUsesModeAwareSgidRule) {
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
   auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.SetAttr(file.ino, file.attr, kKillSuidGidField);
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -112,7 +112,7 @@ TEST(RedisMetaTxnTest, SetAttrExplicitKillprivUsesModeAwareSgidRule) {
   file.attr.mode |= S_ISUID | S_ISGID | S_IXGRP;
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
   status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.SetAttr(file.ino, file.attr, kKillSuidGidField);
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -140,7 +140,7 @@ TEST(RedisMetaTxnTest, SetAttrCombinedModeOwnerAndKillprivUsesFinalRequestedMode
   requested.uid = 2000;
   requested.gid = 200;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.SetAttr(file.ino, requested,
                        SetAttrField::kMode | SetAttrField::kUid | SetAttrField::kGid | kKillSuidGidField);
   });
@@ -172,7 +172,7 @@ TEST(RedisMetaTxnTest, SetAttrLegacyExplicitModeIsNotSecondGuessed) {
   SwordFsAttr requested = file.attr;
   requested.mode = S_IFREG | 0644 | S_ISGID;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.SetAttr(file.ino, requested, SetAttrField::kMode);
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -198,7 +198,7 @@ TEST(RedisMetaTxnTest, TruncateDoesNotInventKillpriv) {
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
     return txn.Truncate(file.ino, 1024);
   });
   ASSERT_TRUE(status.ok()) << status.message();

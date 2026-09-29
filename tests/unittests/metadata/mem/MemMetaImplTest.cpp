@@ -14,11 +14,14 @@
 #include <barrier>
 #include <cerrno>
 #include <limits>
+#include <memory>
 #include <thread>
+#include <utility>
 
 #include "FiberTest.hpp"
 #include "chunk/ChunkObjectKey.hpp"
 #include "chunk/WholeObjectCleanup.hpp"
+#include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
@@ -57,6 +60,15 @@ class MemMetaImplTest : public ::testing::Test {
  protected:
   void SetUp() override {
     impl_ = new MemMetaImpl();
+    swordfs::metadata::MechanismPrivateStorePtr private_metadata;
+    auto status =
+        impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, &private_metadata);
+    ASSERT_TRUE(status.ok()) << status.message();
+    status = swordfs::chunk::internal::CreateChunkMetadataBridge(
+        swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, std::move(private_metadata), &bridge_);
+    ASSERT_TRUE(status.ok()) << status.message();
+    status = impl_->BindChunkMetadataBridge(bridge_.get());
+    ASSERT_TRUE(status.ok()) << status.message();
     // Default context is root (uid=0, gid=0).
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
@@ -134,6 +146,18 @@ class MemMetaImplTest : public ::testing::Test {
     return out;
   }
 
+  std::optional<ReclaimWork> PendingReclaim(InodeID ino) {
+    std::optional<ReclaimWork> out;
+    auto status = impl_->VisitPendingReclaims([&](const ReclaimWork &work) {
+      if (work.ino == ino) {
+        out = work;
+      }
+      return Status::OK();
+    });
+    EXPECT_TRUE(status.ok()) << status.message();
+    return out;
+  }
+
   std::vector<std::string> PendingDeletes() {
     std::vector<std::string> out;
     bool has_more = false;
@@ -155,6 +179,7 @@ class MemMetaImplTest : public ::testing::Test {
     return out;
   }
 
+  std::unique_ptr<swordfs::chunk::internal::ChunkMetadataBridge> bridge_;
   MemMetaImpl *impl_;
 };
 
@@ -414,8 +439,8 @@ FIBER_TEST_F(MemMetaImplTest, MknodSpecialNodesUseOrdinaryNamespaceLifecycle) {
   ASSERT_TRUE(impl_->Unlink(kRoot, "fifo").ok());
   EXPECT_EQ(OrphanCandidates(), std::vector<InodeID>{fifo.ino});
 
-  std::optional<ReclaimWork> work;
-  ASSERT_TRUE(impl_->PrepareReclaim(fifo.ino, &work).ok());
+  ASSERT_TRUE(impl_->PrepareReclaim(fifo.ino).ok());
+  auto work = PendingReclaim(fifo.ino);
   ASSERT_TRUE(work.has_value());
   std::vector<swordfs::chunk::WholeObjectRef> refs;
   ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, kChunkSize, &refs).ok());
@@ -906,9 +931,7 @@ FIBER_TEST_F(MemMetaImplTest, ChunkMutationsRejectInvalidRevision) {
 }
 
 FIBER_TEST_F(MemMetaImplTest, PrepareReclaimMissingInodeIsNoOp) {
-  std::optional<ReclaimWork> work;
-  EXPECT_TRUE(impl_->PrepareReclaim(999, &work).ok());
-  EXPECT_FALSE(work.has_value());
+  EXPECT_TRUE(impl_->PrepareReclaim(999).ok());
   // Completing a reclaim nobody prepared is a no-op.
   EXPECT_TRUE(impl_->CompleteReclaim(999).ok());
 }
@@ -939,9 +962,8 @@ FIBER_TEST_F(MemMetaImplTest, UnlinkOnHardlinkedInodeKeepsInodeAlive) {
   // drops the inode.
   ASSERT_TRUE(impl_->Unlink(kRoot, "link").ok());
   EXPECT_EQ(OrphanCandidates(), std::vector<InodeID>{file.ino});
-  std::optional<ReclaimWork> work;
-  ASSERT_TRUE(impl_->PrepareReclaim(file.ino, &work).ok());
-  ASSERT_TRUE(work.has_value());
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  ASSERT_TRUE(PendingReclaim(file.ino).has_value());
   ASSERT_TRUE(impl_->CompleteReclaim(file.ino).ok());
   SwordFsInode missing;
   EXPECT_TRUE(impl_->GetInode(file.ino, &missing).IsNotFound());
@@ -1123,9 +1145,8 @@ FIBER_TEST_F(MemMetaImplTest, UnlinkPublishesOrphanCandidateForLastLink) {
   EXPECT_EQ(found, chunk);
   EXPECT_TRUE(PendingReclaims().empty());
 
-  std::optional<ReclaimWork> work;
-  ASSERT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
-  ASSERT_TRUE(work.has_value());
+  ASSERT_TRUE(impl_->PrepareReclaim(f_ino).ok());
+  ASSERT_TRUE(PendingReclaim(f_ino).has_value());
   ASSERT_TRUE(impl_->CompleteReclaim(f_ino).ok());
   EXPECT_TRUE(OrphanCandidates().empty());
   EXPECT_TRUE(PendingReclaims().empty());
@@ -1189,9 +1210,8 @@ FIBER_TEST_F(MemMetaImplTest, LinkCancelsOrphanCandidate) {
   ASSERT_TRUE(impl_->GetInode(f_ino, &inode).ok());
   EXPECT_EQ(inode.attr.nlink, 1U);
 
-  std::optional<ReclaimWork> work;
-  EXPECT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
-  EXPECT_FALSE(work.has_value());
+  EXPECT_TRUE(impl_->PrepareReclaim(f_ino).ok());
+  EXPECT_FALSE(PendingReclaim(f_ino).has_value());
   // Untouched: the revived name still owns the inode and its data.
   SwordFsChunk found;
   ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &found).ok());
@@ -1211,8 +1231,8 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFence
   ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .revision = 1, .size = 4096}).ok());
   ASSERT_TRUE(impl_->Unlink(kRoot, "f").ok());
 
-  std::optional<ReclaimWork> work;
-  ASSERT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
+  ASSERT_TRUE(impl_->PrepareReclaim(f_ino).ok());
+  auto work = PendingReclaim(f_ino);
   ASSERT_TRUE(work.has_value());
   EXPECT_EQ(work->ino, f_ino);
   std::vector<swordfs::chunk::WholeObjectRef> refs;
@@ -1236,9 +1256,8 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFence
   // preparation returns the same work.
   EXPECT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
   EXPECT_TRUE(OrphanCandidates().empty());
-  std::optional<ReclaimWork> replay;
-  ASSERT_TRUE(impl_->PrepareReclaim(f_ino, &replay).ok());
-  EXPECT_EQ(replay, work);
+  ASSERT_TRUE(impl_->PrepareReclaim(f_ino).ok());
+  EXPECT_EQ(PendingReclaim(f_ino), work);
 
   ASSERT_TRUE(impl_->CompleteReclaim(f_ino).ok());
   EXPECT_TRUE(PendingReclaims().empty());
@@ -1261,8 +1280,8 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimUsesCurrentRevisionAfterRewrite) {
   ASSERT_TRUE(impl_->CommitChunk(f_ino, first, replacement).ok());
 
   ASSERT_TRUE(impl_->Unlink(kRoot, "f").ok());
-  std::optional<ReclaimWork> work;
-  ASSERT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
+  ASSERT_TRUE(impl_->PrepareReclaim(f_ino).ok());
+  auto work = PendingReclaim(f_ino);
   ASSERT_TRUE(work.has_value());
   std::vector<swordfs::chunk::WholeObjectRef> refs;
   ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, kChunkSize, &refs).ok());
@@ -1279,9 +1298,8 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimRejectsLinkedInode) {
   const InodeID f_ino = file.ino;
   ASSERT_TRUE(impl_->CommitChunk(f_ino, std::nullopt, SwordFsChunk{.index = 0, .revision = 1, .size = 8}).ok());
 
-  std::optional<ReclaimWork> work;
-  EXPECT_TRUE(impl_->PrepareReclaim(f_ino, &work).ok());
-  EXPECT_FALSE(work.has_value());
+  EXPECT_TRUE(impl_->PrepareReclaim(f_ino).ok());
+  EXPECT_FALSE(PendingReclaim(f_ino).has_value());
   // Nothing was removed: the file still resolves and its chunk is intact.
   SwordFsChunk found;
   ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &found).ok());
@@ -1327,15 +1345,17 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentReclaimAndLinkAreAtomic) {
     });
     auto reclaimer = swordfs::test::StartFiberTestThread([&] {
       gate.arrive_and_wait();
-      std::optional<ReclaimWork> work;
-      const auto status = impl_->PrepareReclaim(f_ino, &work);
-      if (status.ok() && work.has_value()) {
+      const auto status = impl_->PrepareReclaim(f_ino);
+      if (!status.ok()) {
+        failures.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+      SwordFsInode probe;
+      if (impl_->GetInode(f_ino, &probe).IsNotFound()) {
         reclaim_won.store(true);
         if (!impl_->CompleteReclaim(f_ino).ok()) {
           failures.fetch_add(1, std::memory_order_relaxed);
         }
-      } else if (!status.ok()) {
-        failures.fetch_add(1, std::memory_order_relaxed);
       }
     });
 
@@ -1375,7 +1395,7 @@ FIBER_TEST_F(MemMetaImplTest, ConcurrentReclaimAndLinkAreAtomic) {
 // (null visitor, null output) must be refused explicitly rather than read as
 // "nothing to reclaim" — an empty scan is a legitimate, different answer.
 
-FIBER_TEST_F(MemMetaImplTest, VisitorAndOutputArgumentsAreValidated) {
+FIBER_TEST_F(MemMetaImplTest, VisitorArgumentsAreValidated) {
   SetContext(0, 0);
 
   EXPECT_EQ(impl_->VisitOrphanCandidates(swordfs::metadata::InodeVisitorFn{}).ToErrno(), EINVAL);
@@ -1384,14 +1404,9 @@ FIBER_TEST_F(MemMetaImplTest, VisitorAndOutputArgumentsAreValidated) {
   EXPECT_EQ(impl_->VisitPendingDeletesBatch(1, swordfs::metadata::PendingDeleteVisitorFn{}, &has_more).ToErrno(),
             EINVAL);
 
-  // A null frozen-work output is refused before anything is mutated.
-  SwordFsInode file;
-  ASSERT_TRUE(impl_->Create(kRoot, "f", 0644, &file).ok());
-  const InodeID f_ino = file.ino;
-  ASSERT_TRUE(impl_->Unlink(kRoot, "f").ok());
-  EXPECT_EQ(impl_->PrepareReclaim(f_ino, nullptr).ToErrno(), EINVAL);
-  EXPECT_EQ(OrphanCandidates(), std::vector<InodeID>{f_ino});
-  EXPECT_TRUE(PendingReclaims().empty());
+  // PrepareReclaim no longer has a caller-visible work output to validate;
+  // a non-reclaimable inode is simply an idempotent no-op.
+  EXPECT_TRUE(impl_->PrepareReclaim(kRoot).ok());
 }
 
 FIBER_TEST_F(MemMetaImplTest, VisitorAbortStopsTheScanAndIsPropagated) {
@@ -1422,9 +1437,8 @@ FIBER_TEST_F(MemMetaImplTest, VisitorAbortStopsTheScanAndIsPropagated) {
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{first, second}));
 
   // The same contract holds for the pending-reclaim scan.
-  std::optional<ReclaimWork> work;
-  ASSERT_TRUE(impl_->PrepareReclaim(second, &work).ok());
-  ASSERT_TRUE(work.has_value());
+  ASSERT_TRUE(impl_->PrepareReclaim(second).ok());
+  ASSERT_TRUE(PendingReclaim(second).has_value());
   ASSERT_EQ(PendingReclaims(), (std::vector<InodeID>{second}));
 
   visited.clear();

@@ -22,7 +22,7 @@ The architecture is guided by a few recurring principles:
 
 - **Keep filesystem semantics in the client, storage primitives below it.** FUSE/VFS code owns filesystem behavior; metadata and data engines expose storage-oriented contracts.
 - **Separate metadata authority from object data.** Namespace/inode/chunk descriptors live in the metadata engine; file bytes live in the data engine.
-- **Publish logical chunk heads through metadata.** The selected overwrite strategy prepares data first, then metadata atomically makes its new logical generation authoritative. The current whole-object strategy uses immutable revisioned objects.
+- **Publish logical chunk heads through metadata.** The selected chunk mechanism prepares data first, then metadata atomically makes its new logical generation authoritative. The current `WholeObjectChunk` implementation uses immutable revisioned objects.
 - **Treat persistent metadata as the source of truth for lifecycle/recovery.** Local runtime state may fence or cache work, but must not become the only record of persistent work.
 - **Make blocking external IO explicit.** Runtime filesystem logic executes as fibers; Redis/S3 calls run on POSIX worker threads through blocking executors.
 - **Prefer clear state ownership over cross-layer reconstruction.** Each lifecycle transition should have one authoritative owner and a small set of explicit invariants.
@@ -41,7 +41,8 @@ flowchart TB
     V[VFS / Handle Layer]
     M[Metadata Engine]
     D[Data Engine]
-    RM[Background Reclaimer]
+    OR[Orphan Reclaimer]
+    GC[Private Chunk GC]
     REDIS[(Redis)]
     MEM[(In-memory metadata)]
     S3[(S3-compatible object storage)]
@@ -51,9 +52,10 @@ flowchart TB
     R --> V
     V --> M
     V --> D
-    V --> RM
-    RM --> M
-    RM --> D
+    V --> OR
+    OR --> M
+    GC --> M
+    GC --> D
     M --> REDIS
     M --> MEM
     D --> S3
@@ -67,13 +69,17 @@ The major responsibilities are:
 | VFS/handle layer | POSIX-facing orchestration, open-handle lifetime, file/chunk runtime state | Durable namespace storage implementation |
 | Metadata engine | Authoritative inode, directory, chunk-descriptor, transaction, orphan/reclaim metadata | File object bytes |
 | Data engine | Put/Get/Delete immutable file objects | Namespace/link/inode semantics |
-| Reclaimer | Schedule and acknowledge cleanup after unlink or replacement | Decoding strategy-private cleanup payloads or selecting physical data to delete |
+| Orphan reclaimer | Apply the mount-local open-handle fence and hand durable orphan candidates to metadata preparation | Physical object deletion or mechanism-specific cleanup payloads |
+| Private chunk GC | Replay durable pending-delete/reclaim work, revalidate reachability, delete physical data, and acknowledge success | Namespace/open-handle policy |
 
-`VolumeImpl` binds one mounted volume to one metadata engine, one overwrite
-strategy, and, when configured, one data engine. Backends are selected by URL
-scheme through registries rather than hard-coded into VFS code. The overwrite
-strategy comes from the persisted volume format and stays fixed for that
-volume; it is not chosen per file or switched at runtime.
+`VolumeImpl` is the mount composition root. It binds one mounted volume to one
+metadata engine and, when configured, one data engine. After loading the
+persisted `ChunkOverwriteMechanism`, it opens the mechanism-private metadata
+store, constructs the private metadata bridge, and then constructs the
+mount-owned `ChunkFactory` and private chunk-GC worker. VFS sees only the stable
+`ChunkFactory`/`Chunk` data-path facade and never receives the mechanism or a
+strategy object. Backends are selected by URL scheme through registries rather
+than hard-coded into VFS code.
 
 ## 3. Process and mount lifecycle
 
@@ -156,7 +162,7 @@ kernel request
 - direct metadata operations for namespace/attribute operations;
 - `FileHandle`/`InodeHandle` operations for open file IO;
 - `DirHandle`/metadata iterators for directory enumeration;
-- wakeups to the background reclaimer after namespace changes that may create reclaim work.
+- wakeups to `OrphanReclaimer` after namespace changes that may create logical orphan work; physical chunk GC is not exposed to VFS.
 
 Before dispatching an operation, the FUSE hook captures the request caller's `uid`, `gid`, `pid`, and `umask` into fiber-local `SwordFsContext`. With `default_permissions`, Linux VFS owns ordinary POSIX DAC, including pathname checks, supplementary groups, and capability overrides. Metadata uses the captured context for post-authorization semantics that still require caller identity, including ownership assignment and transaction-local sticky-directory ownership safety; it does not reconstruct a second mode-bit permission engine.
 
@@ -497,18 +503,35 @@ reachable logical chunk without narrowing.
 
 The volume format persists one stable `ChunkOverwriteMechanism` value.
 Human-readable names are parsed only at the format/configuration boundary;
-runtime strategy selection and private-index namespacing use the typed value.
+mechanism selection and private-index namespacing use the typed value.
 `whole_object` is the only selectable implementation today; `chunk_slice` and
-`redis_cache` are reserved values and are rejected at strategy construction
-until their implementations are available.
-All implementations share directory, inode, and file-to-logical-chunk metadata.
-`IChunkSession` owns per-chunk runtime reads, writes, and publication. The
-strategy owns the chunk-internal index, physical mapping, and cleanup codec.
-`IChunkIndexParticipant` joins publication, size changes, and orphan
-preparation through `IChunkIndexTxn` in the same Memory or Redis metadata
-transaction as the shared head. That private transaction surface permits
-multiple records per chunk and keeps slice and Redis-cache index layouts
-independent. Freeze callbacks may read those records before detaching them.
+`redis_cache` are reserved values and are rejected until their implementations
+are available.
+
+All implementations share directory, inode, and file-to-logical-chunk
+metadata. The VFS-facing runtime boundary is the abstract `chunk::Chunk`:
+reads and writes use **chunk-relative offsets**, `Flush()` publishes pending
+data, `TruncateLocal()` changes only mount-local state, and
+`HasPendingWrites()` is the only dirty-state query exposed to VFS. The current
+implementation is `WholeObjectChunk`. A `Chunk` read returns exactly the
+requested in-chunk range; uncovered bytes inside an existing logical chunk are
+zero-filled by the chunk implementation rather than inferred from physical
+layout by `FileReadWriter`.
+
+`ChunkFactory::Open(ino, index, create_if_missing, out)` is the sole VFS
+construction path. An existing logical chunk returns an initialized `Chunk`;
+a lookup-only miss returns `OK` with `nullptr`; and a create-on-miss returns an
+empty usable chunk. The factory is concrete and mount-owned so mechanism
+selection does not become another public polymorphic API.
+
+Metadata transactions use a transitional private
+`chunk::internal::ChunkMetadataBridge`. It contains only the transaction-time
+callbacks needed by the current shared-head protocol: load, publish, truncate,
+reclaim preparation, and freezing durable cleanup work. It has no runtime
+chunk construction or physical-delete API. Memory and Redis retain a
+non-owning bridge pointer while `VolumeImpl` owns its lifetime. This bridge
+preserves the existing transaction ordering while later mechanism-specific
+metadata work moves behind typed private stores.
 
 Each published chunk has a metadata descriptor:
 
@@ -624,12 +647,12 @@ The current object-storage path uses **whole-chunk copy-on-write** for overwrite
 4. upload a new full immutable object;
 5. CAS-publish the new descriptor;
 6. after a known successful publication, best-effort register the old
-   immutable revision in `pending_deletes` and wake the background reclaimer.
+   immutable revision in `pending_deletes`.
 
 The foreground rewrite path does not physically delete the previous object.
-`Reclaimer` schedules the physical cleanup, while the selected strategy
-validates its frozen payload, rechecks reachability, and deletes its own
-physical data.
+The private chunk-GC worker discovers durable cleanup work at startup and on
+its periodic safety scan, rechecks reachability, and deletes physical data.
+Correctness does not depend on a VFS flush/truncate/setattr wakeup.
 
 There is currently no slice/extent overlay or compaction layer in the open-source data path. Random overwrites can therefore incur whole-chunk read/write amplification.
 
@@ -644,10 +667,10 @@ range cannot leave a partially dirtied cache or live-size update.
 
 For each range:
 
-- if a chunk is present in the local chunk map and contains data for that range, `Chunk::Read` serves it;
+- if a logical chunk exists, `Chunk::Read` serves the exact requested in-chunk range and zero-fills any uncovered bytes;
 - a dirty/writing chunk reads from its local `WriteBuf`;
 - a flushed chunk reads the authoritative revision from the data engine;
-- holes are filled with zeroes up to the next chunk boundary.
+- if no logical chunk exists, `FileReadWriter` fills the hole with zeroes up to the next chunk boundary.
 
 Reads spanning multiple chunks may submit individual chunk reads as concurrent fibers, then wait for all of them before returning the assembled range.
 
@@ -684,7 +707,7 @@ Because writeback cache is disabled, SwordFS keeps direct control over dirty
 chunk publication rather than depending on kernel writeback behavior to define
 visibility.
 
-On the final descriptor close, the `InodeHandle` keeps the reference alive until flush finishes, then releases the reference. The close path itself does not perform inode garbage collection; it wakes the background reclaimer so any durable orphan can be reconsidered promptly.
+On the final descriptor close, the `InodeHandle` keeps the reference alive until flush finishes, then releases the reference. The close path itself does not perform inode garbage collection; it wakes `OrphanReclaimer` so any durable logical orphan can be reconsidered promptly.
 
 ### 11.1 Open/close ordering against reclaim
 
@@ -716,23 +739,23 @@ map. Cleanup completeness is not a precondition for the metadata mutation.
 The per-inode exclusive operation lock covers this sequence:
 
 1. Commit the new inode size and prune or clamp authoritative logical chunk
-   heads. The selected strategy updates its private index in the same metadata
+   heads. The private metadata bridge updates mechanism-private metadata in the same metadata
    transaction and freezes opaque cleanup candidates for detached data.
 2. Best-effort register those candidates in `pending_deletes` after a
    **known-success** metadata outcome. Registration failure is logged and may
    leak garbage, but does not invalidate the already-known truncate result.
 3. Drop cached chunks wholly beyond the new end and shorten the boundary
    chunk. For a dirty rewrite, also clamp its saved CAS expectation.
-4. Wake the background reclaimer so pending-delete work is retried
-   without waiting for the periodic scan.
+4. Return without coupling the VFS data path to physical cleanup. Durable
+   pending-delete work is discovered by chunk GC at startup/periodic scan.
 
 Serializing size changes with writes and flushes prevents a local pending
 write from racing truncate and republishing the removed range.
 
-Pending-delete state uses an opaque strategy-defined queue identity rather
+Pending-delete state uses an opaque mechanism-defined queue identity rather
 than a mutable inode-level batch. Repeated truncates therefore cannot
 overwrite earlier cleanup generations. Replay validates the common envelope
-and persisted Hash field; the selected strategy validates the private payload
+and persisted Hash field; private chunk GC validates the private payload
 and checks current authoritative metadata before deleting data. For
 `whole_object`, this includes matching the frozen object key, derived key,
 canonical chunk layout, and live head. Queue membership is never itself
@@ -801,7 +824,7 @@ This keeps the programming model synchronous at the filesystem call site while a
 
 Deleting a directory entry and deleting the underlying object data are intentionally separate phases.
 
-When `unlink` or rename-overwrite drops a regular file's link count to zero, the metadata mutation atomically publishes an **orphan candidate**. The foreground VFS operation then wakes the background reclaimer and returns; it does not synchronously delete file objects.
+When `unlink` or rename-overwrite drops a regular file's link count to zero, the metadata mutation atomically publishes an **orphan candidate**. The foreground VFS operation then wakes `OrphanReclaimer` and returns; it does not synchronously delete file objects.
 
 This design ensures that a crash after the namespace mutation does not lose knowledge that cleanup is required.
 
@@ -823,62 +846,70 @@ The **metadata point of no return** is `PrepareReclaim`.
 In one atomic metadata transition it must:
 
 1. re-check that the inode is still unlinked;
-2. let the selected strategy freeze its opaque cleanup payload from the
-   authoritative logical heads and private index;
+2. let the private metadata bridge freeze durable cleanup work from the
+   authoritative logical heads and mechanism-private metadata;
 3. remove the live inode/chunk metadata and orphan marker in the same metadata
    transaction, so a later hard link cannot revive an inode whose data is
    being deleted.
 
-After this point, the frozen `ReclaimWork` identifies deletion targets for the
-selected strategy. Before physical deletion, the strategy still checks that
-the live inode is absent. This fails closed if a Redis `EXEC` applied a pending
-record without completing live-inode removal.
+After this point, the frozen `ReclaimWork` is private input to chunk GC. Before
+physical deletion, chunk GC still checks that the live inode is absent. This
+fails closed if a Redis `EXEC` applied a pending record without completing
+live-inode removal. `IMetaEngine::PrepareReclaim` intentionally returns no
+physical identities to VFS.
 
 ### 14.2 Open-file fence
 
-Before preparing an orphan, the reclaimer acquires the inode's local reclaim fence from `InodeHandle`.
+Before preparing an orphan, `OrphanReclaimer` acquires the inode's local reclaim fence from `InodeHandle`.
 
 The fence can be acquired only when:
 
 - no descriptor/open attempt holds an inode reference;
 - no other local reclaim attempt owns the fence.
 
-If a file has been unlinked while still open, the durable orphan remains in metadata and the worker simply retries later. The final close wakes the worker after its flush/reference release.
+If a file has been unlinked while still open, the durable orphan remains in metadata and the orphan worker simply retries later. The final close wakes `OrphanReclaimer` after its flush/reference release.
 
 Once metadata preparation removes the live inode, the local fence can be released even while object deletion continues: new opens can no longer find the inode through authoritative metadata.
 
-### 14.3 Background reclaimer
+### 14.3 Split orphan handoff and private chunk GC
 
-The `Reclaimer` coordinates the cross-engine GC sequence. It treats payloads
-as opaque and delegates physical deletion and reachability checks to the
-selected strategy:
+Cleanup is intentionally split across two ownership domains.
 
-1. replay one bounded batch of pending-delete records from truncate and chunk
-   publication cleanup, asking the strategy to delete each frozen target and
-   acknowledging the record only after success;
-2. replay already-pending last-link reclaim work;
-3. scan orphan candidates;
-4. acquire the local fence when applicable;
-5. call `PrepareReclaim`;
-6. ask the strategy to delete the frozen data idempotently;
-7. call `CompleteReclaim` only when all deletes succeed.
+`vfs::OrphanReclaimer` owns only namespace/runtime handoff:
 
-Its worker runs:
+1. scan durable orphan candidates;
+2. acquire the local `InodeHandle` reclaim fence;
+3. call `PrepareReclaim(ino)`;
+4. release the local fence once metadata has either prepared the reclaim or
+   reported a safe no-op.
 
-- once immediately at mount startup;
-- after explicit wakeups from namespace/close activity;
-- periodically as a safety scan.
+It never scans `PendingDelete`/`ReclaimWork`, never decodes physical identities,
+and never calls the data engine.
 
-Wakeups are coalesced. Failed object deletion leaves the pending record intact, so the next pass or a later mount can retry.
+`chunk::internal::ChunkGcWorker` owns physical cleanup:
+
+1. replay a bounded batch of pending-delete records from truncate/publication;
+2. revalidate that each pending-delete target is no longer authoritative;
+3. replay pending inode `ReclaimWork` records;
+4. fail closed while a supposedly reclaimed inode is still live;
+5. delete physical objects idempotently;
+6. acknowledge pending-delete records or call `CompleteReclaim` only after all
+   required deletes succeed.
+
+Both workers run once immediately at mount startup and periodically as a safety
+scan. The orphan worker also receives namespace/final-close wakeups. Chunk GC
+may self-wake when a bounded pending-delete scan reports more work; its
+correctness does not depend on foreground VFS wake coupling. Failed object
+deletion leaves the durable record intact, so a later pass or mount retries it.
 
 Pending-delete replay is deliberately bounded so a large object-cleanup
 backlog cannot monopolize one reconciliation pass. The bound applies to visitor
 work, while buffering is backend-specific: Redis pages through the durable set
 with `HSCAN`; the Memory backend snapshots its in-process pending set once per
 scan cycle so it can preserve progress across calls. The metadata backend
-reports whether its current scan cycle has more work; the Reclaimer still
-processes pending inode reclaims and orphan candidates in the current pass,
-then self-wakes for another pending-delete batch. A still-authoritative stale
+reports whether its current scan cycle has more work; the chunk-GC worker still
+processes pending inode reclaims in the current pass, then self-wakes for
+another pending-delete batch. A still-authoritative stale
 candidate therefore consumes only its current scan position and cannot
 permanently pin later obsolete candidates behind it.
 
@@ -930,8 +961,8 @@ After Redis EXEC, a timeout or connection close does not prove whether the serve
 ### 15.3 Reclaim
 
 After `PrepareReclaim`, failure is recoverable because the durable pending
-record contains the strategy's frozen deletion targets. `CompleteReclaim` is
-delayed until deletion succeeds. Strategy deletion first verifies that a live
+record contains mechanism-private frozen deletion targets. `CompleteReclaim` is
+delayed until deletion succeeds. Chunk GC first verifies that a live
 inode is absent, which also protects against a partially applied Redis
 transaction.
 
@@ -940,7 +971,7 @@ reclaim. After a known metadata outcome, obsolete immutable identities are
 best-effort registered in `pending_deletes`; registration or later deletion
 failure may leave garbage. The safety rule is stronger and simpler: every
 physical pending-delete operation re-reads authoritative metadata through the
-selected strategy and must not delete data that is still live.
+mechanism-specific chunk-GC logic and must not delete data that is still live.
 
 The architecture generally prefers **leaking unreachable data over deleting reachable data** when a failure leaves uncertainty.
 
@@ -1005,12 +1036,12 @@ Future changes should preserve or explicitly revise the following contracts:
 5. **Rewrite publication is conditional.** A stale writer must not overwrite a newer authoritative chunk descriptor.
 6. **Open-handle runtime state does not replace durable metadata.** Local fences protect transitions; they are not persistent lifecycle records.
 7. **Last-link deletion is recoverable.** The metadata mutation that removes the last name must durably publish cleanup work before the foreground request can forget the inode.
-8. **Deletion after reclaim uses strategy-frozen targets.** The common
-   metadata and reclaimer layers do not reconstruct physical references from
+8. **Deletion after reclaim uses mechanism-frozen targets.** The common
+   metadata and VFS orphan layer do not reconstruct physical references from
    the logical chunk head after the point of no return.
 9. **Cleanup is best effort, but deletion safety is strict.** Rewrite/truncate
    may leave unreachable data if cleanup registration or execution fails. A
-   pending-delete record is only a candidate; the selected strategy must
+   pending-delete record is only a candidate; private chunk GC must
    revalidate authoritative reachability before deleting physical data.
 10. **Data-engine deletion is idempotent.** Registered cleanup may replay the same immutable key after restart, timeout, or acknowledgement failure.
 11. **Ambiguous external commits are not assumed to have rolled back.** Retry/reconciliation semantics must be safe under either outcome.
@@ -1023,8 +1054,8 @@ Any PR that changes one of these invariants should update this document as part 
 The following areas are intentionally not presented as solved architecture:
 
 - whole-chunk object-store rewrite amplification remains until a different data representation is introduced;
-- `chunk_slice` and `redis_cache` require their own runtime sessions and
-  private chunk indexes before they can be selected in a volume format;
+- `chunk_slice` and `redis_cache` require their own `Chunk` implementations and
+  typed private chunk metadata before they can be selected in a volume format;
 - multi-mount/session ownership semantics are not represented by a distributed lease/session layer in the current architecture;
 - reclaim pending-work representation and progress tracking can be made more storage-native/compact over time;
 - GC backlog/age/throughput observability is still limited;
@@ -1042,13 +1073,14 @@ The most useful source entry points are:
 | FUSE admission/replies | `src/fuse/Vfs.*` |
 | VFS semantics | `src/vfs/VfsImpl.*` |
 | open handles/runtime state | `src/vfs/FileHandle.*`, `src/vfs/InodeHandle.*`, `src/vfs/DirHandle.*` |
-| file/chunk IO and overwrite strategy | `src/vfs/FileReadWriter.*`, `src/chunk/IChunkOverwriteStrategy.*`, `src/chunk/Chunk.*`, `src/chunk/WriteBuf.*` |
+| file/chunk IO | `src/vfs/FileReadWriter.*`, `src/chunk/Chunk.*`, `src/chunk/ChunkFactory.*`, `src/chunk/WholeObjectChunk.*`, `src/chunk/WriteBuf.*` |
 | metadata abstraction and private index transaction | `src/metadata/IMetaEngine.hpp`, `src/metadata/IChunkIndexTxn.hpp` |
 | Memory metadata | `src/metadata/mem/` |
 | Redis metadata | `src/metadata/redis/` |
 | data-engine abstraction | `src/storage/IDataEngine.hpp` |
 | S3 data engine | `src/storage/s3/` |
 | runtime/concurrency | `src/utils/FiberRuntime.*`, `src/utils/BlockingExecutor.*`, `src/utils/Synchronization.hpp` |
-| reclaim/recovery | `src/vfs/Reclaimer.*`, `src/metadata/types/Reclaim.*` |
+| orphan reclaim handoff | `src/vfs/OrphanReclaimer.*`, `src/vfs/InodeHandle.*` |
+| physical chunk GC/recovery | `src/chunk/internal/ChunkGcWorker.*`, `src/metadata/types/Reclaim.*` |
 
 For Redis persistence details, see [Redis metadata: storage and transactions](redis-metadata-schema.md).

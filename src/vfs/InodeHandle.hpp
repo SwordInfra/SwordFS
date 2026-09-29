@@ -61,7 +61,7 @@ class InodeHandle {
   utils::Status Close();
 
   /// Claim the local reclaim fence iff no descriptor reference is live and no
-  /// other reclaim already owns it. The background Reclaimer is the only
+  /// other reclaim already owns it. The background OrphanReclaimer is the only
   /// production caller. Once claimed, concurrent Open() fails until
   /// FinishReclaim() releases the fence.
   bool TryStartReclaim();

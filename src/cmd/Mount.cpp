@@ -28,7 +28,7 @@
 #include "utils/Fuse.hpp"
 #include "utils/Logging.hpp"
 #include "vfs/InodeHandle.hpp"
-#include "vfs/Reclaimer.hpp"
+#include "vfs/OrphanReclaimer.hpp"
 #include "volume/VolumeImpl.hpp"
 
 using namespace swordfs::utils;
@@ -265,7 +265,8 @@ int RunMount() {
   // The FUSE destroy hook normally stops the reclaim worker; do it here
   // as well so the thread can never outlive the engines it borrows, even if
   // the session never delivered the callback.
-  swordfs::vfs::Reclaimer::Instance().Stop();
+  swordfs::vfs::OrphanReclaimer::Instance().Stop();
+  swordfs::volume::VolumeImpl::Instance().StopRuntimeServices();
   swordfs::volume::VolumeImpl::Instance().Shutdown();
   return ret;
 }

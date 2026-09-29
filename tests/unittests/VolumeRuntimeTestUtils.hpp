@@ -10,6 +10,7 @@
 
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
+#include "metadata/mem/MemPrivateMetadataStore.hpp"
 #include "metadata/types/Volume.hpp"
 #include "storage/DataEngineRegistry.hpp"
 #include "storage/IDataEngine.hpp"
@@ -79,8 +80,21 @@ class ConfiguredMetaEngine final : public Base {
     return LoadConfiguredTestVolume(out);
   }
 
-  utils::Status BindChunkOverwriteStrategy(chunk::IChunkOverwriteStrategy *strategy) override {
-    auto status = Base::BindChunkOverwriteStrategy(strategy);
+  utils::Status OpenPrivateMetadataStore(metadata::ChunkOverwriteMechanism mechanism,
+                                         metadata::MechanismPrivateStorePtr *out) override {
+    auto status = Base::OpenPrivateMetadataStore(mechanism, out);
+    if (status.ToErrno() != ENOSYS) {
+      return status;
+    }
+    if (out == nullptr) {
+      return utils::Status::InvalidArgument("private metadata store output is null");
+    }
+    *out = std::make_shared<metadata::MemPrivateMetadataStore>(mechanism);
+    return utils::Status::OK();
+  }
+
+  utils::Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) override {
+    auto status = Base::BindChunkMetadataBridge(bridge);
     return status.ToErrno() == ENOSYS ? utils::Status::OK() : status;
   }
 };
