@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Report incremental line/branch coverage for changed production code.
 
-Line coverage is the repository-wide hard gate. Branch coverage is always
+Line coverage is a hard gate both for the aggregate patch and for each changed
+C/C++ production file with executable patch lines. Branch coverage is always
 reported so reviewers can inspect untested business/state-machine decisions,
 but a branch threshold is optional and should only be enabled when a caller
 has deliberately scoped it to logic where a numeric branch gate is meaningful.
@@ -18,6 +19,8 @@ import sys
 
 
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+C_CPP_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
+COMPILED_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx"}
 
 
 def ParseArgs() -> argparse.Namespace:
@@ -152,11 +155,10 @@ def main() -> int:
   changed = ChangedLines(args.base, args.source_prefix)
   lines, branches, seen_changed_sources = ParseTracefile(tracefile, changed, repo_root)
 
-  compiled_source_suffixes = {".c", ".cc", ".cpp", ".cxx"}
   missing_compiled_sources = sorted(
       path
       for path in changed
-      if pathlib.PurePosixPath(path).suffix in compiled_source_suffixes and path not in seen_changed_sources
+      if pathlib.PurePosixPath(path).suffix in COMPILED_SOURCE_SUFFIXES and path not in seen_changed_sources
   )
   if missing_compiled_sources:
     print(
@@ -179,6 +181,26 @@ def main() -> int:
   print(f"  branches: {branch_covered}/{branch_total} = {branch_percent:.2f}%")
   if args.branch_threshold is None:
     print("  branch gate: report-only; review uncovered critical logic branches explicitly")
+
+  lines_by_file: dict[str, list[int]] = collections.defaultdict(list)
+  for (path, _line_no), count in lines.items():
+    lines_by_file[path].append(count)
+
+  failing_files: list[tuple[str, int, int, float]] = []
+  print("Per-file changed production line coverage:")
+  for path in sorted(changed):
+    if pathlib.PurePosixPath(path).suffix not in C_CPP_SUFFIXES:
+      continue
+    file_counts = lines_by_file.get(path, [])
+    if not file_counts:
+      print(f"  {path}: no executable changed lines; not gated")
+      continue
+    file_total = len(file_counts)
+    file_covered = sum(count > 0 for count in file_counts)
+    file_percent = Percentage(file_covered, file_total)
+    print(f"  {path}: {file_covered}/{file_total} = {file_percent:.2f}%")
+    if file_percent < args.line_threshold:
+      failing_files.append((path, file_covered, file_total, file_percent))
 
   missed_lines: dict[str, list[int]] = collections.defaultdict(list)
   for (path, line_no), count in sorted(lines.items()):
@@ -208,6 +230,17 @@ def main() -> int:
         f"ERROR: incremental line coverage {line_percent:.2f}% is below {args.line_threshold:.2f}%",
         file=sys.stderr,
     )
+    failed = True
+  if failing_files:
+    print(
+        f"ERROR: per-file incremental line coverage is below {args.line_threshold:.2f}%:",
+        file=sys.stderr,
+    )
+    for path, file_covered, file_total, file_percent in failing_files:
+      print(
+          f"  {path}: {file_covered}/{file_total} = {file_percent:.2f}%",
+          file=sys.stderr,
+      )
     failed = True
   if args.branch_threshold is not None and branch_percent < args.branch_threshold:
     print(
