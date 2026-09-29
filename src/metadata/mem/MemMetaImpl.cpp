@@ -50,7 +50,7 @@ MemMetaImpl::~MemMetaImpl() {
   utils::ExpectInThreadDomain();
 }
 
-Status MemMetaImpl::OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out) {
+Status MemMetaImpl::OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out) {
   utils::ExpectInThreadDomain();
   return store_.OpenPrivateMetadataStore(mechanism, out);
 }

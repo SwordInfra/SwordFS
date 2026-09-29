@@ -44,7 +44,7 @@ class ChunkMetadataBridge {
                                       metadata::ReclaimWork *out) const = 0;
 };
 
-utils::Status CreateChunkMetadataBridge(metadata::ChunkOverwriteMechanism mechanism,
+utils::Status CreateChunkMetadataBridge(metadata::ChunkType chunk_type,
                                         metadata::MechanismPrivateStorePtr private_metadata,
                                         std::unique_ptr<ChunkMetadataBridge> *out);
 

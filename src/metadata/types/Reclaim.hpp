@@ -12,8 +12,9 @@
 
 namespace swordfs::metadata {
 
-// Frozen at the inode's reclaim point of no return. Only the selected volume
-// strategy may decode payload; the common metadata engine merely persists it.
+// Frozen at the inode's reclaim point of no return. Only the selected chunk
+// type implementation may decode payload; the common metadata engine merely
+// persists it.
 struct ReclaimWork {
   InodeID ino = 0;
   std::string payload;
@@ -24,8 +25,9 @@ struct ReclaimWork {
 };
 
 // Best-effort cleanup candidate. `id` is an opaque queue identity, not a
-// physical object key or permission to delete. The strategy revalidates
-// reachability before deleting and the common worker acknowledges by id.
+// physical object key or permission to delete. The chunk-type implementation
+// revalidates reachability before deleting and the common worker acknowledges
+// by id.
 struct PendingDelete {
   std::string id;
   std::string payload;

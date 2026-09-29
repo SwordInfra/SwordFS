@@ -11,7 +11,7 @@
 #include <string>
 #include <utility>
 
-#include "chunk/ChunkObjectKey.hpp"
+#include "chunk/cow/COWObjectKey.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaTestSupport.hpp"
 
@@ -39,17 +39,17 @@ TEST(RedisMetaTxnTest, PrepareReclaimScansAuthoritativeChunksInsideTransaction) 
 
   std::optional<ReclaimWork> work;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.PrepareReclaim(file.ino, work);
   });
 
   ASSERT_TRUE(status.ok()) << status.message();
   ASSERT_TRUE(work.has_value());
-  std::vector<swordfs::chunk::WholeObjectRef> refs;
-  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, 4096, &refs).ok());
+  std::vector<swordfs::chunk::cow::COWRef> refs;
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWReclaim(*work, 4096, &refs).ok());
   ASSERT_EQ(refs.size(), 1U);
   EXPECT_EQ(refs[0].descriptor, chunk);
-  EXPECT_EQ(refs[0].key, swordfs::chunk::FormatChunkObjectKey(file.ino, chunk.index, chunk.revision));
+  EXPECT_EQ(refs[0].key, swordfs::chunk::cow::FormatCOWObjectKey(file.ino, chunk.index, chunk.revision));
   EXPECT_FALSE(redis.exists(key.Inode(file.ino)));
   EXPECT_FALSE(redis.exists(key.Chunk(file.ino)));
   EXPECT_TRUE(redis.hexists(key.Reclaims(), std::to_string(file.ino)));
@@ -78,7 +78,7 @@ TEST(RedisMetaTxnTest, LinkIgnoresUnrelatedFrozenWorkChanges) {
   int attempts = 0;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     SwordFsInode parent;
     auto status = txn.LookupInode(kRootInodeId, &parent);
     if (!status.ok()) {
@@ -129,7 +129,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimIgnoresUnrelatedFrozenWorkChanges) {
   std::optional<ReclaimWork> work;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     auto status = txn.PrepareReclaim(kIno, work);
     if (!status.ok()) {
       return status;
@@ -175,7 +175,7 @@ TEST(RedisMetaTxnTest, LinkCommitInvalidatesConcurrentReclaimSnapshot) {
   std::optional<ReclaimWork> work;
   const auto status = reclaim_store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     auto status = txn.PrepareReclaim(kIno, work);
     if (!status.ok()) {
       return status;
@@ -185,7 +185,7 @@ TEST(RedisMetaTxnTest, LinkCommitInvalidatesConcurrentReclaimSnapshot) {
     }
 
     return link_store.Transact([&](RedisKvTxn &link_kv_txn) {
-      RedisMetaTxn link_txn(link_kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+      RedisMetaTxn link_txn(link_kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
       SwordFsInode parent;
       auto status = link_txn.LookupInode(kRootInodeId, &parent);
       if (!status.ok()) {
@@ -239,7 +239,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimConvergesAfterAmbiguousExec) {
   std::optional<ReclaimWork> first_work;
   const auto first_status = first_store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     auto status = txn.PrepareReclaim(kIno, first_work);
     if (!status.ok()) {
       return status;
@@ -258,14 +258,14 @@ TEST(RedisMetaTxnTest, PrepareReclaimConvergesAfterAmbiguousExec) {
   RedisMetaClient retry_store(retry_config);
   std::optional<ReclaimWork> replay;
   const auto retry_status = retry_store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.PrepareReclaim(kIno, replay);
   });
 
   ASSERT_TRUE(retry_status.ok()) << retry_status.message();
   ASSERT_TRUE(replay.has_value());
-  std::vector<swordfs::chunk::WholeObjectRef> refs;
-  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*replay, 4096, &refs).ok());
+  std::vector<swordfs::chunk::cow::COWRef> refs;
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWReclaim(*replay, 4096, &refs).ok());
   ASSERT_EQ(refs.size(), 1U);
   EXPECT_EQ(refs[0].descriptor, chunk);
   EXPECT_FALSE(control.exists(key.Inode(kIno)));

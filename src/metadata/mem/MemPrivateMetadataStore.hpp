@@ -17,10 +17,10 @@ namespace swordfs::metadata {
 // the common private sequence semantics established by #315.
 class MemPrivateMetadataStore : public IMechanismPrivateStore {
  public:
-  explicit MemPrivateMetadataStore(ChunkOverwriteMechanism mechanism) : mechanism_(mechanism) {
+  explicit MemPrivateMetadataStore(ChunkType mechanism) : mechanism_(mechanism) {
   }
 
-  ChunkOverwriteMechanism mechanism() const override {
+  ChunkType mechanism() const override {
     return mechanism_;
   }
 
@@ -28,7 +28,7 @@ class MemPrivateMetadataStore : public IMechanismPrivateStore {
   utils::Status AllocateSequenceImpl(uint32_t stable_id, uint64_t *value) override;
 
  private:
-  ChunkOverwriteMechanism mechanism_;
+  ChunkType mechanism_;
   utils::FiberMutex mutex_;
   folly::F14FastMap<uint32_t, uint64_t> sequences_;
 };

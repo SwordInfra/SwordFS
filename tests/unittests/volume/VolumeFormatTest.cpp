@@ -18,7 +18,7 @@
 #include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
 
-using swordfs::metadata::ChunkOverwriteMechanism;
+using swordfs::metadata::ChunkType;
 using swordfs::metadata::SwordFsVolume;
 using swordfs::utils::Status;
 
@@ -75,38 +75,39 @@ TEST(SwordFsVolumeTest, SerializeToAndParseFromRoundTrip) {
   EXPECT_EQ(parsed.bucket, original.bucket);
   EXPECT_EQ(parsed.region, original.region);
   EXPECT_EQ(parsed.chunk_size, original.chunk_size);
-  EXPECT_EQ(parsed.chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
+  EXPECT_EQ(parsed.chunk_type, ChunkType::kCow);
 }
 
-TEST(SwordFsVolumeTest, PersistsMechanismAndRejectsUnknownMechanism) {
+TEST(SwordFsVolumeTest, PersistsChunkTypeAndRejectsUnknownChunkType) {
   SwordFsVolume volume = MakeVolume();
-  volume.chunk_overwrite_mechanism = ChunkOverwriteMechanism::kRedisCache;
+  volume.chunk_type = ChunkType::kRedisCache;
   SwordFsVolume parsed;
   ASSERT_TRUE(parsed.ParseFrom(volume.SerializeTo()).ok());
-  EXPECT_EQ(parsed.chunk_overwrite_mechanism, ChunkOverwriteMechanism::kRedisCache);
+  EXPECT_EQ(parsed.chunk_type, ChunkType::kRedisCache);
 
-  volume.chunk_overwrite_mechanism = static_cast<ChunkOverwriteMechanism>(99);
+  volume.chunk_type = static_cast<ChunkType>(99);
   EXPECT_TRUE(parsed.ParseFrom(volume.SerializeTo()).ToErrno() == EIO);
 }
 
-TEST(SwordFsVolumeTest, ParsesCanonicalMechanismNames) {
-  ChunkOverwriteMechanism mechanism;
-  EXPECT_TRUE(swordfs::metadata::ParseChunkOverwriteMechanism("whole_object", &mechanism).ok());
-  EXPECT_EQ(mechanism, ChunkOverwriteMechanism::kWholeObject);
-  EXPECT_TRUE(swordfs::metadata::ParseChunkOverwriteMechanism("chunk_slice", &mechanism).ok());
-  EXPECT_EQ(mechanism, ChunkOverwriteMechanism::kChunkSlice);
-  EXPECT_TRUE(swordfs::metadata::ParseChunkOverwriteMechanism("redis_cache", &mechanism).ok());
-  EXPECT_EQ(mechanism, ChunkOverwriteMechanism::kRedisCache);
-  EXPECT_EQ(swordfs::metadata::ParseChunkOverwriteMechanism("unknown", &mechanism).ToErrno(), EINVAL);
-  EXPECT_EQ(swordfs::metadata::ParseChunkOverwriteMechanism("whole_object", nullptr).ToErrno(), EINVAL);
+TEST(SwordFsVolumeTest, ParsesCanonicalChunkTypeNames) {
+  ChunkType chunk_type;
+  EXPECT_TRUE(swordfs::metadata::ParseChunkType("cow", &chunk_type).ok());
+  EXPECT_EQ(chunk_type, ChunkType::kCow);
+  EXPECT_TRUE(swordfs::metadata::ParseChunkType("chunk_slice", &chunk_type).ok());
+  EXPECT_EQ(chunk_type, ChunkType::kChunkSlice);
+  EXPECT_TRUE(swordfs::metadata::ParseChunkType("redis_cache", &chunk_type).ok());
+  EXPECT_EQ(chunk_type, ChunkType::kRedisCache);
+  EXPECT_EQ(swordfs::metadata::ParseChunkType("whole_object", &chunk_type).ToErrno(), EINVAL);
+  EXPECT_EQ(swordfs::metadata::ParseChunkType("unknown", &chunk_type).ToErrno(), EINVAL);
+  EXPECT_EQ(swordfs::metadata::ParseChunkType("cow", nullptr).ToErrno(), EINVAL);
 
-  EXPECT_EQ(swordfs::metadata::ChunkOverwriteMechanismName(ChunkOverwriteMechanism::kWholeObject), "whole_object");
-  EXPECT_EQ(swordfs::metadata::ChunkOverwriteMechanismName(ChunkOverwriteMechanism::kChunkSlice), "chunk_slice");
-  EXPECT_EQ(swordfs::metadata::ChunkOverwriteMechanismName(ChunkOverwriteMechanism::kRedisCache), "redis_cache");
-  EXPECT_TRUE(swordfs::metadata::ChunkOverwriteMechanismName(static_cast<ChunkOverwriteMechanism>(99)).empty());
-  EXPECT_EQ(swordfs::metadata::ChunkOverwriteMechanismKey(ChunkOverwriteMechanism::kWholeObject), "1");
-  EXPECT_EQ(swordfs::metadata::ChunkOverwriteMechanismKey(ChunkOverwriteMechanism::kChunkSlice), "2");
-  EXPECT_EQ(swordfs::metadata::ChunkOverwriteMechanismKey(ChunkOverwriteMechanism::kRedisCache), "3");
+  EXPECT_EQ(swordfs::metadata::ChunkTypeName(ChunkType::kCow), "cow");
+  EXPECT_EQ(swordfs::metadata::ChunkTypeName(ChunkType::kChunkSlice), "chunk_slice");
+  EXPECT_EQ(swordfs::metadata::ChunkTypeName(ChunkType::kRedisCache), "redis_cache");
+  EXPECT_TRUE(swordfs::metadata::ChunkTypeName(static_cast<ChunkType>(99)).empty());
+  EXPECT_EQ(swordfs::metadata::ChunkTypeKey(ChunkType::kCow), "1");
+  EXPECT_EQ(swordfs::metadata::ChunkTypeKey(ChunkType::kChunkSlice), "2");
+  EXPECT_EQ(swordfs::metadata::ChunkTypeKey(ChunkType::kRedisCache), "3");
 }
 
 TEST(SwordFsVolumeTest, ParseFromRejectsMalformedData) {

@@ -11,13 +11,13 @@ namespace swordfs::metadata {
 namespace {
 
 struct ExampleTxnCapability : IMechanismPrivateTxn {
-  static constexpr ChunkOverwriteMechanism kMechanism = ChunkOverwriteMechanism::kChunkSlice;
+  static constexpr ChunkType kMechanism = ChunkType::kChunkSlice;
 };
 struct OtherTxnCapability : IMechanismPrivateTxn {
-  static constexpr ChunkOverwriteMechanism kMechanism = ChunkOverwriteMechanism::kChunkSlice;
+  static constexpr ChunkType kMechanism = ChunkType::kChunkSlice;
 };
 struct WrongMechanismTxnCapability : IMechanismPrivateTxn {
-  static constexpr ChunkOverwriteMechanism kMechanism = ChunkOverwriteMechanism::kRedisCache;
+  static constexpr ChunkType kMechanism = ChunkType::kRedisCache;
 };
 
 TEST(PrivateMetadataTest, CheckedSequenceRangeStartsAtOneAndFailsClosedAtPortableMaximum) {
@@ -35,12 +35,12 @@ TEST(PrivateMetadataTest, CheckedSequenceRangeStartsAtOneAndFailsClosedAtPortabl
 }
 
 TEST(PrivateMetadataTest, TransactionContextBindsOneTypedCapabilityWithoutTypeErasureLeakage) {
-  MechanismPrivateTxnContext context(ChunkOverwriteMechanism::kChunkSlice);
+  MechanismPrivateTxnContext context(ChunkType::kChunkSlice);
   ExampleTxnCapability capability;
   OtherTxnCapability other;
   WrongMechanismTxnCapability wrong_mechanism;
 
-  EXPECT_EQ(context.mechanism(), ChunkOverwriteMechanism::kChunkSlice);
+  EXPECT_EQ(context.mechanism(), ChunkType::kChunkSlice);
   EXPECT_EQ(context.Get<ExampleTxnCapability>(), nullptr);
   EXPECT_EQ(context.Bind<ExampleTxnCapability>(nullptr).ToErrno(), EINVAL);
   EXPECT_EQ(context.Bind(&wrong_mechanism).ToErrno(), EINVAL);

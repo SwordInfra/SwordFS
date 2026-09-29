@@ -19,8 +19,8 @@
 #include <utility>
 
 #include "FiberTest.hpp"
-#include "chunk/ChunkObjectKey.hpp"
-#include "chunk/WholeObjectCleanup.hpp"
+#include "chunk/cow/COWCleanup.hpp"
+#include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "metadata/types/Reclaim.hpp"
@@ -62,11 +62,10 @@ class MemMetaImplTest : public ::testing::Test {
   void SetUp() override {
     impl_ = new MemMetaImpl();
     swordfs::metadata::MechanismPrivateStorePtr private_metadata;
-    auto status =
-        impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, &private_metadata);
+    auto status = impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkType::kCow, &private_metadata);
     ASSERT_TRUE(status.ok()) << status.message();
-    status = swordfs::chunk::internal::CreateChunkMetadataBridge(
-        swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, std::move(private_metadata), &bridge_);
+    status = swordfs::chunk::internal::CreateChunkMetadataBridge(swordfs::metadata::ChunkType::kCow,
+                                                                 std::move(private_metadata), &bridge_);
     ASSERT_TRUE(status.ok()) << status.message();
     status = impl_->BindChunkMetadataBridge(bridge_.get());
     ASSERT_TRUE(status.ok()) << status.message();
@@ -165,8 +164,8 @@ class MemMetaImplTest : public ::testing::Test {
     auto status = impl_->VisitPendingDeletesBatch(
         1024,
         [&out](const swordfs::metadata::PendingDelete &work) {
-          swordfs::chunk::WholeObjectRef ref;
-          auto status = swordfs::chunk::DecodeWholeObjectDelete(work, kChunkSize, &ref);
+          swordfs::chunk::cow::COWRef ref;
+          auto status = swordfs::chunk::cow::DecodeCOWDelete(work, kChunkSize, &ref);
           EXPECT_TRUE(status.ok()) << status.message();
           if (status.ok()) {
             out.push_back(ref.key);
@@ -472,8 +471,8 @@ FIBER_TEST_F(MemMetaImplTest, MknodSpecialNodesUseOrdinaryNamespaceLifecycle) {
   ASSERT_TRUE(impl_->PrepareReclaim(fifo.ino).ok());
   auto work = PendingReclaim(fifo.ino);
   ASSERT_TRUE(work.has_value());
-  std::vector<swordfs::chunk::WholeObjectRef> refs;
-  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, kChunkSize, &refs).ok());
+  std::vector<swordfs::chunk::cow::COWRef> refs;
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWReclaim(*work, kChunkSize, &refs).ok());
   EXPECT_TRUE(refs.empty());
   SwordFsInode reclaimed;
   EXPECT_TRUE(impl_->GetInode(fifo.ino, &reclaimed).IsNotFound());
@@ -933,7 +932,7 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSizeM
   EXPECT_EQ(stored.revision, first.revision);
 }
 
-FIBER_TEST_F(MemMetaImplTest, LoadChunkViewReturnsPublishedHeadAndWholeObjectSnapshot) {
+FIBER_TEST_F(MemMetaImplTest, LoadChunkViewReturnsPublishedHeadAndCOWSnapshot) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "chunk-view", 0644, &file).ok());
   const SwordFsChunk head{.index = 0, .revision = 1, .size = 128};
@@ -947,7 +946,7 @@ FIBER_TEST_F(MemMetaImplTest, LoadChunkViewReturnsPublishedHeadAndWholeObjectSna
   EXPECT_EQ(impl_->LoadChunkView(file.ino, 0, nullptr).ToErrno(), EINVAL);
 
   const SwordFsChunk replacement{.index = 0, .revision = 2, .size = 128};
-  const swordfs::metadata::ChunkPublishIntent unexpected{.payload = "not-whole-object"};
+  const swordfs::metadata::ChunkPublishIntent unexpected{.payload = "not-COW"};
   EXPECT_EQ(impl_->CommitChunk(file.ino, head, replacement, unexpected).ToErrno(), EINVAL);
   ASSERT_TRUE(impl_->LoadChunkView(file.ino, 0, &view).ok());
   EXPECT_EQ(view.head, head);
@@ -969,7 +968,7 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempoten
   replacement.size = 64;
   ASSERT_TRUE(impl_->CommitChunk(file.ino, first, replacement).ok());
   EXPECT_EQ(PendingDeletes(),
-            std::vector<std::string>{swordfs::chunk::FormatChunkObjectKey(file.ino, first.index, first.revision)});
+            std::vector<std::string>{swordfs::chunk::cow::FormatCOWObjectKey(file.ino, first.index, first.revision)});
   ASSERT_TRUE(impl_->CommitChunk(file.ino, first, replacement).ok());
 
   SwordFsChunk stored;
@@ -985,9 +984,9 @@ FIBER_TEST_F(MemMetaImplTest, CommitChunkRewriteUsesCompareAndSwapAndIsIdempoten
   stale_replacement.revision = 3;
   EXPECT_TRUE(impl_->CommitChunk(file.ino, first, stale_replacement).ToErrno() == EEXIST);
   EXPECT_EQ(PendingDeletes(),
-            (std::vector<std::string>{
-                swordfs::chunk::FormatChunkObjectKey(file.ino, first.index, first.revision),
-                swordfs::chunk::FormatChunkObjectKey(file.ino, stale_replacement.index, stale_replacement.revision)}));
+            (std::vector<std::string>{swordfs::chunk::cow::FormatCOWObjectKey(file.ino, first.index, first.revision),
+                                      swordfs::chunk::cow::FormatCOWObjectKey(file.ino, stale_replacement.index,
+                                                                              stale_replacement.revision)}));
 
   auto grown = replacement;
   grown.revision = 4;
@@ -1351,13 +1350,13 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFence
   auto work = PendingReclaim(f_ino);
   ASSERT_TRUE(work.has_value());
   EXPECT_EQ(work->ino, f_ino);
-  std::vector<swordfs::chunk::WholeObjectRef> refs;
-  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, kChunkSize, &refs).ok());
+  std::vector<swordfs::chunk::cow::COWRef> refs;
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWReclaim(*work, kChunkSize, &refs).ok());
   ASSERT_EQ(refs.size(), 2U);
   EXPECT_EQ(refs[0].descriptor.index, 0U);
-  EXPECT_EQ(refs[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, 1));
+  EXPECT_EQ(refs[0].key, swordfs::chunk::cow::FormatCOWObjectKey(f_ino, 0, 1));
   EXPECT_EQ(refs[1].descriptor.index, 1U);
-  EXPECT_EQ(refs[1].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 1, 2));
+  EXPECT_EQ(refs[1].key, swordfs::chunk::cow::FormatCOWObjectKey(f_ino, 1, 2));
 
   // The live inode and its chunk metadata are gone, so no name and no
   // inode-by-number reference can reach the data again...
@@ -1399,12 +1398,12 @@ FIBER_TEST_F(MemMetaImplTest, PrepareReclaimUsesCurrentRevisionAfterRewrite) {
   ASSERT_TRUE(impl_->PrepareReclaim(f_ino).ok());
   auto work = PendingReclaim(f_ino);
   ASSERT_TRUE(work.has_value());
-  std::vector<swordfs::chunk::WholeObjectRef> refs;
-  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, kChunkSize, &refs).ok());
+  std::vector<swordfs::chunk::cow::COWRef> refs;
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWReclaim(*work, kChunkSize, &refs).ok());
   ASSERT_EQ(refs.size(), 1U);
   // The frozen identity is the current revisioned key, never the retired one.
-  EXPECT_EQ(refs[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, replacement.revision));
-  EXPECT_NE(refs[0].key, swordfs::chunk::FormatChunkObjectKey(f_ino, 0, first.revision));
+  EXPECT_EQ(refs[0].key, swordfs::chunk::cow::FormatCOWObjectKey(f_ino, 0, replacement.revision));
+  EXPECT_NE(refs[0].key, swordfs::chunk::cow::FormatCOWObjectKey(f_ino, 0, first.revision));
 }
 
 FIBER_TEST_F(MemMetaImplTest, PrepareReclaimRejectsLinkedInode) {

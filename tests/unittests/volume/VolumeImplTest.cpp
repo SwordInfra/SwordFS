@@ -20,7 +20,7 @@
 #include "storage/IDataEngine.hpp"
 #include "volume/VolumeImpl.hpp"
 
-using swordfs::metadata::ChunkOverwriteMechanism;
+using swordfs::metadata::ChunkType;
 using swordfs::metadata::SwordFsVolume;
 using swordfs::metadata::mem::VolumeFile;
 using swordfs::utils::Status;
@@ -75,7 +75,7 @@ TEST(VolumeImplConfigAdapterTest, CreateFromUsesParsedFormatConfiguration) {
       "adapter-region",
       "--chunk-size",
       "4096",
-      "--chunk-overwrite-strategy",
+      "--chunk-type",
       "redis_cache",
   });
 
@@ -86,7 +86,25 @@ TEST(VolumeImplConfigAdapterTest, CreateFromUsesParsedFormatConfiguration) {
   EXPECT_EQ(volume.config().bucket, "swordfs-test-data://endpoint/bucket");
   EXPECT_EQ(volume.config().region, "adapter-region");
   EXPECT_EQ(volume.config().chunk_size, 4096U);
-  EXPECT_EQ(volume.config().chunk_overwrite_mechanism, ChunkOverwriteMechanism::kRedisCache);
+  EXPECT_EQ(volume.config().chunk_type, ChunkType::kRedisCache);
+}
+
+TEST(VolumeImplConfigAdapterTest, RejectsLegacyChunkSelectionOptions) {
+  for (const auto *legacy_option : {"--chunk-overwrite-strategy", "--chunk-overwrite-mechanism"}) {
+    EXPECT_THROW(ParseConfig({
+                     "swordfs",
+                     "format",
+                     "--volume",
+                     "legacy-option",
+                     "--meta",
+                     "swordfs-test-meta://local",
+                     "--bucket",
+                     "swordfs-test-data://endpoint/bucket",
+                     legacy_option,
+                     "cow",
+                 }),
+                 CLI::ParseError);
+  }
 }
 
 TEST(VolumeImplConfigAdapterTest, LoadFromUsesParsedMountRuntimeConfiguration) {
@@ -120,7 +138,7 @@ TEST(VolumeImplConfigAdapterTest, LoadFromUsesParsedMountRuntimeConfiguration) {
   EXPECT_EQ(swordfs::test::pending_data_options.worker_count, 7U);
 }
 
-TEST(VolumeImplConfigAdapterTest, CreateFromRejectsUnknownMechanismName) {
+TEST(VolumeImplConfigAdapterTest, CreateFromRejectsUnknownChunkTypeName) {
   swordfs::test::RegisterTestVolumeEngines();
   ParseConfig({
       "swordfs",
@@ -131,8 +149,8 @@ TEST(VolumeImplConfigAdapterTest, CreateFromRejectsUnknownMechanismName) {
       "swordfs-test-meta://local",
       "--bucket",
       "swordfs-test-data://endpoint/bucket",
-      "--chunk-overwrite-strategy",
-      "unknown-mechanism",
+      "--chunk-type",
+      "unknown-type",
   });
 
   VolumeImpl volume;
@@ -172,13 +190,13 @@ class VolumeImplTest : public ::testing::Test {
 
   FormatOptions makeFormatOptions(const std::string &meta_url, const std::string &vol_name = "testvol",
                                   const std::string &bucket_url = "", const std::string &storage_region = "",
-                                  ChunkOverwriteMechanism mechanism = ChunkOverwriteMechanism::kWholeObject) const {
+                                  ChunkType chunk_type = ChunkType::kCow) const {
     return FormatOptions{
         .name = makeVolumeName(vol_name),
         .meta_url = meta_url,
         .bucket = bucket_url,
         .region = storage_region,
-        .chunk_overwrite_mechanism = mechanism,
+        .chunk_type = chunk_type,
     };
   }
 
@@ -207,7 +225,7 @@ TEST_F(VolumeImplTest, CreateFromSucceeds) {
   VolumeImpl vol;
   const auto status = vol.CreateFrom(options);
   EXPECT_TRUE(status.ok()) << status.message();
-  EXPECT_EQ(vol.config().chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
+  EXPECT_EQ(vol.config().chunk_type, ChunkType::kCow);
 }
 
 TEST_F(VolumeImplTest, CreateFromRejectsInvalidBucketUrl) {
@@ -228,16 +246,16 @@ TEST_F(VolumeImplTest, CreateFromRejectsInvalidMetadataUrl) {
   EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
 }
 
-TEST_F(VolumeImplTest, FormatRejectsUnimplementedStrategy) {
-  auto options = makeFormatOptions("memory://local", "testvol", "s3://endpoint.example.com/bucket", "",
-                                   ChunkOverwriteMechanism::kRedisCache);
+TEST_F(VolumeImplTest, FormatRejectsUnimplementedChunkType) {
+  auto options =
+      makeFormatOptions("memory://local", "testvol", "s3://endpoint.example.com/bucket", "", ChunkType::kRedisCache);
   VolumeImpl vol;
   const auto status = vol.CreateFrom(options);
   EXPECT_TRUE(status.ToErrno() == ENOSYS) << status.message();
   EXPECT_FALSE(VolumeFile{options.name}.Exists());
 }
 
-TEST_F(VolumeImplTest, MountUsesPersistedStrategyAndRejectsUnimplementedMechanism) {
+TEST_F(VolumeImplTest, MountUsesPersistedChunkTypeAndRejectsUnimplementedType) {
   auto format_options = makeFormatOptions("memory://local");
   VolumeImpl formatted;
   const auto format_status = formatted.CreateFrom(format_options);
@@ -247,10 +265,10 @@ TEST_F(VolumeImplTest, MountUsesPersistedStrategyAndRejectsUnimplementedMechanis
   auto mount_options = makeMountOptions("memory://local");
   ASSERT_TRUE(mounted.LoadFrom(mount_options).ok());
   ASSERT_NE(mounted.chunk_factory(), nullptr);
-  EXPECT_EQ(mounted.config().chunk_overwrite_mechanism, ChunkOverwriteMechanism::kWholeObject);
+  EXPECT_EQ(mounted.config().chunk_type, ChunkType::kCow);
 
   SwordFsVolume stored = mounted.config();
-  stored.chunk_overwrite_mechanism = ChunkOverwriteMechanism::kRedisCache;
+  stored.chunk_type = ChunkType::kRedisCache;
   const auto unsupported_options = makeMountOptions("memory://local");
   stored.name = unsupported_options.name;
   ASSERT_TRUE(VolumeFile{stored.name}.Write(stored).ok());

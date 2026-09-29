@@ -9,7 +9,7 @@
 #include <optional>
 
 #include "chunk/Chunk.hpp"
-#include "chunk/WriteBuf.hpp"
+#include "chunk/cow/WriteBuf.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "utils/Synchronization.hpp"
@@ -22,11 +22,11 @@ namespace swordfs::storage {
 class IDataEngine;
 }
 
-namespace swordfs::chunk {
+namespace swordfs::chunk::cow {
 
-// Whole-object implementation of one logical runtime chunk. The common Chunk
+// COW implementation of one logical runtime chunk. The common Chunk
 // API deliberately exposes none of this publication/runtime state machine.
-class WholeObjectChunk final : public Chunk {
+class COWChunk final : public Chunk {
  public:
   enum class State : uint8_t {
     kDirty,
@@ -34,9 +34,8 @@ class WholeObjectChunk final : public Chunk {
     kClean,
   };
 
-  WholeObjectChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t max_chunk_size,
-                   metadata::IMetaEngine *meta, storage::IDataEngine *data,
-                   std::optional<metadata::SwordFsChunk> published_chunk);
+  COWChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t max_chunk_size, metadata::IMetaEngine *meta,
+           storage::IDataEngine *data, std::optional<metadata::SwordFsChunk> published_chunk);
 
   utils::Status Read(size_t offset, size_t len, folly::IOBuf *out) const override;
   utils::Status Write(size_t offset, const folly::IOBuf &data) override;
@@ -63,4 +62,4 @@ class WholeObjectChunk final : public Chunk {
   bool refresh_publication_baseline_ = false;
 };
 
-}  // namespace swordfs::chunk
+}  // namespace swordfs::chunk::cow

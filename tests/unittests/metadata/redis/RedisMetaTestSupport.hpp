@@ -17,7 +17,7 @@
 #include <vector>
 
 #include "FiberTest.hpp"
-#include "chunk/WholeObjectCleanup.hpp"
+#include "chunk/cow/COWCleanup.hpp"
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
@@ -101,7 +101,7 @@ inline utils::Status SeedEntry(sw::redis::Redis &redis, const redis::RedisKey &k
   return utils::Status::OK();
 }
 
-inline const chunk::internal::ChunkMetadataBridge &WholeObjectBridgeForTest();
+inline const chunk::internal::ChunkMetadataBridge &COWBridgeForTest();
 
 inline utils::Status CommitChunkTxn(RedisMetaClient &store, const redis::RedisKey &key, uint64_t chunk_size,
                                     InodeID ino, const std::optional<SwordFsChunk> &expected,
@@ -109,7 +109,7 @@ inline utils::Status CommitChunkTxn(RedisMetaClient &store, const redis::RedisKe
   utils::Status publication_result;
   std::optional<PendingDelete> cleanup_candidate;
   auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, chunk_size, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, chunk_size, ChunkType::kCow, &COWBridgeForTest());
     return txn.CommitChunk(ino, expected, replacement, publication_result, cleanup_candidate);
   });
   if (!status.ok()) {
@@ -118,12 +118,12 @@ inline utils::Status CommitChunkTxn(RedisMetaClient &store, const redis::RedisKe
   return publication_result;
 }
 
-class WholeObjectTestBridge final : public chunk::internal::ChunkMetadataBridge {
+class COWTestBridge final : public chunk::internal::ChunkMetadataBridge {
  public:
   utils::Status LoadPublished(IChunkIndexReader &, InodeID, const SwordFsChunk &,
                               std::string *private_snapshot) const override {
     if (private_snapshot == nullptr) {
-      return utils::Status::InvalidArgument("whole-object private snapshot output is null");
+      return utils::Status::InvalidArgument("COW private snapshot output is null");
     }
     private_snapshot->clear();
     return utils::Status::OK();
@@ -132,7 +132,7 @@ class WholeObjectTestBridge final : public chunk::internal::ChunkMetadataBridge 
   utils::Status Publish(IChunkIndexTxn &, InodeID, const std::optional<SwordFsChunk> &, const SwordFsChunk &,
                         const ChunkPublishIntent &intent) const override {
     if (!intent.payload.empty()) {
-      return utils::Status::InvalidArgument("whole-object publication intent must be empty");
+      return utils::Status::InvalidArgument("COW publication intent must be empty");
     }
     return utils::Status::OK();
   }
@@ -147,26 +147,26 @@ class WholeObjectTestBridge final : public chunk::internal::ChunkMetadataBridge 
 
   utils::Status FreezePendingDelete(IChunkIndexTxn &, InodeID file_ino, const SwordFsChunk &head, uint64_t chunk_size,
                                     PendingDelete *out) const override {
-    return chunk::FreezeWholeObjectDelete(file_ino, head, chunk_size, out);
+    return chunk::cow::FreezeCOWDelete(file_ino, head, chunk_size, out);
   }
 
   utils::Status FreezeRejectedPublication(InodeID file_ino, const SwordFsChunk &replacement,
                                           const ChunkPublishIntent &intent, uint64_t chunk_size,
                                           PendingDelete *out) const override {
     if (!intent.payload.empty()) {
-      return utils::Status::InvalidArgument("whole-object publication intent must be empty");
+      return utils::Status::InvalidArgument("COW publication intent must be empty");
     }
-    return chunk::FreezeWholeObjectDelete(file_ino, replacement, chunk_size, out);
+    return chunk::cow::FreezeCOWDelete(file_ino, replacement, chunk_size, out);
   }
 
   utils::Status FreezeReclaim(IChunkIndexTxn &, InodeID file_ino, const std::vector<SwordFsChunk> &heads,
                               uint64_t chunk_size, ReclaimWork *out) const override {
-    return chunk::FreezeWholeObjectReclaim(file_ino, heads, chunk_size, out);
+    return chunk::cow::FreezeCOWReclaim(file_ino, heads, chunk_size, out);
   }
 };
 
-inline const chunk::internal::ChunkMetadataBridge &WholeObjectBridgeForTest() {
-  static const WholeObjectTestBridge bridge;
+inline const chunk::internal::ChunkMetadataBridge &COWBridgeForTest() {
+  static const COWTestBridge bridge;
   return bridge;
 }
 
@@ -174,8 +174,8 @@ class RecordingRedisBridge final : public chunk::internal::ChunkMetadataBridge {
  public:
   bool reject_publish = false;
 
-  ChunkOverwriteMechanism mechanism() const {
-    return ChunkOverwriteMechanism::kRedisCache;
+  ChunkType mechanism() const {
+    return ChunkType::kRedisCache;
   }
 
   utils::Status LoadPublished(IChunkIndexReader &reader, InodeID file_ino, const SwordFsChunk &head,
@@ -205,17 +205,17 @@ class RecordingRedisBridge final : public chunk::internal::ChunkMetadataBridge {
 
   utils::Status FreezePendingDelete(IChunkIndexTxn &, InodeID file_ino, const SwordFsChunk &head, uint64_t chunk_size,
                                     PendingDelete *out) const override {
-    return chunk::FreezeWholeObjectDelete(file_ino, head, chunk_size, out);
+    return chunk::cow::FreezeCOWDelete(file_ino, head, chunk_size, out);
   }
 
   utils::Status FreezeRejectedPublication(InodeID file_ino, const SwordFsChunk &replacement, const ChunkPublishIntent &,
                                           uint64_t chunk_size, PendingDelete *out) const override {
-    return chunk::FreezeWholeObjectDelete(file_ino, replacement, chunk_size, out);
+    return chunk::cow::FreezeCOWDelete(file_ino, replacement, chunk_size, out);
   }
 
   utils::Status FreezeReclaim(IChunkIndexTxn &, InodeID file_ino, const std::vector<SwordFsChunk> &heads,
                               uint64_t chunk_size, ReclaimWork *out) const override {
-    return chunk::FreezeWholeObjectReclaim(file_ino, heads, chunk_size, out);
+    return chunk::cow::FreezeCOWReclaim(file_ino, heads, chunk_size, out);
   }
 };
 

@@ -10,44 +10,43 @@
 
 namespace swordfs::metadata {
 
-bool IsKnownChunkOverwriteMechanism(ChunkOverwriteMechanism mechanism) {
-  switch (mechanism) {
-    case ChunkOverwriteMechanism::kWholeObject:
-    case ChunkOverwriteMechanism::kChunkSlice:
-    case ChunkOverwriteMechanism::kRedisCache:
+bool IsKnownChunkType(ChunkType chunk_type) {
+  switch (chunk_type) {
+    case ChunkType::kCow:
+    case ChunkType::kChunkSlice:
+    case ChunkType::kRedisCache:
       return true;
   }
   return false;
 }
 
-std::string_view ChunkOverwriteMechanismName(ChunkOverwriteMechanism mechanism) {
-  switch (mechanism) {
-    case ChunkOverwriteMechanism::kWholeObject:
-      return "whole_object";
-    case ChunkOverwriteMechanism::kChunkSlice:
+std::string_view ChunkTypeName(ChunkType chunk_type) {
+  switch (chunk_type) {
+    case ChunkType::kCow:
+      return "cow";
+    case ChunkType::kChunkSlice:
       return "chunk_slice";
-    case ChunkOverwriteMechanism::kRedisCache:
+    case ChunkType::kRedisCache:
       return "redis_cache";
   }
   return {};
 }
 
-std::string ChunkOverwriteMechanismKey(ChunkOverwriteMechanism mechanism) {
-  return std::to_string(static_cast<uint32_t>(mechanism));
+std::string ChunkTypeKey(ChunkType chunk_type) {
+  return std::to_string(static_cast<uint32_t>(chunk_type));
 }
 
-utils::Status ParseChunkOverwriteMechanism(std::string_view name, ChunkOverwriteMechanism *out) {
+utils::Status ParseChunkType(std::string_view name, ChunkType *out) {
   if (out == nullptr) {
-    return utils::Status::InvalidArgument("chunk overwrite mechanism output is null");
+    return utils::Status::InvalidArgument("chunk type output is null");
   }
-  for (const auto mechanism : {ChunkOverwriteMechanism::kWholeObject, ChunkOverwriteMechanism::kChunkSlice,
-                               ChunkOverwriteMechanism::kRedisCache}) {
-    if (name == ChunkOverwriteMechanismName(mechanism)) {
-      *out = mechanism;
+  for (const auto chunk_type : {ChunkType::kCow, ChunkType::kChunkSlice, ChunkType::kRedisCache}) {
+    if (name == ChunkTypeName(chunk_type)) {
+      *out = chunk_type;
       return utils::Status::OK();
     }
   }
-  return utils::Status::InvalidArgument("unknown chunk overwrite mechanism: " + std::string(name));
+  return utils::Status::InvalidArgument("unknown chunk type: " + std::string(name));
 }
 
 std::string SwordFsVolume::SerializeTo() const {
@@ -59,7 +58,7 @@ std::string SwordFsVolume::SerializeTo() const {
   enc.String(bucket);
   enc.String(region);
   enc.U64(chunk_size);
-  enc.U32(static_cast<uint32_t>(chunk_overwrite_mechanism));
+  enc.U32(static_cast<uint32_t>(chunk_type));
   enc.Finish(&out);
   return out;
 }
@@ -73,11 +72,10 @@ utils::Status SwordFsVolume::ParseFrom(std::string_view data) {
   dec.String(&volume.bucket);
   dec.String(&volume.region);
   dec.U64(&volume.chunk_size);
-  uint32_t chunk_overwrite_mechanism = 0;
-  dec.U32(&chunk_overwrite_mechanism);
-  volume.chunk_overwrite_mechanism = static_cast<ChunkOverwriteMechanism>(chunk_overwrite_mechanism);
-  if (!dec || volume.name.empty() || volume.chunk_size == 0 ||
-      !IsKnownChunkOverwriteMechanism(volume.chunk_overwrite_mechanism) || !dec.Done()) {
+  uint32_t chunk_type = 0;
+  dec.U32(&chunk_type);
+  volume.chunk_type = static_cast<ChunkType>(chunk_type);
+  if (!dec || volume.name.empty() || volume.chunk_size == 0 || !IsKnownChunkType(volume.chunk_type) || !dec.Done()) {
     return utils::Status::Malformed("Malformed volume metadata record");
   }
   const bool has_data_engine = !volume.storage.empty();

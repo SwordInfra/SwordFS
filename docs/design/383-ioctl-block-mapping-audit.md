@@ -14,8 +14,8 @@ xattrs, `generic/425` advanced past its xattr prerequisite and exposed a fifth
 FIEMAP blocker. The audit therefore covers 23 current baseline rows.
 
 SwordFS' data path is not a local block filesystem. File offsets map to fixed
-logical chunk indexes, while the selected chunk strategy owns its private
-physical representation. The current whole-object strategy stores immutable
+logical chunk indexes, while the selected chunk type implementation owns its private
+physical representation. The current COW mechanism stores immutable
 revisioned objects in S3-compatible storage; there is no filesystem block
 device, discard address space, DAX mapping, allocation-group topology, or
 stable physical extent address that the VFS layer can truthfully expose.
@@ -64,7 +64,7 @@ as one feature.
 | `generic/159`, `160` | reflink/dedupe restrictions on immutable files | **upstream_not_applicable** | `chattr` is merely the first current prerequisite. The next required contract is reflink/dedupe, which the pinned FUSE model already classifies as unavailable/non-applicable. |
 | `generic/260`, `288` | FITRIM/discard range argument semantics | **upstream_not_applicable** | Object storage provides no mounted block-device discard address space. |
 | `generic/537` | FSTRIM against read-only / norecovery journal states | **upstream_not_applicable** | Both discard and local metadata-journal recovery modes are local block-filesystem concepts. |
-| `generic/367` | physical extent-size allocation hints and allocated/delayed extent state | **upstream_not_applicable** | SwordFS allocation is governed by logical chunking and strategy-private object representation, not local extent-placement hints. |
+| `generic/367` | physical extent-size allocation hints and allocated/delayed extent state | **upstream_not_applicable** | SwordFS allocation is governed by logical chunking and chunk-type-private object representation, not local extent-placement hints. |
 | `generic/507` | inode-flag recovery across forced filesystem shutdown | **upstream_not_applicable** | The flag prerequisite is incidental; the asserted durability mechanism is forced local-filesystem shutdown/journal recovery, which pinned fstests does not support for FUSE. Inode-flag persistence itself belongs to #391. |
 | `generic/508` | birth-time recovery across forced filesystem shutdown | **upstream_not_applicable** | `lsattr`/birth-time prerequisites mask a forced-shutdown/journal-recovery contract. Birth-time support itself remains owned by #381. |
 | `generic/596` | XFS `xfsaild` `PF_MEMALLOC` regression during unmount | **upstream_not_applicable** | The synchronous inode flag is only test setup; the asserted bug is specific to the XFS kernel implementation. |
