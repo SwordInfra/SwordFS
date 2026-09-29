@@ -16,24 +16,27 @@ class Status {
  private:
   enum Code : int {
     kOk = 0,
-    kNotFound,         // ENOENT
-    kEndOfDirectory,   // directory iteration reached the end
-    kAlreadyExists,    // EEXIST
-    kNotDirectory,     // ENOTDIR
-    kIsDirectory,      // EISDIR
-    kNotEmpty,         // ENOTEMPTY
-    kInvalidArgument,  // EINVAL
-    kMalformed,        // malformed persistent data
-    kNotSupported,     // ENOSYS
-    kIOError,          // EIO
-    kUnavailable,      // internal backend availability failure; maps to EIO
-    kOutcomeUnknown,   // internal ambiguous remote mutation outcome; maps to EIO
-    kBusy,             // EBUSY
-    kNotPermitted,     // EPERM
-    kPermission,       // EACCES
-    kNoMemory,         // ENOMEM
-    kNameTooLong,      // ENAMETOOLONG
-    kInternal,         // internal / unexpected error
+    kNotFound,               // ENOENT
+    kEndOfDirectory,         // directory iteration reached the end
+    kAlreadyExists,          // EEXIST
+    kNotDirectory,           // ENOTDIR
+    kIsDirectory,            // EISDIR
+    kNotEmpty,               // ENOTEMPTY
+    kInvalidArgument,        // EINVAL
+    kMalformed,              // malformed persistent data
+    kNotSupported,           // ENOSYS
+    kOperationNotSupported,  // EOPNOTSUPP
+    kNoData,                 // ENODATA
+    kIOError,                // EIO
+    kUnavailable,            // internal backend availability failure; maps to EIO
+    kOutcomeUnknown,         // internal ambiguous remote mutation outcome; maps to EIO
+    kBusy,                   // EBUSY
+    kNotPermitted,           // EPERM
+    kPermission,             // EACCES
+    kNoMemory,               // ENOMEM
+    kNameTooLong,            // ENAMETOOLONG
+    kRange,                  // ERANGE
+    kInternal,               // internal / unexpected error
   };
 
  public:
@@ -93,6 +96,12 @@ class Status {
   static Status NotSupported(std::string msg) {
     return Status(kNotSupported, std::move(msg));
   }
+  static Status OperationNotSupported(std::string msg) {
+    return Status(kOperationNotSupported, std::move(msg));
+  }
+  static Status NoData(std::string msg) {
+    return Status(kNoData, std::move(msg));
+  }
   static Status IOError(std::string msg) {
     return Status(kIOError, std::move(msg));
   }
@@ -119,6 +128,9 @@ class Status {
   }
   static Status NameTooLong(std::string msg) {
     return Status(kNameTooLong, std::move(msg));
+  }
+  static Status Range(std::string msg) {
+    return Status(kRange, std::move(msg));
   }
   static Status Internal(std::string msg) {
     return Status(kInternal, std::move(msg));

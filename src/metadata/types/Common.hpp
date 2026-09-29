@@ -13,6 +13,9 @@ using ChunkRevision = uint64_t;
 
 constexpr InodeID kRootInodeId = 1;
 constexpr ChunkRevision kInvalidChunkRevision = 0;
+inline constexpr uint64_t kMaxXAttrNameLength = 255;
+inline constexpr uint64_t kMaxXAttrValueSize = 64 * 1024;
+inline constexpr uint64_t kMaxXAttrListSize = 64 * 1024;
 
 struct Limits {
   uint64_t max_name_length;
@@ -50,6 +53,12 @@ enum class RenameFlag : uint32_t {
   kNone = 0,
   kNoReplace = 1u << 0,
   kExchange = 1u << 1,
+};
+
+enum class XAttrSetMode : uint8_t {
+  kUpsert,
+  kCreateOnly,
+  kReplaceOnly,
 };
 
 inline SetAttrField FromFuseSetAttrFields(unsigned int fields) {

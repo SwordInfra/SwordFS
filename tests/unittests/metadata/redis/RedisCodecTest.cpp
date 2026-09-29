@@ -64,6 +64,104 @@ TEST(MetadataTypesTest, InodeRoundTrip) {
   EXPECT_EQ(output.parent_ino, input.parent_ino);
 }
 
+TEST(MetadataTypesTest, InodeXAttrsRoundTripPreservesBinaryValues) {
+  auto input = MakeInode();
+  input.xattrs.emplace("user.alpha", std::string("a\0b", 3));
+  input.xattrs.emplace("user.empty", std::string{});
+
+  std::string encoded;
+  ASSERT_TRUE(input.SerializeTo(&encoded).ok());
+
+  SwordFsInode output;
+  ASSERT_TRUE(output.ParseFrom(encoded).ok());
+  EXPECT_EQ(output.xattrs, input.xattrs);
+}
+
+TEST(MetadataTypesTest, InodeXAttrEncodingIsDeterministicByName) {
+  auto first = MakeInode();
+  first.xattrs.emplace("user.zeta", "last");
+  first.xattrs.emplace("user.alpha", "first");
+
+  auto second = MakeInode();
+  second.xattrs.emplace("user.alpha", "first");
+  second.xattrs.emplace("user.zeta", "last");
+
+  std::string first_encoded;
+  std::string second_encoded;
+  ASSERT_TRUE(first.SerializeTo(&first_encoded).ok());
+  ASSERT_TRUE(second.SerializeTo(&second_encoded).ok());
+  EXPECT_EQ(first_encoded, second_encoded);
+}
+
+TEST(MetadataTypesTest, InodeXAttrHelpersValidateArgumentsAndModes) {
+  auto inode = MakeInode();
+  const auto original_ctime = inode.attr.ctime;
+  const auto original_ctime_nsec = inode.attr.ctime_nsec;
+
+  EXPECT_EQ(inode.SetXAttr("", "value", XAttrSetMode::kUpsert).ToErrno(), EINVAL);
+  EXPECT_EQ(inode.SetXAttr("user.key", "value", static_cast<XAttrSetMode>(255)).ToErrno(), EINVAL);
+  EXPECT_EQ(inode.attr.ctime, original_ctime);
+  EXPECT_EQ(inode.attr.ctime_nsec, original_ctime_nsec);
+  EXPECT_EQ(inode.GetXAttr("user.key", nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(inode.ListXAttrs(nullptr).ToErrno(), EINVAL);
+}
+
+TEST(MetadataTypesTest, InodeXAttrLimitsBoundIndividualStateAndKeepListQueryable) {
+  constexpr size_t kMaxXAttrNameLength = 255;
+  constexpr size_t kMaxXAttrValueSize = 64 * 1024;
+  constexpr size_t kMaxXAttrListSize = 64 * 1024;
+
+  auto inode = MakeInode();
+  const std::string max_name = std::string("user.") + std::string(kMaxXAttrNameLength - 5, 'n');
+  const std::string over_name = max_name + "n";
+  const std::string max_value(kMaxXAttrValueSize, 'v');
+  const std::string over_value(kMaxXAttrValueSize + 1, 'v');
+
+  ASSERT_TRUE(inode.SetXAttr("user.small", "x", XAttrSetMode::kUpsert).ok());
+  ASSERT_TRUE(inode.SetXAttr(max_name, max_value, XAttrSetMode::kUpsert).ok());
+  EXPECT_EQ(inode.SetXAttr(over_name, "value", XAttrSetMode::kUpsert).ToErrno(), ERANGE);
+  EXPECT_EQ(inode.SetXAttr("user.too-large", over_value, XAttrSetMode::kUpsert).ToErrno(), ERANGE);
+  ASSERT_TRUE(inode.SetXAttr("user.additional", "x", XAttrSetMode::kUpsert).ok());
+  std::string value;
+  EXPECT_EQ(inode.GetXAttr(over_name, &value).ToErrno(), ERANGE);
+  EXPECT_EQ(inode.RemoveXAttr(over_name).ToErrno(), ERANGE);
+
+  auto list_bound_inode = MakeInode();
+  auto make_max_name = [](size_t index) {
+    std::string suffix = std::to_string(index);
+    suffix.insert(0, 6 - suffix.size(), '0');
+    return std::string("user.") + std::string(244, 'n') + suffix;
+  };
+  constexpr size_t kPackedMaxNameSize = kMaxXAttrNameLength + 1;
+  static_assert(kMaxXAttrListSize % kPackedMaxNameSize == 0);
+  constexpr size_t kNamesAtListLimit = kMaxXAttrListSize / kPackedMaxNameSize;
+  for (size_t i = 0; i < kNamesAtListLimit; ++i) {
+    ASSERT_TRUE(list_bound_inode.SetXAttr(make_max_name(i), "", XAttrSetMode::kUpsert).ok()) << i;
+  }
+  EXPECT_EQ(list_bound_inode.SetXAttr("user.missing", "value", XAttrSetMode::kReplaceOnly).ToErrno(), ENODATA);
+  EXPECT_EQ(list_bound_inode.SetXAttr(make_max_name(kNamesAtListLimit), "", XAttrSetMode::kUpsert).ToErrno(), ERANGE);
+}
+
+TEST(MetadataTypesTest, InodeXAttrDecoderRejectsDuplicateNames) {
+  const auto inode = MakeInode();
+  BufEncoder enc;
+  enc.Header(RecordType::kInode);
+  enc.U64(inode.ino);
+  enc.Attr(inode.attr);
+  enc.U64(inode.parent_ino);
+  enc.String(inode.symlink_target);
+  enc.U64(2);
+  enc.String("user.duplicate");
+  enc.String("first");
+  enc.String("user.duplicate");
+  enc.String("second");
+
+  std::string encoded;
+  enc.Finish(&encoded);
+  SwordFsInode parsed;
+  EXPECT_EQ(parsed.ParseFrom(encoded).ToErrno(), EIO);
+}
+
 TEST(MetadataTypesTest, SymlinkRoundTrip) {
   auto input = MakeInode();
   input.attr.mode = S_IFLNK | 0777;

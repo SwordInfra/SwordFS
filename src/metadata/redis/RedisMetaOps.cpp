@@ -251,6 +251,36 @@ utils::Status RedisMetaOps::SetAttr(InodeID ino, const SwordFsAttr &requested, S
   return status;
 }
 
+utils::Status RedisMetaOps::SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) {
+  utils::ExpectInFiberDomain();
+  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.SetXAttr(ino, name, value, mode); });
+}
+
+utils::Status RedisMetaOps::GetXAttr(InodeID ino, std::string_view name, std::string *value) {
+  utils::ExpectInFiberDomain();
+  SwordFsInode inode;
+  auto status = GetInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  return inode.GetXAttr(name, value);
+}
+
+utils::Status RedisMetaOps::ListXAttrs(InodeID ino, std::vector<std::string> *names) {
+  utils::ExpectInFiberDomain();
+  SwordFsInode inode;
+  auto status = GetInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  return inode.ListXAttrs(names);
+}
+
+utils::Status RedisMetaOps::RemoveXAttr(InodeID ino, std::string_view name) {
+  utils::ExpectInFiberDomain();
+  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.RemoveXAttr(ino, name); });
+}
+
 utils::Status RedisMetaOps::Truncate(InodeID ino, uint64_t size) {
   utils::ExpectInFiberDomain();
   std::vector<PendingDelete> detached_chunks;

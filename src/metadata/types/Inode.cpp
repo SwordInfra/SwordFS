@@ -105,6 +105,97 @@ void SwordFsInode::Touch(SetAttrField fields) {
   }
 }
 
+utils::Status SwordFsInode::SetXAttr(std::string_view name, std::string_view value, XAttrSetMode mode) {
+  if (name.empty()) {
+    return utils::Status::InvalidArgument("xattr name is empty");
+  }
+  if (name.size() > kMaxXAttrNameLength) {
+    return utils::Status::Range("xattr name exceeds maximum length");
+  }
+  if (value.size() > kMaxXAttrValueSize) {
+    return utils::Status::Range("xattr value exceeds maximum size");
+  }
+  const std::string key(name);
+  auto it = xattrs.find(key);
+  switch (mode) {
+    case XAttrSetMode::kUpsert:
+      break;
+    case XAttrSetMode::kCreateOnly:
+      if (it != xattrs.end()) {
+        return utils::Status::AlreadyExists("xattr already exists");
+      }
+      break;
+    case XAttrSetMode::kReplaceOnly:
+      if (it == xattrs.end()) {
+        return utils::Status::NoData("xattr not found");
+      }
+      break;
+    default:
+      return utils::Status::InvalidArgument("invalid xattr set mode");
+  }
+
+  const bool inserts_name = it == xattrs.end();
+  if (inserts_name) {
+    size_t list_bytes = name.size() + 1;
+    for (const auto &[existing_name, existing_value] : xattrs) {
+      (void)existing_value;
+      list_bytes += existing_name.size() + 1;
+    }
+    if (list_bytes > kMaxXAttrListSize) {
+      return utils::Status::Range("xattr name list exceeds maximum size");
+    }
+  }
+
+  if (inserts_name) {
+    xattrs.emplace(key, std::string(value));
+  } else {
+    it->second.assign(value);
+  }
+  Touch(SetAttrField::kCtime);
+  return utils::Status::OK();
+}
+
+utils::Status SwordFsInode::GetXAttr(std::string_view name, std::string *value) const {
+  if (value == nullptr) {
+    return utils::Status::InvalidArgument("xattr value output is null");
+  }
+  if (name.size() > kMaxXAttrNameLength) {
+    return utils::Status::Range("xattr name exceeds maximum length");
+  }
+  auto it = xattrs.find(std::string(name));
+  if (it == xattrs.end()) {
+    return utils::Status::NoData("xattr not found");
+  }
+  *value = it->second;
+  return utils::Status::OK();
+}
+
+utils::Status SwordFsInode::ListXAttrs(std::vector<std::string> *names) const {
+  if (names == nullptr) {
+    return utils::Status::InvalidArgument("xattr names output is null");
+  }
+  names->clear();
+  names->reserve(xattrs.size());
+  for (const auto &[name, value] : xattrs) {
+    (void)value;
+    names->push_back(name);
+  }
+  return utils::Status::OK();
+}
+
+utils::Status SwordFsInode::RemoveXAttr(std::string_view name) {
+  if (name.size() > kMaxXAttrNameLength) {
+    return utils::Status::Range("xattr name exceeds maximum length");
+  }
+  auto it = xattrs.find(std::string(name));
+  if (it == xattrs.end()) {
+    return utils::Status::NoData("xattr not found");
+  }
+  xattrs.erase(it);
+  Touch(SetAttrField::kCtime);
+  return utils::Status::OK();
+}
+
 bool SwordFsInode::IsDir() const {
   return S_ISDIR(attr.mode);
 }
@@ -134,6 +225,11 @@ utils::Status SwordFsInode::SerializeTo(std::string *out) const {
   enc.Attr(attr);
   enc.U64(parent_ino);
   enc.String(symlink_target);
+  enc.U64(xattrs.size());
+  for (const auto &[name, value] : xattrs) {
+    enc.String(name);
+    enc.String(value);
+  }
   enc.Finish(out);
   return utils::Status::OK();
 }
@@ -145,6 +241,22 @@ utils::Status SwordFsInode::ParseFrom(std::string_view data) {
   dec.Attr(&attr);
   dec.U64(&parent_ino);
   dec.String(&symlink_target);
+  uint64_t xattr_count = 0;
+  dec.U64(&xattr_count);
+  xattrs.clear();
+  for (uint64_t i = 0; i < xattr_count; ++i) {
+    std::string name;
+    std::string value;
+    if (!dec.String(&name) || !dec.String(&value)) {
+      return utils::Status::Malformed("Malformed inode record: xattr decode failure");
+    }
+    if (name.empty()) {
+      return utils::Status::Malformed("Malformed inode record: empty xattr name");
+    }
+    if (!xattrs.emplace(std::move(name), std::move(value)).second) {
+      return utils::Status::Malformed("Malformed inode record: duplicate xattr name");
+    }
+  }
   if (!dec || ino == 0) {
     return utils::Status::Malformed("Malformed inode record: decode failure");
   }

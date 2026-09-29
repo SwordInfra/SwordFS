@@ -271,6 +271,32 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
   return utils::Status::OK();
 }
 
+utils::Status RedisMetaTxn::SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) {
+  SwordFsInode inode;
+  auto status = LookupInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  status = inode.SetXAttr(name, value, mode);
+  if (!status.ok()) {
+    return status;
+  }
+  return SetInode(inode);
+}
+
+utils::Status RedisMetaTxn::RemoveXAttr(InodeID ino, std::string_view name) {
+  SwordFsInode inode;
+  auto status = LookupInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  status = inode.RemoveXAttr(name);
+  if (!status.ok()) {
+    return status;
+  }
+  return SetInode(inode);
+}
+
 utils::Status RedisMetaTxn::Truncate(InodeID ino, uint64_t size, std::vector<PendingDelete> *detached_chunks) {
   if (detached_chunks != nullptr) {
     detached_chunks->clear();

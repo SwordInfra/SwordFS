@@ -13,6 +13,7 @@
 #include <folly/io/async/EventBase.h>
 #include <gtest/gtest.h>
 #include <linux/fuse.h>
+#include <sys/xattr.h>
 
 #include <algorithm>
 #include <array>
@@ -56,6 +57,7 @@ using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
+using swordfs::metadata::XAttrSetMode;
 using swordfs::vfs::VfsImpl;
 
 namespace {
@@ -73,6 +75,7 @@ struct FuseReplyCapture {
   std::optional<size_t> write_count;
   std::optional<struct statvfs> statfs;
   std::optional<std::string> readlink;
+  std::optional<size_t> xattr_size;
   std::string buffer;
   bool none = false;
   int reply_result = 0;
@@ -215,6 +218,17 @@ extern "C" int fuse_reply_buf(fuse_req_t req, const char *buf, size_t size) {
   return reply_result;
 }
 
+extern "C" int fuse_reply_xattr(fuse_req_t req, size_t count) {
+  auto *capture = CaptureFor(req);
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->xattr_size = count;
+    capture->replied = true;
+  }
+  capture->cv.notify_one();
+  return 0;
+}
+
 extern "C" void fuse_reply_none(fuse_req_t req) {
   auto *capture = CaptureFor(req);
   {
@@ -280,22 +294,6 @@ class IOBuf;
 
 TEST(VfsImplTest, Fsyncdir) {
   EXPECT_NOT_SUPPORTED(VfsImpl::FSyncDir(1, 0));
-}
-
-TEST(VfsImplTest, Setxattr) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::SetXAttr(1, "user.key", "val", 3, 0));
-}
-
-TEST(VfsImplTest, Getxattr) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::GetXAttr(1, "user.key", 256));
-}
-
-TEST(VfsImplTest, Listxattr) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::ListXAttr(1, 1024));
-}
-
-TEST(VfsImplTest, Removexattr) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::RemoveXAttr(1, "user.key"));
 }
 
 TEST(VfsImplTest, Ioctl) {
@@ -543,6 +541,45 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return call_status_;
   }
+  Status SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) override {
+    ++set_xattr_calls_;
+    last_xattr_ino_ = ino;
+    last_xattr_name_ = name;
+    last_xattr_value_.assign(value);
+    last_xattr_mode_ = mode;
+    return xattr_status_;
+  }
+  Status GetXAttr(InodeID ino, std::string_view name, std::string *value) override {
+    ++get_xattr_calls_;
+    last_xattr_ino_ = ino;
+    last_xattr_name_ = name;
+    if (!xattr_status_.ok()) {
+      return xattr_status_;
+    }
+    if (value == nullptr) {
+      return Status::InvalidArgument("xattr output is null");
+    }
+    *value = xattr_value_;
+    return Status::OK();
+  }
+  Status ListXAttrs(InodeID ino, std::vector<std::string> *names) override {
+    ++list_xattr_calls_;
+    last_xattr_ino_ = ino;
+    if (!xattr_status_.ok()) {
+      return xattr_status_;
+    }
+    if (names == nullptr) {
+      return Status::InvalidArgument("xattr names output is null");
+    }
+    *names = xattr_names_;
+    return Status::OK();
+  }
+  Status RemoveXAttr(InodeID ino, std::string_view name) override {
+    ++remove_xattr_calls_;
+    last_xattr_ino_ = ino;
+    last_xattr_name_ = name;
+    return xattr_status_;
+  }
   Status StatFs(SwordFsStatFs *stbuf) override {
     *stbuf = {};
     stbuf->name_max = 255;
@@ -647,6 +684,32 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     readlink_status_ = std::move(status);
   }
 
+  void set_xattr_result(std::string value, Status status = Status::OK()) {
+    xattr_value_ = std::move(value);
+    xattr_status_ = std::move(status);
+  }
+
+  void set_xattr_list_result(std::vector<std::string> names, Status status = Status::OK()) {
+    xattr_names_ = std::move(names);
+    xattr_status_ = std::move(status);
+  }
+
+  int set_xattr_calls() const {
+    return set_xattr_calls_;
+  }
+
+  XAttrSetMode last_xattr_mode() const {
+    return last_xattr_mode_;
+  }
+
+  const std::string &last_xattr_name() const {
+    return last_xattr_name_;
+  }
+
+  const std::string &last_xattr_value() const {
+    return last_xattr_value_;
+  }
+
   int open_calls() const {
     return open_calls_;
   }
@@ -714,7 +777,18 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status open_status_{Status::OK()};
   Status readlink_status_{Status::OK()};
   Status get_inode_status_{Status::OK()};
+  Status xattr_status_{Status::OK()};
   std::string readlink_target_;
+  std::string xattr_value_;
+  std::vector<std::string> xattr_names_;
+  InodeID last_xattr_ino_ = 0;
+  std::string last_xattr_name_;
+  std::string last_xattr_value_;
+  XAttrSetMode last_xattr_mode_{XAttrSetMode::kUpsert};
+  int set_xattr_calls_ = 0;
+  int get_xattr_calls_ = 0;
+  int list_xattr_calls_ = 0;
+  int remove_xattr_calls_ = 0;
   int lookup_calls_ = 0;
   int open_calls_ = 0;
   int mknod_calls_ = 0;
@@ -1211,6 +1285,177 @@ TEST_F(VfsImplIntegrationTest, FuseDirectoryAndStatfsHooksReturnStructuredReplie
   EXPECT_EQ(statfs_capture.statfs->f_bsize, 4096U);
 }
 
+FIBER_TEST_F(VfsImplIntegrationTest, XAttrVfsPolicyTranslatesLinuxFlagsAndRejectsUnsupportedNamespaces) {
+  ASSERT_TRUE(VfsImpl::SetXAttr(7, "user.key", "value", 5, 0).ok());
+  EXPECT_EQ(mock_meta_->last_xattr_mode(), XAttrSetMode::kUpsert);
+  EXPECT_EQ(mock_meta_->last_xattr_name(), "user.key");
+  EXPECT_EQ(mock_meta_->last_xattr_value(), "value");
+
+  ASSERT_TRUE(VfsImpl::SetXAttr(7, "user.empty", "", 0, 0).ok());
+  EXPECT_TRUE(mock_meta_->last_xattr_value().empty());
+  ASSERT_TRUE(VfsImpl::SetXAttr(7, "user.empty", nullptr, 0, 0).ok());
+  EXPECT_TRUE(mock_meta_->last_xattr_value().empty());
+
+  ASSERT_TRUE(VfsImpl::SetXAttr(7, "user.key", "value", 5, XATTR_CREATE).ok());
+  EXPECT_EQ(mock_meta_->last_xattr_mode(), XAttrSetMode::kCreateOnly);
+  ASSERT_TRUE(VfsImpl::SetXAttr(7, "user.key", "value", 5, XATTR_REPLACE).ok());
+  EXPECT_EQ(mock_meta_->last_xattr_mode(), XAttrSetMode::kReplaceOnly);
+
+  const int calls_before_invalid = mock_meta_->set_xattr_calls();
+  EXPECT_EQ(VfsImpl::SetXAttr(7, "user.key", "value", 5, XATTR_CREATE | XATTR_REPLACE).ToErrno(), EINVAL);
+  EXPECT_EQ(mock_meta_->set_xattr_calls(), calls_before_invalid);
+  EXPECT_EQ(VfsImpl::SetXAttr(7, "user.key", "value", 5, 0x4000).ToErrno(), EINVAL);
+  EXPECT_EQ(mock_meta_->set_xattr_calls(), calls_before_invalid);
+  EXPECT_EQ(VfsImpl::SetXAttr(7, "user.key", nullptr, 1, 0).ToErrno(), EINVAL);
+  EXPECT_EQ(mock_meta_->set_xattr_calls(), calls_before_invalid);
+  EXPECT_EQ(VfsImpl::SetXAttr(7, "", "value", 5, 0).ToErrno(), EINVAL);
+  EXPECT_EQ(VfsImpl::SetXAttr(7, nullptr, "value", 5, 0).ToErrno(), EINVAL);
+  EXPECT_EQ(VfsImpl::SetXAttr(7, "user.", "value", 5, 0).ToErrno(), EINVAL);
+  EXPECT_EQ(VfsImpl::SetXAttr(7, "trusted.key", "value", 5, 0).ToErrno(), EOPNOTSUPP);
+  EXPECT_EQ(mock_meta_->set_xattr_calls(), calls_before_invalid);
+
+  std::string value;
+  std::vector<std::string> names;
+  EXPECT_EQ(VfsImpl::GetXAttr(7, "user.key", nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(VfsImpl::ListXAttrs(7, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(VfsImpl::GetXAttr(7, "system.posix_acl_access", &value).ToErrno(), EOPNOTSUPP);
+  mock_meta_->set_xattr_list_result({}, Status::NoData("list failed"));
+  EXPECT_EQ(VfsImpl::ListXAttrs(7, &names).ToErrno(), ENODATA);
+  mock_meta_->set_xattr_list_result({"trusted.key", "user.", "user.alpha", "system.posix_acl_access"});
+  EXPECT_TRUE(VfsImpl::ListXAttrs(7, &names).ok());
+  EXPECT_EQ(names, (std::vector<std::string>{"user.alpha"}));
+  EXPECT_EQ(VfsImpl::RemoveXAttr(7, "trusted.key").ToErrno(), EOPNOTSUPP);
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, XAttrVfsPolicyEnforcesLinuxNameAndValueLimits) {
+  constexpr size_t kMaxXAttrNameLength = 255;
+  constexpr size_t kMaxXAttrValueSize = 64 * 1024;
+  const std::string max_name = std::string("user.") + std::string(kMaxXAttrNameLength - 5, 'n');
+  const std::string over_name = max_name + "n";
+  const std::string max_value(kMaxXAttrValueSize, 'v');
+  const std::string over_value(kMaxXAttrValueSize + 1, 'v');
+
+  const int calls_before = mock_meta_->set_xattr_calls();
+  ASSERT_TRUE(VfsImpl::SetXAttr(7, max_name.c_str(), max_value.data(), max_value.size(), 0).ok());
+  EXPECT_EQ(mock_meta_->set_xattr_calls(), calls_before + 1);
+  EXPECT_EQ(VfsImpl::SetXAttr(7, over_name.c_str(), "v", 1, 0).ToErrno(), ERANGE);
+  EXPECT_EQ(VfsImpl::SetXAttr(7, "user.value", over_value.data(), over_value.size(), 0).ToErrno(), ERANGE);
+  EXPECT_EQ(mock_meta_->set_xattr_calls(), calls_before + 1);
+
+  std::string value;
+  EXPECT_EQ(VfsImpl::GetXAttr(7, over_name.c_str(), &value).ToErrno(), ERANGE);
+  EXPECT_EQ(VfsImpl::RemoveXAttr(7, over_name.c_str()).ToErrno(), ERANGE);
+}
+
+TEST_F(VfsImplIntegrationTest, FuseXAttrHooksImplementSizeProbeBufferAndErrnoProtocol) {
+  mock_meta_->set_xattr_result(std::string("a\0b", 3));
+
+  FuseReplyCapture get_probe;
+  swordfs::fuse::VfsHookFactory::SwordFsGetxattr(reinterpret_cast<fuse_req_t>(&get_probe), 7, "user.key", 0);
+  ASSERT_TRUE(get_probe.Wait());
+  ASSERT_TRUE(get_probe.xattr_size.has_value());
+  EXPECT_EQ(*get_probe.xattr_size, 3U);
+  EXPECT_FALSE(get_probe.error.has_value());
+
+  FuseReplyCapture get_value;
+  swordfs::fuse::VfsHookFactory::SwordFsGetxattr(reinterpret_cast<fuse_req_t>(&get_value), 7, "user.key", 3);
+  ASSERT_TRUE(get_value.Wait());
+  EXPECT_EQ(get_value.buffer, std::string("a\0b", 3));
+  EXPECT_FALSE(get_value.error.has_value());
+
+  FuseReplyCapture get_small;
+  swordfs::fuse::VfsHookFactory::SwordFsGetxattr(reinterpret_cast<fuse_req_t>(&get_small), 7, "user.key", 2);
+  ASSERT_TRUE(get_small.Wait());
+  ASSERT_TRUE(get_small.error.has_value());
+  EXPECT_EQ(*get_small.error, ERANGE);
+
+  mock_meta_->set_xattr_result("");
+  FuseReplyCapture empty_probe;
+  swordfs::fuse::VfsHookFactory::SwordFsGetxattr(reinterpret_cast<fuse_req_t>(&empty_probe), 7, "user.empty", 0);
+  ASSERT_TRUE(empty_probe.Wait());
+  ASSERT_TRUE(empty_probe.xattr_size.has_value());
+  EXPECT_EQ(*empty_probe.xattr_size, 0U);
+
+  mock_meta_->set_xattr_list_result({"user.alpha", "user.zeta"});
+  const std::string packed_names("user.alpha\0user.zeta\0", 21);
+  FuseReplyCapture list_probe;
+  swordfs::fuse::VfsHookFactory::SwordFsListxattr(reinterpret_cast<fuse_req_t>(&list_probe), 7, 0);
+  ASSERT_TRUE(list_probe.Wait());
+  ASSERT_TRUE(list_probe.xattr_size.has_value());
+  EXPECT_EQ(*list_probe.xattr_size, packed_names.size());
+
+  FuseReplyCapture list_value;
+  swordfs::fuse::VfsHookFactory::SwordFsListxattr(reinterpret_cast<fuse_req_t>(&list_value), 7, packed_names.size());
+  ASSERT_TRUE(list_value.Wait());
+  EXPECT_EQ(list_value.buffer, packed_names);
+
+  FuseReplyCapture list_small;
+  swordfs::fuse::VfsHookFactory::SwordFsListxattr(reinterpret_cast<fuse_req_t>(&list_small), 7,
+                                                  packed_names.size() - 1);
+  ASSERT_TRUE(list_small.Wait());
+  ASSERT_TRUE(list_small.error.has_value());
+  EXPECT_EQ(*list_small.error, ERANGE);
+
+  mock_meta_->set_xattr_list_result({});
+  FuseReplyCapture empty_list_probe;
+  swordfs::fuse::VfsHookFactory::SwordFsListxattr(reinterpret_cast<fuse_req_t>(&empty_list_probe), 7, 0);
+  ASSERT_TRUE(empty_list_probe.Wait());
+  ASSERT_TRUE(empty_list_probe.xattr_size.has_value());
+  EXPECT_EQ(*empty_list_probe.xattr_size, 0U);
+
+  FuseReplyCapture empty_list_value;
+  swordfs::fuse::VfsHookFactory::SwordFsListxattr(reinterpret_cast<fuse_req_t>(&empty_list_value), 7, 1);
+  ASSERT_TRUE(empty_list_value.Wait());
+  EXPECT_TRUE(empty_list_value.buffer.empty());
+  EXPECT_FALSE(empty_list_value.error.has_value());
+
+  mock_meta_->set_xattr_result("", Status::NoData("xattr missing"));
+  FuseReplyCapture list_error;
+  swordfs::fuse::VfsHookFactory::SwordFsListxattr(reinterpret_cast<fuse_req_t>(&list_error), 7, 0);
+  ASSERT_TRUE(list_error.Wait());
+  ASSERT_TRUE(list_error.error.has_value());
+  EXPECT_EQ(*list_error.error, ENODATA);
+
+  FuseReplyCapture missing;
+  swordfs::fuse::VfsHookFactory::SwordFsGetxattr(reinterpret_cast<fuse_req_t>(&missing), 7, "user.missing", 0);
+  ASSERT_TRUE(missing.Wait());
+  ASSERT_TRUE(missing.error.has_value());
+  EXPECT_EQ(*missing.error, ENODATA);
+
+  mock_meta_->set_xattr_result("value");
+  FuseReplyCapture unsupported;
+  swordfs::fuse::VfsHookFactory::SwordFsGetxattr(reinterpret_cast<fuse_req_t>(&unsupported), 7, "trusted.key", 0);
+  ASSERT_TRUE(unsupported.Wait());
+  ASSERT_TRUE(unsupported.error.has_value());
+  EXPECT_EQ(*unsupported.error, EOPNOTSUPP);
+
+  FuseReplyCapture set_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsSetxattr(reinterpret_cast<fuse_req_t>(&set_capture), 7, "user.key", "v", 1, 0);
+  ASSERT_TRUE(set_capture.Wait());
+  ASSERT_TRUE(set_capture.error.has_value());
+  EXPECT_EQ(*set_capture.error, 0);
+
+  FuseReplyCapture set_empty_value;
+  swordfs::fuse::VfsHookFactory::SwordFsSetxattr(reinterpret_cast<fuse_req_t>(&set_empty_value), 7, "user.empty", "", 0,
+                                                 0);
+  ASSERT_TRUE(set_empty_value.Wait());
+  ASSERT_TRUE(set_empty_value.error.has_value());
+  EXPECT_EQ(*set_empty_value.error, 0);
+
+  FuseReplyCapture set_null_empty_value;
+  swordfs::fuse::VfsHookFactory::SwordFsSetxattr(reinterpret_cast<fuse_req_t>(&set_null_empty_value), 7, "user.empty",
+                                                 nullptr, 0, 0);
+  ASSERT_TRUE(set_null_empty_value.Wait());
+  ASSERT_TRUE(set_null_empty_value.error.has_value());
+  EXPECT_EQ(*set_null_empty_value.error, 0);
+
+  FuseReplyCapture remove_capture;
+  swordfs::fuse::VfsHookFactory::SwordFsRemovexattr(reinterpret_cast<fuse_req_t>(&remove_capture), 7, "user.key");
+  ASSERT_TRUE(remove_capture.Wait());
+  ASSERT_TRUE(remove_capture.error.has_value());
+  EXPECT_EQ(*remove_capture.error, 0);
+}
+
 TEST_F(VfsImplIntegrationTest, FuseUnsupportedHooksReplyWithEnosys) {
   auto expect_enosys = [](auto &&invoke) {
     FuseReplyCapture capture;
@@ -1222,10 +1467,6 @@ TEST_F(VfsImplIntegrationTest, FuseUnsupportedHooksReplyWithEnosys) {
 
   fuse_file_info fi{};
   struct flock lock{};
-  expect_enosys([](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsSetxattr(req, 1, "user.key", "v", 1, 0); });
-  expect_enosys([](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsGetxattr(req, 1, "user.key", 128); });
-  expect_enosys([](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsListxattr(req, 1, 128); });
-  expect_enosys([](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsRemovexattr(req, 1, "user.key"); });
   expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsGetlk(req, 1, &fi, &lock); });
   expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsSetlk(req, 1, &fi, &lock, 0); });
   expect_enosys([](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsBmap(req, 1, 4096, 0); });

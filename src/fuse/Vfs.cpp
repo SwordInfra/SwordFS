@@ -87,6 +87,32 @@ bool ResetRuntimeRegistriesForMount() {
   return initialized.load(std::memory_order_acquire);
 }
 
+void ReplyXAttrBuffer(fuse_req_t req, size_t requested_size, std::string_view data) {
+  if (requested_size == 0) {
+    fuse_reply_xattr(req, data.size());
+    return;
+  }
+  if (requested_size < data.size()) {
+    fuse_reply_err(req, ERANGE);
+    return;
+  }
+  fuse_reply_buf(req, data.empty() ? nullptr : data.data(), data.size());
+}
+
+std::string PackXAttrNames(const std::vector<std::string> &names) {
+  size_t packed_size = 0;
+  for (const auto &name : names) {
+    packed_size += name.size() + 1;
+  }
+  std::string packed;
+  packed.reserve(packed_size);
+  for (const auto &name : names) {
+    packed.append(name);
+    packed.push_back('\0');
+  }
+  return packed;
+}
+
 }  // namespace
 
 // ────────────────────────────────────────────────────────────────
@@ -445,9 +471,11 @@ void VfsHookFactory::SwordFsStatfs(fuse_req_t req, fuse_ino_t ino) {
 
 void VfsHookFactory::SwordFsSetxattr(fuse_req_t req, fuse_ino_t ino, const char *name, const char *value, size_t size,
                                      int flags) {
-  RunFuseInFiber(req, [req, ino, name = std::string(name), value = std::string(value, size), size, flags] {
+  const bool value_is_null = value == nullptr;
+  const std::string copied_value = value_is_null || size == 0 ? std::string{} : std::string(value, size);
+  RunFuseInFiber(req, [req, ino, name = std::string(name), value = copied_value, value_is_null, size, flags] {
     SetRequestContext(req);
-    auto status = VfsImpl::SetXAttr(ino, name.c_str(), value.data(), size, flags);
+    auto status = VfsImpl::SetXAttr(ino, name.c_str(), value_is_null ? nullptr : value.data(), size, flags);
     fuse_reply_err(req, status.ToErrno());
   });
 }
@@ -455,16 +483,26 @@ void VfsHookFactory::SwordFsSetxattr(fuse_req_t req, fuse_ino_t ino, const char 
 void VfsHookFactory::SwordFsGetxattr(fuse_req_t req, fuse_ino_t ino, const char *name, size_t size) {
   RunFuseInFiber(req, [req, ino, name = std::string(name), size] {
     SetRequestContext(req);
-    auto status = VfsImpl::GetXAttr(ino, name.c_str(), size);
-    fuse_reply_err(req, status.ToErrno());
+    std::string value;
+    auto status = VfsImpl::GetXAttr(ino, name.c_str(), &value);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    ReplyXAttrBuffer(req, size, value);
   });
 }
 
 void VfsHookFactory::SwordFsListxattr(fuse_req_t req, fuse_ino_t ino, size_t size) {
   RunFuseInFiber(req, [req, ino, size] {
     SetRequestContext(req);
-    auto status = VfsImpl::ListXAttr(ino, size);
-    fuse_reply_err(req, status.ToErrno());
+    std::vector<std::string> names;
+    auto status = VfsImpl::ListXAttrs(ino, &names);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    ReplyXAttrBuffer(req, size, PackXAttrNames(names));
   });
 }
 

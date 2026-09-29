@@ -59,8 +59,8 @@ class VfsImpl {
   static utils::Status FSyncDir(fuse_ino_t ino, int datasync);
   static utils::Status StatFs(fuse_ino_t ino, struct statvfs *stbuf);
   static utils::Status SetXAttr(fuse_ino_t ino, const char *name, const char *value, size_t size, int flags);
-  static utils::Status GetXAttr(fuse_ino_t ino, const char *name, size_t size);
-  static utils::Status ListXAttr(fuse_ino_t ino, size_t size);
+  static utils::Status GetXAttr(fuse_ino_t ino, const char *name, std::string *value);
+  static utils::Status ListXAttrs(fuse_ino_t ino, std::vector<std::string> *names);
   static utils::Status RemoveXAttr(fuse_ino_t ino, const char *name);
   static utils::Status Create(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry,
                               struct fuse_file_info *fi);

@@ -36,6 +36,7 @@ using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsAttr;
 using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
+using swordfs::metadata::XAttrSetMode;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
 
@@ -468,6 +469,92 @@ FIBER_TEST_F(MemMetaImplTest, MetadataDoesNotDuplicateKernelDac) {
   ASSERT_TRUE(impl_->Rename(dir_ino, "f", dir_ino, "renamed", RenameFlag::kNone).ok());
   ASSERT_TRUE(impl_->Unlink(dir_ino, "renamed").ok());
   ASSERT_TRUE(impl_->RmDir(dir_ino, "sub").ok());
+}
+
+FIBER_TEST_F(MemMetaImplTest, XAttrsProvideAtomicSetModesOrderedListingAndCtime) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "xattrs", 0644, &file).ok());
+
+  SwordFsAttr old_time;
+  old_time.ctime = 1;
+  old_time.ctime_nsec = 0;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, old_time, SetAttrField::kCtime, nullptr).ok());
+
+  std::string value;
+  std::vector<std::string> names;
+  EXPECT_EQ(impl_->GetXAttr(file.ino, "user.missing", &value).ToErrno(), ENODATA);
+  EXPECT_EQ(impl_->RemoveXAttr(file.ino, "user.missing").ToErrno(), ENODATA);
+  EXPECT_EQ(impl_->SetXAttr(file.ino, "user.missing", "x", XAttrSetMode::kReplaceOnly).ToErrno(), ENODATA);
+
+  const std::string binary_value("a\0b", 3);
+  ASSERT_TRUE(impl_->SetXAttr(file.ino, "user.zeta", binary_value, XAttrSetMode::kUpsert).ok());
+  ASSERT_TRUE(impl_->SetXAttr(file.ino, "user.alpha", "first", XAttrSetMode::kCreateOnly).ok());
+  EXPECT_EQ(impl_->SetXAttr(file.ino, "user.alpha", "duplicate", XAttrSetMode::kCreateOnly).ToErrno(), EEXIST);
+  ASSERT_TRUE(impl_->SetXAttr(file.ino, "user.alpha", "replacement", XAttrSetMode::kReplaceOnly).ok());
+
+  ASSERT_TRUE(impl_->GetXAttr(file.ino, "user.zeta", &value).ok());
+  EXPECT_EQ(value, binary_value);
+  ASSERT_TRUE(impl_->GetXAttr(file.ino, "user.alpha", &value).ok());
+  EXPECT_EQ(value, "replacement");
+  ASSERT_TRUE(impl_->ListXAttrs(file.ino, &names).ok());
+  EXPECT_EQ(names, (std::vector<std::string>{"user.alpha", "user.zeta"}));
+
+  SwordFsInode after_set;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &after_set).ok());
+  EXPECT_GT(after_set.attr.ctime, 1);
+
+  old_time.ctime = 1;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, old_time, SetAttrField::kCtime, nullptr).ok());
+  ASSERT_TRUE(impl_->RemoveXAttr(file.ino, "user.alpha").ok());
+  SwordFsInode after_remove;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &after_remove).ok());
+  EXPECT_GT(after_remove.attr.ctime, 1);
+  EXPECT_EQ(impl_->GetXAttr(file.ino, "user.alpha", &value).ToErrno(), ENODATA);
+
+  constexpr InodeID kMissing = 999999;
+  EXPECT_EQ(impl_->SetXAttr(kMissing, "user.key", "v", XAttrSetMode::kUpsert).ToErrno(), ENOENT);
+  EXPECT_EQ(impl_->GetXAttr(kMissing, "user.key", &value).ToErrno(), ENOENT);
+  EXPECT_EQ(impl_->ListXAttrs(kMissing, &names).ToErrno(), ENOENT);
+  EXPECT_EQ(impl_->RemoveXAttr(kMissing, "user.key").ToErrno(), ENOENT);
+}
+
+FIBER_TEST_F(MemMetaImplTest, XAttrLimitsApplyToDirectMetadataCallers) {
+  constexpr size_t kMaxXAttrNameLength = 255;
+  constexpr size_t kMaxXAttrValueSize = 64 * 1024;
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "xattr-limits", 0644, &file).ok());
+
+  const std::string max_name = std::string("user.") + std::string(kMaxXAttrNameLength - 5, 'n');
+  const std::string over_name = max_name + "n";
+  const std::string max_value(kMaxXAttrValueSize, 'v');
+  const std::string over_value(kMaxXAttrValueSize + 1, 'v');
+  ASSERT_TRUE(impl_->SetXAttr(file.ino, "user.small", "x", XAttrSetMode::kUpsert).ok());
+  ASSERT_TRUE(impl_->SetXAttr(file.ino, max_name, max_value, XAttrSetMode::kUpsert).ok());
+  EXPECT_EQ(impl_->SetXAttr(file.ino, over_name, "v", XAttrSetMode::kUpsert).ToErrno(), ERANGE);
+  EXPECT_EQ(impl_->SetXAttr(file.ino, "user.value", over_value, XAttrSetMode::kUpsert).ToErrno(), ERANGE);
+
+  std::string value;
+  EXPECT_EQ(impl_->GetXAttr(file.ino, over_name, &value).ToErrno(), ERANGE);
+  EXPECT_EQ(impl_->RemoveXAttr(file.ino, over_name).ToErrno(), ERANGE);
+}
+
+FIBER_TEST_F(MemMetaImplTest, XAttrsFollowInodeIdentityUntilFinalReclaim) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "xattr-source", 0644, &file).ok());
+  ASSERT_TRUE(impl_->SetXAttr(file.ino, "user.key", "value", XAttrSetMode::kUpsert).ok());
+  ASSERT_TRUE(impl_->Link(file.ino, kRoot, "xattr-link", nullptr).ok());
+  ASSERT_TRUE(impl_->Unlink(kRoot, "xattr-source").ok());
+
+  std::string value;
+  ASSERT_TRUE(impl_->GetXAttr(file.ino, "user.key", &value).ok());
+  EXPECT_EQ(value, "value");
+  ASSERT_TRUE(impl_->Rename(kRoot, "xattr-link", kRoot, "xattr-renamed", RenameFlag::kNone).ok());
+  ASSERT_TRUE(impl_->GetXAttr(file.ino, "user.key", &value).ok());
+  EXPECT_EQ(value, "value");
+
+  ASSERT_TRUE(impl_->Unlink(kRoot, "xattr-renamed").ok());
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  EXPECT_EQ(impl_->GetXAttr(file.ino, "user.key", &value).ToErrno(), ENOENT);
 }
 
 FIBER_TEST_F(MemMetaImplTest, StickyDirectoryOwnershipSafetyRemainsInMetadata) {

@@ -17,7 +17,7 @@ not by itself establish support for every Cluster deployment configuration.
 | `next_chunk_revision` | Integer string | Volume-wide logical publication-generation allocator |
 | `private_sequence:<mechanism-key>:<sequence-id>` | Integer string | Mechanism-private monotonic identity allocator; `<sequence-id>` is a stable compile-time discriminator |
 | `inode_count` | Integer string | Advisory legacy inode metric; never an authoritative filesystem invariant |
-| `inode:<ino>` | String | Canonical serialized `SwordFsInode` |
+| `inode:<ino>` | String | Canonical serialized `SwordFsInode`, including ordered raw xattrs |
 | `dir:<parent_ino>` | Hash | Name → child type and inode ID |
 | `chunk:<ino>` | Hash | Canonical decimal 64-bit chunk index → shared published logical `SwordFsChunk` head |
 | `private_chunk_index:<mechanism-key>:<hash>` | Hash | Mechanism-owned chunk-internal fields; logical chunk-index fields use canonical decimal 64-bit indexes, `<mechanism-key>` is the stable typed `ChunkOverwriteMechanism` key, and field layout belongs only to that mechanism |

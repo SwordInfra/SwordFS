@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <folly/io/IOBuf.h>
 #include <folly/logging/xlog.h>
+#include <sys/xattr.h>
 
 #include "config/ConfigCenter.hpp"
 #include "fuse/Limits.hpp"
@@ -42,6 +43,7 @@ using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsAttr;
 using swordfs::metadata::SwordFsInode;
+using swordfs::metadata::XAttrSetMode;
 using swordfs::volume::VolumeImpl;
 
 namespace swordfs::vfs {
@@ -61,6 +63,40 @@ utils::Status RefreshTrackedInode(metadata::SwordFsInode *inode) {
   }
   *inode = std::move(refreshed);
   return utils::Status::OK();
+}
+
+utils::Status ValidateUserXAttrName(const char *name) {
+  if (name == nullptr || name[0] == '\0') {
+    return utils::Status::InvalidArgument("xattr name is empty");
+  }
+  constexpr std::string_view kUserPrefix = "user.";
+  const std::string_view xattr_name(name);
+  if (xattr_name.size() > metadata::kMaxXAttrNameLength) {
+    return utils::Status::Range("xattr name exceeds maximum length");
+  }
+  if (xattr_name == kUserPrefix) {
+    return utils::Status::InvalidArgument("xattr name is empty");
+  }
+  if (!xattr_name.starts_with(kUserPrefix)) {
+    return utils::Status::OperationNotSupported("xattr namespace is not supported");
+  }
+  return utils::Status::OK();
+}
+
+utils::Status TranslateXAttrSetMode(int flags, XAttrSetMode &mode) {
+  switch (flags) {
+    case 0:
+      mode = XAttrSetMode::kUpsert;
+      return utils::Status::OK();
+    case XATTR_CREATE:
+      mode = XAttrSetMode::kCreateOnly;
+      return utils::Status::OK();
+    case XATTR_REPLACE:
+      mode = XAttrSetMode::kReplaceOnly;
+      return utils::Status::OK();
+    default:
+      return utils::Status::InvalidArgument("invalid setxattr flags");
+  }
 }
 
 }  // namespace
@@ -446,31 +482,57 @@ utils::Status VfsImpl::StatFs(fuse_ino_t ino, struct statvfs *stbuf) {
 }
 
 utils::Status VfsImpl::SetXAttr(fuse_ino_t ino, const char *name, const char *value, size_t size, int flags) {
-  (void)ino;
-  (void)name;
-  (void)value;
-  (void)size;
-  (void)flags;
-  return Status::NotSupported("setxattr");
+  auto status = ValidateUserXAttrName(name);
+  if (!status.ok()) {
+    return status;
+  }
+  if (value == nullptr && size != 0) {
+    return Status::InvalidArgument("xattr value is null");
+  }
+  if (size > metadata::kMaxXAttrValueSize) {
+    return Status::Range("xattr value exceeds maximum size");
+  }
+  XAttrSetMode mode = XAttrSetMode::kUpsert;
+  status = TranslateXAttrSetMode(flags, mode);
+  if (!status.ok()) {
+    return status;
+  }
+  const std::string_view xattr_value = size == 0 ? std::string_view{} : std::string_view(value, size);
+  return VolumeImpl::Instance().meta_engine()->SetXAttr(ino, name, xattr_value, mode);
 }
 
-utils::Status VfsImpl::GetXAttr(fuse_ino_t ino, const char *name, size_t size) {
-  (void)ino;
-  (void)name;
-  (void)size;
-  return Status::NotSupported("getxattr");
+utils::Status VfsImpl::GetXAttr(fuse_ino_t ino, const char *name, std::string *value) {
+  auto status = ValidateUserXAttrName(name);
+  if (!status.ok()) {
+    return status;
+  }
+  if (value == nullptr) {
+    return Status::InvalidArgument("xattr value output is null");
+  }
+  return VolumeImpl::Instance().meta_engine()->GetXAttr(ino, name, value);
 }
 
-utils::Status VfsImpl::ListXAttr(fuse_ino_t ino, size_t size) {
-  (void)ino;
-  (void)size;
-  return Status::NotSupported("listxattr");
+utils::Status VfsImpl::ListXAttrs(fuse_ino_t ino, std::vector<std::string> *names) {
+  if (names == nullptr) {
+    return Status::InvalidArgument("xattr names output is null");
+  }
+  auto status = VolumeImpl::Instance().meta_engine()->ListXAttrs(ino, names);
+  if (!status.ok()) {
+    return status;
+  }
+  std::erase_if(*names, [](const std::string &name) {
+    constexpr std::string_view kUserPrefix = "user.";
+    return !std::string_view(name).starts_with(kUserPrefix) || name.size() == kUserPrefix.size();
+  });
+  return Status::OK();
 }
 
 utils::Status VfsImpl::RemoveXAttr(fuse_ino_t ino, const char *name) {
-  (void)ino;
-  (void)name;
-  return Status::NotSupported("removexattr");
+  auto status = ValidateUserXAttrName(name);
+  if (!status.ok()) {
+    return status;
+  }
+  return VolumeImpl::Instance().meta_engine()->RemoveXAttr(ino, name);
 }
 
 utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry,
