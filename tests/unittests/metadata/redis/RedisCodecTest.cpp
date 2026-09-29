@@ -3,6 +3,8 @@
 
 #include <dirent.h>
 #include <gtest/gtest.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 #include <cerrno>
 
@@ -31,8 +33,42 @@ SwordFsInode MakeInode() {
   inode.attr.mtime_nsec = 21;
   inode.attr.ctime = 30;
   inode.attr.ctime_nsec = 31;
+  inode.attr.btime = 40;
+  inode.attr.btime_nsec = 41;
   inode.parent_ino = 7;
   return inode;
+}
+
+std::string EncodePreviousBetaInode(const SwordFsInode &inode) {
+  BufEncoder enc;
+  enc.Header(RecordType::kInode);
+  enc.U64(inode.ino);
+  enc.U64(inode.attr.dev);
+  enc.U64(inode.attr.ino);
+  enc.U32(inode.attr.mode);
+  enc.U64(inode.attr.nlink);
+  enc.U64(inode.attr.uid);
+  enc.U64(inode.attr.gid);
+  enc.U64(inode.attr.rdev);
+  enc.U64(inode.attr.size);
+  enc.U64(inode.attr.blksize);
+  enc.U64(inode.attr.blocks);
+  enc.I64(inode.attr.atime);
+  enc.I64(inode.attr.atime_nsec);
+  enc.I64(inode.attr.mtime);
+  enc.I64(inode.attr.mtime_nsec);
+  enc.I64(inode.attr.ctime);
+  enc.I64(inode.attr.ctime_nsec);
+  enc.U64(inode.parent_ino);
+  enc.String(inode.symlink_target);
+  enc.U64(inode.xattrs.size());
+  for (const auto &[name, value] : inode.xattrs) {
+    enc.String(name);
+    enc.String(value);
+  }
+  std::string encoded;
+  enc.Finish(&encoded);
+  return encoded;
 }
 
 }  // namespace
@@ -61,7 +97,62 @@ TEST(MetadataTypesTest, InodeRoundTrip) {
   EXPECT_EQ(output.attr.mtime_nsec, input.attr.mtime_nsec);
   EXPECT_EQ(output.attr.ctime, input.attr.ctime);
   EXPECT_EQ(output.attr.ctime_nsec, input.attr.ctime_nsec);
+  EXPECT_EQ(output.attr.btime, input.attr.btime);
+  EXPECT_EQ(output.attr.btime_nsec, input.attr.btime_nsec);
   EXPECT_EQ(output.parent_ino, input.parent_ino);
+}
+
+TEST(MetadataTypesTest, InodeRejectsPreviousBetaLayoutWithoutBirthTime) {
+  const auto input = MakeInode();
+  const std::string encoded = EncodePreviousBetaInode(input);
+
+  SwordFsInode output;
+  EXPECT_TRUE(output.ParseFrom(encoded).ToErrno() == EIO);
+}
+
+TEST(MetadataTypesTest, AttrProjectsAuthoritativeStatxFields) {
+  const auto input = MakeInode();
+  struct statx result {};
+
+  input.attr.ToStatX(&result);
+
+  EXPECT_EQ(result.stx_mask, STATX_BASIC_STATS | STATX_BTIME);
+  EXPECT_EQ(result.stx_attributes, 0U);
+  EXPECT_EQ(result.stx_attributes_mask, 0U);
+  EXPECT_EQ(result.stx_blksize, input.attr.blksize);
+  EXPECT_EQ(result.stx_ino, input.attr.ino);
+  EXPECT_EQ(result.stx_mode, input.attr.mode);
+  EXPECT_EQ(result.stx_nlink, input.attr.nlink);
+  EXPECT_EQ(result.stx_uid, input.attr.uid);
+  EXPECT_EQ(result.stx_gid, input.attr.gid);
+  EXPECT_EQ(result.stx_size, input.attr.size);
+  EXPECT_EQ(result.stx_blocks, input.attr.blocks);
+  EXPECT_EQ(result.stx_atime.tv_sec, input.attr.atime);
+  EXPECT_EQ(result.stx_atime.tv_nsec, input.attr.atime_nsec);
+  EXPECT_EQ(result.stx_mtime.tv_sec, input.attr.mtime);
+  EXPECT_EQ(result.stx_mtime.tv_nsec, input.attr.mtime_nsec);
+  EXPECT_EQ(result.stx_ctime.tv_sec, input.attr.ctime);
+  EXPECT_EQ(result.stx_ctime.tv_nsec, input.attr.ctime_nsec);
+  EXPECT_EQ(result.stx_btime.tv_sec, input.attr.btime);
+  EXPECT_EQ(result.stx_btime.tv_nsec, input.attr.btime_nsec);
+  EXPECT_EQ(result.stx_dev_major, major(input.attr.dev));
+  EXPECT_EQ(result.stx_dev_minor, minor(input.attr.dev));
+  EXPECT_EQ(result.stx_rdev_major, major(input.attr.rdev));
+  EXPECT_EQ(result.stx_rdev_minor, minor(input.attr.rdev));
+}
+
+TEST(MetadataTypesTest, StatxSharesRegularFileBlockProjectionWithStat) {
+  SwordFsAttr attr(42, S_IFREG | 0644);
+  attr.size = 4096;
+  attr.blocks = 0;
+
+  struct stat posix {};
+  struct statx extended {};
+  attr.ToPosixStat(&posix);
+  attr.ToStatX(&extended);
+
+  EXPECT_EQ(posix.st_blocks, 1);
+  EXPECT_EQ(extended.stx_blocks, static_cast<uint64_t>(posix.st_blocks));
 }
 
 TEST(MetadataTypesTest, InodeXAttrsRoundTripPreservesBinaryValues) {
@@ -295,6 +386,14 @@ TEST(MetadataTypesTest, RejectsMalformedHeaderAndString) {
   BufDecoder attr_dec(attr_data);
   SwordFsAttr decoded;
   EXPECT_FALSE(attr_dec.Attr(&decoded));
+
+  BufEncoder bad_btime_enc;
+  attr = {};
+  attr.btime_nsec = 1000000000;
+  bad_btime_enc.Attr(attr);
+  bad_btime_enc.Finish(&attr_data);
+  BufDecoder btime_dec(attr_data);
+  EXPECT_FALSE(btime_dec.Attr(&decoded));
 }
 
 TEST(MetadataTypesTest, RejectsWrongTypeAndMalformedRecords) {

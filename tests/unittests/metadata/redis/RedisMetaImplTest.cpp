@@ -245,6 +245,36 @@ FIBER_TEST_F(RedisMetaImplTest, SetAttrPreservesExplicitCtime) {
   EXPECT_EQ(actual.attr.ctime_nsec, requested.ctime_nsec);
 }
 
+FIBER_TEST_F(RedisMetaImplTest, BirthTimeSurvivesInodeIdentityAndAttributeMutations) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "birth", 0644, &file).ok());
+  ASSERT_GT(file.attr.btime, 0);
+  const auto btime = file.attr.btime;
+  const auto btime_nsec = file.attr.btime_nsec;
+
+  SwordFsAttr requested = file.attr;
+  requested.ctime = 123;
+  requested.ctime_nsec = 456;
+  requested.btime = btime + 100;
+  requested.btime_nsec = 789;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kCtime, &file).ok());
+  EXPECT_EQ(file.attr.btime, btime);
+  EXPECT_EQ(file.attr.btime_nsec, btime_nsec);
+
+  ASSERT_TRUE(impl_->Link(file.ino, kRootInodeId, "birth-link", &file).ok());
+  EXPECT_EQ(file.attr.btime, btime);
+  EXPECT_EQ(file.attr.btime_nsec, btime_nsec);
+
+  ASSERT_TRUE(
+      impl_->Rename(kRootInodeId, "birth", kRootInodeId, "birth-renamed", swordfs::metadata::RenameFlag::kNone).ok());
+  ASSERT_TRUE(impl_->Truncate(file.ino, 4096).ok());
+
+  SwordFsInode actual;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_EQ(actual.attr.btime, btime);
+  EXPECT_EQ(actual.attr.btime_nsec, btime_nsec);
+}
+
 FIBER_TEST_F(RedisMetaImplTest, SetAttrSameOwnerKeepsSuidSgid) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0755, &file).ok());
