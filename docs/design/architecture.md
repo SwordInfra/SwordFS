@@ -533,14 +533,21 @@ a lookup-only miss returns `OK` with `nullptr`; and a create-on-miss returns an
 empty usable chunk. The factory is concrete and mount-owned so mechanism
 selection does not become another public polymorphic API.
 
-Metadata transactions use a transitional private
+Metadata transactions use a transitional internal
 `chunk::internal::ChunkMetadataBridge`. It contains only the transaction-time
 callbacks needed by the current shared-head protocol: load, publish, truncate,
 reclaim preparation, and freezing durable cleanup work. It has no runtime
-chunk construction or physical-delete API. Memory and Redis retain a
-non-owning bridge pointer while `VolumeImpl` owns its lifetime. This bridge
+chunk construction or physical-delete API and retains no
+`MechanismPrivateStorePtr`; `cow::COWChunkMetadataBridge` is a stateless
+legacy/common-authority adapter. `VolumeImpl` validates that the opened private
+metadata capability matches the persisted chunk type and owns that capability
+for the mount lifetime. `ChunkFactory` receives the capability explicitly,
+while Memory and Redis retain only a non-owning bridge pointer. This bridge
 preserves the existing transaction ordering while later mechanism-specific
-metadata work moves behind typed private stores.
+metadata work moves behind typed private stores. #318 retires truncate
+callbacks, #319 retires cleanup/reclaim callbacks, #317 retires
+publication/load callbacks, and #320 removes the remaining bridge surface; new
+typed COW metadata must not be routed through this transitional adapter.
 
 Each published chunk has a metadata descriptor:
 

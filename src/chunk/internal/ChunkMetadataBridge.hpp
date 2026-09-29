@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "metadata/IChunkIndexTxn.hpp"
-#include "metadata/IPrivateMetadata.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "metadata/types/Volume.hpp"
 
@@ -44,8 +43,6 @@ class ChunkMetadataBridge {
                                       metadata::ReclaimWork *out) const = 0;
 };
 
-utils::Status CreateChunkMetadataBridge(metadata::ChunkType chunk_type,
-                                        metadata::MechanismPrivateStorePtr private_metadata,
-                                        std::unique_ptr<ChunkMetadataBridge> *out);
+utils::Status CreateChunkMetadataBridge(metadata::ChunkType chunk_type, std::unique_ptr<ChunkMetadataBridge> *out);
 
 }  // namespace swordfs::chunk::internal

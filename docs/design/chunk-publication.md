@@ -102,8 +102,17 @@ runtime scans are not promised to be linearizable, while correctness decisions
 that need a stable view use transaction-scoped typed iteration plus backend
 validation/retry.
 
+`ChunkMetadataBridge` is not a private-metadata capability and does not retain
+the mount's `MechanismPrivateStorePtr`. `cow::COWChunkMetadataBridge` is a
+stateless transitional adapter for the remaining legacy/common-authority
+transaction callbacks only. `VolumeImpl` owns and validates the private
+metadata capability at mount composition, and later typed COW metadata is
+injected directly into the COW runtime rather than through the bridge.
+#318/#319/#317 retire the bridge callbacks in stages and #320 removes the
+remaining surface.
+
 A concrete `Chunk` supplies an opaque `ChunkPublishIntent` after making its new
-data durable. `CommitChunk` passes those bytes unchanged to the private
+data durable. `CommitChunk` passes those bytes unchanged to the transitional
 `ChunkMetadataBridge` while publishing the shared head. The bridge also uses
 that intent to freeze cleanup for a definitely rejected upload, which may never
 have appeared in the live private index. Reads use `LoadChunkView`: the

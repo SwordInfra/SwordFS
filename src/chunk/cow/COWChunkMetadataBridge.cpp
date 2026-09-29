@@ -5,7 +5,6 @@
 
 #include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "chunk/cow/COWCleanup.hpp"
@@ -13,12 +12,10 @@
 namespace swordfs::chunk::cow {
 namespace {
 
+// Legacy/common-authority callbacks only. Runtime COW metadata is owned by
+// mount composition and must not be retained or exposed through this bridge.
 class COWChunkMetadataBridge final : public internal::ChunkMetadataBridge {
  public:
-  explicit COWChunkMetadataBridge(metadata::MechanismPrivateStorePtr private_metadata)
-      : private_metadata_(std::move(private_metadata)) {
-  }
-
   utils::Status LoadPublished(metadata::IChunkIndexReader &, metadata::InodeID, const metadata::SwordFsChunk &,
                               std::string *private_snapshot) const override {
     if (private_snapshot == nullptr) {
@@ -66,21 +63,15 @@ class COWChunkMetadataBridge final : public internal::ChunkMetadataBridge {
                               metadata::ReclaimWork *out) const override {
     return FreezeCOWReclaim(ino, heads, chunk_size, out);
   }
-
- private:
-  // #316 replaces this retained generic capability with the typed COW store;
-  // keeping it here preserves the mount-lifetime ownership boundary from #315.
-  metadata::MechanismPrivateStorePtr private_metadata_;
 };
 
 }  // namespace
 
-utils::Status CreateCOWChunkMetadataBridge(metadata::MechanismPrivateStorePtr private_metadata,
-                                           std::unique_ptr<internal::ChunkMetadataBridge> *out) {
+utils::Status CreateCOWChunkMetadataBridge(std::unique_ptr<internal::ChunkMetadataBridge> *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("COW chunk metadata bridge output is null");
   }
-  *out = std::make_unique<COWChunkMetadataBridge>(std::move(private_metadata));
+  *out = std::make_unique<COWChunkMetadataBridge>();
   return utils::Status::OK();
 }
 

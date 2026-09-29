@@ -198,24 +198,16 @@ class ChunkPrivateMetadataTest : public ::testing::Test {
   MemMetaStore store_;
 };
 
-FIBER_TEST(ChunkMetadataBridgeTest, FactoryValidatesCompositionAndCOWSnapshotOutput) {
+FIBER_TEST(ChunkMetadataBridgeTest, FactoryValidatesConstructionAndCOWSnapshotOutput) {
   std::unique_ptr<chunk::internal::ChunkMetadataBridge> bridge;
-  auto cow_private = std::make_shared<MemPrivateMetadataStore>(ChunkType::kCow);
-  EXPECT_EQ(chunk::internal::CreateChunkMetadataBridge(ChunkType::kCow, cow_private, nullptr).ToErrno(), EINVAL);
-  EXPECT_EQ(chunk::internal::CreateChunkMetadataBridge(ChunkType::kCow, nullptr, &bridge).ToErrno(), EINVAL);
-  EXPECT_EQ(bridge, nullptr);
+  EXPECT_EQ(chunk::internal::CreateChunkMetadataBridge(ChunkType::kCow, nullptr).ToErrno(), EINVAL);
 
-  auto slice_private = std::make_shared<MemPrivateMetadataStore>(ChunkType::kChunkSlice);
-  EXPECT_EQ(chunk::internal::CreateChunkMetadataBridge(ChunkType::kCow, slice_private, &bridge).ToErrno(), EINVAL);
-  EXPECT_EQ(bridge, nullptr);
-
-  const auto unsupported_status =
-      chunk::internal::CreateChunkMetadataBridge(ChunkType::kChunkSlice, slice_private, &bridge);
+  const auto unsupported_status = chunk::internal::CreateChunkMetadataBridge(ChunkType::kChunkSlice, &bridge);
   EXPECT_EQ(unsupported_status.ToErrno(), ENOSYS);
   EXPECT_EQ(unsupported_status.message(), "unsupported chunk metadata bridge type: chunk_slice");
   EXPECT_EQ(bridge, nullptr);
 
-  ASSERT_TRUE(chunk::internal::CreateChunkMetadataBridge(ChunkType::kCow, cow_private, &bridge).ok());
+  ASSERT_TRUE(chunk::internal::CreateChunkMetadataBridge(ChunkType::kCow, &bridge).ok());
   ASSERT_NE(bridge, nullptr);
 
   MemMetaStore store;

@@ -72,7 +72,12 @@ Status VolumeImpl::ComposeChunkMetadata() {
   if (!status.ok()) {
     return status;
   }
-  status = chunk::internal::CreateChunkMetadataBridge(config_.chunk_type, private_metadata_, &chunk_metadata_bridge_);
+  // Mount composition owns capability identity/lifetime. Keep the transaction
+  // bridge stateless so typed COW metadata can flow directly to the runtime.
+  if (private_metadata_ == nullptr || private_metadata_->mechanism() != config_.chunk_type) {
+    return Status::InvalidArgument("private metadata store chunk type mismatch");
+  }
+  status = chunk::internal::CreateChunkMetadataBridge(config_.chunk_type, &chunk_metadata_bridge_);
   if (!status.ok()) {
     return status;
   }
