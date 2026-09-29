@@ -46,9 +46,7 @@ class MemMetaStoreTest : public ::testing::Test {
     store_->SetChunkSize(100);
     swordfs::metadata::MechanismPrivateStorePtr private_metadata;
     ASSERT_TRUE(store_->OpenPrivateMetadataStore(swordfs::metadata::ChunkType::kCow, &private_metadata).ok());
-    ASSERT_TRUE(swordfs::chunk::internal::CreateChunkMetadataBridge(swordfs::metadata::ChunkType::kCow,
-                                                                    private_metadata, &bridge_)
-                    .ok());
+    ASSERT_TRUE(swordfs::chunk::internal::CreateChunkMetadataBridge(swordfs::metadata::ChunkType::kCow, &bridge_).ok());
     ASSERT_TRUE(store_->BindChunkMetadataBridge(bridge_.get()).ok());
   }
   void TearDown() override {

@@ -6,11 +6,9 @@
 #include <memory>
 
 #include "chunk/internal/ChunkMetadataBridge.hpp"
-#include "metadata/IPrivateMetadata.hpp"
 
 namespace swordfs::chunk::cow {
 
-utils::Status CreateCOWChunkMetadataBridge(metadata::MechanismPrivateStorePtr private_metadata,
-                                           std::unique_ptr<internal::ChunkMetadataBridge> *out);
+utils::Status CreateCOWChunkMetadataBridge(std::unique_ptr<internal::ChunkMetadataBridge> *out);
 
 }  // namespace swordfs::chunk::cow

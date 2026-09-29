@@ -64,8 +64,7 @@ class MemMetaImplTest : public ::testing::Test {
     swordfs::metadata::MechanismPrivateStorePtr private_metadata;
     auto status = impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkType::kCow, &private_metadata);
     ASSERT_TRUE(status.ok()) << status.message();
-    status = swordfs::chunk::internal::CreateChunkMetadataBridge(swordfs::metadata::ChunkType::kCow,
-                                                                 std::move(private_metadata), &bridge_);
+    status = swordfs::chunk::internal::CreateChunkMetadataBridge(swordfs::metadata::ChunkType::kCow, &bridge_);
     ASSERT_TRUE(status.ok()) << status.message();
     status = impl_->BindChunkMetadataBridge(bridge_.get());
     ASSERT_TRUE(status.ok()) << status.message();
