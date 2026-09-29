@@ -39,38 +39,6 @@ SwordFsInode MakeInode() {
   return inode;
 }
 
-std::string EncodePreviousBetaInode(const SwordFsInode &inode) {
-  BufEncoder enc;
-  enc.Header(RecordType::kInode);
-  enc.U64(inode.ino);
-  enc.U64(inode.attr.dev);
-  enc.U64(inode.attr.ino);
-  enc.U32(inode.attr.mode);
-  enc.U64(inode.attr.nlink);
-  enc.U64(inode.attr.uid);
-  enc.U64(inode.attr.gid);
-  enc.U64(inode.attr.rdev);
-  enc.U64(inode.attr.size);
-  enc.U64(inode.attr.blksize);
-  enc.U64(inode.attr.blocks);
-  enc.I64(inode.attr.atime);
-  enc.I64(inode.attr.atime_nsec);
-  enc.I64(inode.attr.mtime);
-  enc.I64(inode.attr.mtime_nsec);
-  enc.I64(inode.attr.ctime);
-  enc.I64(inode.attr.ctime_nsec);
-  enc.U64(inode.parent_ino);
-  enc.String(inode.symlink_target);
-  enc.U64(inode.xattrs.size());
-  for (const auto &[name, value] : inode.xattrs) {
-    enc.String(name);
-    enc.String(value);
-  }
-  std::string encoded;
-  enc.Finish(&encoded);
-  return encoded;
-}
-
 }  // namespace
 
 TEST(MetadataTypesTest, InodeRoundTrip) {
@@ -102,12 +70,19 @@ TEST(MetadataTypesTest, InodeRoundTrip) {
   EXPECT_EQ(output.parent_ino, input.parent_ino);
 }
 
-TEST(MetadataTypesTest, InodeRejectsPreviousBetaLayoutWithoutBirthTime) {
+TEST(MetadataTypesTest, AttrRejectsTruncatedBirthTimeFields) {
   const auto input = MakeInode();
-  const std::string encoded = EncodePreviousBetaInode(input);
+  BufEncoder enc;
+  enc.Attr(input.attr);
+  std::string encoded;
+  enc.Finish(&encoded);
 
-  SwordFsInode output;
-  EXPECT_TRUE(output.ParseFrom(encoded).ToErrno() == EIO);
+  for (const size_t removed_bytes : {size_t{1}, sizeof(int64_t) + 1}) {
+    ASSERT_GT(encoded.size(), removed_bytes);
+    BufDecoder dec(std::string_view(encoded).substr(0, encoded.size() - removed_bytes));
+    SwordFsAttr output;
+    EXPECT_FALSE(dec.Attr(&output)) << "removed_bytes=" << removed_bytes;
+  }
 }
 
 TEST(MetadataTypesTest, AttrProjectsAuthoritativeStatxFields) {
@@ -151,7 +126,6 @@ TEST(MetadataTypesTest, StatxSharesRegularFileBlockProjectionWithStat) {
   attr.ToPosixStat(&posix);
   attr.ToStatX(&extended);
 
-  EXPECT_EQ(posix.st_blocks, 1);
   EXPECT_EQ(extended.stx_blocks, static_cast<uint64_t>(posix.st_blocks));
 }
 

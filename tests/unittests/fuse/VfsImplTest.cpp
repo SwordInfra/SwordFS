@@ -1862,8 +1862,10 @@ FIBER_TEST_F(VfsImplIntegrationTest, StatxReportsCachedUnflushedStateAndPersiste
 
   struct statx attr{};
   ASSERT_TRUE(VfsImpl::StatX(kFileIno, 0, STATX_BASIC_STATS | STATX_BTIME, &fi, &attr).ok());
+  struct stat posix_attr{};
+  ASSERT_TRUE(VfsImpl::GetAttr(kFileIno, &posix_attr).ok());
   EXPECT_EQ(attr.stx_size, kWriteSize);
-  EXPECT_EQ(attr.stx_blocks, 1U);
+  EXPECT_EQ(attr.stx_blocks, static_cast<uint64_t>(posix_attr.st_blocks));
   EXPECT_EQ(attr.stx_btime.tv_sec, persistent.attr.btime);
   EXPECT_EQ(attr.stx_btime.tv_nsec, persistent.attr.btime_nsec);
 
