@@ -30,9 +30,9 @@ namespace swordfs::chunk::internal {
 // validation, data deletion and acknowledgement.
 class ChunkGcWorker {
  public:
-  ChunkGcWorker(metadata::ChunkOverwriteMechanism mechanism, uint64_t chunk_size, metadata::IMetaEngine *meta,
+  ChunkGcWorker(metadata::ChunkType chunk_type, uint64_t chunk_size, metadata::IMetaEngine *meta,
                 storage::IDataEngine *data)
-      : mechanism_(mechanism), chunk_size_(chunk_size), meta_(meta), data_(data) {
+      : chunk_type_(chunk_type), chunk_size_(chunk_size), meta_(meta), data_(data) {
   }
 
   ChunkGcWorker(const ChunkGcWorker &) = delete;
@@ -50,7 +50,7 @@ class ChunkGcWorker {
   void RunWorkerPass();
 
  private:
-  metadata::ChunkOverwriteMechanism mechanism_;
+  metadata::ChunkType chunk_type_;
   uint64_t chunk_size_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;

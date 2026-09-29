@@ -25,9 +25,9 @@ namespace swordfs::chunk {
 // is fixed once at mount and is never exposed to VFS callers.
 class ChunkFactory {
  public:
-  ChunkFactory(metadata::ChunkOverwriteMechanism mechanism, metadata::MechanismPrivateStorePtr private_metadata,
+  ChunkFactory(metadata::ChunkType chunk_type, metadata::MechanismPrivateStorePtr private_metadata,
                metadata::IMetaEngine *meta, storage::IDataEngine *data, size_t chunk_size)
-      : mechanism_(mechanism),
+      : chunk_type_(chunk_type),
         private_metadata_(std::move(private_metadata)),
         meta_(meta),
         data_(data),
@@ -38,9 +38,10 @@ class ChunkFactory {
                      std::shared_ptr<Chunk> *out) const;
 
  private:
-  metadata::ChunkOverwriteMechanism mechanism_;
-  // #316 consumes this through the typed whole-object store. Retain the
-  // mount-lifetime capability here now so VFS never needs a strategy object.
+  metadata::ChunkType chunk_type_;
+  // #316 consumes this through the typed COW store. Retain the
+  // mount-lifetime capability here now so VFS never needs chunk-type-private
+  // metadata plumbing.
   metadata::MechanismPrivateStorePtr private_metadata_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;

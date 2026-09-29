@@ -47,7 +47,7 @@ struct FormatOptions {
   std::string bucket;
   std::string region;
   uint64_t chunk_size = 64ULL * 1024 * 1024;
-  metadata::ChunkOverwriteMechanism chunk_overwrite_mechanism = metadata::ChunkOverwriteMechanism::kWholeObject;
+  metadata::ChunkType chunk_type = metadata::ChunkType::kCow;
 };
 
 struct MountOptions {

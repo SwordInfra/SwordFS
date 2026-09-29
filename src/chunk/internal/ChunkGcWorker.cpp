@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#include "chunk/WholeObjectCleanup.hpp"
+#include "chunk/cow/COWCleanup.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/ExecutionDomain.hpp"
@@ -29,11 +29,11 @@ constexpr size_t kPendingDeleteBatchSize = 128;
 }  // namespace
 
 utils::Status ChunkGcWorker::DeletePending(const metadata::PendingDelete &work) {
-  if (mechanism_ != metadata::ChunkOverwriteMechanism::kWholeObject) {
-    return utils::Status::NotSupported("chunk GC mechanism is not implemented");
+  if (chunk_type_ != metadata::ChunkType::kCow) {
+    return utils::Status::NotSupported("chunk GC type is not implemented");
   }
-  WholeObjectRef ref;
-  auto status = DecodeWholeObjectDelete(work, chunk_size_, &ref);
+  cow::COWRef ref;
+  auto status = cow::DecodeCOWDelete(work, chunk_size_, &ref);
   if (!status.ok()) {
     return status;
   }
@@ -56,12 +56,12 @@ utils::Status ChunkGcWorker::DeletePending(const metadata::PendingDelete &work) 
 }
 
 utils::Status ChunkGcWorker::DeleteReclaim(const metadata::ReclaimWork &work) {
-  if (mechanism_ != metadata::ChunkOverwriteMechanism::kWholeObject) {
-    return utils::Status::NotSupported("chunk GC mechanism is not implemented");
+  if (chunk_type_ != metadata::ChunkType::kCow) {
+    return utils::Status::NotSupported("chunk GC type is not implemented");
   }
 
-  std::vector<WholeObjectRef> refs;
-  auto status = DecodeWholeObjectReclaim(work, chunk_size_, &refs);
+  std::vector<cow::COWRef> refs;
+  auto status = cow::DecodeCOWReclaim(work, chunk_size_, &refs);
   if (!status.ok()) {
     return status;
   }
@@ -85,7 +85,7 @@ utils::Status ChunkGcWorker::DeleteReclaim(const metadata::ReclaimWork &work) {
     }
   }
   if (failed != 0) {
-    return utils::Status::IOError("whole-object reclaim left " + std::to_string(failed) + " object(s) undeleted");
+    return utils::Status::IOError("COW reclaim left " + std::to_string(failed) + " object(s) undeleted");
   }
   return meta_->CompleteReclaim(work.ino);
 }

@@ -27,7 +27,7 @@ utils::Status CalculateChunkPosition(off_t file_offset, uint64_t chunk_size, Chu
 utils::Status CalculateFileRangeEnd(off_t file_offset, uint64_t length, uint64_t *out);
 utils::Status CalculateChunkStartOffset(ChunkIndex index, uint64_t chunk_size, uint64_t *out);
 
-/// Common head for one logical chunk. In the current whole-object path,
+/// Common head for one logical chunk. In the current COW path,
 /// revision is both the publication/CAS generation and the immutable physical
 /// object revision. That mechanism-specific meaning is transitional under
 /// #312; it is not part of the target mechanism-neutral common contract.

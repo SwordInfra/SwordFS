@@ -17,8 +17,8 @@
 #include <vector>
 
 #include "FiberTest.hpp"
-#include "chunk/ChunkObjectKey.hpp"
-#include "chunk/WholeObjectCleanup.hpp"
+#include "chunk/cow/COWCleanup.hpp"
+#include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/IPrivateMetadata.hpp"
 #include "metadata/redis/RedisKey.hpp"
@@ -54,14 +54,14 @@ inline metadata::PendingDelete MakePendingDelete(InodeID ino, metadata::ChunkInd
                                                  metadata::ChunkRevision revision) {
   SwordFsChunk descriptor{.index = index, .revision = revision, .size = 64};
   metadata::PendingDelete pending;
-  const auto status = chunk::FreezeWholeObjectDelete(ino, descriptor, kTestChunkSize, &pending);
+  const auto status = chunk::cow::FreezeCOWDelete(ino, descriptor, kTestChunkSize, &pending);
   EXPECT_TRUE(status.ok()) << status.message();
   return pending;
 }
 
 inline std::string PendingDeleteObjectKey(const metadata::PendingDelete &pending) {
-  chunk::WholeObjectRef ref;
-  const auto status = chunk::DecodeWholeObjectDelete(pending, kTestChunkSize, &ref);
+  chunk::cow::COWRef ref;
+  const auto status = chunk::cow::DecodeCOWDelete(pending, kTestChunkSize, &ref);
   EXPECT_TRUE(status.ok()) << status.message();
   return status.ok() ? ref.key : std::string{};
 }
@@ -92,11 +92,10 @@ class RedisMetaImplTest : public ::testing::Test {
     status = impl_->FormatVolume(volume);
     ASSERT_TRUE(status.ok()) << status.message();
     swordfs::metadata::MechanismPrivateStorePtr private_metadata;
-    status =
-        impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, &private_metadata);
+    status = impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkType::kCow, &private_metadata);
     ASSERT_TRUE(status.ok()) << status.message();
-    status = swordfs::chunk::internal::CreateChunkMetadataBridge(
-        swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, std::move(private_metadata), &bridge_);
+    status = swordfs::chunk::internal::CreateChunkMetadataBridge(swordfs::metadata::ChunkType::kCow,
+                                                                 std::move(private_metadata), &bridge_);
     ASSERT_TRUE(status.ok()) << status.message();
     status = impl_->BindChunkMetadataBridge(bridge_.get());
     ASSERT_TRUE(status.ok()) << status.message();

@@ -23,8 +23,8 @@ std::string RedisKey::NextChunkRevision() const {
   return prefix_ + "next_chunk_revision";
 }
 
-std::string RedisKey::PrivateSequence(ChunkOverwriteMechanism mechanism, uint32_t sequence_id) const {
-  return folly::sformat("{}private_sequence:{}:{}", prefix_, ChunkOverwriteMechanismKey(mechanism), sequence_id);
+std::string RedisKey::PrivateSequence(ChunkType mechanism, uint32_t sequence_id) const {
+  return folly::sformat("{}private_sequence:{}:{}", prefix_, ChunkTypeKey(mechanism), sequence_id);
 }
 
 std::string RedisKey::Inode(uint64_t ino) const {
@@ -39,8 +39,8 @@ std::string RedisKey::Chunk(uint64_t ino) const {
   return folly::sformat("{}chunk:{}", prefix_, ino);
 }
 
-std::string RedisKey::PrivateChunkIndex(ChunkOverwriteMechanism mechanism, std::string_view hash) const {
-  return folly::sformat("{}private_chunk_index:{}:{}", prefix_, ChunkOverwriteMechanismKey(mechanism), hash);
+std::string RedisKey::PrivateChunkIndex(ChunkType mechanism, std::string_view hash) const {
+  return folly::sformat("{}private_chunk_index:{}:{}", prefix_, ChunkTypeKey(mechanism), hash);
 }
 
 std::string RedisKey::InodeCount() const {

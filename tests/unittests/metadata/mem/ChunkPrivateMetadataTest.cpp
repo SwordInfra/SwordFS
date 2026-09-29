@@ -34,7 +34,7 @@ std::string FragmentField(const SwordFsChunk &head, unsigned part) {
 
 class RecordingTypedTxn final : public IMechanismPrivateTxn {
  public:
-  static constexpr ChunkOverwriteMechanism kMechanism = ChunkOverwriteMechanism::kChunkSlice;
+  static constexpr ChunkType kMechanism = ChunkType::kChunkSlice;
 
   void Stage(uint64_t value) {
     staged_ = value;
@@ -160,10 +160,10 @@ class RecordingBridge final : public chunk::internal::ChunkMetadataBridge {
   }
 };
 
-class ChunkIndexStrategyTest : public ::testing::Test {
+class ChunkPrivateMetadataTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    ASSERT_TRUE(store_.OpenPrivateMetadataStore(ChunkOverwriteMechanism::kChunkSlice, &private_metadata_).ok());
+    ASSERT_TRUE(store_.OpenPrivateMetadataStore(ChunkType::kChunkSlice, &private_metadata_).ok());
     ASSERT_TRUE(store_.BindChunkMetadataBridge(&bridge_).ok());
     store_.SetChunkSize(128);
   }
@@ -198,26 +198,29 @@ class ChunkIndexStrategyTest : public ::testing::Test {
   MemMetaStore store_;
 };
 
-FIBER_TEST(ChunkMetadataBridgeTest, FactoryValidatesCompositionAndWholeObjectSnapshotOutput) {
+FIBER_TEST(ChunkMetadataBridgeTest, FactoryValidatesCompositionAndCOWSnapshotOutput) {
   std::unique_ptr<chunk::internal::ChunkMetadataBridge> bridge;
-  auto whole_private = std::make_shared<MemPrivateMetadataStore>(ChunkOverwriteMechanism::kWholeObject);
-  EXPECT_EQ(chunk::internal::CreateChunkMetadataBridge(ChunkOverwriteMechanism::kWholeObject, whole_private, nullptr)
-                .ToErrno(),
-            EINVAL);
-
-  auto slice_private = std::make_shared<MemPrivateMetadataStore>(ChunkOverwriteMechanism::kChunkSlice);
-  EXPECT_EQ(chunk::internal::CreateChunkMetadataBridge(ChunkOverwriteMechanism::kWholeObject, slice_private, &bridge)
-                .ToErrno(),
-            EINVAL);
+  auto cow_private = std::make_shared<MemPrivateMetadataStore>(ChunkType::kCow);
+  EXPECT_EQ(chunk::internal::CreateChunkMetadataBridge(ChunkType::kCow, cow_private, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(chunk::internal::CreateChunkMetadataBridge(ChunkType::kCow, nullptr, &bridge).ToErrno(), EINVAL);
   EXPECT_EQ(bridge, nullptr);
 
-  ASSERT_TRUE(
-      chunk::internal::CreateChunkMetadataBridge(ChunkOverwriteMechanism::kWholeObject, whole_private, &bridge).ok());
+  auto slice_private = std::make_shared<MemPrivateMetadataStore>(ChunkType::kChunkSlice);
+  EXPECT_EQ(chunk::internal::CreateChunkMetadataBridge(ChunkType::kCow, slice_private, &bridge).ToErrno(), EINVAL);
+  EXPECT_EQ(bridge, nullptr);
+
+  const auto unsupported_status =
+      chunk::internal::CreateChunkMetadataBridge(ChunkType::kChunkSlice, slice_private, &bridge);
+  EXPECT_EQ(unsupported_status.ToErrno(), ENOSYS);
+  EXPECT_EQ(unsupported_status.message(), "unsupported chunk metadata bridge type: chunk_slice");
+  EXPECT_EQ(bridge, nullptr);
+
+  ASSERT_TRUE(chunk::internal::CreateChunkMetadataBridge(ChunkType::kCow, cow_private, &bridge).ok());
   ASSERT_NE(bridge, nullptr);
 
   MemMetaStore store;
   MechanismPrivateStorePtr private_metadata;
-  ASSERT_TRUE(store.OpenPrivateMetadataStore(ChunkOverwriteMechanism::kWholeObject, &private_metadata).ok());
+  ASSERT_TRUE(store.OpenPrivateMetadataStore(ChunkType::kCow, &private_metadata).ok());
   const SwordFsChunk head{.index = 0, .revision = 1, .size = 64};
   const auto status =
       store.Transact([&](MemMetaTxn &txn) { return bridge->LoadPublished(txn, /*file_ino=*/42, head, nullptr); });
@@ -246,34 +249,32 @@ FIBER_TEST(MemMetaTxnBindingTest, ChunkMutationsFailClosedUntilBridgeIsBound) {
   EXPECT_FALSE(work.has_value());
 }
 
-FIBER_TEST_F(ChunkIndexStrategyTest, BindingProvidesMechanismScopedRuntimeAndTransactionCapabilities) {
+FIBER_TEST_F(ChunkPrivateMetadataTest, BindingProvidesMechanismScopedRuntimeAndTransactionCapabilities) {
   ASSERT_NE(private_metadata_, nullptr);
-  EXPECT_EQ(private_metadata_->mechanism(), ChunkOverwriteMechanism::kChunkSlice);
+  EXPECT_EQ(private_metadata_->mechanism(), ChunkType::kChunkSlice);
 
   uint64_t private_revision = 0;
-  ASSERT_TRUE(private_metadata_
-                  ->AllocateSequence(PrivateSequenceTag<ChunkOverwriteMechanism::kChunkSlice, 31>{}, &private_revision)
-                  .ok());
+  ASSERT_TRUE(
+      private_metadata_->AllocateSequence(PrivateSequenceTag<ChunkType::kChunkSlice, 31>{}, &private_revision).ok());
   EXPECT_EQ(private_revision, 1U);
 
   ChunkRevision legacy_revision = 0;
   ASSERT_TRUE(store_
                   .Transact([&](MemMetaTxn &txn) {
-                    EXPECT_EQ(txn.PrivateMetadata().mechanism(), ChunkOverwriteMechanism::kChunkSlice);
+                    EXPECT_EQ(txn.PrivateMetadata().mechanism(), ChunkType::kChunkSlice);
                     return txn.AllocateChunkRevision(&legacy_revision);
                   })
                   .ok());
   EXPECT_EQ(legacy_revision, 1U);
 
-  ASSERT_TRUE(private_metadata_
-                  ->AllocateSequence(PrivateSequenceTag<ChunkOverwriteMechanism::kChunkSlice, 31>{}, &private_revision)
-                  .ok());
+  ASSERT_TRUE(
+      private_metadata_->AllocateSequence(PrivateSequenceTag<ChunkType::kChunkSlice, 31>{}, &private_revision).ok());
   EXPECT_EQ(private_revision, 2U);
   ASSERT_TRUE(store_.Transact([&](MemMetaTxn &txn) { return txn.AllocateChunkRevision(&legacy_revision); }).ok());
   EXPECT_EQ(legacy_revision, 2U);
 }
 
-FIBER_TEST_F(ChunkIndexStrategyTest, TypedPrivateTransactionCommitsOnlyAfterSuccessfulOuterTransaction) {
+FIBER_TEST_F(ChunkPrivateMetadataTest, TypedPrivateTransactionCommitsOnlyAfterSuccessfulOuterTransaction) {
   RecordingTypedTxn accepted;
   auto status = store_.Transact([&](MemMetaTxn &txn) {
     auto status = txn.PrivateMetadata().Bind(&accepted);
@@ -304,15 +305,15 @@ FIBER_TEST_F(ChunkIndexStrategyTest, TypedPrivateTransactionCommitsOnlyAfterSucc
 
 TEST(MemMetaStoreBindingTest, OpensPrivateCapabilityAndRejectsNullBridge) {
   MemMetaStore store;
-  EXPECT_EQ(store.OpenPrivateMetadataStore(ChunkOverwriteMechanism::kChunkSlice, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(store.OpenPrivateMetadataStore(ChunkType::kChunkSlice, nullptr).ToErrno(), EINVAL);
   MechanismPrivateStorePtr private_metadata;
-  ASSERT_TRUE(store.OpenPrivateMetadataStore(ChunkOverwriteMechanism::kChunkSlice, &private_metadata).ok());
+  ASSERT_TRUE(store.OpenPrivateMetadataStore(ChunkType::kChunkSlice, &private_metadata).ok());
   ASSERT_NE(private_metadata, nullptr);
-  EXPECT_EQ(private_metadata->mechanism(), ChunkOverwriteMechanism::kChunkSlice);
+  EXPECT_EQ(private_metadata->mechanism(), ChunkType::kChunkSlice);
   EXPECT_EQ(store.BindChunkMetadataBridge(nullptr).ToErrno(), EINVAL);
 }
 
-FIBER_TEST_F(ChunkIndexStrategyTest, PublishStagesMultiplePrivateRecordsWithPublicHead) {
+FIBER_TEST_F(ChunkPrivateMetadataTest, PublishStagesMultiplePrivateRecordsWithPublicHead) {
   SwordFsInode file;
   ASSERT_TRUE(AddFile("file", &file).ok());
   const SwordFsChunk first{.index = 0, .revision = 1, .size = 64};
@@ -365,7 +366,7 @@ FIBER_TEST_F(ChunkIndexStrategyTest, PublishStagesMultiplePrivateRecordsWithPubl
   ASSERT_EQ(pending.size(), 2U);
 }
 
-FIBER_TEST_F(ChunkIndexStrategyTest, TruncateAndSetAttrRejectWithoutPublicOrPrivateMutation) {
+FIBER_TEST_F(ChunkPrivateMetadataTest, TruncateAndSetAttrRejectWithoutPublicOrPrivateMutation) {
   SwordFsInode file;
   ASSERT_TRUE(AddFile("file", &file).ok());
   const SwordFsChunk first{.index = 0, .revision = 1, .size = 100};
@@ -423,7 +424,7 @@ FIBER_TEST_F(ChunkIndexStrategyTest, TruncateAndSetAttrRejectWithoutPublicOrPriv
   EXPECT_EQ(Fragments(file.ino).size(), 2U);
 }
 
-FIBER_TEST_F(ChunkIndexStrategyTest, ReclaimFreezesPrivateIndexAndRejectsBeforeInodeRemoval) {
+FIBER_TEST_F(ChunkPrivateMetadataTest, ReclaimFreezesPrivateIndexAndRejectsBeforeInodeRemoval) {
   SwordFsInode file;
   ASSERT_TRUE(AddFile("file", &file).ok());
   const SwordFsChunk first{.index = 0, .revision = 1, .size = 64};

@@ -29,7 +29,7 @@ class RedisMetaImpl : public IMetaEngine {
   RedisMetaImpl &operator=(const RedisMetaImpl &) = delete;
 
   utils::Status Initialize() override;
-  Status OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out) override;
+  Status OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out) override;
   Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) override;
   utils::Status FormatVolume(const SwordFsVolume &config) override;
   utils::Status LoadVolume(SwordFsVolume *config) override;

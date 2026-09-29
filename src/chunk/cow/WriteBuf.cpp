@@ -1,14 +1,14 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include "chunk/WriteBuf.hpp"
+#include "chunk/cow/WriteBuf.hpp"
 
 #include <folly/io/IOBuf.h>
 
 #include <algorithm>
 #include <cstring>
 
-namespace swordfs::chunk {
+namespace swordfs::chunk::cow {
 
 WriteBuf::WriteBuf(size_t capacity) {
   buf_ = folly::IOBuf::create(capacity);
@@ -82,4 +82,4 @@ utils::Status WriteBuf::CopyOut(off_t off, size_t len, folly::IOBuf *out) const 
   return utils::Status::OK();
 }
 
-}  // namespace swordfs::chunk
+}  // namespace swordfs::chunk::cow

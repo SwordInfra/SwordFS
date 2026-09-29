@@ -22,14 +22,14 @@ class RedisKey {
   std::string Format() const;
   std::string NextIno() const;
   std::string NextChunkRevision() const;
-  std::string PrivateSequence(ChunkOverwriteMechanism mechanism, uint32_t sequence_id) const;
+  std::string PrivateSequence(ChunkType mechanism, uint32_t sequence_id) const;
   std::string Inode(uint64_t ino) const;
   std::string Directory(uint64_t parent_ino) const;
   std::string Chunk(uint64_t ino) const;
-  // Generic storage namespace for the selected mechanism's private index.
+  // Generic storage namespace for the selected chunk type's private index.
   // The stable enum value is part of the beta metadata key layout; the
   // mechanism, not RedisKey, defines hash/field encodings.
-  std::string PrivateChunkIndex(ChunkOverwriteMechanism mechanism, std::string_view hash) const;
+  std::string PrivateChunkIndex(ChunkType mechanism, std::string_view hash) const;
   std::string InodeCount() const;
 
   // Orphan candidates: hash of inode id -> marker. Written in the same

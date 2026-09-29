@@ -20,7 +20,7 @@ not by itself establish support for every Cluster deployment configuration.
 | `inode:<ino>` | String | Canonical serialized `SwordFsInode`, including ordered raw xattrs |
 | `dir:<parent_ino>` | Hash | Name → child type and inode ID |
 | `chunk:<ino>` | Hash | Canonical decimal 64-bit chunk index → shared published logical `SwordFsChunk` head |
-| `private_chunk_index:<mechanism-key>:<hash>` | Hash | Mechanism-owned chunk-internal fields; logical chunk-index fields use canonical decimal 64-bit indexes, `<mechanism-key>` is the stable typed `ChunkOverwriteMechanism` key, and field layout belongs only to that mechanism |
+| `private_chunk_index:<mechanism-key>:<hash>` | Hash | Mechanism-owned chunk-internal fields; logical chunk-index fields use canonical decimal 64-bit indexes, `<mechanism-key>` is the stable typed `ChunkType` key, and field layout belongs only to that mechanism |
 | `orphans` | Hash | Inode ID → orphan marker |
 | `reclaims` | Hash | Inode ID → serialized frozen opaque `ReclaimWork` |
 | `pending_deletes` | Hash | Opaque mechanism-defined queue ID → serialized frozen opaque `PendingDelete` |
@@ -33,11 +33,11 @@ child inode. Full attributes remain canonical in the inode record. A missing
 directory Hash represents an empty directory when its directory inode exists.
 
 A chunk Hash represents one authoritative logical head per index. It contains
-neither mutable write buffers nor uploading records. The selected mechanism
+neither mutable write buffers nor uploading records. The selected chunk-type implementation
 owns any chunk-internal index in its private key space. Its metadata bridge
 may read or change multiple private fields in the same WATCH/EXEC
 transaction as the logical head and inode. The common metadata engine never
-interprets those fields. For the currently selectable `whole_object` mechanism,
+interprets those fields. For the currently selectable `cow` mechanism,
 the head generation is also the immutable object revision and the physical
 key derives from inode, index, and revision. That mechanism has no additional
 durable private fragment records.
@@ -46,15 +46,15 @@ durable private fragment records.
 that identify a logical chunk use `std::to_string(index)`, i.e. the canonical
 unsigned decimal representation with no parallel truncated numeric identity.
 The serialized `SwordFsChunk` value stores the index as U64. The selectable
-`whole_object` cleanup/reclaim payloads also encode descriptor indexes as
-U64. SwordFS is still beta and does not preserve historical whole-object layout
+`cow` cleanup/reclaim payloads also encode descriptor indexes as
+U64. SwordFS is still beta and does not preserve historical COW layout
 numbers or dual-decode older beta records.
 
 Private-index Redis keys do not embed the human-readable mechanism name.
 `RedisKey::PrivateChunkIndex()` derives `<mechanism-key>` from the persisted
-`ChunkOverwriteMechanism` through `ChunkOverwriteMechanismKey()`; in the
+`ChunkType` through `ChunkTypeKey()`; in the
 current beta layout the stable enum values are encoded as decimal strings
-(`1` = `whole_object`, `2` = `chunk_slice`, `3` = `redis_cache`). The trailing
+(`1` = `cow`, `2` = `chunk_slice`, `3` = `redis_cache`). The trailing
 `<hash>` and its fields remain mechanism-owned schema. Those strings are a
 Redis adapter detail: mechanism/session code consumes typed private-store
 interfaces and never constructs this layout directly.
@@ -71,11 +71,11 @@ the valid range. The key is created lazily on first use. A lost
 acknowledgement after the script may have executed is `OutcomeUnknown`; a
 later allocation obtains a fresh value and never tries to reconstruct/reuse
 the lost identity. The legacy `next_chunk_revision` allocator remains
-separate while the current whole-object writer still depends on it.
+separate while the current COW writer still depends on it.
 
 Frozen reclaim and pending-delete records carry opaque payloads.
 The common queue validates its envelope and Hash field identity; only the
-selected mechanism's chunk-GC logic interprets physical references and checks reachability
+selected chunk-type implementation's chunk-GC logic interprets physical references and checks reachability
 before deletion. Truncate and rewrite publication use `pending_deletes` as
 best-effort maintenance state after a known metadata outcome. Queue
 membership is not delete authority.
@@ -156,9 +156,9 @@ private state it needs.
 existing common-authority implementation. No new production mechanism/session
 consumer should be built on it. #316 and #270 replace that transitional use
 with their own typed adapters while keeping Redis encoding here at the backend
-boundary. The current `whole_object` strategy has no additional durable
+boundary. The current `cow` chunk-type implementation has no additional durable
 private records in #315, so this stage changes capability plumbing only and
-does not change whole-object read/publication/truncate/reclaim authority.
+does not change COW read/publication/truncate/reclaim authority.
 
 `RedisKvTxn` borrows its transaction connection from the shared redis++ pool
 with `transaction(false, false)`. The `Redis` view returned by
@@ -245,16 +245,16 @@ policy.
 The useful unit of explanation is the set of records that must change
 together, rather than one subsection for every API.
 
-| Mechanism | Records changed together | Invariant |
+| Mutation | Records changed together | Invariant |
 | --- | --- | --- |
 | Namespace creation | Child inode, parent name mapping, parent attributes, inode count | No visible name without its newly created inode |
 | Hard-link addition | Name mapping, inode link count, parent attributes, orphan cleanup when applicable | A revived inode cannot remain eligible for reclaim preparation |
 | Namespace removal or replacement | Directory mappings, affected inode/link counts and parent attributes, orphan marker when last link disappears | Cleanup work is recorded with the namespace change |
-| Chunk publication | Expected logical head validation, strategy-private index update, replacement head, inode size | Only the CAS winner becomes authoritative; cleanup registration happens separately after a known outcome |
-| Size change | Inode size, pruned/clamped logical heads, strategy-private index update | Metadata does not retain readable ranges beyond the new size; frozen opaque cleanup candidates are returned for later best-effort registration |
-| Reclaim preparation | Frozen strategy work, private index update, removal of orphan marker, live inode/chunk heads | Frozen deletion targets and live-state removal commit together without depending on advisory global accounting |
+| Chunk publication | Expected logical head validation, mechanism-private index update, replacement head, inode size | Only the CAS winner becomes authoritative; cleanup registration happens separately after a known outcome |
+| Size change | Inode size, pruned/clamped logical heads, mechanism-private index update | Metadata does not retain readable ranges beyond the new size; frozen opaque cleanup candidates are returned for later best-effort registration |
+| Reclaim preparation | Frozen chunk-type-private work, private index update, removal of orphan marker, live inode/chunk heads | Frozen deletion targets and live-state removal commit together without depending on advisory global accounting |
 | Reclaim completion | Pending reclaim record | Work disappears only after all frozen objects have been deleted |
-| Pending-delete completion | Pending-delete field | Work disappears only after the strategy confirms frozen data is no longer live and deletion succeeds |
+| Pending-delete completion | Pending-delete field | Work disappears only after the chunk-type implementation confirms frozen data is no longer live and deletion succeeds |
 
 Empty directory removal is an atomic namespace mutation. It watches directory
 contents to exclude concurrent child creation, adjusts parent link counts,
@@ -324,7 +324,7 @@ metadata transition:
 2. Read/WATCH the still-live inode and its authoritative public/private chunk
    state. A linked inode is not reclaimable; its stale orphan marker can be
    removed in the same optimistic transaction.
-3. Freeze immutable strategy-owned `ReclaimWork`, apply any strategy-private
+3. Freeze immutable chunk-type-private `ReclaimWork`, apply any mechanism-private
    reclaim mutation, queue `HSET reclaims[ino]` first, then queue removal of
    the orphan marker, public chunk state, and live inode. `EXEC` publishes the
    frozen identities and removes their live metadata as one supported-schema
@@ -404,8 +404,8 @@ changes the watched Hash and forces the optimistic transaction to retry.
 
 The private chunk-GC worker scans `pending_deletes`. Common Redis metadata checks
 that the Hash field equals the frozen opaque ID, without decoding the private
-payload. The selected mechanism validates the payload and checks authoritative
-reachability. For `whole_object`, it verifies the frozen descriptor, canonical
+payload. The selected chunk-type implementation validates the payload and checks authoritative
+reachability. For `cow`, it verifies the frozen descriptor, canonical
 layout, and derived key against the current logical head. A still-live target
 is left untouched; otherwise chunk GC deletes it idempotently and removes the
 queue field only after success. Wrong record types,
@@ -482,7 +482,7 @@ entry, not a transaction-wide snapshot spanning HSCAN and the subsequent MGET.
 - Last-link reclaim requires durable pending work because the live inode is
   removed at its point of no return. Rewrite/truncate object cleanup is
   best-effort maintenance: failures may leave unreachable objects, while
-  strategy-owned authoritative reachability checks remain mandatory before
+  chunk-type-owned authoritative reachability checks remain mandatory before
   deletion.
 - `StatFs` exposes `inode_count` as its file count. Its block-capacity fields
   are fixed values, not measurements of object-store capacity or usage.

@@ -18,8 +18,8 @@
 #include <vector>
 
 #include "FiberTest.hpp"
-#include "chunk/ChunkObjectKey.hpp"
-#include "chunk/WholeObjectCleanup.hpp"
+#include "chunk/cow/COWCleanup.hpp"
+#include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
 #include "metadata/types/Reclaim.hpp"
@@ -45,11 +45,9 @@ class MemMetaStoreTest : public ::testing::Test {
     store_ = new MemMetaStore();
     store_->SetChunkSize(100);
     swordfs::metadata::MechanismPrivateStorePtr private_metadata;
-    ASSERT_TRUE(
-        store_->OpenPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, &private_metadata)
-            .ok());
-    ASSERT_TRUE(swordfs::chunk::internal::CreateChunkMetadataBridge(
-                    swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, private_metadata, &bridge_)
+    ASSERT_TRUE(store_->OpenPrivateMetadataStore(swordfs::metadata::ChunkType::kCow, &private_metadata).ok());
+    ASSERT_TRUE(swordfs::chunk::internal::CreateChunkMetadataBridge(swordfs::metadata::ChunkType::kCow,
+                                                                    private_metadata, &bridge_)
                     .ok());
     ASSERT_TRUE(store_->BindChunkMetadataBridge(bridge_.get()).ok());
   }
@@ -340,8 +338,8 @@ FIBER_TEST_F(MemMetaStoreTest, UnlinkOnlyRemovesDirectoryEntry) {
   ASSERT_TRUE(status.ok());
   ASSERT_TRUE(work.has_value());
   EXPECT_EQ(work->ino, ino);
-  std::vector<swordfs::chunk::WholeObjectRef> refs;
-  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, 0, &refs).ok());
+  std::vector<swordfs::chunk::cow::COWRef> refs;
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWReclaim(*work, 0, &refs).ok());
   EXPECT_TRUE(refs.empty());
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 
@@ -689,11 +687,11 @@ FIBER_TEST_F(MemMetaStoreTest, PrepareReclaimFreezesWorkAndDropsOrphanedInode) {
   ASSERT_TRUE(status.ok());
   ASSERT_TRUE(work.has_value());
   EXPECT_EQ(work->ino, ino);
-  std::vector<swordfs::chunk::WholeObjectRef> refs;
-  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectReclaim(*work, 0, &refs).ok());
+  std::vector<swordfs::chunk::cow::COWRef> refs;
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWReclaim(*work, 0, &refs).ok());
   ASSERT_EQ(refs.size(), 1U);
   EXPECT_EQ(refs[0].descriptor, MakeChunk(0, 100));
-  EXPECT_EQ(refs[0].key, swordfs::chunk::FormatChunkObjectKey(ino, 0, 1));
+  EXPECT_EQ(refs[0].key, swordfs::chunk::cow::FormatCOWObjectKey(ino, 0, 1));
   EXPECT_TRUE(Lookup(ino).IsNotFound());
 
   std::vector<ReclaimWork> pending;

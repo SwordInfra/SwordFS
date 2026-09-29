@@ -1,21 +1,29 @@
 # Chunk Publication Contract
 
-## Volume-fixed chunk mechanism
+## Volume-fixed chunk type
 
-The formatted volume records one stable `ChunkOverwriteMechanism` enum value.
-Human-readable names such as `whole_object` are
+The formatted volume records one stable `ChunkType` enum value.
+Human-readable names such as `cow` are
 accepted only at the CLI/configuration boundary and are converted there to the
 typed value. Mount composes one mechanism implementation from the persisted enum;
 runtime mechanism selection and private-index namespacing do not carry or
 compare arbitrary mechanism strings. There is no per-file or per-chunk
 mechanism tag and no live switching. Until the chunk-slice implementation is
-activated by #270–#275, the existing immutable whole-object path is the only
+activated by #270–#275, the existing immutable COW path is the only
 selectable implementation. Logical chunk indexes are 64-bit values in the
-common descriptor and in whole-object cleanup/reclaim payloads. SwordFS is
+common descriptor and in COW cleanup/reclaim payloads. SwordFS is
 still beta, so current metadata is interpreted only by the current code and no
-historical whole-object layout number is carried through a VFS-visible
-strategy API. Known but unimplemented enum values such as
+historical COW layout number is carried through a VFS-visible
+chunk-type selection API. Known but unimplemented enum values such as
 `chunk_slice` and `redis_cache` are rejected by mount/runtime composition.
+
+The source layout mirrors that ownership boundary: common chunk contracts and
+worker/factory orchestration live under `src/chunk/` (with common internals in
+`src/chunk/internal/`), while COW-specific runtime, object-key, cleanup, and
+private bridge implementation live under `src/chunk/cow/` and
+`swordfs::chunk::cow`. A later slice implementation should use a peer mechanism
+directory/namespace instead of mixing its private implementation into the
+common chunk root.
 
 Directory entries, inodes, and the file-to-logical-chunk head are shared. A
 logical chunk's file offset is derived from its fixed-layout identity as
@@ -46,13 +54,13 @@ Mechanism-private metadata is exposed to chunk code as a typed capability,
 not as Redis-shaped hash/field/value strings. The common plumbing owns only
 capability lifetime, mechanism isolation, transaction participation, and
 private identity allocation. Each mechanism defines its typed reader/store and
-transaction interfaces beside the records it owns. `whole_object` adds its
+transaction interfaces beside the records it owns. `cow` adds its
 typed head interface in #316; `chunk_slice` adds its SliceID/range interface in
 #270. The transitional `IChunkIndexReader` / `IChunkIndexTxn` string surface
 remains only for the current common-authority path until those consumers are
 migrated; new mechanism code must not treat it as the semantic API.
 
-Runtime private stores are bound to exactly one `ChunkOverwriteMechanism` and
+Runtime private stores are bound to exactly one `ChunkType` and
 are retained by the mount composition root so concrete chunks can receive
 their typed mechanism capability explicitly. Transaction-scoped code receives a
 typed capability context owned by the metadata transaction. A concrete
@@ -73,10 +81,10 @@ identities/records to Redis keys, fields, and encoded values.
 Mechanism-private identity allocation is a runtime-store operation separate
 from metadata publication transactions. The common allocator plumbing accepts
 only compile-time stable sequence tags; each tag encodes both its owning
-`ChunkOverwriteMechanism` and its stable numeric discriminator, so passing a
+`ChunkType` and its stable numeric discriminator, so passing a
 tag through a different mechanism's store is rejected. Arbitrary runtime
 sequence names are not part of the contract. The pair
-`(ChunkOverwriteMechanism, stable sequence discriminator)` defines a private
+`(ChunkType, stable sequence discriminator)` defines a private
 sequence namespace. Values start at 1, are positive and monotonic, may have
 gaps, are never reused, and are limited to `INT64_MAX` so Memory and Redis
 share the same portable range. Allocation exhaustion fails closed. A Redis
@@ -87,7 +95,7 @@ value if Redis had applied the first increment.
 The #315 plumbing does not define a universal private record schema and does
 not change read or publication authority. The common `SwordFsChunk` record,
 legacy `AllocateChunkRevision()`, `ChunkPublishIntent`, `ChunkView`, and the
-current whole-object publication/truncate/reclaim behavior remain authoritative
+current COW publication/truncate/reclaim behavior remain authoritative
 until the later #312 stages replace their consumers. Point-read and scan
 consistency semantics are therefore owned by each future typed adapter: direct
 runtime scans are not promised to be linearizable, while correctness decisions
@@ -107,10 +115,10 @@ object-store I/O does not hold a metadata transaction open.
 Reclaim and pending-delete records carry opaque mechanism-private payloads.
 The common metadata engine persists their envelope and queue identity without
 decoding physical references. Private `ChunkGcWorker` schedules, retries, and
-acknowledges those records; the selected mechanism's cleanup logic decodes
+acknowledges those records; the selected chunk-type implementation's cleanup logic decodes
 them, checks live reachability where applicable, and issues physical deletion. Generic
 `BufCodec` schema and exact `RecordType` checks frame the envelopes and the
-whole-object payload; malformed payloads or identity mismatches fail closed and
+COW payload; malformed payloads or identity mismatches fail closed and
 remain queued. Orphan
 preparation freezes the mechanism-private payload in the same transaction that removes
 the live inode and chunk heads; later replay uses the frozen bytes, not a
@@ -122,8 +130,8 @@ partial Redis `EXEC` left the inode visible: `Link` refuses to revive it, and
 an unexpected live inode leaves the frozen record intact with an error rather
 than risking loss of its remaining chunk references.
 
-The whole-object publication protocol below describes the transitional
-`whole_object` implementation. Its object revision and key are private to that
+The COW publication protocol below describes the transitional
+`cow` implementation. Its object revision and key are private to that
 implementation. The stable `Chunk` contract preserves local-write visibility, chunk-relative
 offsets, exact bounded reads with hole reconstruction, successful-flush
 acknowledgement, retryable failures, and generation isolation; it does not
@@ -369,7 +377,7 @@ metadata call is never silently converted to success.
 
 `pending_deletes` stores maintenance candidates, not permission to delete.
 Private chunk GC validates the mechanism-private payload and rechecks authoritative
-metadata before physical deletion. For `whole_object`, it compares the frozen
+metadata before physical deletion. For `cow`, it compares the frozen
 immutable key with the current logical head and skips a candidate while that
 key is still live. Last-link reclaim also checks that the live inode is absent
 before deleting frozen data, so a partially applied Redis transaction cannot

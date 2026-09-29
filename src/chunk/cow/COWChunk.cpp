@@ -1,7 +1,7 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include "chunk/WholeObjectChunk.hpp"
+#include "chunk/cow/COWChunk.hpp"
 
 #include <folly/io/IOBuf.h>
 #include <folly/logging/xlog.h>
@@ -12,12 +12,12 @@
 #include <string_view>
 #include <utility>
 
-#include "chunk/ChunkObjectKey.hpp"
+#include "chunk/cow/COWObjectKey.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Logging.hpp"
 
-namespace swordfs::chunk {
+namespace swordfs::chunk::cow {
 namespace {
 
 utils::Status ValidateRange(size_t offset, size_t len, size_t chunk_size, std::string_view operation) {
@@ -37,9 +37,9 @@ void AppendZeros(size_t len, folly::IOBuf *out) {
 
 }  // namespace
 
-WholeObjectChunk::WholeObjectChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t max_chunk_size,
-                                   metadata::IMetaEngine *meta, storage::IDataEngine *data,
-                                   std::optional<metadata::SwordFsChunk> published_chunk)
+COWChunk::COWChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t max_chunk_size,
+                   metadata::IMetaEngine *meta, storage::IDataEngine *data,
+                   std::optional<metadata::SwordFsChunk> published_chunk)
     : Chunk(index),
       ino_(ino),
       max_chunk_size_(max_chunk_size),
@@ -58,8 +58,8 @@ WholeObjectChunk::WholeObjectChunk(metadata::InodeID ino, metadata::ChunkIndex i
   }
 }
 
-utils::Status WholeObjectChunk::Write(size_t offset, const folly::IOBuf &data) {
-  auto status = ValidateRange(offset, data.length(), max_chunk_size_, "WholeObjectChunk::Write");
+utils::Status COWChunk::Write(size_t offset, const folly::IOBuf &data) {
+  auto status = ValidateRange(offset, data.length(), max_chunk_size_, "COWChunk::Write");
   if (!status.ok()) {
     return status;
   }
@@ -87,7 +87,7 @@ utils::Status WholeObjectChunk::Write(size_t offset, const folly::IOBuf &data) {
   return wb_->Write(static_cast<off_t>(offset), data);
 }
 
-utils::Status WholeObjectChunk::ReadLocal(const WriteBuf &buffer, size_t offset, size_t len, folly::IOBuf *out) const {
+utils::Status COWChunk::ReadLocal(const WriteBuf &buffer, size_t offset, size_t len, folly::IOBuf *out) const {
   const size_t available = offset < buffer.size() ? std::min(len, buffer.size() - offset) : 0;
   if (available != 0) {
     const size_t original_length = out->length();
@@ -99,16 +99,16 @@ utils::Status WholeObjectChunk::ReadLocal(const WriteBuf &buffer, size_t offset,
   return utils::Status::OK();
 }
 
-utils::Status WholeObjectChunk::Read(size_t offset, size_t len, folly::IOBuf *out) const {
+utils::Status COWChunk::Read(size_t offset, size_t len, folly::IOBuf *out) const {
   if (out == nullptr) {
-    return utils::Status::InvalidArgument("WholeObjectChunk::Read: output buffer is null");
+    return utils::Status::InvalidArgument("COWChunk::Read: output buffer is null");
   }
-  auto status = ValidateRange(offset, len, max_chunk_size_, "WholeObjectChunk::Read");
+  auto status = ValidateRange(offset, len, max_chunk_size_, "COWChunk::Read");
   if (!status.ok()) {
     return status;
   }
   if (out->tailroom() < len) {
-    return utils::Status::InvalidArgument("WholeObjectChunk::Read: output buffer too small");
+    return utils::Status::InvalidArgument("COWChunk::Read: output buffer too small");
   }
   if (len == 0) {
     return utils::Status::OK();
@@ -129,7 +129,7 @@ utils::Status WholeObjectChunk::Read(size_t offset, size_t len, folly::IOBuf *ou
     // remote read completes. A rewrite cannot make this immutable object
     // reclaimable while a mount-local read is still using it.
     status =
-        data_->Get(FormatChunkObjectKey(ino_, Index(), published.revision), static_cast<off_t>(offset), available, out);
+        data_->Get(FormatCOWObjectKey(ino_, Index(), published.revision), static_cast<off_t>(offset), available, out);
     const size_t bytes_read = out->length() - original_length;
     if (!status.ok()) {
       out->trimEnd(bytes_read);
@@ -137,14 +137,14 @@ utils::Status WholeObjectChunk::Read(size_t offset, size_t len, folly::IOBuf *ou
     }
     if (bytes_read != available) {
       out->trimEnd(bytes_read);
-      return utils::Status::IOError("WholeObjectChunk::Read: backend returned a short read");
+      return utils::Status::IOError("COWChunk::Read: backend returned a short read");
     }
   }
   AppendZeros(len - available, out);
   return utils::Status::OK();
 }
 
-void WholeObjectChunk::TruncateLocal(size_t size) {
+void COWChunk::TruncateLocal(size_t size) {
   std::lock_guard<utils::FiberRWMutex> lock(mutex_);
   if (state_ == State::kClean) {
     if (published_chunk_) {
@@ -163,7 +163,7 @@ void WholeObjectChunk::TruncateLocal(size_t size) {
   }
 }
 
-utils::Status WholeObjectChunk::Flush() {
+utils::Status COWChunk::Flush() {
   std::shared_ptr<WriteBuf> generation;
   std::optional<metadata::SwordFsChunk> expected;
   bool refresh_baseline = false;
@@ -173,7 +173,7 @@ utils::Status WholeObjectChunk::Flush() {
       return utils::Status::OK();
     }
     if (state_ == State::kFlushing) {
-      return utils::Status::Busy("WholeObjectChunk::Flush: publication already in flight");
+      return utils::Status::Busy("COWChunk::Flush: publication already in flight");
     }
 
     state_ = State::kFlushing;
@@ -207,18 +207,18 @@ utils::Status WholeObjectChunk::Flush() {
   }
 
   const auto replacement = BuildMeta(revision, generation->size());
-  const auto chunk_key = FormatChunkObjectKey(ino_, Index(), replacement.revision);
+  const auto chunk_key = FormatCOWObjectKey(ino_, Index(), replacement.revision);
   auto data = generation->CloneBuf();
   status = data_->Put(chunk_key, std::move(data));
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "WholeObjectChunk::Flush FAILED: ino=" << ino_ << " chunk=" << Index()
-                      << " size=" << replacement.size << " — " << status.message();
+    SWORDFS_LOG_ERROR << "COWChunk::Flush FAILED: ino=" << ino_ << " chunk=" << Index() << " size=" << replacement.size
+                      << " — " << status.message();
     return fail(status);
   }
 
   status = meta_->CommitChunk(ino_, expected, replacement, metadata::ChunkPublishIntent{});
   if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "WholeObjectChunk::Flush CommitChunk FAILED: ino=" << ino_ << " chunk=" << Index()
+    SWORDFS_LOG_ERROR << "COWChunk::Flush CommitChunk FAILED: ino=" << ino_ << " chunk=" << Index()
                       << " size=" << replacement.size << " — " << status.message();
     return fail(status);
   }
@@ -242,12 +242,12 @@ utils::Status WholeObjectChunk::Flush() {
   return utils::Status::OK();
 }
 
-bool WholeObjectChunk::HasPendingWrites() const {
+bool COWChunk::HasPendingWrites() const {
   std::shared_lock<utils::FiberRWMutex> lock(mutex_);
   return state_ != State::kClean && wb_ != nullptr && wb_->size() > 0;
 }
 
-metadata::SwordFsChunk WholeObjectChunk::BuildMeta(metadata::ChunkRevision revision, size_t size) const {
+metadata::SwordFsChunk COWChunk::BuildMeta(metadata::ChunkRevision revision, size_t size) const {
   metadata::SwordFsChunk chunk;
   chunk.index = Index();
   chunk.revision = revision;
@@ -255,7 +255,7 @@ metadata::SwordFsChunk WholeObjectChunk::BuildMeta(metadata::ChunkRevision revis
   return chunk;
 }
 
-utils::Status WholeObjectChunk::LoadPublicationBaseline(std::optional<metadata::SwordFsChunk> *out) const {
+utils::Status COWChunk::LoadPublicationBaseline(std::optional<metadata::SwordFsChunk> *out) const {
   metadata::SwordFsChunk current;
   auto status = meta_->FindChunk(ino_, Index(), &current);
   if (status.ok()) {
@@ -269,23 +269,20 @@ utils::Status WholeObjectChunk::LoadPublicationBaseline(std::optional<metadata::
   return status;
 }
 
-utils::Status WholeObjectChunk::HydrateForWrite(const metadata::SwordFsChunk &published,
-                                                std::shared_ptr<WriteBuf> *out) const {
+utils::Status COWChunk::HydrateForWrite(const metadata::SwordFsChunk &published, std::shared_ptr<WriteBuf> *out) const {
   if (published.size > max_chunk_size_) {
-    return utils::Status::Malformed("WholeObjectChunk::HydrateForWrite: published chunk exceeds configured chunk size");
+    return utils::Status::Malformed("COWChunk::HydrateForWrite: published chunk exceeds configured chunk size");
   }
 
   auto wb = std::make_shared<WriteBuf>(max_chunk_size_);
   if (published.size > 0) {
     auto persisted = folly::IOBuf::create(published.size);
-    auto status =
-        data_->Get(FormatChunkObjectKey(ino_, Index(), published.revision), 0, published.size, persisted.get());
+    auto status = data_->Get(FormatCOWObjectKey(ino_, Index(), published.revision), 0, published.size, persisted.get());
     if (!status.ok()) {
       return status;
     }
     if (persisted->length() != published.size) {
-      return utils::Status::IOError(
-          "WholeObjectChunk::HydrateForWrite: persisted object is shorter than metadata descriptor");
+      return utils::Status::IOError("COWChunk::HydrateForWrite: persisted object is shorter than metadata descriptor");
     }
     status = wb->Write(0, *persisted);
     if (!status.ok()) {
@@ -297,4 +294,4 @@ utils::Status WholeObjectChunk::HydrateForWrite(const metadata::SwordFsChunk &pu
   return utils::Status::OK();
 }
 
-}  // namespace swordfs::chunk
+}  // namespace swordfs::chunk::cow

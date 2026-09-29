@@ -22,7 +22,7 @@ The architecture is guided by a few recurring principles:
 
 - **Keep filesystem semantics in the client, storage primitives below it.** FUSE/VFS code owns filesystem behavior; metadata and data engines expose storage-oriented contracts.
 - **Separate metadata authority from object data.** Namespace/inode/chunk descriptors live in the metadata engine; file bytes live in the data engine.
-- **Publish logical chunk heads through metadata.** The selected chunk mechanism prepares data first, then metadata atomically makes its new logical generation authoritative. The current `WholeObjectChunk` implementation uses immutable revisioned objects.
+- **Publish logical chunk heads through metadata.** The selected chunk type implementation prepares data first, then metadata atomically makes its new logical generation authoritative. The current `COWChunk` implementation uses immutable revisioned objects.
 - **Treat persistent metadata as the source of truth for lifecycle/recovery.** Local runtime state may fence or cache work, but must not become the only record of persistent work.
 - **Make blocking external IO explicit.** Runtime filesystem logic executes as fibers; Redis/S3 calls run on POSIX worker threads through blocking executors.
 - **Prefer clear state ownership over cross-layer reconstruction.** Each lifecycle transition should have one authoritative owner and a small set of explicit invariants.
@@ -74,11 +74,11 @@ The major responsibilities are:
 
 `VolumeImpl` is the mount composition root. It binds one mounted volume to one
 metadata engine and, when configured, one data engine. After loading the
-persisted `ChunkOverwriteMechanism`, it opens the mechanism-private metadata
+persisted `ChunkType`, it opens the chunk-type-selected mechanism-private metadata
 store, constructs the private metadata bridge, and then constructs the
 mount-owned `ChunkFactory` and private chunk-GC worker. VFS sees only the stable
-`ChunkFactory`/`Chunk` data-path facade and never receives the mechanism or a
-strategy object. Backends are selected by URL scheme through registries rather
+`ChunkFactory`/`Chunk` data-path facade and never receives the mechanism-private
+metadata capability or a chunk-type implementation object. Backends are selected by URL scheme through registries rather
 than hard-coded into VFS code.
 
 ## 3. Process and mount lifecycle
@@ -96,7 +96,7 @@ The volume configuration contains, among other fields:
 - bucket/location string interpreted by that data engine;
 - region;
 - configured logical chunk size;
-- typed chunk overwrite mechanism.
+- typed chunk type.
 
 For Redis metadata, volume configuration is persisted in Redis. For the in-memory backend, only the volume configuration is persisted locally in `/etc/swordfs/<volume>/volume.fmt`; inode, directory, chunk, orphan, and pending-reclaim state remain process-lifetime state.
 
@@ -317,14 +317,14 @@ The main logical records are:
 - **`SwordFsChunk`** — the shared file-to-logical-chunk head, currently containing index, publication generation, and logical size; the logical start offset is derived from `index * chunk_size` rather than persisted;
 - **volume configuration** — storage/backend configuration and chunk size;
 - **orphan candidate** — inode whose last namespace link disappeared but which has not crossed the reclaim point of no return;
-- **`ReclaimWork`** — a frozen opaque strategy payload for an inode already removed from live metadata and awaiting/undergoing data deletion.
+- **`ReclaimWork`** — a frozen opaque chunk-type-private payload for an inode already removed from live metadata and awaiting/undergoing data deletion.
 
-Directory entries, inodes, and logical chunk heads are common to every
-overwrite strategy. Chunk-internal fragment indexes belong to the selected
-strategy, under its own metadata key space and encoding. Metadata does
-**not** store mutable object bytes. In the current `whole_object` strategy,
+Directory entries, inodes, and logical chunk heads are common to every chunk
+type. Chunk-internal fragment indexes belong to the selected chunk-type
+implementation, under its own metadata key space and encoding. Metadata does
+**not** store mutable object bytes. In the current `cow` implementation,
 the head's generation also identifies the immutable physical object revision.
-That second meaning is specific to the transitional whole-object common head;
+That second meaning is specific to the transitional COW common head;
 #312 removes it from the final mechanism-neutral `SwordFsChunk` contract after
 the mechanism-private authority cutover.
 
@@ -333,7 +333,7 @@ For relationships between these records, handles, and write buffers, see
 
 ### 6.3 Memory transaction model
 
-The in-memory backend uses `MemMetaStore::Transact()` as its only mutation/operation entry point. A transaction holds one fiber mutex across the callback, so the callback has one visibility boundary relative to other metadata operations. Strategy-private index mutations are staged and committed only when the callback succeeds. Publication, size changes, and reclaim preparation invoke the strategy before changing the public head or inode, so a strategy rejection leaves both public and private state unchanged.
+The in-memory backend uses `MemMetaStore::Transact()` as its only mutation/operation entry point. A transaction holds one fiber mutex across the callback, so the callback has one visibility boundary relative to other metadata operations. Mechanism-private index mutations are staged and committed only when the callback succeeds. Publication, size changes, and reclaim preparation invoke the selected chunk-type implementation before changing the public head or inode, so a private-metadata rejection leaves both public and private state unchanged.
 
 No pointers to mutable store-owned inode state escape the transaction. Reads use value snapshots and writes go through explicit transaction primitives.
 
@@ -502,10 +502,10 @@ valid file byte positions and sizes are non-negative and no greater than
 At the minimum supported 4 KiB chunk size, a 64-bit index still covers every
 reachable logical chunk without narrowing.
 
-The volume format persists one stable `ChunkOverwriteMechanism` value.
+The volume format persists one stable `ChunkType` value.
 Human-readable names are parsed only at the format/configuration boundary;
 mechanism selection and private-index namespacing use the typed value.
-`whole_object` is the only selectable implementation today; `chunk_slice` and
+`cow` is the only selectable implementation today; `chunk_slice` and
 `redis_cache` are reserved values and are rejected until their implementations
 are available.
 
@@ -514,10 +514,18 @@ metadata. The VFS-facing runtime boundary is the abstract `chunk::Chunk`:
 reads and writes use **chunk-relative offsets**, `Flush()` publishes pending
 data, `TruncateLocal()` changes only mount-local state, and
 `HasPendingWrites()` is the only dirty-state query exposed to VFS. The current
-implementation is `WholeObjectChunk`. A `Chunk` read returns exactly the
+implementation is `COWChunk`. A `Chunk` read returns exactly the
 requested in-chunk range; uncovered bytes inside an existing logical chunk are
 zero-filled by the chunk implementation rather than inferred from physical
 layout by `FileReadWriter`.
+
+Mechanism ownership is explicit in the source tree. Mechanism-neutral runtime
+contracts and orchestration remain under `src/chunk/` and
+`src/chunk/internal/`, while COW-only runtime, object-key, cleanup, buffering,
+and bridge implementation live under `src/chunk/cow/` in the
+`swordfs::chunk::cow` namespace. Future mechanisms such as chunk-slice use peer
+mechanism directories/namespaces rather than adding mechanism-specific helpers
+back into the chunk root.
 
 `ChunkFactory::Open(ino, index, create_if_missing, out)` is the sole VFS
 construction path. An existing logical chunk returns an initialized `Chunk`;
@@ -552,29 +560,29 @@ by the supported `off_t` maximum, and a non-empty write validates its entire
 range before mutating local state. Descriptor validation likewise accepts an
 extent ending exactly at `off_t` max and rejects an extent beyond it. During
 the staged #312 refactor, `revision` and `size`
-remain transitional common fields until whole-object publication, truncate,
+remain transitional common fields until COW publication, truncate,
 and cleanup consumers have moved to mechanism-private authoritative state.
 
 `revision` is currently a volume-wide monotonically allocated, non-zero
 publication generation for the shared head. Allocated generations may have
 gaps after failures, but one must not be reused while the volume's metadata
-remains authoritative. For the current `whole_object` implementation, that
+remains authoritative. For the current `cow` implementation, that
 same value also identifies the immutable physical object revision. This
 mechanism-specific physical meaning is transitional and is not part of the
 target common `SwordFsChunk` contract under #312.
 
-For the current `whole_object` implementation using S3/object storage, the
+For the current `cow` implementation using S3/object storage, the
 physical object key is:
 
 ```text
 <inode>/<chunk-index>/<revision>
 ```
 
-This gives each whole-object revision an immutable physical identity and
+This gives each COW revision an immutable physical identity and
 allows metadata publication to change independently from an already-written
 object. `<chunk-index>` is the canonical unsigned decimal 64-bit logical index.
 Common descriptors and frozen cleanup/reclaim identities persist that index at
-64-bit width. No independent whole-object layout number is carried in the
+64-bit width. No independent COW layout number is carried in the
 volume or cleanup wrappers; SwordFS beta metadata follows only the current
 layout, while generic codec schema/type framing remains responsible for record
 integrity. Future strategies may use a different physical layout under the
@@ -595,7 +603,7 @@ Within one inode, `FileReadWriter` uses a fiber read/write lock around file oper
 
 ## 9. Write and publication path
 
-For `whole_object`, the most important data-path invariant is:
+For `cow`, the most important data-path invariant is:
 
 > **Object bytes are written before the metadata descriptor that makes those bytes authoritative.**
 
@@ -758,7 +766,7 @@ than a mutable inode-level batch. Repeated truncates therefore cannot
 overwrite earlier cleanup generations. Replay validates the common envelope
 and persisted Hash field; private chunk GC validates the private payload
 and checks current authoritative metadata before deleting data. For
-`whole_object`, this includes matching the frozen object key, derived key,
+`cow`, this includes matching the frozen object key, derived key,
 canonical chunk layout, and live head. Queue membership is never itself
 permission to delete: cleanup candidates can become stale relative to
 authoritative metadata.
@@ -1078,7 +1086,7 @@ The most useful source entry points are:
 | FUSE admission/replies | `src/fuse/Vfs.*` |
 | VFS semantics | `src/vfs/VfsImpl.*` |
 | open handles/runtime state | `src/vfs/FileHandle.*`, `src/vfs/InodeHandle.*`, `src/vfs/DirHandle.*` |
-| file/chunk IO | `src/vfs/FileReadWriter.*`, `src/chunk/Chunk.*`, `src/chunk/ChunkFactory.*`, `src/chunk/WholeObjectChunk.*`, `src/chunk/WriteBuf.*` |
+| file/chunk IO | `src/vfs/FileReadWriter.*`, `src/chunk/Chunk.*`, `src/chunk/ChunkFactory.*`, `src/chunk/cow/COWChunk.*`, `src/chunk/cow/WriteBuf.*` |
 | metadata abstraction and private index transaction | `src/metadata/IMetaEngine.hpp`, `src/metadata/IChunkIndexTxn.hpp` |
 | Memory metadata | `src/metadata/mem/` |
 | Redis metadata | `src/metadata/redis/` |
