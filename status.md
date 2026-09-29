@@ -30,18 +30,19 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | Classification | Count |
 | --- | ---: |
 | `ENVIRONMENT` | 8 |
-| `KNOWN_UNSUPPORTED` | 128 |
+| `KNOWN_UNSUPPORTED` | 112 |
 | `PASS` | 125 |
-| `UPSTREAM_NOT_APPLICABLE` | 383 |
+| `UPSTREAM_NOT_APPLICABLE` | 399 |
 | `UPSTREAM_TEST_DEFECT` | 1 |
 
 ## Known-gap Issues
 
-- [#255](https://github.com/SwordInfra/SwordFS/issues/255): 128 testcase(s), KNOWN_UNSUPPORTED
+- [#255](https://github.com/SwordInfra/SwordFS/issues/255): 107 testcase(s), KNOWN_UNSUPPORTED
+- [#391](https://github.com/SwordInfra/SwordFS/issues/391): 5 testcase(s), KNOWN_UNSUPPORTED
 
 ## Execution metadata
 
-- SwordFS commit: `32929c97aae089317a47cfef4311b5ce833052c6`
+- SwordFS commit: `4cd5aae0a0b30c858660fd32ef0fa449c78e63ef`
 - fstests commit: `a370dcbed43563f0462801e889e0eceb93c7cfad`
 - fstests patchset: `conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19`
 - fstests selector: `generic/quick`
@@ -49,8 +50,8 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 - libfuse: `fusermount3 version: 3.18.2`
 - Runner: `GitHub Actions (9 fstests shards)`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36512784477
-Recorded at: 2026-09-29T02:43:18+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36515837188
+Recorded at: 2026-09-29T03:24:45+00:00
 
 ## Historical main-branch progress
 
@@ -69,4 +70,4 @@ Recorded at: 2026-09-29T02:43:18+00:00
 | 2026-09-28T07:37:50+00:00 | `20d61ea022ad` | PASS | 17.52% | 113 | 113 | 17 | 515 | 0 | 532 |
 | 2026-09-29T02:43:18+00:00 | `32929c97aae0` | PASS | 19.38% | 125 | 125 | 17 | 503 | 0 | 520 |
 
-Last fully healthy baseline: `32929c97aae089317a47cfef4311b5ce833052c6`
+Last fully healthy baseline: `4cd5aae0a0b30c858660fd32ef0fa449c78e63ef`

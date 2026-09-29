@@ -11,15 +11,15 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "32929c97aae089317a47cfef4311b5ce833052c6"
+    "swordfs_commit": "4cd5aae0a0b30c858660fd32ef0fa449c78e63ef"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "ENVIRONMENT": 8,
-      "KNOWN_UNSUPPORTED": 128,
+      "KNOWN_UNSUPPORTED": 112,
       "PASS": 125,
-      "UPSTREAM_NOT_APPLICABLE": 383,
+      "UPSTREAM_NOT_APPLICABLE": 399,
       "UPSTREAM_TEST_DEFECT": 1
     },
     "classified_count": 645,
@@ -417,10 +417,10 @@
       "test": "generic/063"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "xfs_io fiemap failed (old kernel/wrong fs?)",
-      "reason": "SwordFS does not provide the block-mapping/fiemap capability required by this testcase; tracked by #255.",
+      "reason": "The testcase makes local FIEMAP extent-count/topology behavior part of insert/collapse validation; SwordFS has logical object-backed chunks but no stable physical extent map to expose.",
       "result": "NOTRUN",
       "test": "generic/064"
     },
@@ -506,9 +506,9 @@
     },
     {
       "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "issue": "#391",
       "message": "file system doesn't support chattr +ia",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The testcase exercises meaningful immutable/append-only inode policy; the focused implementation is tracked by #391.",
       "result": "NOTRUN",
       "test": "generic/079"
     },
@@ -593,10 +593,10 @@
       "test": "generic/092"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "xfs_io fiemap failed (old kernel/wrong fs?)",
-      "reason": "SwordFS does not provide the block-mapping/fiemap capability required by this testcase; tracked by #255.",
+      "reason": "The testcase validates preallocation through FIEMAP physical extent mappings; SwordFS object-backed logical chunks do not expose a stable local physical extent map.",
       "result": "NOTRUN",
       "test": "generic/094"
     },
@@ -1049,18 +1049,18 @@
       "test": "generic/158"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "file system doesn't support chattr +i",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The current chattr prerequisite masks a reflink contract; pinned fstests does not provide reflink for the FUSE model, so the testcase is not applicable to SwordFS even after immutable flags exist.",
       "result": "NOTRUN",
       "test": "generic/159"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "file system doesn't support chattr +i",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The current chattr prerequisite masks a dedupe contract; pinned fstests does not provide dedupe for the FUSE model, so the testcase is not applicable to SwordFS even after immutable flags exist.",
       "result": "NOTRUN",
       "test": "generic/160"
     },
@@ -1457,10 +1457,10 @@
       "test": "generic/223"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "xfs_io fiemap failed (old kernel/wrong fs?)",
-      "reason": "SwordFS does not provide the block-mapping/fiemap capability required by this testcase; tracked by #255.",
+      "reason": "The testcase is a FIEMAP physical extent-mapping tester; SwordFS object-backed logical chunks do not expose a stable local physical extent map.",
       "result": "NOTRUN",
       "test": "generic/225"
     },
@@ -1657,10 +1657,10 @@
       "test": "generic/259"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "FITRIM not supported on <FSTESTS_WORK_DIR>/scratch",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "FITRIM validates discard offsets and discarded free blocks on a filesystem block device; SwordFS object storage has no mounted discard address space.",
       "result": "NOTRUN",
       "test": "generic/260"
     },
@@ -1756,7 +1756,7 @@
       "classification": "KNOWN_UNSUPPORTED",
       "issue": "#255",
       "message": "file system doesn't support chattr +A",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "Per-inode no-atime policy is meaningful because SwordFS owns atime/ctime state, but FS_NOATIME_FL is deliberately unsupported and is not part of #391.",
       "result": "NOTRUN",
       "test": "generic/277"
     },
@@ -1825,10 +1825,10 @@
       "test": "generic/287"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "FITRIM not supported on <FSTESTS_WORK_DIR>/scratch",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The testcase validates block-device FITRIM length semantics; SwordFS object storage has no mounted discard address space.",
       "result": "NOTRUN",
       "test": "generic/288"
     },
@@ -2289,10 +2289,10 @@
       "test": "generic/366"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "this test requires extsize support on the filesystem",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "Extent-size hints govern local physical allocation and delayed/allocated extent state; SwordFS allocation is logical chunking plus strategy-private object representation.",
       "result": "NOTRUN",
       "test": "generic/367"
     },
@@ -2682,17 +2682,17 @@
     },
     {
       "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "issue": "#391",
       "message": "file system doesn't support any of /usr/bin/chattr +a/+c/+d/+i",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The testcase reflects supported inode flags through statx; immutable/append-only flag semantics are selected under #391.",
       "result": "NOTRUN",
       "test": "generic/424"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "xfs_io fiemap -a failed (old kernel/wrong fs?)",
-      "reason": "SwordFS does not provide the block-mapping/fiemap capability required by this testcase; tracked by #255.",
+      "reason": "The testcase requires FIEMAP-visible external xattr blocks, but #378 stores SwordFS xattrs inside the authoritative inode record and has no external xattr extents.",
       "result": "NOTRUN",
       "test": "generic/425"
     },
@@ -3116,7 +3116,7 @@
       "classification": "KNOWN_UNSUPPORTED",
       "issue": "#255",
       "message": "xfs_io label failed (old kernel/wrong fs?)",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "Online filesystem labels are meaningful but deliberately unsupported; SwordFsVolume::name is persistent volume identity/metadata namespace, not a mutable label.",
       "result": "NOTRUN",
       "test": "generic/492"
     },
@@ -3225,18 +3225,18 @@
       "test": "generic/506"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "file system doesn't support chattr +ASai",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The inode-flag prerequisite masks a forced local-filesystem shutdown/journal-recovery test; pinned fstests does not support that shutdown model for FUSE. Flag persistence itself is tracked by #391.",
       "result": "NOTRUN",
       "test": "generic/507"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "lsattr not supported by test filesystem type: fuse",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The lsattr/birth-time prerequisites mask a forced local-filesystem shutdown/journal-recovery contract that pinned fstests does not support for FUSE; birth time itself remains under #381.",
       "result": "NOTRUN",
       "test": "generic/508"
     },
@@ -3449,10 +3449,10 @@
       "test": "generic/536"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "FSTRIM not supported",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The testcase combines block-device discard with local metadata-journal norecovery mount semantics, neither of which exists in SwordFS' object-backed FUSE model.",
       "result": "NOTRUN",
       "test": "generic/537"
     },
@@ -3514,9 +3514,9 @@
     },
     {
       "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "issue": "#391",
       "message": "file system doesn't support chattr +i",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The testcase exercises meaningful CAP_LINUX_IMMUTABLE authorization for immutable/append-only inode flags; tracked by #391.",
       "result": "NOTRUN",
       "test": "generic/545"
     },
@@ -3570,9 +3570,9 @@
     },
     {
       "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "issue": "#391",
       "message": "xfs_io chattr +i failed (old kernel/wrong fs?)",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The current blocker is meaningful immutable-file enforcement tracked by #391; after that lands the testcase must be re-evaluated against copy_file_range work in #382.",
       "result": "NOTRUN",
       "test": "generic/553"
     },
@@ -3586,9 +3586,9 @@
     },
     {
       "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "issue": "#391",
       "message": "xfs_io chattr +ia failed (old kernel/wrong fs?)",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The testcase exercises immutable/append-only semantics and CAP_LINUX_IMMUTABLE through FS_IOC_FSSETXATTR; tracked by #391.",
       "result": "NOTRUN",
       "test": "generic/555"
     },
@@ -3729,10 +3729,10 @@
       "test": "generic/577"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "xfs_io fiemap failed (old kernel/wrong fs?)",
-      "reason": "SwordFS does not provide the block-mapping/fiemap capability required by this testcase; tracked by #255.",
+      "reason": "The testcase requires reflink plus FIEMAP/filefrag shared-vs-exclusive physical extent topology; neither physical sharing topology nor the pinned FUSE reflink contract applies to SwordFS.",
       "result": "NOTRUN",
       "test": "generic/578"
     },
@@ -3841,10 +3841,10 @@
       "test": "generic/595"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "file system doesn't support chattr +S",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The sync inode flag is only setup for an XFS xfsaild PF_MEMALLOC kernel regression test, which does not apply to the SwordFS userspace/FUSE implementation.",
       "result": "NOTRUN",
       "test": "generic/596"
     },
@@ -3929,10 +3929,10 @@
       "test": "generic/606"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "xfs_io chattr +x failed (old kernel/wrong fs?)",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The testcase validates DAX inode-flag inheritance under DAX mount modes; DAX is a local persistent-memory/block-filesystem facility with no SwordFS object-backed analogue.",
       "result": "NOTRUN",
       "test": "generic/607"
     },
@@ -4025,10 +4025,10 @@
       "test": "generic/621"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
       "message": "xfs_io shutdown failed (old kernel/wrong fs?)",
-      "reason": "SwordFS VfsImpl::Ioctl returns NotSupported for the required filesystem ioctl capability; tracked by #255.",
+      "reason": "The testcase is an XFS shutdown/iomap mapped-write-fault regression and requires forced local-filesystem shutdown semantics that do not apply to SwordFS FUSE.",
       "result": "NOTRUN",
       "test": "generic/623"
     },
