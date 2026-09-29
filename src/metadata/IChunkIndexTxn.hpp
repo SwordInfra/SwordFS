@@ -38,7 +38,7 @@ class IChunkIndexTxn : public IChunkIndexReader {
   virtual utils::Status Erase(std::string_view hash, std::string_view field) = 0;
 };
 
-// Only the volume-selected mechanism interprets these bytes. The session
+// Only the volume-selected chunk-type implementation interprets these bytes. The session
 // keeps its intent until publication has a known result, including retries.
 struct ChunkPublishIntent {
   std::string payload;

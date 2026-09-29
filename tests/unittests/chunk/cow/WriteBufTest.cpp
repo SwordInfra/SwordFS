@@ -8,10 +8,10 @@
 
 #include <string>
 
-#include "chunk/WriteBuf.hpp"
+#include "chunk/cow/WriteBuf.hpp"
 #include "utils/Status.hpp"
 
-using swordfs::chunk::WriteBuf;
+using swordfs::chunk::cow::WriteBuf;
 using swordfs::utils::Status;
 
 static std::string Repeat(char c, size_t n) {

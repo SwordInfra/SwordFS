@@ -76,10 +76,10 @@ class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
 
-  /// Open the mount-selected mechanism-private backend capability. The
-  /// concrete mechanism interprets typed records; common metadata code only
-  /// owns the capability lifetime and transaction participation.
-  virtual Status OpenPrivateMetadataStore(ChunkOverwriteMechanism, MechanismPrivateStorePtr *) {
+  /// Open the mount-selected chunk type's mechanism-private backend capability.
+  /// The chunk-type implementation interprets typed records; common metadata
+  /// code only owns the capability lifetime and transaction participation.
+  virtual Status OpenPrivateMetadataStore(ChunkType, MechanismPrivateStorePtr *) {
     return Status::NotSupported("metadata backend does not support private chunk metadata");
   }
 
@@ -268,7 +268,7 @@ class IMetaEngine {
   virtual Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                              const SwordFsChunk &replacement) = 0;
 
-  /// Publish a strategy-owned intent with the public head in one metadata
+  /// Publish a chunk-type-owned intent with the public head in one metadata
   /// transaction. Legacy engines may only accept an empty intent.
   virtual Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
                              const ChunkPublishIntent &intent) {
@@ -278,7 +278,7 @@ class IMetaEngine {
     return CommitChunk(ino, expected, replacement);
   }
 
-  /// Read the public head and the selected mechanism's private representation
+  /// Read the public head and the selected chunk type's private representation
   /// from one validated metadata snapshot. NotFound means no public head.
   virtual Status LoadChunkView(InodeID, ChunkIndex, ChunkView *) {
     return Status::NotSupported("metadata backend does not support chunk index snapshots");

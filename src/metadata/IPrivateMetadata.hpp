@@ -24,14 +24,13 @@ constexpr uint64_t kMaxPrivateSequenceValue = static_cast<uint64_t>(std::numeric
 // part of the private metadata contract. Encoding the mechanism in the tag
 // prevents a typed identity allocator from being used through the wrong
 // mechanism-scoped store.
-template <ChunkOverwriteMechanism Mechanism, uint32_t StableId>
+template <ChunkType Mechanism, uint32_t StableId>
 struct PrivateSequenceTag {
-  static_assert(Mechanism == ChunkOverwriteMechanism::kWholeObject ||
-                    Mechanism == ChunkOverwriteMechanism::kChunkSlice ||
-                    Mechanism == ChunkOverwriteMechanism::kRedisCache,
-                "private sequence requires a known chunk overwrite mechanism");
+  static_assert(Mechanism == ChunkType::kCow || Mechanism == ChunkType::kChunkSlice ||
+                    Mechanism == ChunkType::kRedisCache,
+                "private sequence requires a known chunk type");
   static_assert(StableId != 0, "private sequence id 0 is reserved");
-  static constexpr ChunkOverwriteMechanism kMechanism = Mechanism;
+  static constexpr ChunkType kMechanism = Mechanism;
   static constexpr uint32_t kStableId = StableId;
 };
 
@@ -44,16 +43,16 @@ utils::Status AllocatePrivateSequenceValue(uint64_t *current, uint64_t *value);
 
 }  // namespace internal
 
-// Runtime capability shared between the selected mechanism and its metadata
+// Runtime capability shared between the selected chunk-type implementation and its metadata
 // backend. This interface deliberately contains no generic record read/write
 // methods: concrete mechanisms add typed stores beside their record types.
 class IMechanismPrivateStore {
  public:
   virtual ~IMechanismPrivateStore() = default;
 
-  virtual ChunkOverwriteMechanism mechanism() const = 0;
+  virtual ChunkType mechanism() const = 0;
 
-  template <ChunkOverwriteMechanism Mechanism, uint32_t StableId>
+  template <ChunkType Mechanism, uint32_t StableId>
   utils::Status AllocateSequence(PrivateSequenceTag<Mechanism, StableId>, uint64_t *value) {
     if (value == nullptr) {
       return utils::Status::InvalidArgument("private sequence output is null");
@@ -94,10 +93,10 @@ class IMechanismPrivateTxn {
 // the commit hook dangling after the callback returns.
 class MechanismPrivateTxnContext {
  public:
-  explicit MechanismPrivateTxnContext(ChunkOverwriteMechanism mechanism) : mechanism_(mechanism) {
+  explicit MechanismPrivateTxnContext(ChunkType mechanism) : mechanism_(mechanism) {
   }
 
-  ChunkOverwriteMechanism mechanism() const {
+  ChunkType mechanism() const {
     return mechanism_;
   }
 
@@ -138,7 +137,7 @@ class MechanismPrivateTxnContext {
     }
   }
 
-  ChunkOverwriteMechanism mechanism_;
+  ChunkType mechanism_;
   void *capability_ = nullptr;
   IMechanismPrivateTxn *transaction_ = nullptr;
   const std::type_info *capability_type_ = nullptr;

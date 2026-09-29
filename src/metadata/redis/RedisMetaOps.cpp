@@ -54,7 +54,7 @@ RedisMetaOps::~RedisMetaOps() {
   backend_->Shutdown();
 }
 
-utils::Status RedisMetaOps::OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out) {
+utils::Status RedisMetaOps::OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out) {
   utils::ExpectInThreadDomain();
   if (out == nullptr) {
     return utils::Status::InvalidArgument("private metadata store output is null");
@@ -615,8 +615,7 @@ utils::Status RedisMetaOps::TransactFromFiber(const std::function<utils::Status(
   return backend_->executor().RunFromFiber([&] {
     return backend_->client().Transact([&](RedisKvTxn &kv_txn) {
       utils::ExpectInThreadDomain();
-      const auto mechanism =
-          private_metadata_ != nullptr ? private_metadata_->mechanism() : ChunkOverwriteMechanism::kWholeObject;
+      const auto mechanism = private_metadata_ != nullptr ? private_metadata_->mechanism() : ChunkType::kCow;
       RedisMetaTxn txn(kv_txn, key_, chunk_size_, mechanism, chunk_metadata_bridge_);
       return callback(txn);
     });

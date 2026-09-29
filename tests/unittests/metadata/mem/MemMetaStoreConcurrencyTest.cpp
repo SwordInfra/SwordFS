@@ -44,11 +44,9 @@ class MemMetaStoreConcurrencyTest : public ::testing::Test {
   void SetUp() override {
     store_ = new MemMetaStore();
     swordfs::metadata::MechanismPrivateStorePtr private_metadata;
-    ASSERT_TRUE(
-        store_->OpenPrivateMetadataStore(swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, &private_metadata)
-            .ok());
-    ASSERT_TRUE(swordfs::chunk::internal::CreateChunkMetadataBridge(
-                    swordfs::metadata::ChunkOverwriteMechanism::kWholeObject, private_metadata, &bridge_)
+    ASSERT_TRUE(store_->OpenPrivateMetadataStore(swordfs::metadata::ChunkType::kCow, &private_metadata).ok());
+    ASSERT_TRUE(swordfs::chunk::internal::CreateChunkMetadataBridge(swordfs::metadata::ChunkType::kCow,
+                                                                    private_metadata, &bridge_)
                     .ok());
     ASSERT_TRUE(store_->BindChunkMetadataBridge(bridge_.get()).ok());
   }

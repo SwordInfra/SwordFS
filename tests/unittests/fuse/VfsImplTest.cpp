@@ -34,7 +34,7 @@
 #include "FiberTest.hpp"
 #include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
-#include "chunk/ChunkObjectKey.hpp"
+#include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkGcWorker.hpp"
 #include "fuse/Vfs.hpp"
 #include "metadata/IMetaEngine.hpp"
@@ -99,8 +99,8 @@ swordfs::utils::Status ReconcileBackgroundCleanup(swordfs::storage::IDataEngine 
     return status;
   }
   auto &volume = swordfs::volume::VolumeImpl::Instance();
-  swordfs::chunk::internal::ChunkGcWorker worker(volume.config().chunk_overwrite_mechanism, volume.chunk_size(),
-                                                 volume.meta_engine(), data);
+  swordfs::chunk::internal::ChunkGcWorker worker(volume.config().chunk_type, volume.chunk_size(), volume.meta_engine(),
+                                                 data);
   return worker.Reconcile();
 }
 
@@ -2462,7 +2462,7 @@ class VfsLastLinkCleanupTest : public ::testing::Test {
     const swordfs::metadata::SwordFsChunk chunk{.index = 0, .revision = 1, .size = 64};
     const auto committed = meta_->CommitChunk(file.ino, std::nullopt, chunk);
     EXPECT_TRUE(committed.ok()) << committed.message();
-    data_->Seed(swordfs::chunk::FormatChunkObjectKey(file.ino, 0, 1));
+    data_->Seed(swordfs::chunk::cow::FormatCOWObjectKey(file.ino, 0, 1));
     return file.ino;
   }
 
@@ -2758,7 +2758,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, ReadDirPlusRetainsEmittedInodeUntilForget) 
 
 FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkPublishesBackgroundCleanupAndOpenDescriptorDefersWorker) {
   const InodeID ino = CreateChunkedFile("f");
-  const auto key = swordfs::chunk::FormatChunkObjectKey(ino, 0, 1);
+  const auto key = swordfs::chunk::cow::FormatCOWObjectKey(ino, 0, 1);
 
   std::shared_ptr<swordfs::vfs::FileHandle> handle;
   ASSERT_TRUE(OpenDescriptor(ino, &handle));
@@ -2796,7 +2796,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkPublishesBackgroundCleanupAndOpenDesc
 
 FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkReturnsBeforeBackgroundCleanupAndRetrySurvivesFailure) {
   const InodeID ino = CreateChunkedFile("f");
-  const auto key = swordfs::chunk::FormatChunkObjectKey(ino, 0, 1);
+  const auto key = swordfs::chunk::cow::FormatCOWObjectKey(ino, 0, 1);
   data_->fail_keys[key] = swordfs::utils::Status::IOError("injected delete failure");
 
   // The unlink committed: the failed cleanup must not fail the syscall.
@@ -2827,7 +2827,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkReturnsBeforeBackgroundCleanupAndRetr
 
 FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkOfAHardlinkedNameDeletesNothing) {
   const InodeID ino = CreateChunkedFile("f");
-  const auto key = swordfs::chunk::FormatChunkObjectKey(ino, 0, 1);
+  const auto key = swordfs::chunk::cow::FormatCOWObjectKey(ino, 0, 1);
 
   swordfs::metadata::SwordFsInode linked;
   ASSERT_TRUE(meta_->Link(ino, swordfs::metadata::kRootInodeId, "g", &linked).ok());
@@ -2859,8 +2859,8 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwritePublishesBackgroundCleanupFo
   constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
   const InodeID victim = CreateChunkedFile("victim");
   const InodeID moved = CreateChunkedFile("source");
-  const auto victim_key = swordfs::chunk::FormatChunkObjectKey(victim, 0, 1);
-  const auto moved_key = swordfs::chunk::FormatChunkObjectKey(moved, 0, 1);
+  const auto victim_key = swordfs::chunk::cow::FormatCOWObjectKey(victim, 0, 1);
+  const auto moved_key = swordfs::chunk::cow::FormatCOWObjectKey(moved, 0, 1);
 
   ASSERT_TRUE(VfsImpl::Rename(kRoot, "source", kRoot, "victim", 0).ok());
 
@@ -2889,7 +2889,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwritePublishesBackgroundCleanupAn
   constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
   const InodeID victim = CreateChunkedFile("victim");
   const InodeID moved = CreateChunkedFile("source");
-  const auto victim_key = swordfs::chunk::FormatChunkObjectKey(victim, 0, 1);
+  const auto victim_key = swordfs::chunk::cow::FormatCOWObjectKey(victim, 0, 1);
 
   std::shared_ptr<swordfs::vfs::FileHandle> handle;
   ASSERT_TRUE(OpenDescriptor(victim, &handle));
@@ -2925,7 +2925,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, RenameReturnsBeforeBackgroundCleanupAndRetr
   constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
   const InodeID victim = CreateChunkedFile("victim");
   const InodeID moved = CreateChunkedFile("source");
-  const auto victim_key = swordfs::chunk::FormatChunkObjectKey(victim, 0, 1);
+  const auto victim_key = swordfs::chunk::cow::FormatCOWObjectKey(victim, 0, 1);
   data_->fail_keys[victim_key] = swordfs::utils::Status::IOError("injected delete failure");
 
   // The rename committed: the failed cleanup must not fail it.
@@ -2953,7 +2953,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, RenameReturnsBeforeBackgroundCleanupAndRetr
 FIBER_TEST_F(VfsLastLinkCleanupTest, RenameWithoutAnOverwrittenInodeCleansUpNothing) {
   constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
   const InodeID source = CreateChunkedFile("source");
-  const auto key = swordfs::chunk::FormatChunkObjectKey(source, 0, 1);
+  const auto key = swordfs::chunk::cow::FormatCOWObjectKey(source, 0, 1);
 
   ASSERT_TRUE(VfsImpl::Rename(kRoot, "source", kRoot, "target", 0).ok());
 

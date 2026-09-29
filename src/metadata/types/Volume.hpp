@@ -11,16 +11,16 @@
 
 namespace swordfs::metadata {
 
-enum class ChunkOverwriteMechanism : uint32_t {
-  kWholeObject = 1,
+enum class ChunkType : uint32_t {
+  kCow = 1,
   kChunkSlice = 2,
   kRedisCache = 3,
 };
 
-bool IsKnownChunkOverwriteMechanism(ChunkOverwriteMechanism mechanism);
-std::string_view ChunkOverwriteMechanismName(ChunkOverwriteMechanism mechanism);
-std::string ChunkOverwriteMechanismKey(ChunkOverwriteMechanism mechanism);
-utils::Status ParseChunkOverwriteMechanism(std::string_view name, ChunkOverwriteMechanism *out);
+bool IsKnownChunkType(ChunkType chunk_type);
+std::string_view ChunkTypeName(ChunkType chunk_type);
+std::string ChunkTypeKey(ChunkType chunk_type);
+utils::Status ParseChunkType(std::string_view name, ChunkType *out);
 
 /// Volume-level metadata persisted by `swordfs format`.
 struct SwordFsVolume {
@@ -29,8 +29,8 @@ struct SwordFsVolume {
   std::string bucket;
   std::string region;
   uint64_t chunk_size = 64ULL * 1024 * 1024;
-  // Chosen once at format and used as the single runtime mechanism identity.
-  ChunkOverwriteMechanism chunk_overwrite_mechanism = ChunkOverwriteMechanism::kWholeObject;
+  // Chosen once at format and used as the single runtime chunk-type identity.
+  ChunkType chunk_type = ChunkType::kCow;
 
   /// Serialize the volume metadata into its canonical binary representation.
   std::string SerializeTo() const;

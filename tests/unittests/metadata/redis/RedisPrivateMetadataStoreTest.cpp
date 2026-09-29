@@ -19,9 +19,9 @@
 namespace swordfs::metadata {
 namespace {
 
-using WholeSequenceA = PrivateSequenceTag<ChunkOverwriteMechanism::kWholeObject, 21>;
-using WholeSequenceB = PrivateSequenceTag<ChunkOverwriteMechanism::kWholeObject, 22>;
-using SliceSequenceA = PrivateSequenceTag<ChunkOverwriteMechanism::kChunkSlice, 21>;
+using COWSequenceA = PrivateSequenceTag<ChunkType::kCow, 21>;
+using COWSequenceB = PrivateSequenceTag<ChunkType::kCow, 22>;
+using SliceSequenceA = PrivateSequenceTag<ChunkType::kChunkSlice, 21>;
 
 TEST(RedisPrivateMetadataStoreTest, AllocatesIndependentMechanismAndTagSequences) {
   RedisMetaConfig config;
@@ -32,8 +32,8 @@ TEST(RedisPrivateMetadataStoreTest, AllocatesIndependentMechanismAndTagSequences
   const auto volume_name = swordfs::test::UniqueRedisTestNamespace("private-sequence");
   redis::RedisKey key(config.db, volume_name);
   auto backend = std::make_shared<RedisBackendContext>(config, 1);
-  RedisPrivateMetadataStore whole_object(backend, key, ChunkOverwriteMechanism::kWholeObject);
-  RedisPrivateMetadataStore chunk_slice(backend, key, ChunkOverwriteMechanism::kChunkSlice);
+  RedisPrivateMetadataStore cow(backend, key, ChunkType::kCow);
+  RedisPrivateMetadataStore chunk_slice(backend, key, ChunkType::kChunkSlice);
 
   uint64_t first = 0;
   uint64_t second = 0;
@@ -44,16 +44,16 @@ TEST(RedisPrivateMetadataStoreTest, AllocatesIndependentMechanismAndTagSequences
   utils::Status tag_status;
   utils::Status mechanism_status;
   swordfs::test::RunInTestFiber([&] {
-    first_status = whole_object.AllocateSequence(WholeSequenceA{}, &first);
-    second_status = whole_object.AllocateSequence(WholeSequenceA{}, &second);
-    tag_status = whole_object.AllocateSequence(WholeSequenceB{}, &other_tag);
+    first_status = cow.AllocateSequence(COWSequenceA{}, &first);
+    second_status = cow.AllocateSequence(COWSequenceA{}, &second);
+    tag_status = cow.AllocateSequence(COWSequenceB{}, &other_tag);
     mechanism_status = chunk_slice.AllocateSequence(SliceSequenceA{}, &other_mechanism);
   });
 
   sw::redis::Redis cleanup(ConnectionOptions(config));
-  cleanup.del(key.PrivateSequence(ChunkOverwriteMechanism::kWholeObject, WholeSequenceA::kStableId));
-  cleanup.del(key.PrivateSequence(ChunkOverwriteMechanism::kWholeObject, WholeSequenceB::kStableId));
-  cleanup.del(key.PrivateSequence(ChunkOverwriteMechanism::kChunkSlice, SliceSequenceA::kStableId));
+  cleanup.del(key.PrivateSequence(ChunkType::kCow, COWSequenceA::kStableId));
+  cleanup.del(key.PrivateSequence(ChunkType::kCow, COWSequenceB::kStableId));
+  cleanup.del(key.PrivateSequence(ChunkType::kChunkSlice, SliceSequenceA::kStableId));
   backend->Shutdown();
 
   ASSERT_TRUE(first_status.ok()) << first_status.message();
@@ -64,7 +64,7 @@ TEST(RedisPrivateMetadataStoreTest, AllocatesIndependentMechanismAndTagSequences
   EXPECT_EQ(second, 2U);
   EXPECT_EQ(other_tag, 1U);
   EXPECT_EQ(other_mechanism, 1U);
-  EXPECT_EQ(whole_object.AllocateSequence(SliceSequenceA{}, &first).ToErrno(), EINVAL);
+  EXPECT_EQ(cow.AllocateSequence(SliceSequenceA{}, &first).ToErrno(), EINVAL);
 }
 
 TEST(RedisPrivateMetadataStoreTest, RejectsNegativeCounterWithoutMutatingIt) {
@@ -75,19 +75,19 @@ TEST(RedisPrivateMetadataStoreTest, RejectsNegativeCounterWithoutMutatingIt) {
 
   const auto volume_name = swordfs::test::UniqueRedisTestNamespace("private-sequence-range");
   redis::RedisKey key(config.db, volume_name);
-  const auto sequence_key = key.PrivateSequence(ChunkOverwriteMechanism::kWholeObject, WholeSequenceA::kStableId);
+  const auto sequence_key = key.PrivateSequence(ChunkType::kCow, COWSequenceA::kStableId);
   sw::redis::Redis redis(ConnectionOptions(config));
   redis.set(sequence_key, "-1");
 
   auto backend = std::make_shared<RedisBackendContext>(config, 1);
-  RedisPrivateMetadataStore store(backend, key, ChunkOverwriteMechanism::kWholeObject);
+  RedisPrivateMetadataStore store(backend, key, ChunkType::kCow);
   uint64_t first = 0;
   uint64_t second = 0;
   utils::Status first_status;
   utils::Status second_status;
   swordfs::test::RunInTestFiber([&] {
-    first_status = store.AllocateSequence(WholeSequenceA{}, &first);
-    second_status = store.AllocateSequence(WholeSequenceA{}, &second);
+    first_status = store.AllocateSequence(COWSequenceA{}, &first);
+    second_status = store.AllocateSequence(COWSequenceA{}, &second);
   });
   const auto persisted = redis.get(sequence_key);
   redis.del(sequence_key);
@@ -109,19 +109,19 @@ TEST(RedisPrivateMetadataStoreTest, ExhaustionFailsClosedWithoutAdvancingCounter
 
   const auto volume_name = swordfs::test::UniqueRedisTestNamespace("private-sequence-exhaustion");
   redis::RedisKey key(config.db, volume_name);
-  const auto sequence_key = key.PrivateSequence(ChunkOverwriteMechanism::kWholeObject, WholeSequenceA::kStableId);
+  const auto sequence_key = key.PrivateSequence(ChunkType::kCow, COWSequenceA::kStableId);
   sw::redis::Redis redis(ConnectionOptions(config));
   redis.set(sequence_key, std::to_string(kMaxPrivateSequenceValue));
 
   auto backend = std::make_shared<RedisBackendContext>(config, 1);
-  RedisPrivateMetadataStore store(backend, key, ChunkOverwriteMechanism::kWholeObject);
+  RedisPrivateMetadataStore store(backend, key, ChunkType::kCow);
   uint64_t first = 0;
   uint64_t second = 0;
   utils::Status first_status;
   utils::Status second_status;
   swordfs::test::RunInTestFiber([&] {
-    first_status = store.AllocateSequence(WholeSequenceA{}, &first);
-    second_status = store.AllocateSequence(WholeSequenceA{}, &second);
+    first_status = store.AllocateSequence(COWSequenceA{}, &first);
+    second_status = store.AllocateSequence(COWSequenceA{}, &second);
   });
   const auto persisted = redis.get(sequence_key);
   redis.del(sequence_key);
@@ -141,11 +141,11 @@ TEST(RedisPrivateMetadataStoreTest, AmbiguousIncrOutcomePropagatesWithoutReplay)
     ScriptedRedisServer server(scenario);
     auto backend = std::make_shared<RedisBackendContext>(ScriptedConfig(server), 1);
     redis::RedisKey key(0, "private-sequence-fault");
-    RedisPrivateMetadataStore store(backend, key, ChunkOverwriteMechanism::kWholeObject);
+    RedisPrivateMetadataStore store(backend, key, ChunkType::kCow);
     uint64_t value = 0;
     utils::Status status;
 
-    swordfs::test::RunInTestFiber([&] { status = store.AllocateSequence(WholeSequenceA{}, &value); });
+    swordfs::test::RunInTestFiber([&] { status = store.AllocateSequence(COWSequenceA{}, &value); });
     server.Wait();
     backend->Shutdown();
 
@@ -159,15 +159,15 @@ TEST(RedisPrivateMetadataStoreTest, AmbiguousAppliedAllocationLeavesGapAndRetryG
   ScriptedRedisServer server(RedisFaultScenario::kIncrProtocolFailureAppliedThenFreshValue);
   auto backend = std::make_shared<RedisBackendContext>(ScriptedConfig(server), 1);
   redis::RedisKey key(0, "private-sequence-fresh-retry");
-  RedisPrivateMetadataStore store(backend, key, ChunkOverwriteMechanism::kWholeObject);
+  RedisPrivateMetadataStore store(backend, key, ChunkType::kCow);
   uint64_t lost = 0;
   uint64_t fresh = 0;
   utils::Status lost_status;
   utils::Status fresh_status;
 
   swordfs::test::RunInTestFiber([&] {
-    lost_status = store.AllocateSequence(WholeSequenceA{}, &lost);
-    fresh_status = store.AllocateSequence(WholeSequenceA{}, &fresh);
+    lost_status = store.AllocateSequence(COWSequenceA{}, &lost);
+    fresh_status = store.AllocateSequence(COWSequenceA{}, &fresh);
   });
   server.Wait();
   backend->Shutdown();
@@ -188,11 +188,11 @@ TEST(RedisPrivateMetadataStoreTest, RuntimeAllocationRejectsThreadCaller) {
   config.port = 1;
   config.retry_attempts = 1;
   auto backend = std::make_shared<RedisBackendContext>(config, 1);
-  RedisPrivateMetadataStore store(backend, redis::RedisKey(0, "domain"), ChunkOverwriteMechanism::kWholeObject);
+  RedisPrivateMetadataStore store(backend, redis::RedisKey(0, "domain"), ChunkType::kCow);
   uint64_t value = 0;
 
   EXPECT_DEATH(
-      { (void)store.AllocateSequence(WholeSequenceA{}, &value); },
+      { (void)store.AllocateSequence(COWSequenceA{}, &value); },
       "execution-domain violation at .*expected=fiber, actual=POSIX-thread");
   backend->Shutdown();
 }

@@ -194,7 +194,7 @@ class MemMetaTxn : public IChunkIndexTxn {
   Status ListPendingDeletes(std::vector<PendingDelete> &out);
   Status CompletePendingDelete(std::string_view key);
 
-  // Transaction-scoped, strategy-private index operations. Writes are staged
+  // Transaction-scoped, mechanism-private index operations. Writes are staged
   // until MemMetaStore::Transact commits a successful callback.
   MechanismPrivateTxnContext &PrivateMetadata() override {
     return private_metadata_txn_;

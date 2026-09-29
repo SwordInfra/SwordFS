@@ -65,7 +65,7 @@ RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view vol
 
 RedisMetaImpl::~RedisMetaImpl() = default;
 
-Status RedisMetaImpl::OpenPrivateMetadataStore(ChunkOverwriteMechanism mechanism, MechanismPrivateStorePtr *out) {
+Status RedisMetaImpl::OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out) {
   utils::ExpectInThreadDomain();
   return ops_.OpenPrivateMetadataStore(mechanism, out);
 }

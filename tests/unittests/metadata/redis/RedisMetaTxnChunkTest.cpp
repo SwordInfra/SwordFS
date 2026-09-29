@@ -167,20 +167,20 @@ TEST(RedisMetaTxnTest, ChunkOperationsFailClosedWithoutMetadataBridge) {
   utils::Status publication_result;
   std::optional<PendingDelete> cleanup_candidate;
   auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, nullptr);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, nullptr);
     return txn.CommitChunk(kFileIno, std::nullopt, head, publication_result, cleanup_candidate);
   });
   EXPECT_EQ(status.message(), "chunk metadata bridge is not bound");
 
   status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, nullptr);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, nullptr);
     ChunkView view;
     return txn.LoadChunkView(kFileIno, 0, &view);
   });
   EXPECT_EQ(status.message(), "chunk metadata bridge is not bound");
 
   status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, nullptr);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, nullptr);
     std::vector<PendingDelete> detached;
     return txn.Truncate(kFileIno, 0, &detached);
   });
@@ -191,7 +191,7 @@ TEST(RedisMetaTxnTest, ChunkOperationsFailClosedWithoutMetadataBridge) {
   SwordFsInode orphan(kOrphanIno, orphan_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, orphan).ok());
   const auto reclaim_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, nullptr);
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, nullptr);
     std::optional<ReclaimWork> work;
     return txn.PrepareReclaim(kOrphanIno, work);
   });
@@ -302,13 +302,13 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
 
   std::vector<PendingDelete> detached;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.Truncate(9, 1024, &detached);
   });
   ASSERT_TRUE(status.ok()) << status.message();
   ASSERT_EQ(detached.size(), 1U);
-  swordfs::chunk::WholeObjectRef detached_ref;
-  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectDelete(detached.front(), 4096, &detached_ref).ok());
+  swordfs::chunk::cow::COWRef detached_ref;
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWDelete(detached.front(), 4096, &detached_ref).ok());
   EXPECT_EQ(detached_ref.descriptor, second_chunk);
 
   const auto first_value = redis.hget(key.Chunk(9), "0");
@@ -321,7 +321,7 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
   file.attr.size = 4096;
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
   const auto invalid_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 0, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 0, ChunkType::kCow, &COWBridgeForTest());
     EXPECT_EQ(txn.Truncate(9, 1024).ToErrno(), EIO);
     return utils::Status::OK();
   });
@@ -340,7 +340,7 @@ TEST(RedisMetaTxnTest, RegisterPendingDeletesRejectsInvalidEnvelope) {
   const std::vector<PendingDelete> work{{.id = "", .payload = "opaque"}};
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.RegisterPendingDeletes(work);
   });
   EXPECT_EQ(status.ToErrno(), EINVAL);
@@ -370,14 +370,14 @@ TEST(RedisMetaTxnTest, TruncateDoesNotDependOnPendingDeleteState) {
 
   std::vector<PendingDelete> detached;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.Truncate(file.ino, 0, &detached);
   });
 
   ASSERT_TRUE(status.ok()) << status.message();
   ASSERT_EQ(detached.size(), 1U);
-  swordfs::chunk::WholeObjectRef detached_ref;
-  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectDelete(detached.front(), 4096, &detached_ref).ok());
+  swordfs::chunk::cow::COWRef detached_ref;
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWDelete(detached.front(), 4096, &detached_ref).ok());
   EXPECT_EQ(detached_ref.descriptor, chunk);
   EXPECT_FALSE(redis.hexists(key.Chunk(file.ino), "0"));
 }
@@ -411,7 +411,7 @@ TEST(RedisMetaTxnTest, TruncateScansMultipleChunkHashPagesAndCollectsDetachedChu
 
   std::vector<PendingDelete> detached;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, kChunkSize, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, kChunkSize, ChunkType::kCow, &COWBridgeForTest());
     return txn.Truncate(file.ino, 0, &detached);
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -440,7 +440,7 @@ TEST(RedisMetaTxnTest, TruncateRejectsInvalidChunkMetadata) {
   redis.hset(key.Chunk(file.ino), "0", encoded);
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.Truncate(file.ino, 0);
   });
   EXPECT_TRUE(status.ToErrno() == EIO) << status.message();
@@ -451,7 +451,7 @@ TEST(RedisMetaTxnTest, TruncateRejectsInvalidChunkMetadata) {
   ASSERT_TRUE(canonical.SerializeTo(&encoded).ok());
   redis.hset(key.Chunk(file.ino), "1", encoded);
   const auto field_mismatch_status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.Truncate(file.ino, 0);
   });
   EXPECT_TRUE(field_mismatch_status.ToErrno() == EIO) << field_mismatch_status.message();
@@ -474,7 +474,7 @@ TEST(RedisMetaTxnTest, TruncatePropagatesWrongTypeChunkMapFromDestructivePhase) 
   redis.set(key.Chunk(file.ino), "wrong-type");
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.Truncate(file.ino, 0);
   });
   EXPECT_FALSE(status.ok());
@@ -534,15 +534,15 @@ TEST(RedisMetaTxnTest, CommitChunkReturnsCleanupCandidateWithoutPendingDeleteDep
   utils::Status publication_result;
   std::optional<PendingDelete> cleanup_candidate;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.CommitChunk(file.ino, expected, replacement, publication_result, cleanup_candidate);
   });
 
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_TRUE(publication_result.ok()) << publication_result.message();
   ASSERT_TRUE(cleanup_candidate.has_value());
-  swordfs::chunk::WholeObjectRef cleanup_ref;
-  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectDelete(*cleanup_candidate, 4096, &cleanup_ref).ok());
+  swordfs::chunk::cow::COWRef cleanup_ref;
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWDelete(*cleanup_candidate, 4096, &cleanup_ref).ok());
   EXPECT_EQ(cleanup_ref.descriptor, expected);
   const auto stored = redis.hget(key.Chunk(file.ino), "0");
   ASSERT_TRUE(stored.has_value());
@@ -577,15 +577,15 @@ TEST(RedisMetaTxnTest, CommitChunkDefiniteRejectionReturnsReplacementAsCleanupCa
   utils::Status publication_result;
   std::optional<PendingDelete> cleanup_candidate;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkOverwriteMechanism::kWholeObject, &WholeObjectBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
     return txn.CommitChunk(file.ino, std::nullopt, replacement, publication_result, cleanup_candidate);
   });
 
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_TRUE(publication_result.ToErrno() == EEXIST) << publication_result.message();
   ASSERT_TRUE(cleanup_candidate.has_value());
-  swordfs::chunk::WholeObjectRef cleanup_ref;
-  ASSERT_TRUE(swordfs::chunk::DecodeWholeObjectDelete(*cleanup_candidate, 4096, &cleanup_ref).ok());
+  swordfs::chunk::cow::COWRef cleanup_ref;
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWDelete(*cleanup_candidate, 4096, &cleanup_ref).ok());
   EXPECT_EQ(cleanup_ref.descriptor, replacement);
 }
 
