@@ -352,6 +352,15 @@ failures remain blocking under the rules below.
 entry records the exact normalized upstream skip message. If SwordFS merely
 lacks the feature that caused the skip, the correct classification is
 `known_unsupported` with a linked Issue, not `upstream_not_applicable`.
+The first failing prerequisite is not always the semantic owner, however. A
+transport such as `ioctl`, or a setup capability such as an inode flag, may
+prevent a testcase from reaching a later contract that is fundamentally
+inapplicable to SwordFS. Capability audits must read the pinned upstream test
+through to its asserted behavior and classify that final contract. In
+particular, SwordFS must not promise fake physical block mappings, discard
+address spaces, DAX behavior, or local-filesystem shutdown semantics merely to
+advance a transport-level prerequisite. Issue #383 records the current
+ioctl/FIEMAP audit and its testcase-level evidence.
 Any known-gap entry that expects a raw FAIL must preserve the exact normalized
 XUnit failure message, regardless of category. This binds the baseline to the
 reviewed XUnit failure class/message rather than merely to the testcase ID.
