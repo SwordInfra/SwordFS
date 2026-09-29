@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "chunk/internal/ChunkMetadataBridge.hpp"
+#include "metadata/InodePolicy.hpp"
 #include "metadata/Types.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
@@ -155,6 +156,10 @@ Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fi
   if (!inode) {
     return Status::NotFound("inode not found");
   }
+  auto status = CheckSetAttrPolicy(inode->attr, fields);
+  if (!status.ok()) {
+    return status;
+  }
 
   SwordFsAttr st = inode->attr;
   const SwordFsAttr &requested = attr;
@@ -206,7 +211,6 @@ Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fi
     st.ctime_nsec = 0;
   }
 
-  Status status;
   if (size_changed) {
     status = TruncateChunks(ino, st.size);
     if (!status.ok()) {
@@ -223,10 +227,32 @@ Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fi
   return Status::OK();
 }
 
+Status MemMetaTxn::SetInodeFlags(InodeID ino, InodeFlag inode_flags, SwordFsInode *out) {
+  if (!HasOnlySupportedInodeFlags(inode_flags)) {
+    return Status::InvalidArgument("unsupported inode flags");
+  }
+  SwordFsInode *inode = FindInode(ino);
+  if (inode == nullptr) {
+    return Status::NotFound("inode not found");
+  }
+  if (inode->attr.inode_flags != inode_flags) {
+    inode->attr.inode_flags = inode_flags;
+    inode->Touch(SetAttrField::kCtime);
+  }
+  if (out != nullptr) {
+    *out = *inode;
+  }
+  return Status::OK();
+}
+
 Status MemMetaTxn::SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) {
   SwordFsInode *inode = FindInode(ino);
   if (inode == nullptr) {
     return Status::NotFound("inode not found");
+  }
+  auto status = CheckContentMetadataMutationPolicy(inode->attr, "setxattr");
+  if (!status.ok()) {
+    return status;
   }
   return inode->SetXAttr(name, value, mode);
 }
@@ -252,6 +278,10 @@ Status MemMetaTxn::RemoveXAttr(InodeID ino, std::string_view name) {
   if (inode == nullptr) {
     return Status::NotFound("inode not found");
   }
+  auto status = CheckContentMetadataMutationPolicy(inode->attr, "removexattr");
+  if (!status.ok()) {
+    return status;
+  }
   return inode->RemoveXAttr(name);
 }
 
@@ -259,6 +289,10 @@ Status MemMetaTxn::Truncate(InodeID ino, uint64_t size) {
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
     return Status::NotFound("inode not found");
+  }
+  auto status = CheckContentMetadataMutationPolicy(inode->attr, "truncate");
+  if (!status.ok()) {
+    return status;
   }
   if (inode->attr.size == static_cast<int64_t>(size)) {
     return Status::OK();
@@ -271,7 +305,7 @@ Status MemMetaTxn::Truncate(InodeID ino, uint64_t size) {
   st.ctime = static_cast<int64_t>(::time(nullptr));
   st.ctime_nsec = 0;
 
-  Status status = TruncateChunks(ino, size);
+  status = TruncateChunks(ino, size);
   if (!status.ok()) {
     return status;
   }
@@ -337,6 +371,10 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name, uint32_t 
   if (!parent->IsDir()) {
     return Status::NotDirectory("parent is not a directory");
   }
+  auto status = CheckDirectoryAdditionPolicy(parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
   if (FindEntry(parent_ino, name) != nullptr) {
     return Status::AlreadyExists("entry already exists");
   }
@@ -381,10 +419,22 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view old_name, 
   if (!new_parent->IsDir()) {
     return Status::NotDirectory("new parent is not a directory");
   }
+  auto status = CheckDirectoryRemovalPolicy(old_parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckDirectoryAdditionPolicy(new_parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
 
   SwordFsInode *child = FindEntry(old_parent_ino, old_name);
   if (!child) {
     return Status::NotFound("source entry not found");
+  }
+  status = CheckContentMetadataMutationPolicy(child->attr, "rename");
+  if (!status.ok()) {
+    return status;
   }
 
   // A directory can never be moved into itself or its own subtree —
@@ -402,6 +452,14 @@ Status MemMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view old_name, 
     // hard link — is a no-op.
     if (victim == child) {
       return Status::OK();
+    }
+    status = CheckDirectoryRemovalPolicy(new_parent->attr);
+    if (!status.ok()) {
+      return status;
+    }
+    status = CheckContentMetadataMutationPolicy(victim->attr, "rename replacement");
+    if (!status.ok()) {
+      return status;
     }
     // Cannot replace a directory with a non-directory or vice versa.
     if (victim->IsDir() != child->IsDir()) {
@@ -445,11 +503,22 @@ Status MemMetaTxn::Unlink(InodeID parent_ino, std::string_view name) {
     return Status::NotFound("entry not found");
   }
 
+  SwordFsInode *parent = FindInode(parent_ino);
+  if (parent == nullptr) {
+    return Status::NotFound("parent directory not found");
+  }
+  auto status = CheckDirectoryRemovalPolicy(parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckContentMetadataMutationPolicy(child->attr, "unlink");
+  if (!status.ok()) {
+    return status;
+  }
+
   if (child->IsDir() && !IsDirEmpty(child->ino)) {
     return Status::NotEmpty("directory not empty");
   }
-
-  SwordFsInode *parent = FindInode(parent_ino);
 
   // Remove the directory entry. Decrement nlink to track the hard-link count.
   // The inode (and its chunks) survive here; durable orphan state tells the
@@ -488,12 +557,20 @@ Status MemMetaTxn::LinkExistingEntry(InodeID parent_ino, std::string_view name, 
   if (!parent->IsDir()) {
     return Status::NotDirectory("parent is not a directory");
   }
+  auto status = CheckDirectoryAdditionPolicy(parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
   if (FindEntry(parent_ino, name) != nullptr) {
     return Status::AlreadyExists("entry already exists");
   }
   SwordFsInode *inode = FindInode(ino);
   if (!inode) {
     return Status::NotFound("inode not found");
+  }
+  status = CheckContentMetadataMutationPolicy(inode->attr, "link");
+  if (!status.ok()) {
+    return status;
   }
 
   // A revived orphan candidate (nlink 0 -> 1) is no longer an orphan; drop
@@ -588,6 +665,25 @@ Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a, In
   SwordFsInode *inode_b = it_b->second;
   SwordFsInode *parent_a = FindInode(parent_a_ino);
   SwordFsInode *parent_b = FindInode(parent_b_ino);
+  if (parent_a == nullptr || parent_b == nullptr) {
+    return Status::NotFound("exchange parent inode not found");
+  }
+  auto status = CheckDirectoryRemovalPolicy(parent_a->attr);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckDirectoryRemovalPolicy(parent_b->attr);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckContentMetadataMutationPolicy(inode_a->attr, "rename exchange");
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckContentMetadataMutationPolicy(inode_b->attr, "rename exchange");
+  if (!status.ok()) {
+    return status;
+  }
 
   // Two names may be hard links to the same inode. Exchanging those names
   // changes no namespace binding, so it must not rewrite parent metadata or

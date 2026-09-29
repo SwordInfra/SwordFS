@@ -411,6 +411,17 @@ Status MemMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField f
   return Status::OK();
 }
 
+Status MemMetaImpl::SetInodeFlags(InodeID ino, InodeFlag inode_flags, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
+  SwordFsInode result;
+  auto status = store_.Transact(
+      [&](MemMetaTxn &txn) { return txn.SetInodeFlags(ino, inode_flags, out != nullptr ? &result : nullptr); });
+  if (status.ok() && out != nullptr) {
+    *out = result;
+  }
+  return status;
+}
+
 Status MemMetaImpl::SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) {
   utils::ExpectInFiberDomain();
   return store_.Transact([&](MemMetaTxn &txn) { return txn.SetXAttr(ino, name, value, mode); });
@@ -431,9 +442,10 @@ Status MemMetaImpl::RemoveXAttr(InodeID ino, std::string_view name) {
   return store_.Transact([&](MemMetaTxn &txn) { return txn.RemoveXAttr(ino, name); });
 }
 
-Status MemMetaImpl::Open(InodeID ino, uint64_t *size) {
+Status MemMetaImpl::Open(InodeID ino, uint64_t *size, InodeFlag *inode_flags) {
   utils::ExpectInFiberDomain();
   uint64_t authoritative_size = 0;
+  InodeFlag authoritative_flags = InodeFlag::kNone;
   Status status = store_.Transact([&](MemMetaTxn &txn) -> Status {
     SwordFsInode inode;
     Status status = txn.LookupInode(ino, &inode);
@@ -456,6 +468,7 @@ Status MemMetaImpl::Open(InodeID ino, uint64_t *size) {
     }
 
     authoritative_size = inode.attr.size;
+    authoritative_flags = inode.attr.inode_flags;
     if (!runtime::MountRuntimeBehavior::Instance().ImplicitAtimeUpdatesEnabled()) {
       return Status::OK();
     }
@@ -468,6 +481,9 @@ Status MemMetaImpl::Open(InodeID ino, uint64_t *size) {
   }
   if (size != nullptr) {
     *size = authoritative_size;
+  }
+  if (inode_flags != nullptr) {
+    *inode_flags = authoritative_flags;
   }
   return status;
 }

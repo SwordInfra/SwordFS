@@ -46,6 +46,7 @@ class RedisMetaImpl : public IMetaEngine {
   Status Rename(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino, std::string_view new_name,
                 RenameFlag flags) override;
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override;
+  Status SetInodeFlags(InodeID ino, InodeFlag inode_flags, SwordFsInode *out) override;
   Status SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) override;
   Status GetXAttr(InodeID ino, std::string_view name, std::string *value) override;
   Status ListXAttrs(InodeID ino, std::vector<std::string> *names) override;
@@ -54,7 +55,7 @@ class RedisMetaImpl : public IMetaEngine {
   Status Symlink(InodeID parent_ino, std::string_view name, std::string_view link, SwordFsInode *out) override;
   Status Link(InodeID ino, InodeID newparent_ino, std::string_view newname, SwordFsInode *out) override;
   Status Readlink(InodeID ino, std::string *target) override;
-  Status Open(InodeID ino, uint64_t *size = nullptr) override;
+  Status Open(InodeID ino, uint64_t *size = nullptr, InodeFlag *inode_flags = nullptr) override;
   Status PrepareReclaim(InodeID ino) override;
   Status CompleteReclaim(InodeID ino) override;
   Status VisitOrphanCandidates(const InodeVisitorFn &visitor) override;

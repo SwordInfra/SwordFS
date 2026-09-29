@@ -371,6 +371,11 @@ Status RedisMetaImpl::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttr
   return ops_.SetAttr(ino, requested, fields, out);
 }
 
+Status RedisMetaImpl::SetInodeFlags(InodeID ino, InodeFlag inode_flags, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
+  return ops_.SetInodeFlags(ino, inode_flags, out);
+}
+
 Status RedisMetaImpl::SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) {
   utils::ExpectInFiberDomain();
   return ops_.SetXAttr(ino, name, value, mode);
@@ -496,7 +501,7 @@ Status RedisMetaImpl::Readlink(InodeID ino, std::string *target) {
   return Status::OK();
 }
 
-Status RedisMetaImpl::Open(InodeID ino, uint64_t *size) {
+Status RedisMetaImpl::Open(InodeID ino, uint64_t *size, InodeFlag *inode_flags) {
   utils::ExpectInFiberDomain();
   SwordFsInode inode;
   auto status = ops_.GetInode(ino, &inode);
@@ -508,6 +513,9 @@ Status RedisMetaImpl::Open(InodeID ino, uint64_t *size) {
   }
   if (size != nullptr) {
     *size = inode.attr.size;
+  }
+  if (inode_flags != nullptr) {
+    *inode_flags = inode.attr.inode_flags;
   }
   if (runtime::MountRuntimeBehavior::Instance().ImplicitAtimeUpdatesEnabled()) {
     UpdateAtimeBestEffort(ino);

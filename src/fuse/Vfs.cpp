@@ -22,6 +22,7 @@
 #include "fuse/Limits.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
+#include "runtime/MountRuntimeBehavior.hpp"
 #include "utils/ExecutionDomain.hpp"
 #include "utils/FiberRuntime.hpp"
 #include "utils/Logging.hpp"
@@ -166,6 +167,11 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   }
   if (conn->capable & FUSE_CAP_ASYNC_READ) {
     fuse_set_feature_flag(conn, FUSE_CAP_ASYNC_READ);
+  }
+  if (runtime::MountRuntimeBehavior::Instance().IoctlEnabled()) {
+    fuse_set_feature_flag(conn, FUSE_CAP_IOCTL_DIR);
+  } else {
+    fuse_unset_feature_flag(conn, FUSE_CAP_IOCTL_DIR);
   }
   // libfuse 3.18 does not expose OPEN/WRITE KILL_SUIDGID protocol flags to
   // low-level callbacks. Userspace killpriv handling would therefore lose the
@@ -564,13 +570,25 @@ void VfsHookFactory::SwordFsIoctl(fuse_req_t req, fuse_ino_t ino, unsigned int c
   if (in_buf != nullptr && in_bufsz > 0) {
     in_buf_copy.assign(static_cast<const char *>(in_buf), in_bufsz);
   }
-  RunFuseInFiber(req,
-                 [req, ino, cmd, arg, fi = *fi, flags, in_buf = std::move(in_buf_copy), in_bufsz, out_bufsz]() mutable {
-                   SetRequestContext(req);
-                   auto status = VfsImpl::IoCtl(ino, static_cast<int>(cmd), arg, &fi, flags,
-                                                in_buf.empty() ? nullptr : in_buf.data(), in_bufsz, out_bufsz);
-                   fuse_reply_err(req, status.ToErrno());
-                 });
+  RunFuseInFiber(
+      req, [req, ino, cmd, arg, fi = *fi, flags, in_buf = std::move(in_buf_copy), in_bufsz, out_bufsz]() mutable {
+        SetRequestContext(req);
+        swordfs::vfs::IoCtlReply reply;
+        auto status = VfsImpl::IoCtl(ino, cmd, arg, &fi, flags, in_buf.empty() ? nullptr : in_buf.data(), in_bufsz,
+                                     out_bufsz, &reply);
+        if (!status.ok()) {
+          fuse_reply_err(req, status.ToErrno());
+          return;
+        }
+        if (reply.retry) {
+          struct iovec in_iov{arg, reply.retry_in_size};
+          struct iovec out_iov{arg, reply.retry_out_size};
+          fuse_reply_ioctl_retry(req, reply.retry_in_size == 0 ? nullptr : &in_iov, reply.retry_in_size == 0 ? 0 : 1,
+                                 reply.retry_out_size == 0 ? nullptr : &out_iov, reply.retry_out_size == 0 ? 0 : 1);
+          return;
+        }
+        fuse_reply_ioctl(req, 0, reply.output.empty() ? nullptr : reply.output.data(), reply.output.size());
+      });
 }
 
 void VfsHookFactory::SwordFsPoll(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi,

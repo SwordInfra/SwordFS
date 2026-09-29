@@ -16,12 +16,14 @@ class MountRuntimeBehavior {
  public:
   static MountRuntimeBehavior &Instance();
 
-  void Initialize(ImplicitAtimePolicy implicit_atime_policy);
+  void Initialize(ImplicitAtimePolicy implicit_atime_policy, bool ioctl_enabled);
 
   bool ImplicitAtimeUpdatesEnabled() const;
+  bool IoctlEnabled() const;
 
  private:
   ImplicitAtimePolicy implicit_atime_policy_ = ImplicitAtimePolicy::kEnabled;
+  bool ioctl_enabled_ = false;
 };
 
 }  // namespace swordfs::runtime

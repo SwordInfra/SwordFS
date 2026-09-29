@@ -282,6 +282,9 @@ class MockMetaEngine : public IMetaEngine {
     }
     return set_attr_status;
   }
+  Status SetInodeFlags(InodeID, swordfs::metadata::InodeFlag, SwordFsInode *) override {
+    return Status::NotSupported("inode flags");
+  }
   Status SetXAttr(InodeID, std::string_view, std::string_view, swordfs::metadata::XAttrSetMode) override {
     return Status::NotSupported("xattr");
   }
@@ -306,7 +309,7 @@ class MockMetaEngine : public IMetaEngine {
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Open(InodeID, uint64_t *size = nullptr) override {
+  Status Open(InodeID, uint64_t *size = nullptr, swordfs::metadata::InodeFlag * = nullptr) override {
     if (size != nullptr) {
       *size = static_cast<uint64_t>(file_size_);
     }

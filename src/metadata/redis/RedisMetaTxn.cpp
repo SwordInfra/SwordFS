@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "chunk/internal/ChunkMetadataBridge.hpp"
+#include "metadata/InodePolicy.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 
@@ -198,6 +199,10 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
   if (!status.ok()) {
     return status;
   }
+  status = CheckSetAttrPolicy(inode.attr, fields);
+  if (!status.ok()) {
+    return status;
+  }
 
   SwordFsAttr attr = inode.attr;
   const uint64_t old_size = attr.size;
@@ -271,9 +276,36 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
   return utils::Status::OK();
 }
 
+utils::Status RedisMetaTxn::SetInodeFlags(InodeID ino, InodeFlag inode_flags, SwordFsInode *out) {
+  if (!HasOnlySupportedInodeFlags(inode_flags)) {
+    return utils::Status::InvalidArgument("unsupported inode flags");
+  }
+  SwordFsInode inode;
+  auto status = LookupInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  if (inode.attr.inode_flags != inode_flags) {
+    inode.attr.inode_flags = inode_flags;
+    inode.Touch(SetAttrField::kCtime);
+    status = SetInode(inode);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  if (out != nullptr) {
+    *out = inode;
+  }
+  return utils::Status::OK();
+}
+
 utils::Status RedisMetaTxn::SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) {
   SwordFsInode inode;
   auto status = LookupInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckContentMetadataMutationPolicy(inode.attr, "setxattr");
   if (!status.ok()) {
     return status;
   }
@@ -290,6 +322,10 @@ utils::Status RedisMetaTxn::RemoveXAttr(InodeID ino, std::string_view name) {
   if (!status.ok()) {
     return status;
   }
+  status = CheckContentMetadataMutationPolicy(inode.attr, "removexattr");
+  if (!status.ok()) {
+    return status;
+  }
   status = inode.RemoveXAttr(name);
   if (!status.ok()) {
     return status;
@@ -303,6 +339,10 @@ utils::Status RedisMetaTxn::Truncate(InodeID ino, uint64_t size, std::vector<Pen
   }
   SwordFsInode inode;
   auto status = LookupInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckContentMetadataMutationPolicy(inode.attr, "truncate");
   if (!status.ok()) {
     return status;
   }
@@ -463,9 +503,13 @@ utils::Status RedisMetaTxn::AddEntry(InodeID parent_ino, std::string_view name, 
   if (parent->ino != parent_ino || child.parent_ino != parent_ino) {
     return utils::Status::InvalidArgument("entry parent mismatch");
   }
+  auto status = CheckDirectoryAdditionPolicy(parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
 
   std::string existing_value;
-  auto status = txn_.HGet(key_.Directory(parent_ino), name, &existing_value);
+  status = txn_.HGet(key_.Directory(parent_ino), name, &existing_value);
   if (status.ok()) {
     SwordFsEntry existing_entry;
     status = existing_entry.ParseFrom(existing_value);
@@ -513,7 +557,16 @@ utils::Status RedisMetaTxn::UnlinkFile(InodeID parent_ino, std::string_view name
     return utils::Status::InvalidArgument("cannot unlink directory");
   }
 
-  auto status = AdjustNlink(child, -1);
+  auto status = CheckDirectoryRemovalPolicy(parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckContentMetadataMutationPolicy(child->attr, "unlink");
+  if (!status.ok()) {
+    return status;
+  }
+
+  status = AdjustNlink(child, -1);
   if (!status.ok()) {
     return status;
   }
@@ -554,8 +607,17 @@ utils::Status RedisMetaTxn::RemoveDirectory(InodeID parent_ino, std::string_view
     return utils::Status::NotDirectory("not a directory");
   }
 
+  auto status = CheckDirectoryRemovalPolicy(parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckContentMetadataMutationPolicy(child.attr, "rmdir");
+  if (!status.ok()) {
+    return status;
+  }
+
   uint64_t length = 0;
-  auto status = txn_.HLen(key_.Directory(child.ino), &length);
+  status = txn_.HLen(key_.Directory(child.ino), &length);
   if (!status.ok()) {
     return status;
   }
@@ -589,9 +651,22 @@ utils::Status RedisMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view o
     return utils::Status::NotDirectory("rename parent is not a directory");
   }
 
+  auto status = CheckDirectoryRemovalPolicy(old_parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckDirectoryAdditionPolicy(new_parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckContentMetadataMutationPolicy(source->attr, "rename");
+  if (!status.ok()) {
+    return status;
+  }
+
   if (source->IsDir()) {
     bool cycle = false;
-    auto status = IsDescendantOf(source->ino, new_parent_ino, &cycle);
+    status = IsDescendantOf(source->ino, new_parent_ino, &cycle);
     if (!status.ok()) {
       return status;
     }
@@ -606,6 +681,14 @@ utils::Status RedisMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view o
     }
     if (target->ino == source->ino) {
       return utils::Status::OK();
+    }
+    status = CheckDirectoryRemovalPolicy(new_parent->attr);
+    if (!status.ok()) {
+      return status;
+    }
+    status = CheckContentMetadataMutationPolicy(target->attr, "rename replacement");
+    if (!status.ok()) {
+      return status;
     }
     if (source->IsDir() != target->IsDir()) {
       return source->IsDir() ? utils::Status::NotDirectory("target is not a directory")
@@ -625,7 +708,7 @@ utils::Status RedisMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view o
     }
   }
 
-  auto status = DetachEntry(old_parent_ino, old_name, *source, old_parent);
+  status = DetachEntry(old_parent_ino, old_name, *source, old_parent);
   if (!status.ok()) {
     return status;
   }
@@ -663,6 +746,22 @@ utils::Status RedisMetaTxn::ExchangeEntries(InodeID old_parent_ino, std::string_
   if (!old_parent->IsDir() || !new_parent->IsDir()) {
     return utils::Status::NotDirectory("exchange parent is not a directory");
   }
+  auto status = CheckDirectoryRemovalPolicy(old_parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckDirectoryRemovalPolicy(new_parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckContentMetadataMutationPolicy(source->attr, "rename exchange");
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckContentMetadataMutationPolicy(target->attr, "rename exchange");
+  if (!status.ok()) {
+    return status;
+  }
   if (source->ino == target->ino) {
     return utils::Status::OK();
   }
@@ -682,7 +781,7 @@ utils::Status RedisMetaTxn::ExchangeEntries(InodeID old_parent_ino, std::string_
     return utils::Status::OK();
   };
 
-  auto status = validate_directory_destination(*source, new_parent_ino);
+  status = validate_directory_destination(*source, new_parent_ino);
   if (!status.ok()) {
     return status;
   }
@@ -752,9 +851,17 @@ utils::Status RedisMetaTxn::LinkExistingEntry(InodeID parent_ino, std::string_vi
   if (inode->IsDir()) {
     return utils::Status::NotPermitted("cannot hard-link directory");
   }
+  auto status = CheckDirectoryAdditionPolicy(parent->attr);
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckContentMetadataMutationPolicy(inode->attr, "link");
+  if (!status.ok()) {
+    return status;
+  }
 
   SwordFsInode existing;
-  auto status = LookupEntry(*parent, name, &existing);
+  status = LookupEntry(*parent, name, &existing);
   if (status.ok()) {
     return utils::Status::AlreadyExists("entry already exists");
   }

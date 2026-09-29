@@ -55,6 +55,18 @@ enum class RenameFlag : uint32_t {
   kExchange = 1u << 1,
 };
 
+/// SwordFS-owned durable inode policy bits. These values are intentionally
+/// independent from Linux FS_* flags so persisted metadata never embeds UAPI
+/// numbering.
+enum class InodeFlag : uint32_t {
+  kNone = 0,
+  kImmutable = 1u << 0,
+  kAppendOnly = 1u << 1,
+};
+
+inline constexpr uint32_t kSupportedInodeFlagBits =
+    static_cast<uint32_t>(InodeFlag::kImmutable) | static_cast<uint32_t>(InodeFlag::kAppendOnly);
+
 enum class XAttrSetMode : uint8_t {
   kUpsert,
   kCreateOnly,
@@ -83,6 +95,22 @@ inline bool HasRenameFlag(RenameFlag flags, RenameFlag flag) {
 
 inline RenameFlag operator|(RenameFlag a, RenameFlag b) {
   return static_cast<RenameFlag>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
+inline InodeFlag operator|(InodeFlag a, InodeFlag b) {
+  return static_cast<InodeFlag>(static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+}
+
+inline InodeFlag operator&(InodeFlag a, InodeFlag b) {
+  return static_cast<InodeFlag>(static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+}
+
+inline bool HasInodeFlag(InodeFlag flags, InodeFlag flag) {
+  return (static_cast<uint32_t>(flags) & static_cast<uint32_t>(flag)) != 0;
+}
+
+inline bool HasOnlySupportedInodeFlags(InodeFlag flags) {
+  return (static_cast<uint32_t>(flags) & ~kSupportedInodeFlagBits) == 0;
 }
 
 }  // namespace swordfs::metadata

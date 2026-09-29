@@ -104,6 +104,9 @@ class ConfigCenter {
   const std::string &fuse_opts() const {
     return fuse_opts_;
   }
+  bool enable_ioctl() const {
+    return enable_ioctl_;
+  }
 
  private:
   ConfigCenter() = default;
@@ -136,6 +139,7 @@ class ConfigCenter {
   // Volume configuration (format subcommand)
   std::string volume_;                       // --volume (required for format)
   std::string fuse_opts_;                    // -o FUSE mount options (e.g. allow_other,ro)
+  bool enable_ioctl_ = false;                // --enable-ioctl
   std::string pidfile_;                      // --pidfile (mount daemon PID file)
   size_t chunk_size_ = 64ULL * 1024 * 1024;  // --chunk-size
   std::string chunk_type_ = "cow";

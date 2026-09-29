@@ -3,6 +3,7 @@
 
 #include "vfs/FileReadWriter.hpp"
 
+#include <fcntl.h>
 #include <folly/fibers/Baton.h>
 #include <folly/io/IOBuf.h>
 #include <folly/logging/xlog.h>
@@ -207,8 +208,15 @@ FileReadWriter::FileReadWriter(InodeID ino, size_t max_parallel_flushes)
 // Write
 // ────────────────────────────────────────────────────────────────
 
-utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off) {
+utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off, int open_flags) {
   std::shared_lock<utils::FiberRWMutex> operation_lock(operation_mutex_);
+  const auto inode_flags = inode_flags_.load(std::memory_order_acquire);
+  if (metadata::HasInodeFlag(inode_flags, metadata::InodeFlag::kImmutable)) {
+    return utils::Status::NotPermitted("immutable inode rejects write");
+  }
+  if (metadata::HasInodeFlag(inode_flags, metadata::InodeFlag::kAppendOnly) && (open_flags & O_APPEND) == 0) {
+    return utils::Status::NotPermitted("append-only inode requires O_APPEND");
+  }
   SWORDFS_LOG_DEBUG << "FileReadWriter::Write: ino=" << ino_ << " size=" << buf.length() << " off=" << off;
   const size_t write_size = buf.length();
   uint64_t write_end = 0;
@@ -361,12 +369,49 @@ utils::Status FileReadWriter::GetAttr(metadata::SwordFsInode *out) const {
   return utils::Status::OK();
 }
 
-void FileReadWriter::InitializeAuthoritativeSize(uint64_t size) {
+void FileReadWriter::InitializeCreatedState(uint64_t size) {
+  // A fresh FileReadWriter already starts with kNone policy. Do not write
+  // policy here: CREATE can race with a newer same-mount flag transition on
+  // an already-published InodeHandle, and initialization must not roll it back.
   std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
   if (!authoritative_size_.has_value()) {
     authoritative_size_ = size;
     ++size_state_epoch_;
   }
+}
+
+uint64_t FileReadWriter::SnapshotInodeFlagEpoch() const {
+  std::lock_guard<utils::FiberMutex> policy_lock(inode_policy_mutex_);
+  return inode_flag_epoch_;
+}
+
+utils::Status FileReadWriter::ReconcileOpenState(uint64_t size, metadata::InodeFlag inode_flags,
+                                                 uint64_t observed_flag_epoch, int open_flags) {
+  std::lock_guard<utils::FiberMutex> policy_lock(inode_policy_mutex_);
+
+  // A same-mount flag transition that completed while metadata Open was in
+  // flight is newer than that Open snapshot. Preserve the locally committed
+  // policy instead of restoring stale metadata state.
+  if (inode_flag_epoch_ == observed_flag_epoch) {
+    inode_flags_.store(inode_flags, std::memory_order_release);
+  }
+
+  const auto effective_inode_flags = inode_flags_.load(std::memory_order_acquire);
+  const bool writable = (open_flags & O_ACCMODE) != O_RDONLY;
+  if (metadata::HasInodeFlag(effective_inode_flags, metadata::InodeFlag::kImmutable) && writable) {
+    return utils::Status::NotPermitted("immutable inode rejects writable open");
+  }
+  if (metadata::HasInodeFlag(effective_inode_flags, metadata::InodeFlag::kAppendOnly) && writable &&
+      (((open_flags & O_APPEND) == 0) || ((open_flags & O_TRUNC) != 0))) {
+    return utils::Status::NotPermitted("append-only inode requires O_APPEND and rejects O_TRUNC");
+  }
+
+  std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
+  if (!authoritative_size_.has_value()) {
+    authoritative_size_ = size;
+    ++size_state_epoch_;
+  }
+  return utils::Status::OK();
 }
 
 utils::Status FileReadWriter::GetVisibleSize(uint64_t *size) {
@@ -416,6 +461,10 @@ void FileReadWriter::ApplyLiveSize(metadata::SwordFsInode *inode) const {
 utils::Status FileReadWriter::Flush() {
   std::lock_guard<utils::FiberMutex> flush_lock(flush_mutex_);
   std::shared_lock<utils::FiberRWMutex> operation_lock(operation_mutex_);
+  return FlushPendingWritesLocked();
+}
+
+utils::Status FileReadWriter::FlushPendingWritesLocked() {
   uint64_t barrier_epoch = 0;
   std::optional<uint64_t> barrier_live_size;
   {
@@ -451,6 +500,31 @@ utils::Status FileReadWriter::Flush() {
   }
 
   return first_error;
+}
+
+utils::Status FileReadWriter::SetInodeFlags(metadata::InodeFlag inode_flags, metadata::SwordFsInode *out) {
+  if (!metadata::HasOnlySupportedInodeFlags(inode_flags)) {
+    return utils::Status::InvalidArgument("unsupported inode flags");
+  }
+  std::lock_guard<utils::FiberRWMutex> operation_lock(operation_mutex_);
+  if (inode_flags != inode_flags_.load(std::memory_order_acquire) && inode_flags != metadata::InodeFlag::kNone) {
+    auto status = FlushPendingWritesLocked();
+    if (!status.ok()) {
+      return status;
+    }
+  }
+
+  auto status = meta_->SetInodeFlags(ino_, inode_flags, out);
+  if (!status.ok()) {
+    return status;
+  }
+  {
+    std::lock_guard<utils::FiberMutex> policy_lock(inode_policy_mutex_);
+    inode_flags_.store(inode_flags, std::memory_order_release);
+    ++inode_flag_epoch_;
+  }
+  ApplyLiveSize(out);
+  return utils::Status::OK();
 }
 
 utils::Status FileReadWriter::Truncate(size_t size) {

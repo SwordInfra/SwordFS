@@ -28,6 +28,8 @@ int Status::ToErrno() const {
       return ENOSYS;
     case kOperationNotSupported:
       return EOPNOTSUPP;
+    case kNotTty:
+      return ENOTTY;
     case kNoData:
       return ENODATA;
     case kBusy:

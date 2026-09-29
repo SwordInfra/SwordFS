@@ -97,6 +97,13 @@ void SwordFsAttr::ToStatX(struct statx *stx) const {
   stx->stx_rdev_minor = minor(static_cast<dev_t>(rdev));
   stx->stx_dev_major = major(static_cast<dev_t>(dev));
   stx->stx_dev_minor = minor(static_cast<dev_t>(dev));
+  stx->stx_attributes_mask = STATX_ATTR_IMMUTABLE | STATX_ATTR_APPEND;
+  if (HasInodeFlag(inode_flags, InodeFlag::kImmutable)) {
+    stx->stx_attributes |= STATX_ATTR_IMMUTABLE;
+  }
+  if (HasInodeFlag(inode_flags, InodeFlag::kAppendOnly)) {
+    stx->stx_attributes |= STATX_ATTR_APPEND;
+  }
 }
 
 SwordFsAttr SwordFsAttr::FromPosixStat(const struct stat &st) {

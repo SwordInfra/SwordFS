@@ -65,6 +65,7 @@ class MemMetaTxn : public IChunkIndexTxn {
   // Apply the requested SetAttr fields atomically. Size changes also
   // update chunk metadata and apply the killpriv/ctime rules.
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out = nullptr);
+  Status SetInodeFlags(InodeID ino, InodeFlag inode_flags, SwordFsInode *out = nullptr);
 
   Status SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode);
   Status GetXAttr(InodeID ino, std::string_view name, std::string *value);

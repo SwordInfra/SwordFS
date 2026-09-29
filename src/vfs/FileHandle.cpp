@@ -64,7 +64,7 @@ utils::Status FileHandle::Read(size_t size, off_t off, folly::IOBuf *out) {
 }
 
 utils::Status FileHandle::Write(const folly::IOBuf &buf, off_t off) {
-  return handle_->Write(buf, off);
+  return handle_->Write(buf, off, flags_);
 }
 
 utils::Status FileHandle::SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields,

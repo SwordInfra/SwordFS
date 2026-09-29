@@ -12,6 +12,7 @@
 #include <folly/io/IOBuf.h>
 #include <folly/io/async/EventBase.h>
 #include <gtest/gtest.h>
+#include <linux/fs.h>
 #include <linux/fuse.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
@@ -39,6 +40,7 @@
 #include "fuse/Vfs.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
+#include "runtime/MountRuntimeBehavior.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/FiberRuntime.hpp"
 #include "vfs/FileHandle.hpp"
@@ -49,6 +51,7 @@
 #include "volume/VolumeImpl.hpp"
 
 using swordfs::metadata::ChunkIndex;
+using swordfs::metadata::InodeFlag;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
@@ -79,6 +82,10 @@ struct FuseReplyCapture {
   std::optional<struct statvfs> statfs;
   std::optional<std::string> readlink;
   std::optional<size_t> xattr_size;
+  std::optional<int> ioctl_result;
+  bool ioctl_retry = false;
+  size_t ioctl_retry_in_size = 0;
+  size_t ioctl_retry_out_size = 0;
   std::string buffer;
   bool none = false;
   int reply_result = 0;
@@ -245,6 +252,34 @@ extern "C" int fuse_reply_xattr(fuse_req_t req, size_t count) {
   return 0;
 }
 
+extern "C" int fuse_reply_ioctl(fuse_req_t req, int result, const void *buf, size_t size) {
+  auto *capture = CaptureFor(req);
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->ioctl_result = result;
+    if (buf != nullptr && size > 0) {
+      capture->buffer.assign(static_cast<const char *>(buf), size);
+    }
+    capture->replied = true;
+  }
+  capture->cv.notify_one();
+  return 0;
+}
+
+extern "C" int fuse_reply_ioctl_retry(fuse_req_t req, const struct iovec *in_iov, size_t in_count,
+                                      const struct iovec *out_iov, size_t out_count) {
+  auto *capture = CaptureFor(req);
+  {
+    std::lock_guard lock(capture->mutex);
+    capture->ioctl_retry = true;
+    capture->ioctl_retry_in_size = in_count == 0 ? 0 : in_iov[0].iov_len;
+    capture->ioctl_retry_out_size = out_count == 0 ? 0 : out_iov[0].iov_len;
+    capture->replied = true;
+  }
+  capture->cv.notify_one();
+  return 0;
+}
+
 extern "C" void fuse_reply_none(fuse_req_t req) {
   auto *capture = CaptureFor(req);
   {
@@ -310,10 +345,6 @@ class IOBuf;
 
 TEST(VfsImplTest, Fsyncdir) {
   EXPECT_NOT_SUPPORTED(VfsImpl::FSyncDir(1, 0));
-}
-
-TEST(VfsImplTest, Ioctl) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::IoCtl(1, 0, nullptr, nullptr, 0, nullptr, 0, 0));
 }
 
 TEST(VfsImplTest, Flock) {
@@ -553,6 +584,16 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return call_status_;
   }
+  Status SetInodeFlags(InodeID ino, InodeFlag inode_flags, SwordFsInode *out) override {
+    auto &inode = inodes_[ino];
+    inode.ino = ino;
+    inode.attr.ino = ino;
+    inode.attr.inode_flags = inode_flags;
+    if (out != nullptr) {
+      *out = inode;
+    }
+    return call_status_;
+  }
   Status SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) override {
     ++set_xattr_calls_;
     last_xattr_ino_ = ino;
@@ -626,10 +667,14 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return Status::OK();
   }
-  Status Open(InodeID, uint64_t *size = nullptr) override {
+  Status Open(InodeID ino, uint64_t *size = nullptr, InodeFlag *inode_flags = nullptr) override {
     ++open_calls_;
+    auto it = inodes_.find(ino);
     if (size != nullptr) {
-      *size = 0;
+      *size = it == inodes_.end() ? 0 : it->second.attr.size;
+    }
+    if (inode_flags != nullptr) {
+      *inode_flags = it == inodes_.end() ? InodeFlag::kNone : it->second.attr.inode_flags;
     }
     return open_status_;
   }
@@ -886,6 +931,24 @@ TEST(VfsHookFactoryTest, InitDisablesSpliceReadWithoutWriteBufCallback) {
   EXPECT_EQ(conn.want_ext & FUSE_CAP_SPLICE_READ, 0U);
 
   swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
+  swordfs::volume::VolumeImpl::Initialize();
+}
+
+TEST(VfsHookFactoryTest, InitEnablesDirectoryIoctlOnlyForOptInMounts) {
+  swordfs::volume::VolumeImpl::Initialize();
+  struct fuse_conn_info conn{};
+  conn.capable = FUSE_CAP_IOCTL_DIR;
+  conn.capable_ext = FUSE_CAP_IOCTL_DIR;
+
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                /*ioctl_enabled=*/true);
+  swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &conn);
+  EXPECT_NE(conn.want & FUSE_CAP_IOCTL_DIR, 0U);
+  EXPECT_NE(conn.want_ext & FUSE_CAP_IOCTL_DIR, 0U);
+
+  swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                /*ioctl_enabled=*/false);
   swordfs::volume::VolumeImpl::Initialize();
 }
 
@@ -1517,8 +1580,6 @@ TEST_F(VfsImplIntegrationTest, FuseUnsupportedHooksReplyWithEnosys) {
   expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsGetlk(req, 1, &fi, &lock); });
   expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsSetlk(req, 1, &fi, &lock, 0); });
   expect_enosys([](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsBmap(req, 1, 4096, 0); });
-  expect_enosys(
-      [&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsIoctl(req, 1, 0, nullptr, &fi, 0, nullptr, 0, 0); });
   expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsPoll(req, 1, &fi, nullptr); });
   expect_enosys(
       [](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsRetrieveReply(req, nullptr, 1, 0, nullptr); });
@@ -1528,6 +1589,294 @@ TEST_F(VfsImplIntegrationTest, FuseUnsupportedHooksReplyWithEnosys) {
       [&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsCopyFileRange(req, 1, 0, &fi, 2, 0, &fi, 4096, 0); });
   expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsLseek(req, 1, 0, SEEK_SET, &fi); });
   expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsTmpfile(req, 1, 0644, &fi); });
+}
+
+TEST_F(VfsImplIntegrationTest, IoctlControlSurfaceIsGatedAndUsesRestrictedBuffers) {
+  fuse_file_info fi{};
+  SwordFsInode inode;
+  inode.ino = 7;
+  inode.attr.ino = 7;
+  inode.attr.mode = S_IFREG | 0644;
+  inode.attr.inode_flags = InodeFlag::kImmutable | InodeFlag::kAppendOnly;
+  mock_meta_->set_inode(inode);
+
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                /*ioctl_enabled=*/false);
+  FuseReplyCapture disabled;
+  swordfs::fuse::VfsHookFactory::SwordFsIoctl(reinterpret_cast<fuse_req_t>(&disabled), 7, FS_IOC_GETFLAGS,
+                                              reinterpret_cast<void *>(0x1000), &fi, 0, nullptr, 0, 0);
+  ASSERT_TRUE(disabled.Wait());
+  ASSERT_TRUE(disabled.error.has_value());
+  EXPECT_EQ(*disabled.error, ENOTTY);
+
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                /*ioctl_enabled=*/true);
+  FuseReplyCapture retry;
+  swordfs::fuse::VfsHookFactory::SwordFsIoctl(reinterpret_cast<fuse_req_t>(&retry), 7, FS_IOC_GETFLAGS,
+                                              reinterpret_cast<void *>(0x1000), &fi, 0, nullptr, 0, 0);
+  ASSERT_TRUE(retry.Wait());
+  EXPECT_TRUE(retry.ioctl_retry);
+  EXPECT_EQ(retry.ioctl_retry_in_size, 0U);
+  EXPECT_EQ(retry.ioctl_retry_out_size, sizeof(uint32_t));
+
+  FuseReplyCapture get;
+  swordfs::fuse::VfsHookFactory::SwordFsIoctl(reinterpret_cast<fuse_req_t>(&get), 7, FS_IOC_GETFLAGS,
+                                              reinterpret_cast<void *>(0x1000), &fi, 0, nullptr, 0, sizeof(uint32_t));
+  ASSERT_TRUE(get.Wait());
+  ASSERT_TRUE(get.ioctl_result.has_value());
+  EXPECT_EQ(*get.ioctl_result, 0);
+  ASSERT_EQ(get.buffer.size(), sizeof(uint32_t));
+  uint32_t flags = 0;
+  std::memcpy(&flags, get.buffer.data(), sizeof(flags));
+  EXPECT_EQ(flags, static_cast<uint32_t>(FS_IMMUTABLE_FL | FS_APPEND_FL));
+}
+
+TEST_F(VfsImplIntegrationTest, IoctlReportsBufferAndMetadataErrorsWithoutGenericFallback) {
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                /*ioctl_enabled=*/true);
+  swordfs::test::RunInTestFiber([&] {
+    EXPECT_EQ(VfsImpl::IoCtl(7, FS_IOC_GETFLAGS, nullptr, nullptr, 0, nullptr, 0, sizeof(uint32_t), nullptr).ToErrno(),
+              EINVAL);
+
+    swordfs::vfs::IoCtlReply get_xattr_retry;
+    ASSERT_TRUE(VfsImpl::IoCtl(7, FS_IOC_FSGETXATTR, nullptr, nullptr, 0, nullptr, 0, 0, &get_xattr_retry).ok());
+    EXPECT_TRUE(get_xattr_retry.retry);
+    EXPECT_EQ(get_xattr_retry.retry_out_size, sizeof(struct fsxattr));
+
+    swordfs::vfs::IoCtlReply set_xattr_retry;
+    ASSERT_TRUE(VfsImpl::IoCtl(7, FS_IOC_FSSETXATTR, nullptr, nullptr, 0, nullptr, 0, 0, &set_xattr_retry).ok());
+    EXPECT_TRUE(set_xattr_retry.retry);
+    EXPECT_EQ(set_xattr_retry.retry_in_size, sizeof(struct fsxattr));
+
+    mock_meta_->set_get_inode_status(Status::IOError("injected ioctl metadata read failure"));
+    swordfs::vfs::IoCtlReply get_flags_error;
+    EXPECT_EQ(
+        VfsImpl::IoCtl(70007, FS_IOC_GETFLAGS, nullptr, nullptr, 0, nullptr, 0, sizeof(uint32_t), &get_flags_error)
+            .ToErrno(),
+        EIO);
+    swordfs::vfs::IoCtlReply get_xattr_error;
+    EXPECT_EQ(VfsImpl::IoCtl(70007, FS_IOC_FSGETXATTR, nullptr, nullptr, 0, nullptr, 0, sizeof(struct fsxattr),
+                             &get_xattr_error)
+                  .ToErrno(),
+              EIO);
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, IoctlSetRepresentationsPersistOneTypedPolicy) {
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                /*ioctl_enabled=*/true);
+  fuse_file_info fi{};
+  SwordFsInode inode;
+  inode.ino = 7;
+  inode.attr.ino = 7;
+  inode.attr.mode = S_IFREG | 0644;
+  mock_meta_->set_inode(inode);
+
+  FuseReplyCapture retry;
+  swordfs::fuse::VfsHookFactory::SwordFsIoctl(reinterpret_cast<fuse_req_t>(&retry), 7, FS_IOC_SETFLAGS,
+                                              reinterpret_cast<void *>(0x1000), &fi, 0, nullptr, 0, 0);
+  ASSERT_TRUE(retry.Wait());
+  EXPECT_TRUE(retry.ioctl_retry);
+  EXPECT_EQ(retry.ioctl_retry_in_size, sizeof(uint32_t));
+  EXPECT_EQ(retry.ioctl_retry_out_size, 0U);
+
+  uint32_t legacy_flags = FS_IMMUTABLE_FL | FS_APPEND_FL;
+  FuseReplyCapture set_legacy;
+  swordfs::fuse::VfsHookFactory::SwordFsIoctl(reinterpret_cast<fuse_req_t>(&set_legacy), 7, FS_IOC_SETFLAGS,
+                                              reinterpret_cast<void *>(0x1000), &fi, 0, &legacy_flags,
+                                              sizeof(legacy_flags), 0);
+  ASSERT_TRUE(set_legacy.Wait());
+  ASSERT_TRUE(set_legacy.ioctl_result.has_value());
+  EXPECT_EQ(*set_legacy.ioctl_result, 0);
+
+  FuseReplyCapture get_xattr;
+  swordfs::fuse::VfsHookFactory::SwordFsIoctl(reinterpret_cast<fuse_req_t>(&get_xattr), 7, FS_IOC_FSGETXATTR,
+                                              reinterpret_cast<void *>(0x1000), &fi, 0, nullptr, 0,
+                                              sizeof(struct fsxattr));
+  ASSERT_TRUE(get_xattr.Wait());
+  ASSERT_EQ(get_xattr.buffer.size(), sizeof(struct fsxattr));
+  struct fsxattr projected{};
+  std::memcpy(&projected, get_xattr.buffer.data(), sizeof(projected));
+  EXPECT_EQ(projected.fsx_xflags, FS_XFLAG_IMMUTABLE | FS_XFLAG_APPEND);
+
+  struct fsxattr xflags{};
+  xflags.fsx_xflags = FS_XFLAG_IMMUTABLE | FS_XFLAG_APPEND;
+  FuseReplyCapture set_xattr;
+  swordfs::fuse::VfsHookFactory::SwordFsIoctl(reinterpret_cast<fuse_req_t>(&set_xattr), 7, FS_IOC_FSSETXATTR,
+                                              reinterpret_cast<void *>(0x1000), &fi, 0, &xflags, sizeof(xflags), 0);
+  ASSERT_TRUE(set_xattr.Wait());
+  ASSERT_TRUE(set_xattr.ioctl_result.has_value());
+  EXPECT_EQ(*set_xattr.ioctl_result, 0);
+
+  FuseReplyCapture get_legacy;
+  swordfs::fuse::VfsHookFactory::SwordFsIoctl(reinterpret_cast<fuse_req_t>(&get_legacy), 7, FS_IOC_GETFLAGS,
+                                              reinterpret_cast<void *>(0x1000), &fi, 0, nullptr, 0, sizeof(uint32_t));
+  ASSERT_TRUE(get_legacy.Wait());
+  ASSERT_EQ(get_legacy.buffer.size(), sizeof(uint32_t));
+  uint32_t projected_legacy = 0;
+  std::memcpy(&projected_legacy, get_legacy.buffer.data(), sizeof(projected_legacy));
+  EXPECT_EQ(projected_legacy, static_cast<uint32_t>(FS_IMMUTABLE_FL | FS_APPEND_FL));
+}
+
+TEST_F(VfsImplIntegrationTest, IoctlFlagMutationUpdatesTrackedOpenHandlePolicy) {
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                /*ioctl_enabled=*/true);
+  SwordFsInode inode;
+  inode.ino = 7;
+  inode.attr.ino = 7;
+  inode.attr.mode = S_IFREG | 0644;
+  mock_meta_->set_inode(inode);
+
+  swordfs::test::RunInTestFiber([&] {
+    std::shared_ptr<swordfs::vfs::FileHandle> handle;
+    ASSERT_TRUE(swordfs::vfs::FileHandle::Open(7, O_WRONLY, &handle).ok());
+
+    uint32_t legacy_flags = FS_IMMUTABLE_FL;
+    swordfs::vfs::IoCtlReply reply;
+    ASSERT_TRUE(VfsImpl::IoCtl(7, FS_IOC_SETFLAGS, reinterpret_cast<void *>(0x1000), nullptr, 0, &legacy_flags,
+                               sizeof(legacy_flags), 0, &reply)
+                    .ok());
+
+    auto payload = folly::IOBuf::copyBuffer("x");
+    EXPECT_EQ(handle->Write(*payload, 0).ToErrno(), EPERM);
+    ASSERT_TRUE(handle->Release().ok());
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, FsSetXAttrRejectsUnsupportedFieldsInsteadOfSilentlyDroppingThem) {
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                /*ioctl_enabled=*/true);
+  fuse_file_info fi{};
+  struct fsxattr requested{};
+  requested.fsx_xflags = FS_XFLAG_IMMUTABLE;
+  requested.fsx_extsize = 4096;
+
+  FuseReplyCapture capture;
+  swordfs::fuse::VfsHookFactory::SwordFsIoctl(reinterpret_cast<fuse_req_t>(&capture), 7, FS_IOC_FSSETXATTR,
+                                              reinterpret_cast<void *>(0x1000), &fi, 0, &requested, sizeof(requested),
+                                              0);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, EOPNOTSUPP);
+}
+
+TEST_F(VfsImplIntegrationTest, FsSetXAttrRejectsEachUnsupportedFieldClass) {
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                /*ioctl_enabled=*/true);
+  swordfs::test::RunInTestFiber([&] {
+    auto expect_unsupported = [&](const struct fsxattr &requested) {
+      swordfs::vfs::IoCtlReply reply;
+      EXPECT_EQ(
+          VfsImpl::IoCtl(7, FS_IOC_FSSETXATTR, nullptr, nullptr, 0, &requested, sizeof(requested), 0, &reply).ToErrno(),
+          EOPNOTSUPP);
+    };
+
+    struct fsxattr requested{};
+    requested.fsx_xflags = FS_XFLAG_NODUMP;
+    expect_unsupported(requested);
+
+    requested = {};
+    requested.fsx_nextents = 1;
+    expect_unsupported(requested);
+
+    requested = {};
+    requested.fsx_projid = 1;
+    expect_unsupported(requested);
+
+    requested = {};
+    requested.fsx_cowextsize = 4096;
+    expect_unsupported(requested);
+
+    requested = {};
+    requested.fsx_pad[0] = 1;
+    expect_unsupported(requested);
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, IoctlFlagProjectionCoversSingleBitRepresentations) {
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                /*ioctl_enabled=*/true);
+  SwordFsInode inode;
+  inode.ino = 70008;
+  inode.attr.ino = inode.ino;
+  inode.attr.mode = S_IFREG | 0644;
+  inode.attr.inode_flags = InodeFlag::kImmutable;
+  mock_meta_->set_inode(inode);
+  swordfs::test::RunInTestFiber([&] {
+    swordfs::vfs::IoCtlReply legacy_reply;
+    ASSERT_TRUE(
+        VfsImpl::IoCtl(inode.ino, FS_IOC_GETFLAGS, nullptr, nullptr, 0, nullptr, 0, sizeof(uint32_t), &legacy_reply)
+            .ok());
+    ASSERT_EQ(legacy_reply.output.size(), sizeof(uint32_t));
+    uint32_t legacy_flags = 0;
+    std::memcpy(&legacy_flags, legacy_reply.output.data(), sizeof(legacy_flags));
+    EXPECT_EQ(legacy_flags, static_cast<uint32_t>(FS_IMMUTABLE_FL));
+
+    struct fsxattr append_request{};
+    append_request.fsx_xflags = FS_XFLAG_APPEND;
+    swordfs::vfs::IoCtlReply set_reply;
+    ASSERT_TRUE(VfsImpl::IoCtl(inode.ino, FS_IOC_FSSETXATTR, nullptr, nullptr, 0, &append_request,
+                               sizeof(append_request), 0, &set_reply)
+                    .ok());
+
+    swordfs::vfs::IoCtlReply xattr_reply;
+    ASSERT_TRUE(VfsImpl::IoCtl(inode.ino, FS_IOC_FSGETXATTR, nullptr, nullptr, 0, nullptr, 0, sizeof(struct fsxattr),
+                               &xattr_reply)
+                    .ok());
+    ASSERT_EQ(xattr_reply.output.size(), sizeof(struct fsxattr));
+    struct fsxattr projected{};
+    std::memcpy(&projected, xattr_reply.output.data(), sizeof(projected));
+    EXPECT_EQ(projected.fsx_xflags, static_cast<uint32_t>(FS_XFLAG_APPEND));
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, IoctlRejectsUnknownCommandsAndUnsupportedLegacyFlagBits) {
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                /*ioctl_enabled=*/true);
+  fuse_file_info fi{};
+
+  FuseReplyCapture unknown;
+  swordfs::fuse::VfsHookFactory::SwordFsIoctl(reinterpret_cast<fuse_req_t>(&unknown), 7, 0x12345678,
+                                              reinterpret_cast<void *>(0x1000), &fi, 0, nullptr, 0, 0);
+  ASSERT_TRUE(unknown.Wait());
+  ASSERT_TRUE(unknown.error.has_value());
+  EXPECT_EQ(*unknown.error, ENOTTY);
+
+  unsigned long requested = FS_NODUMP_FL;
+  FuseReplyCapture unsupported;
+  swordfs::fuse::VfsHookFactory::SwordFsIoctl(reinterpret_cast<fuse_req_t>(&unsupported), 7, FS_IOC_SETFLAGS,
+                                              reinterpret_cast<void *>(0x1000), &fi, 0, &requested, sizeof(requested),
+                                              0);
+  ASSERT_TRUE(unsupported.Wait());
+  ASSERT_TRUE(unsupported.error.has_value());
+  EXPECT_EQ(*unsupported.error, EOPNOTSUPP);
+}
+
+TEST_F(VfsImplIntegrationTest, FsGetXAttrProjectsOnlySupportedPolicyBits) {
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                /*ioctl_enabled=*/true);
+  fuse_file_info fi{};
+  SwordFsInode inode;
+  inode.ino = 7;
+  inode.attr.ino = 7;
+  inode.attr.mode = S_IFREG | 0644;
+  inode.attr.inode_flags = InodeFlag::kAppendOnly;
+  mock_meta_->set_inode(inode);
+
+  FuseReplyCapture capture;
+  swordfs::fuse::VfsHookFactory::SwordFsIoctl(reinterpret_cast<fuse_req_t>(&capture), 7, FS_IOC_FSGETXATTR,
+                                              reinterpret_cast<void *>(0x1000), &fi, 0, nullptr, 0,
+                                              sizeof(struct fsxattr));
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.ioctl_result.has_value());
+  ASSERT_EQ(capture.buffer.size(), sizeof(struct fsxattr));
+  struct fsxattr projected{};
+  std::memcpy(&projected, capture.buffer.data(), sizeof(projected));
+  EXPECT_EQ(projected.fsx_xflags, FS_XFLAG_APPEND);
+  EXPECT_EQ(projected.fsx_extsize, 0U);
+  EXPECT_EQ(projected.fsx_nextents, 0U);
+  EXPECT_EQ(projected.fsx_projid, 0U);
+  EXPECT_EQ(projected.fsx_cowextsize, 0U);
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, UnlinkDoesNotPerformASeparateLookup) {

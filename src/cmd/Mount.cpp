@@ -239,7 +239,8 @@ int RunMount() {
 
   // Load volume config and initialise engines (after fork).
   swordfs::volume::VolumeImpl::Initialize();
-  runtime::MountRuntimeBehavior::Instance().Initialize(detail::ParseImplicitAtimePolicy(cfg.fuse_opts()));
+  runtime::MountRuntimeBehavior::Instance().Initialize(detail::ParseImplicitAtimePolicy(cfg.fuse_opts()),
+                                                       cfg.enable_ioctl());
   auto status = swordfs::volume::VolumeImpl::Instance().LoadFrom(cfg);
   if (!status.ok()) {
     SWORDFS_PROMPT_INFO << "Error: " << status.message();

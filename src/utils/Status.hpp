@@ -26,6 +26,7 @@ class Status {
     kMalformed,              // malformed persistent data
     kNotSupported,           // ENOSYS
     kOperationNotSupported,  // EOPNOTSUPP
+    kNotTty,                 // ENOTTY
     kNoData,                 // ENODATA
     kIOError,                // EIO
     kUnavailable,            // internal backend availability failure; maps to EIO
@@ -98,6 +99,9 @@ class Status {
   }
   static Status OperationNotSupported(std::string msg) {
     return Status(kOperationNotSupported, std::move(msg));
+  }
+  static Status NotTty(std::string msg) {
+    return Status(kNotTty, std::move(msg));
   }
   static Status NoData(std::string msg) {
     return Status(kNoData, std::move(msg));

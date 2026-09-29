@@ -30,6 +30,13 @@ class VolumeImpl;
 
 namespace vfs {
 
+struct IoCtlReply {
+  bool retry = false;
+  size_t retry_in_size = 0;
+  size_t retry_out_size = 0;
+  std::string output;
+};
+
 class VfsImpl {
  public:
   static utils::Status Lookup(fuse_ino_t parent, const char *name, fuse_entry_param *entry);
@@ -64,8 +71,8 @@ class VfsImpl {
   static utils::Status RemoveXAttr(fuse_ino_t ino, const char *name);
   static utils::Status Create(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry,
                               struct fuse_file_info *fi);
-  static utils::Status IoCtl(fuse_ino_t ino, int cmd, void *arg, struct fuse_file_info *fi, unsigned flags,
-                             const void *in_buf, size_t in_bufsz, size_t out_bufsz);
+  static utils::Status IoCtl(fuse_ino_t ino, unsigned int cmd, void *arg, struct fuse_file_info *fi, unsigned flags,
+                             const void *in_buf, size_t in_bufsz, size_t out_bufsz, IoCtlReply *reply);
   static utils::Status RetrieveReply(fuse_req_t req, void *cookie, fuse_ino_t ino, off_t offset,
                                      struct fuse_bufvec *bufv);
   static utils::Status FLock(fuse_ino_t ino, struct fuse_file_info *fi, int op);

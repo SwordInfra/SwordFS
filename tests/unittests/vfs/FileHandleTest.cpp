@@ -40,6 +40,7 @@ namespace {
 
 using swordfs::metadata::ChunkIndex;
 using swordfs::metadata::IMetaEngine;
+using swordfs::metadata::InodeFlag;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
@@ -58,7 +59,7 @@ class NoopDataEngine : public swordfs::storage::IDataEngine {
     return Status::OK();
   }
   Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
-    return Status::OK();
+    return put_status;
   }
   Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
     return Status::OK();
@@ -66,6 +67,8 @@ class NoopDataEngine : public swordfs::storage::IDataEngine {
   Status Delete(std::string_view) override {
     return Status::OK();
   }
+
+  Status put_status = Status::OK();
 };
 
 // Minimal IMetaEngine — every op succeeds; Create fabricates an inode.
@@ -160,11 +163,35 @@ class MockMetaEngine : public IMetaEngine {
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Open(InodeID, uint64_t *size = nullptr) override {
+  Status Open(InodeID, uint64_t *size = nullptr, InodeFlag *inode_flags = nullptr) override {
+    const auto status = open_status;
+    const auto inode_flags_snapshot = open_inode_flags;
+    if (open_entered_ != nullptr) {
+      auto *entered = open_entered_;
+      auto *release = open_release_;
+      open_entered_ = nullptr;
+      open_release_ = nullptr;
+      entered->post();
+      release->wait();
+    }
     if (size != nullptr) {
       *size = 0;
     }
-    return open_status;
+    if (inode_flags != nullptr) {
+      *inode_flags = inode_flags_snapshot;
+    }
+    return status;
+  }
+  Status SetInodeFlags(InodeID, InodeFlag inode_flags, SwordFsInode *out) override {
+    ++set_inode_flags_calls;
+    commit_chunk_calls_at_flag_set = commit_chunk_calls;
+    last_inode_flags = inode_flags;
+    open_inode_flags = inode_flags;
+    if (out != nullptr) {
+      *out = {};
+      out->attr.inode_flags = inode_flags;
+    }
+    return set_inode_flags_status;
   }
   Status PrepareReclaim(InodeID ino) override {
     ++prepare_reclaim_calls;
@@ -202,6 +229,7 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
   Status CommitChunk(InodeID, const std::optional<SwordFsChunk> &, const SwordFsChunk &) override {
+    ++commit_chunk_calls;
     return Status::OK();
   }
   Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
@@ -221,15 +249,28 @@ class MockMetaEngine : public IMetaEngine {
   int prepare_reclaim_calls = 0;
   InodeID last_reclaim_ino = 0;
   Status open_status = Status::OK();
+  InodeFlag open_inode_flags = InodeFlag::kNone;
+  InodeFlag last_inode_flags = InodeFlag::kNone;
+  int set_inode_flags_calls = 0;
+  int commit_chunk_calls = 0;
+  int commit_chunk_calls_at_flag_set = 0;
+  Status set_inode_flags_status = Status::OK();
   Status truncate_status = Status::OK();
   Status reclaim_status = Status::OK();
   Status prepare_reclaim_status = Status::OK();
   // Frozen descriptors the mock hands out from PrepareReclaim.
   std::vector<swordfs::metadata::SwordFsChunk> reclaim_chunks;
 
+  void BlockNextOpen(folly::fibers::Baton *entered, folly::fibers::Baton *release) {
+    open_entered_ = entered;
+    open_release_ = release;
+  }
+
  private:
   InodeID next_ino_ = 1000;
   swordfs::metadata::ChunkRevision next_revision_ = 1;
+  folly::fibers::Baton *open_entered_{nullptr};
+  folly::fibers::Baton *open_release_{nullptr};
 };
 
 class FileHandleTest : public ::testing::Test {
@@ -237,9 +278,10 @@ class FileHandleTest : public ::testing::Test {
   void SetUp() override {
     auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<MockMetaEngine>>();
     mock_meta_ = meta.get();
+    auto data = std::make_unique<NoopDataEngine>();
+    data_ = data.get();
     SwordFsVolume config;
-    const auto status =
-        swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::make_unique<NoopDataEngine>(), std::move(config));
+    const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
     swordfs::test::RunInTestFiber([&] {
       // Drop any per-inode state left by a prior test. The
@@ -275,6 +317,7 @@ class FileHandleTest : public ::testing::Test {
 
   std::vector<uint64_t> fhs_;
   MockMetaEngine *mock_meta_ = nullptr;
+  NoopDataEngine *data_ = nullptr;
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -490,6 +533,187 @@ FIBER_TEST_F(FileHandleTest, OpenTruncateFailurePropagates) {
   auto status = FileHandle::Open(42, O_TRUNC, &handle);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.ToErrno(), EIO);
+}
+
+FIBER_TEST_F(FileHandleTest, OpenEnforcesImmutableAndAppendOnlyPolicyFromSameMetadataRead) {
+  mock_meta_->open_inode_flags = InodeFlag::kImmutable;
+  std::shared_ptr<FileHandle> immutable;
+  EXPECT_EQ(FileHandle::Open(42, O_WRONLY, &immutable).ToErrno(), EPERM);
+  std::shared_ptr<FileHandle> immutable_read_only;
+  ASSERT_TRUE(FileHandle::Open(42, O_RDONLY, &immutable_read_only).ok());
+  fhs_.push_back(immutable_read_only->fh());
+
+  mock_meta_->open_inode_flags = InodeFlag::kAppendOnly;
+  std::shared_ptr<FileHandle> append_without_flag;
+  EXPECT_EQ(FileHandle::Open(42, O_WRONLY, &append_without_flag).ToErrno(), EPERM);
+  std::shared_ptr<FileHandle> append_read_only;
+  ASSERT_TRUE(FileHandle::Open(42, O_RDONLY, &append_read_only).ok());
+  fhs_.push_back(append_read_only->fh());
+
+  std::shared_ptr<FileHandle> append;
+  ASSERT_TRUE(FileHandle::Open(42, O_WRONLY | O_APPEND, &append).ok());
+  fhs_.push_back(append->fh());
+
+  std::shared_ptr<FileHandle> truncating_append;
+  EXPECT_EQ(FileHandle::Open(42, O_WRONLY | O_APPEND | O_TRUNC, &truncating_append).ToErrno(), EPERM);
+}
+
+FIBER_TEST_F(FileHandleTest, SameMountFlagTransitionRevokesPreexistingHandlesAtInodeOperationBoundary) {
+  mock_meta_->open_inode_flags = InodeFlag::kNone;
+  std::shared_ptr<FileHandle> ordinary;
+  std::shared_ptr<FileHandle> append;
+  ASSERT_TRUE(FileHandle::Open(42, O_WRONLY, &ordinary).ok());
+  ASSERT_TRUE(FileHandle::Open(42, O_WRONLY | O_APPEND, &append).ok());
+  fhs_.push_back(ordinary->fh());
+  fhs_.push_back(append->fh());
+
+  auto inode_handle = InodeHandleManager::Instance().Get(42, /*create_if_missing=*/false);
+  ASSERT_NE(inode_handle, nullptr);
+  ASSERT_TRUE(inode_handle->SetInodeFlags(InodeFlag::kImmutable, nullptr).ok());
+
+  auto payload = folly::IOBuf::copyBuffer("x", 1);
+  EXPECT_EQ(ordinary->Write(*payload, 0).ToErrno(), EPERM);
+  EXPECT_EQ(append->Write(*payload, 0).ToErrno(), EPERM);
+
+  ASSERT_TRUE(inode_handle->SetInodeFlags(InodeFlag::kAppendOnly, nullptr).ok());
+  EXPECT_EQ(ordinary->Write(*payload, 0).ToErrno(), EPERM);
+  EXPECT_TRUE(append->Write(*payload, 0).ok());
+
+  // Idempotent writes and clearing policy both refresh metadata/local state
+  // without a restrictive-transition flush.
+  ASSERT_TRUE(inode_handle->SetInodeFlags(InodeFlag::kAppendOnly, nullptr).ok());
+  ASSERT_TRUE(inode_handle->SetInodeFlags(InodeFlag::kNone, nullptr).ok());
+  EXPECT_TRUE(ordinary->Write(*payload, 0).ok());
+}
+
+FIBER_TEST_F(FileHandleTest, ConcurrentOpenCannotRestoreStalePolicyAfterLocalFlagTransition) {
+  mock_meta_->open_inode_flags = InodeFlag::kNone;
+  std::shared_ptr<FileHandle> first;
+  ASSERT_TRUE(FileHandle::Open(42, O_WRONLY, &first).ok());
+  fhs_.push_back(first->fh());
+
+  folly::fibers::Baton open_entered;
+  folly::fibers::Baton open_release;
+  folly::fibers::Baton opening_thread_done;
+  mock_meta_->BlockNextOpen(&open_entered, &open_release);
+
+  std::atomic<int> open_code{0};
+  std::shared_ptr<FileHandle> second;
+  std::thread opening_thread([&] {
+    swordfs::test::RunInTestFiber([&] {
+      const auto status = FileHandle::Open(42, O_WRONLY, &second);
+      open_code.store(status.ToErrno());
+    });
+    opening_thread_done.post();
+  });
+
+  const bool open_was_entered = swordfs::test::WaitForBaton(open_entered);
+  EXPECT_TRUE(open_was_entered) << "concurrent Open must capture the controlled stale metadata snapshot";
+  if (!open_was_entered) {
+    open_release.post();
+    swordfs::test::WaitForBatonOrAbort(opening_thread_done, "concurrent Open timeout cleanup");
+    opening_thread.join();
+    return;
+  }
+
+  auto inode_handle = InodeHandleManager::Instance().Get(42, /*create_if_missing=*/false);
+  EXPECT_NE(inode_handle, nullptr);
+  if (inode_handle == nullptr) {
+    open_release.post();
+    swordfs::test::WaitForBatonOrAbort(opening_thread_done, "concurrent Open missing-inode cleanup");
+    opening_thread.join();
+    return;
+  }
+  ASSERT_TRUE(inode_handle->SetInodeFlags(InodeFlag::kImmutable, nullptr).ok());
+
+  open_release.post();
+  swordfs::test::WaitForBatonOrAbort(opening_thread_done, "concurrent Open completion after flag transition");
+  opening_thread.join();
+
+  EXPECT_EQ(open_code.load(), EPERM);
+  EXPECT_EQ(second, nullptr);
+  auto payload = folly::IOBuf::copyBuffer("x");
+  EXPECT_EQ(first->Write(*payload, 0).ToErrno(), EPERM);
+
+  if (second != nullptr) {
+    second->Release();
+  }
+}
+
+FIBER_TEST_F(FileHandleTest, CreateInitializationCannotOverwriteNewerLocalPolicy) {
+  mock_meta_->open_inode_flags = InodeFlag::kNone;
+  std::shared_ptr<FileHandle> opener;
+  ASSERT_TRUE(FileHandle::Open(42, O_RDONLY, &opener).ok());
+  fhs_.push_back(opener->fh());
+
+  auto inode_handle = InodeHandleManager::Instance().Get(42, /*create_if_missing=*/false);
+  ASSERT_NE(inode_handle, nullptr);
+  ASSERT_TRUE(inode_handle->SetInodeFlags(InodeFlag::kImmutable, nullptr).ok());
+
+  // A concurrent CREATE may reach handle initialization after another local
+  // request has already committed a restrictive policy on the shared inode
+  // handle. The CREATE's original kNone snapshot must not restore stale state.
+  std::shared_ptr<FileHandle> created;
+  ASSERT_TRUE(FileHandle::Create(42, O_WRONLY, &created).ok());
+  fhs_.push_back(created->fh());
+
+  auto payload = folly::IOBuf::copyBuffer("x");
+  EXPECT_EQ(created->Write(*payload, 0).ToErrno(), EPERM);
+}
+
+FIBER_TEST_F(FileHandleTest, RestrictiveFlagTransitionFlushesAcceptedDirtyDataBeforeMetadataCommit) {
+  std::shared_ptr<FileHandle> handle;
+  ASSERT_TRUE(FileHandle::Open(42, O_WRONLY, &handle).ok());
+  fhs_.push_back(handle->fh());
+
+  auto payload = folly::IOBuf::copyBuffer("dirty-before-flag");
+  ASSERT_TRUE(handle->Write(*payload, 0).ok());
+  ASSERT_EQ(mock_meta_->commit_chunk_calls, 0);
+
+  auto inode_handle = InodeHandleManager::Instance().Get(42, /*create_if_missing=*/false);
+  ASSERT_NE(inode_handle, nullptr);
+  ASSERT_TRUE(inode_handle->SetInodeFlags(InodeFlag::kImmutable, nullptr).ok());
+
+  EXPECT_EQ(mock_meta_->commit_chunk_calls, 1);
+  EXPECT_EQ(mock_meta_->commit_chunk_calls_at_flag_set, 1);
+  EXPECT_EQ(mock_meta_->set_inode_flags_calls, 1);
+}
+
+FIBER_TEST_F(FileHandleTest, FailedDirtyFlushDoesNotCommitRestrictivePolicy) {
+  std::shared_ptr<FileHandle> handle;
+  ASSERT_TRUE(FileHandle::Open(42, O_WRONLY, &handle).ok());
+  fhs_.push_back(handle->fh());
+
+  auto payload = folly::IOBuf::copyBuffer("dirty-before-failed-flag");
+  ASSERT_TRUE(handle->Write(*payload, 0).ok());
+  data_->put_status = Status::IOError("injected flag-transition flush failure");
+
+  auto inode_handle = InodeHandleManager::Instance().Get(42, /*create_if_missing=*/false);
+  ASSERT_NE(inode_handle, nullptr);
+  EXPECT_EQ(inode_handle->SetInodeFlags(InodeFlag::kImmutable, nullptr).ToErrno(), EIO);
+  EXPECT_EQ(mock_meta_->set_inode_flags_calls, 0);
+
+  data_->put_status = Status::OK();
+  auto later = folly::IOBuf::copyBuffer("still-writable");
+  EXPECT_TRUE(handle->Write(*later, static_cast<off_t>(payload->length())).ok());
+}
+
+FIBER_TEST_F(FileHandleTest, InodeFlagMutationRejectsInvalidBitsAndKeepsLocalPolicyOnMetadataFailure) {
+  std::shared_ptr<FileHandle> handle;
+  ASSERT_TRUE(FileHandle::Open(42, O_WRONLY, &handle).ok());
+  fhs_.push_back(handle->fh());
+
+  auto inode_handle = InodeHandleManager::Instance().Get(42, /*create_if_missing=*/false);
+  ASSERT_NE(inode_handle, nullptr);
+  EXPECT_EQ(inode_handle->SetInodeFlags(static_cast<InodeFlag>(1u << 31), nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(mock_meta_->set_inode_flags_calls, 0);
+
+  mock_meta_->set_inode_flags_status = Status::IOError("injected flag commit failure");
+  EXPECT_EQ(inode_handle->SetInodeFlags(InodeFlag::kImmutable, nullptr).ToErrno(), EIO);
+  EXPECT_EQ(mock_meta_->set_inode_flags_calls, 1);
+
+  auto payload = folly::IOBuf::copyBuffer("still-writable-after-failed-policy-commit");
+  EXPECT_TRUE(handle->Write(*payload, 0).ok());
 }
 
 FIBER_TEST_F(FileHandleTest, CreateRejectsNullOutput) {
@@ -769,6 +993,9 @@ class TrackingMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return Status::OK();
   }
+  Status SetInodeFlags(InodeID, swordfs::metadata::InodeFlag, SwordFsInode *) override {
+    return Status::NotSupported("inode flags");
+  }
   Status SetXAttr(InodeID, std::string_view, std::string_view, swordfs::metadata::XAttrSetMode) override {
     return Status::NotSupported("xattr");
   }
@@ -793,7 +1020,7 @@ class TrackingMetaEngine : public swordfs::metadata::IMetaEngine {
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Open(InodeID ino, uint64_t *size = nullptr) override {
+  Status Open(InodeID ino, uint64_t *size = nullptr, InodeFlag *inode_flags = nullptr) override {
     if (open_entered_ != nullptr) {
       auto *entered = open_entered_;
       auto *release = open_release_;
@@ -805,6 +1032,9 @@ class TrackingMetaEngine : public swordfs::metadata::IMetaEngine {
     if (size != nullptr) {
       auto it = attrs.find(ino);
       *size = it == attrs.end() ? 0 : static_cast<uint64_t>(it->second.st_size);
+    }
+    if (inode_flags != nullptr) {
+      *inode_flags = InodeFlag::kNone;
     }
     return open_status;
   }
