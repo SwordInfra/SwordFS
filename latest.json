@@ -11,15 +11,15 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "74ba7b439261b37d1f52ec608645c2dc3a45ad4e"
+    "swordfs_commit": "32929c97aae089317a47cfef4311b5ce833052c6"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "ENVIRONMENT": 8,
-      "KNOWN_UNSUPPORTED": 141,
-      "PASS": 113,
-      "UPSTREAM_NOT_APPLICABLE": 382,
+      "KNOWN_UNSUPPORTED": 128,
+      "PASS": 125,
+      "UPSTREAM_NOT_APPLICABLE": 383,
       "UPSTREAM_TEST_DEFECT": 1
     },
     "classified_count": 645,
@@ -27,17 +27,17 @@
     "deferred_count": 0,
     "executed_classified_percent": 100.0,
     "executed_count": 645,
-    "known_gap_count": 532,
-    "overall_support_percent": 17.52,
+    "known_gap_count": 520,
+    "overall_support_percent": 19.38,
     "raw_results": {
       "FAIL": 17,
-      "NOTRUN": 515,
-      "PASS": 113
+      "NOTRUN": 503,
+      "PASS": 125
     },
     "selected_count": 645,
-    "supported_count": 113,
+    "supported_count": 125,
     "supported_gate_percent": 100.0,
-    "supported_pass_count": 113
+    "supported_pass_count": 125
   },
   "tests": [
     {
@@ -169,11 +169,11 @@
       "test": "generic/018"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/020"
     },
     {
@@ -289,11 +289,11 @@
       "test": "generic/035"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/037"
     },
     {
@@ -403,8 +403,8 @@
     {
       "classification": "KNOWN_UNSUPPORTED",
       "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
+      "message": "attr namespace trusted not supported by this filesystem type: fuse",
+      "reason": "The raw xattr foundation supports only user.*; trusted.* credential/capability semantics remain unsupported and tracked by #255.",
       "result": "NOTRUN",
       "test": "generic/062"
     },
@@ -457,11 +457,11 @@
       "test": "generic/069"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/070"
     },
     {
@@ -619,8 +619,8 @@
     {
       "classification": "KNOWN_UNSUPPORTED",
       "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
+      "message": "attr namespace trusted not supported by this filesystem type: fuse",
+      "reason": "The raw xattr foundation supports only user.*; trusted.* credential/capability semantics remain unsupported and tracked by #255.",
       "result": "NOTRUN",
       "test": "generic/097"
     },
@@ -651,8 +651,8 @@
     {
       "classification": "KNOWN_UNSUPPORTED",
       "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
+      "message": "xfs_io falloc failed (old kernel/wrong fs?)",
+      "reason": "SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.",
       "result": "NOTRUN",
       "test": "generic/103"
     },
@@ -753,11 +753,11 @@
       "test": "generic/116"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/117"
     },
     {
@@ -2137,11 +2137,11 @@
       "test": "generic/336"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/337"
     },
     {
@@ -2369,11 +2369,11 @@
       "test": "generic/376"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/377"
     },
     {
@@ -2691,8 +2691,8 @@
     {
       "classification": "KNOWN_UNSUPPORTED",
       "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
+      "message": "xfs_io fiemap -a failed (old kernel/wrong fs?)",
+      "reason": "SwordFS does not provide the block-mapping/fiemap capability required by this testcase; tracked by #255.",
       "result": "NOTRUN",
       "test": "generic/425"
     },
@@ -2881,10 +2881,10 @@
       "test": "generic/453"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
+      "message": "fuse does not allow unrestricted byte streams for names",
+      "reason": "The testcase requires filename byte-stream behavior excluded by the FUSE protocol/model.",
       "result": "NOTRUN",
       "test": "generic/454"
     },
@@ -3065,11 +3065,11 @@
       "test": "generic/485"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/486"
     },
     {
@@ -3337,11 +3337,11 @@
       "test": "generic/520"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/523"
     },
     {
@@ -3417,11 +3417,11 @@
       "test": "generic/532"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/533"
     },
     {
@@ -3961,11 +3961,11 @@
       "test": "generic/610"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/611"
     },
     {
@@ -4001,11 +4001,11 @@
       "test": "generic/615"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/618"
     },
     {
@@ -4539,8 +4539,8 @@
     {
       "classification": "KNOWN_UNSUPPORTED",
       "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
+      "message": "kernel doesn't support renameat2 syscall",
+      "reason": "The upstream probe exercises RENAME_WHITEOUT, which SwordFS does not currently support; tracked by #255.",
       "result": "NOTRUN",
       "test": "generic/700"
     },
@@ -4737,11 +4737,11 @@
       "test": "generic/727"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/728"
     },
     {
@@ -4859,8 +4859,8 @@
     {
       "classification": "KNOWN_UNSUPPORTED",
       "issue": "#255",
-      "message": "attr namespace user not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
+      "message": "xfs_io falloc -k failed (old kernel/wrong fs?)",
+      "reason": "SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.",
       "result": "NOTRUN",
       "test": "generic/748"
     },
