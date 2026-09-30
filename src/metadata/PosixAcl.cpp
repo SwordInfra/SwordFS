@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -152,10 +153,8 @@ class PosixAcl {
       kDone,
     };
     State state = State::kUserObj;
-    uint32_t last_user_id = 0;
-    uint32_t last_group_id = 0;
-    bool have_user_id = false;
-    bool have_group_id = false;
+    std::unordered_set<uint32_t> user_ids;
+    std::unordered_set<uint32_t> group_ids;
     bool has_named = false;
     bool has_mask = false;
 
@@ -183,11 +182,9 @@ class PosixAcl {
           if (state != State::kUsers) {
             return utils::Status::InvalidArgument("POSIX ACL user entry is out of order");
           }
-          if (have_user_id && entry.id <= last_user_id) {
-            return utils::Status::InvalidArgument("POSIX ACL named users are not strictly ordered");
+          if (!user_ids.insert(entry.id).second) {
+            return utils::Status::InvalidArgument("POSIX ACL contains duplicate named user");
           }
-          last_user_id = entry.id;
-          have_user_id = true;
           has_named = true;
           break;
         case kAclGroupObj:
@@ -200,11 +197,9 @@ class PosixAcl {
           if (state != State::kGroups) {
             return utils::Status::InvalidArgument("POSIX ACL group entry is out of order");
           }
-          if (have_group_id && entry.id <= last_group_id) {
-            return utils::Status::InvalidArgument("POSIX ACL named groups are not strictly ordered");
+          if (!group_ids.insert(entry.id).second) {
+            return utils::Status::InvalidArgument("POSIX ACL contains duplicate named group");
           }
-          last_group_id = entry.id;
-          have_group_id = true;
           has_named = true;
           break;
         case kAclMask:

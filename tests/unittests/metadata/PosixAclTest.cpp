@@ -73,6 +73,14 @@ TEST(PosixAclTest, RejectsMalformedEntryOrderingAndRequiredEntryViolations) {
   }));
   expect_invalid(acl_test::Encode({
       {acl_test::kUserObj, 7},
+      {acl_test::kUser, 6, 1001},
+      {acl_test::kUser, 4, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kMask, 5},
+      {acl_test::kOther, 1},
+  }));
+  expect_invalid(acl_test::Encode({
+      {acl_test::kUserObj, 7},
       {acl_test::kGroupObj, 5},
       {acl_test::kUser, 6, 1001},
       {acl_test::kMask, 5},
@@ -88,8 +96,8 @@ TEST(PosixAclTest, RejectsMalformedEntryOrderingAndRequiredEntryViolations) {
   expect_invalid(acl_test::Encode({
       {acl_test::kUserObj, 7},
       {acl_test::kGroupObj, 5},
-      {acl_test::kGroup, 4, 2002},
       {acl_test::kGroup, 4, 2001},
+      {acl_test::kGroup, 2, 2001},
       {acl_test::kMask, 5},
       {acl_test::kOther, 1},
   }));
@@ -109,6 +117,24 @@ TEST(PosixAclTest, RejectsMalformedEntryOrderingAndRequiredEntryViolations) {
       {acl_test::kGroupObj, 5},
       {acl_test::kMask, 5},
   }));
+}
+
+TEST(PosixAclTest, AcceptsLinuxValidUnsortedNamedIdsWithoutReorderingThem) {
+  const std::string value = acl_test::Encode({
+      {acl_test::kUserObj, 7},
+      {acl_test::kUser, 6, 2002},
+      {acl_test::kUser, 4, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kGroup, 4, 3003},
+      {acl_test::kGroup, 2, 2001},
+      {acl_test::kMask, 5},
+      {acl_test::kOther, 1},
+  });
+  auto file = MakeInode(S_IFREG | 0644);
+
+  ASSERT_TRUE(SetPosixAclXAttr(&file, kPosixAclAccessXAttr, value, XAttrSetMode::kUpsert).ok());
+  ASSERT_TRUE(file.xattrs.contains(std::string(kPosixAclAccessXAttr)));
+  EXPECT_EQ(file.xattrs.at(std::string(kPosixAclAccessXAttr)), value);
 }
 
 TEST(PosixAclTest, MutationBoundaryCoversSetModesPlacementAndResourceLimits) {

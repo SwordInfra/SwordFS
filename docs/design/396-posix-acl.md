@@ -46,7 +46,8 @@ typed `PosixAcl` parser owns validation and transformations:
 - exact entry framing and version;
 - legal tags and permission bits;
 - exactly one owner, owning-group, and other entry;
-- canonical tag ordering and strictly increasing named IDs;
+- canonical tag-group ordering with unique named IDs in any order within each
+  named-user/named-group run;
 - undefined IDs on object/mask/other entries and concrete IDs on named entries;
 - no duplicate named entries;
 - a mask for every ACL containing named users/groups.
