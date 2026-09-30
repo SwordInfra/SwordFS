@@ -1188,6 +1188,40 @@ TEST_F(VfsImplIntegrationTest, CreateHookPublishesLookupReference) {
   });
 }
 
+TEST_F(VfsImplIntegrationTest, FailedCreateReplyReleasesHandleAndLookupReference) {
+  FuseReplyCapture capture;
+  capture.reply_result = -ENOENT;
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+
+  swordfs::fuse::VfsHookFactory::SwordFsCreate(reinterpret_cast<fuse_req_t>(&capture), 1, "reply-fails", 0644, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.entry.has_value());
+  ASSERT_TRUE(capture.fh.has_value());
+
+  // fuse_reply_create() notifies the capture before the callback returns to
+  // failed-reply ownership cleanup. Drain the runtime before checking both
+  // the local handle and provisional lookup reference.
+  auto *runtime = swordfs::utils::ThisFiberRuntime();
+  ASSERT_NE(runtime, nullptr);
+  runtime->Shutdown();
+
+  swordfs::test::RunInTestFiber([&] {
+    auto handle = swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::FileHandle>(*capture.fh);
+    EXPECT_EQ(handle, nullptr) << "a CREATE reply that never reached the kernel must not retain its local fh";
+    if (handle != nullptr) {
+      // Keep this RED regression isolated from later tests while the bug still
+      // exists; the production fix must make this fallback unnecessary.
+      EXPECT_TRUE(handle->Release().ok());
+    }
+
+    mock_meta_->set_get_inode_status(Status::NotFound("create reply was not published"));
+    struct stat attr{};
+    EXPECT_TRUE(VfsImpl::GetAttr(capture.entry->ino, &attr).IsNotFound());
+  });
+}
+
 TEST_F(VfsImplIntegrationTest, TmpfileHookReturnsCreatedEntryAndNormalHandle) {
   FuseReplyCapture capture;
   fuse_file_info fi{};

@@ -83,6 +83,9 @@ class MemMetaImpl : public IMetaEngine {
  private:
   MemMetaStore store_;
   uint64_t chunk_size_ = SwordFsVolume{}.chunk_size;
+  utils::FiberMutex orphan_scan_mutex_;
+  std::vector<InodeID> orphan_scan_snapshot_;
+  size_t orphan_scan_snapshot_offset_ = 0;
   utils::FiberMutex pending_delete_scan_mutex_;
   std::vector<PendingDelete> pending_delete_snapshot_;
   size_t pending_delete_snapshot_offset_ = 0;

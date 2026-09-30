@@ -85,9 +85,20 @@ Failure ownership follows the same ordinary primitives. A handle-creation
 failure best-effort unlinks the created name. An unlink failure releases the
 local handle before retrying cleanup, and the original unlink error remains the
 syscall result. After unlink succeeds, failure to deliver `fuse_reply_create`
-rolls back both the provisional FUSE lookup reference and the local file
-handle; the already-committed orphan remains owned by normal background
-reclamation rather than being synchronously deleted by the reply path.
+uses the same CREATE-style ownership helper as ordinary file creation: both the
+provisional FUSE lookup reference and local file handle are released because
+the kernel received neither. The already-committed namespace/orphan state is
+not rolled back by reply delivery failure; for tmpfiles the durable orphan
+remains owned by normal background reclamation rather than being synchronously
+deleted by the reply path.
+
+Large tmpfile workloads can publish many orphan candidates at once. Orphan
+preparation therefore runs in resumable bounded batches. Memory metadata keeps
+a snapshot continuation and Redis keeps an HSCAN page/cursor continuation
+across worker batch boundaries. The worker can abort an in-flight candidate
+walk promptly during unmount and self-wakes to continue a non-terminal batch,
+so a stress-created orphan backlog cannot make daemon shutdown wait for a full
+queue scan.
 
 ## Model
 

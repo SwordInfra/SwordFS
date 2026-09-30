@@ -92,6 +92,21 @@ bool PublishRetainedLookup(metadata::InodeID ino, ReplyFn &&reply) {
   return true;
 }
 
+void PublishCreatedFile(fuse_req_t req, fuse_entry_param *entry, fuse_file_info *fi) {
+  if (PublishRetainedLookup(entry->ino, [req, entry, fi] { return fuse_reply_create(req, entry, fi); })) {
+    return;
+  }
+
+  // The kernel received neither the provisional lookup nor fh. The metadata
+  // mutation is already committed, so only local ownership is rolled back;
+  // namespace/orphan state remains authoritative for later operations.
+  auto status = VfsImpl::Release(entry->ino, fi->fh);
+  if (!status.ok()) {
+    SWORDFS_LOG_WARN << "Failed to release local file handle after CREATE-style reply failure: ino=" << entry->ino
+                     << " fh=" << fi->fh << " — " << status.message();
+  }
+}
+
 void RollbackRetainedLookups(const std::vector<fuse_ino_t> &inos) {
   auto &cache = ::swordfs::vfs::FuseInodeCache::Instance();
   for (const auto ino : inos) {
@@ -594,7 +609,7 @@ void VfsHookFactory::SwordFsCreate(fuse_req_t req, fuse_ino_t parent, const char
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    PublishRetainedLookup(entry.ino, [req, &entry, &fi] { return fuse_reply_create(req, &entry, &fi); });
+    PublishCreatedFile(req, &entry, &fi);
   });
 }
 
@@ -748,15 +763,7 @@ void VfsHookFactory::SwordFsTmpfile(fuse_req_t req, fuse_ino_t parent, mode_t mo
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    if (!PublishRetainedLookup(entry.ino, [req, &entry, &fi] { return fuse_reply_create(req, &entry, &fi); })) {
-      // A failed CREATE-style reply publishes neither the provisional lookup
-      // reference nor the fh to the kernel. PublishRetainedLookup already
-      // rolled back the former; release the latter while leaving the
-      // committed anonymous orphan to normal reclamation. No user I/O can
-      // precede a failed reply, and FileHandle::Release unregisters the local
-      // handle even if its close status is non-OK, so only ownership matters.
-      (void)VfsImpl::Release(entry.ino, fi.fh);
-    }
+    PublishCreatedFile(req, &entry, &fi);
   });
 }
 

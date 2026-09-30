@@ -1173,6 +1173,29 @@ FIBER_TEST_F(ReclaimerTest, WorkerCompletesAPendingReclaimImmediatelyAtStartup) 
   EXPECT_TRUE(OrphanCandidates().empty());
 }
 
+FIBER_TEST_F(ReclaimerTest, ReconcileLeavesLargeOrphanBacklogsForLaterPassesAndEventuallyDrainsThem) {
+  constexpr int kCandidates = 300;
+  for (int i = 0; i < kCandidates; ++i) {
+    SwordFsInode file;
+    const std::string name = "orphan-batch-" + std::to_string(i);
+    ASSERT_TRUE(meta_->Create(kRootInodeId, name, 0644, &file).ok());
+    ASSERT_TRUE(meta_->Unlink(kRootInodeId, name).ok());
+  }
+  ASSERT_EQ(OrphanCandidates().size(), static_cast<size_t>(kCandidates));
+
+  ASSERT_TRUE(OrphanReclaimer::Instance().Reconcile().ok());
+  const auto after_first_pass = OrphanCandidates();
+  EXPECT_FALSE(after_first_pass.empty()) << "one reconciliation pass must not monopolize an unbounded orphan backlog";
+  EXPECT_LT(after_first_pass.size(), static_cast<size_t>(kCandidates))
+      << "a bounded pass must still make forward progress";
+
+  for (int pass = 0; pass < 10 && !OrphanCandidates().empty(); ++pass) {
+    ASSERT_TRUE(OrphanReclaimer::Instance().Reconcile().ok());
+  }
+  EXPECT_TRUE(OrphanCandidates().empty()) << "repeated bounded passes must converge on the durable backlog";
+  EXPECT_EQ(PendingReclaims().size(), static_cast<size_t>(kCandidates));
+}
+
 class ReclaimerForcedMultiPassTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -1196,6 +1219,54 @@ class ReclaimerForcedMultiPassTest : public ::testing::Test {
   RecordingDataEngine *data_ = nullptr;
 };
 
+class SlowOrphanScanMetaEngine : public MemMetaImpl {
+ public:
+  Status VisitOrphanCandidates(const metadata::InodeVisitorFn &visitor) override {
+    constexpr int kCandidates = 1000;
+    for (int i = 0; i < kCandidates; ++i) {
+      scan_started_.store(true, std::memory_order_release);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      auto status = visitor(static_cast<InodeID>(1000 + i));
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    return Status::OK();
+  }
+
+  Status PrepareReclaim(InodeID) override {
+    return Status::OK();
+  }
+
+  bool scan_started() const {
+    return scan_started_.load(std::memory_order_acquire);
+  }
+
+ private:
+  std::atomic<bool> scan_started_{false};
+};
+
+class ReclaimerSlowScanTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<SlowOrphanScanMetaEngine>>();
+    meta_ = meta.get();
+    SwordFsVolume config;
+    const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::make_unique<RecordingDataEngine>(),
+                                                             std::move(config));
+    ASSERT_TRUE(status.ok()) << status.message();
+    swordfs::test::RunInTestFiber([&] { InodeHandleManager::Instance().Initialize(); });
+  }
+
+  void TearDown() override {
+    OrphanReclaimer::Instance().Stop();
+    swordfs::test::RunInTestFiber([&] { InodeHandleManager::Instance().Initialize(); });
+    volume::VolumeImpl::Initialize();
+  }
+
+  SlowOrphanScanMetaEngine *meta_ = nullptr;
+};
+
 TEST_F(ReclaimerForcedMultiPassTest, ChunkGcWorkerSelfWakesWithoutScanningVfsOrphans) {
   // The production safety scan is five seconds. This shorter mechanism-level
   // watchdog proves has_more -> Wake() started pass two rather than the
@@ -1212,6 +1283,26 @@ TEST_F(ReclaimerForcedMultiPassTest, ChunkGcWorkerSelfWakesWithoutScanningVfsOrp
   EXPECT_GE(meta_->pending_delete_scan_calls(), 2);
   EXPECT_FALSE(meta_->second_scan_followed_orphan())
       << "private chunk GC must not scan or depend on the VFS orphan queue";
+}
+
+TEST_F(ReclaimerSlowScanTest, OrphanWorkerStopInterruptsALongCandidateScan) {
+  auto &worker = OrphanReclaimer::Instance();
+  worker.Start();
+
+  const auto start_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < start_deadline && !meta_->scan_started()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_TRUE(meta_->scan_started()) << "the worker must enter the orphan scan before shutdown is measured";
+
+  const auto started = std::chrono::steady_clock::now();
+  worker.Stop();
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+
+  // A mount with a large durable orphan backlog must still tear down promptly.
+  // Stop should interrupt candidate visitation instead of joining an entire
+  // backlog scan before the daemon can exit.
+  EXPECT_LT(elapsed, std::chrono::milliseconds(250));
 }
 
 FIBER_TEST_F(ReclaimerTest, WorkerSurvivesAFailedPassAndRecoversOnWake) {
