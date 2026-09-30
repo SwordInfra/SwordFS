@@ -116,6 +116,7 @@ class RedisMetaOps {
   const chunk::internal::ChunkMetadataBridge *chunk_metadata_bridge_ = nullptr;
   ChunkMetadataPtr chunk_metadata_;
   redis::RedisKey key_;
+  int reclaim_reconcile_attempts_ = 1;
   uint64_t chunk_size_ = 0;
   utils::FiberMutex pending_delete_scan_mutex_;
   uint64_t pending_delete_cursor_ = 0;

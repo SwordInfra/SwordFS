@@ -12,9 +12,8 @@
 #include <string>
 #include <vector>
 
-#include "chunk/cow/COWCleanup.hpp"
+#include "chunk/internal/ChunkCleanupParticipant.hpp"
 #include "metadata/IMetaEngine.hpp"
-#include "storage/IDataEngine.hpp"
 #include "utils/ExecutionDomain.hpp"
 #include "utils/FiberRuntime.hpp"
 #include "utils/Logging.hpp"
@@ -28,71 +27,41 @@ constexpr size_t kPendingDeleteBatchSize = 128;
 
 }  // namespace
 
+ChunkGcWorker::~ChunkGcWorker() = default;
+
 utils::Status ChunkGcWorker::DeletePending(const metadata::PendingDelete &work) {
-  if (chunk_type_ != metadata::ChunkType::kCow) {
-    return utils::Status::NotSupported("chunk GC type is not implemented");
+  if (cleanup_ == nullptr) {
+    return utils::Status::Internal("chunk cleanup participant is not configured");
   }
-  cow::COWRef ref;
-  auto status = cow::DecodeCOWDelete(work, chunk_size_, &ref);
+  bool completed = false;
+  auto status = cleanup_->DeletePending(work, &completed);
   if (!status.ok()) {
     return status;
   }
-
-  metadata::SwordFsChunk current;
-  status = meta_->FindChunk(ref.ino, ref.descriptor.index, &current);
-  if (status.ok()) {
-    if (current.revision == ref.descriptor.revision) {
-      return utils::Status::OK();
-    }
-  } else if (!status.IsNotFound()) {
-    return status;
-  }
-
-  status = data_->Delete(ref.key);
-  if (!status.ok()) {
-    return status;
+  if (!completed) {
+    return utils::Status::OK();
   }
   return meta_->CompletePendingDelete(work.id);
 }
 
 utils::Status ChunkGcWorker::DeleteReclaim(const metadata::ReclaimWork &work) {
-  if (chunk_type_ != metadata::ChunkType::kCow) {
-    return utils::Status::NotSupported("chunk GC type is not implemented");
+  if (cleanup_ == nullptr) {
+    return utils::Status::Internal("chunk cleanup participant is not configured");
   }
-
-  std::vector<cow::COWRef> refs;
-  auto status = cow::DecodeCOWReclaim(work, chunk_size_, &refs);
+  bool completed = false;
+  auto status = cleanup_->DeleteReclaim(work, &completed);
   if (!status.ok()) {
     return status;
   }
-
-  metadata::SwordFsInode inode;
-  status = meta_->GetInode(work.ino, &inode);
-  if (status.ok()) {
-    // Redis EXEC may partially apply. Frozen work does not authorize a delete
-    // while the live inode remains reachable.
-    return utils::Status::Busy("reclaim inode is still live");
-  }
-  if (!status.IsNotFound()) {
-    return status;
-  }
-
-  size_t failed = 0;
-  for (const auto &ref : refs) {
-    status = data_->Delete(ref.key);
-    if (!status.ok()) {
-      ++failed;
-    }
-  }
-  if (failed != 0) {
-    return utils::Status::IOError("COW reclaim left " + std::to_string(failed) + " object(s) undeleted");
+  if (!completed) {
+    return utils::Status::OK();
   }
   return meta_->CompleteReclaim(work.ino);
 }
 
 utils::Status ChunkGcWorker::Reconcile() {
   utils::ExpectInFiberDomain();
-  if (meta_ == nullptr || data_ == nullptr) {
+  if (meta_ == nullptr || cleanup_ == nullptr) {
     return utils::Status::OK();
   }
 

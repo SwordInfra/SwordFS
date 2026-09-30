@@ -212,7 +212,7 @@ TEST(RedisMetaTxnTest, LinkCommitInvalidatesConcurrentReclaimSnapshot) {
   EXPECT_FALSE(redis.hexists(key.Reclaims(), std::to_string(kIno)));
 }
 
-TEST(RedisMetaTxnTest, PrepareReclaimConvergesAfterAmbiguousExec) {
+TEST(RedisMetaTxnTest, PrepareReclaimFreshRetryUsesAbsentInodeRatherThanFrozenWork) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
@@ -263,9 +263,17 @@ TEST(RedisMetaTxnTest, PrepareReclaimConvergesAfterAmbiguousExec) {
   });
 
   ASSERT_TRUE(retry_status.ok()) << retry_status.message();
-  ASSERT_TRUE(replay.has_value());
+  EXPECT_FALSE(replay.has_value());
+
+  // The first ambiguous EXEC may still have retained maintenance work, but a
+  // fresh reclaim attempt derives logical completion from the absent inode
+  // rather than replaying that record as authority.
+  const auto persisted = control.hget(key.Reclaims(), std::to_string(kIno));
+  ASSERT_TRUE(persisted.has_value());
+  ReclaimWork retained;
+  ASSERT_TRUE(retained.ParseFrom(*persisted).ok());
   std::vector<swordfs::chunk::cow::COWRef> refs;
-  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWReclaim(*replay, 4096, &refs).ok());
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWReclaim(retained, 4096, &refs).ok());
   ASSERT_EQ(refs.size(), 1U);
   EXPECT_EQ(refs[0].descriptor, chunk);
   EXPECT_FALSE(control.exists(key.Inode(kIno)));

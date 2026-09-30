@@ -237,22 +237,81 @@ The concrete chunk interprets the snapshot after that transaction;
 object-store I/O does not hold a metadata transaction open.
 
 Reclaim and pending-delete records carry opaque mechanism-private payloads.
-The common metadata engine persists their envelope and queue identity without
-decoding physical references. Private `ChunkGcWorker` schedules, retries, and
-acknowledges those records; the selected chunk-type implementation's cleanup logic decodes
-them, checks live reachability where applicable, and issues physical deletion. Generic
-`BufCodec` schema and exact `RecordType` checks frame the envelopes and the
-COW payload; malformed payloads or identity mismatches fail closed and
-remain queued. Orphan
-preparation freezes the mechanism-private payload in the same transaction that removes
-the live inode and chunk heads; later replay uses the frozen bytes, not a
-reconstructed target from current state.
+They are maintenance envelopes, not reachability authority. The common metadata
+engine may persist their envelope and queue identity without decoding physical
+references, but correctness does not require a cleanup record to survive after
+the FileMetadata point of no return. Losing such work may leak private metadata
+or immutable objects; it must never make detached state reachable again.
+
+Private `ChunkGcWorker` is mechanism-neutral. It owns queue visitation,
+scheduling, retry, invocation, and generic acknowledgement only. A selected
+chunk mechanism provides an internal cleanup participant that owns payload
+decode/validation, authoritative reachability revalidation, physical-object key
+derivation, and destructive object deletion. The worker does not include COW
+code, compare COW revisions, derive COW keys, or switch on COW deletion policy.
+Generic `BufCodec` schema and exact `RecordType` checks still frame persisted
+envelopes; malformed mechanism payloads fail closed and remain queued.
+
+Cleanup has two distinct reachability levels in the final authority model:
+
+```text
+FileMetadata reachability:
+    ChunkID is live while a live/revivable inode has an authoritative
+    ChunkIndex -> ChunkID mapping to it
+
+COW private reachability:
+    within a live ChunkID, COWChunkHead.revision is the live immutable revision
+```
+
+`COWChunkHead.size` participates in full-head CAS but not immutable-object
+identity. Typed COW cleanup therefore identifies an immutable object by
+`ChunkID + COWChunkRevision`. A rewrite may retire an old revision while the
+ChunkID remains attached. Whole-chunk truncate/reclaim cleanup operates on a
+detached ChunkID and may remove the current COW head/object only after
+FileMetadata revalidation confirms that the ChunkID is no longer reachable.
+A candidate whose revision still equals the live COW head remains live even if
+the head size changed.
+
+#319 stages this private cleanup contract without changing production
+FileMetadata authority. Legacy `SwordFsChunk` cleanup payloads and live common
+descriptor reachability remain authoritative until #317. Typed
+`ChunkID + COWChunkRevision` cleanup payloads and the mechanism-owned cleanup
+participant may exist and be directly tested, but production does not dual-write
+legacy and typed cleanup state. #317 switches FileMetadata mappings, COW private
+authority, object identity, and cleanup reachability together.
+
 For new orphan candidates, `OrphanReclaimer` enters `PrepareReclaim` under the
-open-handle fence. `ChunkGcWorker` consumes only durable pending work and does
-not own that VFS fence. A frozen record is the point of no return even if a
-partial Redis `EXEC` left the inode visible: `Link` refuses to revive it, and
-an unexpected live inode leaves the frozen record intact with an error rather
-than risking loss of its remaining chunk references.
+open-handle fence. The FileMetadata transition, not `ReclaimWork`, is the
+reclaim correctness boundary:
+
+```text
+revalidate nlink == 0
+        |
+        v
+make the inode non-revivable
+        |
+        v
+detach all authoritative ChunkIndex -> ChunkID mappings
+        |  correctness point of no return
+        v
+best-effort cleanup handoff / mechanism cleanup / object deletion
+```
+
+Memory expresses the non-revivability and detach transition atomically. Redis
+uses the inode key itself as the fence: `Link` and reclaim WATCH the same inode
+key. Inside `MULTI/EXEC`, critical destructive commands are queued in
+non-revivability-before-detach order: delete the inode first, then delete its
+mapping state. Auxiliary orphan markers and optional cleanup envelopes are not
+part of the reachability fence and cannot weaken that ordering.
+
+Redis `OutcomeUnknown` is reconciled from authoritative FileMetadata state
+rather than by replaying stale cleanup work. If the inode still exists with
+`nlink == 0`, reclaim retries from a fresh inode/mapping snapshot. If it exists
+with `nlink > 0`, revival won and destructive cleanup stops. If the inode is
+absent, logical reclaim is complete even when the detached-ID/object list was
+lost. Any mapping record surviving under an absent inode is unreachable residue,
+not live ChunkID reachability. `ChunkGcWorker` does not own the VFS open-handle
+fence and never turns queue membership into delete permission.
 
 The COW publication protocol below describes the transitional
 `cow` implementation. Its object revision and key are private to that
@@ -500,12 +559,26 @@ metadata call is never silently converted to success.
 ## Cleanup authority
 
 `pending_deletes` stores maintenance candidates, not permission to delete.
-Private chunk GC validates the mechanism-private payload and rechecks authoritative
-metadata before physical deletion. For `cow`, it compares the frozen
-immutable key with the current logical head and skips a candidate while that
-key is still live. Last-link reclaim also checks that the live inode is absent
-before deleting frozen data, so a partially applied Redis transaction cannot
-turn a pending record into delete authority. Queue membership alone never
+Private chunk GC invokes the selected mechanism's cleanup participant, which
+validates the mechanism-private payload and rechecks authoritative metadata
+before physical deletion. For typed `cow`, rewrite cleanup compares only
+`ChunkID + COWChunkRevision` with the current COW head; a same-revision head is
+live regardless of size. Whole-ChunkID cleanup first verifies that FileMetadata
+no longer reaches that ChunkID, then may delete the current private object/head.
+Late private updates to a detached ChunkID remain unreachable residue because
+FileMetadata never reattaches detached IDs.
+
+During #319 the production COW participant also understands the legacy cleanup
+payloads still emitted by common-authority publication/truncate/reclaim paths
+and revalidates them against legacy descriptors. This is a staging adapter, not
+dual-written authority. #317 removes that legacy reachability source when the
+FileMetadata ChunkID mapping becomes authoritative.
+
+`ReclaimWork`, when retained, improves maintenance continuity and retry but is
+not the reclaim fence. Last-link reclaim establishes inode non-revivability
+before destructive mapping detach. A crash after that point may permanently
+lose cleanup work and leak objects; correctness is preserved because neither
+the inode nor a detached ChunkID can be revived. Queue membership alone never
 grants delete authority.
 
 ## Why there is no post-upload `HEAD`

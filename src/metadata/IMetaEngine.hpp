@@ -185,26 +185,25 @@ class IMetaEngine {
   /// This is the inode's reclaim point of no return. In one atomic metadata
   /// mutation the engine must:
   ///   - recheck that |ino| is still orphaned (nlink == 0);
-  ///   - freeze the authoritative chunk descriptors and their immutable
-  ///     object keys into a durable pending-reclaim record;
-  ///   - drop the live inode (and its orphan marker) so a concurrent Link
-  ///     can no longer revive an inode whose objects are about to go away.
+  ///   - make the inode non-revivable so a concurrent Link cannot restore it;
+  ///   - detach every authoritative chunk mapping only after non-revivability
+  ///     is established.
   ///
   /// OK includes both crossing/replaying the point of no return and ordinary
   /// no-op outcomes (already reclaimed, unreclaimable, or revived). Any
-  /// durable ReclaimWork remains internal and is consumed by the chunk GC
-  /// worker; callers receive no physical identities.
+  /// ReclaimWork remains internal maintenance state consumed by chunk GC;
+  /// callers receive no physical identities and correctness never depends on
+  /// that work surviving the point of no return.
   ///
-  /// The memory backend mirrors these semantics for the lifetime of the
-  /// process; persistent backends must persist the pending record in the same
-  /// metadata transition so mount-time reconciliation can finish object
-  /// deletion after a crash.
+  /// Persistent backends may best-effort retain cleanup work so mount-time
+  /// reconciliation can reduce leaks after a crash. Losing that work after the
+  /// point of no return is permitted; detached identities must remain
+  /// unreachable and non-reusable.
   virtual Status PrepareReclaim(InodeID ino) = 0;
 
-  /// Remove the durable pending-reclaim record for |ino| together with its
-  /// frozen chunk metadata. Called only after every physical target in that
-  /// durable reclaim record has been safely deleted. Idempotent: a missing
-  /// record is not an error.
+  /// Remove optional pending-reclaim maintenance state for |ino| after the
+  /// selected mechanism has safely handled it. Idempotent: a missing record is
+  /// not an error.
   virtual Status CompleteReclaim(InodeID ino) = 0;
 
   /// Visit every inode currently published as an orphan candidate — that is,
@@ -215,9 +214,9 @@ class IMetaEngine {
   /// backends; process-lifetime for the memory backend.
   virtual Status VisitOrphanCandidates(const InodeVisitorFn &visitor) = 0;
 
-  /// Visit every durable pending reclaim. The visitor receives the frozen work
-  /// itself so replay can continue object deletion directly without another
-  /// metadata lookup or PrepareReclaim call.
+  /// Visit retained pending-reclaim maintenance work. Queue membership is not
+  /// delete authority; the selected chunk mechanism revalidates reachability
+  /// before destructive cleanup.
   virtual Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) = 0;
 
   /// Visit a bounded batch of immutable object identities registered as

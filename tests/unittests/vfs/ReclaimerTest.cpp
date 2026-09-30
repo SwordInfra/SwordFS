@@ -28,9 +28,12 @@
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/cow/COWCleanup.hpp"
 #include "chunk/cow/COWObjectKey.hpp"
+#include "chunk/internal/ChunkCleanupParticipant.hpp"
 #include "chunk/internal/ChunkGcWorker.hpp"
 #include "metadata/IMetaEngine.hpp"
+#include "metadata/mem/MemCOWChunkMetadata.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
+#include "metadata/types/BufCodec.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Context.hpp"
@@ -57,9 +60,64 @@ metadata::PendingDelete MakePendingDelete(InodeID ino, const SwordFsChunk &descr
   return pending;
 }
 
+metadata::PendingDelete MakeTypedRevisionDelete(metadata::ChunkID chunk_id, metadata::cow::COWChunkRevision revision) {
+  metadata::BufEncoder enc;
+  enc.Header(metadata::RecordType::kCowTypedCleanup);
+  enc.U32(static_cast<uint32_t>(chunk::cow::COWCleanupKind::kRevision));
+  enc.U64(chunk_id.Value());
+  enc.U64(revision.Value());
+  metadata::PendingDelete pending;
+  pending.id = "cow:revision:" + std::to_string(chunk_id.Value()) + ":" + std::to_string(revision.Value());
+  enc.Finish(&pending.payload);
+  return pending;
+}
+
+metadata::PendingDelete MakeTypedDetachedDelete(InodeID ino, metadata::ChunkIndex index, metadata::ChunkID chunk_id) {
+  metadata::BufEncoder enc;
+  enc.Header(metadata::RecordType::kCowTypedCleanup);
+  enc.U32(static_cast<uint32_t>(chunk::cow::COWCleanupKind::kDetachedChunk));
+  enc.U64(ino);
+  enc.U64(index);
+  enc.U64(chunk_id.Value());
+  metadata::PendingDelete pending;
+  pending.id = "cow:chunk:" + std::to_string(chunk_id.Value());
+  enc.Finish(&pending.payload);
+  return pending;
+}
+
+metadata::ReclaimWork MakeTypedDetachedReclaim(
+    InodeID ino, const std::vector<std::pair<metadata::ChunkIndex, metadata::ChunkID>> &chunks) {
+  metadata::BufEncoder enc;
+  enc.Header(metadata::RecordType::kCowTypedCleanup);
+  enc.U32(static_cast<uint32_t>(chunk::cow::COWCleanupKind::kDetachedReclaim));
+  enc.U64(ino);
+  enc.U32(static_cast<uint32_t>(chunks.size()));
+  for (const auto &[index, chunk_id] : chunks) {
+    enc.U64(index);
+    enc.U64(chunk_id.Value());
+  }
+  metadata::ReclaimWork work;
+  work.ino = ino;
+  enc.Finish(&work.payload);
+  return work;
+}
+
+std::unique_ptr<chunk::internal::ChunkCleanupParticipant> MakeLegacyCleanupParticipant(metadata::IMetaEngine *meta,
+                                                                                       storage::IDataEngine *data) {
+  if (meta == nullptr || data == nullptr) {
+    return nullptr;
+  }
+  std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
+  auto &volume = volume::VolumeImpl::Instance();
+  const auto status = chunk::internal::CreateChunkCleanupParticipant(metadata::ChunkType::kCow, volume.chunk_size(), {},
+                                                                     meta, data, {}, &cleanup);
+  EXPECT_TRUE(status.ok()) << status.message();
+  return cleanup;
+}
+
 utils::Status ReconcilePhysicalCleanup(storage::IDataEngine *data) {
   auto &volume = volume::VolumeImpl::Instance();
-  chunk::internal::ChunkGcWorker worker(volume.config().chunk_type, volume.chunk_size(), volume.meta_engine(), data);
+  chunk::internal::ChunkGcWorker worker(volume.meta_engine(), MakeLegacyCleanupParticipant(volume.meta_engine(), data));
   return worker.Reconcile();
 }
 
@@ -73,9 +131,27 @@ utils::Status ReconcileAll(storage::IDataEngine *data) {
 
 std::unique_ptr<chunk::internal::ChunkGcWorker> MakeChunkGcWorker(storage::IDataEngine *data) {
   auto &volume = volume::VolumeImpl::Instance();
-  return std::make_unique<chunk::internal::ChunkGcWorker>(volume.config().chunk_type, volume.chunk_size(),
-                                                          volume.meta_engine(), data);
+  return std::make_unique<chunk::internal::ChunkGcWorker>(volume.meta_engine(),
+                                                          MakeLegacyCleanupParticipant(volume.meta_engine(), data));
 }
+
+class CompletingCleanupParticipant final : public chunk::internal::ChunkCleanupParticipant {
+ public:
+  Status DeletePending(const metadata::PendingDelete &work, bool *completed) override {
+    pending_id = work.id;
+    *completed = true;
+    return Status::OK();
+  }
+
+  Status DeleteReclaim(const metadata::ReclaimWork &work, bool *completed) override {
+    reclaim_ino = work.ino;
+    *completed = true;
+    return Status::OK();
+  }
+
+  std::string pending_id;
+  InodeID reclaim_ino = 0;
+};
 
 // Data engine that records every Delete and can fail selected keys.
 class RecordingDataEngine : public swordfs::storage::IDataEngine {
@@ -415,28 +491,12 @@ class ReclaimerTest : public ::testing::Test {
   RecordingDataEngine *data_ = nullptr;
 };
 
-FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsUnsupportedPendingDeleteMechanism) {
-  constexpr InodeID kIno = 42;
-  const SwordFsChunk descriptor{.index = 0, .revision = 7, .size = 64};
-  const auto pending = MakePendingDelete(kIno, descriptor);
-
-  RawPendingDeleteMetaEngine *raw_meta = nullptr;
-  swordfs::test::RunInTestThreadFromFiber([&] {
-    auto replacement = std::make_unique<swordfs::test::ConfiguredMetaEngine<RawPendingDeleteMetaEngine>>(pending);
-    raw_meta = replacement.get();
-    auto data = std::make_unique<RecordingDataEngine>();
-    data_ = data.get();
-    SwordFsVolume config;
-    const auto status =
-        swordfs::test::LoadTestVolumeRuntime(std::move(replacement), std::move(data), std::move(config));
-    ASSERT_TRUE(status.ok()) << status.message();
-  });
-
-  chunk::internal::ChunkGcWorker worker(metadata::ChunkType::kChunkSlice, volume::VolumeImpl::Instance().chunk_size(),
-                                        raw_meta, data_);
-  const auto status = worker.Reconcile();
-  EXPECT_EQ(status.ToErrno(), EIO);
-  EXPECT_TRUE(data_->delete_calls.empty());
+FIBER_TEST_F(ReclaimerTest, ChunkCleanupFactoryRejectsUnsupportedMechanism) {
+  std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
+  const auto status = chunk::internal::CreateChunkCleanupParticipant(
+      metadata::ChunkType::kChunkSlice, volume::VolumeImpl::Instance().chunk_size(), {}, meta_, data_, {}, &cleanup);
+  EXPECT_EQ(status.ToErrno(), ENOSYS);
+  EXPECT_EQ(cleanup, nullptr);
 }
 
 FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsMalformedPendingDeleteWork) {
@@ -454,18 +514,15 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsMalformedPendingDeleteWork) {
     ASSERT_TRUE(status.ok()) << status.message();
   });
 
-  chunk::internal::ChunkGcWorker worker(metadata::ChunkType::kCow, volume::VolumeImpl::Instance().chunk_size(),
-                                        raw_meta, data_);
+  chunk::internal::ChunkGcWorker worker(raw_meta, MakeLegacyCleanupParticipant(raw_meta, data_));
   const auto status = worker.Reconcile();
   EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_TRUE(data_->delete_calls.empty());
 }
 
-FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsUnsupportedReclaimMechanism) {
+FIBER_TEST_F(ReclaimerTest, ChunkGcDelegatesReclaimPolicyAndOwnsAcknowledgement) {
   constexpr InodeID kIno = 42;
-  const SwordFsChunk descriptor{.index = 0, .revision = 7, .size = 64};
-  metadata::ReclaimWork frozen;
-  ASSERT_TRUE(chunk::cow::FreezeCOWReclaim(kIno, {descriptor}, 0, &frozen).ok());
+  const metadata::ReclaimWork frozen{.ino = kIno, .payload = "participant-owned-opaque-payload"};
 
   PendingReclaimMetaEngine *pending_meta = nullptr;
   swordfs::test::RunInTestThreadFromFiber([&] {
@@ -479,10 +536,12 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsUnsupportedReclaimMechanism) {
     ASSERT_TRUE(status.ok()) << status.message();
   });
 
-  chunk::internal::ChunkGcWorker worker(metadata::ChunkType::kChunkSlice, volume::VolumeImpl::Instance().chunk_size(),
-                                        pending_meta, data_);
-  EXPECT_EQ(worker.Reconcile().ToErrno(), EIO);
-  EXPECT_FALSE(pending_meta->completed);
+  auto cleanup = std::make_unique<CompletingCleanupParticipant>();
+  auto *cleanup_ptr = cleanup.get();
+  chunk::internal::ChunkGcWorker worker(pending_meta, std::move(cleanup));
+  EXPECT_TRUE(worker.Reconcile().ok());
+  EXPECT_EQ(cleanup_ptr->reclaim_ino, kIno);
+  EXPECT_TRUE(pending_meta->completed);
 }
 
 FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsMalformedReclaimWork) {
@@ -557,7 +616,7 @@ FIBER_TEST_F(ReclaimerTest, ReconcileDeletesFrozenObjectsAndCompletes) {
   EXPECT_TRUE(PendingReclaims().empty());
 }
 
-FIBER_TEST_F(ReclaimerTest, FrozenWorkDoesNotAuthorizeDeletingALiveInode) {
+FIBER_TEST_F(ReclaimerTest, FrozenWorkDoesNotAuthorizeDeletingALiveInodeAndMayBeDiscarded) {
   constexpr InodeID kFileIno = 42;
   const SwordFsChunk head{.index = 0, .revision = 7, .size = 64};
   metadata::ReclaimWork frozen;
@@ -580,15 +639,18 @@ FIBER_TEST_F(ReclaimerTest, FrozenWorkDoesNotAuthorizeDeletingALiveInode) {
   data_->Seed(key);
 
   const auto live_status = ReconcilePhysicalCleanup(data_);
-  EXPECT_EQ(live_status.ToErrno(), EIO) << live_status.message();
+  EXPECT_TRUE(live_status.ok()) << live_status.message();
   EXPECT_TRUE(data_->Contains(key));
   EXPECT_TRUE(data_->delete_calls.empty());
-  EXPECT_FALSE(pending_meta->completed);
+  EXPECT_TRUE(pending_meta->completed);
 
+  // The maintenance handoff was stale and has been acknowledged. If logical
+  // state later becomes unreachable, losing that old target is allowed to
+  // leak storage rather than turning stale queue state into future authority.
   pending_meta->SetInodeLive(false);
   ASSERT_TRUE(ReconcilePhysicalCleanup(data_).ok());
-  EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(pending_meta->completed);
+  EXPECT_TRUE(data_->Contains(key));
+  EXPECT_TRUE(data_->delete_calls.empty());
 }
 
 TEST_F(ReclaimerTest, PendingReclaimContinuesDirectlyToDeletion) {
@@ -689,6 +751,159 @@ FIBER_TEST_F(ReclaimerTest, RewriteCleanupDeletesOnlySupersededRevision) {
   SwordFsChunk authoritative;
   ASSERT_TRUE(meta_->FindChunk(f_ino, 0, &authoritative).ok());
   EXPECT_EQ(authoritative, replacement);
+}
+
+FIBER_TEST_F(ReclaimerTest, TypedCOWRevisionCleanupUsesChunkIDRevisionAndIgnoresHeadSize) {
+  auto chunk_metadata = std::make_shared<metadata::MemCOWChunkMetadata>();
+  metadata::ChunkID chunk_id;
+  ASSERT_TRUE(chunk_metadata->AllocateChunkID(&chunk_id).ok());
+  metadata::cow::COWChunkRevision revision;
+  ASSERT_TRUE(chunk_metadata->AllocateRevision(chunk_id, &revision).ok());
+
+  metadata::cow::COWChunkHead head{revision, 64};
+  ASSERT_TRUE(chunk_metadata->CompareExchangeHead(chunk_id, std::nullopt, head).ok());
+  const chunk::cow::COWObjectKey key(chunk_id, revision);
+  data_->Seed(std::string(static_cast<std::string_view>(key)));
+
+  std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
+  ASSERT_TRUE(chunk::cow::CreateCOWCleanupParticipant(0, chunk_metadata, meta_, data_, {}, &cleanup).ok());
+  const auto pending = MakeTypedRevisionDelete(chunk_id, revision);
+
+  bool completed = true;
+  ASSERT_TRUE(cleanup->DeletePending(pending, &completed).ok());
+  EXPECT_FALSE(completed);
+  EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(key)));
+
+  // Size is full-head CAS state, not immutable-object identity. The same
+  // revision remains live after a size-only shrink.
+  const metadata::cow::COWChunkHead resized{revision, 32};
+  ASSERT_TRUE(chunk_metadata->CompareExchangeHead(chunk_id, head, resized).ok());
+  completed = true;
+  ASSERT_TRUE(cleanup->DeletePending(pending, &completed).ok());
+  EXPECT_FALSE(completed);
+  EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(key)));
+
+  metadata::cow::COWChunkRevision replacement_revision;
+  ASSERT_TRUE(chunk_metadata->AllocateRevision(chunk_id, &replacement_revision).ok());
+  const metadata::cow::COWChunkHead replacement{replacement_revision, 32};
+  ASSERT_TRUE(chunk_metadata->CompareExchangeHead(chunk_id, resized, replacement).ok());
+  const chunk::cow::COWObjectKey replacement_key(chunk_id, replacement_revision);
+  data_->Seed(std::string(static_cast<std::string_view>(replacement_key)));
+
+  completed = false;
+  ASSERT_TRUE(cleanup->DeletePending(pending, &completed).ok());
+  EXPECT_TRUE(completed);
+  EXPECT_FALSE(data_->Contains(static_cast<std::string_view>(key)));
+  EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(replacement_key)));
+}
+
+FIBER_TEST_F(ReclaimerTest, TypedCOWDetachedCleanupRequiresFileMetadataUnreachability) {
+  constexpr InodeID kIno = 42;
+  constexpr metadata::ChunkIndex kIndex = 3;
+  auto chunk_metadata = std::make_shared<metadata::MemCOWChunkMetadata>();
+  metadata::ChunkID chunk_id;
+  ASSERT_TRUE(chunk_metadata->AllocateChunkID(&chunk_id).ok());
+  metadata::cow::COWChunkRevision revision;
+  ASSERT_TRUE(chunk_metadata->AllocateRevision(chunk_id, &revision).ok());
+  const metadata::cow::COWChunkHead head{revision, 64};
+  ASSERT_TRUE(chunk_metadata->CompareExchangeHead(chunk_id, std::nullopt, head).ok());
+
+  const chunk::cow::COWObjectKey key(chunk_id, revision);
+  data_->Seed(std::string(static_cast<std::string_view>(key)));
+  std::optional<metadata::ChunkID> attached = chunk_id;
+  chunk::internal::ChunkReachabilityProbeFn probe = [&](InodeID ino, metadata::ChunkIndex index,
+                                                        std::optional<metadata::ChunkID> *out) {
+    EXPECT_EQ(ino, kIno);
+    EXPECT_EQ(index, kIndex);
+    *out = attached;
+    return Status::OK();
+  };
+
+  std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
+  ASSERT_TRUE(chunk::cow::CreateCOWCleanupParticipant(0, chunk_metadata, meta_, data_, probe, &cleanup).ok());
+  const auto pending = MakeTypedDetachedDelete(kIno, kIndex, chunk_id);
+
+  bool completed = false;
+  ASSERT_TRUE(cleanup->DeletePending(pending, &completed).ok());
+  EXPECT_TRUE(completed) << "an attached candidate is stale maintenance, not future delete authority";
+  EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(key)));
+  metadata::cow::COWChunkHead current;
+  EXPECT_TRUE(chunk_metadata->GetHead(chunk_id, &current).ok());
+
+  attached.reset();
+  completed = false;
+  ASSERT_TRUE(cleanup->DeletePending(pending, &completed).ok());
+  EXPECT_TRUE(completed);
+  EXPECT_FALSE(data_->Contains(static_cast<std::string_view>(key)));
+  EXPECT_TRUE(chunk_metadata->GetHead(chunk_id, &current).IsNotFound());
+
+  // Detaching never resets either identity allocator. A late private update
+  // can create unreachable residue, but it cannot revive the ChunkID.
+  metadata::cow::COWChunkRevision late_revision;
+  ASSERT_TRUE(chunk_metadata->AllocateRevision(chunk_id, &late_revision).ok());
+  EXPECT_GT(late_revision.Value(), revision.Value());
+  const metadata::cow::COWChunkHead late_head{late_revision, 16};
+  ASSERT_TRUE(chunk_metadata->CompareExchangeHead(chunk_id, std::nullopt, late_head).ok());
+  const chunk::cow::COWObjectKey late_key(chunk_id, late_revision);
+  data_->Seed(std::string(static_cast<std::string_view>(late_key)));
+
+  completed = false;
+  ASSERT_TRUE(cleanup->DeletePending(pending, &completed).ok());
+  EXPECT_TRUE(completed);
+  EXPECT_FALSE(data_->Contains(static_cast<std::string_view>(late_key)));
+
+  metadata::ChunkID next_chunk_id;
+  ASSERT_TRUE(chunk_metadata->AllocateChunkID(&next_chunk_id).ok());
+  EXPECT_GT(next_chunk_id.Value(), chunk_id.Value());
+}
+
+FIBER_TEST_F(ReclaimerTest, TypedCOWReclaimPrevalidatesEveryDetachedChunkBeforeDeletion) {
+  constexpr InodeID kIno = 42;
+  auto chunk_metadata = std::make_shared<metadata::MemCOWChunkMetadata>();
+  metadata::ChunkID first_id;
+  metadata::ChunkID second_id;
+  ASSERT_TRUE(chunk_metadata->AllocateChunkID(&first_id).ok());
+  ASSERT_TRUE(chunk_metadata->AllocateChunkID(&second_id).ok());
+  metadata::cow::COWChunkRevision first_revision;
+  metadata::cow::COWChunkRevision second_revision;
+  ASSERT_TRUE(chunk_metadata->AllocateRevision(first_id, &first_revision).ok());
+  ASSERT_TRUE(chunk_metadata->AllocateRevision(second_id, &second_revision).ok());
+  ASSERT_TRUE(
+      chunk_metadata->CompareExchangeHead(first_id, std::nullopt, metadata::cow::COWChunkHead{first_revision, 64})
+          .ok());
+  ASSERT_TRUE(
+      chunk_metadata->CompareExchangeHead(second_id, std::nullopt, metadata::cow::COWChunkHead{second_revision, 64})
+          .ok());
+  const chunk::cow::COWObjectKey first_key(first_id, first_revision);
+  const chunk::cow::COWObjectKey second_key(second_id, second_revision);
+  data_->Seed(std::string(static_cast<std::string_view>(first_key)));
+  data_->Seed(std::string(static_cast<std::string_view>(second_key)));
+
+  std::optional<metadata::ChunkID> first_attached;
+  std::optional<metadata::ChunkID> second_attached = second_id;
+  chunk::internal::ChunkReachabilityProbeFn probe = [&](InodeID ino, metadata::ChunkIndex index,
+                                                        std::optional<metadata::ChunkID> *out) {
+    EXPECT_EQ(ino, kIno);
+    *out = index == 0 ? first_attached : second_attached;
+    return Status::OK();
+  };
+  std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
+  ASSERT_TRUE(chunk::cow::CreateCOWCleanupParticipant(0, chunk_metadata, meta_, data_, probe, &cleanup).ok());
+  const auto work = MakeTypedDetachedReclaim(kIno, {{0, first_id}, {1, second_id}});
+
+  bool completed = false;
+  ASSERT_TRUE(cleanup->DeleteReclaim(work, &completed).ok());
+  EXPECT_TRUE(completed);
+  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(first_key)));
+  EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(second_key)));
+
+  second_attached.reset();
+  completed = false;
+  ASSERT_TRUE(cleanup->DeleteReclaim(work, &completed).ok());
+  EXPECT_TRUE(completed);
+  EXPECT_FALSE(data_->Contains(static_cast<std::string_view>(first_key)));
+  EXPECT_FALSE(data_->Contains(static_cast<std::string_view>(second_key)));
 }
 
 FIBER_TEST_F(ReclaimerTest, PendingDeleteCandidateDoesNotDeleteStillAuthoritativeObject) {
