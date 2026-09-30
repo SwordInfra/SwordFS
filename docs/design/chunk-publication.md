@@ -169,10 +169,14 @@ typed COWChunkMetadata API:
              |
              +-- success --> safe
              +-- CAS conflict --> re-read the current head and retry from it
+             +-- OutcomeUnknown --> re-read/reconcile authoritative head state
 
 The loop never blindly retries a stale expected head. A concurrent ordinary
 COW rewrite may advance the revision; sanitation then clamps the newly observed
-revision. If the COW head disappears, FileMetadata attachment is revalidated:
+revision. An ambiguous CAS is treated the same way at the orchestration layer:
+the sanitizer first re-reads the authoritative head, then either observes that
+the clamp already took effect or retries from the newly observed full head.
+If the COW head disappears, FileMetadata attachment is revalidated:
 the same ChunkID still being attached is a metadata inconsistency and fails
 closed, while a detached/replaced mapping means the old ChunkID is no longer
 authoritative and the sanitation attempt stops.
