@@ -115,6 +115,9 @@ class MissingMetaEngine : public IMetaEngine {
   Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField, SwordFsInode *) override {
     return Status::OK();
   }
+  Status SetInodeFlags(InodeID, swordfs::metadata::InodeFlag, SwordFsInode *) override {
+    return Status::NotSupported("inode flags");
+  }
   Status SetXAttr(InodeID, std::string_view, std::string_view, swordfs::metadata::XAttrSetMode) override {
     return Status::NotSupported("xattr");
   }
@@ -139,7 +142,7 @@ class MissingMetaEngine : public IMetaEngine {
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Open(InodeID, uint64_t *size = nullptr) override {
+  Status Open(InodeID, uint64_t *size = nullptr, swordfs::metadata::InodeFlag * = nullptr) override {
     if (size != nullptr) {
       *size = 0;
     }

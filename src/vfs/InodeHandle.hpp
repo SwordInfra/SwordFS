@@ -43,7 +43,7 @@ class InodeHandle {
 
   utils::Status Read(size_t size, off_t off, folly::IOBuf *out);
 
-  utils::Status Write(const folly::IOBuf &buf, off_t off);
+  utils::Status Write(const folly::IOBuf &buf, off_t off, int open_flags = 0);
 
   utils::Status GetAttr(metadata::SwordFsInode *out) const;
 
@@ -52,6 +52,8 @@ class InodeHandle {
   LiveAttrGuard LockLiveAttr() const;
 
   utils::Status SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields, metadata::SwordFsInode *out);
+
+  utils::Status SetInodeFlags(metadata::InodeFlag inode_flags, metadata::SwordFsInode *out);
 
   /// Always flush — used by FUSE FLUSH / FSYNC.
   utils::Status Flush();

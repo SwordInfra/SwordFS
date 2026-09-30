@@ -13,6 +13,7 @@
 
 #include <folly/container/F14Map.h>
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -87,7 +88,7 @@ class FileReadWriter {
   FileReadWriter(InodeID ino, size_t max_parallel_flushes);
 
   /// Write the contents of |buf| at |off|, splitting across chunk boundaries.
-  utils::Status Write(const folly::IOBuf &buf, off_t off);
+  utils::Status Write(const folly::IOBuf &buf, off_t off, int open_flags = 0);
 
   /// Read up to |size| bytes at |off| into |out|.
   /// |out| must be an empty IOBuf with capacity >= |size|.
@@ -110,13 +111,19 @@ class FileReadWriter {
   /// cache so pending writes cannot be republished past a successful truncate.
   utils::Status SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields, metadata::SwordFsInode *out);
 
+  utils::Status SetInodeFlags(metadata::InodeFlag inode_flags, metadata::SwordFsInode *out);
+
  private:
   friend class LiveAttrGuard;
   friend class InodeHandle;
 
-  void InitializeAuthoritativeSize(uint64_t size);
+  void InitializeCreatedState(uint64_t size);
+  uint64_t SnapshotInodeFlagEpoch() const;
+  utils::Status ReconcileOpenState(uint64_t size, metadata::InodeFlag inode_flags, uint64_t observed_flag_epoch,
+                                   int open_flags);
   utils::Status GetVisibleSize(uint64_t *size);
   void ApplyLiveSize(metadata::SwordFsInode *inode) const;
+  utils::Status FlushPendingWritesLocked();
 
  private:
   InodeID ino_;
@@ -134,6 +141,11 @@ class FileReadWriter {
   mutable utils::FiberMutex size_mutex_;
   mutable std::optional<uint64_t> authoritative_size_;
   std::optional<uint64_t> live_size_;
+  std::atomic<metadata::InodeFlag> inode_flags_{metadata::InodeFlag::kNone};
+  mutable utils::FiberMutex inode_policy_mutex_;
+  // Advances after every successful local flag mutation so an Open metadata
+  // snapshot captured before that mutation cannot overwrite newer policy.
+  uint64_t inode_flag_epoch_ = 0;
   uint64_t size_state_epoch_ = 0;
   uint64_t write_epoch_ = 0;
 };

@@ -33,13 +33,20 @@ utils::Status InodeHandle::Open(int flags) {
 
   // Performs existing-inode validation and the atime update.
   auto meta = volume::VolumeImpl::Instance().meta_engine();
+  const uint64_t observed_flag_epoch = rw_->SnapshotInodeFlagEpoch();
   uint64_t authoritative_size = 0;
-  auto status = meta->Open(ino_, &authoritative_size);
+  metadata::InodeFlag inode_flags = metadata::InodeFlag::kNone;
+  auto status = meta->Open(ino_, &authoritative_size, &inode_flags);
   if (!status.ok()) {
     ReleaseRef();
     return status;
   }
-  rw_->InitializeAuthoritativeSize(authoritative_size);
+
+  status = rw_->ReconcileOpenState(authoritative_size, inode_flags, observed_flag_epoch, flags);
+  if (!status.ok()) {
+    ReleaseRef();
+    return status;
+  }
 
   if (flags & O_TRUNC) {
     status = rw_->Truncate(0);
@@ -55,7 +62,7 @@ utils::Status InodeHandle::OpenCreated() {
   if (!AcquireRefUnlessReclaiming()) {
     return utils::Status::NotFound("inode is being reclaimed");
   }
-  rw_->InitializeAuthoritativeSize(0);
+  rw_->InitializeCreatedState(0);
   return utils::Status::OK();
 }
 
@@ -63,8 +70,8 @@ utils::Status InodeHandle::Read(size_t size, off_t off, folly::IOBuf *out) {
   return rw_->Read(size, off, out);
 }
 
-utils::Status InodeHandle::Write(const folly::IOBuf &buf, off_t off) {
-  return rw_->Write(buf, off);
+utils::Status InodeHandle::Write(const folly::IOBuf &buf, off_t off, int open_flags) {
+  return rw_->Write(buf, off, open_flags);
 }
 
 utils::Status InodeHandle::GetAttr(metadata::SwordFsInode *out) const {
@@ -78,6 +85,10 @@ LiveAttrGuard InodeHandle::LockLiveAttr() const {
 utils::Status InodeHandle::SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields,
                                    metadata::SwordFsInode *out) {
   return rw_->SetAttr(attr, fields, out);
+}
+
+utils::Status InodeHandle::SetInodeFlags(metadata::InodeFlag inode_flags, metadata::SwordFsInode *out) {
+  return rw_->SetInodeFlags(inode_flags, out);
 }
 
 utils::Status InodeHandle::Flush() {

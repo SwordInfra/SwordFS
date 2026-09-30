@@ -251,6 +251,17 @@ utils::Status RedisMetaOps::SetAttr(InodeID ino, const SwordFsAttr &requested, S
   return status;
 }
 
+utils::Status RedisMetaOps::SetInodeFlags(InodeID ino, InodeFlag inode_flags, SwordFsInode *out) {
+  utils::ExpectInFiberDomain();
+  SwordFsInode result;
+  auto status = TransactFromFiber(
+      [&](RedisMetaTxn &txn) { return txn.SetInodeFlags(ino, inode_flags, out != nullptr ? &result : nullptr); });
+  if (status.ok() && out != nullptr) {
+    *out = result;
+  }
+  return status;
+}
+
 utils::Status RedisMetaOps::SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) {
   utils::ExpectInFiberDomain();
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.SetXAttr(ino, name, value, mode); });

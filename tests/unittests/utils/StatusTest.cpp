@@ -29,5 +29,9 @@ TEST(StatusTest, XAttrStatusesMapToLinuxErrnos) {
   EXPECT_EQ(Status::NoData("missing xattr").ToErrno(), ENODATA);
 }
 
+TEST(StatusTest, IoctlStatusMapsToEnotty) {
+  EXPECT_EQ(Status::NotTty("unsupported ioctl").ToErrno(), ENOTTY);
+}
+
 }  // namespace
 }  // namespace swordfs::utils

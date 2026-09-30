@@ -6,12 +6,14 @@
 #include <dirent.h>
 #include <folly/io/IOBuf.h>
 #include <folly/logging/xlog.h>
+#include <linux/fs.h>
 #include <sys/xattr.h>
 
 #include "config/ConfigCenter.hpp"
 #include "fuse/Limits.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Utils.hpp"
+#include "runtime/MountRuntimeBehavior.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Logging.hpp"
 #include "utils/Status.hpp"
@@ -38,6 +40,7 @@ using namespace swordfs::config;
 
 using swordfs::metadata::FromFuseRenameFlags;
 using swordfs::metadata::FromFuseSetAttrFields;
+using swordfs::metadata::InodeFlag;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
@@ -109,6 +112,63 @@ utils::Status TranslateXAttrSetMode(int flags, XAttrSetMode &mode) {
     default:
       return utils::Status::InvalidArgument("invalid setxattr flags");
   }
+}
+
+InodeFlag FromLegacyInodeFlags(uint32_t flags) {
+  InodeFlag result = InodeFlag::kNone;
+  if ((flags & FS_IMMUTABLE_FL) != 0) {
+    result = result | InodeFlag::kImmutable;
+  }
+  if ((flags & FS_APPEND_FL) != 0) {
+    result = result | InodeFlag::kAppendOnly;
+  }
+  return result;
+}
+
+uint32_t ToLegacyInodeFlags(InodeFlag inode_flags) {
+  uint32_t result = 0;
+  if (metadata::HasInodeFlag(inode_flags, InodeFlag::kImmutable)) {
+    result |= FS_IMMUTABLE_FL;
+  }
+  if (metadata::HasInodeFlag(inode_flags, InodeFlag::kAppendOnly)) {
+    result |= FS_APPEND_FL;
+  }
+  return result;
+}
+
+InodeFlag FromFsXFlags(uint32_t flags) {
+  InodeFlag result = InodeFlag::kNone;
+  if ((flags & FS_XFLAG_IMMUTABLE) != 0) {
+    result = result | InodeFlag::kImmutable;
+  }
+  if ((flags & FS_XFLAG_APPEND) != 0) {
+    result = result | InodeFlag::kAppendOnly;
+  }
+  return result;
+}
+
+uint32_t ToFsXFlags(InodeFlag inode_flags) {
+  uint32_t result = 0;
+  if (metadata::HasInodeFlag(inode_flags, InodeFlag::kImmutable)) {
+    result |= FS_XFLAG_IMMUTABLE;
+  }
+  if (metadata::HasInodeFlag(inode_flags, InodeFlag::kAppendOnly)) {
+    result |= FS_XFLAG_APPEND;
+  }
+  return result;
+}
+
+utils::Status SetLocalAwareInodeFlags(InodeID ino, InodeFlag inode_flags) {
+  auto handle = InodeHandleManager::Instance().Get(ino, /*create_if_missing=*/false);
+  if (handle != nullptr) {
+    return handle->SetInodeFlags(inode_flags, nullptr);
+  }
+  return VolumeImpl::Instance().meta_engine()->SetInodeFlags(ino, inode_flags, nullptr);
+}
+
+template <typename T>
+void SetIoCtlOutput(const T &value, IoCtlReply *reply) {
+  reply->output.assign(reinterpret_cast<const char *>(&value), sizeof(value));
 }
 
 }  // namespace
@@ -567,17 +627,94 @@ utils::Status VfsImpl::Create(fuse_ino_t parent, const char *name, mode_t mode, 
   return Status::OK();
 }
 
-utils::Status VfsImpl::IoCtl(fuse_ino_t ino, int cmd, void *arg, struct fuse_file_info *fi, unsigned flags,
-                             const void *in_buf, size_t in_bufsz, size_t out_bufsz) {
-  (void)ino;
-  (void)cmd;
+utils::Status VfsImpl::IoCtl(fuse_ino_t ino, unsigned int cmd, void *arg, struct fuse_file_info *fi, unsigned flags,
+                             const void *in_buf, size_t in_bufsz, size_t out_bufsz, IoCtlReply *reply) {
+  if (reply == nullptr) {
+    return Status::InvalidArgument("ioctl reply output is null");
+  }
+  *reply = {};
   (void)arg;
   (void)fi;
   (void)flags;
-  (void)in_buf;
-  (void)in_bufsz;
-  (void)out_bufsz;
-  return Status::NotSupported("ioctl");
+  if (!runtime::MountRuntimeBehavior::Instance().IoctlEnabled()) {
+    return Status::NotTty("ioctl control surface is disabled");
+  }
+
+  switch (cmd) {
+    case FS_IOC_GETFLAGS: {
+      // Linux FUSE fileattr_get/set transports the legacy flags as an
+      // unsigned int even though FS_IOC_{GET,SET}FLAGS encode `long` in the
+      // public ioctl number on 64-bit architectures.
+      constexpr size_t kSize = sizeof(uint32_t);
+      if (out_bufsz < kSize) {
+        reply->retry = true;
+        reply->retry_out_size = kSize;
+        return Status::OK();
+      }
+      SwordFsInode inode;
+      auto status = ResolveLiveInode(ino, &inode);
+      if (!status.ok()) {
+        return status;
+      }
+      const uint32_t legacy_flags = ToLegacyInodeFlags(inode.attr.inode_flags);
+      SetIoCtlOutput(legacy_flags, reply);
+      return Status::OK();
+    }
+    case FS_IOC_SETFLAGS: {
+      constexpr size_t kSize = sizeof(uint32_t);
+      if (in_buf == nullptr || in_bufsz < kSize) {
+        reply->retry = true;
+        reply->retry_in_size = kSize;
+        return Status::OK();
+      }
+      uint32_t legacy_flags = 0;
+      std::memcpy(&legacy_flags, in_buf, sizeof(legacy_flags));
+      constexpr uint32_t kSupported = FS_IMMUTABLE_FL | FS_APPEND_FL;
+      if ((legacy_flags & ~kSupported) != 0) {
+        return Status::OperationNotSupported("unsupported inode flag bits");
+      }
+      return SetLocalAwareInodeFlags(ino, FromLegacyInodeFlags(legacy_flags));
+    }
+    case FS_IOC_FSGETXATTR: {
+      constexpr size_t kSize = sizeof(struct fsxattr);
+      if (out_bufsz < kSize) {
+        reply->retry = true;
+        reply->retry_out_size = kSize;
+        return Status::OK();
+      }
+      SwordFsInode inode;
+      auto status = ResolveLiveInode(ino, &inode);
+      if (!status.ok()) {
+        return status;
+      }
+      struct fsxattr projected{};
+      projected.fsx_xflags = ToFsXFlags(inode.attr.inode_flags);
+      SetIoCtlOutput(projected, reply);
+      return Status::OK();
+    }
+    case FS_IOC_FSSETXATTR: {
+      constexpr size_t kSize = sizeof(struct fsxattr);
+      if (in_buf == nullptr || in_bufsz < kSize) {
+        reply->retry = true;
+        reply->retry_in_size = kSize;
+        return Status::OK();
+      }
+      struct fsxattr requested{};
+      std::memcpy(&requested, in_buf, sizeof(requested));
+      constexpr uint32_t kSupported = FS_XFLAG_IMMUTABLE | FS_XFLAG_APPEND;
+      bool reserved_nonzero = false;
+      for (const auto byte : requested.fsx_pad) {
+        reserved_nonzero = reserved_nonzero || byte != 0;
+      }
+      if ((requested.fsx_xflags & ~kSupported) != 0 || requested.fsx_extsize != 0 || requested.fsx_nextents != 0 ||
+          requested.fsx_projid != 0 || requested.fsx_cowextsize != 0 || reserved_nonzero) {
+        return Status::OperationNotSupported("unsupported fsxattr fields");
+      }
+      return SetLocalAwareInodeFlags(ino, FromFsXFlags(requested.fsx_xflags));
+    }
+    default:
+      return Status::NotTty("unsupported ioctl command");
+  }
 }
 
 utils::Status VfsImpl::RetrieveReply(fuse_req_t /*req*/, void *cookie, fuse_ino_t ino, off_t offset,

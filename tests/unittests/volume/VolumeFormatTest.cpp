@@ -138,7 +138,7 @@ TEST(SwordFsVolumeTest, ParseFromRejectsOneSidedDataEngineConfig) {
 }
 
 TEST(SwordFsVolumeTest, ParseFromRejectsNonCurrentSchemaVersion) {
-  for (uint32_t schema_version : {0U, 2U}) {
+  for (uint32_t schema_version : {0U, 1U, 3U}) {
     swordfs::metadata::BufEncoder enc;
     enc.String("SWFSMETA");
     enc.U32(schema_version);

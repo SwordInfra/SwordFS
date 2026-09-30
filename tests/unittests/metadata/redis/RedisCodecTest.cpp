@@ -35,6 +35,7 @@ SwordFsInode MakeInode() {
   inode.attr.ctime_nsec = 31;
   inode.attr.btime = 40;
   inode.attr.btime_nsec = 41;
+  inode.attr.inode_flags = InodeFlag::kImmutable | InodeFlag::kAppendOnly;
   inode.parent_ino = 7;
   return inode;
 }
@@ -67,6 +68,7 @@ TEST(MetadataTypesTest, InodeRoundTrip) {
   EXPECT_EQ(output.attr.ctime_nsec, input.attr.ctime_nsec);
   EXPECT_EQ(output.attr.btime, input.attr.btime);
   EXPECT_EQ(output.attr.btime_nsec, input.attr.btime_nsec);
+  EXPECT_EQ(output.attr.inode_flags, input.attr.inode_flags);
   EXPECT_EQ(output.parent_ino, input.parent_ino);
 }
 
@@ -85,6 +87,19 @@ TEST(MetadataTypesTest, AttrRejectsTruncatedBirthTimeFields) {
   }
 }
 
+TEST(MetadataTypesTest, AttrRejectsUnknownPersistedInodeFlagBits) {
+  auto input = MakeInode();
+  input.attr.inode_flags = static_cast<InodeFlag>(1u << 31);
+  BufEncoder enc;
+  enc.Attr(input.attr);
+  std::string encoded;
+  enc.Finish(&encoded);
+
+  BufDecoder dec(encoded);
+  SwordFsAttr output;
+  EXPECT_FALSE(dec.Attr(&output));
+}
+
 TEST(MetadataTypesTest, AttrProjectsAuthoritativeStatxFields) {
   const auto input = MakeInode();
   struct statx result{};
@@ -92,8 +107,8 @@ TEST(MetadataTypesTest, AttrProjectsAuthoritativeStatxFields) {
   input.attr.ToStatX(&result);
 
   EXPECT_EQ(result.stx_mask, STATX_BASIC_STATS | STATX_BTIME);
-  EXPECT_EQ(result.stx_attributes, 0U);
-  EXPECT_EQ(result.stx_attributes_mask, 0U);
+  EXPECT_EQ(result.stx_attributes, STATX_ATTR_IMMUTABLE | STATX_ATTR_APPEND);
+  EXPECT_EQ(result.stx_attributes_mask, STATX_ATTR_IMMUTABLE | STATX_ATTR_APPEND);
   EXPECT_EQ(result.stx_blksize, input.attr.blksize);
   EXPECT_EQ(result.stx_ino, input.attr.ino);
   EXPECT_EQ(result.stx_mode, input.attr.mode);

@@ -74,6 +74,7 @@ void BufEncoder::Attr(const SwordFsAttr &attr) {
   I64(attr.ctime_nsec);
   I64(attr.btime);
   I64(attr.btime_nsec);
+  U32(static_cast<uint32_t>(attr.inode_flags));
 }
 
 void BufEncoder::Header(RecordType type) {
@@ -149,6 +150,12 @@ bool BufDecoder::Attr(SwordFsAttr *attr) {
       !I64(&attr->ctime) || !I64(&attr->ctime_nsec) || !I64(&attr->btime) || !I64(&attr->btime_nsec)) {
     return false;
   }
+  uint32_t inode_flags = 0;
+  if (!U32(&inode_flags) || (inode_flags & ~kSupportedInodeFlagBits) != 0) {
+    impl_->failed_ = true;
+    return false;
+  }
+  attr->inode_flags = static_cast<InodeFlag>(inode_flags);
   if (attr->atime_nsec < 0 || attr->atime_nsec >= 1000000000 || attr->mtime_nsec < 0 ||
       attr->mtime_nsec >= 1000000000 || attr->ctime_nsec < 0 || attr->ctime_nsec >= 1000000000 ||
       attr->btime_nsec < 0 || attr->btime_nsec >= 1000000000) {

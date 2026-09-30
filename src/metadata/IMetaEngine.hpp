@@ -146,6 +146,7 @@ class IMetaEngine {
   /// SetAttrField values; only the bits set in |fields| are read from
   /// |attr| and applied to the inode.
   virtual Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) = 0;
+  virtual Status SetInodeFlags(InodeID ino, InodeFlag inode_flags, SwordFsInode *out) = 0;
 
   /// Set an opaque extended attribute using backend-neutral create/replace semantics.
   virtual Status SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode) = 0;
@@ -176,7 +177,7 @@ class IMetaEngine {
   /// When |size| is non-null, returns the authoritative file size from the
   /// inode already read for validation so the VFS need not issue a duplicate
   /// metadata lookup merely to establish its local logical-EOF boundary.
-  virtual Status Open(InodeID ino, uint64_t *size = nullptr) = 0;
+  virtual Status Open(InodeID ino, uint64_t *size = nullptr, InodeFlag *inode_flags = nullptr) = 0;
 
   /// Prepare reclaim of |ino| without exposing physical cleanup work.
   ///

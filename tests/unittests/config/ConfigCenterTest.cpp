@@ -128,6 +128,22 @@ TEST(MountParamsTest, MountWithFuseOpts) {
   EXPECT_TRUE(ParseOptions(args).empty());
 }
 
+TEST(MountParamsTest, IoctlControlSurfaceIsExplicitlyOptIn) {
+  auto err = ParseOptions(
+      {
+          "swordfs",
+          "mount",
+          "--volume",
+          "myvol",
+          "--meta",
+          "memory://local",
+          "--enable-ioctl",
+          "/mnt/point",
+      },
+      [](const swordfs::config::ConfigCenter &cfg) { EXPECT_TRUE(cfg.enable_ioctl()); });
+  EXPECT_TRUE(err.empty()) << err;
+}
+
 TEST(MountParamsTest, MandatoryDefaultPermissionsArePreservedWithUserOptions) {
   EXPECT_EQ(swordfs::cmd::detail::BuildFuseExtras(""), (std::vector<std::string>{"-o", "default_permissions"}));
   EXPECT_EQ(swordfs::cmd::detail::BuildFuseExtras("allow_other,ro"),

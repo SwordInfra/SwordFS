@@ -38,6 +38,7 @@ struct SwordFsAttr {
   int64_t ctime_nsec = 0;
   int64_t btime = 0;
   int64_t btime_nsec = 0;
+  InodeFlag inode_flags = InodeFlag::kNone;
 
   SwordFsAttr() = default;
   SwordFsAttr(uint64_t ino, uint32_t mode);

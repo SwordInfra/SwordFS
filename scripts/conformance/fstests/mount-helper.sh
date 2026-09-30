@@ -80,6 +80,7 @@ AWS_SECRET_ACCESS_KEY="${FSTESTS_MINIO_ROOT_PASSWORD}" \
   --meta "${FSTESTS_METADATA_URL}" \
   --fuse-threads 4 \
   --storage-thread-count 4 \
+  --enable-ioctl \
   --pidfile "${pid_file}" \
   -o "${fuse_options}" \
   "${mountpoint}"

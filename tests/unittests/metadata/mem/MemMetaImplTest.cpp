@@ -28,6 +28,7 @@
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
 
+using swordfs::metadata::InodeFlag;
 using swordfs::metadata::InodeID;
 using swordfs::metadata::MemMetaImpl;
 using swordfs::metadata::ReclaimWork;
@@ -185,14 +186,16 @@ class MemMetaImplTest : public ::testing::Test {
 class MemMetaNoAtimeTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kDisabled);
+    swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kDisabled,
+                                                                  /*ioctl_enabled=*/false);
     impl_ = new MemMetaImpl();
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
 
   void TearDown() override {
     delete impl_;
-    swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled);
+    swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                  /*ioctl_enabled=*/false);
   }
 
   MemMetaImpl *impl_ = nullptr;
@@ -1656,4 +1659,175 @@ FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchMakesProgressWithoutQueueMutatio
   EXPECT_FALSE(has_more);
   ASSERT_EQ(visited.size(), 2U);
   EXPECT_NE(visited[0], visited[1]);
+}
+
+FIBER_TEST_F(MemMetaImplTest, ImmutableAndAppendOnlyPolicyIsEnforcedInsideMetadataTransactions) {
+  SetContext(0, 0);
+
+  SwordFsInode immutable_file;
+  ASSERT_TRUE(impl_->Create(kRoot, "immutable", 0644, &immutable_file).ok());
+  ASSERT_TRUE(impl_->SetXAttr(immutable_file.ino, "user.seed", "value", XAttrSetMode::kUpsert).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(immutable_file.ino, InodeFlag::kImmutable, &immutable_file).ok());
+  EXPECT_EQ(impl_->SetAttr(immutable_file.ino, SwordFsAttr{}, SetAttrField::kSize, nullptr).ToErrno(), EPERM);
+  EXPECT_EQ(impl_->SetXAttr(immutable_file.ino, "user.x", "value", XAttrSetMode::kUpsert).ToErrno(), EPERM);
+  EXPECT_EQ(impl_->RemoveXAttr(immutable_file.ino, "user.seed").ToErrno(), EPERM);
+  EXPECT_EQ(impl_->Link(immutable_file.ino, kRoot, "immutable-link", nullptr).ToErrno(), EPERM);
+  EXPECT_EQ(impl_->Unlink(kRoot, "immutable").ToErrno(), EPERM);
+
+  SwordFsInode append_file;
+  ASSERT_TRUE(impl_->Create(kRoot, "append", 0644, &append_file).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(append_file.ino, InodeFlag::kAppendOnly, &append_file).ok());
+  uint64_t opened_size = 0;
+  InodeFlag opened_flags = InodeFlag::kNone;
+  ASSERT_TRUE(impl_->Open(append_file.ino, &opened_size, &opened_flags).ok());
+  EXPECT_EQ(opened_flags, InodeFlag::kAppendOnly);
+  EXPECT_EQ(impl_->Truncate(append_file.ino, 0).ToErrno(), EPERM);
+  SwordFsAttr touch_now;
+  EXPECT_TRUE(
+      impl_->SetAttr(append_file.ino, touch_now, SetAttrField::kAtimeNow | SetAttrField::kMtimeNow, nullptr).ok());
+  EXPECT_TRUE(
+      impl_
+          ->SetAttr(append_file.ino, touch_now,
+                    SetAttrField::kAtime | SetAttrField::kAtimeNow | SetAttrField::kMtime | SetAttrField::kMtimeNow,
+                    nullptr)
+          .ok())
+      << "FUSE utime(path, NULL) carries both timestamp and NOW bits";
+  EXPECT_EQ(impl_->SetAttr(append_file.ino, touch_now, SetAttrField::kAtime, nullptr).ToErrno(), EPERM);
+  EXPECT_EQ(impl_->SetAttr(append_file.ino, touch_now, SetAttrField::kMtime, nullptr).ToErrno(), EPERM);
+  EXPECT_EQ(impl_->SetAttr(append_file.ino, touch_now, SetAttrField::kMode, nullptr).ToErrno(), EPERM);
+}
+
+FIBER_TEST_F(MemMetaImplTest, EffectiveInodeFlagChangesUpdateCtimeAndIdempotentWritesDoNot) {
+  SetContext(0, 0);
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "flag-ctime", 0644, &file).ok());
+  SwordFsAttr attr;
+  attr.ctime = 1;
+  attr.ctime_nsec = 0;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, attr, SetAttrField::kCtime, &file).ok());
+  ASSERT_EQ(file.attr.ctime, 1);
+
+  ASSERT_TRUE(impl_->SetInodeFlags(file.ino, InodeFlag::kImmutable, &file).ok());
+  EXPECT_NE(file.attr.ctime, 1);
+  const auto ctime = file.attr.ctime;
+  const auto ctime_nsec = file.attr.ctime_nsec;
+
+  ASSERT_TRUE(impl_->SetInodeFlags(file.ino, InodeFlag::kImmutable, &file).ok());
+  EXPECT_EQ(file.attr.ctime, ctime);
+  EXPECT_EQ(file.attr.ctime_nsec, ctime_nsec);
+  EXPECT_EQ(impl_->SetInodeFlags(file.ino, static_cast<InodeFlag>(1u << 31), nullptr).ToErrno(), EINVAL);
+  EXPECT_TRUE(impl_->SetInodeFlags(999999, InodeFlag::kImmutable, nullptr).IsNotFound());
+}
+
+FIBER_TEST_F(MemMetaImplTest, DirectoryPolicyDistinguishesPureAdditionFromRemovalOrReplacement) {
+  SetContext(0, 0);
+
+  SwordFsInode immutable_dir;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "immutable-dir", 0755, &immutable_dir).ok());
+  SwordFsInode visible_child;
+  ASSERT_TRUE(impl_->Create(immutable_dir.ino, "visible", 0644, &visible_child).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(immutable_dir.ino, InodeFlag::kImmutable, &immutable_dir).ok());
+  SwordFsInode lookup;
+  ASSERT_TRUE(impl_->Lookup(immutable_dir.ino, "visible", &lookup).ok());
+  EXPECT_EQ(lookup.ino, visible_child.ino);
+  EXPECT_EQ(impl_->Create(immutable_dir.ino, "blocked", 0644, nullptr).ToErrno(), EPERM);
+
+  SwordFsInode append_dir;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "append-dir", 0755, &append_dir).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(append_dir.ino, InodeFlag::kAppendOnly, &append_dir).ok());
+  SwordFsInode child;
+  ASSERT_TRUE(impl_->Create(append_dir.ino, "added", 0644, &child).ok());
+  EXPECT_EQ(child.attr.inode_flags, InodeFlag::kNone);
+  EXPECT_EQ(impl_->Unlink(append_dir.ino, "added").ToErrno(), EPERM);
+
+  SwordFsInode source;
+  ASSERT_TRUE(impl_->Create(kRoot, "rename-source", 0644, &source).ok());
+  ASSERT_TRUE(impl_->Rename(kRoot, "rename-source", append_dir.ino, "new-name", RenameFlag::kNone).ok());
+  SwordFsInode replacement;
+  ASSERT_TRUE(impl_->Create(kRoot, "replacement", 0644, &replacement).ok());
+  EXPECT_EQ(impl_->Rename(kRoot, "replacement", append_dir.ino, "new-name", RenameFlag::kNone).ToErrno(), EPERM);
+}
+
+FIBER_TEST_F(MemMetaImplTest, RenameAndLinkPolicyChecksEveryParticipatingInode) {
+  SetContext(0, 0);
+
+  SwordFsInode immutable_destination;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "immutable-destination", 0755, &immutable_destination).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(immutable_destination.ino, InodeFlag::kImmutable, nullptr).ok());
+
+  SwordFsInode link_source;
+  ASSERT_TRUE(impl_->Create(kRoot, "link-source", 0644, &link_source).ok());
+  EXPECT_EQ(impl_->Link(link_source.ino, immutable_destination.ino, "blocked-link", nullptr).ToErrno(), EPERM);
+
+  SwordFsInode into_immutable;
+  ASSERT_TRUE(impl_->Create(kRoot, "into-immutable", 0644, &into_immutable).ok());
+  EXPECT_EQ(
+      impl_->Rename(kRoot, "into-immutable", immutable_destination.ino, "blocked-rename", RenameFlag::kNone).ToErrno(),
+      EPERM);
+
+  SwordFsInode append_parent;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "append-parent", 0755, &append_parent).ok());
+  SwordFsInode append_child;
+  ASSERT_TRUE(impl_->Create(append_parent.ino, "child", 0644, &append_child).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(append_parent.ino, InodeFlag::kAppendOnly, nullptr).ok());
+  EXPECT_EQ(impl_->Rename(append_parent.ino, "child", kRoot, "moved-out", RenameFlag::kNone).ToErrno(), EPERM);
+
+  SwordFsInode immutable_source;
+  ASSERT_TRUE(impl_->Create(kRoot, "immutable-source", 0644, &immutable_source).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(immutable_source.ino, InodeFlag::kImmutable, nullptr).ok());
+  EXPECT_EQ(impl_->Rename(kRoot, "immutable-source", kRoot, "renamed-source", RenameFlag::kNone).ToErrno(), EPERM);
+
+  SwordFsInode replacement_source;
+  SwordFsInode immutable_victim;
+  ASSERT_TRUE(impl_->Create(kRoot, "replacement-source", 0644, &replacement_source).ok());
+  ASSERT_TRUE(impl_->Create(kRoot, "immutable-victim", 0644, &immutable_victim).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(immutable_victim.ino, InodeFlag::kImmutable, nullptr).ok());
+  EXPECT_EQ(impl_->Rename(kRoot, "replacement-source", kRoot, "immutable-victim", RenameFlag::kNone).ToErrno(), EPERM);
+}
+
+FIBER_TEST_F(MemMetaImplTest, RenameExchangePolicyChecksBothParentsAndBothEntries) {
+  SetContext(0, 0);
+  SwordFsInode old_parent;
+  SwordFsInode new_parent;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "exchange-old", 0755, &old_parent).ok());
+  ASSERT_TRUE(impl_->MkDir(kRoot, "exchange-new", 0755, &new_parent).ok());
+  SwordFsInode source;
+  SwordFsInode target;
+  ASSERT_TRUE(impl_->Create(old_parent.ino, "source", 0644, &source).ok());
+  ASSERT_TRUE(impl_->Create(new_parent.ino, "target", 0644, &target).ok());
+
+  auto expect_blocked = [&] {
+    EXPECT_EQ(impl_->Rename(old_parent.ino, "source", new_parent.ino, "target", RenameFlag::kExchange).ToErrno(),
+              EPERM);
+  };
+
+  ASSERT_TRUE(impl_->SetInodeFlags(old_parent.ino, InodeFlag::kAppendOnly, nullptr).ok());
+  expect_blocked();
+  ASSERT_TRUE(impl_->SetInodeFlags(old_parent.ino, InodeFlag::kNone, nullptr).ok());
+
+  ASSERT_TRUE(impl_->SetInodeFlags(new_parent.ino, InodeFlag::kImmutable, nullptr).ok());
+  expect_blocked();
+  ASSERT_TRUE(impl_->SetInodeFlags(new_parent.ino, InodeFlag::kNone, nullptr).ok());
+
+  ASSERT_TRUE(impl_->SetInodeFlags(source.ino, InodeFlag::kAppendOnly, nullptr).ok());
+  expect_blocked();
+  ASSERT_TRUE(impl_->SetInodeFlags(source.ino, InodeFlag::kNone, nullptr).ok());
+
+  ASSERT_TRUE(impl_->SetInodeFlags(target.ino, InodeFlag::kImmutable, nullptr).ok());
+  expect_blocked();
+}
+
+FIBER_TEST_F(MemMetaImplTest, RmDirPolicyChecksParentAndVictim) {
+  SetContext(0, 0);
+  SwordFsInode parent;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "rmdir-parent", 0755, &parent).ok());
+  SwordFsInode child;
+  ASSERT_TRUE(impl_->MkDir(parent.ino, "child", 0755, &child).ok());
+
+  ASSERT_TRUE(impl_->SetInodeFlags(parent.ino, InodeFlag::kAppendOnly, nullptr).ok());
+  EXPECT_EQ(impl_->RmDir(parent.ino, "child").ToErrno(), EPERM);
+  ASSERT_TRUE(impl_->SetInodeFlags(parent.ino, InodeFlag::kNone, nullptr).ok());
+
+  ASSERT_TRUE(impl_->SetInodeFlags(child.ino, InodeFlag::kImmutable, nullptr).ok());
+  EXPECT_EQ(impl_->RmDir(parent.ino, "child").ToErrno(), EPERM);
 }

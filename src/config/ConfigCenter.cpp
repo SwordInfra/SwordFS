@@ -44,6 +44,7 @@ void ConfigCenter::RegisterMountOptions(CLI::App &app) {
       ->required()
       ->check(swordfs::config::ValidateMetaUrl);
   cmd->add_option("-o", fuse_opts_, "FUSE mount options (e.g. -o allow_other,ro)")->allow_extra_args(false);
+  cmd->add_flag("--enable-ioctl", enable_ioctl_, "Enable the restricted inode-policy ioctl control surface");
   cmd->add_option("--storage-thread-count", storage_thread_count_, "Storage engine thread count (default: CPU count)")
       ->check(CLI::PositiveNumber);
   cmd->add_option("--meta-thread-count", meta_thread_count_, "Metadata engine thread count (default: CPU count)")

@@ -50,6 +50,7 @@ class RedisMetaTxn : public IChunkIndexTxn {
   // ────────────────────────────────────────────────────────────────
   utils::Status SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out = nullptr,
                         std::vector<PendingDelete> *detached_chunks = nullptr);
+  utils::Status SetInodeFlags(InodeID ino, InodeFlag inode_flags, SwordFsInode *out = nullptr);
   utils::Status SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode);
   utils::Status RemoveXAttr(InodeID ino, std::string_view name);
   utils::Status Truncate(InodeID ino, uint64_t size, std::vector<PendingDelete> *detached_chunks = nullptr);
