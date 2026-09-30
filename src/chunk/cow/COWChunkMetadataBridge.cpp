@@ -33,11 +33,6 @@ class COWChunkMetadataBridge final : public internal::ChunkMetadataBridge {
     return utils::Status::OK();
   }
 
-  utils::Status Truncate(metadata::IChunkIndexTxn &, metadata::InodeID,
-                         const std::vector<metadata::ChunkIndexChange> &) const override {
-    return utils::Status::OK();
-  }
-
   utils::Status PrepareReclaim(metadata::IChunkIndexTxn &, metadata::InodeID,
                                const std::vector<metadata::SwordFsChunk> &) const override {
     return utils::Status::OK();

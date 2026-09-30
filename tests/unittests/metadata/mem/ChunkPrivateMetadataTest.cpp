@@ -36,7 +36,7 @@ std::string FragmentField(const SwordFsChunk &head, unsigned part) {
 class RecordingBridge final : public chunk::internal::ChunkMetadataBridge {
  public:
   bool reject_publish = false;
-  bool reject_truncate = false;
+  bool reject_pending_delete = false;
   bool reject_reclaim = false;
 
   utils::Status LoadPublished(IChunkIndexReader &reader, InodeID file_ino, const SwordFsChunk &head,
@@ -73,27 +73,6 @@ class RecordingBridge final : public chunk::internal::ChunkMetadataBridge {
     return reject_publish ? utils::Status::IOError("reject private publication") : utils::Status::OK();
   }
 
-  utils::Status Truncate(IChunkIndexTxn &txn, InodeID file_ino,
-                         const std::vector<ChunkIndexChange> &changes) const override {
-    for (const auto &change : changes) {
-      if (!change.current.has_value()) {
-        for (unsigned part = 0; part != 2; ++part) {
-          // Keep old generation records until physical cleanup confirms they
-          // are unreachable; Redis EXEC can partially apply queued commands.
-          auto status = txn.Put("retired", FragmentField(change.previous, part), "detached");
-          if (!status.ok()) {
-            return status;
-          }
-        }
-      }
-    }
-    auto status = txn.Put("events", "truncate:" + std::to_string(file_ino), std::to_string(changes.size()));
-    if (!status.ok()) {
-      return status;
-    }
-    return reject_truncate ? utils::Status::IOError("reject private truncate") : utils::Status::OK();
-  }
-
   utils::Status PrepareReclaim(IChunkIndexTxn &txn, InodeID file_ino,
                                const std::vector<SwordFsChunk> &) const override {
     std::vector<std::pair<std::string, std::string>> fragments;
@@ -110,6 +89,9 @@ class RecordingBridge final : public chunk::internal::ChunkMetadataBridge {
 
   utils::Status FreezePendingDelete(IChunkIndexTxn &, InodeID file_ino, const SwordFsChunk &head, uint64_t,
                                     PendingDelete *out) const override {
+    if (reject_pending_delete) {
+      return utils::Status::IOError("reject pending delete freeze");
+    }
     *out = {.id = "candidate:" + std::to_string(file_ino) + ":" + std::to_string(head.index) + ":" +
                   std::to_string(head.revision),
             .payload = "opaque"};
@@ -302,7 +284,7 @@ FIBER_TEST_F(ChunkPrivateMetadataTest, PublishStagesMultiplePrivateRecordsWithPu
   ASSERT_EQ(pending.size(), 2U);
 }
 
-FIBER_TEST_F(ChunkPrivateMetadataTest, TruncateAndSetAttrRejectWithoutPublicOrPrivateMutation) {
+FIBER_TEST_F(ChunkPrivateMetadataTest, TruncateLeavesLegacyPrivateRecordsForIndependentCleanup) {
   SwordFsInode file;
   ASSERT_TRUE(AddFile("file", &file).ok());
   const SwordFsChunk first{.index = 0, .revision = 1, .size = 100};
@@ -310,44 +292,27 @@ FIBER_TEST_F(ChunkPrivateMetadataTest, TruncateAndSetAttrRejectWithoutPublicOrPr
   ASSERT_TRUE(Publish(file.ino, std::nullopt, first).ok());
   ASSERT_TRUE(Publish(file.ino, std::nullopt, second).ok());
 
-  bridge_.reject_truncate = true;
-  EXPECT_EQ(store_.Transact([&](MemMetaTxn &txn) { return txn.Truncate(file.ino, 64); }).ToErrno(), EIO);
+  ASSERT_TRUE(store_.Transact([&](MemMetaTxn &txn) { return txn.Truncate(file.ino, 64); }).ok());
   SwordFsInode inode;
   ASSERT_TRUE(Lookup(file.ino, &inode).ok());
-  EXPECT_EQ(inode.attr.size, 198);
-  SwordFsChunk head;
-  ASSERT_TRUE(Find(file.ino, 0, &head).ok());
-  EXPECT_EQ(head, first);
-  ASSERT_TRUE(Find(file.ino, 1, &head).ok());
-  EXPECT_EQ(head, second);
-  EXPECT_EQ(Fragments(file.ino).size(), 4U);
-  std::string marker;
-  EXPECT_TRUE(Read("events", "truncate:" + std::to_string(file.ino), &marker).IsNotFound());
-
-  SwordFsAttr requested = inode.attr;
-  requested.size = 50;
-  EXPECT_EQ(
-      store_.Transact([&](MemMetaTxn &txn) { return txn.SetAttr(file.ino, requested, SetAttrField::kSize); }).ToErrno(),
-      EIO);
-  ASSERT_TRUE(Lookup(file.ino, &inode).ok());
-  EXPECT_EQ(inode.attr.size, 198);
-  EXPECT_EQ(Fragments(file.ino).size(), 4U);
-
-  bridge_.reject_truncate = false;
-  ASSERT_TRUE(store_.Transact([&](MemMetaTxn &txn) { return txn.Truncate(file.ino, 64); }).ok());
-  ASSERT_TRUE(Lookup(file.ino, &inode).ok());
   EXPECT_EQ(inode.attr.size, 64);
+  SwordFsChunk head;
   ASSERT_TRUE(Find(file.ino, 0, &head).ok());
   EXPECT_EQ(head.size, 64);
   EXPECT_TRUE(Find(file.ino, 1, &head).IsNotFound());
   EXPECT_EQ(Fragments(file.ino).size(), 4U);
-  ASSERT_TRUE(Read("events", "truncate:" + std::to_string(file.ino), &marker).ok());
-  EXPECT_EQ(marker, "2");
-  ASSERT_TRUE(Read("retired", FragmentField(second, 0), &marker).ok());
-  EXPECT_EQ(marker, "detached");
 
-  // Once the public head is gone, a later cleanup transaction may erase its
-  // private records without affecting the surviving logical chunk.
+  SwordFsAttr requested = inode.attr;
+  requested.size = 50;
+  ASSERT_TRUE(
+      store_.Transact([&](MemMetaTxn &txn) { return txn.SetAttr(file.ino, requested, SetAttrField::kSize); }).ok());
+  ASSERT_TRUE(Lookup(file.ino, &inode).ok());
+  EXPECT_EQ(inode.attr.size, 50);
+  EXPECT_EQ(Fragments(file.ino).size(), 4U);
+
+  // The retired bridge no longer mutates mechanism-private state during
+  // FileMetadata truncate. Detached state may leak until independent cleanup,
+  // but it cannot become visible through the removed public descriptor.
   ASSERT_TRUE(store_
                   .Transact([&](MemMetaTxn &txn) {
                     auto status = txn.Erase(FragmentsHash(file.ino), FragmentField(second, 0));
@@ -358,6 +323,47 @@ FIBER_TEST_F(ChunkPrivateMetadataTest, TruncateAndSetAttrRejectWithoutPublicOrPr
                   })
                   .ok());
   EXPECT_EQ(Fragments(file.ino).size(), 2U);
+}
+
+FIBER_TEST_F(ChunkPrivateMetadataTest, LegacyTruncateExercisesCompleteSharedSizeLayoutContract) {
+  SwordFsInode file;
+  ASSERT_TRUE(AddFile("layout", &file).ok());
+  const SwordFsChunk first{.index = 0, .revision = 11, .size = 100};
+  const SwordFsChunk boundary{.index = 1, .revision = 12, .size = 40};
+  const SwordFsChunk tail{.index = 2, .revision = 13, .size = 20};
+  ASSERT_TRUE(Publish(file.ino, std::nullopt, first).ok());
+  ASSERT_TRUE(Publish(file.ino, std::nullopt, boundary).ok());
+  ASSERT_TRUE(Publish(file.ino, std::nullopt, tail).ok());
+
+  // Interior shrink: chunk 0 is before the boundary, chunk 1 is already
+  // shorter than the visible prefix, and chunk 2 is wholly detached.
+  ASSERT_TRUE(store_.Transact([&](MemMetaTxn &txn) { return txn.Truncate(file.ino, 192); }).ok());
+  SwordFsChunk head;
+  ASSERT_TRUE(Find(file.ino, 0, &head).ok());
+  EXPECT_EQ(head, first);
+  ASSERT_TRUE(Find(file.ino, 1, &head).ok());
+  EXPECT_EQ(head, boundary);
+  EXPECT_TRUE(Find(file.ino, 2, &head).IsNotFound());
+
+  // Exact-boundary shrink has no retained partial boundary.
+  ASSERT_TRUE(store_.Transact([&](MemMetaTxn &txn) { return txn.Truncate(file.ino, 128); }).ok());
+  ASSERT_TRUE(Find(file.ino, 0, &head).ok());
+  EXPECT_EQ(head, first);
+  EXPECT_TRUE(Find(file.ino, 1, &head).IsNotFound());
+
+  // Invalid layout input is propagated rather than mutating FileMetadata.
+  store_.SetChunkSize(0);
+  EXPECT_EQ(store_.Transact([&](MemMetaTxn &txn) { return txn.Truncate(file.ino, 64); }).ToErrno(), EINVAL);
+  SwordFsInode inode;
+  ASSERT_TRUE(Lookup(file.ino, &inode).ok());
+  EXPECT_EQ(inode.attr.size, 128U);
+
+  // A cleanup-freeze failure also leaves the public descriptor attached.
+  store_.SetChunkSize(128);
+  bridge_.reject_pending_delete = true;
+  EXPECT_EQ(store_.Transact([&](MemMetaTxn &txn) { return txn.Truncate(file.ino, 0); }).ToErrno(), EIO);
+  ASSERT_TRUE(Find(file.ino, 0, &head).ok());
+  EXPECT_EQ(head, first);
 }
 
 FIBER_TEST_F(ChunkPrivateMetadataTest, ReclaimFreezesPrivateIndexAndRejectsBeforeInodeRemoval) {

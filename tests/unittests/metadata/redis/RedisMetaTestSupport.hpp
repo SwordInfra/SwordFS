@@ -137,10 +137,6 @@ class COWTestBridge final : public chunk::internal::ChunkMetadataBridge {
     return utils::Status::OK();
   }
 
-  utils::Status Truncate(IChunkIndexTxn &, InodeID, const std::vector<ChunkIndexChange> &) const override {
-    return utils::Status::OK();
-  }
-
   utils::Status PrepareReclaim(IChunkIndexTxn &, InodeID, const std::vector<SwordFsChunk> &) const override {
     return utils::Status::OK();
   }
@@ -173,6 +169,7 @@ inline const chunk::internal::ChunkMetadataBridge &COWBridgeForTest() {
 class RecordingRedisBridge final : public chunk::internal::ChunkMetadataBridge {
  public:
   bool reject_publish = false;
+  bool reject_pending_delete = false;
 
   ChunkType mechanism() const {
     return ChunkType::kRedisCache;
@@ -195,16 +192,15 @@ class RecordingRedisBridge final : public chunk::internal::ChunkMetadataBridge {
     return reject_publish ? utils::Status::IOError("reject private publication") : utils::Status::OK();
   }
 
-  utils::Status Truncate(IChunkIndexTxn &, InodeID, const std::vector<ChunkIndexChange> &) const override {
-    return utils::Status::OK();
-  }
-
   utils::Status PrepareReclaim(IChunkIndexTxn &, InodeID, const std::vector<SwordFsChunk> &) const override {
     return utils::Status::OK();
   }
 
   utils::Status FreezePendingDelete(IChunkIndexTxn &, InodeID file_ino, const SwordFsChunk &head, uint64_t chunk_size,
                                     PendingDelete *out) const override {
+    if (reject_pending_delete) {
+      return utils::Status::IOError("reject pending delete freeze");
+    }
     return chunk::cow::FreezeCOWDelete(file_ino, head, chunk_size, out);
   }
 

@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "chunk/internal/ChunkMetadataBridge.hpp"
+#include "metadata/ChunkSizePlan.hpp"
 #include "metadata/InodePolicy.hpp"
 #include "metadata/PosixAcl.hpp"
 #include "metadata/Types.hpp"
@@ -883,34 +884,29 @@ Status MemMetaTxn::TruncateChunks(InodeID ino, uint64_t new_size) {
   // Non-empty chunk maps imply a successful CommitChunk(), and therefore
   // an already-bound mount-time bridge.
   const auto &bridge = *store_->chunk_metadata_bridge_;
+  ChunkSizeLayout layout;
+  auto status = PlanChunkSizeLayout(new_size, store_->chunk_size_, &layout);
+  if (!status.ok()) {
+    return status;
+  }
   std::vector<ChunkIndexChange> changes;
   std::vector<PendingDelete> detached;
   for (const auto &[index, head] : cmap) {
     (void)index;
-    // Stored chunks have already passed CommitChunk's derived-offset
-    // validation for this volume-fixed chunk size, so the multiplication is
-    // safe here and truncate does not need a second validation state.
-    const uint64_t start_offset = static_cast<uint64_t>(head.index) * store_->chunk_size_;
-    if (start_offset >= new_size) {
+    if (layout.ShouldDetach(head.index)) {
       PendingDelete pending;
-      auto status = bridge.FreezePendingDelete(*this, ino, head, store_->chunk_size_, &pending);
+      status = bridge.FreezePendingDelete(*this, ino, head, store_->chunk_size_, &pending);
       if (!status.ok()) {
         return status;
       }
       detached.push_back(std::move(pending));
       changes.push_back({head, std::nullopt});
-    } else {
-      const uint64_t surviving_size = new_size - start_offset;
-      if (head.size > surviving_size) {
-        auto clamped = head;
-        clamped.size = surviving_size;
-        changes.push_back({head, clamped});
-      }
+    } else if (layout.boundary.has_value() && head.index == layout.boundary->index &&
+               head.size > layout.boundary->visible_prefix) {
+      auto clamped = head;
+      clamped.size = layout.boundary->visible_prefix;
+      changes.push_back({head, clamped});
     }
-  }
-  auto status = bridge.Truncate(*this, ino, changes);
-  if (!status.ok()) {
-    return status;
   }
   for (auto &pending : detached) {
     store_->pending_deletes_.insert_or_assign(pending.id, std::move(pending));

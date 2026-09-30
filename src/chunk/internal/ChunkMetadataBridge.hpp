@@ -27,8 +27,6 @@ class ChunkMetadataBridge {
                                 const std::optional<metadata::SwordFsChunk> &expected,
                                 const metadata::SwordFsChunk &replacement,
                                 const metadata::ChunkPublishIntent &intent) const = 0;
-  virtual utils::Status Truncate(metadata::IChunkIndexTxn &txn, metadata::InodeID ino,
-                                 const std::vector<metadata::ChunkIndexChange> &changes) const = 0;
   virtual utils::Status PrepareReclaim(metadata::IChunkIndexTxn &txn, metadata::InodeID ino,
                                        const std::vector<metadata::SwordFsChunk> &heads) const = 0;
 

@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -325,6 +326,83 @@ TEST(RedisMetaTxnTest, TruncateClampsPersistedBoundaryChunk) {
     return utils::Status::OK();
   });
   EXPECT_TRUE(invalid_status.ok()) << invalid_status.message();
+}
+
+TEST(RedisMetaTxnTest, TruncateExercisesCompleteSharedSizeLayoutContract) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("truncate-size-layout"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+  RecordingRedisBridge bridge;
+  constexpr uint64_t kChunkSize = 100;
+
+  SwordFsAttr file_attr(9, S_IFREG | 0644);
+  file_attr.size = 300;
+  SwordFsInode file(9, file_attr, kRootInodeId);
+  ASSERT_TRUE(SeedInode(redis, key, file).ok());
+
+  const SwordFsChunk first{.index = 0, .revision = 11, .size = 100};
+  const SwordFsChunk boundary{.index = 1, .revision = 12, .size = 40};
+  const SwordFsChunk tail{.index = 2, .revision = 13, .size = 20};
+  for (const auto &chunk : {first, boundary, tail}) {
+    std::string encoded;
+    ASSERT_TRUE(chunk.SerializeTo(&encoded).ok());
+    redis.hset(key.Chunk(file.ino), std::to_string(chunk.index), encoded);
+  }
+
+  std::vector<PendingDelete> detached;
+  auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, kChunkSize, bridge.mechanism(), &bridge);
+    return txn.Truncate(file.ino, 150, &detached);
+  });
+  ASSERT_TRUE(status.ok()) << status.message();
+  ASSERT_EQ(detached.size(), 1U);
+
+  auto encoded = redis.hget(key.Chunk(file.ino), "0");
+  ASSERT_TRUE(encoded.has_value());
+  SwordFsChunk observed;
+  ASSERT_TRUE(observed.ParseFrom(*encoded).ok());
+  EXPECT_EQ(observed, first);
+  encoded = redis.hget(key.Chunk(file.ino), "1");
+  ASSERT_TRUE(encoded.has_value());
+  ASSERT_TRUE(observed.ParseFrom(*encoded).ok());
+  EXPECT_EQ(observed, boundary);
+  EXPECT_FALSE(redis.hexists(key.Chunk(file.ino), "2"));
+
+  // Exact-boundary shrink has no retained partial boundary.
+  detached.clear();
+  status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, kChunkSize, bridge.mechanism(), &bridge);
+    return txn.Truncate(file.ino, 100, &detached);
+  });
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_FALSE(redis.hexists(key.Chunk(file.ino), "1"));
+
+  // Force the planner's fail-closed path with an old EOF above the supported
+  // off_t range and an invalid target that is still a shrink.
+  file.attr.size = std::numeric_limits<uint64_t>::max();
+  ASSERT_TRUE(SeedInode(redis, key, file).ok());
+  status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, kChunkSize, bridge.mechanism(), &bridge);
+    return txn.Truncate(file.ino, kMaxSupportedFileSize + 1);
+  });
+  EXPECT_EQ(status.ToErrno(), EINVAL);
+
+  // Cleanup-freeze failure must stop before the descriptor is detached.
+  file.attr.size = 100;
+  ASSERT_TRUE(SeedInode(redis, key, file).ok());
+  bridge.reject_pending_delete = true;
+  detached.clear();
+  status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, kChunkSize, bridge.mechanism(), &bridge);
+    return txn.Truncate(file.ino, 0, &detached);
+  });
+  EXPECT_EQ(status.ToErrno(), EIO);
+  EXPECT_TRUE(redis.hexists(key.Chunk(file.ino), "0"));
 }
 
 TEST(RedisMetaTxnTest, RegisterPendingDeletesRejectsInvalidEnvelope) {
