@@ -11,15 +11,15 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "ae8b24ff5894f77a8765f35134af2bdcbbba4d1d"
+    "swordfs_commit": "b3e2b7769f53b29458facbee0bf6736cf5aac968"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "ENVIRONMENT": 8,
-      "KNOWN_UNSUPPORTED": 106,
-      "PASS": 130,
-      "UPSTREAM_NOT_APPLICABLE": 400,
+      "KNOWN_UNSUPPORTED": 94,
+      "PASS": 141,
+      "UPSTREAM_NOT_APPLICABLE": 401,
       "UPSTREAM_TEST_DEFECT": 1
     },
     "classified_count": 645,
@@ -27,17 +27,17 @@
     "deferred_count": 0,
     "executed_classified_percent": 100.0,
     "executed_count": 645,
-    "known_gap_count": 515,
-    "overall_support_percent": 20.16,
+    "known_gap_count": 504,
+    "overall_support_percent": 21.86,
     "raw_results": {
-      "FAIL": 18,
-      "NOTRUN": 497,
-      "PASS": 130
+      "FAIL": 19,
+      "NOTRUN": 485,
+      "PASS": 141
     },
     "selected_count": 645,
-    "supported_count": 130,
+    "supported_count": 141,
     "supported_gate_percent": 100.0,
-    "supported_pass_count": 130
+    "supported_pass_count": 141
   },
   "tests": [
     {
@@ -217,10 +217,10 @@
       "test": "generic/025"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
+      "message": "fuse does not define maximum ACL count",
+      "reason": "Pinned fstests does not define an ACL entry-count limit for filesystem type fuse, so this limit-specific testcase is not applicable.",
       "result": "NOTRUN",
       "test": "generic/026"
     },
@@ -345,11 +345,11 @@
       "test": "generic/052"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/053"
     },
     {
@@ -633,11 +633,11 @@
       "test": "generic/098"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/099"
     },
     {
@@ -665,11 +665,11 @@
       "test": "generic/104"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/105"
     },
     {
@@ -1513,11 +1513,11 @@
       "test": "generic/236"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/237"
     },
     {
@@ -1945,11 +1945,11 @@
       "test": "generic/306"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/307"
     },
     {
@@ -2017,19 +2017,19 @@
       "test": "generic/317"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/318"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/319"
     },
     {
@@ -2354,10 +2354,10 @@
     },
     {
       "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "issue": "#406",
+      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/375.out.bad)",
+      "reason": "Kernel chmod SGID clearing passes, but libfuse 3.18 does not expose FUSE_SETXATTR_ACL_KILL_SGID to the low-level setxattr callback; tracked by #406.",
+      "result": "FAIL",
       "test": "generic/375"
     },
     {
@@ -2809,11 +2809,11 @@
       "test": "generic/443"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/444"
     },
     {
@@ -2843,8 +2843,8 @@
     {
       "classification": "KNOWN_UNSUPPORTED",
       "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
+      "message": "attr namespace trusted not supported by this filesystem type: fuse",
+      "reason": "ACL support now passes the former prerequisite; the testcase next requires trusted.* xattrs, which remain unsupported under #255.",
       "result": "NOTRUN",
       "test": "generic/449"
     },
@@ -3385,11 +3385,11 @@
       "test": "generic/528"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/529"
     },
     {
@@ -4089,11 +4089,11 @@
       "test": "generic/632"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/633"
     },
     {
@@ -4513,11 +4513,11 @@
       "test": "generic/696"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "ACLs not supported by this filesystem type: fuse",
-      "reason": "SwordFS xattr operations return NotSupported, which also prevents ACL/xattr prerequisites; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/697"
     },
     {

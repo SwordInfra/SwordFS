@@ -9,9 +9,9 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | Selected upstream testcases | 645 |
 | Executed testcases | 645 |
 | Deferred from CI | 0 |
-| Explicitly supported | 130 |
-| Known gaps | 515 |
-| Overall support | 20.16% |
+| Explicitly supported | 141 |
+| Known gaps | 504 |
+| Overall support | 21.86% |
 | Supported gate | 100.00% |
 | Executed population classified | 100.00% |
 | Full selected population classified | 100.00% |
@@ -21,27 +21,28 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 
 | Result | Count |
 | --- | ---: |
-| `PASS` | 130 |
-| `FAIL` | 18 |
-| `NOTRUN` | 497 |
+| `PASS` | 141 |
+| `FAIL` | 19 |
+| `NOTRUN` | 485 |
 
 ## Outcome counts
 
 | Classification | Count |
 | --- | ---: |
 | `ENVIRONMENT` | 8 |
-| `KNOWN_UNSUPPORTED` | 106 |
-| `PASS` | 130 |
-| `UPSTREAM_NOT_APPLICABLE` | 400 |
+| `KNOWN_UNSUPPORTED` | 94 |
+| `PASS` | 141 |
+| `UPSTREAM_NOT_APPLICABLE` | 401 |
 | `UPSTREAM_TEST_DEFECT` | 1 |
 
 ## Known-gap Issues
 
-- [#255](https://github.com/SwordInfra/SwordFS/issues/255): 106 testcase(s), KNOWN_UNSUPPORTED
+- [#255](https://github.com/SwordInfra/SwordFS/issues/255): 93 testcase(s), KNOWN_UNSUPPORTED
+- [#406](https://github.com/SwordInfra/SwordFS/issues/406): 1 testcase(s), KNOWN_UNSUPPORTED
 
 ## Execution metadata
 
-- SwordFS commit: `ae8b24ff5894f77a8765f35134af2bdcbbba4d1d`
+- SwordFS commit: `b3e2b7769f53b29458facbee0bf6736cf5aac968`
 - fstests commit: `a370dcbed43563f0462801e889e0eceb93c7cfad`
 - fstests patchset: `conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19`
 - fstests selector: `generic/quick`
@@ -49,8 +50,8 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 - libfuse: `fusermount3 version: 3.18.2`
 - Runner: `GitHub Actions (9 fstests shards)`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36681378140
-Recorded at: 2026-09-30T07:16:54+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/36687465559
+Recorded at: 2026-09-30T08:18:42+00:00
 
 ## Historical main-branch progress
 
@@ -70,5 +71,6 @@ Recorded at: 2026-09-30T07:16:54+00:00
 | 2026-09-29T02:43:18+00:00 | `32929c97aae0` | PASS | 19.38% | 125 | 125 | 17 | 503 | 0 | 520 |
 | 2026-09-29T05:04:11+00:00 | `9494348d5367` | PASS | 19.53% | 126 | 126 | 17 | 502 | 0 | 519 |
 | 2026-09-30T01:30:44+00:00 | `9d7112bed869` | PASS | 20.16% | 130 | 130 | 18 | 497 | 0 | 515 |
+| 2026-09-30T08:18:42+00:00 | `b3e2b7769f53` | PASS | 21.86% | 141 | 141 | 19 | 485 | 0 | 504 |
 
-Last fully healthy baseline: `ae8b24ff5894f77a8765f35134af2bdcbbba4d1d`
+Last fully healthy baseline: `b3e2b7769f53b29458facbee0bf6736cf5aac968`
