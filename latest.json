@@ -11,15 +11,15 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "ec7715b2ccee535030d1685cb51b3b44a5da7456"
+    "swordfs_commit": "9d7112bed869b3ae7ac6715ebff07e896bd9c420"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "ENVIRONMENT": 8,
-      "KNOWN_UNSUPPORTED": 111,
-      "PASS": 126,
-      "UPSTREAM_NOT_APPLICABLE": 399,
+      "KNOWN_UNSUPPORTED": 106,
+      "PASS": 130,
+      "UPSTREAM_NOT_APPLICABLE": 400,
       "UPSTREAM_TEST_DEFECT": 1
     },
     "classified_count": 645,
@@ -27,17 +27,17 @@
     "deferred_count": 0,
     "executed_classified_percent": 100.0,
     "executed_count": 645,
-    "known_gap_count": 519,
-    "overall_support_percent": 19.53,
+    "known_gap_count": 515,
+    "overall_support_percent": 20.16,
     "raw_results": {
-      "FAIL": 17,
-      "NOTRUN": 502,
-      "PASS": 126
+      "FAIL": 18,
+      "NOTRUN": 497,
+      "PASS": 130
     },
     "selected_count": 645,
-    "supported_count": 126,
+    "supported_count": 130,
     "supported_gate_percent": 100.0,
-    "supported_pass_count": 126
+    "supported_pass_count": 130
   },
   "tests": [
     {
@@ -505,11 +505,11 @@
       "test": "generic/078"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#391",
-      "message": "file system doesn't support chattr +ia",
-      "reason": "The testcase exercises meaningful immutable/append-only inode policy; the focused implementation is tracked by #391.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/079"
     },
     {
@@ -1051,16 +1051,16 @@
     {
       "classification": "UPSTREAM_NOT_APPLICABLE",
       "issue": "-",
-      "message": "file system doesn't support chattr +i",
-      "reason": "The current chattr prerequisite masks a reflink contract; pinned fstests does not provide reflink for the FUSE model, so the testcase is not applicable to SwordFS even after immutable flags exist.",
+      "message": "Reflink not supported by test filesystem type: fuse",
+      "reason": "With inode flags available, the testcase reaches its actual reflink prerequisite; pinned fstests does not support reflink for filesystem type fuse.",
       "result": "NOTRUN",
       "test": "generic/159"
     },
     {
       "classification": "UPSTREAM_NOT_APPLICABLE",
       "issue": "-",
-      "message": "file system doesn't support chattr +i",
-      "reason": "The current chattr prerequisite masks a dedupe contract; pinned fstests does not provide dedupe for the FUSE model, so the testcase is not applicable to SwordFS even after immutable flags exist.",
+      "message": "Dedupe not supported by test filesystem type: fuse",
+      "reason": "With inode flags available, the testcase reaches its actual dedupe prerequisite; pinned fstests does not support dedupe for filesystem type fuse.",
       "result": "NOTRUN",
       "test": "generic/160"
     },
@@ -2681,11 +2681,11 @@
       "test": "generic/423"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#391",
-      "message": "file system doesn't support any of /usr/bin/chattr +a/+c/+d/+i",
-      "reason": "The testcase reflects supported inode flags through statx; immutable/append-only flag semantics are selected under #391.",
-      "result": "NOTRUN",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
+      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/424.out.bad)",
+      "reason": "The pinned Linux FUSE statx path returns only basic stats and birth time to VFS and discards userspace statx attribute bits, so STATX_ATTR_IMMUTABLE/APPEND cannot be surfaced by a FUSE daemon on this kernel even though SwordFS projects them internally.",
+      "result": "FAIL",
       "test": "generic/424"
     },
     {
@@ -3235,8 +3235,8 @@
     {
       "classification": "UPSTREAM_NOT_APPLICABLE",
       "issue": "-",
-      "message": "lsattr not supported by test filesystem type: fuse",
-      "reason": "The lsattr/birth-time prerequisites mask a forced local-filesystem shutdown/journal-recovery contract that pinned fstests does not support for FUSE; birth time itself remains under #381.",
+      "message": "fuse does not support shutdown",
+      "reason": "With inode flag queries available, this testcase reaches its forced local-filesystem shutdown prerequisite; pinned fstests does not support that shutdown model for FUSE.",
       "result": "NOTRUN",
       "test": "generic/508"
     },
@@ -3513,11 +3513,11 @@
       "test": "generic/544"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#391",
-      "message": "file system doesn't support chattr +i",
-      "reason": "The testcase exercises meaningful CAP_LINUX_IMMUTABLE authorization for immutable/append-only inode flags; tracked by #391.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/545"
     },
     {
@@ -3569,11 +3569,11 @@
       "test": "generic/552"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#391",
-      "message": "xfs_io chattr +i failed (old kernel/wrong fs?)",
-      "reason": "The current blocker is meaningful immutable-file enforcement tracked by #391; after that lands the testcase must be re-evaluated against copy_file_range work in #382.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/553"
     },
     {
@@ -3585,11 +3585,11 @@
       "test": "generic/554"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#391",
-      "message": "xfs_io chattr +ia failed (old kernel/wrong fs?)",
-      "reason": "The testcase exercises immutable/append-only semantics and CAP_LINUX_IMMUTABLE through FS_IOC_FSSETXATTR; tracked by #391.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/555"
     },
     {
