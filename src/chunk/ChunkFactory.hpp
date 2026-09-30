@@ -13,7 +13,10 @@
 
 namespace swordfs::metadata {
 class IMetaEngine;
+namespace cow {
+class COWChunkMetadata;
 }
+}  // namespace swordfs::metadata
 
 namespace swordfs::storage {
 class IDataEngine;
@@ -26,13 +29,7 @@ namespace swordfs::chunk {
 class ChunkFactory {
  public:
   ChunkFactory(metadata::ChunkType chunk_type, metadata::ChunkMetadataPtr chunk_metadata, metadata::IMetaEngine *meta,
-               storage::IDataEngine *data, size_t chunk_size)
-      : chunk_type_(chunk_type),
-        chunk_metadata_(std::move(chunk_metadata)),
-        meta_(meta),
-        data_(data),
-        chunk_size_(chunk_size) {
-  }
+               storage::IDataEngine *data, size_t chunk_size);
 
   utils::Status Open(metadata::InodeID ino, metadata::ChunkIndex index, bool create_if_missing,
                      std::shared_ptr<Chunk> *out) const;
@@ -43,6 +40,7 @@ class ChunkFactory {
   // mount-lifetime capability here so VFS never needs mechanism metadata
   // plumbing.
   metadata::ChunkMetadataPtr chunk_metadata_;
+  std::shared_ptr<metadata::cow::COWChunkMetadata> cow_metadata_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
   size_t chunk_size_;

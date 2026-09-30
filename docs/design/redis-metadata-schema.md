@@ -20,7 +20,9 @@ not by itself establish support for every Cluster deployment configuration.
 | `inode:<ino>` | String | Canonical serialized `SwordFsInode`, including ordered raw xattrs |
 | `dir:<parent_ino>` | Hash | Name → child type and inode ID |
 | `chunk:<ino>` | Hash | Canonical decimal 64-bit chunk index → shared published logical `SwordFsChunk` head |
-| `private_chunk_index:<mechanism-key>:<hash>` | Hash | Mechanism-owned chunk-internal fields; logical chunk-index fields use canonical decimal 64-bit indexes, `<mechanism-key>` is the stable typed `ChunkType` key, and field layout belongs only to that mechanism |
+| `private_chunk_index:<mechanism-key>:<hash>` | Hash | Transitional legacy bridge fields; logical chunk-index fields use canonical decimal 64-bit indexes and field layout belongs only to that mechanism |
+| `private_chunk_index:1:head:<chunk-id>` | String | Staged typed COW `COWChunkHead{revision,size}` for one ChunkID |
+| `private_chunk_index:1:revision:<chunk-id>` | Integer string | Per-ChunkID monotonic COW revision allocator |
 | `orphans` | Hash | Inode ID → orphan marker |
 | `reclaims` | Hash | Inode ID → serialized frozen opaque `ReclaimWork` |
 | `pending_deletes` | Hash | Opaque mechanism-defined queue ID → serialized frozen opaque `PendingDelete` |
@@ -38,10 +40,12 @@ cutover, the legacy metadata bridge may still read or change private-index
 fields in the same WATCH/EXEC transaction as the logical head and inode. That
 raw private index is transitional common-authority plumbing, not the target
 typed ChunkMetadata API. Final mechanism-owned state is rooted at `ChunkID`
-and uses its own consistency domain. For the currently selectable `cow` mechanism,
-the head generation is also the immutable object revision and the physical
-key derives from inode, index, and revision. That mechanism has no additional
-durable private fragment records.
+and uses its own consistency domain. #316 stages typed COW head and per-ChunkID
+revision state under separate private keys, but those records are not a shadow
+copy of the live common descriptor and are not yet production authority. For
+the currently selectable `cow` data path, the legacy common head generation is
+still also the immutable object revision and the production physical key still
+derives from inode, index, and revision until #317.
 
 `ChunkIndex` is a 64-bit unsigned logical coordinate. Redis Hash field names
 that identify a logical chunk use `std::to_string(index)`, i.e. the canonical
@@ -56,9 +60,10 @@ Private-index Redis keys do not embed the human-readable mechanism name.
 `ChunkType` through `ChunkTypeKey()`; in the
 current beta layout the stable enum values are encoded as decimal strings
 (`1` = `cow`, `2` = `chunk_slice`, `3` = `redis_cache`). The trailing
-`<hash>` and its fields remain legacy bridge schema. New mechanism/session
-code consumes typed ChunkMetadata interfaces and never constructs this layout
-directly.
+`<hash>` and its fields remain legacy bridge schema. The Redis COW adapter also
+uses the same mechanism-private namespace internally for per-ChunkID head and
+revision string keys; callers consume typed ChunkMetadata interfaces and never
+construct Redis keys or encoded values directly.
 
 `next_chunk_id` is mechanism-neutral and volume-scoped. The Redis
 ChunkMetadata adapter uses one atomic Lua command that rejects a negative
@@ -72,6 +77,14 @@ after the script may have executed is `OutcomeUnknown`; a later allocation
 obtains a fresh value and never reconstructs or reuses the lost identity. The
 legacy `next_chunk_revision` allocator remains separate while the current COW
 writer still depends on it.
+
+Each COW ChunkID also owns a separate revision counter key. Allocation uses the
+same validated non-negative Redis increment semantics as ChunkID allocation,
+but its sequence is local to that ChunkID: different ChunkIDs may both allocate
+revision 1. An ambiguous increment is never reconstructed or reused; retrying
+allocates a later revision and leaves a legal gap. Immutable target object
+identity is `(ChunkID, COWChunkRevision)`, while the legacy volume-wide
+`next_chunk_revision` remains production authority until #317.
 
 Frozen reclaim and pending-delete records carry opaque payloads.
 The common queue validates its envelope and Hash field identity; only the
@@ -156,8 +169,10 @@ FileMetadata transaction because they are part of the old common-head
 protocol; this is not a typed ChunkMetadata transaction seam and no new typed
 mechanism state may use it. #318/#319/#317 retire the bridge callbacks as their
 authorities move, and #320 removes the remaining raw bridge surface. #316 and
-#270 add mechanism-owned typed metadata behind the independent ChunkMetadata
-boundary instead of extending `IChunkIndexTxn`.
+#270 place mechanism-owned typed metadata behind the independent ChunkMetadata
+boundary instead of extending `IChunkIndexTxn`. The #316 COW adapter uses its
+own per-ChunkID keys and `RedisMetaClient::Transact` for full-head CAS/erase;
+it never receives a `RedisMetaTxn` or FileMetadata transaction handle.
 
 `RedisKvTxn` borrows its transaction connection from the shared redis++ pool
 with `transaction(false, false)`. The `Redis` view returned by

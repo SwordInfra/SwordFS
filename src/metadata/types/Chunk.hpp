@@ -29,6 +29,10 @@ class ChunkID {
 
   auto operator<=>(const ChunkID &) const = default;
 
+  constexpr uint64_t Value() const {
+    return value_;
+  }
+
  private:
   uint64_t value_ = 0;
 };

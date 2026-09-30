@@ -4,6 +4,8 @@
 #pragma once
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <utility>
 
 #include "metadata/cow/COWChunkMetadata.hpp"
@@ -23,6 +25,15 @@ class RedisCOWChunkMetadata final : public cow::COWChunkMetadata {
   }
 
   utils::Status AllocateChunkID(ChunkID *out) override;
+  utils::Status AllocateRevision(ChunkID chunk_id, cow::COWChunkRevision *out) override;
+  utils::Status GetHead(ChunkID chunk_id, cow::COWChunkHead *out) override;
+  utils::Status CompareExchangeHead(ChunkID chunk_id, const std::optional<cow::COWChunkHead> &expected,
+                                    const cow::COWChunkHead &replacement) override;
+  utils::Status EraseHead(ChunkID chunk_id, const cow::COWChunkHead &expected) override;
+
+ private:
+  std::string HeadKey(ChunkID chunk_id) const;
+  std::string RevisionKey(ChunkID chunk_id) const;
 
  private:
   std::shared_ptr<RedisBackendContext> backend_;
