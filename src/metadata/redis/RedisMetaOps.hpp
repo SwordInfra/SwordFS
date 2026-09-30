@@ -102,9 +102,6 @@ class RedisMetaOps {
   // but it must not invalidate an otherwise successful metadata operation.
   void RegisterPendingDeletesBestEffort(InodeID ino, const std::vector<PendingDelete> &work, std::string_view reason);
 
-  // Snapshot the inode ids published as orphan candidates.
-  utils::Status CollectOrphanCandidates(std::vector<InodeID> &out);
-
   // Snapshot the frozen pending-reclaim records, validating persisted state
   // before exposing it to the replay worker.
   utils::Status CollectPendingReclaims(std::vector<ReclaimWork> &out);
@@ -117,6 +114,10 @@ class RedisMetaOps {
   ChunkMetadataPtr chunk_metadata_;
   redis::RedisKey key_;
   uint64_t chunk_size_ = 0;
+  utils::FiberMutex orphan_scan_mutex_;
+  uint64_t orphan_scan_cursor_ = 0;
+  std::vector<InodeID> orphan_scan_page_;
+  size_t orphan_scan_page_offset_ = 0;
   utils::FiberMutex pending_delete_scan_mutex_;
   uint64_t pending_delete_cursor_ = 0;
   std::vector<PendingDelete> pending_delete_page_;

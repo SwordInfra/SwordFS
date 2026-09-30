@@ -332,20 +332,59 @@ utils::Status RedisMetaOps::VisitOrphanCandidates(const std::function<utils::Sta
     return utils::Status::InvalidArgument("orphan candidate visitor is null");
   }
 
-  // Snapshot before visiting: the visitor typically reclaims the visited
-  // inode, which mutates the hash a cursor-based scan is walking.
-  std::vector<InodeID> candidates;
-  auto status = CollectOrphanCandidates(candidates);
-  if (!status.ok()) {
-    return status;
-  }
-  for (InodeID ino : candidates) {
-    status = visitor(ino);
-    if (!status.ok()) {
-      return status;
+  // Keep a resumable HSCAN page across visitor aborts. Reclaiming a visited
+  // inode mutates the hash, so the cursor/page are owned by this scan rather
+  // than reconstructed from zero after every bounded worker pass.
+  constexpr size_t kScanBatchSize = 128;
+  std::lock_guard<utils::FiberMutex> lock(orphan_scan_mutex_);
+  for (;;) {
+    if (orphan_scan_page_offset_ >= orphan_scan_page_.size()) {
+      orphan_scan_page_.clear();
+      orphan_scan_page_offset_ = 0;
+
+      std::vector<std::pair<std::string, std::string>> values;
+      uint64_t next_cursor = 0;
+      auto status = backend_->executor().RunFromFiber([&] {
+        return backend_->client().HScan(key_.Orphans(), orphan_scan_cursor_, kScanBatchSize, &values, &next_cursor);
+      });
+      if (!status.ok()) {
+        return status;
+      }
+
+      std::vector<InodeID> page;
+      page.reserve(values.size());
+      for (const auto &[field, value] : values) {
+        (void)value;
+        InodeID ino = 0;
+        status = ParseInodeField(field, "orphan candidate", ino);
+        if (!status.ok()) {
+          return status;
+        }
+        page.push_back(ino);
+      }
+      std::sort(page.begin(), page.end());
+      orphan_scan_page_ = std::move(page);
+      orphan_scan_cursor_ = next_cursor;
+
+      if (orphan_scan_page_.empty() && orphan_scan_cursor_ == 0) {
+        return utils::Status::OK();
+      }
+    }
+
+    while (orphan_scan_page_offset_ < orphan_scan_page_.size()) {
+      auto status = visitor(orphan_scan_page_[orphan_scan_page_offset_]);
+      if (!status.ok()) {
+        return status;
+      }
+      ++orphan_scan_page_offset_;
+    }
+
+    if (orphan_scan_cursor_ == 0) {
+      orphan_scan_page_.clear();
+      orphan_scan_page_offset_ = 0;
+      return utils::Status::OK();
     }
   }
-  return utils::Status::OK();
 }
 
 utils::Status RedisMetaOps::VisitPendingReclaims(const std::function<utils::Status(const ReclaimWork &)> &visitor) {
@@ -530,36 +569,6 @@ void RedisMetaOps::RegisterPendingDeletesBestEffort(InodeID ino, const std::vect
     SWORDFS_LOG_WARN << "Best-effort pending-delete registration failed after " << reason << ": ino=" << ino
                      << " items=" << work.size() << " — " << status.message();
   }
-}
-
-utils::Status RedisMetaOps::CollectOrphanCandidates(std::vector<InodeID> &out) {
-  utils::ExpectInFiberDomain();
-  out.clear();
-
-  constexpr size_t kScanBatchSize = 128;
-  uint64_t cursor = 0;
-  do {
-    std::vector<std::pair<std::string, std::string>> values;
-    uint64_t next_cursor = 0;
-    auto status = backend_->executor().RunFromFiber(
-        [&] { return backend_->client().HScan(key_.Orphans(), cursor, kScanBatchSize, &values, &next_cursor); });
-    if (!status.ok()) {
-      return status;
-    }
-    for (const auto &[field, value] : values) {
-      (void)value;
-      InodeID ino = 0;
-      status = ParseInodeField(field, "orphan candidate", ino);
-      if (!status.ok()) {
-        return status;
-      }
-      out.push_back(ino);
-    }
-    cursor = next_cursor;
-  } while (cursor != 0);
-
-  std::sort(out.begin(), out.end());
-  return utils::Status::OK();
 }
 
 utils::Status RedisMetaOps::CollectPendingReclaims(std::vector<ReclaimWork> &out) {
