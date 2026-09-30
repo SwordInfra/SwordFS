@@ -505,14 +505,27 @@ Status MemMetaImpl::VisitOrphanCandidates(const InodeVisitorFn &visitor) {
     return Status::InvalidArgument("orphan candidate visitor is null");
   }
 
-  std::vector<InodeID> candidates;
-  store_.Transact([&](MemMetaTxn &txn) { return txn.ListOrphanCandidates(&candidates); });
-  for (InodeID ino : candidates) {
-    auto status = visitor(ino);
+  std::lock_guard<utils::FiberMutex> lock(orphan_scan_mutex_);
+  if (orphan_scan_snapshot_offset_ >= orphan_scan_snapshot_.size()) {
+    orphan_scan_snapshot_.clear();
+    orphan_scan_snapshot_offset_ = 0;
+    auto status = store_.Transact([&](MemMetaTxn &txn) { return txn.ListOrphanCandidates(&orphan_scan_snapshot_); });
     if (!status.ok()) {
       return status;
     }
   }
+
+  while (orphan_scan_snapshot_offset_ < orphan_scan_snapshot_.size()) {
+    const InodeID ino = orphan_scan_snapshot_[orphan_scan_snapshot_offset_];
+    auto status = visitor(ino);
+    if (!status.ok()) {
+      return status;
+    }
+    ++orphan_scan_snapshot_offset_;
+  }
+
+  orphan_scan_snapshot_.clear();
+  orphan_scan_snapshot_offset_ = 0;
   return Status::OK();
 }
 

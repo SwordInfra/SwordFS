@@ -360,10 +360,6 @@ TEST(VfsImplTest, Lseek) {
   EXPECT_NOT_SUPPORTED(VfsImpl::LSeek(1, 0, SEEK_SET, nullptr));
 }
 
-TEST(VfsImplTest, Tmpfile) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::TmpFile(1, 0644, nullptr));
-}
-
 // ────────────────────────────────────────────────────────────────
 // RetrieveReply — also a stub
 // ────────────────────────────────────────────────────────────────
@@ -528,14 +524,18 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     *out = std::move(result);
     return Status::OK();
   }
-  Status Create(InodeID, std::string_view, uint32_t mode, SwordFsInode *out) override {
+  Status Create(InodeID, std::string_view name, uint32_t mode, SwordFsInode *out) override {
+    ++create_calls_;
+    create_names_.emplace_back(name);
+    const Status status =
+        create_status_index_ < create_statuses_.size() ? create_statuses_[create_status_index_++] : call_status_;
     if (out) {
       *out = {};
       out->ino = 100;
       out->attr.ino = 100;
       out->attr.mode = S_IFREG | (mode & 07777);
     }
-    return call_status_;
+    return status;
   }
   Status MkNod(InodeID, std::string_view, uint32_t mode, uint64_t rdev, SwordFsInode *out) override {
     ++mknod_calls_;
@@ -557,8 +557,10 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return call_status_;
   }
-  Status Unlink(InodeID, std::string_view) override {
-    return call_status_;
+  Status Unlink(InodeID, std::string_view name) override {
+    ++unlink_calls_;
+    unlink_names_.emplace_back(name);
+    return unlink_status_index_ < unlink_statuses_.size() ? unlink_statuses_[unlink_status_index_++] : call_status_;
   }
   Status RmDir(InodeID, std::string_view) override {
     return call_status_;
@@ -733,6 +735,16 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     call_status_ = s;
   }
 
+  void set_create_statuses(std::vector<Status> statuses) {
+    create_statuses_ = std::move(statuses);
+    create_status_index_ = 0;
+  }
+
+  void set_unlink_statuses(std::vector<Status> statuses) {
+    unlink_statuses_ = std::move(statuses);
+    unlink_status_index_ = 0;
+  }
+
   void set_open_status(Status status) {
     open_status_ = std::move(status);
   }
@@ -774,6 +786,22 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
 
   int mknod_calls() const {
     return mknod_calls_;
+  }
+
+  int create_calls() const {
+    return create_calls_;
+  }
+
+  int unlink_calls() const {
+    return unlink_calls_;
+  }
+
+  const std::vector<std::string> &create_names() const {
+    return create_names_;
+  }
+
+  const std::vector<std::string> &unlink_names() const {
+    return unlink_names_;
   }
 
   void set_get_inode_status(Status status) {
@@ -850,6 +878,14 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   int lookup_calls_ = 0;
   int open_calls_ = 0;
   int mknod_calls_ = 0;
+  int create_calls_ = 0;
+  int unlink_calls_ = 0;
+  std::vector<std::string> create_names_;
+  std::vector<std::string> unlink_names_;
+  std::vector<Status> create_statuses_;
+  std::vector<Status> unlink_statuses_;
+  size_t create_status_index_ = 0;
+  size_t unlink_status_index_ = 0;
   int get_inode_calls_ = 0;
   int get_inodes_calls_ = 0;
   size_t max_get_inodes_batch_size_ = 0;
@@ -1149,6 +1185,197 @@ TEST_F(VfsImplIntegrationTest, CreateHookPublishesLookupReference) {
     EXPECT_TRUE(VfsImpl::GetAttr(100, &attr).ok());
     EXPECT_EQ(attr.st_nlink, 0U);
     EXPECT_TRUE(VfsImpl::Release(100, *capture.fh).ok());
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, TmpfileHookReturnsCreatedEntryAndNormalHandle) {
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), 1, 0600, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  EXPECT_FALSE(capture.error.has_value());
+  ASSERT_TRUE(capture.entry.has_value());
+  ASSERT_TRUE(capture.fh.has_value());
+  EXPECT_EQ(capture.entry->ino, 100U);
+  ASSERT_EQ(mock_meta_->create_calls(), 1);
+  ASSERT_EQ(mock_meta_->unlink_calls(), 1);
+  ASSERT_EQ(mock_meta_->create_names().size(), 1U);
+  ASSERT_EQ(mock_meta_->unlink_names().size(), 1U);
+  EXPECT_EQ(mock_meta_->unlink_names().front(), mock_meta_->create_names().front());
+  EXPECT_EQ(mock_meta_->create_names().front().rfind(".swordfs-tmp-", 0), 0U);
+
+  swordfs::test::RunInTestFiber([&] { EXPECT_TRUE(VfsImpl::Release(capture.entry->ino, *capture.fh).ok()); });
+}
+
+TEST_F(VfsImplIntegrationTest, TmpfileRetriesGeneratedNameCollision) {
+  mock_meta_->set_create_statuses({Status::AlreadyExists("collision"), Status::OK()});
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), 1, 0600, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  EXPECT_FALSE(capture.error.has_value());
+  ASSERT_TRUE(capture.entry.has_value());
+  ASSERT_TRUE(capture.fh.has_value());
+  ASSERT_EQ(mock_meta_->create_calls(), 2);
+  ASSERT_EQ(mock_meta_->create_names().size(), 2U);
+  EXPECT_NE(mock_meta_->create_names()[0], mock_meta_->create_names()[1]);
+  ASSERT_EQ(mock_meta_->unlink_names().size(), 1U);
+  EXPECT_EQ(mock_meta_->unlink_names().front(), mock_meta_->create_names().back());
+
+  swordfs::test::RunInTestFiber([&] { EXPECT_TRUE(VfsImpl::Release(capture.entry->ino, *capture.fh).ok()); });
+}
+
+TEST_F(VfsImplIntegrationTest, TmpfileCollisionRetryIsBounded) {
+  std::vector<Status> collisions;
+  for (int i = 0; i < 32; ++i) {
+    collisions.push_back(Status::AlreadyExists("collision"));
+  }
+  mock_meta_->set_create_statuses(std::move(collisions));
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), 1, 0600, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, EEXIST);
+  EXPECT_GT(mock_meta_->create_calls(), 1);
+  EXPECT_LT(mock_meta_->create_calls(), 32);
+  EXPECT_EQ(mock_meta_->unlink_calls(), 0);
+  EXPECT_FALSE(capture.entry.has_value());
+  EXPECT_FALSE(capture.fh.has_value());
+}
+
+TEST_F(VfsImplIntegrationTest, TmpfileCreateFailureDoesNotAttemptCleanup) {
+  mock_meta_->set_create_statuses({Status::Permission("create denied")});
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), 1, 0600, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, EACCES);
+  EXPECT_FALSE(capture.entry.has_value());
+  EXPECT_FALSE(capture.fh.has_value());
+  EXPECT_EQ(mock_meta_->create_calls(), 1);
+  EXPECT_EQ(mock_meta_->unlink_calls(), 0);
+}
+
+TEST_F(VfsImplIntegrationTest, TmpfileHandleCreationFailureRemovesTemporaryEntry) {
+  std::shared_ptr<swordfs::vfs::InodeHandle> inode_handle;
+  swordfs::test::RunInTestFiber([&] {
+    inode_handle = swordfs::vfs::InodeHandleManager::Instance().Get(100, /*create_if_missing=*/true);
+    ASSERT_NE(inode_handle, nullptr);
+    ASSERT_TRUE(inode_handle->TryStartReclaim());
+  });
+
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), 1, 0600, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, ENOENT);
+  EXPECT_EQ(mock_meta_->create_calls(), 1);
+  EXPECT_EQ(mock_meta_->unlink_calls(), 1);
+  ASSERT_EQ(mock_meta_->create_names().size(), 1U);
+  ASSERT_EQ(mock_meta_->unlink_names().size(), 1U);
+  EXPECT_EQ(mock_meta_->unlink_names().front(), mock_meta_->create_names().front());
+
+  swordfs::test::RunInTestFiber([&] { inode_handle->FinishReclaim(); });
+}
+
+TEST_F(VfsImplIntegrationTest, TmpfileHandleFailurePreservesErrorWhenCleanupFails) {
+  mock_meta_->set_unlink_statuses({Status::IOError("cleanup failed")});
+  std::shared_ptr<swordfs::vfs::InodeHandle> inode_handle;
+  swordfs::test::RunInTestFiber([&] {
+    inode_handle = swordfs::vfs::InodeHandleManager::Instance().Get(100, /*create_if_missing=*/true);
+    ASSERT_NE(inode_handle, nullptr);
+    ASSERT_TRUE(inode_handle->TryStartReclaim());
+  });
+
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), 1, 0600, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, ENOENT);
+  EXPECT_EQ(mock_meta_->create_calls(), 1);
+  EXPECT_EQ(mock_meta_->unlink_calls(), 1);
+
+  swordfs::test::RunInTestFiber([&] { inode_handle->FinishReclaim(); });
+}
+
+TEST_F(VfsImplIntegrationTest, TmpfileUnlinkFailureReleasesHandleAndRetriesCleanup) {
+  mock_meta_->set_unlink_statuses({Status::IOError("unlink failed"), Status::OK()});
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), 1, 0600, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, EIO);
+  EXPECT_FALSE(capture.entry.has_value());
+  EXPECT_FALSE(capture.fh.has_value());
+  EXPECT_EQ(mock_meta_->create_calls(), 1);
+  EXPECT_EQ(mock_meta_->unlink_calls(), 2);
+
+  swordfs::test::RunInTestFiber([&] {
+    EXPECT_EQ(swordfs::vfs::InodeHandleManager::Instance().Get(100, /*create_if_missing=*/false), nullptr)
+        << "failed tmpfile must drop the local inode/handle reference";
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, TmpfileCleanupRetryFailureKeepsOriginalUnlinkError) {
+  mock_meta_->set_unlink_statuses({Status::IOError("initial unlink failed"), Status::Permission("cleanup denied")});
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), 1, 0600, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, EIO);
+  EXPECT_EQ(mock_meta_->create_calls(), 1);
+  EXPECT_EQ(mock_meta_->unlink_calls(), 2);
+  EXPECT_FALSE(capture.entry.has_value());
+  EXPECT_FALSE(capture.fh.has_value());
+}
+
+TEST_F(VfsImplIntegrationTest, FailedTmpfileReplyReleasesHandleAndLookupReference) {
+  FuseReplyCapture capture;
+  capture.reply_result = -ENOENT;
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), 1, 0600, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.entry.has_value());
+  ASSERT_TRUE(capture.fh.has_value());
+
+  // fuse_reply_create() notifies the capture before the callback returns to
+  // the failed-reply cleanup path. Drain the runtime before checking ownership.
+  auto *runtime = swordfs::utils::ThisFiberRuntime();
+  ASSERT_NE(runtime, nullptr);
+  runtime->Shutdown();
+
+  swordfs::test::RunInTestFiber([&] {
+    EXPECT_EQ(swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::FileHandle>(*capture.fh), nullptr);
+    mock_meta_->set_get_inode_status(Status::NotFound("tmpfile reply was not published"));
+    struct stat attr{};
+    EXPECT_TRUE(VfsImpl::GetAttr(capture.entry->ino, &attr).IsNotFound());
   });
 }
 
@@ -1691,7 +1918,6 @@ TEST_F(VfsImplIntegrationTest, FuseUnsupportedHooksReplyWithEnosys) {
   expect_enosys(
       [&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsCopyFileRange(req, 1, 0, &fi, 2, 0, &fi, 4096, 0); });
   expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsLseek(req, 1, 0, SEEK_SET, &fi); });
-  expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsTmpfile(req, 1, 0644, &fi); });
 }
 
 TEST_F(VfsImplIntegrationTest, IoctlControlSurfaceIsGatedAndUsesRestrictedBuffers) {
@@ -2947,12 +3173,109 @@ class VfsLastLinkCleanupTest : public ::testing::Test {
     return out;
   }
 
+  std::vector<swordfs::metadata::SwordFsEntry> DirectoryEntries(InodeID ino) {
+    std::vector<swordfs::metadata::SwordFsEntry> entries;
+    swordfs::metadata::DirIteratorPtr iterator;
+    const auto open_status = meta_->OpenDir(ino, &iterator);
+    EXPECT_TRUE(open_status.ok()) << open_status.message();
+    if (!open_status.ok()) {
+      return entries;
+    }
+    for (;;) {
+      swordfs::metadata::SwordFsEntry entry;
+      uint64_t next_cookie = 0;
+      const auto status = iterator->Peek(&entry, &next_cookie);
+      if (status.IsEndOfDirectory()) {
+        break;
+      }
+      EXPECT_TRUE(status.ok()) << status.message();
+      if (!status.ok()) {
+        break;
+      }
+      entries.push_back(std::move(entry));
+      iterator->Advance();
+    }
+    return entries;
+  }
+
   swordfs::metadata::MemMetaImpl *meta_ = nullptr;
   RecordingDataEngine *data_ = nullptr;
   std::vector<uint64_t> fhs_;
 };
 
 }  // namespace
+
+TEST_F(VfsLastLinkCleanupTest, TmpfileIsAnonymousUsableAndReclaimedAfterFinalClose) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), kRoot, 0600, &fi);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_FALSE(capture.error.has_value());
+  ASSERT_TRUE(capture.entry.has_value());
+  ASSERT_TRUE(capture.fh.has_value());
+  fhs_.push_back(*capture.fh);
+
+  swordfs::test::RunInTestFiber([&] {
+    const auto entries = DirectoryEntries(kRoot);
+    ASSERT_EQ(entries.size(), 2U);
+    EXPECT_EQ(entries[0].name, ".");
+    EXPECT_EQ(entries[1].name, "..");
+
+    SwordFsInode inode;
+    ASSERT_TRUE(meta_->GetInode(capture.entry->ino, &inode).ok());
+    EXPECT_EQ(inode.attr.nlink, 0U);
+    EXPECT_EQ(inode.attr.mode & S_IFMT, static_cast<uint32_t>(S_IFREG));
+    EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{capture.entry->ino}));
+
+    constexpr std::string_view kPayload = "tmpfile-payload";
+    auto write_data = folly::IOBuf::copyBuffer(kPayload);
+    ASSERT_TRUE(VfsImpl::Write(capture.entry->ino, *write_data, 0, *capture.fh).ok());
+    std::unique_ptr<folly::IOBuf> read_data;
+    ASSERT_TRUE(VfsImpl::Read(capture.entry->ino, kPayload.size(), 0, *capture.fh, &read_data).ok());
+    ASSERT_NE(read_data, nullptr);
+    EXPECT_EQ(read_data->computeChainDataLength(), kPayload.size());
+
+    ASSERT_TRUE(VfsImpl::Release(capture.entry->ino, *capture.fh).ok());
+    ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
+    EXPECT_TRUE(meta_->GetInode(capture.entry->ino, nullptr).IsNotFound());
+    EXPECT_TRUE(OrphanCandidates().empty());
+  });
+}
+
+TEST_F(VfsLastLinkCleanupTest, TmpfileLinkRevivesOrphanAndSurvivesOriginalClose) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), kRoot, 0600, &fi);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_FALSE(capture.error.has_value());
+  ASSERT_TRUE(capture.entry.has_value());
+  ASSERT_TRUE(capture.fh.has_value());
+  fhs_.push_back(*capture.fh);
+
+  swordfs::test::RunInTestFiber([&] {
+    EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{capture.entry->ino}));
+
+    fuse_entry_param linked{};
+    ASSERT_TRUE(VfsImpl::Link(capture.entry->ino, kRoot, "linked-tmpfile", &linked).ok());
+    EXPECT_EQ(linked.ino, capture.entry->ino);
+    EXPECT_EQ(linked.attr.st_nlink, 1U);
+    EXPECT_TRUE(OrphanCandidates().empty());
+
+    ASSERT_TRUE(VfsImpl::Release(capture.entry->ino, *capture.fh).ok());
+    ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
+
+    SwordFsInode inode;
+    ASSERT_TRUE(meta_->Lookup(kRoot, "linked-tmpfile", &inode).ok());
+    EXPECT_EQ(inode.ino, capture.entry->ino);
+    EXPECT_EQ(inode.attr.nlink, 1U);
+  });
+}
 
 FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwriteKeepsLookedUpDirectoryVictimVisibleByInode) {
   constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;

@@ -87,8 +87,13 @@ completion and submission rejection signal the baton.
 The orphan worker only applies the mount-local open-handle fence and calls
 metadata `PrepareReclaim(ino)`. The chunk-GC worker independently replays
 durable pending-delete/reclaim queues and performs physical deletion. A bounded
-pending-delete scan may self-wake chunk GC for another batch; VFS data-path
-flush/truncate/setattr operations do not submit physical-cleanup work.
+pending-delete scan may self-wake chunk GC for another batch. Orphan handoff is
+bounded in the same way: metadata visitors preserve a continuation point when
+the worker ends a batch, and the worker self-wakes for the next slice. A stop
+request aborts candidate visitation at that boundary instead of joining an
+entire durable orphan backlog, so unmount latency does not scale with the number
+of unlinked files waiting for preparation. VFS data-path flush/truncate/setattr
+operations do not submit physical-cleanup work.
 
 ## Admission and shutdown state machine
 

@@ -23,6 +23,7 @@ namespace swordfs::vfs {
 namespace {
 
 constexpr auto kSafetyScanInterval = std::chrono::seconds(5);
+constexpr size_t kOrphanBatchSize = 128;
 
 }  // namespace
 
@@ -60,16 +61,38 @@ utils::Status OrphanReclaimer::Reconcile() {
   }
 
   size_t failures = 0;
-  auto status = meta->VisitOrphanCandidates([this, &failures](metadata::InodeID ino) {
-    auto status = PrepareOrphan(ino);
-    if (!status.ok()) {
-      ++failures;
-      SWORDFS_LOG_WARN << "OrphanReclaimer: preparation of ino " << ino << " failed: " << status.message();
-    }
+  size_t visited = 0;
+  bool batch_limited = false;
+  bool stopping = false;
+  auto status =
+      meta->VisitOrphanCandidates([this, &failures, &visited, &batch_limited, &stopping](metadata::InodeID ino) {
+        if (stop_requested_.load(std::memory_order_relaxed)) {
+          stopping = true;
+          return utils::Status::Busy("orphan reclaim stopping");
+        }
+        if (visited >= kOrphanBatchSize) {
+          batch_limited = true;
+          return utils::Status::Busy("orphan reclaim batch complete");
+        }
+        ++visited;
+        auto status = PrepareOrphan(ino);
+        if (!status.ok()) {
+          ++failures;
+          SWORDFS_LOG_WARN << "OrphanReclaimer: preparation of ino " << ino << " failed: " << status.message();
+        }
+        return utils::Status::OK();
+      });
+  if (stopping) {
     return utils::Status::OK();
-  });
-  if (!status.ok()) {
+  }
+  if (!status.ok() && !batch_limited) {
     return status;
+  }
+  if (batch_limited) {
+    // The metadata visitor preserves its continuation point when our callback
+    // stops a pass. Schedule the next bounded slice immediately instead of
+    // waiting for the periodic safety scan.
+    Wake();
   }
   if (failures != 0) {
     return utils::Status::IOError("orphan reclaim left " + std::to_string(failures) + " inode(s) pending");
@@ -92,15 +115,17 @@ void OrphanReclaimer::Start() {
 
 void OrphanReclaimer::Stop() {
   utils::ExpectInThreadDomain();
-  stop_requested_.store(true, std::memory_order_relaxed);
   if (!worker_thread_.joinable()) {
+    stop_requested_.store(false, std::memory_order_relaxed);
     return;
   }
+  stop_requested_.store(true, std::memory_order_relaxed);
   wake_sem_.post();
   worker_thread_.join();
   while (wake_sem_.try_wait()) {
   }
   wake_pending_.store(false, std::memory_order_relaxed);
+  stop_requested_.store(false, std::memory_order_relaxed);
   SWORDFS_LOG_INFO << "orphan reclaimer stopped";
 }
 
