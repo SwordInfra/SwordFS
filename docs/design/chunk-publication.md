@@ -55,23 +55,27 @@ Mechanism-owned metadata is exposed to chunk code through the mount-scoped
 and not through a FileMetadata transaction. The common `ChunkMetadata`
 contract is intentionally narrow: it identifies the selected `ChunkType` and
 allocates fresh mechanism-neutral `ChunkID` values. Each mechanism adds its
-own typed state API beside the records it owns. `cow` adds the
-`COWChunkMetadata` typed root now; #316 extends that root with the
-`ChunkID -> COWChunkHead` state API. `chunk_slice` adds its distinct typed
+own typed state API beside the records it owns. `cow` exposes
+`COWChunkMetadata`, whose staged target state is
+`ChunkID -> COWChunkHead{revision,size}` together with per-ChunkID revision
+allocation, full-head CAS, semantic boundary clamp, and conditional erase.
+`chunk_slice` adds its distinct typed
 metadata root/state in #270. Unsupported mechanisms do not receive a generic
 fallback ChunkMetadata implementation. Those APIs may have different record
 shapes and mutation operations; a common revision or raw key/value API is not
 required.
 
 `ChunkID` answers which mechanism-owned chunk-state instance is attached to a
-logical file position. It is strong and opaque, volume-scoped, stable for one
-attached materialization lifetime, and never reused after detach. Value zero is
-invalid; allocated values are in `1..INT64_MAX` so Memory and Redis share one
-portable representation. Ordinary COW rewrites and retained-boundary truncates
-do not allocate a new ChunkID. A later rematerialization after detach receives
-a fresh ID. This identity is distinct from `ChunkIndex` (where in the file)
-and from the COW-private revision introduced by #316 (which immutable object
-version backs the current COW head).
+logical file position. It is a strong numeric identity, volume-scoped, stable
+for one attached materialization lifetime, and never reused after detach. Its
+numeric representation may be used for stable persistence/key encoding and
+diagnostics but carries no mechanism semantics. Value zero is invalid;
+allocated values are in `1..INT64_MAX` so Memory and Redis share one portable
+representation. Ordinary COW rewrites and retained-boundary truncates do not
+allocate a new ChunkID. A later rematerialization after detach receives a fresh
+ID. This identity is distinct from `ChunkIndex` (where in the file) and from
+the COW-private revision (which immutable object version backs the current COW
+head).
 
 ChunkID allocation is owned by ChunkMetadata and is independent of FileMetadata
 transactions. Memory uses ChunkMetadata-owned synchronization and state rather
@@ -81,6 +85,33 @@ joining `RedisMetaTxn` / `MULTI/EXEC` for correctness. Allocation may leave
 gaps, exhaustion fails closed, and a Redis increment whose acknowledgement is
 ambiguous returns `OutcomeUnknown`; callers obtain a fresh ID on a later
 attempt rather than reconstructing or reusing the uncertain allocation.
+
+`COWChunkRevision` is scoped to one `ChunkID` rather than to the volume. Each
+ChunkID has an independent monotonic sequence in `1..INT64_MAX`; zero is
+invalid, gaps are allowed after failed or ambiguous allocation, and an
+allocated revision is never intentionally reused. Different ChunkIDs may use
+the same revision number. The typed immutable object identity is therefore
+`(ChunkID, COWChunkRevision)`, and COW object-key derivation can be performed
+without an inode or logical chunk index. The legacy
+`(InodeID, ChunkIndex, ChunkRevision)` object key remains the production data
+path until #317 performs the authority/identity cutover.
+
+`COWChunkHead{revision,size}` is the complete typed state for one ChunkID.
+Both fields participate in equality and compare-and-swap. Ordinary rewrite
+publishes a newer revision under the same ChunkID. Boundary truncate is a
+specialized full-head CAS that preserves the revision and may only reduce the
+visible `size`; this makes `{R,S_old}` conflict with a stale writer after a
+successful `{R,S_new}` clamp even though both heads reference the same
+immutable object. Conditional erase likewise requires the complete expected
+head. These operations are mechanism-owned and do not join a FileMetadata
+transaction.
+
+Memory stores the typed COW head map and per-ChunkID revision counters behind
+its own `FiberMutex`, independent of `MemMetaStore::Transact()`. Redis stores
+each ChunkID head and revision counter under COW-private per-ID keys and uses
+its own backend executor/optimistic transaction for head CAS/erase. Per-ID
+keys keep unrelated ChunkIDs out of one Redis WATCH conflict domain. Redis
+codec and key construction remain private to the Redis COW adapter.
 
 The old `IMechanismPrivateTxn`, `MechanismPrivateTxnContext`, and
 `IChunkIndexTxn::PrivateMetadata()` cross-domain transaction seam does not
@@ -102,8 +133,12 @@ inside its independent domain.
 the mount's `ChunkMetadataPtr`. `cow::COWChunkMetadataBridge` is a
 stateless transitional adapter for the remaining legacy/common-authority
 transaction callbacks only. `VolumeImpl` owns and validates the private
-metadata capability at mount composition, and later typed COW metadata is
-injected directly into the COW runtime rather than through the bridge.
+metadata capability at mount composition. `ChunkFactory` narrows that
+mount-scoped capability to `COWChunkMetadata` and injects it directly into each
+`COWChunk` rather than through the bridge. During #316 the runtime retains this
+dependency for the later authority cutover but does not read, publish, clamp,
+or dual-write live state through it: common `SwordFsChunk` remains the only
+production authority until #317.
 #318/#319/#317 retire the bridge callbacks in stages and #320 removes the
 remaining surface.
 

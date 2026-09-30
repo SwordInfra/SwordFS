@@ -38,11 +38,12 @@ void AppendZeros(size_t len, folly::IOBuf *out) {
 }  // namespace
 
 COWChunk::COWChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t max_chunk_size,
-                   metadata::IMetaEngine *meta, storage::IDataEngine *data,
-                   std::optional<metadata::SwordFsChunk> published_chunk)
+                   metadata::cow::COWChunkMetadataPtr cow_metadata, metadata::IMetaEngine *meta,
+                   storage::IDataEngine *data, std::optional<metadata::SwordFsChunk> published_chunk)
     : Chunk(index),
       ino_(ino),
       max_chunk_size_(max_chunk_size),
+      cow_metadata_(std::move(cow_metadata)),
       meta_(meta),
       data_(data),
       published_chunk_(published_chunk) {

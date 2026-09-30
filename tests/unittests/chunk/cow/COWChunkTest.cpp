@@ -256,13 +256,15 @@ class ChunkTest : public ::testing::Test {
     data_ = InitializeRuntime();
     meta_ = dynamic_cast<MissingMetaEngine *>(swordfs::volume::VolumeImpl::Instance().meta_engine());
     ASSERT_NE(meta_, nullptr);
+    cow_metadata_ = std::make_shared<swordfs::metadata::MemCOWChunkMetadata>();
   }
 
   std::unique_ptr<COWChunk> MakeChunk(ChunkIndex index = 0) {
-    return std::make_unique<COWChunk>(
-        /*ino=*/42, index, kChunkTestSize, swordfs::volume::VolumeImpl::Instance().meta_engine(), data_, std::nullopt);
+    return std::make_unique<COWChunk>(/*ino=*/42, index, kChunkTestSize, cow_metadata_,
+                                      swordfs::volume::VolumeImpl::Instance().meta_engine(), data_, std::nullopt);
   }
 
+  std::shared_ptr<swordfs::metadata::MemCOWChunkMetadata> cow_metadata_;
   MissingMetaEngine *meta_ = nullptr;
   NullDataEngine *data_ = nullptr;
 };
@@ -406,6 +408,12 @@ TEST_F(ChunkTest, FactoryRejectsInvalidRuntimeCompositionBeforeLookup) {
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.message(), "ChunkFactory is not fully initialized");
 
+  swordfs::chunk::ChunkFactory wrong_cow_capability(swordfs::metadata::ChunkType::kCow, cow_metadata, meta_, data_,
+                                                    kChunkTestSize);
+  status = wrong_cow_capability.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.message(), "ChunkFactory COW metadata capability mismatch");
+
   auto slice_metadata = std::make_shared<swordfs::test::StubChunkMetadata>(swordfs::metadata::ChunkType::kChunkSlice);
   swordfs::chunk::ChunkFactory mismatched_metadata(swordfs::metadata::ChunkType::kCow, slice_metadata, meta_, data_,
                                                    kChunkTestSize);
@@ -462,7 +470,7 @@ TEST_F(ChunkTest, ReadRejectsInvalidOutputBuffersBeforeAccessingChunkState) {
 TEST_F(ChunkTest, WriteRejectsMalformedPublishedDescriptorBeforeHydration) {
   RunInTestFiber([&] {
     const SwordFsChunk malformed{.index = 0, .revision = 1, .size = kChunkTestSize + 1};
-    COWChunk chunk(/*ino=*/42, /*index=*/0, kChunkTestSize, meta_, data_, malformed);
+    COWChunk chunk(/*ino=*/42, /*index=*/0, kChunkTestSize, cow_metadata_, meta_, data_, malformed);
     const auto status = chunk.Write(/*offset=*/0, Buf("x"));
     EXPECT_FALSE(status.ok());
     EXPECT_NE(status.message().find("published chunk exceeds configured chunk size"), std::string::npos);
@@ -559,6 +567,25 @@ TEST_F(ChunkTest, SuccessfulFlushClearsPendingWritesAndSecondFlushIsNoOp) {
 
     EXPECT_TRUE(chunk->Flush().ok());
     EXPECT_EQ(data_->put_calls, 1);
+  });
+}
+
+TEST_F(ChunkTest, LegacyFlushRemainsSoleAuthorityWhileTypedCowCapabilityIsOnlyInjected) {
+  RunInTestFiber([&] {
+    auto chunk = MakeChunk();
+    ASSERT_TRUE(chunk->Write(0, Buf("hello")).ok());
+    ASSERT_TRUE(chunk->Flush().ok());
+
+    SwordFsChunk published;
+    ASSERT_TRUE(meta_->FindChunk(/*ino=*/42, /*index=*/0, &published).ok());
+    EXPECT_EQ(published.revision, 1U);
+    EXPECT_EQ(published.size, 5U);
+
+    swordfs::metadata::ChunkID first_chunk_id;
+    ASSERT_TRUE(cow_metadata_->AllocateChunkID(&first_chunk_id).ok());
+    EXPECT_EQ(first_chunk_id, swordfs::metadata::ChunkID(1));
+    swordfs::metadata::cow::COWChunkHead staged_head;
+    EXPECT_TRUE(cow_metadata_->GetHead(first_chunk_id, &staged_head).IsNotFound());
   });
 }
 

@@ -568,9 +568,14 @@ behind `IMetaEngine`: FileMetadata owns inode/namespace/EOF and the eventual
 `ChunkIndex -> ChunkID` reachability mapping, while the selected
 `ChunkMetadata` implementation owns mechanism state rooted at `ChunkID`.
 `ChunkID` is a strong volume-scoped identity that is stable for one attached
-chunk-state materialization and is never reused after detach. ChunkMetadata
-allocation and typed mutation do not participate in `MemMetaTxn` or
-`RedisMetaTxn`; Memory owns separate synchronization and Redis may share
+chunk-state materialization and is never reused after detach. Its numeric value
+is exposed only as a stable representation for persistence, typed key
+construction, and diagnostics. For COW, `COWChunkMetadata` now owns the staged
+`ChunkID -> COWChunkHead{revision,size}` model and an independent monotonic
+`COWChunkRevision` allocator per ChunkID. Full-head CAS compares revision and
+size; a retained-boundary clamp keeps the same revision and reduces only size.
+ChunkMetadata allocation and typed mutation do not participate in `MemMetaTxn`
+or `RedisMetaTxn`; Memory owns separate synchronization and Redis may share
 backend infrastructure without sharing a correctness transaction. The raw
 `IChunkIndexTxn` record operations that remain today are solely legacy
 `ChunkMetadataBridge` plumbing until the staged authority cutover removes
@@ -578,6 +583,14 @@ them. The implemented COW path is represented by the typed
 `COWChunkMetadata` root; Memory and Redis provide COW-specific backend
 implementations. Other chunk types remain unsupported until their own typed
 metadata roots exist rather than falling back to a generic backend capability.
+
+`ChunkFactory` narrows the mount-owned generic capability to
+`COWChunkMetadata` and passes that typed dependency into each `COWChunk`.
+During #316 the runtime retains the dependency but does not use it as live
+read/publication/truncate authority. Legacy `SwordFsChunk`, the common revision
+allocator, and `(InodeID, ChunkIndex, ChunkRevision)` object keys therefore
+remain the sole production path until #317; no shadow state or dual-write
+invariant is introduced.
 
 Each published chunk has a metadata descriptor:
 

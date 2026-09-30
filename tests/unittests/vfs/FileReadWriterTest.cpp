@@ -628,6 +628,7 @@ class FileReadWriterTest : public ::testing::Test {
     config.chunk_size = kChunkSize;
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
+    cow_metadata_ = std::make_shared<swordfs::metadata::MemCOWChunkMetadata>();
   }
 
   FileReadWriter Make(off_t file_size = 0) {
@@ -637,6 +638,7 @@ class FileReadWriterTest : public ::testing::Test {
 
   static constexpr size_t kChunkSize = kTestChunkSize;
   static constexpr InodeID kIno = 42;
+  std::shared_ptr<swordfs::metadata::MemCOWChunkMetadata> cow_metadata_;
   MockDataEngine *mock_data_ = nullptr;
   MockMetaEngine *mock_meta_ = nullptr;
 };
@@ -1033,7 +1035,7 @@ TEST_F(FileReadWriterTest, PersistedChunkReadErrorRollsBackPartialOutput) {
     mock_data_->get_error_payload = "partial";
     mock_data_->get_status = Status::IOError("injected data read failure");
 
-    swordfs::chunk::cow::COWChunk chunk(kIno, 0, kTestChunkSize, mock_meta_, mock_data_, published);
+    swordfs::chunk::cow::COWChunk chunk(kIno, 0, kTestChunkSize, cow_metadata_, mock_meta_, mock_data_, published);
 
     auto out = folly::IOBuf::create(68);
     std::memcpy(out->writableTail(), "keep", 4);
@@ -1054,7 +1056,7 @@ TEST_F(FileReadWriterTest, PersistedChunkZeroLengthReadIsNoOp) {
     published.size = 64;
     ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, published).ok());
 
-    swordfs::chunk::cow::COWChunk chunk(kIno, 0, kTestChunkSize, mock_meta_, mock_data_, published);
+    swordfs::chunk::cow::COWChunk chunk(kIno, 0, kTestChunkSize, cow_metadata_, mock_meta_, mock_data_, published);
 
     auto out = folly::IOBuf::copyBuffer("keep");
     ASSERT_TRUE(chunk.Read(16, 0, out.get()).ok());

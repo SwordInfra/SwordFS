@@ -22,7 +22,9 @@ flowchart LR
 | Directory entry | Name, child inode ID, child type | Namespace mapping; multiple entries may name one regular-file inode |
 | `SwordFsInode` | ID, attributes including size and `nlink`, parent ID, symlink target, ordered raw xattrs | Canonical inode attributes and raw xattrs; removing a name need not remove the inode |
 | `SwordFsChunk` | Index, revision, size; start offset is derived from `index * chunk_size` | Current shared publication head for one logical chunk; `revision`/`size` remain transitional under #312 |
-| `ChunkID` | Strong opaque volume-scoped identifier | Identifies one attached mechanism-owned chunk-state materialization; stable while attached and never reused after detach |
+| `ChunkID` | Strong numeric volume-scoped identifier | Identifies one attached mechanism-owned chunk-state materialization; stable while attached and never reused after detach; numeric value is representation only |
+| `COWChunkRevision` | Strong COW-private per-ChunkID revision | Identifies one immutable COW object version inside a ChunkID; independently monotonic per ChunkID |
+| `COWChunkHead` | COW-private revision and valid-prefix size | Complete typed CAS identity for the staged `ChunkID -> COWChunkHead` model; not production authority until #317 |
 | Orphan candidate | Inode ID and cleanup marker | Last-link removal recorded while the live inode still exists |
 | `ReclaimWork` | Inode ID and opaque chunk-type-private payload | Replaces live inode/chunk metadata atomically at reclaim preparation |
 | `PendingDelete` | Opaque queue ID and chunk-type-private payload | Best-effort cleanup candidate whose physical identity is validated by the selected chunk-type implementation |
@@ -42,7 +44,11 @@ COW) says which immutable object version backs that state. FileMetadata will
 eventually own only `ChunkIndex -> ChunkID`; selected ChunkMetadata owns the
 typed state behind ChunkID. #392 introduces the common ChunkID identity and
 independent ChunkMetadata domain while the current `SwordFsChunk` descriptor
-remains production authority until the later cutover.
+remains production authority until the later cutover. #316 adds the typed COW
+state behind that boundary: per-ChunkID `COWChunkRevision` allocation and
+`COWChunkHead{revision,size}` full-head CAS. The numeric ChunkID value is
+intentionally available for persistence/key encoding and diagnostics, but its
+number does not encode a revision, generation, or mechanism-specific layout.
 
 For the current `cow` mechanism, the object key is
 `<inode>/<chunk-index>/<revision>`. The common-head `revision` is therefore
@@ -51,7 +57,10 @@ immutable physical object revision; gaps are valid. That physical meaning is
 specific to the transitional COW model and is not part of #312's
 target mechanism-neutral common contract. Each volume needs an isolated
 bucket/prefix because the current derived object key does not include a volume
-name.
+name. #316 also defines the target typed COW object identity as
+`(ChunkID, COWChunkRevision)` and exposes object-key derivation from that pair;
+the production read/write path deliberately keeps using the legacy key until
+#317 switches authority coherently rather than dual-writing both identities.
 
 `SwordFsVolume` persists data-engine identity separately from the engine-specific
 bucket/location string. Format derives the identity from the current CLI input;

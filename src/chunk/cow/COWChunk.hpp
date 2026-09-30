@@ -10,6 +10,7 @@
 
 #include "chunk/Chunk.hpp"
 #include "chunk/cow/WriteBuf.hpp"
+#include "metadata/cow/COWChunkMetadata.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "utils/Synchronization.hpp"
@@ -34,8 +35,9 @@ class COWChunk final : public Chunk {
     kClean,
   };
 
-  COWChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t max_chunk_size, metadata::IMetaEngine *meta,
-           storage::IDataEngine *data, std::optional<metadata::SwordFsChunk> published_chunk);
+  COWChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t max_chunk_size,
+           metadata::cow::COWChunkMetadataPtr cow_metadata, metadata::IMetaEngine *meta, storage::IDataEngine *data,
+           std::optional<metadata::SwordFsChunk> published_chunk);
 
   utils::Status Read(size_t offset, size_t len, folly::IOBuf *out) const override;
   utils::Status Write(size_t offset, const folly::IOBuf &data) override;
@@ -56,6 +58,7 @@ class COWChunk final : public Chunk {
   std::shared_ptr<WriteBuf> wb_;
   std::shared_ptr<WriteBuf> flushing_wb_;
   State state_ = State::kDirty;
+  metadata::cow::COWChunkMetadataPtr cow_metadata_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
   std::optional<metadata::SwordFsChunk> published_chunk_;
