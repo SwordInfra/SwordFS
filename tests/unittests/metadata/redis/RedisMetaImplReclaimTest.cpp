@@ -421,7 +421,7 @@ FIBER_TEST_F(RedisMetaImplTest, VisitorArgumentsAreValidated) {
   EXPECT_FALSE(PendingReclaim(kRootInodeId).has_value());
 }
 
-FIBER_TEST_F(RedisMetaImplTest, ReclaimVisitorsReturnSnapshotsAndPropagateAbort) {
+FIBER_TEST_F(RedisMetaImplTest, ReclaimVisitorsVisitCurrentCandidatesAndPropagateAbort) {
   SwordFsInode first;
   SwordFsInode second;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "first", 0644, &first).ok());
@@ -465,6 +465,41 @@ FIBER_TEST_F(RedisMetaImplTest, ReclaimVisitorsReturnSnapshotsAndPropagateAbort)
   });
   EXPECT_EQ(pending_abort.ToErrno(), EIO);
   EXPECT_EQ(visited, (std::vector<InodeID>{second.ino}));
+}
+
+FIBER_TEST_F(RedisMetaImplTest, OrphanVisitorResumesAfterAbortWithoutRevisitingCompletedCandidates) {
+  SwordFsInode first;
+  SwordFsInode second;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "resume-first", 0644, &first).ok());
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "resume-second", 0644, &second).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "resume-first").ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "resume-second").ok());
+
+  std::vector<InodeID> visited;
+  const auto interrupted = impl_->VisitOrphanCandidates([&](InodeID ino) {
+    visited.push_back(ino);
+    return ino == first.ino ? Status::OK() : Status::Busy("pause orphan scan");
+  });
+  EXPECT_EQ(interrupted.ToErrno(), EBUSY);
+  EXPECT_EQ(visited, (std::vector<InodeID>{first.ino, second.ino}));
+
+  visited.clear();
+  ASSERT_TRUE(impl_
+                  ->VisitOrphanCandidates([&](InodeID ino) {
+                    visited.push_back(ino);
+                    return Status::OK();
+                  })
+                  .ok());
+  EXPECT_EQ(visited, (std::vector<InodeID>{second.ino}));
+
+  visited.clear();
+  ASSERT_TRUE(impl_
+                  ->VisitOrphanCandidates([&](InodeID ino) {
+                    visited.push_back(ino);
+                    return Status::OK();
+                  })
+                  .ok());
+  EXPECT_EQ(visited, (std::vector<InodeID>{first.ino, second.ino}));
 }
 
 FIBER_TEST_F(RedisMetaImplTest, PendingDeleteBatchBoundsVisitsAndContinuesWhileQueueMutates) {

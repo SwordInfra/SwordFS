@@ -84,10 +84,12 @@ void RunFuseInFiber(fuse_req_t req, Fn &&fn) {
 }
 
 template <typename ReplyFn>
-void PublishRetainedLookup(metadata::InodeID ino, ReplyFn &&reply) {
+bool PublishRetainedLookup(metadata::InodeID ino, ReplyFn &&reply) {
   if (std::forward<ReplyFn>(reply)() != 0) {
     ::swordfs::vfs::FuseInodeCache::Instance().Forget(ino, 1);
+    return false;
   }
+  return true;
 }
 
 void RollbackRetainedLookups(const std::vector<fuse_ino_t> &inos) {
@@ -740,8 +742,21 @@ void VfsHookFactory::SwordFsLseek(fuse_req_t req, fuse_ino_t ino, off_t off, int
 void VfsHookFactory::SwordFsTmpfile(fuse_req_t req, fuse_ino_t parent, mode_t mode, struct fuse_file_info *fi) {
   RunFuseInFiber(req, [req, parent, mode, fi = *fi]() mutable {
     SetRequestContext(req);
-    auto status = VfsImpl::TmpFile(parent, mode, &fi);
-    fuse_reply_err(req, status.ToErrno());
+    fuse_entry_param entry{};
+    auto status = VfsImpl::TmpFile(parent, mode, &entry, &fi);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    if (!PublishRetainedLookup(entry.ino, [req, &entry, &fi] { return fuse_reply_create(req, &entry, &fi); })) {
+      // A failed CREATE-style reply publishes neither the provisional lookup
+      // reference nor the fh to the kernel. PublishRetainedLookup already
+      // rolled back the former; release the latter while leaving the
+      // committed anonymous orphan to normal reclamation. No user I/O can
+      // precede a failed reply, and FileHandle::Release unregisters the local
+      // handle even if its close status is non-OK, so only ownership matters.
+      (void)VfsImpl::Release(entry.ino, fi.fh);
+    }
   });
 }
 
