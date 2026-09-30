@@ -13,7 +13,7 @@
 #include <string>
 #include <string_view>
 
-#include "metadata/IPrivateMetadata.hpp"
+#include "metadata/ChunkMetadata.hpp"
 #include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
 
@@ -121,13 +121,13 @@ class VolumeImpl {
  private:
   swordfs::metadata::SwordFsVolume config_;
   // Metadata backends retain a non-owning pointer to the bridge. Declare the
-  // private capability and bridge before the engines so normal reverse member
+  // ChunkMetadata capability and bridge before the engines so normal reverse member
   // destruction also keeps the bridge alive through metadata-engine teardown.
-  swordfs::metadata::MechanismPrivateStorePtr private_metadata_;
+  swordfs::metadata::ChunkMetadataPtr chunk_metadata_;
   std::unique_ptr<swordfs::chunk::internal::ChunkMetadataBridge> chunk_metadata_bridge_;
   std::unique_ptr<swordfs::metadata::IMetaEngine> meta_engine_;
   std::unique_ptr<swordfs::storage::IDataEngine> data_engine_;
-  // Runtime factory/GC borrow the engines and private store for the mounted
+  // Runtime factory/GC borrow the engines and ChunkMetadata for the mounted
   // volume lifetime, so they are destroyed first.
   std::unique_ptr<swordfs::chunk::ChunkFactory> chunk_factory_;
   std::unique_ptr<swordfs::chunk::internal::ChunkGcWorker> chunk_gc_worker_;

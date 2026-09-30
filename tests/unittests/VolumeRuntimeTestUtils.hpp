@@ -10,7 +10,7 @@
 
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
-#include "metadata/mem/MemPrivateMetadataStore.hpp"
+#include "metadata/mem/MemCOWChunkMetadata.hpp"
 #include "metadata/types/Volume.hpp"
 #include "storage/DataEngineRegistry.hpp"
 #include "storage/IDataEngine.hpp"
@@ -26,6 +26,23 @@ inline std::unique_ptr<metadata::IMetaEngine> pending_meta_engine;
 inline std::unique_ptr<storage::IDataEngine> pending_data_engine;
 inline metadata::SwordFsVolume pending_volume;
 inline storage::DataEngineOptions pending_data_options;
+
+class StubChunkMetadata final : public metadata::ChunkMetadata {
+ public:
+  explicit StubChunkMetadata(metadata::ChunkType chunk_type) : chunk_type_(chunk_type) {
+  }
+
+  metadata::ChunkType Type() const override {
+    return chunk_type_;
+  }
+
+  utils::Status AllocateChunkID(metadata::ChunkID *) override {
+    return utils::Status::NotSupported("stub chunk metadata does not allocate IDs");
+  }
+
+ private:
+  metadata::ChunkType chunk_type_;
+};
 
 inline utils::Status CreatePendingMetaEngine(std::string_view, std::string_view,
                                              std::unique_ptr<metadata::IMetaEngine> *out) {
@@ -80,16 +97,18 @@ class ConfiguredMetaEngine final : public Base {
     return LoadConfiguredTestVolume(out);
   }
 
-  utils::Status OpenPrivateMetadataStore(metadata::ChunkType mechanism,
-                                         metadata::MechanismPrivateStorePtr *out) override {
-    auto status = Base::OpenPrivateMetadataStore(mechanism, out);
+  utils::Status OpenChunkMetadata(metadata::ChunkType chunk_type, metadata::ChunkMetadataPtr *out) override {
+    auto status = Base::OpenChunkMetadata(chunk_type, out);
     if (status.ToErrno() != ENOSYS) {
       return status;
     }
     if (out == nullptr) {
-      return utils::Status::InvalidArgument("private metadata store output is null");
+      return utils::Status::InvalidArgument("chunk metadata output is null");
     }
-    *out = std::make_shared<metadata::MemPrivateMetadataStore>(mechanism);
+    if (chunk_type != metadata::ChunkType::kCow) {
+      return utils::Status::NotSupported("test chunk metadata type is not implemented");
+    }
+    *out = std::make_shared<metadata::MemCOWChunkMetadata>();
     return utils::Status::OK();
   }
 

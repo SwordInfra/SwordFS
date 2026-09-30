@@ -50,9 +50,9 @@ MemMetaImpl::~MemMetaImpl() {
   utils::ExpectInThreadDomain();
 }
 
-Status MemMetaImpl::OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out) {
+Status MemMetaImpl::OpenChunkMetadata(ChunkType chunk_type, ChunkMetadataPtr *out) {
   utils::ExpectInThreadDomain();
-  return store_.OpenPrivateMetadataStore(mechanism, out);
+  return store_.OpenChunkMetadata(chunk_type, out);
 }
 
 Status MemMetaImpl::BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) {

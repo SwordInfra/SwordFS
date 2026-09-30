@@ -15,7 +15,7 @@ not by itself establish support for every Cluster deployment configuration.
 | `format` | String | Serialized volume configuration |
 | `next_ino` | Integer string | Inode allocator |
 | `next_chunk_revision` | Integer string | Volume-wide logical publication-generation allocator |
-| `private_sequence:<mechanism-key>:<sequence-id>` | Integer string | Mechanism-private monotonic identity allocator; `<sequence-id>` is a stable compile-time discriminator |
+| `next_chunk_id` | Integer string | Volume-scoped monotonic `ChunkID` allocator |
 | `inode_count` | Integer string | Advisory legacy inode metric; never an authoritative filesystem invariant |
 | `inode:<ino>` | String | Canonical serialized `SwordFsInode`, including ordered raw xattrs |
 | `dir:<parent_ino>` | Hash | Name → child type and inode ID |
@@ -33,11 +33,12 @@ child inode. Full attributes remain canonical in the inode record. A missing
 directory Hash represents an empty directory when its directory inode exists.
 
 A chunk Hash represents one authoritative logical head per index. It contains
-neither mutable write buffers nor uploading records. The selected chunk-type implementation
-owns any chunk-internal index in its private key space. Its metadata bridge
-may read or change multiple private fields in the same WATCH/EXEC
-transaction as the logical head and inode. The common metadata engine never
-interprets those fields. For the currently selectable `cow` mechanism,
+neither mutable write buffers nor uploading records. During the staged #312
+cutover, the legacy metadata bridge may still read or change private-index
+fields in the same WATCH/EXEC transaction as the logical head and inode. That
+raw private index is transitional common-authority plumbing, not the target
+typed ChunkMetadata API. Final mechanism-owned state is rooted at `ChunkID`
+and uses its own consistency domain. For the currently selectable `cow` mechanism,
 the head generation is also the immutable object revision and the physical
 key derives from inode, index, and revision. That mechanism has no additional
 durable private fragment records.
@@ -55,23 +56,22 @@ Private-index Redis keys do not embed the human-readable mechanism name.
 `ChunkType` through `ChunkTypeKey()`; in the
 current beta layout the stable enum values are encoded as decimal strings
 (`1` = `cow`, `2` = `chunk_slice`, `3` = `redis_cache`). The trailing
-`<hash>` and its fields remain mechanism-owned schema. Those strings are a
-Redis adapter detail: mechanism/session code consumes typed private-store
-interfaces and never constructs this layout directly.
+`<hash>` and its fields remain legacy bridge schema. New mechanism/session
+code consumes typed ChunkMetadata interfaces and never constructs this layout
+directly.
 
-Private sequence keys use the same mechanism namespace. `<sequence-id>` is a
-stable numeric discriminator chosen by the owning mechanism at compile time;
-it is not a runtime string name. The Redis adapter uses one atomic Lua command
-that rejects a negative persisted counter before mutation and otherwise
-executes Redis `INCR`. Malformed values and signed-64-bit overflow are Redis
-command errors and likewise leave the counter unchanged. SwordFS therefore
-accepts successful values only in `1..INT64_MAX`, matching the Memory backend
-without allowing repeated retries of corrupt negative state to walk back into
-the valid range. The key is created lazily on first use. A lost
-acknowledgement after the script may have executed is `OutcomeUnknown`; a
-later allocation obtains a fresh value and never tries to reconstruct/reuse
-the lost identity. The legacy `next_chunk_revision` allocator remains
-separate while the current COW writer still depends on it.
+`next_chunk_id` is mechanism-neutral and volume-scoped. The Redis
+ChunkMetadata adapter uses one atomic Lua command that rejects a negative
+persisted counter before mutation and otherwise executes Redis `INCR`.
+Malformed values and signed-64-bit overflow are Redis command errors and
+likewise leave the counter unchanged. SwordFS accepts successful ChunkID values
+only in `1..INT64_MAX`, matching the Memory backend. The counter is created
+lazily by the first allocation rather than by the FileMetadata format
+transaction. A lost acknowledgement
+after the script may have executed is `OutcomeUnknown`; a later allocation
+obtains a fresh value and never reconstructs or reuses the lost identity. The
+legacy `next_chunk_revision` allocator remains separate while the current COW
+writer still depends on it.
 
 Frozen reclaim and pending-delete records carry opaque payloads.
 The common queue validates its envelope and Hash field identity; only the
@@ -138,27 +138,26 @@ the inode key remains the namespace/reclaim serialization point, while an
 unrelated inode's reclaim field must not force a retry. All reads must precede
 the first queued write; the wrapper rejects reads after writes.
 
-The typed private-metadata capability layer does not expose `RedisKvTxn`, Redis
-keys, fields, or encoded values to mechanism code. A Redis mechanism adapter
-binds its typed transaction interface into the metadata transaction's private
-capability context and performs the necessary `HGET`/`HSCAN`/`HSET`/`HDEL`
-operations at this boundary. Transactional private reads still finish during
-the watched read phase before the first queued write, preserving
-`RedisKvTxn`'s WATCH/MULTI discipline. The capability context itself has no
-second Redis commit step: a rejected metadata callback discards all queued
-private/common commands together, while a successful callback leaves
-`RedisKvTxn::Commit()` as the only backend commit boundary. Since Redis can
-partially apply a failed `EXEC`, typed mechanism protocols must still order
-durable authority so a later common write cannot become readable without the
-private state it needs.
+Typed `ChunkMetadata` is an independent semantic and atomicity domain. Its
+mechanism-specific APIs are keyed by `ChunkID`; they do not expose
+`RedisKvTxn`, Redis keys, fields, or encoded values to callers, and they must
+not be bound into `RedisMetaTxn` or committed through the FileMetadata
+`WATCH`/`MULTI`/`EXEC` lifecycle. A Redis ChunkMetadata implementation may
+reuse `RedisBackendContext`, executors, pools, and the same physical Redis
+deployment, but it owns its own commands and any mechanism-local transaction.
+Cross-domain correctness is therefore expressed by the higher-level
+publication/reclaim protocol and its ordering/reconciliation rules, not by a
+shared Redis transaction.
 
-`IChunkIndexTxn` currently remains as a transitional string adapter for the
-existing common-authority implementation. No new production mechanism/session
-consumer should be built on it. #316 and #270 replace that transitional use
-with their own typed adapters while keeping Redis encoding here at the backend
-boundary. The current `cow` chunk-type implementation has no additional durable
-private records in #315, so this stage changes capability plumbing only and
-does not change COW read/publication/truncate/reclaim authority.
+`IChunkIndexTxn` currently remains only as a transitional raw string adapter
+for the legacy `ChunkMetadataBridge` while `SwordFsChunk` remains production
+authority. Those bridge reads/writes still execute inside the existing
+FileMetadata transaction because they are part of the old common-head
+protocol; this is not a typed ChunkMetadata transaction seam and no new typed
+mechanism state may use it. #318/#319/#317 retire the bridge callbacks as their
+authorities move, and #320 removes the remaining raw bridge surface. #316 and
+#270 add mechanism-owned typed metadata behind the independent ChunkMetadata
+boundary instead of extending `IChunkIndexTxn`.
 
 `RedisKvTxn` borrows its transaction connection from the shared redis++ pool
 with `transaction(false, false)`. The `Redis` view returned by

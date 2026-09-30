@@ -20,7 +20,7 @@
 #include "chunk/cow/COWCleanup.hpp"
 #include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkMetadataBridge.hpp"
-#include "metadata/IPrivateMetadata.hpp"
+#include "metadata/ChunkMetadata.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/redis/RedisMetaImpl.hpp"
@@ -91,8 +91,8 @@ class RedisMetaImplTest : public ::testing::Test {
     volume.chunk_size = 4096;
     status = impl_->FormatVolume(volume);
     ASSERT_TRUE(status.ok()) << status.message();
-    swordfs::metadata::MechanismPrivateStorePtr private_metadata;
-    status = impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkType::kCow, &private_metadata);
+    swordfs::metadata::ChunkMetadataPtr chunk_metadata;
+    status = impl_->OpenChunkMetadata(swordfs::metadata::ChunkType::kCow, &chunk_metadata);
     ASSERT_TRUE(status.ok()) << status.message();
     status = swordfs::chunk::internal::CreateChunkMetadataBridge(swordfs::metadata::ChunkType::kCow, &bridge_);
     ASSERT_TRUE(status.ok()) << status.message();

@@ -26,7 +26,6 @@
 #include "chunk/cow/WriteBuf.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
-#include "metadata/mem/MemPrivateMetadataStore.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Status.hpp"
 #include "volume/VolumeImpl.hpp"
@@ -382,21 +381,39 @@ TEST_F(ChunkTest, FactoryOpenDistinguishesMissingExistingAndCreate) {
 
 TEST_F(ChunkTest, FactoryRejectsInvalidRuntimeCompositionBeforeLookup) {
   std::shared_ptr<Chunk> chunk;
-  swordfs::chunk::ChunkFactory missing_private(swordfs::metadata::ChunkType::kCow, nullptr, meta_, data_,
-                                               kChunkTestSize);
-  auto status = missing_private.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
+  auto cow_metadata = std::make_shared<swordfs::test::StubChunkMetadata>(swordfs::metadata::ChunkType::kCow);
+
+  swordfs::chunk::ChunkFactory missing_meta(swordfs::metadata::ChunkType::kCow, cow_metadata, nullptr, data_,
+                                            kChunkTestSize);
+  auto status = missing_meta.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.message(), "ChunkFactory is not fully initialized");
 
-  auto slice_private =
-      std::make_shared<swordfs::metadata::MemPrivateMetadataStore>(swordfs::metadata::ChunkType::kChunkSlice);
-  swordfs::chunk::ChunkFactory mismatched_private(swordfs::metadata::ChunkType::kCow, slice_private, meta_, data_,
-                                                  kChunkTestSize);
-  status = mismatched_private.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
+  swordfs::chunk::ChunkFactory missing_data(swordfs::metadata::ChunkType::kCow, cow_metadata, meta_, nullptr,
+                                            kChunkTestSize);
+  status = missing_data.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
   EXPECT_FALSE(status.ok());
-  EXPECT_EQ(status.message(), "ChunkFactory private metadata chunk type mismatch");
+  EXPECT_EQ(status.message(), "ChunkFactory is not fully initialized");
 
-  swordfs::chunk::ChunkFactory unsupported(swordfs::metadata::ChunkType::kChunkSlice, std::move(slice_private), meta_,
+  swordfs::chunk::ChunkFactory missing_metadata(swordfs::metadata::ChunkType::kCow, nullptr, meta_, data_,
+                                                kChunkTestSize);
+  status = missing_metadata.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.message(), "ChunkFactory is not fully initialized");
+
+  swordfs::chunk::ChunkFactory missing_chunk_size(swordfs::metadata::ChunkType::kCow, cow_metadata, meta_, data_, 0);
+  status = missing_chunk_size.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.message(), "ChunkFactory is not fully initialized");
+
+  auto slice_metadata = std::make_shared<swordfs::test::StubChunkMetadata>(swordfs::metadata::ChunkType::kChunkSlice);
+  swordfs::chunk::ChunkFactory mismatched_metadata(swordfs::metadata::ChunkType::kCow, slice_metadata, meta_, data_,
+                                                   kChunkTestSize);
+  status = mismatched_metadata.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.message(), "ChunkFactory chunk metadata type mismatch");
+
+  swordfs::chunk::ChunkFactory unsupported(swordfs::metadata::ChunkType::kChunkSlice, std::move(slice_metadata), meta_,
                                            data_, kChunkTestSize);
   status = unsupported.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
   EXPECT_EQ(status.ToErrno(), ENOSYS);

@@ -195,11 +195,8 @@ class MemMetaTxn : public IChunkIndexTxn {
   Status ListPendingDeletes(std::vector<PendingDelete> &out);
   Status CompletePendingDelete(std::string_view key);
 
-  // Transaction-scoped, mechanism-private index operations. Writes are staged
-  // until MemMetaStore::Transact commits a successful callback.
-  MechanismPrivateTxnContext &PrivateMetadata() override {
-    return private_metadata_txn_;
-  }
+  // Transitional raw operations used only by ChunkMetadataBridge. Writes are
+  // staged until the enclosing FileMetadata transaction commits.
   Status Read(std::string_view hash, std::string_view field, std::string *value) override;
   Status Scan(std::string_view hash, std::vector<std::pair<std::string, std::string>> *values) override;
   Status Put(std::string_view hash, std::string_view field, std::string_view value) override;
@@ -214,7 +211,7 @@ class MemMetaTxn : public IChunkIndexTxn {
     std::optional<std::string> value;
   };
   std::string PrivateHash(std::string_view hash) const;
-  void CommitPrivateMetadata();
+  void CommitLegacyBridgeWrites();
 
   // Only MemMetaStore::Transact() may begin a transaction.
   explicit MemMetaTxn(MemMetaStore *store);
@@ -237,7 +234,6 @@ class MemMetaTxn : public IChunkIndexTxn {
  private:
   // Non-owning; the store outlives every transaction.
   MemMetaStore *store_;
-  MechanismPrivateTxnContext private_metadata_txn_;
   std::vector<IndexWrite> index_writes_;
 };
 

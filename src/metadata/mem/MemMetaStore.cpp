@@ -4,16 +4,25 @@
 #include "metadata/mem/MemMetaStore.hpp"
 
 #include "chunk/internal/ChunkMetadataBridge.hpp"
-#include "metadata/mem/MemPrivateMetadataStore.hpp"
+#include "metadata/mem/MemCOWChunkMetadata.hpp"
 
 namespace swordfs::metadata {
 
-utils::Status MemMetaStore::OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out) {
+utils::Status MemMetaStore::OpenChunkMetadata(ChunkType chunk_type, ChunkMetadataPtr *out) {
   if (out == nullptr) {
-    return utils::Status::InvalidArgument("private metadata store output is null");
+    return utils::Status::InvalidArgument("chunk metadata output is null");
   }
-  private_metadata_ = std::make_shared<MemPrivateMetadataStore>(mechanism);
-  *out = private_metadata_;
+  if (chunk_type != ChunkType::kCow) {
+    return utils::Status::NotSupported("chunk metadata type is not implemented: " +
+                                       std::string(ChunkTypeName(chunk_type)));
+  }
+  if (chunk_metadata_ != nullptr) {
+    *out = chunk_metadata_;
+    return utils::Status::OK();
+  }
+  chunk_type_ = chunk_type;
+  chunk_metadata_ = std::make_shared<MemCOWChunkMetadata>();
+  *out = chunk_metadata_;
   return utils::Status::OK();
 }
 

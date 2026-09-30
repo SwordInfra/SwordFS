@@ -16,7 +16,6 @@
 #include "VolumeRuntimeTestUtils.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
-#include "metadata/mem/MemPrivateMetadataStore.hpp"
 #include "metadata/mem/VolumeFile.hpp"
 #include "storage/IDataEngine.hpp"
 #include "volume/VolumeImpl.hpp"
@@ -59,28 +58,28 @@ class NoopDataEngine final : public swordfs::storage::IDataEngine {
   }
 };
 
-class InvalidPrivateMetadataEngine final : public swordfs::metadata::MemMetaImpl {
+class InvalidChunkMetadataEngine final : public swordfs::metadata::MemMetaImpl {
  public:
   enum class Result {
     kNullCapability,
     kMismatchedChunkType,
   };
 
-  explicit InvalidPrivateMetadataEngine(Result result) : result_(result) {
+  explicit InvalidChunkMetadataEngine(Result result) : result_(result) {
   }
 
   Status LoadVolume(SwordFsVolume *out) override {
     return swordfs::test::LoadConfiguredTestVolume(out);
   }
 
-  Status OpenPrivateMetadataStore(ChunkType, swordfs::metadata::MechanismPrivateStorePtr *out) override {
+  Status OpenChunkMetadata(ChunkType, swordfs::metadata::ChunkMetadataPtr *out) override {
     if (out == nullptr) {
-      return Status::InvalidArgument("private metadata store output is null");
+      return Status::InvalidArgument("chunk metadata output is null");
     }
     if (result_ == Result::kNullCapability) {
       out->reset();
     } else {
-      *out = std::make_shared<swordfs::metadata::MemPrivateMetadataStore>(ChunkType::kChunkSlice);
+      *out = std::make_shared<swordfs::test::StubChunkMetadata>(ChunkType::kChunkSlice);
     }
     return Status::OK();
   }
@@ -307,23 +306,23 @@ TEST_F(VolumeImplTest, MountUsesPersistedChunkTypeAndRejectsUnimplementedType) {
   EXPECT_TRUE(unsupported.LoadFrom(unsupported_options).ToErrno() == ENOSYS);
 }
 
-TEST_F(VolumeImplTest, MountRejectsInvalidPrivateMetadataCapability) {
+TEST_F(VolumeImplTest, MountRejectsInvalidChunkMetadataCapability) {
   swordfs::test::RegisterTestVolumeEngines();
-  for (const auto result : {InvalidPrivateMetadataEngine::Result::kNullCapability,
-                            InvalidPrivateMetadataEngine::Result::kMismatchedChunkType}) {
+  for (const auto result : {InvalidChunkMetadataEngine::Result::kNullCapability,
+                            InvalidChunkMetadataEngine::Result::kMismatchedChunkType}) {
     SCOPED_TRACE(static_cast<int>(result));
-    const auto volume_name = makeVolumeName("invalid-private-metadata");
+    const auto volume_name = makeVolumeName("invalid-chunk-metadata");
     swordfs::test::pending_volume = SwordFsVolume{
         .name = volume_name,
         .chunk_type = ChunkType::kCow,
     };
-    swordfs::test::pending_meta_engine = std::make_unique<InvalidPrivateMetadataEngine>(result);
+    swordfs::test::pending_meta_engine = std::make_unique<InvalidChunkMetadataEngine>(result);
     swordfs::test::pending_data_engine.reset();
 
     VolumeImpl volume;
     const auto status = volume.LoadFrom(swordfs::test::MakeTestMountOptions(volume_name));
     EXPECT_EQ(status.ToErrno(), EINVAL);
-    EXPECT_EQ(status.message(), "private metadata store chunk type mismatch");
+    EXPECT_EQ(status.message(), "chunk metadata type mismatch");
   }
 }
 

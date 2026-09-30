@@ -66,16 +66,17 @@ VolumeImpl &VolumeImpl::Instance() {
 }
 
 Status VolumeImpl::ComposeChunkMetadata() {
-  private_metadata_.reset();
+  chunk_metadata_.reset();
   chunk_metadata_bridge_.reset();
-  auto status = meta_engine_->OpenPrivateMetadataStore(config_.chunk_type, &private_metadata_);
+  auto status = meta_engine_->OpenChunkMetadata(config_.chunk_type, &chunk_metadata_);
   if (!status.ok()) {
     return status;
   }
-  // Mount composition owns capability identity/lifetime. Keep the transaction
-  // bridge stateless so typed COW metadata can flow directly to the runtime.
-  if (private_metadata_ == nullptr || private_metadata_->mechanism() != config_.chunk_type) {
-    return Status::InvalidArgument("private metadata store chunk type mismatch");
+  // Mount composition owns typed metadata identity/lifetime. Keep the legacy
+  // transaction bridge stateless and outside the independent ChunkMetadata
+  // domain.
+  if (chunk_metadata_ == nullptr || chunk_metadata_->Type() != config_.chunk_type) {
+    return Status::InvalidArgument("chunk metadata type mismatch");
   }
   status = chunk::internal::CreateChunkMetadataBridge(config_.chunk_type, &chunk_metadata_bridge_);
   if (!status.ok()) {
@@ -87,10 +88,10 @@ Status VolumeImpl::ComposeChunkMetadata() {
 Status VolumeImpl::ComposeChunkRuntime() {
   chunk_factory_.reset();
   chunk_gc_worker_.reset();
-  if (meta_engine_ == nullptr || private_metadata_ == nullptr || chunk_metadata_bridge_ == nullptr) {
+  if (meta_engine_ == nullptr || chunk_metadata_ == nullptr || chunk_metadata_bridge_ == nullptr) {
     return Status::Internal("chunk runtime requires composed metadata capabilities");
   }
-  chunk_factory_ = std::make_unique<chunk::ChunkFactory>(config_.chunk_type, private_metadata_, meta_engine_.get(),
+  chunk_factory_ = std::make_unique<chunk::ChunkFactory>(config_.chunk_type, chunk_metadata_, meta_engine_.get(),
                                                          data_engine_.get(), config_.chunk_size);
   if (data_engine_ != nullptr) {
     chunk_gc_worker_ = std::make_unique<chunk::internal::ChunkGcWorker>(config_.chunk_type, config_.chunk_size,
@@ -215,7 +216,7 @@ void VolumeImpl::Shutdown() {
   data_engine_.reset();
   meta_engine_.reset();
   chunk_metadata_bridge_.reset();
-  private_metadata_.reset();
+  chunk_metadata_.reset();
 }
 
 void VolumeImpl::StartRuntimeServices() {

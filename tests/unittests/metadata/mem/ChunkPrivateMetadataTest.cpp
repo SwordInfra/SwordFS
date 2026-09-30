@@ -1,9 +1,10 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// The public inode/chunk head and mechanism-private index participate in the
-// same metadata operation. A deliberately rejecting participant verifies that
-// its staged index writes and the public mutation are both left untouched.
+// Transitional bridge coverage only: the current public SwordFsChunk head and
+// legacy raw bridge index still participate in one FileMetadata operation until
+// #317/#318/#319 retire those callbacks. Typed ChunkMetadata is intentionally
+// absent from these transactions.
 
 #include <gtest/gtest.h>
 #include <sys/stat.h>
@@ -18,8 +19,8 @@
 #include "FiberTest.hpp"
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/IChunkIndexTxn.hpp"
+#include "metadata/mem/MemCOWChunkMetadata.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
-#include "metadata/mem/MemPrivateMetadataStore.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -31,32 +32,6 @@ std::string FragmentsHash(InodeID file_ino) {
 std::string FragmentField(const SwordFsChunk &head, unsigned part) {
   return std::to_string(head.index) + ":" + std::to_string(head.revision) + ":" + std::to_string(part);
 }
-
-class RecordingTypedTxn final : public IMechanismPrivateTxn {
- public:
-  static constexpr ChunkType kMechanism = ChunkType::kChunkSlice;
-
-  void Stage(uint64_t value) {
-    staged_ = value;
-  }
-  size_t commit_count() const {
-    return commit_count_;
-  }
-  const std::optional<uint64_t> &committed() const {
-    return committed_;
-  }
-
- private:
-  void Commit() noexcept override {
-    ++commit_count_;
-    committed_ = staged_;
-  }
-
- private:
-  std::optional<uint64_t> staged_;
-  std::optional<uint64_t> committed_;
-  size_t commit_count_ = 0;
-};
 
 class RecordingBridge final : public chunk::internal::ChunkMetadataBridge {
  public:
@@ -163,7 +138,7 @@ class RecordingBridge final : public chunk::internal::ChunkMetadataBridge {
 class ChunkPrivateMetadataTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    ASSERT_TRUE(store_.OpenPrivateMetadataStore(ChunkType::kChunkSlice, &private_metadata_).ok());
+    ASSERT_TRUE(store_.OpenChunkMetadata(ChunkType::kCow, &chunk_metadata_).ok());
     ASSERT_TRUE(store_.BindChunkMetadataBridge(&bridge_).ok());
     store_.SetChunkSize(128);
   }
@@ -194,7 +169,7 @@ class ChunkPrivateMetadataTest : public ::testing::Test {
   }
 
   RecordingBridge bridge_;
-  MechanismPrivateStorePtr private_metadata_;
+  ChunkMetadataPtr chunk_metadata_;
   MemMetaStore store_;
 };
 
@@ -211,8 +186,8 @@ FIBER_TEST(ChunkMetadataBridgeTest, FactoryValidatesConstructionAndCOWSnapshotOu
   ASSERT_NE(bridge, nullptr);
 
   MemMetaStore store;
-  MechanismPrivateStorePtr private_metadata;
-  ASSERT_TRUE(store.OpenPrivateMetadataStore(ChunkType::kCow, &private_metadata).ok());
+  ChunkMetadataPtr chunk_metadata;
+  ASSERT_TRUE(store.OpenChunkMetadata(ChunkType::kCow, &chunk_metadata).ok());
   const SwordFsChunk head{.index = 0, .revision = 1, .size = 64};
   const auto status =
       store.Transact([&](MemMetaTxn &txn) { return bridge->LoadPublished(txn, /*file_ino=*/42, head, nullptr); });
@@ -241,67 +216,36 @@ FIBER_TEST(MemMetaTxnBindingTest, ChunkMutationsFailClosedUntilBridgeIsBound) {
   EXPECT_FALSE(work.has_value());
 }
 
-FIBER_TEST_F(ChunkPrivateMetadataTest, BindingProvidesMechanismScopedRuntimeAndTransactionCapabilities) {
-  ASSERT_NE(private_metadata_, nullptr);
-  EXPECT_EQ(private_metadata_->mechanism(), ChunkType::kChunkSlice);
+FIBER_TEST_F(ChunkPrivateMetadataTest, ChunkIDAllocationIsIndependentOfLegacyFileMetadataRevisionTransactions) {
+  ASSERT_NE(chunk_metadata_, nullptr);
+  EXPECT_EQ(chunk_metadata_->Type(), ChunkType::kCow);
 
-  uint64_t private_revision = 0;
-  ASSERT_TRUE(
-      private_metadata_->AllocateSequence(PrivateSequenceTag<ChunkType::kChunkSlice, 31>{}, &private_revision).ok());
-  EXPECT_EQ(private_revision, 1U);
-
+  ChunkID first;
+  ChunkID second;
+  ASSERT_TRUE(chunk_metadata_->AllocateChunkID(&first).ok());
+  EXPECT_EQ(first, ChunkID(1));
   ChunkRevision legacy_revision = 0;
-  ASSERT_TRUE(store_
-                  .Transact([&](MemMetaTxn &txn) {
-                    EXPECT_EQ(txn.PrivateMetadata().mechanism(), ChunkType::kChunkSlice);
-                    return txn.AllocateChunkRevision(&legacy_revision);
-                  })
-                  .ok());
+  ASSERT_TRUE(store_.Transact([&](MemMetaTxn &txn) { return txn.AllocateChunkRevision(&legacy_revision); }).ok());
   EXPECT_EQ(legacy_revision, 1U);
 
-  ASSERT_TRUE(
-      private_metadata_->AllocateSequence(PrivateSequenceTag<ChunkType::kChunkSlice, 31>{}, &private_revision).ok());
-  EXPECT_EQ(private_revision, 2U);
+  ASSERT_TRUE(chunk_metadata_->AllocateChunkID(&second).ok());
+  EXPECT_EQ(second, ChunkID(2));
   ASSERT_TRUE(store_.Transact([&](MemMetaTxn &txn) { return txn.AllocateChunkRevision(&legacy_revision); }).ok());
   EXPECT_EQ(legacy_revision, 2U);
 }
 
-FIBER_TEST_F(ChunkPrivateMetadataTest, TypedPrivateTransactionCommitsOnlyAfterSuccessfulOuterTransaction) {
-  RecordingTypedTxn accepted;
-  auto status = store_.Transact([&](MemMetaTxn &txn) {
-    auto status = txn.PrivateMetadata().Bind(&accepted);
-    if (!status.ok()) {
-      return status;
-    }
-    EXPECT_EQ(txn.PrivateMetadata().Get<RecordingTypedTxn>(), &accepted);
-    accepted.Stage(41);
-    return utils::Status::OK();
-  });
-  ASSERT_TRUE(status.ok()) << status.message();
-  EXPECT_EQ(accepted.commit_count(), 1U);
-  EXPECT_EQ(accepted.committed(), std::optional<uint64_t>{41});
-
-  RecordingTypedTxn rejected;
-  status = store_.Transact([&](MemMetaTxn &txn) {
-    auto status = txn.PrivateMetadata().Bind(&rejected);
-    if (!status.ok()) {
-      return status;
-    }
-    rejected.Stage(42);
-    return utils::Status::IOError("reject typed private mutation");
-  });
-  EXPECT_EQ(status.ToErrno(), EIO);
-  EXPECT_EQ(rejected.commit_count(), 0U);
-  EXPECT_FALSE(rejected.committed().has_value());
-}
-
-TEST(MemMetaStoreBindingTest, OpensPrivateCapabilityAndRejectsNullBridge) {
+TEST(MemMetaStoreBindingTest, OpensChunkMetadataCapabilityAndRejectsNullBridge) {
   MemMetaStore store;
-  EXPECT_EQ(store.OpenPrivateMetadataStore(ChunkType::kChunkSlice, nullptr).ToErrno(), EINVAL);
-  MechanismPrivateStorePtr private_metadata;
-  ASSERT_TRUE(store.OpenPrivateMetadataStore(ChunkType::kChunkSlice, &private_metadata).ok());
-  ASSERT_NE(private_metadata, nullptr);
-  EXPECT_EQ(private_metadata->mechanism(), ChunkType::kChunkSlice);
+  EXPECT_EQ(store.OpenChunkMetadata(ChunkType::kCow, nullptr).ToErrno(), EINVAL);
+  ChunkMetadataPtr chunk_metadata;
+  ASSERT_TRUE(store.OpenChunkMetadata(ChunkType::kCow, &chunk_metadata).ok());
+  ASSERT_NE(chunk_metadata, nullptr);
+  EXPECT_EQ(chunk_metadata->Type(), ChunkType::kCow);
+  EXPECT_NE(std::dynamic_pointer_cast<cow::COWChunkMetadata>(chunk_metadata), nullptr);
+  ChunkMetadataPtr reopened;
+  ASSERT_TRUE(store.OpenChunkMetadata(ChunkType::kCow, &reopened).ok());
+  EXPECT_EQ(reopened, chunk_metadata);
+  EXPECT_EQ(store.OpenChunkMetadata(ChunkType::kChunkSlice, &reopened).ToErrno(), ENOSYS);
   EXPECT_EQ(store.BindChunkMetadataBridge(nullptr).ToErrno(), EINVAL);
 }
 

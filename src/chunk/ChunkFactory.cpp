@@ -16,11 +16,11 @@ utils::Status ChunkFactory::Open(metadata::InodeID ino, metadata::ChunkIndex ind
     return utils::Status::InvalidArgument("ChunkFactory::Open output is null");
   }
   out->reset();
-  if (meta_ == nullptr || data_ == nullptr || private_metadata_ == nullptr || chunk_size_ == 0) {
+  if (meta_ == nullptr || data_ == nullptr || chunk_metadata_ == nullptr || chunk_size_ == 0) {
     return utils::Status::Internal("ChunkFactory is not fully initialized");
   }
-  if (private_metadata_->mechanism() != chunk_type_) {
-    return utils::Status::Internal("ChunkFactory private metadata chunk type mismatch");
+  if (chunk_metadata_->Type() != chunk_type_) {
+    return utils::Status::Internal("ChunkFactory chunk metadata type mismatch");
   }
   if (chunk_type_ != metadata::ChunkType::kCow) {
     return utils::Status::NotSupported("selected chunk type has no runtime implementation");

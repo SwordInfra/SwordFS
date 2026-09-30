@@ -50,60 +50,56 @@ mechanism owns the concrete `Chunk`, its internal index schema and operations,
 the translation from private index state to physical data, and cleanup
 validation/deletion.
 
-Mechanism-private metadata is exposed to chunk code as a typed capability,
-not as Redis-shaped hash/field/value strings. The common plumbing owns only
-capability lifetime, mechanism isolation, transaction participation, and
-private identity allocation. Each mechanism defines its typed reader/store and
-transaction interfaces beside the records it owns. `cow` adds its
-typed head interface in #316; `chunk_slice` adds its SliceID/range interface in
-#270. The transitional `IChunkIndexReader` / `IChunkIndexTxn` string surface
-remains only for the current common-authority path until those consumers are
-migrated; new mechanism code must not treat it as the semantic API.
+Mechanism-owned metadata is exposed to chunk code through the mount-scoped
+`ChunkMetadata` hierarchy, not through Redis-shaped hash/field/value strings
+and not through a FileMetadata transaction. The common `ChunkMetadata`
+contract is intentionally narrow: it identifies the selected `ChunkType` and
+allocates fresh mechanism-neutral `ChunkID` values. Each mechanism adds its
+own typed state API beside the records it owns. `cow` adds the
+`COWChunkMetadata` typed root now; #316 extends that root with the
+`ChunkID -> COWChunkHead` state API. `chunk_slice` adds its distinct typed
+metadata root/state in #270. Unsupported mechanisms do not receive a generic
+fallback ChunkMetadata implementation. Those APIs may have different record
+shapes and mutation operations; a common revision or raw key/value API is not
+required.
 
-Runtime private stores are bound to exactly one `ChunkType` and
-are retained by the mount composition root so concrete chunks can receive
-their typed mechanism capability explicitly. Transaction-scoped code receives a
-typed capability context owned by the metadata transaction. A concrete
-mechanism adapter binds its typed transaction interface into that context;
-common code never asks the context for hash names, fields, or encoded bytes.
-The backend transaction owns that adapter for the complete transaction
-lifetime; a callback-local adapter must not be bound because Memory finalizes
-staged typed changes only after the callback has returned successfully.
-Memory typed adapters stage their native-container changes and are finalized
-only after the enclosing `MemMetaStore::Transact()` callback succeeds; a
-rejected callback therefore drops both common metadata changes and typed
-private mutations. Redis typed adapters queue their mutations into the same
-`RedisKvTxn`, so callback rejection discards the queued Redis commands and
-`EXEC` remains the single backend commit boundary. This keeps Memory free to
-store typed records directly while Redis adapters alone translate typed
-identities/records to Redis keys, fields, and encoded values.
+`ChunkID` answers which mechanism-owned chunk-state instance is attached to a
+logical file position. It is strong and opaque, volume-scoped, stable for one
+attached materialization lifetime, and never reused after detach. Value zero is
+invalid; allocated values are in `1..INT64_MAX` so Memory and Redis share one
+portable representation. Ordinary COW rewrites and retained-boundary truncates
+do not allocate a new ChunkID. A later rematerialization after detach receives
+a fresh ID. This identity is distinct from `ChunkIndex` (where in the file)
+and from the COW-private revision introduced by #316 (which immutable object
+version backs the current COW head).
 
-Mechanism-private identity allocation is a runtime-store operation separate
-from metadata publication transactions. The common allocator plumbing accepts
-only compile-time stable sequence tags; each tag encodes both its owning
-`ChunkType` and its stable numeric discriminator, so passing a
-tag through a different mechanism's store is rejected. Arbitrary runtime
-sequence names are not part of the contract. The pair
-`(ChunkType, stable sequence discriminator)` defines a private
-sequence namespace. Values start at 1, are positive and monotonic, may have
-gaps, are never reused, and are limited to `INT64_MAX` so Memory and Redis
-share the same portable range. Allocation exhaustion fails closed. A Redis
-`INCR` whose acknowledgement is ambiguous returns `OutcomeUnknown`; callers
-never replay that same allocation result and a later attempt obtains a fresh
-value if Redis had applied the first increment.
+ChunkID allocation is owned by ChunkMetadata and is independent of FileMetadata
+transactions. Memory uses ChunkMetadata-owned synchronization and state rather
+than the `MemMetaStore::Transact()` lock/commit lifecycle. Redis uses a
+standalone volume-scoped counter through its backend executor rather than
+joining `RedisMetaTxn` / `MULTI/EXEC` for correctness. Allocation may leave
+gaps, exhaustion fails closed, and a Redis increment whose acknowledgement is
+ambiguous returns `OutcomeUnknown`; callers obtain a fresh ID on a later
+attempt rather than reconstructing or reusing the uncertain allocation.
 
-The #315 plumbing does not define a universal private record schema and does
+The old `IMechanismPrivateTxn`, `MechanismPrivateTxnContext`, and
+`IChunkIndexTxn::PrivateMetadata()` cross-domain transaction seam does not
+exist in the target model. The transitional `IChunkIndexReader` /
+`IChunkIndexTxn` raw read/scan/put/erase surface remains only for the existing
+`ChunkMetadataBridge` callbacks while common `SwordFsChunk` is still
+production authority. It is legacy bridge plumbing, not a typed ChunkMetadata
+API, and new mechanism metadata must not use or extend it.
+
+The #392 boundary does not define a universal mechanism record schema and does
 not change read or publication authority. The common `SwordFsChunk` record,
 legacy `AllocateChunkRevision()`, `ChunkPublishIntent`, `ChunkView`, and the
 current COW publication/truncate/reclaim behavior remain authoritative
-until the later #312 stages replace their consumers. Point-read and scan
-consistency semantics are therefore owned by each future typed adapter: direct
-runtime scans are not promised to be linearizable, while correctness decisions
-that need a stable view use transaction-scoped typed iteration plus backend
-validation/retry.
+until the later #312 stages replace their consumers. Each typed mechanism
+metadata implementation owns the consistency semantics of its own operations
+inside its independent domain.
 
-`ChunkMetadataBridge` is not a private-metadata capability and does not retain
-the mount's `MechanismPrivateStorePtr`. `cow::COWChunkMetadataBridge` is a
+`ChunkMetadataBridge` is not a ChunkMetadata capability and does not retain
+the mount's `ChunkMetadataPtr`. `cow::COWChunkMetadataBridge` is a
 stateless transitional adapter for the remaining legacy/common-authority
 transaction callbacks only. `VolumeImpl` owns and validates the private
 metadata capability at mount composition, and later typed COW metadata is

@@ -15,6 +15,7 @@
 #include <string_view>
 #include <vector>
 
+#include "metadata/ChunkMetadata.hpp"
 #include "metadata/IChunkIndexTxn.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
@@ -76,11 +77,11 @@ class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
 
-  /// Open the mount-selected chunk type's mechanism-private backend capability.
-  /// The chunk-type implementation interprets typed records; common metadata
-  /// code only owns the capability lifetime and transaction participation.
-  virtual Status OpenPrivateMetadataStore(ChunkType, MechanismPrivateStorePtr *) {
-    return Status::NotSupported("metadata backend does not support private chunk metadata");
+  /// Open the mount-selected mechanism's independent ChunkMetadata domain.
+  /// Concrete mechanisms extend this narrow root with typed ChunkID-keyed
+  /// state; FileMetadata transactions never participate in that state.
+  virtual Status OpenChunkMetadata(ChunkType, ChunkMetadataPtr *) {
+    return Status::NotSupported("metadata backend does not support chunk metadata");
   }
 
   /// Transitional #384 bridge used only by legacy common-authority chunk

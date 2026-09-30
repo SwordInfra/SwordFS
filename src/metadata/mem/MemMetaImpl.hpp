@@ -26,7 +26,7 @@ class MemMetaImpl : public IMetaEngine {
 
   MemMetaImpl();
   ~MemMetaImpl() override;
-  Status OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out) override;
+  Status OpenChunkMetadata(ChunkType chunk_type, ChunkMetadataPtr *out) override;
   Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) override;
 
   // Entry operations
