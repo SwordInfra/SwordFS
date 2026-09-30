@@ -12,9 +12,10 @@
 
 namespace swordfs::metadata {
 
-// Frozen at the inode's reclaim point of no return. Only the selected chunk
+// Optional maintenance handoff after logical reclaim. Only the selected chunk
 // type implementation may decode payload; the common metadata engine merely
-// persists it.
+// persists it. This record is never reclaim/reachability authority and may be
+// lost after the FileMetadata point of no return at the cost of leaked storage.
 struct ReclaimWork {
   InodeID ino = 0;
   std::string payload;

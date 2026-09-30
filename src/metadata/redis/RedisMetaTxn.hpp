@@ -59,17 +59,18 @@ class RedisMetaTxn : public IChunkIndexTxn {
   // ────────────────────────────────────────────────────────────────
   // Reclaim operations
   // ────────────────────────────────────────────────────────────────
-  // Freeze the reclaim of |ino|. The transaction scans and WATCHes the
-  // authoritative chunk hash itself before queuing any writes so the frozen
-  // identities and live-metadata removal use one optimistic snapshot.
+  // Prepare reclaim of |ino|. The transaction scans and WATCHes the
+  // authoritative chunk hash itself before queuing any writes. It makes the
+  // inode non-revivable before deleting chunk mappings; cleanup handoff is
+  // optional maintenance queued only after that correctness transition.
   //
-  // On OK, |work| contains the frozen identities when the point of no return
-  // was crossed/replayed. An empty optional is the normal non-reclaimable
-  // outcome after stale orphan cleanup.
+  // On OK, |work| contains cleanup identities produced by this fresh reclaim
+  // attempt. An empty optional is the normal already-reclaimed,
+  // non-reclaimable, or revived outcome.
   utils::Status PrepareReclaim(InodeID ino, std::optional<ReclaimWork> &work);
 
-  // Drop the frozen record of |ino|. Called only once every object of the
-  // record has been deleted; missing records are not an error.
+  // Drop optional cleanup maintenance for |ino|. Missing records are not an
+  // error.
   utils::Status CompleteReclaim(InodeID ino);
 
   // Drop one immutable object from the truncate cleanup queue after physical

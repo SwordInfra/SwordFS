@@ -197,6 +197,32 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimFreezesRecordAndRemovesLiveMetadat
   EXPECT_TRUE(impl_->CompleteReclaim(file.ino).ok());
 }
 
+FIBER_TEST_F(RedisMetaImplTest, ReclaimOutcomeUnknownAfterPointOfNoReturnConvergesFromAbsentInode) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "ambiguous-file", 0644, &file).ok());
+  const SwordFsChunk chunk{.index = 0, .revision = 7, .size = 128};
+  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, chunk).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "ambiguous-file").ok());
+
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
+    // The critical DEL inode / DEL mappings commands execute before this
+    // deliberately invalid maintenance HSET. EXEC therefore returns
+    // OutcomeUnknown even though the logical point of no return was crossed.
+    redis.set(key.Reclaims(), "wrong-type-maintenance-state");
+  });
+
+  const auto status = impl_->PrepareReclaim(file.ino);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_TRUE(impl_->GetInode(file.ino, &file).IsNotFound());
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
+    EXPECT_FALSE(redis.exists(key.Inode(file.ino)));
+    EXPECT_FALSE(redis.exists(key.Chunk(file.ino)));
+    EXPECT_FALSE(redis.hexists(key.Orphans(), std::to_string(file.ino)));
+    EXPECT_EQ(redis.get(key.Reclaims()).value_or(""), "wrong-type-maintenance-state");
+  });
+}
+
 FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimIgnoresAdvisoryInodeCountState) {
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
   const std::vector<std::string> counter_states = {"missing", "noncanonical", "wrong-type"};
@@ -282,7 +308,7 @@ FIBER_TEST_F(RedisMetaImplTest, CrashLeftPendingReclaimIsRetriedFromPersistedSta
   ASSERT_TRUE(impl_->VisitPendingReclaims([](const ReclaimWork &) { return Status::OK(); }).ok());
 }
 
-FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimRejectsFrozenRecordWithLiveInode) {
+FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimTreatsFrozenRecordAsMaintenanceAndUsesLiveInode) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "inconsistent-reclaim", 0644, &file).ok());
   const SwordFsChunk head{.index = 0, .revision = 7, .size = 128};
@@ -295,19 +321,17 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimRejectsFrozenRecordWithLiveInode) 
   ASSERT_TRUE(frozen.SerializeTo(&encoded).ok());
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
-    // This state is outside the current one-stage beta protocol. Reclaim must
-    // fail closed rather than inventing compatibility recovery for it.
     redis.hset(key.Reclaims(), std::to_string(file.ino), encoded);
     EXPECT_TRUE(redis.hexists(key.Orphans(), std::to_string(file.ino)));
     EXPECT_TRUE(redis.exists(key.Inode(file.ino)));
     EXPECT_TRUE(redis.exists(key.Chunk(file.ino)));
   });
 
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino).ToErrno() == EBUSY);
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
-    EXPECT_TRUE(redis.exists(key.Inode(file.ino)));
-    EXPECT_TRUE(redis.exists(key.Chunk(file.ino)));
-    EXPECT_TRUE(redis.hexists(key.Orphans(), std::to_string(file.ino)));
+    EXPECT_FALSE(redis.exists(key.Inode(file.ino)));
+    EXPECT_FALSE(redis.exists(key.Chunk(file.ino)));
+    EXPECT_FALSE(redis.hexists(key.Orphans(), std::to_string(file.ino)));
     EXPECT_TRUE(redis.hexists(key.Reclaims(), std::to_string(file.ino)));
   });
 }
@@ -334,11 +358,11 @@ FIBER_TEST_F(RedisMetaImplTest, LinkRevivesOrphanCandidateAndClearsMarker) {
   RunWithRawRedisFromFiber(
       [&](sw::redis::Redis &redis) { redis.hset(key.Reclaims(), std::to_string(file.ino), encoded); });
 
-  // A frozen record alongside a live inode is outside the current one-stage
-  // protocol. Never reinterpret or cancel it while the inode is live.
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino).ToErrno() == EBUSY);
+  // The inode is authoritative. Stale maintenance work is discarded without
+  // touching the revived inode or its objects.
+  EXPECT_TRUE(impl_->PrepareReclaim(file.ino).ok());
   RunWithRawRedisFromFiber(
-      [&](sw::redis::Redis &redis) { EXPECT_TRUE(redis.hexists(key.Reclaims(), std::to_string(file.ino))); });
+      [&](sw::redis::Redis &redis) { EXPECT_FALSE(redis.hexists(key.Reclaims(), std::to_string(file.ino))); });
   SwordFsInode stored;
   ASSERT_TRUE(impl_->GetInode(file.ino, &stored).ok());
   EXPECT_EQ(stored.attr.nlink, 1U);
@@ -355,10 +379,11 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedPendingReclaimRecordIsRejected) {
                   })
                   .ToErrno() == EIO);
 
-  // PrepareReclaim replays an existing frozen record before consulting live
-  // inode state. A corrupt pending record must therefore fail closed here too
-  // rather than being treated as a fresh reclaim.
-  EXPECT_TRUE(impl_->PrepareReclaim(4242).ToErrno() == EIO);
+  // Corrupt maintenance cannot block idempotent logical reclaim of an already
+  // absent inode. Queue visitation still fails closed when it later encounters
+  // the malformed record.
+  EXPECT_TRUE(impl_->PrepareReclaim(4242).ok());
+  EXPECT_TRUE(impl_->VisitPendingReclaims([](const ReclaimWork &) { return Status::OK(); }).ToErrno() == EIO);
 
   // A decodable record whose serialized inode disagrees with its hash field
   // is corrupt too: acting on it could delete another inode's objects.
@@ -390,7 +415,7 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedPendingReclaimRecordIsRejected) {
   EXPECT_TRUE(impl_->VisitOrphanCandidates([](InodeID) { return Status::OK(); }).ToErrno() == EIO);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimRejectsPendingRecordForAnotherInode) {
+FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimOverwritesStalePendingRecordFromLiveAuthority) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
   ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
@@ -404,7 +429,11 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimRejectsPendingRecordForAnotherInod
   RunWithRawRedisFromFiber(
       [&](sw::redis::Redis &redis) { redis.hset(key.Reclaims(), std::to_string(file.ino), serialized); });
 
-  EXPECT_TRUE(impl_->PrepareReclaim(file.ino).ToErrno() == EIO);
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  auto pending = PendingReclaim(file.ino);
+  ASSERT_TRUE(pending.has_value());
+  EXPECT_EQ(pending->ino, file.ino);
+  EXPECT_TRUE(impl_->GetInode(file.ino, &file).IsNotFound());
 }
 
 FIBER_TEST_F(RedisMetaImplTest, MalformedChunkMetadataIsRejectedByPrepareReclaim) {

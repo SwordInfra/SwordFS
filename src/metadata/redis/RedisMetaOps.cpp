@@ -20,6 +20,7 @@
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
 #include "metadata/redis/RedisMetaTxn.hpp"
+#include "metadata/redis/RedisReclaimCoordinator.hpp"
 #include "utils/BlockingExecutor.hpp"
 #include "utils/ExecutionDomain.hpp"
 #include "utils/Logging.hpp"
@@ -45,7 +46,8 @@ utils::Status ParseInodeField(const std::string &field, std::string_view what, I
 RedisMetaOps::RedisMetaOps(const RedisMetaConfig &config, std::string_view volume_name)
     : backend_(std::make_shared<RedisBackendContext>(
           config, static_cast<size_t>(std::max(1, swordfs::config::ConfigCenter::Instance().meta_thread_count())))),
-      key_(config.db, volume_name) {
+      key_(config.db, volume_name),
+      reclaim_reconcile_attempts_(std::max(1, config.retry_attempts)) {
   utils::ExpectInThreadDomain();
 }
 
@@ -315,10 +317,16 @@ utils::Status RedisMetaOps::TouchInode(InodeID ino, SetAttrField fields) {
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.TouchInode(ino, fields); });
 }
 
-utils::Status RedisMetaOps::PrepareReclaim(InodeID ino) {
-  utils::ExpectInFiberDomain();
+utils::Status RedisMetaOps::PrepareReclaimAttempt(InodeID ino) {
   std::optional<ReclaimWork> work;
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.PrepareReclaim(ino, work); });
+}
+
+utils::Status RedisMetaOps::PrepareReclaim(InodeID ino) {
+  utils::ExpectInFiberDomain();
+  return redis::internal::RunReclaimWithOutcomeReconciliation(
+      reclaim_reconcile_attempts_, [&] { return PrepareReclaimAttempt(ino); },
+      [&](SwordFsInode *inode) { return GetInode(ino, inode); });
 }
 
 utils::Status RedisMetaOps::CompleteReclaim(InodeID ino) {

@@ -379,58 +379,32 @@ utils::Status RedisMetaTxn::TouchInode(InodeID ino, SetAttrField fields) {
 utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> &work) {
   work.reset();
 
-  // The shared reclaims Hash is not a serialization point. The inode key is:
-  // every fresh reclaim and Link watches it, so unrelated reclaim fields must
-  // not make this transaction retry.
-  std::string existing;
-  auto status = txn_.HGet(key_.Reclaims(), std::to_string(ino), &existing, RedisKvTxn::ReadMode::kUnwatched);
-  if (status.ok()) {
-    ReclaimWork pending;
-    status = pending.ParseFrom(existing);
-    if (!status.ok()) {
-      return status;
-    }
-    if (pending.ino != ino) {
-      return utils::Status::Malformed("pending reclaim record inode mismatch");
-    }
-    SwordFsInode live;
-    status = LookupInode(ino, &live);
-    if (status.ok()) {
-      // The current beta protocol publishes frozen work and removes the live
-      // inode in one transaction. A frozen+live state is therefore outside
-      // the supported state machine; preserve everything and fail closed.
-      return utils::Status::Busy("frozen reclaim conflicts with live inode");
-    } else if (!status.IsNotFound()) {
-      return status;
-    }
-    work = std::move(pending);
-    return utils::Status::OK();
-  }
-  if (!status.IsNotFound()) {
-    return status;
-  }
-
-  // All remaining reads happen before the first write. The live inode and the
+  // The inode is the serialization fence shared with Link. Cleanup records are
+  // optional maintenance state and are deliberately not consulted as reclaim
+  // authority.
+  //
+  // All reads happen before the first write. The live inode and the
   // complete chunk hash are WATCHed on the same Redis connection, so a
   // concurrent metadata mutation aborts EXEC and RedisMetaClient retries the
   // whole attempt from a fresh snapshot.
   SwordFsInode inode;
-  status = LookupInode(ino, &inode);
+  auto status = LookupInode(ino, &inode);
   const bool has_inode = status.ok();
   if (!has_inode && !status.IsNotFound()) {
     return status;
   }
 
   if (!has_inode || inode.IsDir() || inode.attr.nlink != 0) {
-    // The inode was already reclaimed, is a directory (never reclaimed
-    // through an orphan candidate), or a concurrent Link revived it: it must
-    // not be frozen. Dropping the orphan marker in this same transaction is
-    // what makes that safe — the inode key is watched, so a concurrent unlink
-    // that publishes the marker either lands before this EXEC (and is then
-    // observed, so we freeze instead) or aborts it and is retried.
+    // The inode was already reclaimed, is a directory, or a concurrent Link
+    // revived it. A maintenance record must never override that authoritative
+    // state. For a live/unreclaimable inode, drop any stale cleanup handoff so
+    // it cannot become future delete authority after an unrelated transition.
     status = ClearOrphanMarker(ino);
     if (!status.ok()) {
       return status;
+    }
+    if (has_inode) {
+      return CompleteReclaim(ino);
     }
     return utils::Status::OK();
   }
@@ -467,14 +441,11 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     return status;
   }
 
-  // Publish immutable deletion targets first in the same EXEC that removes
-  // their live metadata. Under the supported valid-schema model these writes
-  // form one transition; advisory inode_count is intentionally not involved.
-  status = txn_.HSet(key_.Reclaims(), std::to_string(ino), serialized);
-  if (!status.ok()) {
-    return status;
-  }
-  status = ClearOrphanMarker(ino);
+  // Critical destructive ordering: make the inode non-revivable before
+  // detaching its mapping state. Both operations use type-insensitive DEL, so
+  // a later auxiliary command failure cannot leave a revivable inode whose
+  // mappings were already destroyed.
+  status = txn_.Del(key_.Inode(ino));
   if (!status.ok()) {
     return status;
   }
@@ -482,7 +453,14 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
   if (!status.ok()) {
     return status;
   }
-  status = txn_.Del(key_.Inode(ino));
+
+  // Everything below is maintenance. Losing it after the point of no return
+  // can leak cleanup work but cannot make the inode or detached state live.
+  status = ClearOrphanMarker(ino);
+  if (!status.ok()) {
+    return status;
+  }
+  status = txn_.HSet(key_.Reclaims(), std::to_string(ino), serialized);
   if (!status.ok()) {
     return status;
   }

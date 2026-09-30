@@ -97,6 +97,8 @@ class RedisMetaOps {
   utils::Status TransactFromFiber(const std::function<utils::Status(RedisMetaTxn &)> &callback);
 
  private:
+  utils::Status PrepareReclaimAttempt(InodeID ino);
+
   // Register cleanup candidates after a metadata mutation has a known
   // outcome. Failure is intentionally non-fatal: it may leak obsolete data,
   // but it must not invalidate an otherwise successful metadata operation.
@@ -113,6 +115,7 @@ class RedisMetaOps {
   const chunk::internal::ChunkMetadataBridge *chunk_metadata_bridge_ = nullptr;
   ChunkMetadataPtr chunk_metadata_;
   redis::RedisKey key_;
+  int reclaim_reconcile_attempts_ = 1;
   uint64_t chunk_size_ = 0;
   utils::FiberMutex orphan_scan_mutex_;
   uint64_t orphan_scan_cursor_ = 0;

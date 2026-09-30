@@ -326,23 +326,23 @@ being treated as a definite rollback.
 
 ### Object cleanup registration and delete authority
 
-Redis and the object store do not share a transaction. The handoff is
-`orphans → reclaims → completion` for last-link reclaim. Under the supported
-SwordFS-writer / valid-schema model, Redis preparation keeps one atomic
-metadata transition:
+Redis and the object store do not share a transaction. Last-link reclaim
+therefore separates the FileMetadata point of no return from optional cleanup
+handoff:
 
-1. Read `reclaims[ino]` without WATCHing the shared Hash. A valid existing
-   record is replayable only when the live inode is already absent. An
-   unexpected frozen record alongside a live inode is an invariant violation
-   and fails closed rather than being repaired as a historical beta state.
-2. Read/WATCH the still-live inode and its authoritative public/private chunk
-   state. A linked inode is not reclaimable; its stale orphan marker can be
-   removed in the same optimistic transaction.
-3. Freeze immutable chunk-type-private `ReclaimWork`, apply any mechanism-private
-   reclaim mutation, queue `HSET reclaims[ino]` first, then queue removal of
-   the orphan marker, public chunk state, and live inode. `EXEC` publishes the
-   frozen identities and removes their live metadata as one supported-schema
-   transition.
+1. Read/WATCH the still-live inode and its authoritative chunk mapping state.
+   A linked inode is not reclaimable; its stale orphan marker and stale
+   `reclaims[ino]` maintenance entry can be removed in the same optimistic
+   transaction.
+2. For an unlinked inode, freeze chunk-type-private cleanup work in memory and
+   queue `DEL inode:<ino>` first. The inode key is the non-revivability fence
+   shared with `Link`.
+3. Queue `DEL chunk:<ino>` only after the inode deletion. Crossing this second
+   command is the logical point of no return: no live/revivable FileMetadata
+   path can reach the detached mappings.
+4. Queue orphan-marker removal and `HSET reclaims[ino]` afterwards as
+   maintenance. Failure or loss of these auxiliary commands may leak cleanup
+   work but cannot restore reachability.
 
 `Link` does not read or WATCH the shared `reclaims` Hash. Link and reclaim
 already read/WATCH the same inode key. If Link commits first, its inode update
@@ -357,23 +357,24 @@ be part of the proof that an inode is safe to reclaim. This removes both the
 partial-`EXEC` ambiguity created by a failing counter command and the
 shared-key contention created by treating a global metric as authoritative.
 
-The remaining write sequence relies on the repository's normal Redis schema
-contract. `PrepareReclaim` pre-reads the `reclaims` Hash, so a pre-existing
-wrong Redis type fails before writes are queued. Supported SwordFS writers do
-not concurrently change that key's type. A concurrent external schema/type
-mutation between validation and `EXEC` is corruption-repair scope, not a
-normal reclaim state that justifies a second metadata phase.
+The critical `DEL` operations are deliberately type-insensitive. An auxiliary
+`HDEL`/`HSET` can still fail during `EXEC` (for example because external
+corruption changed a Hash key's Redis type), yielding `OutcomeUnknown` after
+the critical commands executed. `PrepareReclaim` reconciles such ambiguity
+from the inode key, not from cleanup records:
 
-Replay always uses the frozen payload; it does not reconstruct deletion
-targets from a newer logical head. After an ambiguous `EXEC`, a later pass
-converges from authoritative state: if the original live orphan state remains,
-preparation runs again; if the one-stage transition committed, the frozen
-record exists and the live inode is absent, so the same work is returned.
-Pending frozen work can therefore proceed directly to object deletion. Before
-physical deletion, private chunk GC independently verifies that the live
-inode is absent. A frozen record by itself never authorizes deletion of
-still-live data, and an inconsistent frozen+live state remains fail-closed.
-Completion removes the frozen work only after deletion succeeds.
+- inode absent: logical reclaim completed; lost cleanup work is an acceptable
+  storage leak;
+- inode present with `nlink > 0`: revival won; destructive cleanup stops;
+- inode present with `nlink == 0`: retry from a fresh WATCHed inode/mapping
+  snapshot.
+
+A surviving `chunk:<ino>` key under an absent inode is unreachable residue,
+not authoritative data. Likewise, `ReclaimWork` is maintenance only. Private
+chunk GC revalidates authoritative reachability before deleting data and may
+discard stale cleanup work that conflicts with a live inode. Completion removes
+retained maintenance after the selected mechanism reports it safe to
+acknowledge.
 
 StatFs follows the same advisory-accounting rule. Both Redis and memory
 backends report a positive virtual inode capacity from their backend limits,
