@@ -20,6 +20,12 @@ using metadata::cow::COWChunkRevision;
 
 class ScriptedCOWChunkMetadata final : public COWChunkMetadata {
  public:
+  enum class AmbiguousCAS {
+    kNone,
+    kAppliedOnce,
+    kNotAppliedOnce,
+  };
+
   utils::Status AllocateChunkID(ChunkID *) override {
     return utils::Status::NotSupported("not used");
   }
@@ -43,6 +49,14 @@ class ScriptedCOWChunkMetadata final : public COWChunkMetadata {
   utils::Status CompareExchangeHead(ChunkID, const std::optional<COWChunkHead> &expected,
                                     const COWChunkHead &replacement) override {
     ++cas_calls;
+    if (ambiguous_cas != AmbiguousCAS::kNone) {
+      const auto outcome = ambiguous_cas;
+      ambiguous_cas = AmbiguousCAS::kNone;
+      if (outcome == AmbiguousCAS::kAppliedOnce) {
+        head = replacement;
+      }
+      return utils::Status::OutcomeUnknown("ambiguous COW head CAS");
+    }
     if (inject_conflict.has_value()) {
       head = *inject_conflict;
       inject_conflict.reset();
@@ -74,6 +88,7 @@ class ScriptedCOWChunkMetadata final : public COWChunkMetadata {
   std::optional<COWChunkHead> inject_conflict;
   utils::Status get_status = utils::Status::OK();
   utils::Status cas_status = utils::Status::OK();
+  AmbiguousCAS ambiguous_cas = AmbiguousCAS::kNone;
   bool remove_on_cas = false;
   int get_calls = 0;
   int cas_calls = 0;
@@ -119,6 +134,34 @@ TEST(COWChunkBoundaryTest, CASConflictRefreshesAndClampsNewlyObservedRevision) {
               }).ok());
   ASSERT_TRUE(metadata.head.has_value());
   EXPECT_EQ(*metadata.head, (COWChunkHead{.revision = COWChunkRevision(8), .size = 64}));
+  EXPECT_EQ(metadata.get_calls, 2);
+  EXPECT_EQ(metadata.cas_calls, 2);
+}
+
+TEST(COWChunkBoundaryTest, AmbiguousAppliedCASReReadsAuthoritativeHeadAndConverges) {
+  ScriptedCOWChunkMetadata metadata;
+  metadata.head = COWChunkHead{.revision = COWChunkRevision(7), .size = 96};
+  metadata.ambiguous_cas = ScriptedCOWChunkMetadata::AmbiguousCAS::kAppliedOnce;
+
+  ASSERT_TRUE(SanitizeCOWBoundary(metadata, Boundary(), [](ChunkIndex, std::optional<ChunkID> *) {
+                return utils::Status::OK();
+              }).ok());
+  ASSERT_TRUE(metadata.head.has_value());
+  EXPECT_EQ(*metadata.head, (COWChunkHead{.revision = COWChunkRevision(7), .size = 64}));
+  EXPECT_EQ(metadata.get_calls, 2);
+  EXPECT_EQ(metadata.cas_calls, 1);
+}
+
+TEST(COWChunkBoundaryTest, AmbiguousNotAppliedCASReReadsBeforeRetryingFromFreshHead) {
+  ScriptedCOWChunkMetadata metadata;
+  metadata.head = COWChunkHead{.revision = COWChunkRevision(7), .size = 96};
+  metadata.ambiguous_cas = ScriptedCOWChunkMetadata::AmbiguousCAS::kNotAppliedOnce;
+
+  ASSERT_TRUE(SanitizeCOWBoundary(metadata, Boundary(), [](ChunkIndex, std::optional<ChunkID> *) {
+                return utils::Status::OK();
+              }).ok());
+  ASSERT_TRUE(metadata.head.has_value());
+  EXPECT_EQ(*metadata.head, (COWChunkHead{.revision = COWChunkRevision(7), .size = 64}));
   EXPECT_EQ(metadata.get_calls, 2);
   EXPECT_EQ(metadata.cas_calls, 2);
 }
@@ -178,7 +221,7 @@ TEST(COWChunkBoundaryTest, PropagatesMetadataAndMappingProbeFailures) {
 TEST(COWChunkBoundaryTest, PropagatesNonConflictCASFailureAndRejectsInvalidIntent) {
   ScriptedCOWChunkMetadata metadata;
   metadata.head = COWChunkHead{.revision = COWChunkRevision(7), .size = 96};
-  metadata.cas_status = utils::Status::OutcomeUnknown("CAS ambiguous");
+  metadata.cas_status = utils::Status::Unavailable("CAS unavailable");
   EXPECT_EQ(SanitizeCOWBoundary(metadata, Boundary(),
                                 [](ChunkIndex, std::optional<ChunkID> *) { return utils::Status::OK(); })
                 .ToErrno(),

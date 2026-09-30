@@ -43,7 +43,7 @@ utils::Status internal::SanitizeCOWBoundaryImpl(metadata::cow::COWChunkMetadata 
     if (status.ok()) {
       return utils::Status::OK();
     }
-    if (status.IsNotFound() || status.ToErrno() == EEXIST) {
+    if (status.IsNotFound() || status.ToErrno() == EEXIST || status.IsOutcomeUnknown()) {
       continue;
     }
     return status;
