@@ -78,7 +78,7 @@ class VfsImpl {
   static utils::Status FLock(fuse_ino_t ino, struct fuse_file_info *fi, int op);
   static utils::Status FAllocate(fuse_ino_t ino, int mode, off_t offset, off_t length, struct fuse_file_info *fi);
   static utils::Status LSeek(fuse_ino_t ino, off_t off, int whence, struct fuse_file_info *fi);
-  static utils::Status TmpFile(fuse_ino_t parent, mode_t mode, struct fuse_file_info *fi);
+  static utils::Status TmpFile(fuse_ino_t parent, mode_t mode, fuse_entry_param *entry, struct fuse_file_info *fi);
   static utils::Status StatX(fuse_ino_t ino, int flags, int mask, struct fuse_file_info *fi, struct statx *attr);
 };
 

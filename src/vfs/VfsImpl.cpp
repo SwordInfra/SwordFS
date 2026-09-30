@@ -4,6 +4,7 @@
 #include "vfs/VfsImpl.hpp"
 
 #include <dirent.h>
+#include <folly/Random.h>
 #include <folly/io/IOBuf.h>
 #include <folly/logging/xlog.h>
 #include <linux/fs.h>
@@ -53,6 +54,16 @@ using swordfs::volume::VolumeImpl;
 namespace swordfs::vfs {
 
 namespace {
+
+constexpr int kTmpFileCreateAttempts = 16;
+
+std::string NewTmpFileName() {
+  // Two independently generated 64-bit values make accidental collision
+  // vanishingly unlikely, while the retry loop below still treats EEXIST as
+  // an ordinary race rather than assuming uniqueness.
+  return ".swordfs-tmp-" + std::to_string(folly::Random::secureRand64()) + "-" +
+         std::to_string(folly::Random::secureRand64());
+}
 
 utils::Status RefreshTrackedInode(metadata::SwordFsInode *inode) {
   auto handle = InodeHandleManager::Instance().Get(inode->ino, false);
@@ -755,11 +766,76 @@ utils::Status VfsImpl::LSeek(fuse_ino_t ino, off_t off, int whence, struct fuse_
   return Status::NotSupported("lseek");
 }
 
-utils::Status VfsImpl::TmpFile(fuse_ino_t parent, mode_t mode, struct fuse_file_info *fi) {
-  (void)parent;
-  (void)mode;
-  (void)fi;
-  return Status::NotSupported("tmpfile");
+utils::Status VfsImpl::TmpFile(fuse_ino_t parent, mode_t mode, fuse_entry_param *entry, struct fuse_file_info *fi) {
+  SwordFsInode child;
+  std::string name;
+  Status status;
+  for (int attempt = 0; attempt < kTmpFileCreateAttempts; ++attempt) {
+    name = NewTmpFileName();
+    status = VolumeImpl::Instance().meta_engine()->Create(parent, name, static_cast<uint32_t>(mode), &child);
+    if (status.ok()) {
+      break;
+    }
+    if (status.ToErrno() != EEXIST) {
+      return status;
+    }
+  }
+  if (!status.ok()) {
+    return status;
+  }
+
+  // Hold the ordinary per-inode open reference before removing the temporary
+  // namespace entry. This is the same fence used by unlink-while-open and
+  // prevents the background orphan reclaimer from crossing its point of no
+  // return while the anonymous descriptor is live.
+  std::shared_ptr<FileHandle> handle;
+  status = FileHandle::Create(child.ino, fi->flags, &handle);
+  if (!status.ok()) {
+    {
+      const auto status = Unlink(parent, name.c_str());
+      if (!status.ok()) {
+        SWORDFS_LOG_WARN << "TmpFile: failed to remove temporary entry after handle creation failure: parent=" << parent
+                         << " name='" << name << "' ino=" << child.ino << " — " << status.message();
+      }
+    }
+    return status;
+  }
+
+  status = Unlink(parent, name.c_str());
+  if (!status.ok()) {
+    // The tmpfile contract was not established, so the caller must not own a
+    // local fh. Release first, then make one best-effort cleanup retry; the
+    // original unlink error remains the syscall result either way.
+    {
+      const auto status = Release(child.ino, handle->fh());
+      if (!status.ok()) {
+        SWORDFS_LOG_WARN << "TmpFile: failed to release local handle after unlink failure: ino=" << child.ino
+                         << " fh=" << handle->fh() << " — " << status.message();
+      }
+    }
+    {
+      const auto status = Unlink(parent, name.c_str());
+      if (!status.ok() && !status.IsNotFound()) {
+        SWORDFS_LOG_WARN << "TmpFile: temporary entry cleanup retry failed: parent=" << parent << " name='" << name
+                         << "' ino=" << child.ino << " — " << status.message();
+      }
+    }
+    return status;
+  }
+
+  // The sole namespace link was just removed successfully. Preserve the
+  // authoritative create attributes while publishing the now-anonymous link
+  // count to FUSE and the detached-inode cache.
+  child.attr.nlink = 0;
+  fi->fh = handle->fh();
+  *entry = {};
+  entry->ino = child.ino;
+  child.attr.ToPosixStat(&entry->attr);
+  entry->attr_timeout = 1.0;
+  entry->entry_timeout = 1.0;
+  FuseInodeCache::Instance().RetainLookup(child);
+  SWORDFS_LOG_DEBUG << "TmpFile: ino=" << child.ino << " fh=" << handle->fh();
+  return Status::OK();
 }
 
 utils::Status VfsImpl::StatX(fuse_ino_t ino, int flags, int mask, struct fuse_file_info *fi, struct statx *attr) {
