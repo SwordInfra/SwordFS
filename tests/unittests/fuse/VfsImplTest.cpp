@@ -16,6 +16,7 @@
 #include <linux/fuse.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -934,20 +935,46 @@ TEST(VfsHookFactoryTest, InitNegotiatesPosixAclAndDontMaskAsOneContract) {
   struct fuse_conn_info conn{};
   conn.capable = static_cast<uint32_t>(kAclCaps | FUSE_CAP_SETXATTR_EXT);
   conn.capable_ext = kAclCaps | FUSE_CAP_SETXATTR_EXT;
-  swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &conn);
+  int ready_pipe[2];
+  ASSERT_EQ(::pipe(ready_pipe), 0);
+  swordfs::fuse::MountInitContext ready_context(ready_pipe[1]);
+  swordfs::fuse::VfsHookFactory::SwordFsInit(&ready_context, &conn);
 
+  EXPECT_FALSE(ready_context.failed);
   EXPECT_EQ(conn.want_ext & kAclCaps, kAclCaps);
   EXPECT_EQ(conn.want_ext & FUSE_CAP_SETXATTR_EXT, 0U);
+  char ready = 1;
+  EXPECT_EQ(::read(ready_pipe[0], &ready, 1), 1);
+  EXPECT_EQ(ready, 0);
+  ::close(ready_pipe[0]);
   swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
 
   struct fuse_conn_info incomplete{};
   incomplete.capable = FUSE_CAP_POSIX_ACL;
   incomplete.capable_ext = FUSE_CAP_POSIX_ACL;
-  swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &incomplete);
+  int failed_pipe[2];
+  ASSERT_EQ(::pipe(failed_pipe), 0);
+  swordfs::fuse::MountInitContext init_context(failed_pipe[1]);
+  swordfs::fuse::VfsHookFactory::SwordFsInit(&init_context, &incomplete);
+  EXPECT_TRUE(init_context.failed);
   EXPECT_EQ(incomplete.want_ext & kAclCaps, 0U);
+  EXPECT_EQ(::read(failed_pipe[0], &ready, 1), 0);
+  ::close(failed_pipe[0]);
   swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
 
   swordfs::volume::VolumeImpl::Initialize();
+}
+
+TEST(VfsHookFactoryTest, MountInitContextClosesUnfinishedReadinessPipe) {
+  int readiness_pipe[2];
+  ASSERT_EQ(::pipe(readiness_pipe), 0);
+  {
+    swordfs::fuse::MountInitContext init_context(readiness_pipe[1]);
+  }
+
+  char ready = 1;
+  EXPECT_EQ(::read(readiness_pipe[0], &ready, 1), 0);
+  ::close(readiness_pipe[0]);
 }
 
 TEST(VfsHookFactoryTest, InitDoesNotNegotiatePosixAclWithoutVolumeOptIn) {

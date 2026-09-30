@@ -17,6 +17,24 @@
 
 namespace swordfs::fuse {
 
+/// Mount-lifecycle context passed to the low-level FUSE init callback.
+///
+/// The session pointer is populated after fuse_session_new() returns. The
+/// readiness fd is owned by the daemon child until INIT either succeeds or
+/// fails; a negative fd means no daemon parent is waiting.
+struct MountInitContext {
+  explicit MountInitContext(int readiness_fd = -1) : readiness_fd(readiness_fd) {
+  }
+  ~MountInitContext();
+
+  MountInitContext(const MountInitContext &) = delete;
+  MountInitContext &operator=(const MountInitContext &) = delete;
+
+  fuse_session *session = nullptr;
+  int readiness_fd = -1;
+  bool failed = false;
+};
+
 /// Static registry of FUSE callbacks that forward every request to a
 /// VfsImpl instance bound to a VolumeImpl.
 class VfsHookFactory {
