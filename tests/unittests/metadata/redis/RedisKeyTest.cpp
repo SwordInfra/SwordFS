@@ -13,8 +13,7 @@ TEST(RedisKeyTest, UsesDatabaseScopedPrefix) {
   EXPECT_EQ(key.Format(), "{3:volume}:format");
   EXPECT_EQ(key.NextIno(), "{3:volume}:next_ino");
   EXPECT_EQ(key.NextChunkRevision(), "{3:volume}:next_chunk_revision");
-  EXPECT_EQ(key.PrivateSequence(ChunkType::kCow, 7), "{3:volume}:private_sequence:1:7");
-  EXPECT_NE(key.PrivateSequence(ChunkType::kCow, 7), key.PrivateSequence(ChunkType::kChunkSlice, 7));
+  EXPECT_EQ(key.NextChunkID(), "{3:volume}:next_chunk_id");
   EXPECT_EQ(key.Inode(42), "{3:volume}:inode:42");
   EXPECT_EQ(key.Directory(7), "{3:volume}:dir:7");
   EXPECT_EQ(key.Chunk(42), "{3:volume}:chunk:42");

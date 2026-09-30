@@ -74,12 +74,13 @@ The major responsibilities are:
 
 `VolumeImpl` is the mount composition root. It binds one mounted volume to one
 metadata engine and, when configured, one data engine. After loading the
-persisted `ChunkType`, it opens the chunk-type-selected mechanism-private metadata
-store, constructs the private metadata bridge, and then constructs the
-mount-owned `ChunkFactory` and private chunk-GC worker. VFS sees only the stable
-`ChunkFactory`/`Chunk` data-path facade and never receives the mechanism-private
-metadata capability or a chunk-type implementation object. Backends are selected by URL scheme through registries rather
-than hard-coded into VFS code.
+persisted `ChunkType`, it opens the chunk-type-selected typed `ChunkMetadata`
+capability, constructs the transitional legacy `ChunkMetadataBridge`, and then
+constructs the mount-owned `ChunkFactory` and private chunk-GC worker. VFS sees
+only the stable `ChunkFactory`/`Chunk` data-path facade and never receives the
+typed mechanism metadata capability or a chunk-type implementation object.
+Backends are selected by URL scheme through registries rather than hard-coded
+into VFS code.
 
 ## 3. Process and mount lifecycle
 
@@ -333,7 +334,20 @@ For relationships between these records, handles, and write buffers, see
 
 ### 6.3 Memory transaction model
 
-The in-memory backend uses `MemMetaStore::Transact()` as its only mutation/operation entry point. A transaction holds one fiber mutex across the callback, so the callback has one visibility boundary relative to other metadata operations. Mechanism-private index mutations are staged and committed only when the callback succeeds. Publication, size changes, and reclaim preparation invoke the selected chunk-type implementation before changing the public head or inode, so a private-metadata rejection leaves both public and private state unchanged.
+The in-memory FileMetadata backend uses `MemMetaStore::Transact()` as its
+mutation/operation entry point. A transaction holds one fiber mutex across the
+callback, so the callback has one visibility boundary relative to other
+FileMetadata operations. While `SwordFsChunk` remains production authority, the
+transitional `ChunkMetadataBridge` still stages its raw `IChunkIndexTxn`
+records inside that same callback so the legacy common-head protocol preserves
+its existing ordering.
+
+Typed `ChunkMetadata` is deliberately outside `MemMetaTxn`. It owns separate
+synchronization and its own semantic/atomicity domain; future COW/Slice typed
+state must not be staged or committed by `MemMetaStore::Transact()`. The
+remaining bridge participation in publication/truncate/reclaim is transitional
+common-authority plumbing only and is retired by the staged #317/#318/#319/#320
+cutover.
 
 No pointers to mutable store-owned inode state escape the transaction. Reads use value snapshots and writes go through explicit transaction primitives.
 
@@ -538,16 +552,32 @@ Metadata transactions use a transitional internal
 callbacks needed by the current shared-head protocol: load, publish, truncate,
 reclaim preparation, and freezing durable cleanup work. It has no runtime
 chunk construction or physical-delete API and retains no
-`MechanismPrivateStorePtr`; `cow::COWChunkMetadataBridge` is a stateless
-legacy/common-authority adapter. `VolumeImpl` validates that the opened private
-metadata capability matches the persisted chunk type and owns that capability
-for the mount lifetime. `ChunkFactory` receives the capability explicitly,
-while Memory and Redis retain only a non-owning bridge pointer. This bridge
+`ChunkMetadataPtr`; `cow::COWChunkMetadataBridge` is a stateless
+legacy/common-authority adapter. `VolumeImpl` validates that the opened typed
+ChunkMetadata capability matches the persisted chunk type and owns that
+capability for the mount lifetime. `ChunkFactory` receives the capability
+explicitly, while Memory and Redis retain only a non-owning bridge pointer. This bridge
 preserves the existing transaction ordering while later mechanism-specific
-metadata work moves behind typed private stores. #318 retires truncate
+metadata work moves behind typed ChunkMetadata implementations. #318 retires truncate
 callbacks, #319 retires cleanup/reclaim callbacks, #317 retires
 publication/load callbacks, and #320 removes the remaining bridge surface; new
 typed COW metadata must not be routed through this transitional adapter.
+
+The final metadata architecture has two independent semantic/atomicity domains
+behind `IMetaEngine`: FileMetadata owns inode/namespace/EOF and the eventual
+`ChunkIndex -> ChunkID` reachability mapping, while the selected
+`ChunkMetadata` implementation owns mechanism state rooted at `ChunkID`.
+`ChunkID` is a strong volume-scoped identity that is stable for one attached
+chunk-state materialization and is never reused after detach. ChunkMetadata
+allocation and typed mutation do not participate in `MemMetaTxn` or
+`RedisMetaTxn`; Memory owns separate synchronization and Redis may share
+backend infrastructure without sharing a correctness transaction. The raw
+`IChunkIndexTxn` record operations that remain today are solely legacy
+`ChunkMetadataBridge` plumbing until the staged authority cutover removes
+them. The implemented COW path is represented by the typed
+`COWChunkMetadata` root; Memory and Redis provide COW-specific backend
+implementations. Other chunk types remain unsupported until their own typed
+metadata roots exist rather than falling back to a generic backend capability.
 
 Each published chunk has a metadata descriptor:
 

@@ -22,6 +22,7 @@ flowchart LR
 | Directory entry | Name, child inode ID, child type | Namespace mapping; multiple entries may name one regular-file inode |
 | `SwordFsInode` | ID, attributes including size and `nlink`, parent ID, symlink target, ordered raw xattrs | Canonical inode attributes and raw xattrs; removing a name need not remove the inode |
 | `SwordFsChunk` | Index, revision, size; start offset is derived from `index * chunk_size` | Current shared publication head for one logical chunk; `revision`/`size` remain transitional under #312 |
+| `ChunkID` | Strong opaque volume-scoped identifier | Identifies one attached mechanism-owned chunk-state materialization; stable while attached and never reused after detach |
 | Orphan candidate | Inode ID and cleanup marker | Last-link removal recorded while the live inode still exists |
 | `ReclaimWork` | Inode ID and opaque chunk-type-private payload | Replaces live inode/chunk metadata atomically at reclaim preparation |
 | `PendingDelete` | Opaque queue ID and chunk-type-private payload | Best-effort cleanup candidate whose physical identity is validated by the selected chunk-type implementation |
@@ -33,6 +34,15 @@ name mappings. `nlink` counts namespace links, separately from open references.
 For chunk size `C`, file offset `x` maps to index `x / C` and offset `x % C`
 within the chunk. Descriptor size may be smaller than `C`. Missing descriptors
 and gaps after chunk data represent holes, filled with zeroes by the read path.
+
+The final #312 authority model separates three identities: `ChunkIndex` says
+where a logical chunk is in the file, `ChunkID` says which mechanism-owned
+chunk-state instance is attached there, and a mechanism-private revision (for
+COW) says which immutable object version backs that state. FileMetadata will
+eventually own only `ChunkIndex -> ChunkID`; selected ChunkMetadata owns the
+typed state behind ChunkID. #392 introduces the common ChunkID identity and
+independent ChunkMetadata domain while the current `SwordFsChunk` descriptor
+remains production authority until the later cutover.
 
 For the current `cow` mechanism, the object key is
 `<inode>/<chunk-index>/<revision>`. The common-head `revision` is therefore

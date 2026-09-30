@@ -35,7 +35,7 @@ class RedisKvTxn;
 // of the mutation's correctness contract.
 class RedisMetaTxn : public IChunkIndexTxn {
  public:
-  RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size, ChunkType mechanism,
+  RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size, ChunkType chunk_type,
                const chunk::internal::ChunkMetadataBridge *bridge);
 
   // ────────────────────────────────────────────────────────────────
@@ -76,9 +76,8 @@ class RedisMetaTxn : public IChunkIndexTxn {
   // deletion. Missing entries are already complete.
   utils::Status CompletePendingDelete(std::string_view object_key);
 
-  MechanismPrivateTxnContext &PrivateMetadata() override {
-    return private_metadata_txn_;
-  }
+  // Transitional raw operations used only by ChunkMetadataBridge. Final typed
+  // ChunkMetadata is an independent domain and never binds to this transaction.
   utils::Status Read(std::string_view hash, std::string_view field, std::string *value) override;
   utils::Status Scan(std::string_view hash, std::vector<std::pair<std::string, std::string>> *values) override;
   utils::Status Put(std::string_view hash, std::string_view field, std::string_view value) override;
@@ -144,7 +143,7 @@ class RedisMetaTxn : public IChunkIndexTxn {
   const redis::RedisKey &key_;
   uint64_t chunk_size_;
   const chunk::internal::ChunkMetadataBridge *chunk_metadata_bridge_;
-  MechanismPrivateTxnContext private_metadata_txn_;
+  ChunkType chunk_type_;
 };
 
 }  // namespace swordfs::metadata

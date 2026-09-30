@@ -15,11 +15,11 @@
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/redis/RedisBackendContext.hpp"
+#include "metadata/redis/RedisCOWChunkMetadata.hpp"
 #include "metadata/redis/RedisDirIterator.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
 #include "metadata/redis/RedisMetaTxn.hpp"
-#include "metadata/redis/RedisPrivateMetadataStore.hpp"
 #include "utils/BlockingExecutor.hpp"
 #include "utils/ExecutionDomain.hpp"
 #include "utils/Logging.hpp"
@@ -54,13 +54,21 @@ RedisMetaOps::~RedisMetaOps() {
   backend_->Shutdown();
 }
 
-utils::Status RedisMetaOps::OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out) {
+utils::Status RedisMetaOps::OpenChunkMetadata(ChunkType chunk_type, ChunkMetadataPtr *out) {
   utils::ExpectInThreadDomain();
   if (out == nullptr) {
-    return utils::Status::InvalidArgument("private metadata store output is null");
+    return utils::Status::InvalidArgument("chunk metadata output is null");
   }
-  private_metadata_ = std::make_shared<RedisPrivateMetadataStore>(backend_, key_, mechanism);
-  *out = private_metadata_;
+  if (chunk_type != ChunkType::kCow) {
+    return utils::Status::NotSupported("chunk metadata type is not implemented: " +
+                                       std::string(ChunkTypeName(chunk_type)));
+  }
+  if (chunk_metadata_ != nullptr) {
+    *out = chunk_metadata_;
+    return utils::Status::OK();
+  }
+  chunk_metadata_ = std::make_shared<RedisCOWChunkMetadata>(backend_, key_);
+  *out = chunk_metadata_;
   return utils::Status::OK();
 }
 
@@ -626,8 +634,8 @@ utils::Status RedisMetaOps::TransactFromFiber(const std::function<utils::Status(
   return backend_->executor().RunFromFiber([&] {
     return backend_->client().Transact([&](RedisKvTxn &kv_txn) {
       utils::ExpectInThreadDomain();
-      const auto mechanism = private_metadata_ != nullptr ? private_metadata_->mechanism() : ChunkType::kCow;
-      RedisMetaTxn txn(kv_txn, key_, chunk_size_, mechanism, chunk_metadata_bridge_);
+      const auto chunk_type = chunk_metadata_ != nullptr ? chunk_metadata_->Type() : ChunkType::kCow;
+      RedisMetaTxn txn(kv_txn, key_, chunk_size_, chunk_type, chunk_metadata_bridge_);
       return callback(txn);
     });
   });

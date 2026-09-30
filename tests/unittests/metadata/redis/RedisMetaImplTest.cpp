@@ -11,6 +11,7 @@
 #include <limits>
 #include <thread>
 
+#include "metadata/cow/COWChunkMetadata.hpp"
 #include "metadata/redis/RedisMetaImplTestBase.hpp"
 #include "metadata/redis/RedisMetaTestSupport.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
@@ -64,42 +65,39 @@ FIBER_TEST_F(RedisMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) 
   swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
 }
 
-FIBER_TEST_F(RedisMetaImplTest, PrivateSequenceBindingCoexistsWithLegacyChunkRevisionAllocator) {
-  swordfs::metadata::RecordingRedisBridge bridge;
-  swordfs::metadata::MechanismPrivateStorePtr private_metadata;
+FIBER_TEST_F(RedisMetaImplTest, ChunkIDAllocationCoexistsWithLegacyChunkRevisionAllocator) {
+  swordfs::metadata::ChunkMetadataPtr chunk_metadata;
   Status bind_status;
-  swordfs::test::RunInTestThreadFromFiber([&] {
-    bind_status = impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkType::kRedisCache, &private_metadata);
-    if (bind_status.ok()) {
-      bind_status = impl_->BindChunkMetadataBridge(&bridge);
-    }
-  });
+  swordfs::test::RunInTestThreadFromFiber(
+      [&] { bind_status = impl_->OpenChunkMetadata(swordfs::metadata::ChunkType::kCow, &chunk_metadata); });
   ASSERT_TRUE(bind_status.ok()) << bind_status.message();
-  ASSERT_NE(private_metadata, nullptr);
-  EXPECT_EQ(private_metadata->mechanism(), swordfs::metadata::ChunkType::kRedisCache);
+  ASSERT_NE(chunk_metadata, nullptr);
+  EXPECT_EQ(chunk_metadata->Type(), swordfs::metadata::ChunkType::kCow);
+  EXPECT_NE(std::dynamic_pointer_cast<swordfs::metadata::cow::COWChunkMetadata>(chunk_metadata), nullptr);
 
-  uint64_t private_revision = 0;
-  ASSERT_TRUE(
-      private_metadata
-          ->AllocateSequence(swordfs::metadata::PrivateSequenceTag<swordfs::metadata::ChunkType::kRedisCache, 33>{},
-                             &private_revision)
-          .ok());
-  EXPECT_EQ(private_revision, 1U);
+  swordfs::metadata::ChunkID chunk_id;
+  ASSERT_TRUE(chunk_metadata->AllocateChunkID(&chunk_id).ok());
+  EXPECT_EQ(chunk_id, swordfs::metadata::ChunkID(1));
 
   swordfs::metadata::ChunkRevision legacy_revision = 0;
   ASSERT_TRUE(impl_->AllocateChunkRevision(&legacy_revision).ok());
   EXPECT_EQ(legacy_revision, 1U);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, PrivateCapabilityCompositionRejectsNullOutputsAndBridge) {
+FIBER_TEST_F(RedisMetaImplTest, ChunkMetadataCompositionRejectsNullOutputsAndBridge) {
   Status null_store_status;
+  Status mismatched_store_status;
   Status null_bridge_status;
+  swordfs::metadata::ChunkMetadataPtr mismatched;
   swordfs::test::RunInTestThreadFromFiber([&] {
-    null_store_status = impl_->OpenPrivateMetadataStore(swordfs::metadata::ChunkType::kRedisCache, nullptr);
+    null_store_status = impl_->OpenChunkMetadata(swordfs::metadata::ChunkType::kRedisCache, nullptr);
+    mismatched_store_status = impl_->OpenChunkMetadata(swordfs::metadata::ChunkType::kRedisCache, &mismatched);
     null_bridge_status = impl_->BindChunkMetadataBridge(nullptr);
   });
 
   EXPECT_EQ(null_store_status.ToErrno(), EINVAL);
+  EXPECT_EQ(mismatched_store_status.ToErrno(), ENOSYS);
+  EXPECT_EQ(mismatched, nullptr);
   EXPECT_EQ(null_bridge_status.ToErrno(), EINVAL);
 }
 

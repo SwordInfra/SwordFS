@@ -1,7 +1,7 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include "metadata/mem/MemPrivateMetadataStore.hpp"
+#include "metadata/mem/MemCOWChunkMetadata.hpp"
 
 #include <mutex>
 
@@ -9,10 +9,10 @@
 
 namespace swordfs::metadata {
 
-utils::Status MemPrivateMetadataStore::AllocateSequenceImpl(uint32_t stable_id, uint64_t *value) {
+utils::Status MemCOWChunkMetadata::AllocateChunkID(ChunkID *out) {
   utils::ExpectInFiberDomain();
   std::lock_guard<utils::FiberMutex> lock(mutex_);
-  return internal::AllocatePrivateSequenceValue(&sequences_[stable_id], value);
+  return internal::AllocateChunkIDValue(&next_chunk_id_, out);
 }
 
 }  // namespace swordfs::metadata

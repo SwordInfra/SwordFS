@@ -11,8 +11,8 @@
 #include <string_view>
 #include <vector>
 
+#include "metadata/ChunkMetadata.hpp"
 #include "metadata/IChunkIndexTxn.hpp"
-#include "metadata/IPrivateMetadata.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/types/Chunk.hpp"
@@ -53,7 +53,7 @@ class RedisMetaOps {
   RedisMetaOps &operator=(RedisMetaOps &&) = delete;
 
   utils::Status Initialize();
-  utils::Status OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out);
+  utils::Status OpenChunkMetadata(ChunkType chunk_type, ChunkMetadataPtr *out);
   utils::Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge);
   utils::Status FormatVolume(const SwordFsVolume &config);
   utils::Status LoadVolume(SwordFsVolume *config);
@@ -114,7 +114,7 @@ class RedisMetaOps {
  private:
   std::shared_ptr<RedisBackendContext> backend_;
   const chunk::internal::ChunkMetadataBridge *chunk_metadata_bridge_ = nullptr;
-  MechanismPrivateStorePtr private_metadata_;
+  ChunkMetadataPtr chunk_metadata_;
   redis::RedisKey key_;
   uint64_t chunk_size_ = 0;
   utils::FiberMutex pending_delete_scan_mutex_;

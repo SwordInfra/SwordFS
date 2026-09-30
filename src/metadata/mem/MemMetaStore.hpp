@@ -32,6 +32,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "metadata/ChunkMetadata.hpp"
 #include "metadata/mem/MemMetaTxn.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
@@ -55,7 +56,7 @@ class MemMetaStore {
   }
   ~MemMetaStore() = default;
 
-  utils::Status OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out);
+  utils::Status OpenChunkMetadata(ChunkType chunk_type, ChunkMetadataPtr *out);
   utils::Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge);
   void SetChunkSize(uint64_t chunk_size) {
     chunk_size_ = chunk_size;
@@ -77,15 +78,15 @@ class MemMetaStore {
     using Result = std::invoke_result_t<F, MemMetaTxn &>;
     if constexpr (std::is_void_v<Result>) {
       std::forward<F>(f)(txn);
-      txn.CommitPrivateMetadata();
+      txn.CommitLegacyBridgeWrites();
     } else {
       auto result = std::forward<F>(f)(txn);
       if constexpr (std::is_same_v<std::remove_cvref_t<Result>, Status>) {
         if (result.ok()) {
-          txn.CommitPrivateMetadata();
+          txn.CommitLegacyBridgeWrites();
         }
       } else {
-        txn.CommitPrivateMetadata();
+        txn.CommitLegacyBridgeWrites();
       }
       return result;
     }
@@ -100,7 +101,8 @@ class MemMetaStore {
   std::atomic<InodeID> next_ino_;
   ChunkRevision next_chunk_revision_ = 1;
   const chunk::internal::ChunkMetadataBridge *chunk_metadata_bridge_ = nullptr;
-  MechanismPrivateStorePtr private_metadata_;
+  ChunkMetadataPtr chunk_metadata_;
+  ChunkType chunk_type_ = ChunkType::kCow;
   uint64_t chunk_size_ = 0;
 
   folly::F14FastMap<InodeID, std::unique_ptr<SwordFsInode>> inodes_;
@@ -108,7 +110,8 @@ class MemMetaStore {
 
   // Chunk metadata: inode → (index → SwordFsChunk).
   folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, SwordFsChunk>> chunks_;
-  // Private hash names and fields are supplied by the selected chunk mechanism.
+  // Legacy bridge hash names and fields are supplied by the selected chunk
+  // mechanism. Final typed ChunkMetadata does not use this table.
   folly::F14FastMap<std::string, folly::F14FastMap<std::string, std::string>> private_chunk_index_;
 
   // Orphan candidates: inodes whose nlink dropped to zero. Published by the

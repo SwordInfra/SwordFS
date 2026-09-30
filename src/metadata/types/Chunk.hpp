@@ -5,6 +5,7 @@
 
 #include <sys/types.h>
 
+#include <compare>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -16,6 +17,23 @@
 namespace swordfs::metadata {
 
 inline constexpr uint64_t kMaxSupportedFileSize = static_cast<uint64_t>(std::numeric_limits<off_t>::max());
+
+// Mechanism-neutral identity for one attached chunk-state materialization.
+// Zero is invalid. A detached ID is never reused or reattached; later
+// rematerialization receives a fresh ID.
+class ChunkID {
+ public:
+  constexpr ChunkID() = default;
+  explicit constexpr ChunkID(uint64_t value) : value_(value) {
+  }
+
+  auto operator<=>(const ChunkID &) const = default;
+
+ private:
+  uint64_t value_ = 0;
+};
+
+inline constexpr ChunkID kInvalidChunkID;
 
 struct ChunkPosition {
   ChunkIndex index = 0;

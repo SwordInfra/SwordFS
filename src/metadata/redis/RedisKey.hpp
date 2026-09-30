@@ -22,7 +22,7 @@ class RedisKey {
   std::string Format() const;
   std::string NextIno() const;
   std::string NextChunkRevision() const;
-  std::string PrivateSequence(ChunkType mechanism, uint32_t sequence_id) const;
+  std::string NextChunkID() const;
   std::string Inode(uint64_t ino) const;
   std::string Directory(uint64_t parent_ino) const;
   std::string Chunk(uint64_t ino) const;

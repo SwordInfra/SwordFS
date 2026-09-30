@@ -65,9 +65,9 @@ RedisMetaImpl::RedisMetaImpl(const RedisMetaConfig &config, std::string_view vol
 
 RedisMetaImpl::~RedisMetaImpl() = default;
 
-Status RedisMetaImpl::OpenPrivateMetadataStore(ChunkType mechanism, MechanismPrivateStorePtr *out) {
+Status RedisMetaImpl::OpenChunkMetadata(ChunkType chunk_type, ChunkMetadataPtr *out) {
   utils::ExpectInThreadDomain();
-  return ops_.OpenPrivateMetadataStore(mechanism, out);
+  return ops_.OpenChunkMetadata(chunk_type, out);
 }
 
 Status RedisMetaImpl::BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) {

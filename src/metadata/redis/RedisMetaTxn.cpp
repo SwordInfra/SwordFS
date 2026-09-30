@@ -20,13 +20,13 @@
 
 namespace swordfs::metadata {
 
-RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size, ChunkType mechanism,
+RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size, ChunkType chunk_type,
                            const chunk::internal::ChunkMetadataBridge *bridge)
-    : txn_(txn), key_(key), chunk_size_(chunk_size), chunk_metadata_bridge_(bridge), private_metadata_txn_(mechanism) {
+    : txn_(txn), key_(key), chunk_size_(chunk_size), chunk_metadata_bridge_(bridge), chunk_type_(chunk_type) {
 }
 
 std::string RedisMetaTxn::PrivateHash(std::string_view hash) const {
-  return key_.PrivateChunkIndex(private_metadata_txn_.mechanism(), hash);
+  return key_.PrivateChunkIndex(chunk_type_, hash);
 }
 
 utils::Status RedisMetaTxn::Read(std::string_view hash, std::string_view field, std::string *value) {
