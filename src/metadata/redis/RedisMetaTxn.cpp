@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "chunk/internal/ChunkMetadataBridge.hpp"
+#include "metadata/ChunkSizePlan.hpp"
 #include "metadata/InodePolicy.hpp"
 #include "metadata/PosixAcl.hpp"
 #include "metadata/Utils.hpp"
@@ -1195,13 +1196,18 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
   if (chunk_size_ == 0) {
     return utils::Status::Internal("volume chunk size is not initialized");
   }
+  ChunkSizeLayout layout;
+  auto status = PlanChunkSizeLayout(new_size, chunk_size_, &layout);
+  if (!status.ok()) {
+    return status;
+  }
 
   // Drive truncate work from materialized metadata, never from logical file
   // length. ScanChunks WATCHes the chunk hash before any write is queued; a
   // concurrent chunk-map mutation therefore aborts EXEC and retries the whole
   // operation.
   std::vector<std::pair<std::string, SwordFsChunk>> chunks;
-  auto status = ScanChunks(ino, chunks);
+  status = ScanChunks(ino, chunks);
   if (!status.ok()) {
     return status;
   }
@@ -1213,10 +1219,7 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
   std::vector<ChunkIndexChange> changes;
   for (const auto &[field, head] : chunks) {
     (void)field;
-    // ScanChunks() validated every descriptor against this volume-fixed chunk
-    // size, so the derived offset cannot overflow here.
-    const uint64_t start_offset = static_cast<uint64_t>(head.index) * chunk_size_;
-    if (start_offset >= new_size) {
+    if (layout.ShouldDetach(head.index)) {
       if (detached_chunks != nullptr) {
         PendingDelete pending;
         status = chunk_metadata_bridge_->FreezePendingDelete(*this, ino, head, chunk_size_, &pending);
@@ -1226,18 +1229,12 @@ utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint6
         detached_chunks->push_back(std::move(pending));
       }
       changes.push_back({head, std::nullopt});
-    } else {
-      const uint64_t surviving_size = new_size - start_offset;
-      if (head.size > surviving_size) {
-        auto clamped = head;
-        clamped.size = surviving_size;
-        changes.push_back({head, clamped});
-      }
+    } else if (layout.boundary.has_value() && head.index == layout.boundary->index &&
+               head.size > layout.boundary->visible_prefix) {
+      auto clamped = head;
+      clamped.size = layout.boundary->visible_prefix;
+      changes.push_back({head, clamped});
     }
-  }
-  status = chunk_metadata_bridge_->Truncate(*this, ino, changes);
-  if (!status.ok()) {
-    return status;
   }
   for (const auto &change : changes) {
     if (change.current.has_value()) {

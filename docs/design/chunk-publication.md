@@ -106,6 +106,86 @@ immutable object. Conditional erase likewise requires the complete expected
 head. These operations are mechanism-owned and do not join a FileMetadata
 transaction.
 
+### FileMetadata size planning and COW boundary sanitation
+
+#318 stages the final size-change contract without making the typed model
+production authority yet. The FileMetadata-facing planner operates only on a
+consistent mechanism-neutral snapshot:
+
+    EOF
+    ChunkIndex -> ChunkID
+
+and returns:
+
+- the target EOF;
+- the observed old EOF plus the old interior-boundary mapping state needed as
+  a later publication precondition;
+- one retained mapped boundary, when mechanism sanitation is required,
+  expressed only as (ChunkIndex, ChunkID, visible_prefix);
+- whole detached ChunkIDs on shrink for best-effort cleanup handoff.
+
+The planner deliberately contains no COW revision, COW head, object key, or
+backend-specific state. An interior EOF whose ChunkIndex has no mapping is
+recorded as a hole. An EOF exactly on a chunk boundary has no retained
+boundary at all.
+
+The boundary/whole-detach arithmetic itself is shared with the legacy
+authority path through a smaller ChunkSizeLayout classification containing
+only the interior boundary (ChunkIndex, visible_prefix) and the first wholly
+detached ChunkIndex. Memory and Redis legacy truncate consume that layout
+instead of independently deriving offsets from SwordFsChunk; the final
+FileMetadata planner applies the same layout to ChunkIndex -> ChunkID mappings.
+This transitional reuse does not invent ChunkIDs for legacy descriptors and
+does not make staged COW private heads authoritative.
+
+For shrink S -> T, FileMetadata's final atomic operation will publish the new
+EOF/attrs and detach every mapping wholly beyond T. If T falls inside a mapped
+chunk, that mapping remains attached and the plan carries its ChunkID and
+visible prefix for the selected mechanism to clamp after FileMetadata has made
+the removed range unreachable. Shrink-to-zero therefore detaches every
+mapping and has no retained boundary. Detached ChunkIDs are never reattached;
+later materialization allocates fresh IDs.
+
+For grow S -> T, the planner never scans detached mechanism state. Only an
+attached ChunkID containing the old interior EOF can contain a hidden tail
+that matters. That boundary is sanitized to the old visible prefix before
+FileMetadata publishes the larger EOF. FileMetadata then revalidates the
+planner's old-state precondition so sanitation cannot race with an unrelated
+EOF or boundary-mapping change. If publication loses that race, the sanitation
+is left in place because it only discarded bytes that were already hidden
+beyond the authoritative old EOF.
+
+COW implements the retained-boundary intent as a revalidation loop over the
+typed COWChunkMetadata API:
+
+    read current head
+      |
+      +-- head.size <= visible_prefix --> already safe
+      |
+      +-- head.size > visible_prefix
+             |
+             v
+     full-head CAS {R,S} -> {R,visible_prefix}
+             |
+             +-- success --> safe
+             +-- CAS conflict --> re-read the current head and retry from it
+
+The loop never blindly retries a stale expected head. A concurrent ordinary
+COW rewrite may advance the revision; sanitation then clamps the newly observed
+revision. If the COW head disappears, FileMetadata attachment is revalidated:
+the same ChunkID still being attached is a metadata inconsistency and fails
+closed, while a detached/replaced mapping means the old ChunkID is no longer
+authoritative and the sanitation attempt stops.
+
+Through #318, this planning/sanitation API is staged and directly tested but
+is not dual-written with live legacy state. Existing SwordFsChunk truncate
+behavior remains production authority until #317. In particular,
+ChunkMetadataBridge::Truncate() is retired here rather than becoming a second
+cross-domain coordination mechanism. Legacy truncate may leave
+mechanism-private residue for independent cleanup, but public descriptor
+removal/clamp continues to determine visibility until the coherent #317
+authority cutover.
+
 Memory stores the typed COW head map and per-ChunkID revision counters behind
 its own `FiberMutex`, independent of `MemMetaStore::Transact()`. Redis stores
 each ChunkID head and revision counter under COW-private per-ID keys and uses
