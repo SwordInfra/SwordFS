@@ -37,6 +37,7 @@
 #include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/cow/COWObjectKey.hpp"
+#include "chunk/internal/ChunkCleanupParticipant.hpp"
 #include "chunk/internal/ChunkGcWorker.hpp"
 #include "fuse/Vfs.hpp"
 #include "metadata/IMetaEngine.hpp"
@@ -107,8 +108,13 @@ swordfs::utils::Status ReconcileBackgroundCleanup(swordfs::storage::IDataEngine 
     return status;
   }
   auto &volume = swordfs::volume::VolumeImpl::Instance();
-  swordfs::chunk::internal::ChunkGcWorker worker(volume.config().chunk_type, volume.chunk_size(), volume.meta_engine(),
-                                                 data);
+  std::unique_ptr<swordfs::chunk::internal::ChunkCleanupParticipant> cleanup;
+  status = swordfs::chunk::internal::CreateChunkCleanupParticipant(volume.config().chunk_type, volume.chunk_size(), {},
+                                                                   volume.meta_engine(), data, {}, &cleanup);
+  if (!status.ok()) {
+    return status;
+  }
+  swordfs::chunk::internal::ChunkGcWorker worker(volume.meta_engine(), std::move(cleanup));
   return worker.Reconcile();
 }
 

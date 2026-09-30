@@ -8,6 +8,7 @@
 #include <algorithm>
 
 #include "chunk/ChunkFactory.hpp"
+#include "chunk/internal/ChunkCleanupParticipant.hpp"
 #include "chunk/internal/ChunkGcWorker.hpp"
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "config/ConfigCenter.hpp"
@@ -94,8 +95,13 @@ Status VolumeImpl::ComposeChunkRuntime() {
   chunk_factory_ = std::make_unique<chunk::ChunkFactory>(config_.chunk_type, chunk_metadata_, meta_engine_.get(),
                                                          data_engine_.get(), config_.chunk_size);
   if (data_engine_ != nullptr) {
-    chunk_gc_worker_ = std::make_unique<chunk::internal::ChunkGcWorker>(config_.chunk_type, config_.chunk_size,
-                                                                        meta_engine_.get(), data_engine_.get());
+    std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
+    auto status = chunk::internal::CreateChunkCleanupParticipant(
+        config_.chunk_type, config_.chunk_size, chunk_metadata_, meta_engine_.get(), data_engine_.get(), {}, &cleanup);
+    if (!status.ok()) {
+      return status;
+    }
+    chunk_gc_worker_ = std::make_unique<chunk::internal::ChunkGcWorker>(meta_engine_.get(), std::move(cleanup));
   }
   return Status::OK();
 }

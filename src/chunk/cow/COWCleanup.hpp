@@ -4,14 +4,23 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "chunk/internal/ChunkCleanupParticipant.hpp"
+#include "metadata/ChunkMetadata.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "utils/Status.hpp"
 
 namespace swordfs::chunk::cow {
+
+enum class COWCleanupKind : uint32_t {
+  kRevision = 1,
+  kDetachedChunk = 2,
+  kDetachedReclaim = 3,
+};
 
 struct COWRef {
   metadata::InodeID ino = 0;
@@ -29,5 +38,10 @@ utils::Status FreezeCOWReclaim(metadata::InodeID ino, const std::vector<metadata
                                uint64_t chunk_size, metadata::ReclaimWork *out);
 utils::Status DecodeCOWDelete(const metadata::PendingDelete &work, uint64_t chunk_size, COWRef *out);
 utils::Status DecodeCOWReclaim(const metadata::ReclaimWork &work, uint64_t chunk_size, std::vector<COWRef> *out);
+
+utils::Status CreateCOWCleanupParticipant(uint64_t chunk_size, metadata::ChunkMetadataPtr chunk_metadata,
+                                          metadata::IMetaEngine *meta, storage::IDataEngine *data,
+                                          internal::ChunkReachabilityProbeFn reachability_probe,
+                                          std::unique_ptr<internal::ChunkCleanupParticipant> *out);
 
 }  // namespace swordfs::chunk::cow
