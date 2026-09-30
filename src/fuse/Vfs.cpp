@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <folly/ScopeGuard.h>
 #include <folly/logging/xlog.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cerrno>
@@ -36,7 +37,33 @@ using swordfs::vfs::VfsImpl;
 
 namespace swordfs::fuse {
 
+MountInitContext::~MountInitContext() {
+  if (readiness_fd >= 0) {
+    ::close(readiness_fd);
+  }
+}
+
 namespace {
+
+void CompleteMountInit(MountInitContext *context, bool success) {
+  if (context == nullptr) {
+    return;
+  }
+  context->failed = !success;
+  if (context->readiness_fd >= 0) {
+    if (success) {
+      char ok = 0;
+      if (::write(context->readiness_fd, &ok, 1) < 0) {
+        // Best-effort: the daemon parent may already have exited.
+      }
+    }
+    ::close(context->readiness_fd);
+    context->readiness_fd = -1;
+  }
+  if (!success && context->session != nullptr) {
+    fuse_session_exit(context->session);
+  }
+}
 
 template <typename Fn, typename RejectFn>
 void RunFuseInFiber(fuse_req_t req, Fn &&fn, RejectFn &&on_reject) {
@@ -138,11 +165,23 @@ void VfsHookFactory::SetRequestContext(fuse_req_t req) {
 void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   // Initialise per-thread fiber runtime.
   ::swordfs::utils::InitFiberRuntime();
-  (void)userdata;
+  auto *init_context = static_cast<MountInitContext *>(userdata);
   conn->no_interrupt = 1;
   conn->max_write = kMaxWriteSize;
   conn->max_readahead = kMaxReadAheadSize;
   conn->time_gran = kTimeGran;
+
+  constexpr uint64_t kPosixAclCaps = FUSE_CAP_POSIX_ACL | FUSE_CAP_DONT_MASK;
+  const uint64_t capable = conn->capable_ext != 0 ? conn->capable_ext : conn->capable;
+  const bool volume_posix_acl_enabled = ::swordfs::volume::VolumeImpl::Instance().config().enable_posix_acl;
+  if (volume_posix_acl_enabled && (capable & kPosixAclCaps) != kPosixAclCaps) {
+    fuse_unset_feature_flag(conn, FUSE_CAP_POSIX_ACL);
+    fuse_unset_feature_flag(conn, FUSE_CAP_DONT_MASK);
+    runtime::MountRuntimeBehavior::Instance().SetPosixAclEnabled(false);
+    SWORDFS_LOG_ERROR << "POSIX ACL volume requires FUSE_CAP_POSIX_ACL and FUSE_CAP_DONT_MASK";
+    CompleteMountInit(init_context, false);
+    return;
+  }
 
   // Reset per-inode runtime state before FUSE can dispatch any request for
   // this mount. The registry is fiber-domain state, so submit the reset to the
@@ -179,18 +218,14 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   } else {
     fuse_unset_feature_flag(conn, FUSE_CAP_IOCTL_DIR);
   }
-  constexpr uint64_t kPosixAclCaps = FUSE_CAP_POSIX_ACL | FUSE_CAP_DONT_MASK;
-  const uint64_t capable = conn->capable_ext != 0 ? conn->capable_ext : conn->capable;
-  const bool posix_acl_enabled =
-      ::swordfs::volume::VolumeImpl::Instance().config().enable_posix_acl && (capable & kPosixAclCaps) == kPosixAclCaps;
-  if (posix_acl_enabled) {
+  if (volume_posix_acl_enabled) {
     fuse_set_feature_flag(conn, FUSE_CAP_POSIX_ACL);
     fuse_set_feature_flag(conn, FUSE_CAP_DONT_MASK);
   } else {
     fuse_unset_feature_flag(conn, FUSE_CAP_POSIX_ACL);
     fuse_unset_feature_flag(conn, FUSE_CAP_DONT_MASK);
   }
-  runtime::MountRuntimeBehavior::Instance().SetPosixAclEnabled(posix_acl_enabled);
+  runtime::MountRuntimeBehavior::Instance().SetPosixAclEnabled(volume_posix_acl_enabled);
 
   // libfuse 3.18's low-level setxattr callback does not expose the
   // FUSE_SETXATTR_ACL_KILL_SGID extra flag. Advertising this feature would
@@ -207,6 +242,7 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
 
   fuse_unset_feature_flag(conn, FUSE_CAP_SPLICE_WRITE);
 
+  CompleteMountInit(init_context, true);
   SWORDFS_LOG_INFO << "SwordFS filesystem initialized (mount OK)";
 }
 

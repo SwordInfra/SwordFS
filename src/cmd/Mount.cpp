@@ -179,12 +179,14 @@ static FuseArgsGuard BuildFuseArgs(const std::vector<std::string> &extras) {
 // Mount the filesystem via libfuse low-level API. Blocks until unmounted.
 static int Mount(const std::string &mountpoint, const std::vector<std::string> &extras, int signal_fd) {
   FuseArgsGuard args(BuildFuseArgs(extras));
+  ::swordfs::fuse::MountInitContext init_context(signal_fd);
 
   FuseSessionGuard se(fuse_session_new(args.get(), &::swordfs::fuse::VfsHookFactory::get_ops(),
-                                       sizeof(struct fuse_lowlevel_ops), nullptr));
+                                       sizeof(struct fuse_lowlevel_ops), &init_context));
   if (!se) {
     return 1;
   }
+  init_context.session = se.get();
 
   if (fuse_set_signal_handlers(se.get()) != 0) {
     return 1;
@@ -194,20 +196,11 @@ static int Mount(const std::string &mountpoint, const std::vector<std::string> &
     return 1;
   }
 
-  // Signal the parent that the mount succeeded (daemon mode).
-  if (signal_fd >= 0) {
-    char ok = 0;
-    if (::write(signal_fd, &ok, 1) < 0) {
-      // Best-effort: parent already exited or pipe broken, nothing to do.
-    }
-    ::close(signal_fd);
-  }
-
   struct fuse_loop_config *loop_cfg = fuse_loop_cfg_create();
   fuse_loop_cfg_set_max_threads(loop_cfg, ConfigCenter::Instance().fuse_threads());
   int ret = fuse_session_loop_mt(se.get(), loop_cfg);
   fuse_loop_cfg_destroy(loop_cfg);
-  return ret;
+  return init_context.failed ? 1 : ret;
 }
 
 int RunMount() {

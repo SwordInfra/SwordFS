@@ -28,14 +28,20 @@ and the kernel advertises both `FUSE_CAP_POSIX_ACL` and
 `default_permissions`; `FUSE_CAP_DONT_MASK` delivers the unmasked create
 mode and caller umask so create-time ACL/umask derivation happens exactly once.
 
+An ACL-enabled volume must fail mount initialization if either required
+capability is unavailable. Falling back to mode-only authorization is unsafe:
+for an extended access ACL the mode group-class bits project `ACL_MASK`, not
+the owning-group entry, so disabling ACL evaluation can grant permissions that
+the durable ACL denies. Daemon readiness is therefore published only after the
+FUSE INIT callback has validated this capability contract.
+
 `FUSE_CAP_SETXATTR_EXT` remains disabled with libfuse 3.18 because the
 low-level callback does not expose `FUSE_SETXATTR_ACL_KILL_SGID`.
 
-When the volume feature is disabled, or when the capability pair is
-unavailable, the exact
-`system.posix_acl_access` and `system.posix_acl_default` names remain
-unsupported at the FUSE/VFS boundary. Raw `user.*` xattrs continue to use
-the #378 path; other `system.*` and `trusted.*` names stay unsupported.
+When the volume feature is disabled, the exact `system.posix_acl_access` and
+`system.posix_acl_default` names remain unsupported at the FUSE/VFS boundary.
+Raw `user.*` xattrs continue to use the #378 path; other `system.*` and
+`trusted.*` names stay unsupported.
 
 ## Durable representation
 
