@@ -48,6 +48,7 @@ struct FormatOptions {
   std::string region;
   uint64_t chunk_size = 64ULL * 1024 * 1024;
   metadata::ChunkType chunk_type = metadata::ChunkType::kCow;
+  bool enable_posix_acl = false;
 };
 
 struct MountOptions {

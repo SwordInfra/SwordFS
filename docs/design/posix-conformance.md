@@ -36,13 +36,16 @@ persisted. Character and block devices persist the supplied `rdev` exactly.
 All other accepted node types canonicalize `rdev` to zero because device
 identity has no meaning for them.
 
-Mode ownership follows the current low-level FUSE contract. SwordFS does not
-enable `FUSE_CAP_DONT_MASK`, so the kernel applies the caller's umask before
-the `mknod` callback. Metadata therefore preserves the permission bits it
-receives and must not apply `SwordFsContext::umask` a second time. Likewise,
-Linux VFS/FUSE with `default_permissions` owns ordinary DAC and device-node
-authorization; metadata only enforces namespace/state invariants after kernel
-authorization.
+Mode ownership follows the negotiated low-level FUSE contract. Volumes
+formatted with `--enable-posix-acl` request `FUSE_CAP_POSIX_ACL` and
+`FUSE_CAP_DONT_MASK` only as a pair. With the pair active, the kernel supplies
+the unmasked create mode and caller umask, and metadata applies that umask
+exactly once when no parent default ACL exists. Volumes without the persistent
+feature, or mounts where the pair is unavailable, keep POSIX ACL xattrs
+disabled and request setup normalizes the already-kernel-applied umask to zero
+before metadata creation. Linux VFS/FUSE with `default_permissions` remains the
+ordinary DAC/ACL authorization authority; metadata owns only persistence,
+inheritance, mode synchronization, and namespace/state invariants.
 
 Special nodes reuse the ordinary inode/dentry lifecycle. They inherit the
 current creation uid/gid rule, start with one link, use zero size, participate

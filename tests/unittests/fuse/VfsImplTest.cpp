@@ -894,6 +894,19 @@ TEST(FuseSetAttrFieldTest, KillSuidgidProtocolBitMapsToSemanticIntent) {
   EXPECT_TRUE(swordfs::metadata::HasSetAttrField(fields, swordfs::metadata::SetAttrField::kKillSuidGid));
 }
 
+namespace {
+
+void LoadVfsHookVolume(bool enable_posix_acl) {
+  auto mock = std::make_unique<swordfs::test::ConfiguredMetaEngine<MockMetaEngine>>();
+  SwordFsVolume config;
+  config.enable_posix_acl = enable_posix_acl;
+  const auto status =
+      swordfs::test::LoadTestVolumeRuntime(std::move(mock), std::make_unique<NoopDataEngine>(), std::move(config));
+  ASSERT_TRUE(status.ok()) << status.message();
+}
+
+}  // namespace
+
 TEST(VfsHookFactoryTest, InitDisablesUserspaceKillprivAndAtomicOTrunc) {
   swordfs::volume::VolumeImpl::Initialize();
 
@@ -909,6 +922,44 @@ TEST(VfsHookFactoryTest, InitDisablesUserspaceKillprivAndAtomicOTrunc) {
 
   EXPECT_EQ(conn.want & kUserspaceKillprivCaps, 0U);
   EXPECT_EQ(conn.want_ext & kUserspaceKillprivCaps, 0U);
+
+  swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
+  swordfs::volume::VolumeImpl::Initialize();
+}
+
+TEST(VfsHookFactoryTest, InitNegotiatesPosixAclAndDontMaskAsOneContract) {
+  LoadVfsHookVolume(/*enable_posix_acl=*/true);
+
+  constexpr uint64_t kAclCaps = FUSE_CAP_POSIX_ACL | FUSE_CAP_DONT_MASK;
+  struct fuse_conn_info conn{};
+  conn.capable = static_cast<uint32_t>(kAclCaps | FUSE_CAP_SETXATTR_EXT);
+  conn.capable_ext = kAclCaps | FUSE_CAP_SETXATTR_EXT;
+  swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &conn);
+
+  EXPECT_EQ(conn.want_ext & kAclCaps, kAclCaps);
+  EXPECT_EQ(conn.want_ext & FUSE_CAP_SETXATTR_EXT, 0U);
+  swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
+
+  struct fuse_conn_info incomplete{};
+  incomplete.capable = FUSE_CAP_POSIX_ACL;
+  incomplete.capable_ext = FUSE_CAP_POSIX_ACL;
+  swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &incomplete);
+  EXPECT_EQ(incomplete.want_ext & kAclCaps, 0U);
+  swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
+
+  swordfs::volume::VolumeImpl::Initialize();
+}
+
+TEST(VfsHookFactoryTest, InitDoesNotNegotiatePosixAclWithoutVolumeOptIn) {
+  LoadVfsHookVolume(/*enable_posix_acl=*/false);
+
+  constexpr uint64_t kAclCaps = FUSE_CAP_POSIX_ACL | FUSE_CAP_DONT_MASK;
+  struct fuse_conn_info conn{};
+  conn.capable = static_cast<uint32_t>(kAclCaps);
+  conn.capable_ext = kAclCaps;
+  swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &conn);
+
+  EXPECT_EQ(conn.want_ext & kAclCaps, 0U);
 
   swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
   swordfs::volume::VolumeImpl::Initialize();
@@ -1435,6 +1486,31 @@ FIBER_TEST_F(VfsImplIntegrationTest, XAttrVfsPolicyTranslatesLinuxFlagsAndReject
   EXPECT_TRUE(VfsImpl::ListXAttrs(7, &names).ok());
   EXPECT_EQ(names, (std::vector<std::string>{"user.alpha"}));
   EXPECT_EQ(VfsImpl::RemoveXAttr(7, "trusted.key").ToErrno(), EOPNOTSUPP);
+}
+
+FIBER_TEST_F(VfsImplIntegrationTest, XAttrVfsPolicyRoutesOnlyExactPosixAclNamesWhenNegotiated) {
+  swordfs::test::RunInTestThreadFromFiber(
+      [] { swordfs::runtime::MountRuntimeBehavior::Instance().SetPosixAclEnabled(true); });
+
+  EXPECT_TRUE(VfsImpl::SetXAttr(7, "system.posix_acl_access", "acl", 3, 0).ok());
+  EXPECT_EQ(mock_meta_->last_xattr_name(), "system.posix_acl_access");
+  EXPECT_TRUE(VfsImpl::SetXAttr(7, "system.posix_acl_default", "acl", 3, XATTR_REPLACE).ok());
+  EXPECT_EQ(mock_meta_->last_xattr_mode(), XAttrSetMode::kReplaceOnly);
+
+  std::string value;
+  EXPECT_TRUE(VfsImpl::GetXAttr(7, "system.posix_acl_access", &value).ok());
+  EXPECT_TRUE(VfsImpl::RemoveXAttr(7, "system.posix_acl_default").ok());
+  EXPECT_EQ(VfsImpl::GetXAttr(7, "system.posix_acl_other", &value).ToErrno(), EOPNOTSUPP);
+  EXPECT_EQ(VfsImpl::GetXAttr(7, "system.key", &value).ToErrno(), EOPNOTSUPP);
+
+  std::vector<std::string> names;
+  mock_meta_->set_xattr_list_result(
+      {"trusted.key", "user.alpha", "system.posix_acl_access", "system.posix_acl_default", "system.other"});
+  EXPECT_TRUE(VfsImpl::ListXAttrs(7, &names).ok());
+  EXPECT_EQ(names, (std::vector<std::string>{"user.alpha", "system.posix_acl_access", "system.posix_acl_default"}));
+
+  swordfs::test::RunInTestThreadFromFiber(
+      [] { swordfs::runtime::MountRuntimeBehavior::Instance().SetPosixAclEnabled(false); });
 }
 
 FIBER_TEST_F(VfsImplIntegrationTest, XAttrVfsPolicyEnforcesLinuxNameAndValueLimits) {

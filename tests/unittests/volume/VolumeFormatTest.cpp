@@ -76,6 +76,28 @@ TEST(SwordFsVolumeTest, SerializeToAndParseFromRoundTrip) {
   EXPECT_EQ(parsed.region, original.region);
   EXPECT_EQ(parsed.chunk_size, original.chunk_size);
   EXPECT_EQ(parsed.chunk_type, ChunkType::kCow);
+  EXPECT_FALSE(parsed.enable_posix_acl);
+}
+
+TEST(SwordFsVolumeTest, PersistsPosixAclFeatureInCanonicalVolumeRecord) {
+  const SwordFsVolume volume = MakeVolume();
+
+  swordfs::metadata::BufEncoder enc;
+  enc.Header(swordfs::metadata::RecordType::kVolume);
+  enc.String(volume.name);
+  enc.String(volume.storage);
+  enc.String(volume.bucket);
+  enc.String(volume.region);
+  enc.U64(volume.chunk_size);
+  enc.U32(static_cast<uint32_t>(volume.chunk_type));
+  enc.U32(1);
+  std::string encoded;
+  enc.Finish(&encoded);
+
+  SwordFsVolume parsed;
+  ASSERT_TRUE(parsed.ParseFrom(encoded).ok());
+  EXPECT_TRUE(parsed.enable_posix_acl);
+  EXPECT_EQ(parsed.SerializeTo(), encoded);
 }
 
 TEST(SwordFsVolumeTest, PersistsChunkTypeAndRejectsUnknownChunkType) {

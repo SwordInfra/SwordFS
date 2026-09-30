@@ -16,6 +16,12 @@ void MountRuntimeBehavior::Initialize(ImplicitAtimePolicy implicit_atime_policy,
   utils::ExpectInThreadDomain();
   implicit_atime_policy_ = implicit_atime_policy;
   ioctl_enabled_ = ioctl_enabled;
+  posix_acl_enabled_ = false;
+}
+
+void MountRuntimeBehavior::SetPosixAclEnabled(bool enabled) {
+  utils::ExpectInThreadDomain();
+  posix_acl_enabled_ = enabled;
 }
 
 bool MountRuntimeBehavior::ImplicitAtimeUpdatesEnabled() const {
@@ -24,6 +30,10 @@ bool MountRuntimeBehavior::ImplicitAtimeUpdatesEnabled() const {
 
 bool MountRuntimeBehavior::IoctlEnabled() const {
   return ioctl_enabled_;
+}
+
+bool MountRuntimeBehavior::PosixAclEnabled() const {
+  return posix_acl_enabled_;
 }
 
 }  // namespace swordfs::runtime

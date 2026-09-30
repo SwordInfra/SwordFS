@@ -98,6 +98,7 @@ The volume configuration contains, among other fields:
 - region;
 - configured logical chunk size;
 - typed chunk type.
+- persistent POSIX ACL feature enablement.
 
 For Redis metadata, volume configuration is persisted in Redis. For the in-memory backend, only the volume configuration is persisted locally in `/etc/swordfs/<volume>/volume.fmt`; inode, directory, chunk, orphan, and pending-reclaim state remain process-lifetime state.
 
@@ -134,6 +135,13 @@ normalized policy directly. `VolumeImpl`, metadata factories, and operation
 interfaces do not carry mount-policy arguments. Memory and Redis therefore
 consume typed runtime policy without parsing raw FUSE options or reaching back
 into `ConfigCenter`.
+
+Persistent volume features follow a different authority path. POSIX ACL
+enablement remains owned by the loaded `SwordFsVolume`; the FUSE init hook
+combines that persisted feature with the kernel ACL capability pair and stores
+only the resulting effective state in `MountRuntimeBehavior`. It is therefore
+not reconstructed from a mount CLI flag or copied through metadata operation
+arguments.
 
 `noatime` currently controls only SwordFS's existing implicit access-time side
 effects on file `Open` and directory `OpenDir`. The normal `VfsImpl`, handle,
@@ -1083,10 +1091,15 @@ The current open-source backend set is also intentionally narrower than possible
 
 Additional metadata/data engines are extension opportunities through the registries, not current capabilities unless present in the repository.
 
-Raw `user.*` extended attributes are persisted in `SwordFsInode` and exposed
-through the low-level FUSE xattr callbacks. Other namespaces, including POSIX
-ACL xattrs, remain unsupported by this raw foundation; see
-[Persistent extended attributes](378-persistent-xattrs.md).
+Raw `user.*` extended attributes and Linux
+`system.posix_acl_{access,default}` bytes are persisted in
+`SwordFsInode` and exposed through the low-level FUSE xattr callbacks. POSIX
+ACL names are exposed only when the kernel advertises both POSIX-ACL and
+DONT_MASK capabilities; Linux VFS remains the authorization authority while
+SwordFS validates, inherits, and synchronizes ACL state with inode mode. Other
+`system.*` and `trusted.*` namespaces remain unsupported. See
+[Persistent extended attributes](378-persistent-xattrs.md) and
+[POSIX ACLs](396-posix-acl.md).
 
 ## 18. Architectural invariants for future changes
 

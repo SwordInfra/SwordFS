@@ -1,1 +1,1 @@
-"/usr/bin/mount -t fuse.swordfs -o allow_other -o remount,ro <FSTESTS_WORK_DIR>/scratch <FSTESTS_WORK_DIR>/scratch" failed at <TIMESTAMP>
+"/usr/bin/mount -t fuse.swordfs -o allow_other,suid -o remount,ro <FSTESTS_WORK_DIR>/scratch <FSTESTS_WORK_DIR>/scratch" failed at <TIMESTAMP>

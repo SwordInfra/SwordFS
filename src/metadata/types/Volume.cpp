@@ -59,6 +59,7 @@ std::string SwordFsVolume::SerializeTo() const {
   enc.String(region);
   enc.U64(chunk_size);
   enc.U32(static_cast<uint32_t>(chunk_type));
+  enc.U32(enable_posix_acl ? 1U : 0U);
   enc.Finish(&out);
   return out;
 }
@@ -75,9 +76,13 @@ utils::Status SwordFsVolume::ParseFrom(std::string_view data) {
   uint32_t chunk_type = 0;
   dec.U32(&chunk_type);
   volume.chunk_type = static_cast<ChunkType>(chunk_type);
-  if (!dec || volume.name.empty() || volume.chunk_size == 0 || !IsKnownChunkType(volume.chunk_type) || !dec.Done()) {
+  uint32_t enable_posix_acl = 0;
+  dec.U32(&enable_posix_acl);
+  if (!dec || volume.name.empty() || volume.chunk_size == 0 || !IsKnownChunkType(volume.chunk_type) ||
+      enable_posix_acl > 1 || !dec.Done()) {
     return utils::Status::Malformed("Malformed volume metadata record");
   }
+  volume.enable_posix_acl = enable_posix_acl != 0;
   const bool has_data_engine = !volume.storage.empty();
   const bool has_data_location = !volume.bucket.empty();
   if (has_data_engine != has_data_location) {

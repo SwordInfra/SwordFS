@@ -14,6 +14,7 @@
 
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/InodePolicy.hpp"
+#include "metadata/PosixAcl.hpp"
 #include "metadata/Types.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaStore.hpp"
@@ -213,7 +214,12 @@ Status MemMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fi
       return status;
     }
   }
-  status = WriteAttr(ino, st);
+  if (HasSetAttrField(fields, SetAttrField::kMode)) {
+    status = SyncPosixAccessAclForMode(inode, st.mode);
+  }
+  if (status.ok()) {
+    status = WriteAttr(ino, st);
+  }
   if (!status.ok()) {
     return status;
   }
@@ -382,21 +388,24 @@ Status MemMetaTxn::AddEntry(InodeID parent_ino, std::string_view name, uint32_t 
   attr.rdev = rdev;
 
   auto child = std::make_unique<SwordFsInode>(attr.ino, attr, parent_ino);
+  status = ApplyPosixAclCreateInheritance(*parent, static_cast<uint32_t>(ctx.umask), child.get());
   SwordFsInode *child_ptr = child.get();
-  InsertInode(std::move(child));
-  LinkEntry(parent_ino, name, child_ptr);
+  if (status.ok()) {
+    InsertInode(std::move(child));
+    LinkEntry(parent_ino, name, child_ptr);
 
-  // A new subdirectory's ".." is an additional hard link to the parent,
-  // and the entry-list change bumps the parent's mtime/ctime.
-  if (child_ptr->IsDir()) {
-    parent->attr.nlink++;
-  }
-  parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+    // A new subdirectory's ".." is an additional hard link to the parent,
+    // and the entry-list change bumps the parent's mtime/ctime.
+    if (child_ptr->IsDir()) {
+      parent->attr.nlink++;
+    }
+    parent->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
-  if (out) {
-    *out = *child_ptr;
+    if (out) {
+      *out = *child_ptr;
+    }
   }
-  return Status::OK();
+  return status;
 }
 
 Status MemMetaTxn::MoveEntry(InodeID old_parent_ino, std::string_view old_name, InodeID new_parent_ino,

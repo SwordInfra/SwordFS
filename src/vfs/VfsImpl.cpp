@@ -12,6 +12,7 @@
 #include "config/ConfigCenter.hpp"
 #include "fuse/Limits.hpp"
 #include "metadata/IMetaEngine.hpp"
+#include "metadata/PosixAcl.hpp"
 #include "metadata/Utils.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
 #include "storage/IDataEngine.hpp"
@@ -80,7 +81,7 @@ utils::Status ResolveLiveInode(fuse_ino_t ino, metadata::SwordFsInode *inode) {
   return status;
 }
 
-utils::Status ValidateUserXAttrName(const char *name) {
+utils::Status ValidateXAttrName(const char *name) {
   if (name == nullptr || name[0] == '\0') {
     return utils::Status::InvalidArgument("xattr name is empty");
   }
@@ -89,13 +90,13 @@ utils::Status ValidateUserXAttrName(const char *name) {
   if (xattr_name.size() > metadata::kMaxXAttrNameLength) {
     return utils::Status::Range("xattr name exceeds maximum length");
   }
-  if (xattr_name == kUserPrefix) {
-    return utils::Status::InvalidArgument("xattr name is empty");
+  if (xattr_name.starts_with(kUserPrefix)) {
+    return xattr_name == kUserPrefix ? utils::Status::InvalidArgument("xattr name is empty") : utils::Status::OK();
   }
-  if (!xattr_name.starts_with(kUserPrefix)) {
-    return utils::Status::OperationNotSupported("xattr namespace is not supported");
+  if (metadata::IsPosixAclXAttrName(xattr_name) && runtime::MountRuntimeBehavior::Instance().PosixAclEnabled()) {
+    return utils::Status::OK();
   }
-  return utils::Status::OK();
+  return utils::Status::OperationNotSupported("xattr namespace is not supported");
 }
 
 utils::Status TranslateXAttrSetMode(int flags, XAttrSetMode &mode) {
@@ -549,7 +550,7 @@ utils::Status VfsImpl::StatFs(fuse_ino_t ino, struct statvfs *stbuf) {
 }
 
 utils::Status VfsImpl::SetXAttr(fuse_ino_t ino, const char *name, const char *value, size_t size, int flags) {
-  auto status = ValidateUserXAttrName(name);
+  auto status = ValidateXAttrName(name);
   if (!status.ok()) {
     return status;
   }
@@ -569,7 +570,7 @@ utils::Status VfsImpl::SetXAttr(fuse_ino_t ino, const char *name, const char *va
 }
 
 utils::Status VfsImpl::GetXAttr(fuse_ino_t ino, const char *name, std::string *value) {
-  auto status = ValidateUserXAttrName(name);
+  auto status = ValidateXAttrName(name);
   if (!status.ok()) {
     return status;
   }
@@ -589,13 +590,17 @@ utils::Status VfsImpl::ListXAttrs(fuse_ino_t ino, std::vector<std::string> *name
   }
   std::erase_if(*names, [](const std::string &name) {
     constexpr std::string_view kUserPrefix = "user.";
-    return !std::string_view(name).starts_with(kUserPrefix) || name.size() == kUserPrefix.size();
+    const std::string_view xattr_name(name);
+    if (xattr_name.starts_with(kUserPrefix) && xattr_name.size() != kUserPrefix.size()) {
+      return false;
+    }
+    return !runtime::MountRuntimeBehavior::Instance().PosixAclEnabled() || !metadata::IsPosixAclXAttrName(xattr_name);
   });
   return Status::OK();
 }
 
 utils::Status VfsImpl::RemoveXAttr(fuse_ino_t ino, const char *name) {
-  auto status = ValidateUserXAttrName(name);
+  auto status = ValidateXAttrName(name);
   if (!status.ok()) {
     return status;
   }

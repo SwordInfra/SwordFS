@@ -113,6 +113,7 @@ Status VolumeImpl::CreateFrom(const config::ConfigCenter &config) {
       .region = config.storage_region(),
       .chunk_size = config.chunk_size(),
       .chunk_type = chunk_type,
+      .enable_posix_acl = config.enable_posix_acl(),
   });
 }
 
@@ -133,6 +134,7 @@ Status VolumeImpl::CreateFrom(const FormatOptions &options) {
   }
   config_.chunk_size = options.chunk_size;
   config_.chunk_type = options.chunk_type;
+  config_.enable_posix_acl = options.enable_posix_acl;
 
   if (config_.chunk_type != metadata::ChunkType::kCow) {
     return Status::NotSupported("selected chunk type is not implemented");

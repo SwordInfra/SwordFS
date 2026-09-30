@@ -212,7 +212,7 @@ Status MemMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t m
     if (!parent.IsDir()) {
       return Status::NotDirectory("parent is not a directory");
     }
-    uint32_t file_mode = static_cast<uint32_t>(S_IFREG) | (mode & 0777u);
+    uint32_t file_mode = static_cast<uint32_t>(S_IFREG) | (mode & 07777u);
     return txn.AddEntry(parent_ino, name, file_mode, &child);
   });
 
