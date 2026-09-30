@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "metadata/MetaEngineRegistry.hpp"
+#include "metadata/PosixAcl.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/redis/RedisMetaTxn.hpp"
 #include "metadata/types/Chunk.hpp"
@@ -157,7 +158,7 @@ Status RedisMetaImpl::Create(InodeID parent_ino, std::string_view name, uint32_t
   if (auto status = ValidateNameComponent(name); !status.ok()) {
     return status;
   }
-  return CreateNode(parent_ino, name, S_IFREG | (mode & 0777u), 0, out);
+  return CreateNode(parent_ino, name, S_IFREG | (mode & 07777u), 0, out);
 }
 
 Status RedisMetaImpl::MkNod(InodeID parent_ino, std::string_view name, uint32_t mode, uint64_t rdev,
@@ -206,6 +207,10 @@ Status RedisMetaImpl::CreateNode(InodeID parent_ino, std::string_view name, uint
     SwordFsAttr attr(child_ino, inheritance.mode, ctx.uid, inheritance.gid);
     attr.rdev = rdev;
     child = SwordFsInode(child_ino, attr, parent_ino);
+    status = ApplyPosixAclCreateInheritance(parent, static_cast<uint32_t>(ctx.umask), &child);
+    if (!status.ok()) {
+      return status;
+    }
     return txn.AddEntry(parent_ino, name, child, &parent);
   });
   if (status.ok() && out != nullptr) {

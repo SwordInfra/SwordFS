@@ -17,7 +17,7 @@ not by itself establish support for every Cluster deployment configuration.
 | `next_chunk_revision` | Integer string | Volume-wide logical publication-generation allocator |
 | `next_chunk_id` | Integer string | Volume-scoped monotonic `ChunkID` allocator |
 | `inode_count` | Integer string | Advisory legacy inode metric; never an authoritative filesystem invariant |
-| `inode:<ino>` | String | Canonical serialized `SwordFsInode`, including ordered raw xattrs |
+| `inode:<ino>` | String | Canonical serialized `SwordFsInode`, including ordered raw xattrs and POSIX ACL xattr bytes |
 | `dir:<parent_ino>` | Hash | Name → child type and inode ID |
 | `chunk:<ino>` | Hash | Canonical decimal 64-bit chunk index → shared published logical `SwordFsChunk` head |
 | `private_chunk_index:<mechanism-key>:<hash>` | Hash | Transitional legacy bridge fields; logical chunk-index fields use canonical decimal 64-bit indexes and field layout belongs only to that mechanism |

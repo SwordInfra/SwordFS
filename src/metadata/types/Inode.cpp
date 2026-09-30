@@ -10,6 +10,7 @@
 #include <ctime>
 #include <utility>
 
+#include "metadata/PosixAcl.hpp"
 #include "metadata/types/BufCodec.hpp"
 
 namespace swordfs::metadata {
@@ -148,6 +149,9 @@ void SwordFsInode::Touch(SetAttrField fields) {
 }
 
 utils::Status SwordFsInode::SetXAttr(std::string_view name, std::string_view value, XAttrSetMode mode) {
+  if (IsPosixAclXAttrName(name)) {
+    return SetPosixAclXAttr(this, name, value, mode);
+  }
   if (name.empty()) {
     return utils::Status::InvalidArgument("xattr name is empty");
   }
@@ -226,6 +230,9 @@ utils::Status SwordFsInode::ListXAttrs(std::vector<std::string> *names) const {
 }
 
 utils::Status SwordFsInode::RemoveXAttr(std::string_view name) {
+  if (IsPosixAclXAttrName(name)) {
+    return RemovePosixAclXAttr(this, name);
+  }
   if (name.size() > kMaxXAttrNameLength) {
     return utils::Status::Range("xattr name exceeds maximum length");
   }

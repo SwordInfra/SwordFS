@@ -16,6 +16,11 @@ part of this Issue. `trusted.*` and other namespaces are also not enabled by
 this version. A callback exists for these requests, so an unsupported
 namespace is reported as `EOPNOTSUPP`, not `ENOSYS`.
 
+Issue #396 later builds POSIX ACL persistence, validation, inheritance, and
+mode synchronization on this same inode-owned xattr authority; see
+[POSIX ACLs](396-posix-acl.md). It does not change the raw `user.*` contract
+described here.
+
 ## Semantic contract
 
 Each inode owns a mapping from xattr name to opaque bytes. The metadata API

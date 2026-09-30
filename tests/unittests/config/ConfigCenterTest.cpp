@@ -88,6 +88,23 @@ TEST(FormatParamsTest, MemoryFormatWithRegion) {
   EXPECT_TRUE(ParseOptions(args).empty());
 }
 
+TEST(FormatParamsTest, PosixAclIsExplicitVolumeFormatOptIn) {
+  std::vector<std::string> args = {
+      "swordfs",
+      "format",
+      "--volume",
+      "myvol",
+      "--meta",
+      "memory://local",
+      "--bucket",
+      "s3://mybucket.s3.amazonaws.com/chunks",
+      "--enable-posix-acl",
+  };
+  const auto err =
+      ParseOptions(args, [](const swordfs::config::ConfigCenter &cfg) { EXPECT_TRUE(cfg.enable_posix_acl()); });
+  EXPECT_TRUE(err.empty()) << err;
+}
+
 // ================================================================
 // mount — valid parameter combinations
 // ================================================================

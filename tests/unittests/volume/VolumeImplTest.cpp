@@ -119,6 +119,29 @@ TEST(VolumeImplConfigAdapterTest, CreateFromUsesParsedFormatConfiguration) {
   EXPECT_EQ(volume.config().chunk_type, ChunkType::kRedisCache);
 }
 
+TEST(VolumeImplConfigAdapterTest, CreateFromMapsParsedPosixAclFeature) {
+  swordfs::test::RegisterTestVolumeEngines();
+  ParseConfig({
+      "swordfs",
+      "format",
+      "--volume",
+      "acladaptervol",
+      "--meta",
+      "swordfs-test-meta://local",
+      "--bucket",
+      "swordfs-test-data://endpoint/bucket",
+      "--enable-posix-acl",
+  });
+
+  VolumeImpl volume;
+  // This adapter test intentionally does not prepare a concrete metadata
+  // engine. The configuration projection happens before backend creation and
+  // is the behavior under test; canonical persistence is covered separately
+  // by SwordFsVolume serialization tests.
+  EXPECT_FALSE(volume.CreateFrom(swordfs::config::ConfigCenter::Instance()).ok());
+  EXPECT_TRUE(volume.config().enable_posix_acl);
+}
+
 TEST(VolumeImplConfigAdapterTest, RejectsLegacyChunkSelectionOptions) {
   for (const auto *legacy_option : {"--chunk-overwrite-strategy", "--chunk-overwrite-mechanism"}) {
     EXPECT_THROW(ParseConfig({

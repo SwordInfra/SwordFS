@@ -15,6 +15,7 @@
 
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/InodePolicy.hpp"
+#include "metadata/PosixAcl.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 
@@ -266,6 +267,12 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
   }
 
   inode.attr = attr;
+  if (HasSetAttrField(fields, SetAttrField::kMode)) {
+    status = SyncPosixAccessAclForMode(&inode, attr.mode);
+    if (!status.ok()) {
+      return status;
+    }
+  }
   status = SetInode(inode);
   if (!status.ok()) {
     return status;

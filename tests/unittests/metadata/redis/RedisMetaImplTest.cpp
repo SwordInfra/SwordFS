@@ -11,6 +11,7 @@
 #include <limits>
 #include <thread>
 
+#include "metadata/PosixAclTestSupport.hpp"
 #include "metadata/cow/COWChunkMetadata.hpp"
 #include "metadata/redis/RedisMetaImplTestBase.hpp"
 #include "metadata/redis/RedisMetaTestSupport.hpp"
@@ -37,6 +38,7 @@ using swordfs::test::redis_meta::SwordFsContext;
 using swordfs::test::redis_meta::SwordFsEntry;
 using swordfs::test::redis_meta::SwordFsInode;
 using swordfs::test::redis_meta::SwordFsVolume;
+namespace acl_test = swordfs::test::posix_acl;
 
 FIBER_TEST_F(RedisMetaImplTest, AllocateChunkRevisionIsMonotonicAndStartsAtOne) {
   swordfs::metadata::ChunkRevision first = 0;
@@ -401,6 +403,104 @@ FIBER_TEST_F(RedisMetaImplTest, XAttrsMatchMemorySemanticsAndSurviveRemount) {
   EXPECT_EQ(impl_->RemoveXAttr(kMissing, "user.key").ToErrno(), ENOENT);
 }
 
+FIBER_TEST_F(RedisMetaImplTest, PosixAclSemanticsMatchMemoryAndPersist) {
+  SwordFsInode parent;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "acl-parent", 0777, &parent).ok());
+  const std::string default_acl = acl_test::Encode({
+      {acl_test::kUserObj, 7},
+      {acl_test::kUser, 6, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kGroup, 4, 2001},
+      {acl_test::kMask, 7},
+      {acl_test::kOther, 3},
+  });
+  ASSERT_TRUE(impl_->SetXAttr(parent.ino, "system.posix_acl_default", default_acl, XAttrSetMode::kUpsert).ok());
+
+  auto &ctx = folly::fibers::local<SwordFsContext>();
+  ctx.umask = 0077;
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(parent.ino, "file", 0660, &file).ok());
+  EXPECT_EQ(file.attr.mode & 0777u, 0660u);
+
+  std::string value;
+  const std::string expected_access = acl_test::Encode({
+      {acl_test::kUserObj, 6},
+      {acl_test::kUser, 6, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kGroup, 4, 2001},
+      {acl_test::kMask, 6},
+      {acl_test::kOther, 0},
+  });
+  ASSERT_TRUE(impl_->GetXAttr(file.ino, "system.posix_acl_access", &value).ok());
+  EXPECT_EQ(value, expected_access);
+
+  SwordFsAttr requested;
+  requested.mode = 0640;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kMode, nullptr).ok());
+  const std::string chmod_acl = acl_test::Encode({
+      {acl_test::kUserObj, 6},
+      {acl_test::kUser, 6, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kGroup, 4, 2001},
+      {acl_test::kMask, 4},
+      {acl_test::kOther, 0},
+  });
+  ASSERT_TRUE(impl_->GetXAttr(file.ino, "system.posix_acl_access", &value).ok());
+  EXPECT_EQ(value, chmod_acl);
+
+  std::unique_ptr<RedisMetaImpl> peer;
+  swordfs::test::RunInTestThreadFromFiber([&] {
+    peer = std::make_unique<RedisMetaImpl>(config_, volume_name_);
+    ASSERT_TRUE(peer->Initialize().ok());
+    SwordFsVolume volume;
+    volume.name = volume_name_;
+    ASSERT_TRUE(peer->LoadVolume(&volume).ok());
+  });
+  ASSERT_TRUE(peer->GetXAttr(file.ino, "system.posix_acl_access", &value).ok());
+  EXPECT_EQ(value, chmod_acl);
+  swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
+
+  const std::string missing_mask = acl_test::Encode({
+      {acl_test::kUserObj, 7},
+      {acl_test::kUser, 6, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kOther, 1},
+  });
+  EXPECT_EQ(impl_->SetXAttr(file.ino, "system.posix_acl_access", missing_mask, XAttrSetMode::kUpsert).ToErrno(),
+            EINVAL);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, PosixAclCorruptionRejectsModeSyncAndCreateWithoutPublication) {
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "acl-corrupt-file", 0644, &file).ok());
+  file.xattrs["system.posix_acl_access"] = "malformed";
+  std::string encoded;
+  ASSERT_TRUE(file.SerializeTo(&encoded).ok());
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.Inode(file.ino), encoded); });
+
+  SwordFsAttr requested;
+  requested.mode = 0600;
+  EXPECT_EQ(impl_->SetAttr(file.ino, requested, SetAttrField::kMode, nullptr).ToErrno(), EIO);
+
+  const std::string persisted_file =
+      RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { return redis.get(key.Inode(file.ino)).value_or(""); });
+  SwordFsInode unchanged;
+  ASSERT_TRUE(unchanged.ParseFrom(persisted_file).ok());
+  EXPECT_EQ(unchanged.attr.mode & 0777u, 0644u);
+
+  SwordFsInode parent;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "acl-corrupt-parent", 0777, &parent).ok());
+  parent.xattrs["system.posix_acl_default"] = "malformed";
+  ASSERT_TRUE(parent.SerializeTo(&encoded).ok());
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.Inode(parent.ino), encoded); });
+
+  EXPECT_EQ(impl_->Create(parent.ino, "blocked", 0666, nullptr).ToErrno(), EIO);
+  SwordFsInode missing;
+  EXPECT_EQ(impl_->Lookup(parent.ino, "blocked", &missing).ToErrno(), ENOENT);
+}
+
 FIBER_TEST_F(RedisMetaImplTest, XAttrLimitsApplyToDirectMetadataCallers) {
   constexpr size_t kMaxXAttrNameLength = 255;
   constexpr size_t kMaxXAttrValueSize = 64 * 1024;
@@ -488,7 +588,9 @@ FIBER_TEST_F(RedisMetaImplTest, MknodPersistsSupportedTypesModeAndDeviceIdentity
     SwordFsInode created;
     ASSERT_TRUE(impl_->MkNod(kRootInodeId, test_case.name, test_case.mode, test_case.rdev, &created).ok())
         << test_case.name;
-    EXPECT_EQ(created.attr.mode, static_cast<uint32_t>(test_case.mode)) << test_case.name;
+    EXPECT_EQ(created.attr.mode,
+              static_cast<uint32_t>((test_case.mode & S_IFMT) | ((test_case.mode & 0777) & ~ctx.umask)))
+        << test_case.name;
     EXPECT_EQ(created.attr.rdev, static_cast<uint64_t>(test_case.expected_rdev)) << test_case.name;
 
     SwordFsInode found;
@@ -569,6 +671,29 @@ FIBER_TEST_F(RedisMetaImplTest, CreateOwnershipInheritsGidAndDirectorySgidFromPa
   SwordFsInode symlink;
   ASSERT_TRUE(impl_->Symlink(parent.ino, "symlink", "target", &symlink).ok());
   EXPECT_EQ(symlink.attr.gid, kParentGid);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, CreateUnderSgidParentPreservesKernelAuthorizedSgidBit) {
+  constexpr uid_t kCallerUid = 4301;
+  constexpr gid_t kParentGid = 5302;
+
+  SwordFsInode parent;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "sgid-create-parent", 0755, &parent).ok());
+  SwordFsAttr parent_attr = parent.attr;
+  parent_attr.gid = kParentGid;
+  parent_attr.mode = S_IFDIR | 02775;
+  ASSERT_TRUE(impl_->SetAttr(parent.ino, parent_attr, SetAttrField::kGid | SetAttrField::kMode, &parent).ok());
+
+  auto &ctx = folly::fibers::local<SwordFsContext>();
+  ctx.uid = kCallerUid;
+  ctx.gid = kParentGid;
+  ctx.umask = 0022;
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(parent.ino, "file", S_ISGID | S_IXGRP, &file).ok());
+  EXPECT_EQ(file.attr.gid, kParentGid);
+  EXPECT_NE(file.attr.mode & S_ISGID, 0U);
+  EXPECT_NE(file.attr.mode & S_IXGRP, 0U);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, MknodReusesNamespaceValidationAndRejectsNonMknodTypes) {
@@ -922,7 +1047,9 @@ FIBER_TEST_F(RedisMetaImplTest, SetAttrNowAndGrowPreserveExpectedMetadata) {
   EXPECT_EQ(file.attr.size, 8192U);
   EXPECT_GE(file.attr.atime, old_atime);
   EXPECT_GE(file.attr.mtime, old_mtime);
-  EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), 0U);
+  // Metadata must not invent killpriv. The kernel communicates that decision
+  // explicitly through FUSE_SET_ATTR_KILL_SUID/kKillSuidGid when required.
+  EXPECT_EQ(file.attr.mode & (S_ISUID | S_ISGID), static_cast<uint32_t>(S_ISUID | S_ISGID));
 }
 
 FIBER_TEST_F(RedisMetaImplTest, CommitChunkInitialPublishIsIdempotentAndGrowsSizeMonotonically) {

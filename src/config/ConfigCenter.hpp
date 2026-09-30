@@ -96,6 +96,9 @@ class ConfigCenter {
   const std::string &chunk_type() const {
     return chunk_type_;
   }
+  bool enable_posix_acl() const {
+    return enable_posix_acl_;
+  }
   /// Returns the volume name (format and mount subcommands).
   const std::string &volume() const {
     return volume_;
@@ -143,6 +146,7 @@ class ConfigCenter {
   std::string pidfile_;                      // --pidfile (mount daemon PID file)
   size_t chunk_size_ = 64ULL * 1024 * 1024;  // --chunk-size
   std::string chunk_type_ = "cow";
+  bool enable_posix_acl_ = false;  // --enable-posix-acl (format-time volume feature)
 
   // Subcommands registered with the CLI::App.
   std::vector<SubCommand> sub_commands_;

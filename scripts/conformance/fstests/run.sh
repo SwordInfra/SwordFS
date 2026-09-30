@@ -457,7 +457,11 @@ echo "=== Building pinned liburing ==="
 ) >"${OUTPUT_DIR}/liburing-build.log" 2>&1
 export PKG_CONFIG_PATH="${LIBURING_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
 export CPPFLAGS="-I${LIBURING_PREFIX}/include${CPPFLAGS:+ ${CPPFLAGS}}"
-export LDFLAGS="-L${LIBURING_PREFIX}/lib${LDFLAGS:+ ${LDFLAGS}}"
+# generic/633 copies vfstest into the tested filesystem and executes that
+# copy with setuid/setgid bits. glibc secure-execution mode ignores
+# LD_LIBRARY_PATH for such binaries, so make the pinned liburing location an
+# explicit loader search path in the helper itself as well as a link path.
+export LDFLAGS="-L${LIBURING_PREFIX}/lib -Wl,-rpath,${LIBURING_PREFIX}/lib${LDFLAGS:+ ${LDFLAGS}}"
 export LIBRARY_PATH="${LIBURING_PREFIX}/lib${LIBRARY_PATH:+:${LIBRARY_PATH}}"
 export LD_LIBRARY_PATH="${LIBURING_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
@@ -551,7 +555,8 @@ format_volume() {
   "${SWORDFS_BIN}" --log-file "${OUTPUT_DIR}/swordfs-format.log" format \
     --volume "${volume}" \
     --meta "${METADATA_URL}" \
-    --bucket "${bucket_url}"
+    --bucket "${bucket_url}" \
+    --enable-posix-acl
 }
 
 echo "=== Formatting fresh SwordFS fstests volumes ==="
@@ -602,7 +607,7 @@ echo "=== Verifying SwordFS FUSE mount lifecycle ==="
   echo "TEST_DEV=${TEST_DEV}"
   echo "TEST_DIR=${TEST_DIR}"
   echo "-- mount --"
-  mount -t fuse.swordfs -o allow_other "${TEST_DEV}" "${TEST_DIR}"
+  mount -t fuse.swordfs -o allow_other,suid "${TEST_DEV}" "${TEST_DIR}"
   test_pid="$(cat "${OUTPUT_DIR}/swordfs-test.pid")"
   echo "daemon pid=${test_pid}"
   echo "-- source lookup --"
@@ -628,7 +633,7 @@ echo "=== Verifying SwordFS FUSE mount lifecycle ==="
   wait_for_daemon_exit "${test_pid}"
 
   echo "-- immediate remount --"
-  mount -t fuse.swordfs -o allow_other "${TEST_DEV}" "${TEST_DIR}"
+  mount -t fuse.swordfs -o allow_other,suid "${TEST_DEV}" "${TEST_DIR}"
   test_pid="$(cat "${OUTPUT_DIR}/swordfs-test.pid")"
   echo "remount daemon pid=${test_pid}"
   findmnt -rncv -S "${TEST_DEV}" -o SOURCE,TARGET,FSTYPE,OPTIONS || true
@@ -648,8 +653,12 @@ export SCRATCH_DEV=${SCRATCH_DEV}
 export SCRATCH_MNT=${SCRATCH_MNT}
 export FSTYP=fuse
 export FUSE_SUBTYP=.swordfs
-export MOUNT_OPTIONS="-o allow_other"
-export TEST_FS_MOUNT_OPTS="-o allow_other"
+# libfuse defaults FUSE mounts to nosuid even when the harness itself runs as
+# root. fstests' generic permission suite expects an ordinary privileged mount,
+# including setid execution (generic/633), so opt in only for these dedicated
+# conformance mounts. This does not change SwordFS' normal mount defaults.
+export MOUNT_OPTIONS="-o allow_other,suid"
+export TEST_FS_MOUNT_OPTS="-o allow_other,suid"
 EOF
 cp "${FSTESTS_DIR}/local.config" "${OUTPUT_DIR}/local.config"
 

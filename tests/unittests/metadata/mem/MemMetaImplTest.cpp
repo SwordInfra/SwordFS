@@ -22,6 +22,7 @@
 #include "chunk/cow/COWCleanup.hpp"
 #include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkMetadataBridge.hpp"
+#include "metadata/PosixAclTestSupport.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
@@ -40,6 +41,7 @@ using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::XAttrSetMode;
 using swordfs::utils::Status;
 using swordfs::utils::SwordFsContext;
+namespace acl_test = swordfs::test::posix_acl;
 
 static constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
 static constexpr uid_t kOwner = 1000;
@@ -327,7 +329,9 @@ FIBER_TEST_F(MemMetaImplTest, MknodPersistsSupportedTypesModeAndDeviceIdentity) 
   for (const auto &test_case : cases) {
     SwordFsInode created;
     ASSERT_TRUE(impl_->MkNod(kRoot, test_case.name, test_case.mode, test_case.rdev, &created).ok()) << test_case.name;
-    EXPECT_EQ(created.attr.mode, static_cast<uint32_t>(test_case.mode)) << test_case.name;
+    EXPECT_EQ(created.attr.mode,
+              static_cast<uint32_t>((test_case.mode & S_IFMT) | ((test_case.mode & 0777) & ~ctx.umask)))
+        << test_case.name;
     EXPECT_EQ(created.attr.rdev, static_cast<uint64_t>(test_case.expected_rdev)) << test_case.name;
     EXPECT_EQ(created.attr.nlink, 1U) << test_case.name;
     EXPECT_EQ(created.attr.size, 0U) << test_case.name;
@@ -396,6 +400,22 @@ FIBER_TEST_F(MemMetaImplTest, CreateOwnershipInheritsGidAndDirectorySgidFromPare
   SwordFsInode symlink;
   ASSERT_TRUE(impl_->Symlink(parent_ino, "symlink", "target", &symlink).ok());
   EXPECT_EQ(symlink.attr.gid, kParentGid);
+}
+
+FIBER_TEST_F(MemMetaImplTest, CreateUnderSgidParentPreservesKernelAuthorizedSgidBit) {
+  constexpr gid_t kParentGid = 5302;
+
+  InodeID parent_ino = MakeOwnedDir(kRoot, "sgid-create-parent", 02775);
+  SetDirOwner(parent_ino, kOwner, kParentGid);
+  SetDirMode(parent_ino, 02775);
+  SetContext(kOwner, kParentGid);
+  folly::fibers::local<SwordFsContext>().umask = 0022;
+
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(parent_ino, "file", S_ISGID | S_IXGRP, &file).ok());
+  EXPECT_EQ(file.attr.gid, kParentGid);
+  EXPECT_NE(file.attr.mode & S_ISGID, 0U);
+  EXPECT_NE(file.attr.mode & S_IXGRP, 0U);
 }
 
 FIBER_TEST_F(MemMetaImplTest, BirthTimeSurvivesInodeIdentityAndAttributeMutations) {
@@ -546,6 +566,196 @@ FIBER_TEST_F(MemMetaImplTest, XAttrsProvideAtomicSetModesOrderedListingAndCtime)
   EXPECT_EQ(impl_->GetXAttr(kMissing, "user.key", &value).ToErrno(), ENOENT);
   EXPECT_EQ(impl_->ListXAttrs(kMissing, &names).ToErrno(), ENOENT);
   EXPECT_EQ(impl_->RemoveXAttr(kMissing, "user.key").ToErrno(), ENOENT);
+}
+
+FIBER_TEST_F(MemMetaImplTest, PosixAccessAclValidatesCanonicalizesAndSynchronizesMode) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "acl-file", 0666, &file).ok());
+
+  const std::string missing_mask = acl_test::Encode({
+      {acl_test::kUserObj, 7},
+      {acl_test::kUser, 6, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kOther, 1},
+  });
+  EXPECT_EQ(impl_->SetXAttr(file.ino, "system.posix_acl_access", missing_mask, XAttrSetMode::kUpsert).ToErrno(),
+            EINVAL);
+
+  const std::string minimal = acl_test::Encode({
+      {acl_test::kUserObj, 6},
+      {acl_test::kGroupObj, 4},
+      {acl_test::kOther, 0},
+  });
+  ASSERT_TRUE(impl_->SetXAttr(file.ino, "system.posix_acl_access", minimal, XAttrSetMode::kUpsert).ok());
+
+  SwordFsInode inode;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &inode).ok());
+  EXPECT_EQ(inode.attr.mode & 0777u, 0640u);
+  std::string value;
+  EXPECT_EQ(impl_->GetXAttr(file.ino, "system.posix_acl_access", &value).ToErrno(), ENODATA);
+
+  const std::string extended = acl_test::Encode({
+      {acl_test::kUserObj, 7},
+      {acl_test::kUser, 6, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kGroup, 4, 2001},
+      {acl_test::kMask, 5},
+      {acl_test::kOther, 1},
+  });
+  ASSERT_TRUE(impl_->SetXAttr(file.ino, "system.posix_acl_access", extended, XAttrSetMode::kUpsert).ok());
+  ASSERT_TRUE(impl_->GetInode(file.ino, &inode).ok());
+  EXPECT_EQ(inode.attr.mode & 0777u, 0751u);
+  ASSERT_TRUE(impl_->GetXAttr(file.ino, "system.posix_acl_access", &value).ok());
+  EXPECT_EQ(value, extended);
+
+  SwordFsAttr requested;
+  requested.mode = 0640;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kMode, nullptr).ok());
+  const std::string chmod_acl = acl_test::Encode({
+      {acl_test::kUserObj, 6},
+      {acl_test::kUser, 6, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kGroup, 4, 2001},
+      {acl_test::kMask, 4},
+      {acl_test::kOther, 0},
+  });
+  ASSERT_TRUE(impl_->GetXAttr(file.ino, "system.posix_acl_access", &value).ok());
+  EXPECT_EQ(value, chmod_acl);
+  ASSERT_TRUE(impl_->GetInode(file.ino, &inode).ok());
+  EXPECT_EQ(inode.attr.mode & 0777u, 0640u);
+
+  ASSERT_TRUE(impl_->RemoveXAttr(file.ino, "system.posix_acl_access").ok());
+  EXPECT_EQ(impl_->GetXAttr(file.ino, "system.posix_acl_access", &value).ToErrno(), ENODATA);
+  ASSERT_TRUE(impl_->GetInode(file.ino, &inode).ok());
+  EXPECT_EQ(inode.attr.mode & 0777u, 0640u);
+}
+
+FIBER_TEST_F(MemMetaImplTest, PosixAclRejectsMalformedLinuxXattrEncoding) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "acl-invalid", 0644, &file).ok());
+
+  auto expect_invalid = [&](std::string value) {
+    EXPECT_EQ(impl_->SetXAttr(file.ino, "system.posix_acl_access", value, XAttrSetMode::kUpsert).ToErrno(), EINVAL);
+  };
+
+  std::string bad_version = acl_test::Encode({
+      {acl_test::kUserObj, 7},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kOther, 5},
+  });
+  bad_version[0] = 1;
+  expect_invalid(bad_version);
+
+  std::string truncated = acl_test::Encode({
+      {acl_test::kUserObj, 7},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kOther, 5},
+  });
+  truncated.pop_back();
+  expect_invalid(truncated);
+
+  expect_invalid(acl_test::Encode({
+      {acl_test::kUserObj, 8},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kOther, 5},
+  }));
+  expect_invalid(acl_test::Encode({
+      {acl_test::kUserObj, 7, 1000},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kOther, 5},
+  }));
+  expect_invalid(acl_test::Encode({
+      {acl_test::kUserObj, 7},
+      {acl_test::kUser, 6},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kMask, 5},
+      {acl_test::kOther, 5},
+  }));
+  expect_invalid(acl_test::Encode({
+      {acl_test::kGroupObj, 5},
+      {acl_test::kUserObj, 7},
+      {acl_test::kOther, 5},
+  }));
+  expect_invalid(acl_test::Encode({
+      {acl_test::kUserObj, 7},
+      {acl_test::kUser, 6, 1001},
+      {acl_test::kUser, 4, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kMask, 5},
+      {acl_test::kOther, 5},
+  }));
+  expect_invalid(acl_test::Encode({
+      {acl_test::kUserObj, 7},
+      {0x40, 5},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kOther, 5},
+  }));
+
+  const std::string minimal = acl_test::Encode({
+      {acl_test::kUserObj, 6},
+      {acl_test::kGroupObj, 4},
+      {acl_test::kOther, 0},
+  });
+  EXPECT_EQ(impl_->SetXAttr(file.ino, "system.posix_acl_access", minimal, XAttrSetMode::kReplaceOnly).ToErrno(),
+            ENODATA);
+  EXPECT_EQ(impl_->SetXAttr(file.ino, "system.posix_acl_default", minimal, XAttrSetMode::kUpsert).ToErrno(), EACCES);
+}
+
+FIBER_TEST_F(MemMetaImplTest, PosixDefaultAclControlsInheritanceAndUmask) {
+  SwordFsInode plain_parent;
+  ASSERT_TRUE(impl_->MkDir(kRoot, "plain-parent", 0777, &plain_parent).ok());
+  auto &ctx = folly::fibers::local<SwordFsContext>();
+  ctx.umask = 0027;
+
+  SwordFsInode masked;
+  ASSERT_TRUE(impl_->Create(plain_parent.ino, "masked", 0666, &masked).ok());
+  EXPECT_EQ(masked.attr.mode & 0777u, 0640u);
+
+  const std::string default_acl = acl_test::Encode({
+      {acl_test::kUserObj, 7},
+      {acl_test::kUser, 6, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kGroup, 4, 2001},
+      {acl_test::kMask, 7},
+      {acl_test::kOther, 3},
+  });
+  ASSERT_TRUE(impl_->SetXAttr(plain_parent.ino, "system.posix_acl_default", default_acl, XAttrSetMode::kUpsert).ok());
+
+  SwordFsInode child;
+  ASSERT_TRUE(impl_->Create(plain_parent.ino, "inherited", 0660, &child).ok());
+  EXPECT_EQ(child.attr.mode & 0777u, 0660u);
+  std::string value;
+  const std::string expected_access = acl_test::Encode({
+      {acl_test::kUserObj, 6},
+      {acl_test::kUser, 6, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kGroup, 4, 2001},
+      {acl_test::kMask, 6},
+      {acl_test::kOther, 0},
+  });
+  ASSERT_TRUE(impl_->GetXAttr(child.ino, "system.posix_acl_access", &value).ok());
+  EXPECT_EQ(value, expected_access);
+  EXPECT_EQ(impl_->GetXAttr(child.ino, "system.posix_acl_default", &value).ToErrno(), ENODATA);
+
+  SwordFsInode subdir;
+  ASSERT_TRUE(impl_->MkDir(plain_parent.ino, "subdir", 0777, &subdir).ok());
+  ASSERT_TRUE(impl_->GetXAttr(subdir.ino, "system.posix_acl_default", &value).ok());
+  EXPECT_EQ(value, default_acl);
+  const uint32_t subdir_mode = subdir.attr.mode;
+  ASSERT_TRUE(impl_->RemoveXAttr(subdir.ino, "system.posix_acl_default").ok());
+  ASSERT_TRUE(impl_->GetInode(subdir.ino, &subdir).ok());
+  EXPECT_EQ(subdir.attr.mode, subdir_mode);
+
+  SwordFsInode symlink;
+  ASSERT_TRUE(impl_->Symlink(plain_parent.ino, "symlink", "target", &symlink).ok());
+  EXPECT_EQ(symlink.attr.mode & 0777u, 0777u);
+  EXPECT_EQ(impl_->GetXAttr(symlink.ino, "system.posix_acl_access", &value).ToErrno(), ENODATA);
+  EXPECT_EQ(impl_->GetXAttr(symlink.ino, "system.posix_acl_default", &value).ToErrno(), ENODATA);
+  EXPECT_EQ(impl_->SetXAttr(symlink.ino, "system.posix_acl_access", default_acl, XAttrSetMode::kUpsert).ToErrno(),
+            EOPNOTSUPP);
+
+  EXPECT_EQ(impl_->SetXAttr(child.ino, "system.posix_acl_default", default_acl, XAttrSetMode::kUpsert).ToErrno(),
+            EACCES);
 }
 
 FIBER_TEST_F(MemMetaImplTest, XAttrLimitsApplyToDirectMetadataCallers) {

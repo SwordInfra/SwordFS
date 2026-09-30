@@ -123,6 +123,12 @@ std::string PackXAttrNames(const std::vector<std::string> &names) {
 void VfsHookFactory::SetRequestContext(fuse_req_t req) {
   auto &ctx = folly::fibers::local<SwordFsContext>();
   ctx = SwordFsContext{fuse_req_ctx(req)};
+  if (!runtime::MountRuntimeBehavior::Instance().PosixAclEnabled()) {
+    // Without DONT_MASK the kernel has already applied the caller umask.
+    // Normalize it away so metadata create paths can apply ctx.umask exactly
+    // once regardless of which side owns masking for this mount.
+    ctx.umask = 0;
+  }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -173,6 +179,24 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   } else {
     fuse_unset_feature_flag(conn, FUSE_CAP_IOCTL_DIR);
   }
+  constexpr uint64_t kPosixAclCaps = FUSE_CAP_POSIX_ACL | FUSE_CAP_DONT_MASK;
+  const uint64_t capable = conn->capable_ext != 0 ? conn->capable_ext : conn->capable;
+  const bool posix_acl_enabled =
+      ::swordfs::volume::VolumeImpl::Instance().config().enable_posix_acl && (capable & kPosixAclCaps) == kPosixAclCaps;
+  if (posix_acl_enabled) {
+    fuse_set_feature_flag(conn, FUSE_CAP_POSIX_ACL);
+    fuse_set_feature_flag(conn, FUSE_CAP_DONT_MASK);
+  } else {
+    fuse_unset_feature_flag(conn, FUSE_CAP_POSIX_ACL);
+    fuse_unset_feature_flag(conn, FUSE_CAP_DONT_MASK);
+  }
+  runtime::MountRuntimeBehavior::Instance().SetPosixAclEnabled(posix_acl_enabled);
+
+  // libfuse 3.18's low-level setxattr callback does not expose the
+  // FUSE_SETXATTR_ACL_KILL_SGID extra flag. Advertising this feature would
+  // silently drop a kernel authorization decision.
+  fuse_unset_feature_flag(conn, FUSE_CAP_SETXATTR_EXT);
+
   // libfuse 3.18 does not expose OPEN/WRITE KILL_SUIDGID protocol flags to
   // low-level callbacks. Userspace killpriv handling would therefore lose the
   // kernel's decision. Keep the legacy SETATTR/MODE path, which also requires
