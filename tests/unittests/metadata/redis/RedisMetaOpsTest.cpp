@@ -129,6 +129,17 @@ TEST(RedisMetaOpsTest, GetInodesPropagatesConnectionFailure) {
   EXPECT_EQ(status.ToErrno(), EIO) << status.message();
 }
 
+TEST(RedisMetaOpsTest, PrepareReclaimPropagatesConnectionFailure) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.port = 1;
+  config.retry_attempts = 1;
+
+  RedisMetaOps ops(config, "unreachable-prepare-reclaim");
+  const auto status = RunInFiber([&] { return ops.PrepareReclaim(42); });
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
+}
+
 TEST(RedisMetaOpsTest, GetInodesRejectsMalformedAndMismatchedRecords) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {

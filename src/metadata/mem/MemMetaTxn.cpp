@@ -927,26 +927,25 @@ Status MemMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work)
   }
   work->reset();
 
-  // Idempotent replay: once the point of no return has been crossed, the
-  // frozen record — not the (already removed) live inode — is the authority,
-  // so crash recovery and retries get the same work back unchanged.
+  // Cleanup work is maintenance state, not reclaim authority. Consult the
+  // live inode first so a stale handoff can never override a revived inode.
   auto pending_it = store_->pending_reclaims_.find(ino);
-  if (pending_it != store_->pending_reclaims_.end()) {
-    *work = pending_it->second;
-    return Status::OK();
-  }
-
   SwordFsInode *inode = FindInode(ino);
   if (inode == nullptr) {
-    // Already reclaimed. Any marker left behind is stale.
+    // The logical point of no return was already crossed. Preserve any
+    // remaining maintenance work for GC, but its presence is not required.
     store_->orphans_.erase(ino);
+    if (pending_it != store_->pending_reclaims_.end()) {
+      *work = pending_it->second;
+    }
     return Status::OK();
   }
   if (inode->IsDir() || inode->attr.nlink != 0) {
     // A concurrent Link revived the inode before this transaction, or the
-    // node is a directory (never reclaimed through an orphan candidate).
-    // Drop the marker and leave the inode and its objects untouched.
+    // node is a directory. Drop stale maintenance state together with the
+    // orphan marker; neither can authorize cleanup of a live inode.
     store_->orphans_.erase(ino);
+    store_->pending_reclaims_.erase(ino);
     return Status::OK();
   }
 
@@ -975,13 +974,12 @@ Status MemMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work)
     return status;
   }
 
-  // Retain the frozen work durably, then drop the live inode (and with it the
-  // only other copy of the descriptors) and the orphan marker. This is the
-  // point of no return: from here on no Link can revive the inode and every
-  // remaining step is idempotent.
-  store_->pending_reclaims_[ino] = frozen;
-  store_->orphans_.erase(ino);
+  // Memory performs the non-revivability and descriptor detach atomically
+  // under the store transaction. The cleanup handoff is published only after
+  // that correctness transition; losing it would leak data, not revive it.
   DeleteInode(ino);
+  store_->orphans_.erase(ino);
+  store_->pending_reclaims_[ino] = frozen;
 
   *work = std::move(frozen);
   return Status::OK();

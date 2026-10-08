@@ -7,10 +7,10 @@
 
 #include <atomic>
 #include <cstddef>
-#include <cstdint>
+#include <memory>
 #include <thread>
+#include <utility>
 
-#include "metadata/types/Volume.hpp"
 #include "utils/Status.hpp"
 
 namespace swordfs::metadata {
@@ -19,21 +19,19 @@ struct PendingDelete;
 struct ReclaimWork;
 }  // namespace swordfs::metadata
 
-namespace swordfs::storage {
-class IDataEngine;
-}
-
 namespace swordfs::chunk::internal {
 
+class ChunkCleanupParticipant;
+
 // Mount-private physical cleanup worker. Durable metadata queues are the
-// restart authority; this class owns mechanism-specific decode, reachability
-// validation, data deletion and acknowledgement.
+// restart work source; this class owns mechanism-neutral scheduling, retry,
+// participant invocation and acknowledgement only.
 class ChunkGcWorker {
  public:
-  ChunkGcWorker(metadata::ChunkType chunk_type, uint64_t chunk_size, metadata::IMetaEngine *meta,
-                storage::IDataEngine *data)
-      : chunk_type_(chunk_type), chunk_size_(chunk_size), meta_(meta), data_(data) {
+  ChunkGcWorker(metadata::IMetaEngine *meta, std::unique_ptr<ChunkCleanupParticipant> cleanup)
+      : meta_(meta), cleanup_(std::move(cleanup)) {
   }
+  ~ChunkGcWorker();
 
   ChunkGcWorker(const ChunkGcWorker &) = delete;
   ChunkGcWorker &operator=(const ChunkGcWorker &) = delete;
@@ -50,10 +48,8 @@ class ChunkGcWorker {
   void RunWorkerPass();
 
  private:
-  metadata::ChunkType chunk_type_;
-  uint64_t chunk_size_;
   metadata::IMetaEngine *meta_;
-  storage::IDataEngine *data_;
+  std::unique_ptr<ChunkCleanupParticipant> cleanup_;
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> wake_pending_{false};
   folly::LifoSem wake_sem_;

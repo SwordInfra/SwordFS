@@ -63,6 +63,7 @@ class InvalidChunkMetadataEngine final : public swordfs::metadata::MemMetaImpl {
   enum class Result {
     kNullCapability,
     kMismatchedChunkType,
+    kCowTypeButWrongClass,
   };
 
   explicit InvalidChunkMetadataEngine(Result result) : result_(result) {
@@ -78,8 +79,10 @@ class InvalidChunkMetadataEngine final : public swordfs::metadata::MemMetaImpl {
     }
     if (result_ == Result::kNullCapability) {
       out->reset();
-    } else {
+    } else if (result_ == Result::kMismatchedChunkType) {
       *out = std::make_shared<swordfs::test::StubChunkMetadata>(ChunkType::kChunkSlice);
+    } else {
+      *out = std::make_shared<swordfs::test::StubChunkMetadata>(ChunkType::kCow);
     }
     return Status::OK();
   }
@@ -347,6 +350,25 @@ TEST_F(VolumeImplTest, MountRejectsInvalidChunkMetadataCapability) {
     EXPECT_EQ(status.ToErrno(), EINVAL);
     EXPECT_EQ(status.message(), "chunk metadata type mismatch");
   }
+}
+
+TEST_F(VolumeImplTest, MountRejectsCleanupMetadataClassMismatch) {
+  swordfs::test::RegisterTestVolumeEngines();
+  const auto volume_name = makeVolumeName("invalid-cleanup-metadata");
+  swordfs::test::pending_volume = SwordFsVolume{
+      .name = volume_name,
+      .storage = std::string(swordfs::test::kTestDataEngine),
+      .bucket = "opaque://endpoint/bucket",
+      .chunk_type = ChunkType::kCow,
+  };
+  swordfs::test::pending_meta_engine =
+      std::make_unique<InvalidChunkMetadataEngine>(InvalidChunkMetadataEngine::Result::kCowTypeButWrongClass);
+  swordfs::test::pending_data_engine = std::make_unique<NoopDataEngine>();
+
+  VolumeImpl volume;
+  const auto status = volume.LoadFrom(swordfs::test::MakeTestMountOptions(volume_name));
+  EXPECT_EQ(status.ToErrno(), EINVAL);
+  EXPECT_EQ(status.message(), "COW cleanup metadata type mismatch");
 }
 
 TEST_F(VolumeImplTest, CreateFromNormalizesDataEngineIdentity) {

@@ -22,6 +22,7 @@ enum class RecordType : uint32_t {
   kReclaim = 5,
   kPendingDelete = 6,
   kCowCleanup = 7,
+  kCowTypedCleanup = 8,
 };
 
 class BufEncoder {
