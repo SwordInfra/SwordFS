@@ -54,6 +54,49 @@ unlink/orphan/reclaim machinery. Persisting a socket inode represents the
 filesystem namespace object created by Unix-domain-socket `bind`; socket data
 transport remains kernel-owned.
 
+## Anonymous temporary files (`O_TMPFILE`)
+
+SwordFS implements Linux `O_TMPFILE` by composing the ordinary namespace and
+open-file lifecycles instead of introducing a hidden-dentry or special-inode
+state. The low-level FUSE tmpfile callback creates a regular file under a
+reserved collision-resistant `.swordfs-tmp-*` name, establishes a normal
+`FileHandle`, and then unlinks that generated name before replying to the
+kernel. Generated-name `EEXIST` races are retried with a fresh name and never
+overwrite an existing entry.
+
+The ordering is deliberate. Establishing the normal `FileHandle` first takes
+the inode's existing local open reference, so the subsequent last-link unlink
+publishes an ordinary durable orphan candidate while the open-file fence keeps
+the background reclaimer from preparing it. The successful FUSE reply returns
+the same regular inode and handle with `nlink == 0`; normal read, write, flush,
+setattr and link operations therefore need no tmpfile-specific branches. A
+later hard link uses the existing metadata `Link` transition to revive the
+orphan atomically, while closing an unlinked tmpfile simply releases the last
+open reference and lets the existing orphan/reclaim path remove it.
+
+This implementation accepts one bounded semantic approximation: the generated
+name is briefly visible between metadata create and unlink. A crash in that
+window can leave a reserved-name regular file behind rather than an anonymous
+inode. That residue is intentionally ordinary namespace state and requires no
+backend-specific recovery format. Once unlink has committed, crash recovery is
+the normal durable orphan/reclaimer lifecycle.
+
+Failure ownership follows the same ordinary primitives. A handle-creation
+failure best-effort unlinks the created name. An unlink failure releases the
+local handle before retrying cleanup, and the original unlink error remains the
+syscall result. After unlink succeeds, failure to deliver `fuse_reply_create`
+rolls back both the provisional FUSE lookup reference and the local file
+handle; the already-committed orphan remains owned by normal background
+reclamation rather than being synchronously deleted by the reply path.
+
+Large tmpfile workloads can publish many orphan candidates at once. Orphan
+preparation therefore runs in resumable bounded batches. Memory metadata keeps
+a snapshot continuation and Redis keeps an HSCAN page/cursor continuation
+across worker batch boundaries. The worker can abort an in-flight candidate
+walk promptly during unmount and self-wakes to continue a non-terminal batch,
+so a stress-created orphan backlog cannot make daemon shutdown wait for a full
+queue scan.
+
 ## Model
 
 The upstream revision is pinned in `conformance/pjdfstest/version.env`. A run

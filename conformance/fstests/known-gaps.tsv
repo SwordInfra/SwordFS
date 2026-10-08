@@ -1,6 +1,5 @@
 test	category	issue	expected_result	expected_message	expected_evidence	reason
 generic/003	upstream_not_applicable	-	NOTRUN	relatime not supported by the current kernel	-	The upstream relatime prerequisite requires local remount-style mount semantics not available in the current FUSE test model.
-generic/004	known_unsupported	#255	NOTRUN	O_TMPFILE is not supported	-	SwordFS VfsImpl::TmpFile returns NotSupported; tracked by #255.
 generic/008	known_unsupported	#255	NOTRUN	xfs_io fzero failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/009	known_unsupported	#255	NOTRUN	xfs_io fzero failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/012	known_unsupported	#255	NOTRUN	xfs_io fpunch failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
@@ -223,7 +222,6 @@ generic/383	upstream_not_applicable	-	NOTRUN	disk quotas not supported by this f
 generic/384	upstream_not_applicable	-	NOTRUN	disk quotas not supported by this filesystem type: fuse	-	Pinned fstests classifies disk quota testing as unsupported for filesystem type fuse.
 generic/385	upstream_not_applicable	-	NOTRUN	disk quotas not supported by this filesystem type: fuse	-	Pinned fstests classifies disk quota testing as unsupported for filesystem type fuse.
 generic/386	upstream_not_applicable	-	NOTRUN	disk quotas not supported by this filesystem type: fuse	-	Pinned fstests classifies disk quota testing as unsupported for filesystem type fuse.
-generic/389	known_unsupported	#255	NOTRUN	O_TMPFILE is not supported	-	SwordFS VfsImpl::TmpFile returns NotSupported; tracked by #255.
 generic/391	known_unsupported	#255	NOTRUN	xfs_io falloc failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/392	upstream_not_applicable	-	NOTRUN	fuse does not support shutdown	-	Pinned fstests excludes this local-filesystem shutdown/freeze operation for FUSE.
 generic/394	environment	-	FAIL	[dumped core]	-	Upstream intentionally triggers SIGXFSZ under RLIMIT_FSIZE; the hosted systemd-coredump environment reports the xfs_io helper termination as a dumped-core failure although SwordFS remains healthy.
@@ -302,7 +300,7 @@ generic/505	upstream_not_applicable	-	NOTRUN	fuse does not support shutdown	-	Pi
 generic/506	upstream_not_applicable	-	NOTRUN	disk quotas not supported by this filesystem type: fuse	-	Pinned fstests classifies disk quota testing as unsupported for filesystem type fuse.
 generic/507	upstream_not_applicable	-	NOTRUN	file system doesn't support chattr +ASai	-	The inode-flag prerequisite masks a forced local-filesystem shutdown/journal-recovery test; pinned fstests does not support that shutdown model for FUSE. Flag persistence itself is tracked by #391.
 generic/508	upstream_not_applicable	-	NOTRUN	fuse does not support shutdown	-	With inode flag queries available, this testcase reaches its forced local-filesystem shutdown prerequisite; pinned fstests does not support that shutdown model for FUSE.
-generic/509	known_unsupported	#255	NOTRUN	O_TMPFILE is not supported	-	SwordFS VfsImpl::TmpFile returns NotSupported; tracked by #255.
+generic/509	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The pinned testcase requires dm-flakey power-loss injection, a local scratch block device, and metadata journaling; that local journal-recovery model is not applicable to SwordFS object-backed FUSE.
 generic/510	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/511	known_unsupported	#255	NOTRUN	xfs_io falloc -k failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
 generic/512	known_unsupported	#255	NOTRUN	xfs_io falloc failed (old kernel/wrong fs?)	-	SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.
@@ -316,7 +314,6 @@ generic/520	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch 
 generic/526	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/527	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/530	upstream_not_applicable	-	NOTRUN	fuse does not support shutdown	-	Pinned fstests excludes this local-filesystem shutdown/freeze operation for FUSE.
-generic/531	known_unsupported	#255	NOTRUN	O_TMPFILE is not supported	-	SwordFS VfsImpl::TmpFile returns NotSupported; tracked by #255.
 generic/534	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/535	upstream_not_applicable	-	NOTRUN	require <FSTESTS_WORK_DIR>/scratch to be valid block disk	-	The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.
 generic/536	upstream_not_applicable	-	NOTRUN	fuse does not support shutdown	-	Pinned fstests excludes this local-filesystem shutdown/freeze operation for FUSE.

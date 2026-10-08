@@ -1778,6 +1778,38 @@ FIBER_TEST_F(MemMetaImplTest, VisitorAbortStopsTheScanAndIsPropagated) {
   EXPECT_EQ(visited, (std::vector<InodeID>{second}));
 }
 
+FIBER_TEST_F(MemMetaImplTest, OrphanVisitorResumesAfterAbortWithoutRevisitingCompletedCandidates) {
+  SetContext(0, 0);
+
+  SwordFsInode first_file;
+  SwordFsInode second_file;
+  ASSERT_TRUE(impl_->Create(kRoot, "resume-a", 0644, &first_file).ok());
+  ASSERT_TRUE(impl_->Create(kRoot, "resume-b", 0644, &second_file).ok());
+  ASSERT_TRUE(impl_->Unlink(kRoot, "resume-a").ok());
+  ASSERT_TRUE(impl_->Unlink(kRoot, "resume-b").ok());
+
+  std::vector<InodeID> visited;
+  const auto interrupted = impl_->VisitOrphanCandidates([&](InodeID ino) {
+    visited.push_back(ino);
+    return ino == first_file.ino ? Status::OK() : Status::Busy("pause orphan scan");
+  });
+  EXPECT_EQ(interrupted.ToErrno(), EBUSY);
+  EXPECT_EQ(visited, (std::vector<InodeID>{first_file.ino, second_file.ino}));
+
+  visited.clear();
+  ASSERT_TRUE(impl_
+                  ->VisitOrphanCandidates([&](InodeID ino) {
+                    visited.push_back(ino);
+                    return Status::OK();
+                  })
+                  .ok());
+  EXPECT_EQ(visited, (std::vector<InodeID>{second_file.ino}));
+
+  // Completing the interrupted scan resets its continuation. Neither durable
+  // candidate was mutated, so the next scan starts fresh and sees both again.
+  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{first_file.ino, second_file.ino}));
+}
+
 FIBER_TEST_F(MemMetaImplTest, PendingDeleteBatchVisitorAbortIsPropagated) {
   SetContext(0, 0);
 

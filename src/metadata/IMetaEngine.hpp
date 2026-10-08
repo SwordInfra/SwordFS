@@ -212,7 +212,12 @@ class IMetaEngine {
   /// or revived since. The candidate is published atomically by the mutation
   /// that reached nlink == 0 (unlink, rename-overwrite), so a crash before
   /// the caller reclaims it cannot lose the inode. Persisted by persistent
-  /// backends; process-lifetime for the memory backend.
+  /// backends; process-lifetime for the memory backend. If |visitor| aborts,
+  /// the next invocation resumes the interrupted backend scan rather than
+  /// intentionally restarting it from the beginning. Cursor-backed stores may
+  /// still have their normal duplicate/weak-consistency scan semantics, so
+  /// visitors must remain idempotent. After the interrupted scan completes, a
+  /// later invocation begins a fresh scan of the then-current candidates.
   virtual Status VisitOrphanCandidates(const InodeVisitorFn &visitor) = 0;
 
   /// Visit every durable pending reclaim. The visitor receives the frozen work
