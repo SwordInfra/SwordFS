@@ -185,6 +185,28 @@ class MemMetaImplTest : public ::testing::Test {
   MemMetaImpl *impl_;
 };
 
+FIBER_TEST_F(MemMetaImplTest, ConditionalUnlinkProtectsReplacedTemporaryEntry) {
+  SetContext(0, 0);
+  SwordFsInode original;
+  SwordFsInode replacement;
+  ASSERT_TRUE(impl_->Create(kRoot, "temporary", 0600, &original).ok());
+  ASSERT_TRUE(impl_->Rename(kRoot, "temporary", kRoot, "saved", RenameFlag::kNone).ok());
+  ASSERT_TRUE(impl_->Create(kRoot, "temporary", 0600, &replacement).ok());
+
+  // Cleanup belongs to the original Create, but the name now refers to a
+  // different inode. The expected-identity comparison must be atomic with
+  // deletion, so the replacement is never removed.
+  EXPECT_EQ(impl_->Unlink(kRoot, "temporary", original.ino).ToErrno(), EBUSY);
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(kRoot, "temporary", &found).ok());
+  EXPECT_EQ(found.ino, replacement.ino);
+  ASSERT_TRUE(impl_->Lookup(kRoot, "saved", &found).ok());
+  EXPECT_EQ(found.ino, original.ino);
+
+  EXPECT_TRUE(impl_->Unlink(kRoot, "temporary", replacement.ino).ok());
+  EXPECT_TRUE(impl_->Lookup(kRoot, "temporary", &found).IsNotFound());
+}
+
 class MemMetaNoAtimeTest : public ::testing::Test {
  protected:
   void SetUp() override {

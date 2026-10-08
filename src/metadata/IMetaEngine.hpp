@@ -132,7 +132,11 @@ class IMetaEngine {
   /// POSIX unlink(2): detach the directory entry and decrement nlink. When the
   /// last name of a file disappears, the same atomic metadata mutation
   /// publishes the durable orphan candidate consumed by the reclaim worker.
-  virtual Status Unlink(InodeID parent_ino, std::string_view name) = 0;
+  /// When |expected_ino| is specified, unlink only if this name still points
+  /// to that inode. Compare and remove in one metadata transaction; a changed
+  /// entry must not be removed as part of temporary-file cleanup.
+  virtual Status Unlink(InodeID parent_ino, std::string_view name,
+                        std::optional<InodeID> expected_ino = std::nullopt) = 0;
 
   /// Remove an empty directory. Decrements parent nlink.
   virtual Status RmDir(InodeID parent_ino, std::string_view name) = 0;

@@ -557,9 +557,19 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     }
     return call_status_;
   }
-  Status Unlink(InodeID, std::string_view name) override {
+  Status Unlink(InodeID, std::string_view name, std::optional<InodeID> expected_ino = std::nullopt) override {
     ++unlink_calls_;
     unlink_names_.emplace_back(name);
+    if (replace_tmpfile_name_on_unlink_call_ == unlink_calls_) {
+      // Another namespace actor moved the tmpfile's temporary entry away and
+      // created an unrelated inode at that name between Create and Unlink.
+      // The conditional namespace operation must distinguish the replacement.
+      if (expected_ino.has_value() && *expected_ino != 200) {
+        return Status::Busy("temporary entry replaced");
+      }
+      unrelated_entry_deleted_ = true;
+      return Status::OK();
+    }
     return unlink_status_index_ < unlink_statuses_.size() ? unlink_statuses_[unlink_status_index_++] : call_status_;
   }
   Status RmDir(InodeID, std::string_view) override {
@@ -745,6 +755,14 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     unlink_status_index_ = 0;
   }
 
+  void replace_tmpfile_name_on_unlink(int unlink_call = 1) {
+    replace_tmpfile_name_on_unlink_call_ = unlink_call;
+  }
+
+  bool unrelated_entry_deleted() const {
+    return unrelated_entry_deleted_;
+  }
+
   void set_open_status(Status status) {
     open_status_ = std::move(status);
   }
@@ -860,6 +878,8 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
 
  private:
   Status call_status_{Status::OK()};
+  int replace_tmpfile_name_on_unlink_call_ = 0;
+  bool unrelated_entry_deleted_ = false;
   Status open_status_{Status::OK()};
   Status readlink_status_{Status::OK()};
   Status get_inode_status_{Status::OK()};
@@ -1208,6 +1228,45 @@ TEST_F(VfsImplIntegrationTest, TmpfileHookReturnsCreatedEntryAndNormalHandle) {
   EXPECT_EQ(mock_meta_->create_names().front().rfind(".swordfs-tmp-", 0), 0U);
 
   swordfs::test::RunInTestFiber([&] { EXPECT_TRUE(VfsImpl::Release(capture.entry->ino, *capture.fh).ok()); });
+}
+
+TEST_F(VfsImplIntegrationTest, TmpfileCannotUnlinkAnUnrelatedReplacementAtItsTemporaryName) {
+  // This models a real namespace interleaving: after tmpfile Create returns,
+  // another actor renames that inode away and creates a different inode under
+  // the generated name. Internal cleanup must not delete the replacement or
+  // report that the original inode is anonymous.
+  mock_meta_->replace_tmpfile_name_on_unlink();
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), 1, 0600, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  EXPECT_TRUE(capture.error.has_value());
+  EXPECT_FALSE(mock_meta_->unrelated_entry_deleted());
+  if (capture.entry.has_value() && capture.fh.has_value()) {
+    swordfs::test::RunInTestFiber([&] { EXPECT_TRUE(VfsImpl::Release(capture.entry->ino, *capture.fh).ok()); });
+  }
+}
+
+TEST_F(VfsImplIntegrationTest, TmpfileFailedUnlinkRetryCannotDeleteAReplacement) {
+  // A transport-ambiguous first unlink is followed by cleanup. Between those
+  // attempts another inode may acquire the same generated name.
+  mock_meta_->set_unlink_statuses({Status::IOError("first unlink failed"), Status::OK()});
+  mock_meta_->replace_tmpfile_name_on_unlink(2);
+  FuseReplyCapture capture;
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+
+  swordfs::fuse::VfsHookFactory::SwordFsTmpfile(reinterpret_cast<fuse_req_t>(&capture), 1, 0600, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, EIO);
+  EXPECT_FALSE(mock_meta_->unrelated_entry_deleted());
+  EXPECT_FALSE(capture.entry.has_value());
+  EXPECT_FALSE(capture.fh.has_value());
 }
 
 TEST_F(VfsImplIntegrationTest, TmpfileRetriesGeneratedNameCollision) {

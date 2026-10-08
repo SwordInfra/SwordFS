@@ -74,6 +74,15 @@ later hard link uses the existing metadata `Link` transition to revive the
 orphan atomically, while closing an unlinked tmpfile simply releases the last
 open reference and lets the existing orphan/reclaim path remove it.
 
+The temporary name is briefly visible, so another actor can rename the
+created inode away and replace that name before internal unlink. To avoid
+deleting an unrelated replacement, tmpfile removal and its failure cleanup
+pass the created `InodeID` as an expected-identity precondition to metadata
+Unlink. Memory/Redis compare the current directory entry to this identity
+atomically with deletion. A replaced name fails without being removed.
+Ordinary user unlink has no such precondition. This guard does not remove the
+accepted brief visibility of the temporary name.
+
 This implementation accepts one bounded semantic approximation: the generated
 name is briefly visible between metadata create and unlink. A crash in that
 window can leave a reserved-name regular file behind rather than an anonymous

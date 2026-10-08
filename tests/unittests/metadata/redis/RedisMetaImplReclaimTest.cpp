@@ -31,6 +31,25 @@ using swordfs::test::redis_meta::SwordFsEntry;
 using swordfs::test::redis_meta::SwordFsInode;
 using swordfs::test::redis_meta::SwordFsVolume;
 
+FIBER_TEST_F(RedisMetaImplTest, ConditionalUnlinkProtectsReplacedTemporaryEntry) {
+  SwordFsInode original;
+  SwordFsInode replacement;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "temporary", 0600, &original).ok());
+  ASSERT_TRUE(
+      impl_->Rename(kRootInodeId, "temporary", kRootInodeId, "saved", swordfs::metadata::RenameFlag::kNone).ok());
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "temporary", 0600, &replacement).ok());
+
+  EXPECT_EQ(impl_->Unlink(kRootInodeId, "temporary", original.ino).ToErrno(), EBUSY);
+  SwordFsInode found;
+  ASSERT_TRUE(impl_->Lookup(kRootInodeId, "temporary", &found).ok());
+  EXPECT_EQ(found.ino, replacement.ino);
+  ASSERT_TRUE(impl_->Lookup(kRootInodeId, "saved", &found).ok());
+  EXPECT_EQ(found.ino, original.ino);
+
+  EXPECT_TRUE(impl_->Unlink(kRootInodeId, "temporary", replacement.ino).ok());
+  EXPECT_TRUE(impl_->Lookup(kRootInodeId, "temporary", &found).IsNotFound());
+}
+
 FIBER_TEST_F(RedisMetaImplTest, ReclaimKeepsLinkedInodesAndRemovesOrphans) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());

@@ -261,7 +261,7 @@ Status MemMetaImpl::MkNod(InodeID parent_ino, std::string_view name, uint32_t mo
   return Status::OK();
 }
 
-Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
+Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name, std::optional<InodeID> expected_ino) {
   utils::ExpectInFiberDomain();
   if (auto status = ValidateNameComponent(name); !status.ok()) {
     return status;
@@ -287,6 +287,10 @@ Status MemMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
     status = txn.LookupEntry(parent_ino, name, &target);
     if (!status.ok()) {
       return status;
+    }
+
+    if (expected_ino.has_value() && target.ino != *expected_ino) {
+      return Status::Busy("temporary entry inode changed before unlink");
     }
 
     if (!parent.CheckStickyDelete(ctx.uid, target)) {
