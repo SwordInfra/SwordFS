@@ -11,15 +11,15 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "6ea45d1cc64402072babebb920ffd695e897d1c1"
+    "swordfs_commit": "0ff0a31b5d4303645e8aea80ba81ee865856ddaa"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "ENVIRONMENT": 8,
-      "KNOWN_UNSUPPORTED": 94,
-      "PASS": 141,
-      "UPSTREAM_NOT_APPLICABLE": 401,
+      "KNOWN_UNSUPPORTED": 90,
+      "PASS": 144,
+      "UPSTREAM_NOT_APPLICABLE": 402,
       "UPSTREAM_TEST_DEFECT": 1
     },
     "classified_count": 645,
@@ -27,17 +27,17 @@
     "deferred_count": 0,
     "executed_classified_percent": 100.0,
     "executed_count": 645,
-    "known_gap_count": 504,
-    "overall_support_percent": 21.86,
+    "known_gap_count": 501,
+    "overall_support_percent": 22.33,
     "raw_results": {
       "FAIL": 19,
-      "NOTRUN": 485,
-      "PASS": 141
+      "NOTRUN": 482,
+      "PASS": 144
     },
     "selected_count": 645,
-    "supported_count": 141,
+    "supported_count": 144,
     "supported_gate_percent": 100.0,
-    "supported_pass_count": 141
+    "supported_pass_count": 144
   },
   "tests": [
     {
@@ -65,11 +65,11 @@
       "test": "generic/003"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "O_TMPFILE is not supported",
-      "reason": "SwordFS VfsImpl::TmpFile returns NotSupported; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/004"
     },
     {
@@ -2449,11 +2449,11 @@
       "test": "generic/386"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "O_TMPFILE is not supported",
-      "reason": "SwordFS VfsImpl::TmpFile returns NotSupported; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/389"
     },
     {
@@ -3241,10 +3241,10 @@
       "test": "generic/508"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "O_TMPFILE is not supported",
-      "reason": "SwordFS VfsImpl::TmpFile returns NotSupported; tracked by #255.",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
+      "message": "require <FSTESTS_WORK_DIR>/scratch to be valid block disk",
+      "reason": "The pinned testcase requires dm-flakey power-loss injection, a local scratch block device, and metadata journaling; that local journal-recovery model is not applicable to SwordFS object-backed FUSE.",
       "result": "NOTRUN",
       "test": "generic/509"
     },
@@ -3401,11 +3401,11 @@
       "test": "generic/530"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "O_TMPFILE is not supported",
-      "reason": "SwordFS VfsImpl::TmpFile returns NotSupported; tracked by #255.",
-      "result": "NOTRUN",
+      "classification": "PASS",
+      "issue": "",
+      "message": "",
+      "reason": "",
+      "result": "PASS",
       "test": "generic/531"
     },
     {
