@@ -329,12 +329,130 @@ before claiming Linux-equivalent cross-mount deadlock detection.
 
 ### Design sign-off / test matrix
 
-Before moving #379 into TDD, verify the exact **target Linux + libfuse**
-transport in source or a focused FUSE probe: normalized owner/range,
-`flock_release`, `FLUSH` on each close, `RELEASE` on last close,
-independent `open`, `dup`, `fork`, both mounts, and OFD operations. Verify
-interrupt delivery and the kernel's behavior when success races a signal.
-The transport probe does **not** require enabling unsupported classes.
+#### #428 Linux/libfuse transport verification
+
+The lock authority must consume a **mount-scoped opaque kernel owner**, not
+derive owner identity from PID, `fh`, or a process table. The selected libfuse
+low-level API (`fuse_lowlevel_ops`) transports `getlk(fi, flock)`,
+`setlk(fi, flock, sleep)`, `flock(fi, op)`, `flush(fi)` and `release(fi)`.
+`fuse_file_info.lock_owner` is documented for locking operations and flush;
+`flock_release` is **only** meaningful on release and guarantees a valid
+`lock_owner` when set. `fuse_reply_lock` is the correct GETLK response, not
+`fuse_reply_err(req, 0)`. `fuse_req_interrupt_func` synchronously invokes its
+callback if the interrupt preceded registration; code must not access a
+request after a synchronous callback may have consumed it.
+
+The kernel-side logic in Linux `fs/fuse/file.c` uses `fuse_lock_owner_id` to
+translate kernel owner identity and sends remote GETLK/SETLK/SETLKW when remote
+POSIX locking is negotiated. It routes remote flock through its separate
+flock path and indicates flock release on final close. A local mount/session
+incarnation remains necessary even if two kernel-owner numbers happen to
+match across mounts. Unlink/reopen paths must not invent lock ownership from
+the per-open `fh`. Kernel-local fallback when remote flags are absent is
+**not** evidence of cross-mount lock authority.
+
+**OFD integration blocker (transport verified):** Linux `fs/locks.c` converts
+`F_OFD_SETLK`/`F_OFD_SETLKW` into the ordinary `F_SETLK`/`F_SETLKW` internal
+commands, retains `FL_OFDLCK`, and changes the owner to the open file
+description. The FUSE lock wire input exposes only `FUSE_LK_FLOCK` as a
+lock-class flag, not `FL_OFDLCK`; libfuse routes both OFD and traditional
+record locks to the same low-level `setlk` callback without an explicit lock
+kind. The target CI observer **confirmed both** `F_OFD_GETLK` and `F_OFD_SETLK`
+arrive through ordinary low-level `getlk`/`setlk`, using the same opaque OFD
+owner for both operations. On its final close, `FLUSH` carried the traditional
+process lock owner instead; `RELEASE` carried `flock_release=0` and no OFD
+owner. Therefore treating an OFD `setlk` grant as a traditional POSIX grant
+would not remove it at the right time. #379/#431 must settle a safe strategy
+(including whether the first-stage POSIX-only target is possible with this
+transport) **before** enabling `FUSE_CAP_POSIX_LOCKS`. Merely declining to
+advertise OFD support cannot filter these requests.
+
+**One-time investigation method, not a permanent CI gate:** a standalone
+low-level FUSE observer and Python driver exercised Linux/libfuse directly,
+without running SwordFS. The investigation source was deliberately **not
+merged** as ongoing repository test infrastructure; the experimental revision
+is recorded in [commit 47290c8](https://github.com/SwordInfra/SwordFS/commit/47290c87f9fc9f69e4a8ad7d700b1851eb3e8b0a).
+The observer unconditionally granted SETLK and returned `F_UNLCK` for GETLK:
+**its success establishes transport behavior, never distributed lock
+correctness**. Its interrupt callback signaled a worker, which unregistered
+the callback after its return and then replied once.
+
+**Captured transport matrix:** [focused job in run 37791689635](https://github.com/SwordInfra/SwordFS/actions/runs/37791689635)
+(and [successful full run 37792896892](https://github.com/SwordInfra/SwordFS/actions/runs/37792896892)),
+artifact `fuse-lock-transport-evidence` (`fuse-lock-evidence.json`), Linux
+`6.17.0-1022-azure`, libfuse `3.18.2`, x86_64. All **26/26 transport
+assertions passed**, including OFD final-close identity checks and both
+interrupt reply outcomes. GitHub artifacts have limited retention; this
+matrix and its caveats are the durable conclusions.
+The following are observations from that artifact, not inferred POSIX lock
+authority behavior:
+
+| Probe | Actual transport evidence |
+| --- | --- |
+| Independent `open`, `F_SETLK`/`F_GETLK`, unrelated close | `fh=100` vs `101`; both locks had owner `13572322902548544518`; closing `101` sent `FLUSH` with that owner and then `RELEASE` |
+| `dup`, close, last close | Duplicated fd kept `fh=100`; intermediate close sent `FLUSH` without `RELEASE`; last close sent `RELEASE` |
+| Fork/exec with inherited fd | Child used inherited `fh=100`, but POSIX owner `5227323326283428974`, different from parent; separate child `FLUSH` occurred |
+| `flock`, fork/exec, dup, last close | `flock` owner `15731337448195210765` was inherited; intermediate close sent only `FLUSH`; final `RELEASE` sent `flock_release=1` and the same flock owner |
+| Separate mounts | Both emitted `setlk`, but different opaque owner values for the same calling process; never globally compare raw owner IDs without session identity |
+| `F_GETLK` reply | `fuse_reply_lock` returned `0`; syscall returned `F_UNLCK` |
+| `F_OFD_GETLK`/`F_OFD_SETLK` | Both **succeeded** and reached ordinary callbacks, with the same OFD owner `15697360896097286241`; final `FLUSH` used POSIX owner, `RELEASE` did not identify that OFD owner |
+| Disable remote-lock capabilities | `F_SETLK`, `F_GETLK` and flock completed locally with **no** locking callbacks (but `FLUSH`/`RELEASE` still occurred) |
+| Blocking `F_SETLKW` and signal | `setlk(sleep=1)` occurred; interrupt callback saw `fuse_req_interrupted(req)=1`; callback was unregistered before reply. Replying `EINTR` returned syscall `-1/EINTR`; alternatively replying success `0` **after** the signal returned syscall `0` on this target kernel. Both FUSE reply writes returned `0` |
+
+These results are for **normal close**. Linux `fuse_flush()` may return before
+issuing `FUSE_FLUSH` if writeback or mapping error checks fail, or if it
+negotiated `FOPEN_NOFLUSH` under the relevant conditions. Consequently a
+daemon cannot promise an unconditional remote POSIX any-close cleanup event
+on **every** kernel close in error paths; #431 must explicitly resolve the
+remaining lifetime bound and recovery strategy, not silently claim it gets
+all exceptional close notifications.
+
+**Source-backed, not yet completely runtime-proven:** the libfuse API
+guarantees synchronous callback delivery when an interrupt arrives before
+`fuse_req_interrupt_func` registration, and permits `func=NULL` to unregister.
+In pinned libfuse **3.18.2**, `fuse_req_interrupt_func` takes the request
+mutex, installs the callback, calls it inline when `req->interrupted` is
+already set, and only then unlocks. **Do not call a consuming `fuse_reply_*`
+from that interrupt callback**: the reply may free/destroy the request while
+the registration path still holds its mutex. A notification-only callback,
+followed by unregister and reply in an independent owner, avoids this trap.
+The same libfuse source shows `send_reply_iov()` calls `fuse_free_req()`
+**even when the device reply write fails**. A negative reply-write return
+is a failure signal, not permission to retry with the now-consumed `req`.
+The request fiber must own registration, response, unregister and callback
+state lifetime; it must not assume its own successful reply write is an
+atomic commit with the backend or that userspace necessarily observed success.
+The probe demonstrated two signal/reply interleavings, **not** a proof
+that every possible race is harmless, a successful `fuse_reply_*` proves the
+client consumed success, or a failed reply is recoverable. Failed reply-write
+recovery, ambiguous Redis grant, late cancel after grant, and exact rollback
+of same-owner conversion remain mandatory implementation gates for #430/#433;
+the kernel FUSE reply is not atomically coupled to backend authority. No
+unsafe fabricated reply-write failure is counted as verification evidence.
+
+Design consequence for #431–#433: carry the exact copied `fi` owner/release
+fields into the asynchronous fiber, distinguish POSIX any-close from flock
+last-close, and make a single request fiber own reply/teardown. The
+investigation probe's immediate interrupt reply is **not** a proposed
+production cancellation policy: the production waiter must first resolve
+whether an atomic grant committed, and handle lost reply, successful reply
+and late interrupt races without leaving a ghost lock. Unregister and destroy
+interrupt callback state only after establishing callback/request lifetime
+safety. Do not enable remote capabilities under #428.
+
+Source references: [libfuse low-level API](https://libfuse.github.io/doxygen/fuse__lowlevel_8h.html),
+[libfuse 3.18.2 request and interrupt implementation](https://github.com/libfuse/libfuse/blob/fuse-3.18.2/lib/fuse_lowlevel.c),
+`/usr/include/fuse3/fuse_common.h` for the pinned libfuse version, and
+[Linux FUSE file operations](https://code.googlesource.com/linux/torvalds/linux/+/3cb12d27ff655e57e8efe3486dca2a22f4e30578/fs/fuse/file.c),
+[Linux `fcntl` lock translation](https://code.googlesource.com/linux/torvalds/linux/+/c9049984f0e470af865c497c7f785fe895e5da9c/fs/locks.c),
+and [FUSE wire ABI](https://github.com/torvalds/linux/blob/master/include/uapi/linux/fuse.h).
+
+The #428 transport investigation above satisfies this source/probe gate for
+the recorded kernel and libfuse version; its findings do **not** establish
+the backend lock authority, exceptional close cleanup, or every cancellation
+race. Revalidate on materially different target kernel/libfuse versions
+before claiming the same transport contract. The probe did **not** enable
+unsupported lock classes in SwordFS.
 
 Document the concrete session heartbeat/revocation scheduler, Redis
 operation-ID retention, bounded waiter resource policy, **conversion
