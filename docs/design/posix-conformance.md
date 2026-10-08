@@ -96,6 +96,268 @@ instead replies with that error and performs no release. Regular-file release
 uses the existing final-close flush: an unexpected flush error is logged, but
 the handle and inode open reference are still relinquished.
 
+## Distributed advisory locks (#379 — design contract)
+
+This section defines the proposed **first-stage** cross-mount locking contract.
+It is not a claim of implemented support: current `getlk`/`setlk` callbacks
+return `ENOSYS` and `flock` returns `NotSupported`. FUSE remote-lock feature
+flags must not be enabled before authority, lifecycle, and transport tests
+prove their semantics.
+
+### Implementation decomposition and handoff
+
+Parent #379 owns this cross-class architecture contract, integration,
+conformance classification and final closeout; its children own bounded
+design, implementation, test and review evidence. Use the repository's
+**native GitHub sub-issue hierarchy**, not an unrelated backlog of PRs:
+
+| Issue | Deliverable | Depends on |
+| --- | --- | --- |
+| #428 | Verify Linux/libfuse owners, close and interrupt behavior; classify OFD | — |
+| #429 | Mount-session incarnation, liveness, revocation and cleanup-enumeration contract | #428 for finalized transport identity |
+| #430 | Memory/Redis atomic lock authority, lock reverse-index cleanup and uncertainty recovery | #428, #429 |
+| #431 | Traditional POSIX `getlk`/`setlk` and any-close release | #428–#430 |
+| #432 | BSD `flock` and open-file-description last-close release | #428–#430 |
+| #433 | Interruptible waits, cancellation, cross-mount integration and activation | #431, #432 (and the shared prerequisites) |
+
+The actual changes may be reviewed separately as each child reaches its own
+design-readiness checkpoint. The parent remains open until integration on
+both backends, relevant fstests classification, post-merge main CI and review
+are reconciled. #429 establishes the session lifecycle without requiring a
+premature lock table; #430 implements lock-specific reverse-index mutation
+and cleanup against that lifecycle. No intermediate child is permission to enable incomplete
+remote-lock support or claim OFD/delegation compatibility. The known
+conversion/reply-delivery ambiguity is a mandatory #430 authority decision,
+then an integration regression case in #433; do not leave it as an orphan
+parent-only concern.
+
+### Supported classes and transport
+
+The intended first stage supports traditional **process-associated POSIX
+record locks** (`F_GETLK`, `F_SETLK`, `F_SETLKW`) and **BSD `flock`**
+(`LOCK_SH`, `LOCK_EX`, `LOCK_UN`, `LOCK_NB`). They are advisory: an application
+that does not lock may still read/write. Locks on separate mounts of one
+Redis-backed volume must observe the same conflicts. The Memory backend
+implements the equivalent contract within its one in-process authority;
+Memory is not a cross-process distributed metadata service.
+
+Traditional POSIX locks belong to the **process lock owner and inode**, not
+the descriptor used to create the lock. Closing **any** descriptor for that
+inode from the same process releases that process's **entire** record-lock
+set for the inode, even when other independently opened descriptors remain.
+Use kernel-supplied `fi->lock_owner` to identify this owner across `getlk`,
+`setlk`, and the `FLUSH` event; PID and mount-local `fh` are insufficient.
+`FLUSH` is the per-close signal, not necessarily the last-reference release.
+Never skip this release merely because data `Flush` returned an error.
+
+BSD `flock` belongs to the **open file description** and covers the complete
+inode. Descriptors sharing it through `dup` or `fork` share the lock; only
+the last reference releases it. The FUSE `flock` callback uses kernel
+`lock_owner`, and the `RELEASE` callback's `fi->flock_release` conveys the
+last-close release. The POSIX record-lock and BSD flock conflict namespaces
+are distinct on Linux; treating all locks as one mutex is incorrect.
+
+POSIX record locks admit compatible overlapping read/read holders; any
+other-owner range intersection involving a write lock conflicts. Same-owner
+relocking, partial unlocking, split/merge and conversion use POSIX semantics.
+BSD flock admits shared/shared, rejects other-owner shared/exclusive and
+exclusive/exclusive, and applies whole-file conversion. Nonblocking conflicts
+use the proper Linux errno (`EAGAIN`/`EACCES` for record locks,
+`EWOULDBLOCK` for flock). `GETLK` must use `fuse_reply_lock` and return
+`F_UNLCK` or a real conflicting range; the `l_pid` field is diagnostic, not
+the ownership key. Never fabricate a globally valid PID when a conflicting
+holder lives on another mount/PID namespace.
+
+**Explicitly excluded:** OFD record locks (`F_OFD_*`) and file
+leases/delegations (`F_SETLEASE`, `F_SETDELEG`). OFD is not BSD `flock`; the
+selected low-level FUSE `getlk`/`setlk` callback does not expose an explicit
+OFD-versus-process lock-kind argument. Do not claim OFD support until
+verified on the target kernel/libfuse. `generic/478` exercises mixed OFD
+and POSIX behavior and cannot be promoted solely because POSIX locking
+passes. `generic/786` and `generic/787` require separate delegation support.
+Advisory user locks are not #424's internal Slice write/truncate/grow fence.
+
+### Stable identity and session lifecycle
+
+The backend owns locking independently of chunk-content metadata:
+
+```
+POSIX owner = (volume, mount_session_id, kernel_lock_owner, POSIX)
+flock owner = (volume, mount_session_id, kernel_lock_owner, FLOCK)
+lock record = (inode_id, owner, class, mode, byte_range_or_whole_file)
+```
+
+Every new mount incarnation registers a strong, globally unique session ID
+before allowing remote locking; a restarted daemon never reuses it. Existing
+mount-local `FileHandle::fh` and `InodeHandle::open_count` are not distributed
+session identities. `fh` is still checked for legitimate access to the inode.
+
+One metadata authority stores:
+
+- Session state: `ACTIVE` or `REVOKED`, immutable incarnation ID, and an
+  **server-clock** lease deadline. A revoked/expired session cannot renew or
+  issue new successful lock operations.
+- Per-inode POSIX record locks: canonical owner-keyed, nonoverlapping
+  `[start,end]` intervals with read/write mode and optional diagnostic PID.
+  End-of-file (`l_len == 0`) has an explicit infinity sentinel; validate
+  range normalization and overflow, not physical file size.
+- Per-inode BSD flocks: whole-file shared/exclusive owner records.
+- Session-to-inode reverse index for bounded eventual cleanup; an index is
+  **not** a second source of lock ownership truth.
+- Per-owner operation IDs/outcomes for uncertain-commit replay and a
+  per-inode lock-change sequence for waiters.
+
+`GETLK`, range-set/unlock, and flock operations have backend-neutral
+semantic interfaces. VFS must not decode Redis lock keys or implement a
+parallel client-local authoritative lock table. Locks can survive unlink
+while open handles exist; reclaim must not reuse an inode identity with
+stale live locks. Distinguish POSIX owner cleanup at every qualifying
+`FLUSH` from flock cleanup at `flock_release`/last `RELEASE`.
+
+### Atomic grant, unlock and ambiguous outcomes
+
+The **linearization point** is one Memory serialized transition or one
+successfully committed Redis transaction/script. Lock operations atomically:
+
+1. Validate that the session incarnation is `ACTIVE` and unexpired using
+   the metadata authority's clock (not the daemon's local time).
+2. Check relevant lock conflicts and class-specific owner replacement,
+   insertion, splitting, or removal against the same authoritative snapshot.
+3. Mutate the lock record, session reverse index and inode change sequence
+   together, including any operation identity/outcome for replay.
+
+Redis `WATCH`/`EXEC` (or one equivalent atomic server-side script) must
+cover **all** modified pieces; a check-then-write sequence spanning multiple
+independent commits is not correct. Redis WATCH conflicts are distinct from
+semantic lock conflicts. Limit retries and contention; do not hold a Redis
+connection/transaction during an application lock wait. All keys that must
+commit atomically must reside in one supported Redis transaction domain.
+
+Give each modifying request a stable operation ID, unique under its session.
+Serialize still-unresolved modifications to a single
+`(session,owner,inode,class)` until their outcome is known. On
+`OutcomeUnknown`, retry/reconcile with **the same operation identity** and
+the persisted original result; never blindly retry with a new ID or infer
+non-application from a matching final lock shape. Define bounded retention
+and pruning of the per-session result journal so late replays cannot execute
+an already-acknowledged grant or undo a later one. Session cleanup is
+idempotent and guards the complete owner/incarnation identity.
+
+An unsuccessful lock release must be diagnosed and retried safely; ordinary
+`FLUSH` can still return its existing data-writeback error, but may not
+silently declare remote unlock complete if it failed. `RELEASE` must free
+local handle resources even if its remote flock cleanup fails. Redis failover
+that loses acknowledged state is **outside** the claimed single-authority
+guarantee: mounts must fail closed if the authoritative history becomes
+untrustworthy, not assume Redis alone supplies distributed consensus.
+
+### Session expiry and failure model
+
+```
+REGISTER -> ACTIVE --heartbeat--> ACTIVE
+ACTIVE --explicit unmount / expiry / fencing--> REVOKED
+REVOKED --bounded, idempotent lock cleanup--> REMOVED
+```
+
+Every mutation checks the same session state that an atomic revoke/heartbeat
+updates. Revocation must become authoritative **before** lock cleanup.
+Once revoked, late heartbeat/grant/unlock retries from that incarnation
+cannot resurrect locks or remove a newer incarnation's locks. Cleanup may
+run in bounded batches; each batch rechecks the saved exact session/owner
+identity. New grants can ignore a revoked session's records only after that
+revoke is committed. Keep stale cleanup work from deleting a newly granted
+owner's lock.
+
+A daemon that cannot establish its session health must stop returning new
+successful locking/filesystem operations; known revocation requires an
+abort/fail-closed mount path, not re-registration under a fresh session
+with old live handles. However, **Redis lease expiry cannot fence arbitrary
+application code** that still believes it holds an advisory lock during a
+network partition. #379 offers bounded stale-lock recovery plus explicit
+fail-closed daemon behavior, not a guarantee of fencing all old application
+critical sections. Strong application fencing or cross-mount data mutation
+ordering is a distinct problem.
+
+### Waiting, wakeup, cancellation and reply ownership
+
+Nonblocking operations perform one conditional grant. Blocking `F_SETLKW`
+and blocking `flock` use a bounded **wait/recheck loop**, not a long-lived
+Redis transaction or polling spin. A waiter observes a per-inode version,
+subscribes to a wakeup channel, then rechecks version/authority **after**
+subscription and before sleeping. Redis notifications only improve latency:
+missed notifications must recover through version comparison and a bounded
+recheck interval. Only a new atomic conflict check can grant the lock. Bound
+queued waiters, memory, and notification fanout; strict FIFO is not promised.
+
+Enable interrupt handling by changing `conn->no_interrupt = 1` when locking
+support is activated. `fuse_req_interrupt_func` registers without losing
+already-arrived interrupts. Its callback only updates thread-safe
+cancellation state and wakes the fiber-owned waiter; it must not acquire a
+fiber mutex or use request memory after unregister/destruction. The request
+fiber coordinates exactly one reply and interrupt-handler removal:
+
+```
+NEW -> CHECKING -> WAITING --wake/recheck--> CHECKING
+         |           |
+         +-----------+--interrupt--> CANCELLING -> DONE_INTERRUPTED
+CHECKING --atomic grant--> GRANTED_PENDING_REPLY
+GRANTED_PENDING_REPLY --successfully delivered--> DONE_GRANTED
+GRANTED_PENDING_REPLY --cancel/failed delivery--> RESOLVE_UNDELIVERED
+RESOLVE_UNDELIVERED --safe compensation--> DONE_WITHOUT_NEW_GRANT
+```
+
+An interrupted waiter must not leave a **ghost lock**. If the backend grant
+committed but no success reply was delivered, compensate with the **exact
+operation/grant identity**, never by blindly removing all locks for that
+owner after a newer operation could have succeeded. Do not reply `EINTR`
+while still leaving an in-flight request eligible to acquire a lock.
+**A lock conversion complicates compensation**: undoing a newly acquired
+range can differ from restoring a prior same-owner range, and another owner
+may have acquired an intervening compatible lock. Conditional compensation
+must validate the owner revision and the whole affected conflict state; a
+reply failure cannot justify overwriting newer lock grants to restore the
+old shape. If a conversion cannot be safely reversed, the protocol needs an
+explicitly justified failure/owner-revocation policy before activation.
+The Redis commit and kernel reply are not one atomic transaction; an
+unqualified claim of perfect cancel-and-restore semantics would be false.
+Interrupted/cancelled, success-delivered, ambiguous reply-delivery, and
+compensation-error cases require explicit deterministic tests. A late
+interrupt after a successfully delivered reply cannot retroactively
+withdraw the successful grant. Deadlock detection/`EDEADLK` is **not**
+automatically provided by this wait loop; investigate pinned workloads
+before claiming Linux-equivalent cross-mount deadlock detection.
+
+### Design sign-off / test matrix
+
+Before moving #379 into TDD, verify the exact **target Linux + libfuse**
+transport in source or a focused FUSE probe: normalized owner/range,
+`flock_release`, `FLUSH` on each close, `RELEASE` on last close,
+independent `open`, `dup`, `fork`, both mounts, and OFD operations. Verify
+interrupt delivery and the kernel's behavior when success races a signal.
+The transport probe does **not** require enabling unsupported classes.
+
+Document the concrete session heartbeat/revocation scheduler, Redis
+operation-ID retention, bounded waiter resource policy, **conversion
+compensation**, and exact failure responses before the implementation is
+deemed ready. Protect the following
+with Memory/Redis tests and end-to-end / two-mount tests: lock range
+split/merge, read/read and read/write, owner upgrades, `GETLK` PID
+limitations, POSIX any-close, flock last-close, `LOCK_NB`, wait and wake,
+missed wakeup, cancel-before/after grant, ambiguous commit, stale session
+cleanup, Redis outage/restart, and reply-delivery failure. Tests must await
+semantic completion, not use sleep as proof of correctness.
+
+Promote `generic/131` and `generic/504` only on authoritative CI evidence;
+evaluate `generic/478` separately as mixed POSIX/OFD coverage. Delegation
+cases remain unsupported. Do not enable `FUSE_CAP_POSIX_LOCKS` or
+`FUSE_CAP_FLOCK_LOCKS` merely because the corresponding callbacks exist.
+
+References: Linux `fcntl_locking(2)` and `flock(2)` man pages; Linux
+`fs/fuse/file.c` for lock/flush/release; libfuse low-level lock callbacks and
+`fuse_req_interrupt_func`; JuiceFS `pkg/meta/redis.go` lock/session keys
+and `pkg/meta/interface.go` for comparable lock operations. JuiceFS is a
+reference, not proof that TTL alone fences a partitioned client.
+
 ## Anonymous temporary files (`O_TMPFILE`)
 
 SwordFS implements Linux `O_TMPFILE` by composing the ordinary namespace and
