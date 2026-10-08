@@ -594,7 +594,16 @@ void VfsHookFactory::SwordFsCreate(fuse_req_t req, fuse_ino_t parent, const char
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    PublishRetainedLookup(entry.ino, [req, &entry, &fi] { return fuse_reply_create(req, &entry, &fi); });
+    if (!PublishRetainedLookup(entry.ino, [req, &entry, &fi] { return fuse_reply_create(req, &entry, &fi); })) {
+      // The reply failed, so the kernel cannot release this unpublished fh.
+      // Lookup rollback is already handled by PublishRetainedLookup; keep the
+      // committed named entry and relinquish only the local open reference.
+      status = VfsImpl::Release(entry.ino, fi.fh);
+      if (!status.ok()) {
+        SWORDFS_LOG_WARN << "Failed to release unpublished CREATE fh=" << fi.fh << " ino=" << entry.ino << ": "
+                         << status.message();
+      }
+    }
   });
 }
 
