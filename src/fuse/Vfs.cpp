@@ -411,7 +411,14 @@ void VfsHookFactory::SwordFsOpen(fuse_req_t req, fuse_ino_t ino, struct fuse_fil
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    fuse_reply_open(req, &fi);
+    if (fuse_reply_open(req, &fi) != 0) {
+      // The kernel never acquired this fh; relinquish the local open reference.
+      status = VfsImpl::Release(ino, fi.fh);
+      if (!status.ok()) {
+        SWORDFS_LOG_WARN << "Failed to release unpublished OPEN fh=" << fi.fh << " ino=" << ino << ": "
+                         << status.message();
+      }
+    }
   });
 }
 
@@ -488,7 +495,14 @@ void VfsHookFactory::SwordFsOpendir(fuse_req_t req, fuse_ino_t ino, struct fuse_
       fuse_reply_err(req, status.ToErrno());
       return;
     }
-    fuse_reply_open(req, &fi);
+    if (fuse_reply_open(req, &fi) != 0) {
+      // The kernel never acquired this fh; release its directory iterator.
+      status = VfsImpl::ReleaseDir(ino, fi.fh);
+      if (!status.ok()) {
+        SWORDFS_LOG_WARN << "Failed to release unpublished OPENDIR fh=" << fi.fh << " ino=" << ino << ": "
+                         << status.message();
+      }
+    }
   });
 }
 

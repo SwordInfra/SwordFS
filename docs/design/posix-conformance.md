@@ -76,6 +76,26 @@ The `O_TMPFILE` CREATE-style reply uses the same ownership split, except its
 metadata commit has already unlinked the generated name and published an
 anonymous orphan for normal reclamation.
 
+## OPEN and OPENDIR reply ownership
+
+An ordinary low-level FUSE `OPEN` or `OPENDIR` registers a local handle before
+`fuse_reply_open` attempts to deliver the descriptor to the kernel. Unlike
+`CREATE`, neither hook retains a new FUSE lookup reference. Reply delivery
+determines who is responsible for releasing the handle:
+
+| Hook | Reply delivered | Reply delivery failed | Lookup / metadata |
+| --- | --- | --- | --- |
+| `OPEN` | The kernel owns `fh` until `RELEASE` | The request fiber calls `VfsImpl::Release` to unregister the unpublished `FileHandle` and drop its inode open reference | No additional `nlookup`; existing open-time effects (including atime or `O_TRUNC`) remain committed |
+| `OPENDIR` | The kernel owns `fh` until `RELEASEDIR` | The request fiber calls `VfsImpl::ReleaseDir` to unregister the unpublished `DirHandle`, allowing its iterator to be destroyed | No additional `nlookup` or namespace mutation |
+
+The failed-reply cleanup happens synchronously in the original request fiber.
+The transport has already attempted the one permitted FUSE reply, so the hook
+does not send another error reply, roll back metadata, or adjust lookup counts.
+If the initial VFS open operation fails before registering a handle, the hook
+instead replies with that error and performs no release. Regular-file release
+uses the existing final-close flush: an unexpected flush error is logged, but
+the handle and inode open reference are still relinquished.
+
 ## Anonymous temporary files (`O_TMPFILE`)
 
 SwordFS implements Linux `O_TMPFILE` by composing the ordinary namespace and
