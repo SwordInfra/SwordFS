@@ -24,6 +24,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -91,6 +92,7 @@ struct FuseReplyCapture {
   std::string buffer;
   bool none = false;
   int reply_result = 0;
+  std::function<void(const fuse_entry_param &, const fuse_file_info &)> before_create_reply;
 
   bool Wait() {
     std::unique_lock lock(mutex);
@@ -219,6 +221,9 @@ extern "C" int fuse_reply_statfs(fuse_req_t req, const struct statvfs *statfs) {
 
 extern "C" int fuse_reply_create(fuse_req_t req, const fuse_entry_param *entry, const fuse_file_info *fi) {
   auto *capture = CaptureFor(req);
+  if (capture->before_create_reply) {
+    capture->before_create_reply(*entry, *fi);
+  }
   int reply_result = 0;
   {
     std::lock_guard lock(capture->mutex);
@@ -326,7 +331,8 @@ class NoopDataEngine : public swordfs::storage::IDataEngine {
     return swordfs::utils::Status::OK();
   }
   swordfs::utils::Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
-    return swordfs::utils::Status::OK();
+    ++put_calls_;
+    return put_status_;
   }
   swordfs::utils::Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
     return swordfs::utils::Status::OK();
@@ -334,6 +340,18 @@ class NoopDataEngine : public swordfs::storage::IDataEngine {
   swordfs::utils::Status Delete(std::string_view) override {
     return swordfs::utils::Status::OK();
   }
+
+  void set_put_status(swordfs::utils::Status status) {
+    put_status_ = std::move(status);
+  }
+
+  int put_calls() const {
+    return put_calls_;
+  }
+
+ private:
+  swordfs::utils::Status put_status_{swordfs::utils::Status::OK()};
+  int put_calls_ = 0;
 };
 
 namespace folly {
@@ -932,9 +950,10 @@ class VfsImplIntegrationTest : public ::testing::Test {
   void SetUp() override {
     auto mock = std::make_unique<swordfs::test::ConfiguredMetaEngine<MockMetaEngine>>();
     mock_meta_ = mock.get();
+    auto data = std::make_unique<NoopDataEngine>();
+    data_engine_ = data.get();
     swordfs::metadata::SwordFsVolume config;
-    const auto status =
-        swordfs::test::LoadTestVolumeRuntime(std::move(mock), std::make_unique<NoopDataEngine>(), std::move(config));
+    const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(mock), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
     swordfs::test::RunInTestFiber([&] { swordfs::vfs::FuseInodeCache::Instance().Initialize(); });
   }
@@ -947,6 +966,7 @@ class VfsImplIntegrationTest : public ::testing::Test {
   }
 
   MockMetaEngine *mock_meta_ = nullptr;
+  NoopDataEngine *data_engine_ = nullptr;
 };
 
 }  // namespace
@@ -1207,10 +1227,95 @@ TEST_F(VfsImplIntegrationTest, CreateHookPublishesLookupReference) {
 
   mock_meta_->set_get_inode_status(Status::NotFound("detached after create publication"));
   swordfs::test::RunInTestFiber([&] {
+    EXPECT_NE(swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::FileHandle>(*capture.fh), nullptr);
     struct stat attr{};
     EXPECT_TRUE(VfsImpl::GetAttr(100, &attr).ok());
     EXPECT_EQ(attr.st_nlink, 0U);
     EXPECT_TRUE(VfsImpl::Release(100, *capture.fh).ok());
+    EXPECT_EQ(swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::FileHandle>(*capture.fh), nullptr);
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, FailedCreateReplyReleasesHandleAndLookupReference) {
+  FuseReplyCapture capture;
+  capture.reply_result = -ENOENT;
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+
+  swordfs::fuse::VfsHookFactory::SwordFsCreate(reinterpret_cast<fuse_req_t>(&capture), 1, "created", 0644, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.entry.has_value());
+  ASSERT_TRUE(capture.fh.has_value());
+
+  // Capture notifies inside fuse_reply_create(), before the hook can release
+  // the unpublished fh. Wait for the request fiber to finish cleanup.
+  auto *runtime = swordfs::utils::ThisFiberRuntime();
+  ASSERT_NE(runtime, nullptr);
+  runtime->Shutdown();
+
+  EXPECT_FALSE(capture.error.has_value()) << "failed CREATE reply must not produce a second FUSE reply";
+
+  EXPECT_EQ(mock_meta_->create_calls(), 1);
+  ASSERT_EQ(mock_meta_->create_names().size(), 1U);
+  EXPECT_EQ(mock_meta_->create_names().front(), "created");
+  EXPECT_EQ(mock_meta_->unlink_calls(), 0) << "a failed reply must not undo committed namespace state";
+
+  swordfs::test::RunInTestFiber([&] {
+    EXPECT_EQ(swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::FileHandle>(*capture.fh), nullptr);
+    auto inode_handle =
+        swordfs::vfs::InodeHandleManager::Instance().Get(capture.entry->ino, /*create_if_missing=*/false);
+    if (inode_handle) {
+      const bool reclaimed = inode_handle->TryStartReclaim();
+      EXPECT_TRUE(reclaimed) << "failed reply must relinquish its inode open reference";
+      if (reclaimed) {
+        inode_handle->FinishReclaim();
+      }
+    }
+
+    mock_meta_->set_get_inode_status(Status::NotFound("created entry later removed from metadata"));
+    struct stat attr{};
+    EXPECT_TRUE(VfsImpl::GetAttr(capture.entry->ino, &attr).IsNotFound());
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, FailedCreateReplyUnregistersHandleEvenWhenCloseFlushFails) {
+  data_engine_->set_put_status(Status::IOError("injected final flush failure"));
+  FuseReplyCapture capture;
+  capture.reply_result = -ENOENT;
+  // Inject a pending local write before the reply returns, solely to make
+  // the final close fail. The kernel cannot perform such a write on an
+  // unpublished fh; this exercises defensive cleanup, not a kernel race.
+  capture.before_create_reply = [](const fuse_entry_param &entry, const fuse_file_info &fi) {
+    auto payload = folly::IOBuf::copyBuffer("pending");
+    EXPECT_TRUE(VfsImpl::Write(entry.ino, *payload, 0, fi.fh).ok());
+  };
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+
+  swordfs::fuse::VfsHookFactory::SwordFsCreate(reinterpret_cast<fuse_req_t>(&capture), 1, "created", 0644, &fi);
+
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.entry.has_value());
+  ASSERT_TRUE(capture.fh.has_value());
+  auto *runtime = swordfs::utils::ThisFiberRuntime();
+  ASSERT_NE(runtime, nullptr);
+  runtime->Shutdown();
+
+  EXPECT_GT(data_engine_->put_calls(), 0) << "injected final flush must actually reach the failing data engine";
+  EXPECT_FALSE(capture.error.has_value()) << "failed reply must not be followed by another FUSE reply";
+  EXPECT_EQ(mock_meta_->unlink_calls(), 0);
+  swordfs::test::RunInTestFiber([&] {
+    EXPECT_EQ(swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::FileHandle>(*capture.fh), nullptr);
+    auto inode_handle =
+        swordfs::vfs::InodeHandleManager::Instance().Get(capture.entry->ino, /*create_if_missing=*/false);
+    if (inode_handle) {
+      const bool reclaimed = inode_handle->TryStartReclaim();
+      EXPECT_TRUE(reclaimed) << "even a failed final flush must drop the unpublished fh's open reference";
+      if (reclaimed) {
+        inode_handle->FinishReclaim();
+      }
+    }
   });
 }
 

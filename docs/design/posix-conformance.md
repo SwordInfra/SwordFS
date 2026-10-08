@@ -54,6 +54,28 @@ unlink/orphan/reclaim machinery. Persisting a socket inode represents the
 filesystem namespace object created by Unix-domain-socket `bind`; socket data
 transport remains kernel-owned.
 
+## CREATE reply ownership
+
+The low-level FUSE `CREATE` operation commits the named inode and directory
+entry before registering a local `FileHandle` and provisionally retaining one
+inode lookup reference. Delivery of `fuse_reply_create` determines whether the
+kernel acquired ownership of these local resources:
+
+| Reply result | Lookup reference | Local file handle | Committed named entry |
+| --- | --- | --- | --- |
+| Success | Published until `FORGET` | Registered until kernel `RELEASE` | Preserved |
+| Failure | `PublishRetainedLookup` rolls back one reference | The CREATE hook releases/unregisters the unpublished `fh` | Preserved |
+
+A reply transport failure must not unlink the created name, undo metadata,
+or send another FUSE reply. The reply helper owns the provisional lookup
+rollback; the FUSE hook owns cleanup of the unpublished file handle. Release
+still unregisters the handle when its final flush/close returns an error; that
+error is diagnostic after the reply attempt, not another syscall reply.
+
+The `O_TMPFILE` CREATE-style reply uses the same ownership split, except its
+metadata commit has already unlinked the generated name and published an
+anonymous orphan for normal reclamation.
+
 ## Anonymous temporary files (`O_TMPFILE`)
 
 SwordFS implements Linux `O_TMPFILE` by composing the ordinary namespace and
