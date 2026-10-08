@@ -219,7 +219,7 @@ Status RedisMetaImpl::CreateNode(InodeID parent_ino, std::string_view name, uint
   return status;
 }
 
-Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
+Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name, std::optional<InodeID> expected_ino) {
   utils::ExpectInFiberDomain();
   if (auto status = ValidateNameComponent(name); !status.ok()) {
     return status;
@@ -241,6 +241,9 @@ Status RedisMetaImpl::Unlink(InodeID parent_ino, std::string_view name) {
     status = txn.LookupEntry(parent, name, &child);
     if (!status.ok()) {
       return status;
+    }
+    if (expected_ino.has_value() && child.ino != *expected_ino) {
+      return Status::Busy("temporary entry inode changed before unlink");
     }
     if (child.IsDir()) {
       return Status::InvalidArgument("cannot unlink directory");

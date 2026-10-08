@@ -280,11 +280,11 @@ utils::Status VfsImpl::MkDir(fuse_ino_t parent, const char *name, mode_t mode, f
   return Status::OK();
 }
 
-utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name) {
+utils::Status VfsImpl::Unlink(fuse_ino_t parent, const char *name, std::optional<InodeID> expected_ino) {
   // The metadata mutation owns last-link detection and publishes durable
   // orphan work atomically. Foreground unlink never performs object-store
   // deletion; it only nudges OrphanReclaimer after commit.
-  auto status = VolumeImpl::Instance().meta_engine()->Unlink(parent, name);
+  auto status = VolumeImpl::Instance().meta_engine()->Unlink(parent, name, expected_ino);
   if (!status.ok()) {
     return status;
   }
@@ -792,7 +792,7 @@ utils::Status VfsImpl::TmpFile(fuse_ino_t parent, mode_t mode, fuse_entry_param 
   status = FileHandle::Create(child.ino, fi->flags, &handle);
   if (!status.ok()) {
     {
-      const auto status = Unlink(parent, name.c_str());
+      const auto status = Unlink(parent, name.c_str(), child.ino);
       if (!status.ok()) {
         SWORDFS_LOG_WARN << "TmpFile: failed to remove temporary entry after handle creation failure: parent=" << parent
                          << " name='" << name << "' ino=" << child.ino << " — " << status.message();
@@ -801,7 +801,7 @@ utils::Status VfsImpl::TmpFile(fuse_ino_t parent, mode_t mode, fuse_entry_param 
     return status;
   }
 
-  status = Unlink(parent, name.c_str());
+  status = Unlink(parent, name.c_str(), child.ino);
   if (!status.ok()) {
     // The tmpfile contract was not established, so the caller must not own a
     // local fh. Release first, then make one best-effort cleanup retry; the
@@ -814,7 +814,7 @@ utils::Status VfsImpl::TmpFile(fuse_ino_t parent, mode_t mode, fuse_entry_param 
       }
     }
     {
-      const auto status = Unlink(parent, name.c_str());
+      const auto status = Unlink(parent, name.c_str(), child.ino);
       if (!status.ok() && !status.IsNotFound()) {
         SWORDFS_LOG_WARN << "TmpFile: temporary entry cleanup retry failed: parent=" << parent << " name='" << name
                          << "' ino=" << child.ino << " — " << status.message();

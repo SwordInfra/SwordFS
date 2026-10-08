@@ -102,7 +102,7 @@ class MissingMetaEngine : public IMetaEngine {
   Status MkDir(InodeID, std::string_view, uint32_t, SwordFsInode *) override {
     return Status::OK();
   }
-  Status Unlink(InodeID, std::string_view) override {
+  Status Unlink(InodeID, std::string_view, std::optional<InodeID> = std::nullopt) override {
     return Status::OK();
   }
   Status RmDir(InodeID, std::string_view) override {

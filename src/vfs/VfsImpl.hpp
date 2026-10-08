@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "metadata/types/Common.hpp"
 #include "utils/Status.hpp"
 
 namespace folly {
@@ -46,7 +47,8 @@ class VfsImpl {
   static utils::Status ReadLink(fuse_ino_t ino, std::string *target);
   static utils::Status MkNod(fuse_ino_t parent, const char *name, mode_t mode, dev_t rdev, fuse_entry_param *entry);
   static utils::Status MkDir(fuse_ino_t parent, const char *name, mode_t mode, fuse_entry_param *entry);
-  static utils::Status Unlink(fuse_ino_t parent, const char *name);
+  static utils::Status Unlink(fuse_ino_t parent, const char *name,
+                              std::optional<metadata::InodeID> expected_ino = std::nullopt);
   static utils::Status RmDir(fuse_ino_t parent, const char *name);
   static utils::Status Symlink(const char *link, fuse_ino_t parent, const char *name, fuse_entry_param *entry);
   static utils::Status Rename(fuse_ino_t parent, const char *name, fuse_ino_t newparent, const char *newname,
