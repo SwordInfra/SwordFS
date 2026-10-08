@@ -1868,5 +1868,35 @@
     "supported_gate_percent": 100.0,
     "swordfs_commit": "da8802351feb519a21fae809111fb07018f11c61",
     "timestamp": "2026-10-08T06:36:34+00:00"
+  },
+  {
+    "blocking_count": 0,
+    "classifications": {
+      "ENVIRONMENT": 8,
+      "KNOWN_UNSUPPORTED": 90,
+      "PASS": 144,
+      "UPSTREAM_NOT_APPLICABLE": 402,
+      "UPSTREAM_TEST_DEFECT": 1
+    },
+    "deferred_count": 0,
+    "executed_classified_percent": 100.0,
+    "executed_count": 645,
+    "fstests_commit": "a370dcbed43563f0462801e889e0eceb93c7cfad",
+    "fstests_group": "generic/quick",
+    "known_gap_count": 501,
+    "overall_support_percent": 22.33,
+    "raw_results": {
+      "FAIL": 19,
+      "NOTRUN": 482,
+      "PASS": 144
+    },
+    "run_id": 37740343878,
+    "run_url": "https://github.com/SwordInfra/SwordFS/actions/runs/37740343878",
+    "selected_count": 645,
+    "status": "PASS",
+    "supported_count": 144,
+    "supported_gate_percent": 100.0,
+    "swordfs_commit": "e7bd4247fe7fce2a2451c9a04d6a114b6996be8d",
+    "timestamp": "2026-10-08T07:17:46+00:00"
   }
 ]
