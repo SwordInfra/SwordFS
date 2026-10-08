@@ -16,6 +16,7 @@
 #include <barrier>
 #include <cerrno>
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -636,6 +637,18 @@ FIBER_TEST_F(ReclaimerTest, TypedCOWCleanupRejectsMalformedPersistedIdentity) {
   trailing_encoder.U64(123);
   trailing_encoder.Finish(&trailing_reclaim.payload);
   expect_bad_reclaim(std::move(trailing_reclaim));
+
+  // A corrupt queue entry must not reserve billions of elements before
+  // discovering that its payload contains no detached identities.
+  metadata::ReclaimWork overstated_reclaim;
+  overstated_reclaim.ino = kIno;
+  metadata::BufEncoder overstated_encoder;
+  overstated_encoder.Header(metadata::RecordType::kCowTypedCleanup);
+  overstated_encoder.U32(static_cast<uint32_t>(chunk::cow::COWCleanupKind::kDetachedReclaim));
+  overstated_encoder.U64(kIno);
+  overstated_encoder.U32(std::numeric_limits<uint32_t>::max());
+  overstated_encoder.Finish(&overstated_reclaim.payload);
+  expect_bad_reclaim(std::move(overstated_reclaim));
 
   EXPECT_EQ(cleanup->DeletePending(MakeTypedRevisionDelete(chunk_id, revision), nullptr).ToErrno(), EINVAL);
   EXPECT_EQ(cleanup->DeleteReclaim(MakeTypedDetachedReclaim(kIno, {}), nullptr).ToErrno(), EINVAL);

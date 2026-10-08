@@ -115,6 +115,13 @@ utils::Status DecodeTypedReclaim(const metadata::ReclaimWork &work, std::vector<
     return utils::Status::Malformed("invalid typed COW reclaim header");
   }
 
+  // Each detached identity needs two U64 fields. Reject overstated counts
+  // before reserving memory from an untrusted maintenance payload.
+  constexpr size_t kDetachedIdentityBytes = 2 * sizeof(uint64_t);
+  if (count > work.payload.size() / kDetachedIdentityBytes) {
+    return utils::Status::Malformed("typed COW reclaim count exceeds encoded payload");
+  }
+
   std::vector<COWDetachedChunk> chunks;
   chunks.reserve(count);
   for (uint32_t i = 0; i < count; ++i) {

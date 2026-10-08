@@ -250,7 +250,9 @@ decode/validation, authoritative reachability revalidation, physical-object key
 derivation, and destructive object deletion. The worker does not include COW
 code, compare COW revisions, derive COW keys, or switch on COW deletion policy.
 Generic `BufCodec` schema and exact `RecordType` checks still frame persisted
-envelopes; malformed mechanism payloads fail closed and remain queued.
+envelopes; malformed mechanism payloads fail closed and remain queued. Typed COW
+reclaim decoding checks that its declared detached-identity count fits the
+encoded payload before reserving the corresponding in-memory list.
 
 Cleanup has two distinct reachability levels in the final authority model:
 
