@@ -46,6 +46,7 @@
 #include "runtime/MountRuntimeBehavior.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/FiberRuntime.hpp"
+#include "vfs/DirHandle.hpp"
 #include "vfs/FileHandle.hpp"
 #include "vfs/FuseInodeCache.hpp"
 #include "vfs/InodeHandle.hpp"
@@ -92,6 +93,9 @@ struct FuseReplyCapture {
   std::string buffer;
   bool none = false;
   int reply_result = 0;
+  int open_reply_calls = 0;
+  int error_reply_calls = 0;
+  std::function<void(const fuse_file_info &)> before_open_reply;
   std::function<void(const fuse_entry_param &, const fuse_file_info &)> before_create_reply;
 
   bool Wait() {
@@ -130,6 +134,7 @@ extern "C" int fuse_reply_err(fuse_req_t req, int err) {
   auto *capture = CaptureFor(req);
   {
     std::lock_guard lock(capture->mutex);
+    ++capture->error_reply_calls;
     capture->error = err;
     capture->replied = true;
   }
@@ -188,13 +193,19 @@ extern "C" int fuse_reply_readlink(fuse_req_t req, const char *link) {
 
 extern "C" int fuse_reply_open(fuse_req_t req, const fuse_file_info *fi) {
   auto *capture = CaptureFor(req);
+  if (capture->before_open_reply) {
+    capture->before_open_reply(*fi);
+  }
+  int reply_result = 0;
   {
     std::lock_guard lock(capture->mutex);
+    ++capture->open_reply_calls;
     capture->fh = fi->fh;
     capture->replied = true;
+    reply_result = capture->reply_result;
   }
   capture->cv.notify_one();
-  return 0;
+  return reply_result;
 }
 
 extern "C" int fuse_reply_write(fuse_req_t req, size_t count) {
@@ -1788,6 +1799,188 @@ TEST_F(VfsImplIntegrationTest, FuseOpenRejectsMetadataFailure) {
   ASSERT_TRUE(capture.error.has_value());
   EXPECT_EQ(*capture.error, EACCES);
   EXPECT_FALSE(capture.fh.has_value());
+  EXPECT_EQ(capture.open_reply_calls, 0);
+  EXPECT_EQ(capture.error_reply_calls, 1);
+}
+
+TEST_F(VfsImplIntegrationTest, FailedOpenReplyReleasesUnpublishedFileHandle) {
+  constexpr InodeID file_ino = 2;
+  fuse_file_info fi{};
+  fi.flags = O_RDONLY;
+  FuseReplyCapture capture;
+  capture.reply_result = -ENOENT;
+
+  swordfs::fuse::VfsHookFactory::SwordFsOpen(reinterpret_cast<fuse_req_t>(&capture), file_ino, &fi);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.fh.has_value());
+
+  // The reply stub signals before the hook processes its return value.
+  // Shutdown drains the entire request fiber, including failed-reply cleanup.
+  auto *runtime = swordfs::utils::ThisFiberRuntime();
+  ASSERT_NE(runtime, nullptr);
+  runtime->Shutdown();
+
+  EXPECT_EQ(capture.open_reply_calls, 1);
+  EXPECT_EQ(capture.error_reply_calls, 0) << "a failed transport reply must not trigger another FUSE reply";
+  EXPECT_FALSE(capture.error.has_value());
+  EXPECT_EQ(mock_meta_->open_calls(), 1) << "the VFS open completed before reply delivery failed";
+  swordfs::test::RunInTestFiber([&] {
+    EXPECT_EQ(swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::FileHandle>(*capture.fh), nullptr);
+    auto inode_handle = swordfs::vfs::InodeHandleManager::Instance().Get(file_ino, /*create_if_missing=*/false);
+    if (inode_handle) {
+      const bool reclaimed = inode_handle->TryStartReclaim();
+      EXPECT_TRUE(reclaimed) << "unpublished OPEN must release the local descriptor reference";
+      if (reclaimed) {
+        inode_handle->FinishReclaim();
+      }
+    }
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, SuccessfulOpenReplyRetainsHandleUntilRelease) {
+  constexpr InodeID file_ino = 2;
+  fuse_file_info fi{};
+  fi.flags = O_RDONLY;
+  FuseReplyCapture capture;
+  swordfs::fuse::VfsHookFactory::SwordFsOpen(reinterpret_cast<fuse_req_t>(&capture), file_ino, &fi);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.fh.has_value());
+
+  auto *runtime = swordfs::utils::ThisFiberRuntime();
+  ASSERT_NE(runtime, nullptr);
+  runtime->Shutdown();
+
+  EXPECT_EQ(capture.open_reply_calls, 1);
+  EXPECT_EQ(capture.error_reply_calls, 0);
+  swordfs::test::RunInTestFiber([&] {
+    auto &manager = swordfs::vfs::HandleManager::Instance();
+    ASSERT_NE(manager.FindAs<swordfs::vfs::FileHandle>(*capture.fh), nullptr);
+    auto inode_handle = swordfs::vfs::InodeHandleManager::Instance().Get(file_ino, false);
+    ASSERT_NE(inode_handle, nullptr);
+    EXPECT_FALSE(inode_handle->TryStartReclaim());
+    EXPECT_TRUE(VfsImpl::Release(file_ino, *capture.fh).ok());
+    EXPECT_EQ(manager.FindAs<swordfs::vfs::FileHandle>(*capture.fh), nullptr);
+    const bool reclaimed = inode_handle->TryStartReclaim();
+    EXPECT_TRUE(reclaimed);
+    if (reclaimed) {
+      inode_handle->FinishReclaim();
+    }
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, FailedOpenReplyUnregistersHandleEvenWhenFinalFlushFails) {
+  constexpr InodeID file_ino = 2;
+  data_engine_->set_put_status(Status::IOError("injected final flush failure"));
+  fuse_file_info fi{};
+  fi.flags = O_RDWR;
+  FuseReplyCapture capture;
+  capture.reply_result = -ENOENT;
+  // An unpublished fh cannot receive a kernel write. This test-only write
+  // defensively exercises cleanup when a final close itself fails.
+  capture.before_open_reply = [](const fuse_file_info &opened) {
+    auto payload = folly::IOBuf::copyBuffer("pending");
+    EXPECT_TRUE(VfsImpl::Write(2, *payload, 0, opened.fh).ok());
+  };
+
+  swordfs::fuse::VfsHookFactory::SwordFsOpen(reinterpret_cast<fuse_req_t>(&capture), file_ino, &fi);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.fh.has_value());
+
+  auto *runtime = swordfs::utils::ThisFiberRuntime();
+  ASSERT_NE(runtime, nullptr);
+  runtime->Shutdown();
+
+  EXPECT_GT(data_engine_->put_calls(), 0);
+  EXPECT_EQ(capture.open_reply_calls, 1);
+  EXPECT_EQ(capture.error_reply_calls, 0);
+  swordfs::test::RunInTestFiber([&] {
+    EXPECT_EQ(swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::FileHandle>(*capture.fh), nullptr);
+    auto inode_handle = swordfs::vfs::InodeHandleManager::Instance().Get(file_ino, false);
+    if (inode_handle) {
+      const bool reclaimed = inode_handle->TryStartReclaim();
+      EXPECT_TRUE(reclaimed) << "a failed final flush must still release the descriptor reference";
+      if (reclaimed) {
+        inode_handle->FinishReclaim();
+      }
+    }
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, FuseOpendirRejectsMetadataFailure) {
+  mock_meta_->set_status(Status::Permission("denied"));
+  fuse_file_info fi{};
+  FuseReplyCapture capture;
+  swordfs::fuse::VfsHookFactory::SwordFsOpendir(reinterpret_cast<fuse_req_t>(&capture), 1, &fi);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.error.has_value());
+  EXPECT_EQ(*capture.error, EACCES);
+  EXPECT_FALSE(capture.fh.has_value());
+  EXPECT_EQ(capture.open_reply_calls, 0);
+  EXPECT_EQ(capture.error_reply_calls, 1);
+}
+
+TEST_F(VfsImplIntegrationTest, FailedOpendirReplyReleasesUnpublishedDirectoryHandle) {
+  fuse_file_info fi{};
+  FuseReplyCapture capture;
+  capture.reply_result = -ENOENT;
+  swordfs::fuse::VfsHookFactory::SwordFsOpendir(reinterpret_cast<fuse_req_t>(&capture), 1, &fi);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.fh.has_value());
+
+  auto *runtime = swordfs::utils::ThisFiberRuntime();
+  ASSERT_NE(runtime, nullptr);
+  runtime->Shutdown();
+
+  EXPECT_EQ(capture.open_reply_calls, 1);
+  EXPECT_EQ(capture.error_reply_calls, 0) << "failed OPENDIR reply must not send an error reply";
+  EXPECT_FALSE(capture.error.has_value());
+  swordfs::test::RunInTestFiber([&] {
+    EXPECT_EQ(swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::DirHandle>(*capture.fh), nullptr);
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, FailedOpendirReplyDoesNotReplyAgainWhenCleanupReturnsError) {
+  fuse_file_info fi{};
+  FuseReplyCapture capture;
+  capture.reply_result = -ENOENT;
+  // Force the defensive cleanup-error branch by removing the handle before
+  // the reply returns. This is test-owned interference, not a kernel event.
+  capture.before_open_reply = [](const fuse_file_info &opened) { EXPECT_TRUE(VfsImpl::ReleaseDir(1, opened.fh).ok()); };
+  swordfs::fuse::VfsHookFactory::SwordFsOpendir(reinterpret_cast<fuse_req_t>(&capture), 1, &fi);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.fh.has_value());
+
+  auto *runtime = swordfs::utils::ThisFiberRuntime();
+  ASSERT_NE(runtime, nullptr);
+  runtime->Shutdown();
+
+  EXPECT_EQ(capture.open_reply_calls, 1);
+  EXPECT_EQ(capture.error_reply_calls, 0);
+  EXPECT_FALSE(capture.error.has_value());
+  swordfs::test::RunInTestFiber([&] {
+    EXPECT_EQ(swordfs::vfs::HandleManager::Instance().FindAs<swordfs::vfs::DirHandle>(*capture.fh), nullptr);
+  });
+}
+
+TEST_F(VfsImplIntegrationTest, SuccessfulOpendirReplyRetainsHandleUntilReleaseDir) {
+  fuse_file_info fi{};
+  FuseReplyCapture capture;
+  swordfs::fuse::VfsHookFactory::SwordFsOpendir(reinterpret_cast<fuse_req_t>(&capture), 1, &fi);
+  ASSERT_TRUE(capture.Wait());
+  ASSERT_TRUE(capture.fh.has_value());
+
+  auto *runtime = swordfs::utils::ThisFiberRuntime();
+  ASSERT_NE(runtime, nullptr);
+  runtime->Shutdown();
+
+  EXPECT_EQ(capture.open_reply_calls, 1);
+  EXPECT_EQ(capture.error_reply_calls, 0);
+  swordfs::test::RunInTestFiber([&] {
+    auto &manager = swordfs::vfs::HandleManager::Instance();
+    EXPECT_NE(manager.FindAs<swordfs::vfs::DirHandle>(*capture.fh), nullptr);
+    EXPECT_TRUE(VfsImpl::ReleaseDir(1, *capture.fh).ok());
+    EXPECT_EQ(manager.FindAs<swordfs::vfs::DirHandle>(*capture.fh), nullptr);
+  });
 }
 
 TEST_F(VfsImplIntegrationTest, FuseFileLifecycleRoundTripsBufferedData) {
