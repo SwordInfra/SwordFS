@@ -427,30 +427,45 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     return utils::Status::OK();
   }
 
-  std::vector<std::pair<std::string, SwordFsChunk>> scanned;
-  status = ScanChunks(ino, scanned);
-  if (!status.ok()) {
-    return status;
+  FileMappingSnapshot typed;
+  if (inode.IsRegular()) {
+    // Scan and WATCH the authoritative map under the same transaction as the
+    // inode's last-link fence; a competing attachment must abort EXEC.
+    status = ReadFileMappingSnapshot(ino, &typed);
+    if (!status.ok()) {
+      return status;
+    }
   }
 
   std::vector<SwordFsChunk> heads;
-  heads.reserve(scanned.size());
-  for (const auto &[field, descriptor] : scanned) {
-    (void)field;
-    heads.push_back(descriptor);
+  if (typed.mappings.empty()) {
+    std::vector<std::pair<std::string, SwordFsChunk>> scanned;
+    status = ScanChunks(ino, scanned);
+    if (!status.ok()) {
+      return status;
+    }
+    heads.reserve(scanned.size());
+    for (const auto &[field, descriptor] : scanned) {
+      (void)field;
+      heads.push_back(descriptor);
+    }
+    std::sort(heads.begin(), heads.end(),
+              [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
   }
-  std::sort(heads.begin(), heads.end(), [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
   if (chunk_metadata_bridge_ == nullptr) {
     return utils::Status::Internal("chunk metadata bridge is not bound");
   }
   ReclaimWork pending;
-  status = chunk_metadata_bridge_->FreezeReclaim(*this, ino, heads, chunk_size_, &pending);
+  status = !typed.mappings.empty() ? chunk_metadata_bridge_->FreezeDetachedReclaim(ino, typed.mappings, &pending)
+                                   : chunk_metadata_bridge_->FreezeReclaim(*this, ino, heads, chunk_size_, &pending);
   if (!status.ok()) {
     return status;
   }
-  status = chunk_metadata_bridge_->PrepareReclaim(*this, ino, heads);
-  if (!status.ok()) {
-    return status;
+  if (typed.mappings.empty()) {
+    status = chunk_metadata_bridge_->PrepareReclaim(*this, ino, heads);
+    if (!status.ok()) {
+      return status;
+    }
   }
 
   std::string serialized;
@@ -464,6 +479,10 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
   // a later auxiliary command failure cannot leave a revivable inode whose
   // mappings were already destroyed.
   status = txn_.Del(key_.Inode(ino));
+  if (!status.ok()) {
+    return status;
+  }
+  status = txn_.Del(key_.ChunkRefs(ino));
   if (!status.ok()) {
     return status;
   }

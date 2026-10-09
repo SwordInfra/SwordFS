@@ -2931,6 +2931,18 @@ TEST_F(FileReadWriterTest, TruncatePropagatesMetaError) {
   });
 }
 
+TEST_F(FileReadWriterTest, TypedSizeTransitionPropagatesMappingSnapshotFailure) {
+  RunInTestFiber([&] {
+    auto rw = Make(64);
+    mock_meta_->get_inode_status = Status::IOError("injected mapping snapshot read failure");
+    const auto status = rw.Truncate(32);
+    EXPECT_EQ(status.ToErrno(), EIO);
+    EXPECT_EQ(status.message(), "injected mapping snapshot read failure");
+    EXPECT_EQ(mock_meta_->file_size(), 64);
+    EXPECT_EQ(mock_meta_->truncate_calls, 0);
+  });
+}
+
 TEST_F(FileReadWriterTest, TruncateDropsDirtyChunks) {
   RunInTestFiber([&] {
     auto rw = Make();

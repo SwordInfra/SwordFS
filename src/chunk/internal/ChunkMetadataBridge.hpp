@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "metadata/ChunkSizePlan.hpp"
 #include "metadata/IChunkIndexTxn.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "metadata/types/Volume.hpp"
@@ -39,6 +40,12 @@ class ChunkMetadataBridge {
   virtual utils::Status FreezeReclaim(metadata::IChunkIndexTxn &txn, metadata::InodeID ino,
                                       const std::vector<metadata::SwordFsChunk> &heads, uint64_t chunk_size,
                                       metadata::ReclaimWork *out) const = 0;
+
+  // Pure serialization of the authoritative typed FileMetadata attachments.
+  // The bridge must not read or mutate the private ChunkMetadata domain here.
+  virtual utils::Status FreezeDetachedReclaim(metadata::InodeID ino,
+                                              const std::vector<metadata::ChunkMapping> &mappings,
+                                              metadata::ReclaimWork *out) const = 0;
 };
 
 utils::Status CreateChunkMetadataBridge(metadata::ChunkType chunk_type, std::unique_ptr<ChunkMetadataBridge> *out);

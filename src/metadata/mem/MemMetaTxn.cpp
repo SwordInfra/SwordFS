@@ -1205,20 +1205,35 @@ Status MemMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWork> *work)
     return Status::Internal("chunk metadata bridge is not bound");
   }
   const auto &bridge = *store_->chunk_metadata_bridge_;
+  std::vector<ChunkMapping> attached;
+  if (const auto refs_it = store_->chunk_refs_.find(ino); refs_it != store_->chunk_refs_.end()) {
+    attached.reserve(refs_it->second.size());
+    for (const auto &[index, chunk_id] : refs_it->second) {
+      attached.push_back({.index = index, .chunk_id = chunk_id});
+    }
+    std::sort(attached.begin(), attached.end(),
+              [](const ChunkMapping &a, const ChunkMapping &b) { return a.index < b.index; });
+  }
   ReclaimWork frozen;
-  auto status = bridge.FreezeReclaim(*this, ino, heads, store_->chunk_size_, &frozen);
+  // The typed attachment map, when present, is the only live publication
+  // authority. Never derive typed cleanup from the unrelated legacy table.
+  auto status = !attached.empty() ? bridge.FreezeDetachedReclaim(ino, attached, &frozen)
+                                  : bridge.FreezeReclaim(*this, ino, heads, store_->chunk_size_, &frozen);
   if (!status.ok()) {
     return status;
   }
-  status = bridge.PrepareReclaim(*this, ino, heads);
-  if (!status.ok()) {
-    return status;
+  if (attached.empty()) {
+    status = bridge.PrepareReclaim(*this, ino, heads);
+    if (!status.ok()) {
+      return status;
+    }
   }
 
   // Memory performs the non-revivability and descriptor detach atomically
   // under the store transaction. The cleanup handoff is published only after
   // that correctness transition; losing it would leak data, not revive it.
   DeleteInode(ino);
+  store_->chunk_refs_.erase(ino);
   store_->orphans_.erase(ino);
   store_->pending_reclaims_[ino] = frozen;
 

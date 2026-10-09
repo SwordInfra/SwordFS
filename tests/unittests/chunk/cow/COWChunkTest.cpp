@@ -520,6 +520,10 @@ TEST_F(ChunkTest, FactoryRejectsInvalidRuntimeCompositionBeforeLookup) {
   auto status = missing_meta.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.message(), "ChunkFactory is not fully initialized");
+  EXPECT_EQ(
+      missing_meta.SanitizeBoundary(42, {.index = 0, .chunk_id = swordfs::metadata::ChunkID(47), .visible_prefix = 1})
+          .ToErrno(),
+      ENOSYS);
 
   swordfs::chunk::ChunkFactory missing_data(swordfs::metadata::ChunkType::kCow, cow_metadata, meta_, nullptr,
                                             kChunkTestSize);
@@ -555,6 +559,17 @@ TEST_F(ChunkTest, FactoryRejectsInvalidRuntimeCompositionBeforeLookup) {
                                            data_, kChunkTestSize);
   status = unsupported.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
   EXPECT_EQ(status.ToErrno(), ENOSYS);
+}
+
+TEST_F(ChunkTest, FactoryBoundarySanitationChecksMissingHeadAgainstLiveAttachment) {
+  RunInTestFiber([&] {
+    const auto *factory = swordfs::volume::VolumeImpl::Instance().chunk_factory();
+    ASSERT_NE(factory, nullptr);
+    const swordfs::metadata::RetainedChunkBoundary orphan_head{
+        .index = 0, .chunk_id = swordfs::metadata::ChunkID(811), .visible_prefix = 7};
+    EXPECT_TRUE(factory->SanitizeBoundary(42, orphan_head).ok())
+        << "a missing head that is not FileMetadata-attached must not turn into a file error";
+  });
 }
 
 TEST_F(ChunkTest, FactoryOpenPropagatesLookupErrorsWithoutReturningAChunk) {

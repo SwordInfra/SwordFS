@@ -58,6 +58,11 @@ class COWChunkMetadataBridge final : public internal::ChunkMetadataBridge {
                               metadata::ReclaimWork *out) const override {
     return FreezeCOWReclaim(ino, heads, chunk_size, out);
   }
+
+  utils::Status FreezeDetachedReclaim(metadata::InodeID ino, const std::vector<metadata::ChunkMapping> &mappings,
+                                      metadata::ReclaimWork *out) const override {
+    return FreezeCOWDetachedReclaim(ino, mappings, out);
+  }
 };
 
 }  // namespace

@@ -240,6 +240,30 @@ utils::Status FreezeCOWReclaim(metadata::InodeID ino, const std::vector<metadata
   return utils::Status::OK();
 }
 
+utils::Status FreezeCOWDetachedReclaim(metadata::InodeID ino, const std::vector<metadata::ChunkMapping> &mappings,
+                                       metadata::ReclaimWork *out) {
+  if (out == nullptr || ino == 0 || mappings.size() > std::numeric_limits<uint32_t>::max()) {
+    return utils::Status::InvalidArgument("invalid typed COW reclaim");
+  }
+  metadata::BufEncoder encoded;
+  encoded.Header(metadata::RecordType::kCowTypedCleanup);
+  encoded.U32(static_cast<uint32_t>(COWCleanupKind::kDetachedReclaim));
+  encoded.U64(ino);
+  encoded.U32(static_cast<uint32_t>(mappings.size()));
+  for (const auto &mapping : mappings) {
+    if (!metadata::cow::internal::IsValidChunkID(mapping.chunk_id)) {
+      return utils::Status::InvalidArgument("invalid attached ChunkID for typed reclaim");
+    }
+    encoded.U64(mapping.index);
+    encoded.U64(mapping.chunk_id.Value());
+  }
+  metadata::ReclaimWork frozen;
+  frozen.ino = ino;
+  encoded.Finish(&frozen.payload);
+  *out = std::move(frozen);
+  return utils::Status::OK();
+}
+
 utils::Status DecodeCOWDelete(const metadata::PendingDelete &work, uint64_t chunk_size, COWRef *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("COW delete output is null");

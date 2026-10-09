@@ -62,6 +62,14 @@ FIBER_TEST_F(RedisMetaImplTest, PreparedChunkAttachmentIsAtomicAndCannotBeStolen
   EXPECT_EQ(after.chunk_id, first_id);
   EXPECT_EQ(after.inode.attr.size, 24U);
 
+  // Probe uses the same runtime FileMetadata facade as typed GC. Verify both
+  // the reachable mapping and an absent neighboring attachment.
+  std::optional<swordfs::metadata::ChunkID> attached;
+  ASSERT_TRUE(impl_->ProbeAttachment(file.ino, 0, &attached).ok());
+  EXPECT_EQ(attached, first_id);
+  ASSERT_TRUE(impl_->ProbeAttachment(file.ino, 1, &attached).ok());
+  EXPECT_FALSE(attached.has_value());
+
   swordfs::metadata::FileChunkSnapshot other_index;
   ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 1, &other_index).ok());
   EXPECT_FALSE(other_index.chunk_id.has_value());
