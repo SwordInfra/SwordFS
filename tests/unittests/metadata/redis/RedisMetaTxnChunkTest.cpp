@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "metadata/ChunkSizePlan.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaTestSupport.hpp"
 

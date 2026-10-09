@@ -351,6 +351,58 @@ FIBER_TEST_F(MemMetaImplTest, TypedFileMetadataRejectsInvalidTargetsWithoutPubli
   EXPECT_TRUE(file.mappings.empty());
 }
 
+FIBER_TEST_F(MemMetaImplTest, TypedCOWMutationsRespectImmutablePolicyAndStaleBoundary) {
+  using swordfs::metadata::ChunkBoundarySnapshot;
+  using swordfs::metadata::ChunkID;
+  using swordfs::metadata::ChunkSizeCommitResult;
+  using swordfs::metadata::ChunkSizePlan;
+  using swordfs::metadata::FileMappingSnapshot;
+  using swordfs::metadata::FileSizePrecondition;
+
+  SwordFsInode immutable;
+  ASSERT_TRUE(impl_->Create(kRoot, "typed-immutable", 0644, &immutable).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(immutable.ino, InodeFlag::kImmutable, nullptr).ok());
+  EXPECT_EQ(impl_->AttachPrepared(immutable.ino, 0, ChunkID(18), 8, {.eof = 0}).ToErrno(), EPERM);
+
+  SwordFsInode published;
+  ASSERT_TRUE(impl_->Create(kRoot, "typed-immutable-published", 0644, &published).ok());
+  const ChunkID id(19);
+  ASSERT_TRUE(impl_->AttachPrepared(published.ino, 0, id, 8, {.eof = 0}).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(published.ino, InodeFlag::kImmutable, nullptr).ok());
+  EXPECT_EQ(impl_
+                ->FinalizeAttachedWrite(
+                    published.ino, 0, id, 8,
+                    FileSizePrecondition{
+                        .eof = 8, .boundary = ChunkBoundarySnapshot{.index = 0, .chunk_id = id, .visible_prefix = 8}})
+                .ToErrno(),
+            EPERM);
+  FileMappingSnapshot snapshot;
+  ASSERT_TRUE(impl_->ReadFileMappingSnapshot(published.ino, &snapshot).ok());
+  ChunkSizePlan shrink;
+  ASSERT_TRUE(swordfs::metadata::PlanChunkSizeChange(8, 0, kChunkSize, snapshot.mappings, &shrink).ok());
+  SwordFsAttr requested;
+  requested.size = 0;
+  ChunkSizeCommitResult committed;
+  EXPECT_EQ(impl_->CommitShrink(published.ino, shrink, requested, SetAttrField::kSize, &committed).ToErrno(), EPERM);
+
+  SwordFsInode boundary_file;
+  ASSERT_TRUE(impl_->Create(kRoot, "typed-stale-eof-boundary", 0644, &boundary_file).ok());
+  SwordFsAttr extended;
+  extended.size = 100;
+  ASSERT_TRUE(impl_->SetAttr(boundary_file.ino, extended, SetAttrField::kSize, nullptr).ok());
+  const FileSizePrecondition stale{
+      .eof = 100,
+      .boundary = ChunkBoundarySnapshot{.index = 0, .chunk_id = ChunkID(31), .visible_prefix = 100},
+  };
+  EXPECT_EQ(impl_->AttachPrepared(boundary_file.ino, 1, ChunkID(32), kChunkSize + 8, stale).ToErrno(), EEXIST);
+  const FileSizePrecondition initial{
+      .eof = 100,
+      .boundary = ChunkBoundarySnapshot{.index = 0, .chunk_id = std::nullopt, .visible_prefix = 100},
+  };
+  ASSERT_TRUE(impl_->AttachPrepared(boundary_file.ino, 0, ChunkID(31), 8, initial).ok());
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(boundary_file.ino, 0, ChunkID(31), 16, initial).ToErrno(), EEXIST);
+}
+
 FIBER_TEST_F(MemMetaImplTest, LosingPreparedAttachmentNeverReplacesWinningChunkID) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRoot, "typed-conflict", 0644, &file).ok());
