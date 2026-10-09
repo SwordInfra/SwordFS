@@ -12,10 +12,60 @@
 #include <string>
 #include <utility>
 
+#include "metadata/ChunkSizePlan.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaTestSupport.hpp"
 
 namespace swordfs::metadata {
+
+TEST(RedisMetaTxnTest, TypedFileContractRejectsInvalidTransactionInputs) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  RedisMetaClient store(config);
+  const redis::RedisKey key(config.db, UniqueRedisName("typed-txn-contract-validation"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+  constexpr InodeID kFileIno = 41;
+  constexpr InodeID kDirectoryIno = 42;
+  constexpr InodeID kMissingIno = 43;
+  ASSERT_TRUE(SeedInode(redis, key, SwordFsInode(kFileIno, SwordFsAttr(kFileIno, S_IFREG | 0644), kRootInodeId)).ok());
+  ASSERT_TRUE(
+      SeedInode(redis, key, SwordFsInode(kDirectoryIno, SwordFsAttr(kDirectoryIno, S_IFDIR | 0755), kRootInodeId))
+          .ok());
+  RecordingRedisBridge bridge;
+
+  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
+    RedisMetaTxn txn(kv_txn, key, 4096, bridge.mechanism(), &bridge);
+    FileChunkSnapshot chunk;
+    FileMappingSnapshot mappings;
+    std::optional<ChunkID> attached;
+    ChunkSizePlan plan;
+    SwordFsAttr requested;
+    requested.size = 0;
+    ChunkSizeCommitResult committed;
+
+    EXPECT_EQ(txn.ReadFileChunkSnapshot(kFileIno, 0, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.ReadFileMappingSnapshot(kFileIno, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.ProbeAttachment(kFileIno, 0, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.CommitShrink(kFileIno, plan, requested, SetAttrField::kSize, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.CommitGrow(kFileIno, plan, requested, SetAttrField::kMode, &committed).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.ReadFileChunkSnapshot(kDirectoryIno, 0, &chunk).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.ReadFileMappingSnapshot(kDirectoryIno, &mappings).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.AttachPrepared(kDirectoryIno, 0, ChunkID(17), 8, {.eof = 0}).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.FinalizeAttachedWrite(kDirectoryIno, 0, ChunkID(17), 8, {.eof = 0}).ToErrno(), EINVAL);
+    EXPECT_TRUE(txn.ReadFileChunkSnapshot(kMissingIno, 0, &chunk).IsNotFound());
+    EXPECT_TRUE(txn.ReadFileMappingSnapshot(kMissingIno, &mappings).IsNotFound());
+    EXPECT_TRUE(txn.ProbeAttachment(kMissingIno, 0, &attached).IsNotFound());
+    EXPECT_TRUE(txn.AttachPrepared(kMissingIno, 0, ChunkID(17), 8, {.eof = 0}).IsNotFound());
+    EXPECT_TRUE(txn.FinalizeAttachedWrite(kMissingIno, 0, ChunkID(17), 8, {.eof = 0}).IsNotFound());
+    EXPECT_TRUE(txn.CommitShrink(kMissingIno, plan, requested, SetAttrField::kSize, &committed).IsNotFound());
+    EXPECT_TRUE(txn.CommitGrow(kMissingIno, plan, requested, SetAttrField::kSize, &committed).IsNotFound());
+    return utils::Status::OK();
+  });
+  ASSERT_TRUE(status.ok()) << status.message();
+}
 
 TEST(RedisMetaTxnTest, PrivateIndexPublicationCommitsAndRejectsWithLogicalHead) {
   RedisMetaConfig config;
