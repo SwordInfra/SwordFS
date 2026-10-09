@@ -21,6 +21,42 @@
 namespace swordfs::metadata {
 namespace {
 
+TEST(RedisCOWChunkMetadataTest, IndependentVolumesAndErasureNeverReuseAllocatedChunkIds) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  redis::RedisKey first_key(config.db, swordfs::test::UniqueRedisTestNamespace("contract-volume-a"));
+  redis::RedisKey second_key(config.db, swordfs::test::UniqueRedisTestNamespace("contract-volume-b"));
+  auto backend = std::make_shared<RedisBackendContext>(config, 1);
+  RedisCOWChunkMetadata first_volume(backend, first_key);
+  RedisCOWChunkMetadata second_volume(backend, second_key);
+
+  swordfs::test::RunInTestFiber([&] {
+    ChunkID first_id;
+    ChunkID other_volume_id;
+    ChunkID next_id;
+    ASSERT_TRUE(first_volume.AllocateChunkID(&first_id).ok());
+    ASSERT_TRUE(second_volume.AllocateChunkID(&other_volume_id).ok());
+    EXPECT_EQ(first_id, ChunkID(1));
+    EXPECT_EQ(other_volume_id, ChunkID(1));
+
+    cow::COWChunkRevision first_revision;
+    ASSERT_TRUE(first_volume.AllocateRevision(first_id, &first_revision).ok());
+    const cow::COWChunkHead head{first_revision, 32};
+    ASSERT_TRUE(first_volume.CompareExchangeHead(first_id, std::nullopt, head).ok());
+    ASSERT_TRUE(first_volume.EraseHead(first_id, head).ok());
+    cow::COWChunkRevision after_erase;
+    ASSERT_TRUE(first_volume.AllocateRevision(first_id, &after_erase).ok());
+    EXPECT_EQ(after_erase, cow::COWChunkRevision(2));
+
+    ASSERT_TRUE(first_volume.AllocateChunkID(&next_id).ok());
+    EXPECT_EQ(next_id, ChunkID(2));
+  });
+  backend->Shutdown();
+}
+
 TEST(RedisCOWChunkMetadataTest, AllocatesOneVolumeScopedIdentitySequenceAcrossTypedViews) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
