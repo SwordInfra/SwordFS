@@ -2943,6 +2943,64 @@ TEST_F(FileReadWriterTest, TypedSizeTransitionPropagatesMappingSnapshotFailure) 
   });
 }
 
+TEST_F(FileReadWriterTest, UnchangedTypedSizeStillPropagatesAttributeMutationError) {
+  RunInTestFiber([&] {
+    auto rw = Make(64);
+    mock_meta_->set_attr_status = Status::IOError("attributes rejected");
+    SwordFsAttr requested;
+    requested.size = 64;
+    EXPECT_EQ(rw.SetAttr(requested, SetAttrField::kSize, nullptr).ToErrno(), EIO);
+    EXPECT_EQ(mock_meta_->file_size(), 64);
+  });
+}
+
+TEST_F(FileReadWriterTest, TypedSizePlanningRejectsCorruptedPriorEofWithoutMutatingMetadata) {
+  RunInTestFiber([&] {
+    auto rw = Make(64);
+    const uint64_t invalid_eof = swordfs::metadata::kMaxSupportedFileSize + 1;
+    mock_meta_->set_file_size(static_cast<off_t>(invalid_eof));
+    EXPECT_EQ(rw.Truncate(32).ToErrno(), EINVAL);
+    EXPECT_EQ(mock_meta_->file_size(), static_cast<off_t>(invalid_eof));
+  });
+}
+
+TEST_F(FileReadWriterTest, TypedGrowRejectsMissingStillAttachedBoundaryHeadBeforeCommit) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    swordfs::metadata::FileChunkSnapshot before;
+    ASSERT_TRUE(mock_meta_->ReadFileChunkSnapshot(kIno, 0, &before).ok());
+    ASSERT_TRUE(before.chunk_id.has_value());
+    swordfs::metadata::cow::COWChunkHead head;
+    ASSERT_TRUE(cow_metadata_->GetHead(*before.chunk_id, &head).ok());
+    ASSERT_TRUE(cow_metadata_->EraseHead(*before.chunk_id, head).ok());
+
+    EXPECT_EQ(rw.Truncate(20).ToErrno(), EIO);
+    EXPECT_EQ(mock_meta_->file_size(), 11);
+  });
+}
+
+TEST_F(FileReadWriterTest, TypedShrinkKeepsCommittedEofWhenPrivateBoundaryHeadIsMissing) {
+  RunInTestFiber([&] {
+    auto rw = Make();
+    ASSERT_TRUE(rw.Write(Buf("hello world"), 0).ok());
+    ASSERT_TRUE(rw.Flush().ok());
+    swordfs::metadata::FileChunkSnapshot before;
+    ASSERT_TRUE(mock_meta_->ReadFileChunkSnapshot(kIno, 0, &before).ok());
+    ASSERT_TRUE(before.chunk_id.has_value());
+    swordfs::metadata::cow::COWChunkHead head;
+    ASSERT_TRUE(cow_metadata_->GetHead(*before.chunk_id, &head).ok());
+    ASSERT_TRUE(cow_metadata_->EraseHead(*before.chunk_id, head).ok());
+
+    EXPECT_EQ(rw.Truncate(5).ToErrno(), EIO);
+    swordfs::metadata::FileChunkSnapshot after;
+    ASSERT_TRUE(mock_meta_->ReadFileChunkSnapshot(kIno, 0, &after).ok());
+    EXPECT_EQ(after.inode.attr.size, 5U);
+    EXPECT_EQ(after.chunk_id, before.chunk_id);
+  });
+}
+
 TEST_F(FileReadWriterTest, TruncateDropsDirtyChunks) {
   RunInTestFiber([&] {
     auto rw = Make();
