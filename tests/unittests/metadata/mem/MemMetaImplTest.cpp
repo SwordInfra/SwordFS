@@ -25,6 +25,7 @@
 #include "metadata/PosixAclTestSupport.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
+#include "metadata/types/BufCodec.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
 #include "utils/Context.hpp"
@@ -1862,6 +1863,41 @@ FIBER_TEST_F(MemMetaImplTest, LinkCancelsOrphanCandidate) {
   SwordFsChunk found;
   ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &found).ok());
   EXPECT_TRUE(PendingReclaims().empty());
+}
+
+FIBER_TEST_F(MemMetaImplTest, TypedReclaimFreezesChunkIDAttachmentsInsteadOfLegacyDescriptors) {
+  SetContext(0, 0);
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "typed-reclaim", 0644, &file).ok());
+  const swordfs::metadata::ChunkID attached_id(807);
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, attached_id, 24, {.eof = 0}).ok());
+  ASSERT_TRUE(impl_->Unlink(kRoot, "typed-reclaim").ok());
+
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  const auto work = PendingReclaim(file.ino);
+  ASSERT_TRUE(work.has_value());
+  swordfs::metadata::BufDecoder decoded(work->payload);
+  ASSERT_TRUE(decoded.Header(swordfs::metadata::RecordType::kCowTypedCleanup))
+      << "reclaim must freeze the typed attachment, not an empty legacy chunk list";
+  uint32_t kind = 0;
+  uint64_t ino = 0;
+  uint32_t count = 0;
+  uint64_t index = 0;
+  uint64_t chunk_id = 0;
+  ASSERT_TRUE(decoded.U32(&kind));
+  ASSERT_TRUE(decoded.U64(&ino));
+  ASSERT_TRUE(decoded.U32(&count));
+  ASSERT_TRUE(decoded.U64(&index));
+  ASSERT_TRUE(decoded.U64(&chunk_id));
+  EXPECT_TRUE(decoded.Done());
+  EXPECT_EQ(kind, static_cast<uint32_t>(swordfs::chunk::cow::COWCleanupKind::kDetachedReclaim));
+  EXPECT_EQ(ino, file.ino);
+  EXPECT_EQ(count, 1U);
+  EXPECT_EQ(index, 0U);
+  EXPECT_EQ(chunk_id, attached_id.Value());
+  SwordFsInode missing;
+  EXPECT_TRUE(impl_->GetInode(file.ino, &missing).IsNotFound());
+  EXPECT_TRUE(impl_->Link(file.ino, kRoot, "revived", nullptr).IsNotFound());
 }
 
 FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFencesLink) {
