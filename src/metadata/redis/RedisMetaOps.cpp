@@ -14,6 +14,7 @@
 
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "config/ConfigCenter.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/redis/RedisBackendContext.hpp"
 #include "metadata/redis/RedisCOWChunkMetadata.hpp"
 #include "metadata/redis/RedisDirIterator.hpp"
@@ -564,6 +565,109 @@ utils::Status RedisMetaOps::LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView
   }
   *out = std::move(view);
   return utils::Status::OK();
+}
+
+utils::Status RedisMetaOps::ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out) {
+  utils::ExpectInFiberDomain();
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("file chunk snapshot output is null");
+  }
+  FileChunkSnapshot result;
+  utils::Status read_status;
+  auto status = TransactFromFiber([&](RedisMetaTxn &txn) {
+    read_status = txn.ReadFileChunkSnapshot(ino, index, &result);
+    return utils::Status::OK();  // Read-only EXEC validates all WATCHed keys.
+  });
+  if (!status.ok()) {
+    return status;
+  }
+  if (read_status.ok()) {
+    *out = std::move(result);
+  }
+  return read_status;
+}
+
+utils::Status RedisMetaOps::ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out) {
+  utils::ExpectInFiberDomain();
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("file mapping snapshot output is null");
+  }
+  FileMappingSnapshot result;
+  utils::Status read_status;
+  auto status = TransactFromFiber([&](RedisMetaTxn &txn) {
+    read_status = txn.ReadFileMappingSnapshot(ino, &result);
+    return utils::Status::OK();
+  });
+  if (!status.ok()) {
+    return status;
+  }
+  if (read_status.ok()) {
+    *out = std::move(result);
+  }
+  return read_status;
+}
+
+utils::Status RedisMetaOps::ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out) {
+  utils::ExpectInFiberDomain();
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("attachment output is null");
+  }
+  std::optional<ChunkID> result;
+  utils::Status read_status;
+  auto status = TransactFromFiber([&](RedisMetaTxn &txn) {
+    read_status = txn.ProbeAttachment(ino, index, &result);
+    return utils::Status::OK();
+  });
+  if (!status.ok()) {
+    return status;
+  }
+  if (read_status.ok()) {
+    *out = result;
+  }
+  return read_status;
+}
+
+utils::Status RedisMetaOps::AttachPrepared(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                                           const FileSizePrecondition &expected) {
+  utils::ExpectInFiberDomain();
+  return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.AttachPrepared(ino, index, chunk_id, end, expected); });
+}
+
+utils::Status RedisMetaOps::FinalizeAttachedWrite(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                                                  const FileSizePrecondition &expected) {
+  utils::ExpectInFiberDomain();
+  return TransactFromFiber(
+      [&](RedisMetaTxn &txn) { return txn.FinalizeAttachedWrite(ino, index, chunk_id, end, expected); });
+}
+
+utils::Status RedisMetaOps::CommitShrink(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
+                                         SetAttrField fields, ChunkSizeCommitResult *out) {
+  utils::ExpectInFiberDomain();
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("typed shrink result is null");
+  }
+  ChunkSizeCommitResult committed;
+  auto status =
+      TransactFromFiber([&](RedisMetaTxn &txn) { return txn.CommitShrink(ino, plan, requested, fields, &committed); });
+  if (status.ok()) {
+    *out = std::move(committed);
+  }
+  return status;
+}
+
+utils::Status RedisMetaOps::CommitGrow(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
+                                       SetAttrField fields, ChunkSizeCommitResult *out) {
+  utils::ExpectInFiberDomain();
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("typed grow result is null");
+  }
+  ChunkSizeCommitResult committed;
+  auto status =
+      TransactFromFiber([&](RedisMetaTxn &txn) { return txn.CommitGrow(ino, plan, requested, fields, &committed); });
+  if (status.ok()) {
+    *out = std::move(committed);
+  }
+  return status;
 }
 
 void RedisMetaOps::RegisterPendingDeletesBestEffort(InodeID ino, const std::vector<PendingDelete> &work,

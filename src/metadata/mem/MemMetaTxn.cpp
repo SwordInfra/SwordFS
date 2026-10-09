@@ -14,6 +14,7 @@
 
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/ChunkSizePlan.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/InodePolicy.hpp"
 #include "metadata/PosixAcl.hpp"
 #include "metadata/Types.hpp"
@@ -743,6 +744,246 @@ Status MemMetaTxn::SwapEntries(InodeID parent_a_ino, std::string_view name_a, In
   parent_a->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
   parent_b->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
 
+  return Status::OK();
+}
+
+Status MemMetaTxn::ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out) {
+  if (out == nullptr) {
+    return Status::InvalidArgument("file chunk snapshot output is null");
+  }
+  auto *inode = FindInode(ino);
+  if (inode == nullptr) {
+    return Status::NotFound("inode not found");
+  }
+  if (!inode->IsRegular()) {
+    return Status::InvalidArgument("not a regular file");
+  }
+  FileChunkSnapshot result;
+  result.inode = *inode;
+  const auto file_it = store_->chunk_refs_.find(ino);
+  if (file_it != store_->chunk_refs_.end()) {
+    const auto it = file_it->second.find(index);
+    if (it != file_it->second.end()) {
+      result.chunk_id = it->second;
+    }
+  }
+  ChunkSizeLayout eof_layout;
+  auto status = PlanChunkSizeLayout(result.inode.attr.size, store_->chunk_size_, &eof_layout);
+  if (!status.ok()) {
+    return status;
+  }
+  if (eof_layout.boundary.has_value()) {
+    const auto &boundary = *eof_layout.boundary;
+    std::optional<ChunkID> boundary_id;
+    if (boundary.index == index) {
+      boundary_id = result.chunk_id;
+    } else {
+      status = ProbeAttachment(ino, boundary.index, &boundary_id);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    result.eof_boundary = ChunkBoundarySnapshot{
+        .index = boundary.index, .chunk_id = boundary_id, .visible_prefix = boundary.visible_prefix};
+  }
+  *out = std::move(result);
+  return Status::OK();
+}
+
+Status MemMetaTxn::ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out) {
+  if (out == nullptr) {
+    return Status::InvalidArgument("file mapping snapshot output is null");
+  }
+  auto *inode = FindInode(ino);
+  if (inode == nullptr) {
+    return Status::NotFound("inode not found");
+  }
+  if (!inode->IsRegular()) {
+    return Status::InvalidArgument("not a regular file");
+  }
+  FileMappingSnapshot result;
+  result.inode = *inode;
+  const auto file_it = store_->chunk_refs_.find(ino);
+  if (file_it != store_->chunk_refs_.end()) {
+    result.mappings.reserve(file_it->second.size());
+    for (const auto &[index, chunk_id] : file_it->second) {
+      result.mappings.push_back({.index = index, .chunk_id = chunk_id});
+    }
+    std::sort(result.mappings.begin(), result.mappings.end(),
+              [](const ChunkMapping &lhs, const ChunkMapping &rhs) { return lhs.index < rhs.index; });
+  }
+  *out = std::move(result);
+  return Status::OK();
+}
+
+Status MemMetaTxn::ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out) {
+  if (out == nullptr) {
+    return Status::InvalidArgument("attachment output is null");
+  }
+  if (FindInode(ino) == nullptr) {
+    return Status::NotFound("inode not found");
+  }
+  out->reset();
+  const auto file_it = store_->chunk_refs_.find(ino);
+  if (file_it != store_->chunk_refs_.end()) {
+    const auto it = file_it->second.find(index);
+    if (it != file_it->second.end()) {
+      *out = it->second;
+    }
+  }
+  return Status::OK();
+}
+
+Status MemMetaTxn::AttachPrepared(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                                  const FileSizePrecondition &expected) {
+  auto status = ValidateFileChunkWrite(index, chunk_id, end, store_->chunk_size_);
+  if (!status.ok()) {
+    return status;
+  }
+  status = ValidateFileSizePrecondition(expected, store_->chunk_size_);
+  if (!status.ok()) {
+    return status;
+  }
+  auto *inode = FindInode(ino);
+  if (inode == nullptr) {
+    return Status::NotFound("inode not found");
+  }
+  if (!inode->IsRegular()) {
+    return Status::InvalidArgument("not a regular file");
+  }
+  status = CheckContentMetadataMutationPolicy(inode->attr, "attach chunk");
+  if (!status.ok()) {
+    return status;
+  }
+  if (inode->attr.size != expected.eof) {
+    return Status::AlreadyExists("file size changed before chunk attachment");
+  }
+  if (expected.boundary.has_value()) {
+    std::optional<ChunkID> observed;
+    status = ProbeAttachment(ino, expected.boundary->index, &observed);
+    if (!status.ok()) {
+      return status;
+    }
+    if (observed != expected.boundary->chunk_id) {
+      return Status::AlreadyExists("FileMetadata EOF boundary changed before attachment");
+    }
+  }
+  const auto file_it = store_->chunk_refs_.find(ino);
+  if (file_it != store_->chunk_refs_.end() && file_it->second.contains(index)) {
+    return Status::AlreadyExists("chunk is already attached");
+  }
+  store_->chunk_refs_[ino].emplace(index, chunk_id);
+  inode->attr.size = std::max(inode->attr.size, end);
+  inode->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  return Status::OK();
+}
+
+Status MemMetaTxn::FinalizeAttachedWrite(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                                         const FileSizePrecondition &expected) {
+  auto status = ValidateFileChunkWrite(index, chunk_id, end, store_->chunk_size_);
+  if (!status.ok()) {
+    return status;
+  }
+  status = ValidateFileSizePrecondition(expected, store_->chunk_size_);
+  if (!status.ok()) {
+    return status;
+  }
+  auto *inode = FindInode(ino);
+  if (inode == nullptr) {
+    return Status::NotFound("inode not found");
+  }
+  if (!inode->IsRegular()) {
+    return Status::InvalidArgument("not a regular file");
+  }
+  status = CheckContentMetadataMutationPolicy(inode->attr, "finalize chunk write");
+  if (!status.ok()) {
+    return status;
+  }
+  const auto file_it = store_->chunk_refs_.find(ino);
+  if (inode->attr.size != expected.eof || file_it == store_->chunk_refs_.end() || !file_it->second.contains(index) ||
+      file_it->second.at(index) != chunk_id) {
+    return Status::AlreadyExists("FileMetadata attachment or size changed before finalization");
+  }
+  if (expected.boundary.has_value()) {
+    std::optional<ChunkID> observed;
+    status = ProbeAttachment(ino, expected.boundary->index, &observed);
+    if (!status.ok()) {
+      return status;
+    }
+    if (observed != expected.boundary->chunk_id) {
+      return Status::AlreadyExists("FileMetadata EOF boundary changed before finalization");
+    }
+  }
+  inode->attr.size = std::max(inode->attr.size, end);
+  inode->Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  return Status::OK();
+}
+
+Status MemMetaTxn::CommitShrink(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
+                                SetAttrField fields, ChunkSizeCommitResult *out) {
+  return CommitSizeChange(ino, plan, requested, fields, /*is_shrink=*/true, out);
+}
+
+Status MemMetaTxn::CommitGrow(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                              ChunkSizeCommitResult *out) {
+  return CommitSizeChange(ino, plan, requested, fields, /*is_shrink=*/false, out);
+}
+
+Status MemMetaTxn::CommitSizeChange(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
+                                    SetAttrField fields, bool is_shrink, ChunkSizeCommitResult *out) {
+  if (out == nullptr || !HasSetAttrField(fields, SetAttrField::kSize) || requested.size != plan.target_eof) {
+    return Status::InvalidArgument("typed size commit requires matching SetAttr size and result");
+  }
+  FileMappingSnapshot snapshot;
+  auto status = ReadFileMappingSnapshot(ino, &snapshot);
+  if (!status.ok()) {
+    return status;
+  }
+  ChunkSizePlan current;
+  status = ValidateSizeCommitPlan(plan, snapshot.inode.attr.size, store_->chunk_size_, snapshot.mappings, is_shrink,
+                                  &current);
+  if (!status.ok()) {
+    return status;
+  }
+
+  // All potentially failing ACL and policy checks run against a clone before
+  // the authoritative inode or any attachment is mutated.
+  SwordFsInode updated;
+  status = PrepareSetAttrMutation(snapshot.inode, requested, fields, &updated);
+  if (!status.ok()) {
+    return status;
+  }
+
+  ChunkSizeCommitResult result{.inode = updated, .boundary = current.boundary};
+  ChunkSizeLayout old_layout;
+  status = PlanChunkSizeLayout(snapshot.inode.attr.size, store_->chunk_size_, &old_layout);
+  if (!status.ok()) {
+    return status;
+  }
+  ChunkSizeLayout new_layout;
+  status = PlanChunkSizeLayout(plan.target_eof, store_->chunk_size_, &new_layout);
+  if (!status.ok()) {
+    return status;
+  }
+  for (const auto &mapping : snapshot.mappings) {
+    if ((is_shrink && new_layout.ShouldDetach(mapping.index)) ||
+        (!is_shrink && old_layout.ShouldDetach(mapping.index))) {
+      // A future grow must never reactivate a mapping left past EOF by an
+      // earlier uncertain shrink. Treat it as newly detached maintenance.
+      result.detached.push_back(mapping);
+    }
+  }
+  auto refs_it = store_->chunk_refs_.find(ino);
+  if (refs_it != store_->chunk_refs_.end()) {
+    for (const auto &detached : result.detached) {
+      refs_it->second.erase(detached.index);
+    }
+    if (refs_it->second.empty()) {
+      store_->chunk_refs_.erase(refs_it);
+    }
+  }
+  *FindInode(ino) = std::move(updated);
+  *out = std::move(result);
   return Status::OK();
 }
 

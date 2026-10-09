@@ -252,16 +252,6 @@ jobs:
           # Step 3: print summary
           lcov --list coverage.info --branch-coverage --ignore-errors unused,empty,source || true
 
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-          else
-            BASE=$(git rev-parse HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
-          fi
-          python3 scripts/coverage/check-diff-coverage.py \
-            --base "$BASE" \
-            --tracefile coverage.info \
-            --line-threshold 90
-
       - name: Upload coverage to Codecov
         if: matrix.build_type == 'Debug'
         uses: codecov/codecov-action@v5
@@ -271,6 +261,19 @@ jobs:
           disable_search: true
           plugins: noop
           fail_ci_if_error: false
+
+      - name: Enforce per-file patch coverage
+        if: matrix.build_type == 'Debug'
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE=$(git rev-parse HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          fi
+          python3 scripts/coverage/check-diff-coverage.py \
+            --base "$BASE" \
+            --tracefile coverage.info \
+            --line-threshold 90
 
   e2e-test:
     name: e2e-test (Release)

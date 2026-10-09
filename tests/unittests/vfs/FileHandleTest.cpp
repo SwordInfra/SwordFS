@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -24,6 +25,7 @@
 #include "chunk/cow/COWObjectKey.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
+#include "metadata/mem/MemCOWChunkMetadata.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Context.hpp"
@@ -74,6 +76,188 @@ class NoopDataEngine : public swordfs::storage::IDataEngine {
 // Minimal IMetaEngine — every op succeeds; Create fabricates an inode.
 class MockMetaEngine : public IMetaEngine {
  public:
+  Status OpenChunkMetadata(metadata::ChunkType type, metadata::ChunkMetadataPtr *out) override {
+    if (out == nullptr || type != metadata::ChunkType::kCow) {
+      return Status::InvalidArgument("invalid typed chunk metadata request");
+    }
+    *out = cow_metadata_;
+    return Status::OK();
+  }
+
+  Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, metadata::FileChunkSnapshot *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("missing typed chunk snapshot output");
+    }
+    metadata::FileChunkSnapshot snapshot;
+    auto status = GetInode(ino, &snapshot.inode);
+    if (!status.ok()) {
+      return status;
+    }
+    auto &attached = attachments_[ino];
+    if (auto it = attached.find(index); it != attached.end()) {
+      snapshot.chunk_id = it->second;
+    }
+    metadata::ChunkSizeLayout layout;
+    status =
+        metadata::PlanChunkSizeLayout(snapshot.inode.attr.size, volume::VolumeImpl::Instance().chunk_size(), &layout);
+    if (!status.ok()) {
+      return status;
+    }
+    if (layout.boundary.has_value()) {
+      std::optional<metadata::ChunkID> old_boundary;
+      if (auto it = attached.find(layout.boundary->index); it != attached.end()) {
+        old_boundary = it->second;
+      }
+      snapshot.eof_boundary = metadata::ChunkBoundarySnapshot{
+          .index = layout.boundary->index, .chunk_id = old_boundary, .visible_prefix = layout.boundary->visible_prefix};
+    }
+    *out = std::move(snapshot);
+    return Status::OK();
+  }
+
+  Status ReadFileMappingSnapshot(InodeID ino, metadata::FileMappingSnapshot *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("missing typed mapping snapshot output");
+    }
+    metadata::FileMappingSnapshot snapshot;
+    auto status = GetInode(ino, &snapshot.inode);
+    if (!status.ok()) {
+      return status;
+    }
+    for (const auto &[index, id] : attachments_[ino]) {
+      snapshot.mappings.push_back({.index = index, .chunk_id = id});
+    }
+    *out = std::move(snapshot);
+    return Status::OK();
+  }
+
+  Status ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<metadata::ChunkID> *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("missing attachment probe output");
+    }
+    out->reset();
+    if (auto it = attachments_[ino].find(index); it != attachments_[ino].end()) {
+      *out = it->second;
+    }
+    return Status::OK();
+  }
+
+  Status AttachPrepared(InodeID ino, ChunkIndex index, metadata::ChunkID id, uint64_t end,
+                        const metadata::FileSizePrecondition &expected) override {
+    auto status = CheckOldEof(ino, expected);
+    if (!status.ok()) {
+      return status;
+    }
+    status = metadata::ValidateFileChunkWrite(index, id, end, volume::VolumeImpl::Instance().chunk_size());
+    if (!status.ok()) {
+      return status;
+    }
+    if (!attachments_[ino].emplace(index, id).second) {
+      return Status::AlreadyExists("attachment was already published");
+    }
+    eof_[ino] = std::max(eof_[ino], end);
+    ++commit_chunk_calls;
+    return Status::OK();
+  }
+
+  Status FinalizeAttachedWrite(InodeID ino, ChunkIndex index, metadata::ChunkID id, uint64_t end,
+                               const metadata::FileSizePrecondition &expected) override {
+    auto status = CheckOldEof(ino, expected);
+    if (!status.ok()) {
+      return status;
+    }
+    status = metadata::ValidateFileChunkWrite(index, id, end, volume::VolumeImpl::Instance().chunk_size());
+    if (!status.ok()) {
+      return status;
+    }
+    const auto it = attachments_[ino].find(index);
+    if (it == attachments_[ino].end() || it->second != id) {
+      return Status::AlreadyExists("attached identity changed");
+    }
+    eof_[ino] = std::max(eof_[ino], end);
+    ++commit_chunk_calls;
+    return Status::OK();
+  }
+
+  Status CommitShrink(InodeID ino, const metadata::ChunkSizePlan &plan, const SwordFsAttr &requested,
+                      SetAttrField fields, metadata::ChunkSizeCommitResult *out) override {
+    return CommitTypedSize(ino, plan, requested, fields, /*shrink=*/true, out);
+  }
+
+  Status CommitGrow(InodeID ino, const metadata::ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                    metadata::ChunkSizeCommitResult *out) override {
+    return CommitTypedSize(ino, plan, requested, fields, /*shrink=*/false, out);
+  }
+
+  Status CheckOldEof(InodeID ino, const metadata::FileSizePrecondition &expected) {
+    auto status = metadata::ValidateFileSizePrecondition(expected, volume::VolumeImpl::Instance().chunk_size());
+    if (!status.ok()) {
+      return status;
+    }
+    if (eof_[ino] != expected.eof) {
+      return Status::AlreadyExists("EOF changed before typed attachment");
+    }
+    if (expected.boundary.has_value()) {
+      std::optional<metadata::ChunkID> observed;
+      status = ProbeAttachment(ino, expected.boundary->index, &observed);
+      if (!status.ok()) {
+        return status;
+      }
+      if (observed != expected.boundary->chunk_id) {
+        return Status::AlreadyExists("EOF attachment changed");
+      }
+    }
+    return Status::OK();
+  }
+
+  Status CommitTypedSize(InodeID ino, const metadata::ChunkSizePlan &plan, const SwordFsAttr &requested,
+                         SetAttrField fields, bool shrink, metadata::ChunkSizeCommitResult *out) {
+    if (out == nullptr || !metadata::HasSetAttrField(fields, SetAttrField::kSize) ||
+        requested.size != plan.target_eof) {
+      return Status::InvalidArgument("invalid typed size mutation");
+    }
+    if (!truncate_status.ok()) {
+      return truncate_status;
+    }
+    metadata::FileMappingSnapshot snapshot;
+    auto status = ReadFileMappingSnapshot(ino, &snapshot);
+    if (!status.ok()) {
+      return status;
+    }
+    metadata::ChunkSizePlan verified;
+    status =
+        metadata::ValidateSizeCommitPlan(plan, snapshot.inode.attr.size, volume::VolumeImpl::Instance().chunk_size(),
+                                         snapshot.mappings, shrink, &verified);
+    if (!status.ok()) {
+      return status;
+    }
+    if (shrink) {
+      metadata::ChunkSizeLayout layout;
+      status = metadata::PlanChunkSizeLayout(requested.size, volume::VolumeImpl::Instance().chunk_size(), &layout);
+      if (!status.ok()) {
+        return status;
+      }
+      for (auto it = attachments_[ino].begin(); it != attachments_[ino].end();) {
+        if (layout.ShouldDetach(it->first)) {
+          out->detached.push_back({.index = it->first, .chunk_id = it->second});
+          it = attachments_[ino].erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    eof_[ino] = requested.size;
+    out->inode = snapshot.inode;
+    out->inode.attr.size = requested.size;
+    out->boundary = verified.boundary;
+    ++truncate_calls;
+    last_truncate_size = requested.size;
+    return Status::OK();
+  }
+
+  void SetFileSizeForTest(InodeID ino, uint64_t size) {
+    eof_[ino] = size;
+  }
   Status Initialize() override {
     return Status::OK();
   }
@@ -89,11 +273,13 @@ class MockMetaEngine : public IMetaEngine {
   Status Lookup(InodeID, std::string_view, SwordFsInode *) override {
     return Status::OK();
   }
-  Status GetInode(InodeID, SwordFsInode *out) override {
+  Status GetInode(InodeID ino, SwordFsInode *out) override {
     // The reclaim path no longer consults inode metadata; this remains for
     // tests that model an inode's attributes (ownership, nlink).
     if (out) {
-      *out = {};
+      *out = SwordFsInode(ino, SwordFsAttr(ino, S_IFREG | 0644), /*parent_ino=*/1);
+      out->attr.size = eof_[ino];
+      out->attr.inode_flags = open_inode_flags;
     }
     return Status::OK();
   }
@@ -136,7 +322,13 @@ class MockMetaEngine : public IMetaEngine {
   Status Rename(InodeID, std::string_view, InodeID, std::string_view, RenameFlag) override {
     return Status::OK();
   }
-  Status SetAttr(InodeID, const SwordFsAttr &, SetAttrField, SwordFsInode *) override {
+  Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override {
+    if (metadata::HasSetAttrField(fields, SetAttrField::kSize)) {
+      eof_[ino] = attr.size;
+    }
+    if (out != nullptr) {
+      return GetInode(ino, out);
+    }
     return Status::OK();
   }
   Status SetXAttr(InodeID, std::string_view, std::string_view, swordfs::metadata::XAttrSetMode) override {
@@ -163,7 +355,7 @@ class MockMetaEngine : public IMetaEngine {
   Status Readlink(InodeID, std::string *) override {
     return Status::OK();
   }
-  Status Open(InodeID, uint64_t *size = nullptr, InodeFlag *inode_flags = nullptr) override {
+  Status Open(InodeID ino, uint64_t *size = nullptr, InodeFlag *inode_flags = nullptr) override {
     const auto status = open_status;
     const auto inode_flags_snapshot = open_inode_flags;
     if (open_entered_ != nullptr) {
@@ -175,7 +367,7 @@ class MockMetaEngine : public IMetaEngine {
       release->wait();
     }
     if (size != nullptr) {
-      *size = 0;
+      *size = eof_[ino];
     }
     if (inode_flags != nullptr) {
       *inode_flags = inode_flags_snapshot;
@@ -267,6 +459,9 @@ class MockMetaEngine : public IMetaEngine {
   }
 
  private:
+  std::unordered_map<InodeID, uint64_t> eof_;
+  std::unordered_map<InodeID, std::map<ChunkIndex, metadata::ChunkID>> attachments_;
+  std::shared_ptr<metadata::MemCOWChunkMetadata> cow_metadata_ = std::make_shared<metadata::MemCOWChunkMetadata>();
   InodeID next_ino_ = 1000;
   swordfs::metadata::ChunkRevision next_revision_ = 1;
   folly::fibers::Baton *open_entered_{nullptr};
@@ -519,6 +714,7 @@ FIBER_TEST_F(FileHandleTest, OpenMetaFailurePropagates) {
 }
 
 FIBER_TEST_F(FileHandleTest, OpenTruncateAppliesOTrunc) {
+  mock_meta_->SetFileSizeForTest(42, 32);
   std::shared_ptr<FileHandle> handle;
   auto status = FileHandle::Open(42, O_TRUNC, &handle);
   ASSERT_TRUE(status.ok());
@@ -528,6 +724,7 @@ FIBER_TEST_F(FileHandleTest, OpenTruncateAppliesOTrunc) {
 }
 
 FIBER_TEST_F(FileHandleTest, OpenTruncateFailurePropagates) {
+  mock_meta_->SetFileSizeForTest(42, 32);
   mock_meta_->truncate_status = Status::Internal("truncate failed");
   std::shared_ptr<FileHandle> handle;
   auto status = FileHandle::Open(42, O_TRUNC, &handle);
@@ -896,6 +1093,181 @@ class FakeDataEngine : public swordfs::storage::IDataEngine {
 // handle lifecycle tests.
 class TrackingMetaEngine : public swordfs::metadata::IMetaEngine {
  public:
+  Status OpenChunkMetadata(metadata::ChunkType type, metadata::ChunkMetadataPtr *out) override {
+    if (out == nullptr || type != metadata::ChunkType::kCow) {
+      return Status::InvalidArgument("invalid tracked chunk metadata request");
+    }
+    *out = cow_metadata_;
+    return Status::OK();
+  }
+
+  Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, metadata::FileChunkSnapshot *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("missing tracked chunk snapshot output");
+    }
+    metadata::FileChunkSnapshot snapshot;
+    auto status = GetInode(ino, &snapshot.inode);
+    if (!status.ok()) {
+      return status;
+    }
+    const auto &chunks = attachments_[ino];
+    if (auto it = chunks.find(index); it != chunks.end()) {
+      snapshot.chunk_id = it->second;
+    }
+    metadata::ChunkSizeLayout layout;
+    status =
+        metadata::PlanChunkSizeLayout(snapshot.inode.attr.size, volume::VolumeImpl::Instance().chunk_size(), &layout);
+    if (!status.ok()) {
+      return status;
+    }
+    if (layout.boundary.has_value()) {
+      std::optional<metadata::ChunkID> boundary_id;
+      if (auto it = chunks.find(layout.boundary->index); it != chunks.end()) {
+        boundary_id = it->second;
+      }
+      snapshot.eof_boundary = metadata::ChunkBoundarySnapshot{
+          .index = layout.boundary->index, .chunk_id = boundary_id, .visible_prefix = layout.boundary->visible_prefix};
+    }
+    *out = std::move(snapshot);
+    return Status::OK();
+  }
+
+  Status ReadFileMappingSnapshot(InodeID ino, metadata::FileMappingSnapshot *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("missing tracked file mapping output");
+    }
+    metadata::FileMappingSnapshot snapshot;
+    auto status = GetInode(ino, &snapshot.inode);
+    if (!status.ok()) {
+      return status;
+    }
+    for (const auto &[index, id] : attachments_[ino]) {
+      snapshot.mappings.push_back({.index = index, .chunk_id = id});
+    }
+    *out = std::move(snapshot);
+    return Status::OK();
+  }
+
+  Status ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<metadata::ChunkID> *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("missing tracked attachment probe output");
+    }
+    out->reset();
+    if (auto it = attachments_[ino].find(index); it != attachments_[ino].end()) {
+      *out = it->second;
+    }
+    return Status::OK();
+  }
+
+  Status ValidateEof(InodeID ino, const metadata::FileSizePrecondition &expected) {
+    auto status = metadata::ValidateFileSizePrecondition(expected, volume::VolumeImpl::Instance().chunk_size());
+    if (!status.ok()) {
+      return status;
+    }
+    auto it = attrs.find(ino);
+    if (it == attrs.end()) {
+      return Status::NotFound("tracked inode missing");
+    }
+    if (static_cast<uint64_t>(it->second.st_size) != expected.eof) {
+      return Status::AlreadyExists("tracked EOF changed");
+    }
+    if (expected.boundary.has_value()) {
+      std::optional<metadata::ChunkID> actual;
+      status = ProbeAttachment(ino, expected.boundary->index, &actual);
+      if (!status.ok()) {
+        return status;
+      }
+      if (actual != expected.boundary->chunk_id) {
+        return Status::AlreadyExists("tracked boundary changed");
+      }
+    }
+    return Status::OK();
+  }
+
+  Status AttachPrepared(InodeID ino, ChunkIndex index, metadata::ChunkID id, uint64_t end,
+                        const metadata::FileSizePrecondition &expected) override {
+    auto status = metadata::ValidateFileChunkWrite(index, id, end, volume::VolumeImpl::Instance().chunk_size());
+    if (!status.ok()) {
+      return status;
+    }
+    status = ValidateEof(ino, expected);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!attachments_[ino].emplace(index, id).second) {
+      return Status::AlreadyExists("tracked attachment already exists");
+    }
+    attrs[ino].st_size = std::max<off_t>(attrs[ino].st_size, static_cast<off_t>(end));
+    return Status::OK();
+  }
+
+  Status FinalizeAttachedWrite(InodeID ino, ChunkIndex index, metadata::ChunkID id, uint64_t end,
+                               const metadata::FileSizePrecondition &expected) override {
+    auto status = metadata::ValidateFileChunkWrite(index, id, end, volume::VolumeImpl::Instance().chunk_size());
+    if (!status.ok()) {
+      return status;
+    }
+    status = ValidateEof(ino, expected);
+    if (!status.ok()) {
+      return status;
+    }
+    const auto it = attachments_[ino].find(index);
+    if (it == attachments_[ino].end() || it->second != id) {
+      return Status::AlreadyExists("tracked attachment changed");
+    }
+    attrs[ino].st_size = std::max<off_t>(attrs[ino].st_size, static_cast<off_t>(end));
+    return Status::OK();
+  }
+
+  Status CommitShrink(InodeID ino, const metadata::ChunkSizePlan &plan, const SwordFsAttr &requested,
+                      SetAttrField fields, metadata::ChunkSizeCommitResult *out) override {
+    return CommitTypedSize(ino, plan, requested, fields, /*shrink=*/true, out);
+  }
+  Status CommitGrow(InodeID ino, const metadata::ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                    metadata::ChunkSizeCommitResult *out) override {
+    return CommitTypedSize(ino, plan, requested, fields, /*shrink=*/false, out);
+  }
+
+  Status CommitTypedSize(InodeID ino, const metadata::ChunkSizePlan &plan, const SwordFsAttr &requested,
+                         SetAttrField fields, bool shrink, metadata::ChunkSizeCommitResult *out) {
+    if (out == nullptr || !metadata::HasSetAttrField(fields, SetAttrField::kSize) ||
+        requested.size != plan.target_eof) {
+      return Status::InvalidArgument("invalid tracked typed size change");
+    }
+    metadata::FileMappingSnapshot snapshot;
+    auto status = ReadFileMappingSnapshot(ino, &snapshot);
+    if (!status.ok()) {
+      return status;
+    }
+    metadata::ChunkSizePlan validated;
+    status =
+        metadata::ValidateSizeCommitPlan(plan, snapshot.inode.attr.size, volume::VolumeImpl::Instance().chunk_size(),
+                                         snapshot.mappings, shrink, &validated);
+    if (!status.ok()) {
+      return status;
+    }
+    out->detached.clear();
+    if (shrink) {
+      metadata::ChunkSizeLayout layout;
+      status = metadata::PlanChunkSizeLayout(requested.size, volume::VolumeImpl::Instance().chunk_size(), &layout);
+      if (!status.ok()) {
+        return status;
+      }
+      for (auto it = attachments_[ino].begin(); it != attachments_[ino].end();) {
+        if (layout.ShouldDetach(it->first)) {
+          out->detached.push_back({.index = it->first, .chunk_id = it->second});
+          it = attachments_[ino].erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    status = SetAttr(ino, requested, fields, &out->inode);
+    if (status.ok()) {
+      out->boundary = validated.boundary;
+    }
+    return status;
+  }
   Status Initialize() override {
     return Status::OK();
   }
@@ -1105,6 +1477,8 @@ class TrackingMetaEngine : public swordfs::metadata::IMetaEngine {
   }
 
  private:
+  std::unordered_map<InodeID, std::map<ChunkIndex, metadata::ChunkID>> attachments_;
+  std::shared_ptr<metadata::MemCOWChunkMetadata> cow_metadata_ = std::make_shared<metadata::MemCOWChunkMetadata>();
   swordfs::metadata::ChunkRevision next_revision_ = 1;
   folly::fibers::Baton *open_entered_{nullptr};
   folly::fibers::Baton *open_release_{nullptr};
@@ -1207,20 +1581,20 @@ FIBER_TEST_F(FileHandleTest, GetAttrDoesNotShrinkPersistedSizeForInPlaceWrite) {
   ASSERT_TRUE(handle->Release().ok());
 }
 
-FIBER_TEST_F(FileHandleTest, ReadUsesSizeCapturedByOpenWithoutMetadataRefetch) {
+FIBER_TEST_F(FileHandleTest, ReadPreservesOpenedLogicalSizeAcrossSparseChunkLookup) {
   ResetVolumeFromFiberForTest();
   auto [meta, data] = InstallEnginesForInode(7, /*nlink=*/1, /*size=*/300);
   (void)data;
 
   std::shared_ptr<FileHandle> handle;
   ASSERT_TRUE(FileHandle::Open(7, O_RDONLY, &handle).ok());
-  EXPECT_EQ(meta->get_inode_calls, 0);
 
   auto out = folly::IOBuf::create(1024);
   ASSERT_TRUE(handle->Read(1024, 0, out.get()).ok());
   EXPECT_EQ(out->length(), 300U);
   EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), std::string(300, '\0'));
-  EXPECT_EQ(meta->get_inode_calls, 0);
+  EXPECT_GE(meta->get_inode_calls, 1)
+      << "a typed sparse-chunk lookup must still validate the authoritative FileMetadata attachment";
 
   ASSERT_TRUE(handle->Release().ok());
 }

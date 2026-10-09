@@ -7,6 +7,7 @@
 #include <folly/logging/xlog.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -35,23 +36,36 @@ void AppendZeros(size_t len, folly::IOBuf *out) {
   out->append(len);
 }
 
+std::string ObjectKey(metadata::ChunkID id, metadata::cow::COWChunkRevision revision) {
+  const COWObjectKey key(id, revision);
+  return std::string(static_cast<std::string_view>(key));
+}
+
+metadata::FileSizePrecondition FilePrecondition(const metadata::FileChunkSnapshot &snapshot) {
+  return metadata::FileSizePrecondition{.eof = snapshot.inode.attr.size, .boundary = snapshot.eof_boundary};
+}
+
 }  // namespace
 
 COWChunk::COWChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t max_chunk_size,
                    metadata::cow::COWChunkMetadataPtr cow_metadata, metadata::IMetaEngine *meta,
-                   storage::IDataEngine *data, std::optional<metadata::SwordFsChunk> published_chunk)
+                   storage::IDataEngine *data, std::optional<metadata::ChunkID> attached_id,
+                   std::optional<metadata::cow::COWChunkHead> published_head, size_t visible_prefix)
     : Chunk(index),
       ino_(ino),
       max_chunk_size_(max_chunk_size),
       cow_metadata_(std::move(cow_metadata)),
       meta_(meta),
       data_(data),
-      published_chunk_(published_chunk) {
+      attached_id_(attached_id),
+      published_head_(published_head),
+      visible_prefix_(visible_prefix) {
   CHECK(meta_ != nullptr);
   CHECK(data_ != nullptr);
+  CHECK(cow_metadata_ != nullptr);
   CHECK_GT(max_chunk_size_, 0);
-  if (published_chunk_.has_value()) {
-    CHECK_EQ(published_chunk_->index, Index());
+  CHECK_EQ(attached_id_.has_value(), published_head_.has_value());
+  if (published_head_.has_value()) {
     state_ = State::kClean;
   } else {
     wb_ = std::make_shared<WriteBuf>(max_chunk_size_);
@@ -67,9 +81,9 @@ utils::Status COWChunk::Write(size_t offset, const folly::IOBuf &data) {
 
   std::unique_lock<utils::FiberRWMutex> lock(mutex_);
   if (state_ == State::kClean) {
-    CHECK(published_chunk_.has_value());
+    CHECK(attached_id_.has_value() && published_head_.has_value());
     std::shared_ptr<WriteBuf> hydrated;
-    status = HydrateForWrite(*published_chunk_, &hydrated);
+    status = HydrateForWrite(*attached_id_, *published_head_, &hydrated);
     if (!status.ok()) {
       return status;
     }
@@ -121,16 +135,19 @@ utils::Status COWChunk::Read(size_t offset, size_t len, folly::IOBuf *out) const
     return ReadLocal(*wb_, offset, len, out);
   }
 
-  CHECK(published_chunk_.has_value());
-  const auto published = *published_chunk_;
-  const size_t available = offset < published.size ? std::min<uint64_t>(len, published.size - offset) : 0;
+  CHECK(attached_id_.has_value() && published_head_.has_value());
+  const auto head = *published_head_;
+  if (head.size > max_chunk_size_ || visible_prefix_ > max_chunk_size_) {
+    return utils::Status::Malformed("COWChunk::Read: typed head exceeds configured chunk size");
+  }
+  const size_t visible = std::min<uint64_t>(head.size, visible_prefix_);
+  const size_t available = offset < visible ? std::min<size_t>(len, visible - offset) : 0;
   const size_t original_length = out->length();
   if (available != 0) {
     // Keep the published revision pinned by the shared chunk lock until its
     // remote read completes. A rewrite cannot make this immutable object
     // reclaimable while a mount-local read is still using it.
-    status =
-        data_->Get(FormatCOWObjectKey(ino_, Index(), published.revision), static_cast<off_t>(offset), available, out);
+    status = data_->Get(ObjectKey(*attached_id_, head.revision), static_cast<off_t>(offset), available, out);
     const size_t bytes_read = out->length() - original_length;
     if (!status.ok()) {
       out->trimEnd(bytes_read);
@@ -147,27 +164,26 @@ utils::Status COWChunk::Read(size_t offset, size_t len, folly::IOBuf *out) const
 
 void COWChunk::TruncateLocal(size_t size) {
   std::lock_guard<utils::FiberRWMutex> lock(mutex_);
+  visible_prefix_ = std::min(visible_prefix_, size);
+  if (published_head_.has_value()) {
+    // The mount-local size barrier commits the new EOF and clamps the same
+    // ChunkID's private head without changing its revision. Carry that
+    // monotonic size clamp into the cached publication precondition so the
+    // next write does not reject its own completed truncate as stale.
+    published_head_->size = std::min<uint64_t>(published_head_->size, size);
+  }
   if (state_ == State::kClean) {
-    if (published_chunk_) {
-      published_chunk_->size = std::min<uint64_t>(published_chunk_->size, size);
-    }
     return;
   }
   if (wb_) {
     wb_->Truncate(size);
   }
-  if (published_chunk_) {
-    // The cached published descriptor is the first-attempt CAS baseline.
-    // Metadata truncate clamps that descriptor too, so keep the local baseline
-    // in lockstep until a failed Flush requires an authoritative refresh.
-    published_chunk_->size = std::min<uint64_t>(published_chunk_->size, size);
-  }
 }
 
 utils::Status COWChunk::Flush() {
   std::shared_ptr<WriteBuf> generation;
-  std::optional<metadata::SwordFsChunk> expected;
-  bool refresh_baseline = false;
+  std::optional<metadata::ChunkID> session_id;
+  std::optional<metadata::cow::COWChunkHead> session_head;
   {
     std::lock_guard<utils::FiberRWMutex> lock(mutex_);
     if (state_ == State::kClean || (state_ == State::kDirty && wb_->size() == 0)) {
@@ -180,8 +196,8 @@ utils::Status COWChunk::Flush() {
     state_ = State::kFlushing;
     flushing_wb_ = wb_;
     generation = flushing_wb_;
-    expected = published_chunk_;
-    refresh_baseline = refresh_publication_baseline_;
+    session_id = attached_id_;
+    session_head = published_head_;
   }
 
   auto fail = [&](utils::Status failure) {
@@ -190,46 +206,159 @@ utils::Status COWChunk::Flush() {
     CHECK(flushing_wb_ == generation);
     flushing_wb_.reset();
     state_ = State::kDirty;
-    refresh_publication_baseline_ = true;
     return failure;
   };
 
-  if (refresh_baseline) {
-    auto status = LoadPublicationBaseline(&expected);
+  metadata::FileChunkSnapshot file;
+  auto status = meta_->ReadFileChunkSnapshot(ino_, Index(), &file);
+  if (!status.ok()) {
+    return fail(status);
+  }
+  if (file.chunk_id != session_id) {
+    return fail(utils::Status::AlreadyExists("COWChunk::Flush: attachment changed; session is stale"));
+  }
+  if (session_id.has_value()) {
+    metadata::cow::COWChunkHead current;
+    status = cow_metadata_->GetHead(*session_id, &current);
+    if (status.IsNotFound()) {
+      return fail(utils::Status::Malformed("COWChunk::Flush: attached ChunkID has no COW head"));
+    }
     if (!status.ok()) {
       return fail(status);
     }
+    if (!session_head.has_value() || current != *session_head) {
+      return fail(utils::Status::AlreadyExists("COWChunk::Flush: private COW head has changed"));
+    }
   }
 
-  metadata::ChunkRevision revision = metadata::kInvalidChunkRevision;
-  auto status = meta_->AllocateChunkRevision(&revision);
+  uint64_t start = 0;
+  status = metadata::CalculateChunkStartOffset(Index(), max_chunk_size_, &start);
   if (!status.ok()) {
     return fail(status);
   }
-
-  const auto replacement = BuildMeta(revision, generation->size());
-  const auto chunk_key = FormatCOWObjectKey(ino_, Index(), replacement.revision);
-  auto data = generation->CloneBuf();
-  status = data_->Put(chunk_key, std::move(data));
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "COWChunk::Flush FAILED: ino=" << ino_ << " chunk=" << Index() << " size=" << replacement.size
-                      << " — " << status.message();
-    return fail(status);
+  if (generation->size() > metadata::kMaxSupportedFileSize - start) {
+    return fail(utils::Status::InvalidArgument("COWChunk::Flush: file range exceeds supported size"));
   }
+  const uint64_t end = start + generation->size();
 
-  status = meta_->CommitChunk(ino_, expected, replacement, metadata::ChunkPublishIntent{});
-  if (!status.ok()) {
-    SWORDFS_LOG_ERROR << "COWChunk::Flush CommitChunk FAILED: ino=" << ino_ << " chunk=" << Index()
-                      << " size=" << replacement.size << " — " << status.message();
-    return fail(status);
+  metadata::ChunkID id;
+  metadata::cow::COWChunkHead replacement;
+  bool finalized = false;
+  // An initial attachment can lose the EOF precondition to another chunk's
+  // successful Flush. Only a *known* precondition rejection with an absent
+  // mapping allows re-preparation; every subsequent attempt allocates a fresh
+  // ChunkID/revision/object. An ambiguous first attachment never reuses its ID.
+  for (int candidate_attempt = 0; candidate_attempt < 8 && !finalized; ++candidate_attempt) {
+    if (session_id.has_value()) {
+      id = *session_id;
+    } else {
+      status = cow_metadata_->AllocateChunkID(&id);
+      if (!status.ok()) {
+        return fail(status);
+      }
+    }
+    status = metadata::ValidateFileChunkWrite(Index(), id, end, max_chunk_size_);
+    if (!status.ok()) {
+      return fail(status);
+    }
+
+    metadata::cow::COWChunkRevision revision;
+    status = cow_metadata_->AllocateRevision(id, &revision);
+    if (!status.ok()) {
+      return fail(status);
+    }
+    replacement = metadata::cow::COWChunkHead{.revision = revision, .size = generation->size()};
+    status = data_->Put(ObjectKey(id, revision), generation->CloneBuf());
+    if (!status.ok()) {
+      return fail(status);
+    }
+
+    status = cow_metadata_->CompareExchangeHead(id, session_head, replacement);
+    if (status.IsOutcomeUnknown()) {
+      metadata::cow::COWChunkHead observed;
+      auto probe = cow_metadata_->GetHead(id, &observed);
+      if (!probe.ok() || observed != replacement) {
+        return fail(status);
+      }
+    } else if (!status.ok()) {
+      return fail(status);
+    }
+
+    // Once a private CAS succeeds for an attached ID, it remains the
+    // mechanism publication point even if the later inode side effect fails.
+    const auto mark_head_published = [&] {
+      if (session_id.has_value()) {
+        std::lock_guard<utils::FiberRWMutex> lock(mutex_);
+        published_head_ = replacement;
+      }
+    };
+
+    bool retry_fresh_attachment = false;
+    for (int finalize_attempt = 0; finalize_attempt < 3; ++finalize_attempt) {
+      const auto expected = FilePrecondition(file);
+      if (session_id.has_value()) {
+        status = meta_->FinalizeAttachedWrite(ino_, Index(), id, end, expected);
+      } else {
+        status = meta_->AttachPrepared(ino_, Index(), id, end, expected);
+      }
+      if (status.ok()) {
+        finalized = true;
+        break;
+      }
+
+      metadata::FileChunkSnapshot observed;
+      auto probe = meta_->ReadFileChunkSnapshot(ino_, Index(), &observed);
+      if (!probe.ok()) {
+        mark_head_published();
+        return fail(probe);
+      }
+      if (!session_id.has_value()) {
+        if (status.IsOutcomeUnknown() && observed.chunk_id == id && observed.inode.attr.size >= end) {
+          finalized = true;
+          break;
+        }
+        if (status.ToErrno() == EEXIST && !observed.chunk_id.has_value() &&
+            observed.inode.attr.size > file.inode.attr.size) {
+          // The loser may safely begin a new candidate, not retry this ID.
+          // The superseded blob/head is unreachable and eligible for future
+          // best-effort cleanup; foreground publication never deletes it.
+          file = std::move(observed);
+          retry_fresh_attachment = true;
+          break;
+        }
+        return fail(status);
+      }
+      if (observed.chunk_id != id) {
+        return fail(utils::Status::AlreadyExists("COWChunk::Flush: attached ChunkID was replaced"));
+      }
+
+      metadata::cow::COWChunkHead current;
+      probe = cow_metadata_->GetHead(id, &current);
+      if (!probe.ok() || current != replacement) {
+        return fail(utils::Status::AlreadyExists("COWChunk::Flush: candidate COW head was superseded"));
+      }
+      if (observed.inode.attr.size < file.inode.attr.size) {
+        mark_head_published();
+        return fail(utils::Status::AlreadyExists("COWChunk::Flush: EOF shrank during finalization"));
+      }
+      file = std::move(observed);
+    }
+    if (!finalized && !retry_fresh_attachment) {
+      mark_head_published();
+      return fail(status);
+    }
+  }
+  if (!finalized) {
+    return fail(utils::Status::AlreadyExists("COWChunk::Flush: too many concurrent attachment changes"));
   }
 
   {
     std::lock_guard<utils::FiberRWMutex> lock(mutex_);
     CHECK(state_ == State::kFlushing);
     CHECK(flushing_wb_ == generation);
-    published_chunk_ = replacement;
-    refresh_publication_baseline_ = false;
+    attached_id_ = id;
+    published_head_ = replacement;
+    visible_prefix_ = generation->size();
     flushing_wb_.reset();
     if (wb_ == generation) {
       wb_.reset();
@@ -239,7 +368,8 @@ utils::Status COWChunk::Flush() {
     }
   }
 
-  SWORDFS_LOG_DEBUG << "Flush uploaded: ino=" << ino_ << " chunk=" << Index() << " size=" << replacement.size;
+  SWORDFS_LOG_DEBUG << "Typed COW Flush uploaded: ino=" << ino_ << " chunk=" << Index() << " ChunkID=" << id.Value()
+                    << " size=" << replacement.size;
   return utils::Status::OK();
 }
 
@@ -248,41 +378,21 @@ bool COWChunk::HasPendingWrites() const {
   return state_ != State::kClean && wb_ != nullptr && wb_->size() > 0;
 }
 
-metadata::SwordFsChunk COWChunk::BuildMeta(metadata::ChunkRevision revision, size_t size) const {
-  metadata::SwordFsChunk chunk;
-  chunk.index = Index();
-  chunk.revision = revision;
-  chunk.size = size;
-  return chunk;
-}
-
-utils::Status COWChunk::LoadPublicationBaseline(std::optional<metadata::SwordFsChunk> *out) const {
-  metadata::SwordFsChunk current;
-  auto status = meta_->FindChunk(ino_, Index(), &current);
-  if (status.ok()) {
-    *out = current;
-    return utils::Status::OK();
-  }
-  if (status.IsNotFound()) {
-    out->reset();
-    return utils::Status::OK();
-  }
-  return status;
-}
-
-utils::Status COWChunk::HydrateForWrite(const metadata::SwordFsChunk &published, std::shared_ptr<WriteBuf> *out) const {
-  if (published.size > max_chunk_size_) {
+utils::Status COWChunk::HydrateForWrite(metadata::ChunkID id, const metadata::cow::COWChunkHead &head,
+                                        std::shared_ptr<WriteBuf> *out) const {
+  if (head.size > max_chunk_size_ || visible_prefix_ > max_chunk_size_) {
     return utils::Status::Malformed("COWChunk::HydrateForWrite: published chunk exceeds configured chunk size");
   }
 
   auto wb = std::make_shared<WriteBuf>(max_chunk_size_);
-  if (published.size > 0) {
-    auto persisted = folly::IOBuf::create(published.size);
-    auto status = data_->Get(FormatCOWObjectKey(ino_, Index(), published.revision), 0, published.size, persisted.get());
+  const size_t visible = std::min<uint64_t>(head.size, visible_prefix_);
+  if (visible > 0) {
+    auto persisted = folly::IOBuf::create(visible);
+    auto status = data_->Get(ObjectKey(id, head.revision), 0, visible, persisted.get());
     if (!status.ok()) {
       return status;
     }
-    if (persisted->length() != published.size) {
+    if (persisted->length() != visible) {
       return utils::Status::IOError("COWChunk::HydrateForWrite: persisted object is shorter than metadata descriptor");
     }
     status = wb->Write(0, *persisted);
