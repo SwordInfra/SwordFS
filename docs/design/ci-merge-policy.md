@@ -23,9 +23,55 @@ The required PR checks are:
 - `codecov/patch`
 
 A required check that fails, is cancelled, is still pending, or does not report
-success keeps the ruleset unsatisfied and prevents a normal merge to `main`.
+an accepted conclusion keeps the ruleset unsatisfied and prevents a normal
+merge to `main`. GitHub treats an explicitly skipped **job** as a successful
+required check; the documentation-only exception below constrains when this
+is permitted. Skipping the entire workflow would instead leave checks pending.
 Strict required-check mode also requires the PR head to be tested against the
 current target branch state.
+
+## Documentation-only PR fast path
+
+The formal CI workflow is **always triggered** for pull requests: applying
+`paths-ignore` to the whole workflow would leave required checks pending and
+block merging. Its `change-scope` job instead computes the **whole PR diff**
+from the merge base to the proposed head and permits the docs-only path only
+when every changed path is allowlisted:
+
+- `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `CODE_OF_CONDUCT.md`;
+- `.md`, `.mdx` and `.rst` files under `docs/`.
+
+An empty diff, moved/deleted source file, CI workflow, script, test, source,
+configuration, or any other path requires the **full** build, audit, E2E and
+conformance matrix. Git renames are disabled for classification so a code-to-
+docs move cannot hide the deleted source path. Classification failures fail
+the required workflow rather than silently skipping expensive validation.
+
+For qualifying docs-only PRs:
+
+1. `change-scope` and `clang-format` still run; the latter checks repository
+   formatting/tooling without building SwordFS.
+2. The heavy static, E2E, pjdfstest and fstests **jobs** keep their existing
+   required names but are marked `skipped`, which GitHub accepts for required
+   job checks. The required `build-and-test (Debug)` and `(Release)` are a
+   special case: skipping their whole matrix job would emit only an
+   **unexpanded** check name. Instead both entries execute a lightweight
+   docs-only acknowledgement step while all checkout/dependency/build/test/
+   coverage steps are skipped; their concrete required check names stay green.
+3. `codecov-docs-only` runs Codecov's supported `empty-upload` command after
+   the classifier and formatting succeed. It emits the existing external
+   `codecov/patch` result *without inventing coverage numbers*. `force` is
+   allowed here **only** because the complete PR diff has already been
+   checked to contain no coverable/code changes. This upload fails the job
+   if Codecov rejects the operation; it does not bypass the required status.
+
+**Every push to `main` and every manual `workflow_dispatch` runs the full
+matrix**, even if the most recent commit only changes Markdown. Normal
+code-bearing PRs continue to run the full Debug/Release/CodeCov E2E and
+conformance gates. Do not infer a passing implementation test from a job
+intentionally marked skipped; the change-scope decision is the evidence for
+why that particular check was inapplicable. Adding new documentation formats
+or paths to the allowlist requires reviewing their build/CI impact first.
 
 `publish-pjdfstest-status` and `publish-fstests-status` are intentionally not
 required because they run only after a push to `main`; making a post-merge
