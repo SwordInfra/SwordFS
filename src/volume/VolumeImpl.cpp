@@ -6,6 +6,7 @@
 #include <folly/logging/xlog.h>
 
 #include <algorithm>
+#include <optional>
 
 #include "chunk/ChunkFactory.hpp"
 #include "chunk/internal/ChunkCleanupParticipant.hpp"
@@ -96,8 +97,22 @@ Status VolumeImpl::ComposeChunkRuntime() {
                                                          data_engine_.get(), config_.chunk_size);
   if (data_engine_ != nullptr) {
     std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
-    auto status = chunk::internal::CreateChunkCleanupParticipant(
-        config_.chunk_type, config_.chunk_size, chunk_metadata_, meta_engine_.get(), data_engine_.get(), {}, &cleanup);
+    // A queued typed delete is only maintenance: revalidate the *current*
+    // FileMetadata attachment before touching the immutable COW object.
+    // The inode can already be absent after an atomic reclaim, which is
+    // equivalent to an unattached logical chunk for reachability purposes.
+    const auto reachability = [meta = meta_engine_.get()](metadata::InodeID ino, metadata::ChunkIndex index,
+                                                          std::optional<metadata::ChunkID> *attached) {
+      auto status = meta->ProbeAttachment(ino, index, attached);
+      if (status.IsNotFound()) {
+        attached->reset();
+        return Status::OK();
+      }
+      return status;
+    };
+    auto status =
+        chunk::internal::CreateChunkCleanupParticipant(config_.chunk_type, config_.chunk_size, chunk_metadata_,
+                                                       meta_engine_.get(), data_engine_.get(), reachability, &cleanup);
     if (!status.ok()) {
       return status;
     }

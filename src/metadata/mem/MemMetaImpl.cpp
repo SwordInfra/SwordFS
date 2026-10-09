@@ -834,6 +834,46 @@ Status MemMetaImpl::Readlink(InodeID ino, std::string *target) {
 // Chunk metadata
 // ────────────────────────────────────────────────────────────────
 
+Status MemMetaImpl::ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.ReadFileChunkSnapshot(ino, index, out); });
+}
+
+Status MemMetaImpl::ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.ReadFileMappingSnapshot(ino, out); });
+}
+
+Status MemMetaImpl::ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.ProbeAttachment(ino, index, out); });
+}
+
+Status MemMetaImpl::AttachPrepared(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                                   const FileSizePrecondition &expected) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.AttachPrepared(ino, index, chunk_id, end, expected); });
+}
+
+Status MemMetaImpl::FinalizeAttachedWrite(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                                          const FileSizePrecondition &expected) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact(
+      [&](MemMetaTxn &txn) { return txn.FinalizeAttachedWrite(ino, index, chunk_id, end, expected); });
+}
+
+Status MemMetaImpl::CommitShrink(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
+                                 SetAttrField fields, ChunkSizeCommitResult *out) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.CommitShrink(ino, plan, requested, fields, out); });
+}
+
+Status MemMetaImpl::CommitGrow(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
+                               SetAttrField fields, ChunkSizeCommitResult *out) {
+  utils::ExpectInFiberDomain();
+  return store_.Transact([&](MemMetaTxn &txn) { return txn.CommitGrow(ino, plan, requested, fields, out); });
+}
+
 Status MemMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
                                 const SwordFsChunk &replacement) {
   return CommitChunk(ino, expected, replacement, {});

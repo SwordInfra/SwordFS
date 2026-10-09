@@ -110,6 +110,10 @@ class MemMetaStore {
 
   // Chunk metadata: inode → (index → SwordFsChunk).
   folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, SwordFsChunk>> chunks_;
+  // Final logical attachment identity, independent of mechanism-owned heads.
+  // #317 switches production writers/readers to this map; #320 removes the
+  // then-dead legacy descriptor table.
+  folly::F14FastMap<InodeID, folly::F14FastMap<ChunkIndex, ChunkID>> chunk_refs_;
   // Legacy bridge hash names and fields are supplied by the selected chunk
   // mechanism. Final typed ChunkMetadata does not use this table.
   folly::F14FastMap<std::string, folly::F14FastMap<std::string, std::string>> private_chunk_index_;

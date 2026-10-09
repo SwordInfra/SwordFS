@@ -654,6 +654,28 @@ FIBER_TEST_F(ReclaimerTest, TypedCOWCleanupRejectsMalformedPersistedIdentity) {
   EXPECT_EQ(cleanup->DeleteReclaim(MakeTypedDetachedReclaim(kIno, {}), nullptr).ToErrno(), EINVAL);
 }
 
+FIBER_TEST_F(ReclaimerTest, TypedCleanupFreezeRejectsInvalidIdentityWithoutPublishingWork) {
+  metadata::ReclaimWork reclaim{.ino = 77, .payload = "unchanged"};
+  EXPECT_EQ(chunk::cow::FreezeCOWDetachedReclaim(0, {}, &reclaim).ToErrno(), EINVAL);
+  EXPECT_EQ(chunk::cow::FreezeCOWDetachedReclaim(42, {}, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(chunk::cow::FreezeCOWDetachedReclaim(42, {{.index = 1, .chunk_id = metadata::kInvalidChunkID}}, &reclaim)
+                .ToErrno(),
+            EINVAL);
+  EXPECT_EQ(reclaim.ino, 77U);
+  EXPECT_EQ(reclaim.payload, "unchanged");
+
+  metadata::PendingDelete pending{.id = "unchanged", .payload = "unchanged"};
+  EXPECT_EQ(chunk::cow::FreezeCOWDetachedDelete(0, {.index = 1, .chunk_id = metadata::ChunkID(17)}, &pending).ToErrno(),
+            EINVAL);
+  EXPECT_EQ(
+      chunk::cow::FreezeCOWDetachedDelete(42, {.index = 1, .chunk_id = metadata::kInvalidChunkID}, &pending).ToErrno(),
+      EINVAL);
+  EXPECT_EQ(chunk::cow::FreezeCOWDetachedDelete(42, {.index = 1, .chunk_id = metadata::ChunkID(17)}, nullptr).ToErrno(),
+            EINVAL);
+  EXPECT_EQ(pending.id, "unchanged");
+  EXPECT_EQ(pending.payload, "unchanged");
+}
+
 FIBER_TEST_F(ReclaimerTest, TypedCOWCleanupRequiresConfiguredAuthority) {
   constexpr InodeID kIno = 42;
   constexpr metadata::ChunkIndex kIndex = 3;

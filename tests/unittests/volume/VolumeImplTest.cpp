@@ -5,16 +5,24 @@
 #include <unistd.h>
 
 #include <CLI/CLI.hpp>
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "FiberTest.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
+#include "chunk/cow/COWCleanup.hpp"
 #include "config/ConfigCenter.hpp"
+#include "metadata/ChunkSizePlan.hpp"
+#include "metadata/cow/COWChunkMetadata.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "metadata/mem/VolumeFile.hpp"
 #include "storage/IDataEngine.hpp"
@@ -56,6 +64,32 @@ class NoopDataEngine final : public swordfs::storage::IDataEngine {
   Status Delete(std::string_view) override {
     return Status::OK();
   }
+};
+
+class TrackedCleanupDataEngine final : public swordfs::storage::IDataEngine {
+ public:
+  Status Initialize() override {
+    return Status::OK();
+  }
+  Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
+    return Status::OK();
+  }
+  Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
+    return Status::OK();
+  }
+  Status Delete(std::string_view key) override {
+    std::lock_guard lock(mutex_);
+    deleted_.emplace_back(key);
+    return Status::OK();
+  }
+  std::vector<std::string> Deleted() const {
+    std::lock_guard lock(mutex_);
+    return deleted_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::vector<std::string> deleted_;
 };
 
 class InvalidChunkMetadataEngine final : public swordfs::metadata::MemMetaImpl {
@@ -369,6 +403,109 @@ TEST_F(VolumeImplTest, MountRejectsCleanupMetadataClassMismatch) {
   const auto status = volume.LoadFrom(swordfs::test::MakeTestMountOptions(volume_name));
   EXPECT_EQ(status.ToErrno(), EINVAL);
   EXPECT_EQ(status.message(), "COW cleanup metadata type mismatch");
+}
+
+TEST_F(VolumeImplTest, RuntimeGcProbeDeletesOrphansButPreservesAttachedChunkIDs) {
+  swordfs::test::RegisterTestVolumeEngines();
+  const auto name = makeVolumeName("live-gc-reachability");
+  const SwordFsVolume config{
+      .name = name,
+      .storage = std::string(swordfs::test::kTestDataEngine),
+      .bucket = "opaque://endpoint/bucket",
+      .chunk_size = 4096,
+      .chunk_type = ChunkType::kCow,
+  };
+  ASSERT_TRUE(VolumeFile{name}.Write(config).ok());
+  auto data = std::make_unique<TrackedCleanupDataEngine>();
+  auto *raw_data = data.get();
+  swordfs::test::pending_data_engine = std::move(data);
+
+  VolumeImpl volume;
+  ASSERT_TRUE(volume.LoadFrom({.name = name, .meta_url = "memory://local"}).ok());
+  auto *raw_meta = dynamic_cast<swordfs::metadata::MemMetaImpl *>(volume.meta_engine());
+  ASSERT_NE(raw_meta, nullptr);
+  swordfs::metadata::ChunkMetadataPtr capability;
+  ASSERT_TRUE(volume.meta_engine()->OpenChunkMetadata(ChunkType::kCow, &capability).ok());
+  auto cow = std::dynamic_pointer_cast<swordfs::metadata::cow::COWChunkMetadata>(capability);
+  ASSERT_NE(cow, nullptr);
+
+  swordfs::metadata::ChunkID detached_id;
+  swordfs::metadata::ChunkID live_id;
+  swordfs::metadata::ChunkID orphan_id;
+  swordfs::test::RunInTestFiber([&] {
+    ASSERT_TRUE(cow->AllocateChunkID(&detached_id).ok());
+    ASSERT_TRUE(cow->AllocateChunkID(&live_id).ok());
+    ASSERT_TRUE(cow->AllocateChunkID(&orphan_id).ok());
+    for (const auto id : {detached_id, live_id, orphan_id}) {
+      swordfs::metadata::cow::COWChunkRevision revision;
+      ASSERT_TRUE(cow->AllocateRevision(id, &revision).ok());
+      ASSERT_TRUE(cow->CompareExchangeHead(id, std::nullopt, {.revision = revision, .size = 8}).ok());
+    }
+  });
+
+  swordfs::metadata::SwordFsInode file;
+  swordfs::test::RunInTestFiber([&] {
+    ASSERT_TRUE(raw_meta->Create(swordfs::metadata::kRootInodeId, "attached", 0644, &file).ok());
+    ASSERT_TRUE(raw_meta->AttachPrepared(file.ino, 0, detached_id, 8, {.eof = 0}).ok());
+
+    swordfs::metadata::FileMappingSnapshot snapshot;
+    ASSERT_TRUE(raw_meta->ReadFileMappingSnapshot(file.ino, &snapshot).ok());
+    swordfs::metadata::ChunkSizePlan shrink;
+    ASSERT_TRUE(swordfs::metadata::PlanChunkSizeChange(8, 0, 4096, snapshot.mappings, &shrink).ok());
+    swordfs::metadata::SwordFsAttr requested;
+    requested.size = 0;
+    swordfs::metadata::ChunkSizeCommitResult committed;
+    ASSERT_TRUE(
+        raw_meta->CommitShrink(file.ino, shrink, requested, swordfs::metadata::SetAttrField::kSize, &committed).ok());
+    // A new identity may materialize after a detach. Cleanup for the old
+    // identity must not touch this still-attached successor.
+    ASSERT_TRUE(raw_meta->AttachPrepared(file.ino, 0, live_id, 8, {.eof = 0}).ok());
+
+    swordfs::metadata::SwordFsInode orphan;
+    ASSERT_TRUE(raw_meta->Create(swordfs::metadata::kRootInodeId, "orphan", 0644, &orphan).ok());
+    ASSERT_TRUE(raw_meta->AttachPrepared(orphan.ino, 0, orphan_id, 8, {.eof = 0}).ok());
+    ASSERT_TRUE(raw_meta->Unlink(swordfs::metadata::kRootInodeId, "orphan").ok());
+    ASSERT_TRUE(raw_meta->PrepareReclaim(orphan.ino).ok());
+  });
+
+  volume.StartRuntimeServices();
+  bool pending_empty = false;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  do {
+    swordfs::test::RunInTestFiber([&] {
+      bool has_more = false;
+      size_t count = 0;
+      ASSERT_TRUE(raw_meta
+                      ->VisitPendingDeletesBatch(
+                          32,
+                          [&](const swordfs::metadata::PendingDelete &) {
+                            ++count;
+                            return Status::OK();
+                          },
+                          &has_more)
+                      .ok());
+      pending_empty = count == 0 && !has_more;
+    });
+    if (!pending_empty) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+  } while (!pending_empty && std::chrono::steady_clock::now() < deadline);
+  volume.StopRuntimeServices();
+
+  ASSERT_TRUE(pending_empty) << "production GC should acknowledge both live and orphan candidates";
+  const auto deleted = raw_data->Deleted();
+  EXPECT_EQ(deleted.size(), 2U);
+  const auto was_deleted = [&](swordfs::metadata::ChunkID id) {
+    return std::find(deleted.begin(), deleted.end(), std::to_string(id.Value()) + "/1") != deleted.end();
+  };
+  EXPECT_TRUE(was_deleted(detached_id));
+  EXPECT_TRUE(was_deleted(orphan_id));
+  EXPECT_FALSE(was_deleted(live_id));
+  swordfs::test::RunInTestFiber([&] {
+    swordfs::metadata::cow::COWChunkHead head;
+    EXPECT_TRUE(cow->GetHead(live_id, &head).ok());
+    EXPECT_TRUE(cow->GetHead(orphan_id, &head).IsNotFound());
+  });
 }
 
 TEST_F(VolumeImplTest, CreateFromNormalizesDataEngineIdentity) {

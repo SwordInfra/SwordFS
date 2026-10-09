@@ -9,11 +9,14 @@
 #include <folly/io/IOBuf.h>
 #include <folly/io/async/EventBase.h>
 #include <gtest/gtest.h>
+#include <sys/stat.h>
 
 #include <cerrno>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "FiberTest.hpp"
@@ -88,6 +91,90 @@ class MissingMetaEngine : public IMetaEngine {
     return Status::OK();
   }
   Status GetInode(InodeID, SwordFsInode *) override {
+    return Status::OK();
+  }
+  Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, swordfs::metadata::FileChunkSnapshot *out) override {
+    if (!file_snapshot_status.ok()) {
+      return file_snapshot_status;
+    }
+    if (out == nullptr) {
+      return Status::InvalidArgument("typed chunk snapshot output is null");
+    }
+    swordfs::metadata::FileChunkSnapshot snapshot;
+    snapshot.inode = SwordFsInode(ino, SwordFsAttr(ino, S_IFREG | 0644), ino);
+    snapshot.inode.attr.size = file_size_;
+    if (auto it = typed_mappings_.find(index); it != typed_mappings_.end()) {
+      snapshot.chunk_id = it->second;
+    }
+    swordfs::metadata::ChunkSizeLayout layout;
+    auto status = swordfs::metadata::PlanChunkSizeLayout(file_size_, kChunkTestSize, &layout);
+    if (!status.ok()) {
+      return status;
+    }
+    if (layout.boundary.has_value()) {
+      std::optional<swordfs::metadata::ChunkID> boundary_id;
+      if (auto it = typed_mappings_.find(layout.boundary->index); it != typed_mappings_.end()) {
+        boundary_id = it->second;
+      }
+      snapshot.eof_boundary = swordfs::metadata::ChunkBoundarySnapshot{
+          .index = layout.boundary->index, .chunk_id = boundary_id, .visible_prefix = layout.boundary->visible_prefix};
+    }
+    *out = std::move(snapshot);
+    return Status::OK();
+  }
+  Status ReadFileMappingSnapshot(InodeID, swordfs::metadata::FileMappingSnapshot *) override {
+    return Status::NotSupported("whole-file size mutations are outside these chunk-focused tests");
+  }
+  Status CommitShrink(InodeID, const swordfs::metadata::ChunkSizePlan &, const SwordFsAttr &, SetAttrField,
+                      swordfs::metadata::ChunkSizeCommitResult *) override {
+    return Status::NotSupported("whole-file size mutations are outside these chunk-focused tests");
+  }
+  Status CommitGrow(InodeID, const swordfs::metadata::ChunkSizePlan &, const SwordFsAttr &, SetAttrField,
+                    swordfs::metadata::ChunkSizeCommitResult *) override {
+    return Status::NotSupported("whole-file size mutations are outside these chunk-focused tests");
+  }
+  Status ProbeAttachment(InodeID, ChunkIndex index, std::optional<swordfs::metadata::ChunkID> *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("typed attachment output is null");
+    }
+    out->reset();
+    if (auto it = typed_mappings_.find(index); it != typed_mappings_.end()) {
+      *out = it->second;
+    }
+    return Status::OK();
+  }
+  Status AttachPrepared(InodeID, ChunkIndex index, swordfs::metadata::ChunkID id, uint64_t end,
+                        const swordfs::metadata::FileSizePrecondition &expected) override {
+    auto status = swordfs::metadata::ValidateFileChunkWrite(index, id, end, kChunkTestSize);
+    if (!status.ok()) {
+      return status;
+    }
+    status = ValidateExpectedFileState(expected);
+    if (!status.ok()) {
+      return status;
+    }
+    if (typed_mappings_.contains(index)) {
+      return Status::AlreadyExists("attachment already won");
+    }
+    typed_mappings_.emplace(index, id);
+    file_size_ = std::max(file_size_, end);
+    return Status::OK();
+  }
+  Status FinalizeAttachedWrite(InodeID, ChunkIndex index, swordfs::metadata::ChunkID id, uint64_t end,
+                               const swordfs::metadata::FileSizePrecondition &expected) override {
+    auto status = swordfs::metadata::ValidateFileChunkWrite(index, id, end, kChunkTestSize);
+    if (!status.ok()) {
+      return status;
+    }
+    status = ValidateExpectedFileState(expected);
+    if (!status.ok()) {
+      return status;
+    }
+    auto it = typed_mappings_.find(index);
+    if (it == typed_mappings_.end() || it->second != id) {
+      return Status::AlreadyExists("attached identity changed");
+    }
+    file_size_ = std::max(file_size_, end);
     return Status::OK();
   }
   Status GetInodes(const std::vector<InodeID> &, std::vector<std::optional<SwordFsInode>> *) override {
@@ -189,8 +276,33 @@ class MissingMetaEngine : public IMetaEngine {
   Status find_chunk_status = Status::OK();
 
  private:
+  Status ValidateExpectedFileState(const swordfs::metadata::FileSizePrecondition &expected) const {
+    auto status = swordfs::metadata::ValidateFileSizePrecondition(expected, kChunkTestSize);
+    if (!status.ok()) {
+      return status;
+    }
+    if (expected.eof != file_size_) {
+      return Status::AlreadyExists("EOF changed");
+    }
+    if (expected.boundary.has_value()) {
+      std::optional<swordfs::metadata::ChunkID> current;
+      if (auto it = typed_mappings_.find(expected.boundary->index); it != typed_mappings_.end()) {
+        current = it->second;
+      }
+      if (current != expected.boundary->chunk_id) {
+        return Status::AlreadyExists("EOF boundary changed");
+      }
+    }
+    return Status::OK();
+  }
+
   swordfs::metadata::ChunkRevision next_revision_ = 1;
   std::optional<SwordFsChunk> published_;
+  uint64_t file_size_ = 0;
+  std::map<ChunkIndex, swordfs::metadata::ChunkID> typed_mappings_;
+
+ public:
+  Status file_snapshot_status = Status::OK();
 };
 
 // Minimal data engine used to observe flush generations and inject a
@@ -200,8 +312,9 @@ class NullDataEngine final : public IDataEngine {
   Status Initialize() override {
     return Status::OK();
   }
-  Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
+  Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) override {
     ++put_calls;
+    uploaded_keys.emplace_back(key);
     if (put_started_ != nullptr) {
       auto *started = put_started_;
       auto *release = put_release_;
@@ -215,10 +328,25 @@ class NullDataEngine final : public IDataEngine {
       next_put_status = Status::OK();
       return status;
     }
+    blobs_.insert_or_assign(std::string(key),
+                            std::string(reinterpret_cast<const char *>(data->data()), data->length()));
     return Status::OK();
   }
-  Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
-    return Status::NotFound("nope");
+  Status Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) override {
+    const auto it = blobs_.find(std::string(key));
+    if (it == blobs_.end()) {
+      return Status::NotFound("missing immutable COW blob");
+    }
+    const auto &blob = it->second;
+    if (offset < blob.size()) {
+      const size_t available = std::min(size, blob.size() - offset);
+      if (available > out->tailroom()) {
+        return Status::InvalidArgument("insufficient object-read tailroom");
+      }
+      std::memcpy(out->writableTail(), blob.data() + offset, available);
+      out->append(available);
+    }
+    return Status::OK();
   }
   Status Delete(std::string_view) override {
     return Status::OK();
@@ -230,11 +358,57 @@ class NullDataEngine final : public IDataEngine {
   }
 
   int put_calls = 0;
+  std::vector<std::string> uploaded_keys;
   Status next_put_status = Status::OK();
 
  private:
+  std::unordered_map<std::string, std::string> blobs_;
   folly::fibers::Baton *put_started_{nullptr};
   folly::fibers::Baton *put_release_{nullptr};
+};
+
+// Inject COW private-domain failures without adding test-only APIs to the
+// production metadata implementation.
+class FaultingCOWChunkMetadata final : public swordfs::metadata::cow::COWChunkMetadata {
+ public:
+  enum class CASFailure { kNone, kAmbiguousApplied, kAmbiguousNotApplied, kRejected };
+
+  Status AllocateChunkID(swordfs::metadata::ChunkID *out) override {
+    if (!allocation_status.ok()) {
+      return allocation_status;
+    }
+    return delegate_.AllocateChunkID(out);
+  }
+  Status AllocateRevision(swordfs::metadata::ChunkID id, swordfs::metadata::cow::COWChunkRevision *out) override {
+    return delegate_.AllocateRevision(id, out);
+  }
+  Status GetHead(swordfs::metadata::ChunkID id, swordfs::metadata::cow::COWChunkHead *out) override {
+    return delegate_.GetHead(id, out);
+  }
+  Status CompareExchangeHead(swordfs::metadata::ChunkID id,
+                             const std::optional<swordfs::metadata::cow::COWChunkHead> &expected,
+                             const swordfs::metadata::cow::COWChunkHead &replacement) override {
+    if (cas_failure == CASFailure::kRejected) {
+      return Status::IOError("private head CAS rejected");
+    }
+    if (cas_failure == CASFailure::kAmbiguousNotApplied) {
+      return Status::OutcomeUnknown("private head CAS outcome lost");
+    }
+    auto status = delegate_.CompareExchangeHead(id, expected, replacement);
+    if (status.ok() && cas_failure == CASFailure::kAmbiguousApplied) {
+      return Status::OutcomeUnknown("private head CAS reply lost after commit");
+    }
+    return status;
+  }
+  Status EraseHead(swordfs::metadata::ChunkID id, const swordfs::metadata::cow::COWChunkHead &expected) override {
+    return delegate_.EraseHead(id, expected);
+  }
+
+  Status allocation_status = Status::OK();
+  CASFailure cas_failure = CASFailure::kNone;
+
+ private:
+  swordfs::metadata::MemCOWChunkMetadata delegate_;
 };
 
 NullDataEngine *InitializeRuntime() {
@@ -390,6 +564,10 @@ TEST_F(ChunkTest, FactoryRejectsInvalidRuntimeCompositionBeforeLookup) {
   auto status = missing_meta.Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.message(), "ChunkFactory is not fully initialized");
+  EXPECT_EQ(
+      missing_meta.SanitizeBoundary(42, {.index = 0, .chunk_id = swordfs::metadata::ChunkID(47), .visible_prefix = 1})
+          .ToErrno(),
+      ENOSYS);
 
   swordfs::chunk::ChunkFactory missing_data(swordfs::metadata::ChunkType::kCow, cow_metadata, meta_, nullptr,
                                             kChunkTestSize);
@@ -427,11 +605,22 @@ TEST_F(ChunkTest, FactoryRejectsInvalidRuntimeCompositionBeforeLookup) {
   EXPECT_EQ(status.ToErrno(), ENOSYS);
 }
 
+TEST_F(ChunkTest, FactoryBoundarySanitationChecksMissingHeadAgainstLiveAttachment) {
+  RunInTestFiber([&] {
+    const auto *factory = swordfs::volume::VolumeImpl::Instance().chunk_factory();
+    ASSERT_NE(factory, nullptr);
+    const swordfs::metadata::RetainedChunkBoundary orphan_head{
+        .index = 0, .chunk_id = swordfs::metadata::ChunkID(811), .visible_prefix = 7};
+    EXPECT_TRUE(factory->SanitizeBoundary(42, orphan_head).ok())
+        << "a missing head that is not FileMetadata-attached must not turn into a file error";
+  });
+}
+
 TEST_F(ChunkTest, FactoryOpenPropagatesLookupErrorsWithoutReturningAChunk) {
   RunInTestFiber([&] {
     const auto *factory = swordfs::volume::VolumeImpl::Instance().chunk_factory();
     ASSERT_NE(factory, nullptr);
-    meta_->find_chunk_status = Status::IOError("injected lookup failure");
+    meta_->file_snapshot_status = Status::IOError("injected lookup failure");
 
     std::shared_ptr<Chunk> chunk;
     const auto status = factory->Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/true, &chunk);
@@ -445,13 +634,13 @@ TEST_F(ChunkTest, FactoryOpenRejectsMalformedPersistedDescriptors) {
   RunInTestFiber([&] {
     const auto *factory = swordfs::volume::VolumeImpl::Instance().chunk_factory();
     ASSERT_NE(factory, nullptr);
-    const SwordFsChunk malformed{.index = 0, .revision = 1, .size = kChunkTestSize + 1};
-    ASSERT_TRUE(meta_->CommitChunk(/*ino=*/42, std::nullopt, malformed).ok());
+    ASSERT_TRUE(
+        meta_->AttachPrepared(/*ino=*/42, /*index=*/0, swordfs::metadata::ChunkID(17), /*end=*/5, {.eof = 0}).ok());
 
     std::shared_ptr<Chunk> chunk;
     const auto status = factory->Open(/*ino=*/42, /*index=*/0, /*create_if_missing=*/false, &chunk);
 
-    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.ToErrno(), EIO);
     EXPECT_EQ(chunk, nullptr);
   });
 }
@@ -469,8 +658,10 @@ TEST_F(ChunkTest, ReadRejectsInvalidOutputBuffersBeforeAccessingChunkState) {
 
 TEST_F(ChunkTest, WriteRejectsMalformedPublishedDescriptorBeforeHydration) {
   RunInTestFiber([&] {
-    const SwordFsChunk malformed{.index = 0, .revision = 1, .size = kChunkTestSize + 1};
-    COWChunk chunk(/*ino=*/42, /*index=*/0, kChunkTestSize, cow_metadata_, meta_, data_, malformed);
+    const swordfs::metadata::cow::COWChunkHead malformed{.revision = swordfs::metadata::cow::COWChunkRevision(1),
+                                                         .size = kChunkTestSize + 1};
+    COWChunk chunk(/*ino=*/42, /*index=*/0, kChunkTestSize, cow_metadata_, meta_, data_, swordfs::metadata::ChunkID(55),
+                   malformed, kChunkTestSize);
     const auto status = chunk.Write(/*offset=*/0, Buf("x"));
     EXPECT_FALSE(status.ok());
     EXPECT_NE(status.message().find("published chunk exceeds configured chunk size"), std::string::npos);
@@ -570,22 +761,170 @@ TEST_F(ChunkTest, SuccessfulFlushClearsPendingWritesAndSecondFlushIsNoOp) {
   });
 }
 
-TEST_F(ChunkTest, LegacyFlushRemainsSoleAuthorityWhileTypedCowCapabilityIsOnlyInjected) {
+TEST_F(ChunkTest, ReadRejectsOversizedPrivateHeadBeforeObjectAccess) {
+  RunInTestFiber([&] {
+    const swordfs::metadata::cow::COWChunkHead invalid{.revision = swordfs::metadata::cow::COWChunkRevision(1),
+                                                       .size = kChunkTestSize + 1};
+    COWChunk chunk(42, 0, kChunkTestSize, cow_metadata_, meta_, data_, swordfs::metadata::ChunkID(87), invalid,
+                   kChunkTestSize);
+    auto out = folly::IOBuf::create(1);
+    EXPECT_EQ(chunk.Read(0, 1, out.get()).ToErrno(), EIO);
+    EXPECT_EQ(out->length(), 0U);
+  });
+}
+
+TEST_F(ChunkTest, FlushRejectsMissingPrivateHeadForStillAttachedChunk) {
+  RunInTestFiber([&] {
+    const swordfs::metadata::ChunkID id(87);
+    ASSERT_TRUE(meta_->AttachPrepared(42, 0, id, 1, {.eof = 0}).ok());
+    const swordfs::metadata::cow::COWChunkHead stale{.revision = swordfs::metadata::cow::COWChunkRevision(1),
+                                                     .size = 0};
+    COWChunk chunk(42, 0, kChunkTestSize, cow_metadata_, meta_, data_, id, stale, 0);
+    ASSERT_TRUE(chunk.Write(0, Buf("x")).ok());
+    EXPECT_EQ(chunk.Flush().ToErrno(), EIO);
+    EXPECT_TRUE(chunk.HasPendingWrites());
+  });
+}
+
+TEST_F(ChunkTest, FlushPreservesDirtyGenerationWhenChunkIDAllocationFails) {
+  RunInTestFiber([&] {
+    auto faulting = std::make_shared<FaultingCOWChunkMetadata>();
+    faulting->allocation_status = Status::IOError("allocator unavailable");
+    COWChunk chunk(42, 0, kChunkTestSize, faulting, meta_, data_, std::nullopt);
+    ASSERT_TRUE(chunk.Write(0, Buf("payload")).ok());
+    EXPECT_EQ(chunk.Flush().ToErrno(), EIO);
+    EXPECT_TRUE(chunk.HasPendingWrites());
+    EXPECT_EQ(data_->put_calls, 0);
+  });
+}
+
+TEST_F(ChunkTest, FlushReconcilesAppliedPrivateHeadCASWithLostReply) {
+  RunInTestFiber([&] {
+    auto faulting = std::make_shared<FaultingCOWChunkMetadata>();
+    faulting->cas_failure = FaultingCOWChunkMetadata::CASFailure::kAmbiguousApplied;
+    COWChunk chunk(42, 0, kChunkTestSize, faulting, meta_, data_, std::nullopt);
+    ASSERT_TRUE(chunk.Write(0, Buf("payload")).ok());
+    EXPECT_TRUE(chunk.Flush().ok());
+    EXPECT_FALSE(chunk.HasPendingWrites());
+    EXPECT_EQ(data_->put_calls, 1);
+  });
+}
+
+TEST_F(ChunkTest, FlushPreservesDirtyGenerationWhenPrivateHeadCASNotApplied) {
+  RunInTestFiber([&] {
+    auto faulting = std::make_shared<FaultingCOWChunkMetadata>();
+    faulting->cas_failure = FaultingCOWChunkMetadata::CASFailure::kAmbiguousNotApplied;
+    COWChunk chunk(42, 0, kChunkTestSize, faulting, meta_, data_, std::nullopt);
+    ASSERT_TRUE(chunk.Write(0, Buf("payload")).ok());
+    EXPECT_TRUE(chunk.Flush().IsOutcomeUnknown());
+    EXPECT_TRUE(chunk.HasPendingWrites());
+    swordfs::metadata::FileChunkSnapshot file;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(42, 0, &file).ok());
+    EXPECT_FALSE(file.chunk_id.has_value());
+  });
+}
+
+TEST_F(ChunkTest, FlushPreservesDirtyGenerationWhenPrivateHeadCASRejects) {
+  RunInTestFiber([&] {
+    auto faulting = std::make_shared<FaultingCOWChunkMetadata>();
+    faulting->cas_failure = FaultingCOWChunkMetadata::CASFailure::kRejected;
+    COWChunk chunk(42, 0, kChunkTestSize, faulting, meta_, data_, std::nullopt);
+    ASSERT_TRUE(chunk.Write(0, Buf("payload")).ok());
+    EXPECT_EQ(chunk.Flush().ToErrno(), EIO);
+    EXPECT_TRUE(chunk.HasPendingWrites());
+  });
+}
+
+TEST_F(ChunkTest, AttachedRewritePreservesChunkIDAndAdvancesOnlyPrivateHead) {
   RunInTestFiber([&] {
     auto chunk = MakeChunk();
     ASSERT_TRUE(chunk->Write(0, Buf("hello")).ok());
     ASSERT_TRUE(chunk->Flush().ok());
 
-    SwordFsChunk published;
-    ASSERT_TRUE(meta_->FindChunk(/*ino=*/42, /*index=*/0, &published).ok());
-    EXPECT_EQ(published.revision, 1U);
-    EXPECT_EQ(published.size, 5U);
+    swordfs::metadata::FileChunkSnapshot before;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(/*ino=*/42, 0, &before).ok());
+    ASSERT_TRUE(before.chunk_id.has_value());
+    swordfs::metadata::cow::COWChunkHead first;
+    ASSERT_TRUE(cow_metadata_->GetHead(*before.chunk_id, &first).ok());
+    ASSERT_TRUE(chunk->Write(5, Buf("!")).ok());
+    ASSERT_TRUE(chunk->Flush().ok());
 
-    swordfs::metadata::ChunkID first_chunk_id;
-    ASSERT_TRUE(cow_metadata_->AllocateChunkID(&first_chunk_id).ok());
-    EXPECT_EQ(first_chunk_id, swordfs::metadata::ChunkID(1));
-    swordfs::metadata::cow::COWChunkHead staged_head;
-    EXPECT_TRUE(cow_metadata_->GetHead(first_chunk_id, &staged_head).IsNotFound());
+    swordfs::metadata::FileChunkSnapshot after;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(/*ino=*/42, 0, &after).ok());
+    EXPECT_EQ(after.chunk_id, before.chunk_id);
+    EXPECT_EQ(after.inode.attr.size, 6U);
+    swordfs::metadata::cow::COWChunkHead second;
+    ASSERT_TRUE(cow_metadata_->GetHead(*after.chunk_id, &second).ok());
+    EXPECT_GT(second.revision.Value(), first.revision.Value());
+    EXPECT_EQ(second.size, 6U);
+    EXPECT_EQ(data_->uploaded_keys.size(), 2U);
+  });
+}
+
+TEST_F(ChunkTest, ConcurrentFirstAttachmentsAtDistinctIndexesPreserveBothWrites) {
+  auto first = MakeChunk(/*index=*/0);
+  auto second = MakeChunk(/*index=*/1);
+  RunInTestFiber([&] {
+    ASSERT_TRUE(first->Write(0, Buf("first")).ok());
+    ASSERT_TRUE(second->Write(0, Buf("second")).ok());
+  });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton first_put_started;
+  folly::fibers::Baton release_first_put;
+  folly::fibers::Baton first_done;
+  folly::fibers::Baton second_done;
+  data_->BlockNextPut(&first_put_started, &release_first_put);
+  Status first_status;
+  Status second_status;
+  fm.addTask([&] {
+    first_status = first->Flush();
+    first_done.post();
+  });
+  fm.addTask([&] {
+    first_put_started.wait();
+    second_status = second->Flush();
+    second_done.post();
+    release_first_put.post();
+  });
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return first_done.try_wait() && second_done.try_wait(); },
+      "parallel distinct-chunk first attachments");
+  EXPECT_TRUE(first_status.ok()) << first_status.message();
+  EXPECT_TRUE(second_status.ok()) << second_status.message();
+  RunInTestFiber([&] {
+    swordfs::metadata::FileChunkSnapshot a;
+    swordfs::metadata::FileChunkSnapshot b;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(42, 0, &a).ok());
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(42, 1, &b).ok());
+    EXPECT_TRUE(a.chunk_id.has_value());
+    EXPECT_TRUE(b.chunk_id.has_value());
+    EXPECT_EQ(a.inode.attr.size, kChunkTestSize + 6);
+    EXPECT_EQ(b.inode.attr.size, kChunkTestSize + 6);
+  });
+}
+
+TEST_F(ChunkTest, FirstFlushPublishesTypedChunkIdAndPrivateHeadWithoutLegacyDescriptor) {
+  RunInTestFiber([&] {
+    auto chunk = MakeChunk();
+    ASSERT_TRUE(chunk->Write(0, Buf("hello")).ok());
+    ASSERT_TRUE(chunk->Flush().ok());
+
+    swordfs::metadata::FileChunkSnapshot file;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(/*ino=*/42, /*index=*/0, &file).ok());
+    ASSERT_TRUE(file.chunk_id.has_value()) << "FileMetadata must own the attached ChunkID";
+    EXPECT_EQ(file.inode.attr.size, 5U);
+    swordfs::metadata::cow::COWChunkHead head;
+    ASSERT_TRUE(cow_metadata_->GetHead(*file.chunk_id, &head).ok());
+    EXPECT_EQ(head.size, 5U);
+    ASSERT_EQ(data_->uploaded_keys.size(), 1U);
+    EXPECT_EQ(
+        data_->uploaded_keys[0],
+        std::string(static_cast<std::string_view>(swordfs::chunk::cow::COWObjectKey(*file.chunk_id, head.revision))));
+    SwordFsChunk legacy;
+    EXPECT_TRUE(meta_->FindChunk(/*ino=*/42, /*index=*/0, &legacy).IsNotFound())
+        << "a completed flush must never publish two conflicting authorities";
   });
 }
 

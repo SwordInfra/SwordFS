@@ -26,6 +26,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -42,6 +43,7 @@
 #include "chunk/internal/ChunkGcWorker.hpp"
 #include "fuse/Vfs.hpp"
 #include "metadata/IMetaEngine.hpp"
+#include "metadata/mem/MemCOWChunkMetadata.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
 #include "storage/IDataEngine.hpp"
@@ -114,9 +116,31 @@ swordfs::utils::Status ReconcileBackgroundCleanup(swordfs::storage::IDataEngine 
     return status;
   }
   auto &volume = swordfs::volume::VolumeImpl::Instance();
+  swordfs::metadata::ChunkMetadataPtr chunk_metadata;
+  swordfs::utils::Status open_status;
+  // Use the mounted mechanism capability, not a fresh independent COW
+  // metadata instance. Its head identities must match live file mappings.
+  swordfs::test::RunInTestThreadFromFiber(
+      [&] { open_status = volume.meta_engine()->OpenChunkMetadata(volume.config().chunk_type, &chunk_metadata); });
+  if (!open_status.ok()) {
+    return open_status;
+  }
   std::unique_ptr<swordfs::chunk::internal::ChunkCleanupParticipant> cleanup;
-  status = swordfs::chunk::internal::CreateChunkCleanupParticipant(volume.config().chunk_type, volume.chunk_size(), {},
-                                                                   volume.meta_engine(), data, {}, &cleanup);
+  // Match production's live FileMetadata reachability contract: reclaim has
+  // already made an orphan inode non-revivable, so ENOENT is an absent map.
+  // All other probe failures must fail closed rather than delete live data.
+  const auto reachability = [meta = volume.meta_engine()](InodeID ino, ChunkIndex index,
+                                                          std::optional<swordfs::metadata::ChunkID> *attached) {
+    auto probe = meta->ProbeAttachment(ino, index, attached);
+    if (probe.IsNotFound()) {
+      attached->reset();
+      return swordfs::utils::Status::OK();
+    }
+    return probe;
+  };
+  status = swordfs::chunk::internal::CreateChunkCleanupParticipant(volume.config().chunk_type, volume.chunk_size(),
+                                                                   chunk_metadata, volume.meta_engine(), data,
+                                                                   reachability, &cleanup);
   if (!status.ok()) {
     return status;
   }
@@ -341,14 +365,33 @@ class NoopDataEngine : public swordfs::storage::IDataEngine {
   swordfs::utils::Status Initialize() override {
     return swordfs::utils::Status::OK();
   }
-  swordfs::utils::Status Put(std::string_view, std::unique_ptr<folly::IOBuf>) override {
+  swordfs::utils::Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) override {
     ++put_calls_;
+    if (put_status_.ok()) {
+      if (data == nullptr) {
+        return swordfs::utils::Status::InvalidArgument("missing stored object");
+      }
+      std::lock_guard lock(mutex_);
+      objects_[std::string(key)] = std::string(reinterpret_cast<const char *>(data->data()), data->length());
+    }
     return put_status_;
   }
-  swordfs::utils::Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
+  swordfs::utils::Status Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) override {
+    std::lock_guard lock(mutex_);
+    const auto it = objects_.find(std::string(key));
+    if (it == objects_.end()) {
+      return swordfs::utils::Status::NotFound("data object not found");
+    }
+    if (out == nullptr || offset > it->second.size() || size > it->second.size() - offset || out->tailroom() < size) {
+      return swordfs::utils::Status::InvalidArgument("invalid data object read range");
+    }
+    std::memcpy(out->writableTail(), it->second.data() + offset, size);
+    out->append(size);
     return swordfs::utils::Status::OK();
   }
-  swordfs::utils::Status Delete(std::string_view) override {
+  swordfs::utils::Status Delete(std::string_view key) override {
+    std::lock_guard lock(mutex_);
+    objects_.erase(std::string(key));
     return swordfs::utils::Status::OK();
   }
 
@@ -361,6 +404,8 @@ class NoopDataEngine : public swordfs::storage::IDataEngine {
   }
 
  private:
+  std::mutex mutex_;
+  std::unordered_map<std::string, std::string> objects_;
   swordfs::utils::Status put_status_{swordfs::utils::Status::OK()};
   int put_calls_ = 0;
 };
@@ -495,6 +540,191 @@ class BatchProbeDirIterator final : public swordfs::metadata::DirIterator {
 
 class MockMetaEngine : public swordfs::metadata::IMetaEngine {
  public:
+  Status OpenChunkMetadata(swordfs::metadata::ChunkType type, swordfs::metadata::ChunkMetadataPtr *out) override {
+    if (out == nullptr || type != swordfs::metadata::ChunkType::kCow) {
+      return Status::InvalidArgument("invalid typed chunk metadata request");
+    }
+    *out = cow_metadata_;
+    return Status::OK();
+  }
+
+  Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, swordfs::metadata::FileChunkSnapshot *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("null typed chunk snapshot output");
+    }
+    swordfs::metadata::FileChunkSnapshot snapshot;
+    auto status = GetInode(ino, &snapshot.inode);
+    if (!status.ok()) {
+      return status;
+    }
+    const auto &chunks = attachments_[ino];
+    if (auto it = chunks.find(index); it != chunks.end()) {
+      snapshot.chunk_id = it->second;
+    }
+    swordfs::metadata::ChunkSizeLayout layout;
+    status = swordfs::metadata::PlanChunkSizeLayout(snapshot.inode.attr.size,
+                                                    swordfs::volume::VolumeImpl::Instance().chunk_size(), &layout);
+    if (!status.ok()) {
+      return status;
+    }
+    if (layout.boundary.has_value()) {
+      std::optional<swordfs::metadata::ChunkID> boundary_id;
+      if (auto it = chunks.find(layout.boundary->index); it != chunks.end()) {
+        boundary_id = it->second;
+      }
+      snapshot.eof_boundary = swordfs::metadata::ChunkBoundarySnapshot{
+          .index = layout.boundary->index, .chunk_id = boundary_id, .visible_prefix = layout.boundary->visible_prefix};
+    }
+    *out = std::move(snapshot);
+    return Status::OK();
+  }
+
+  Status ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<swordfs::metadata::ChunkID> *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("null attachment output");
+    }
+    out->reset();
+    if (auto it = attachments_[ino].find(index); it != attachments_[ino].end()) {
+      *out = it->second;
+    }
+    return Status::OK();
+  }
+
+  Status ValidateEof(InodeID ino, const swordfs::metadata::FileSizePrecondition &expected) {
+    auto status =
+        swordfs::metadata::ValidateFileSizePrecondition(expected, swordfs::volume::VolumeImpl::Instance().chunk_size());
+    if (!status.ok()) {
+      return status;
+    }
+    SwordFsInode inode;
+    status = GetInode(ino, &inode);
+    if (!status.ok()) {
+      return status;
+    }
+    if (inode.attr.size != expected.eof) {
+      return Status::AlreadyExists("EOF changed");
+    }
+    if (expected.boundary.has_value()) {
+      std::optional<swordfs::metadata::ChunkID> actual;
+      status = ProbeAttachment(ino, expected.boundary->index, &actual);
+      if (!status.ok()) {
+        return status;
+      }
+      if (actual != expected.boundary->chunk_id) {
+        return Status::AlreadyExists("EOF boundary changed");
+      }
+    }
+    return Status::OK();
+  }
+
+  Status AttachPrepared(InodeID ino, ChunkIndex index, swordfs::metadata::ChunkID id, uint64_t end,
+                        const swordfs::metadata::FileSizePrecondition &expected) override {
+    auto status =
+        swordfs::metadata::ValidateFileChunkWrite(index, id, end, swordfs::volume::VolumeImpl::Instance().chunk_size());
+    if (!status.ok()) {
+      return status;
+    }
+    status = ValidateEof(ino, expected);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!attachments_[ino].emplace(index, id).second) {
+      return Status::AlreadyExists("typed attachment exists");
+    }
+    auto &inode = inodes_[ino];
+    inode.ino = ino;
+    inode.attr.ino = ino;
+    inode.attr.size = std::max(inode.attr.size, end);
+    return Status::OK();
+  }
+
+  Status FinalizeAttachedWrite(InodeID ino, ChunkIndex index, swordfs::metadata::ChunkID id, uint64_t end,
+                               const swordfs::metadata::FileSizePrecondition &expected) override {
+    auto status =
+        swordfs::metadata::ValidateFileChunkWrite(index, id, end, swordfs::volume::VolumeImpl::Instance().chunk_size());
+    if (!status.ok()) {
+      return status;
+    }
+    status = ValidateEof(ino, expected);
+    if (!status.ok()) {
+      return status;
+    }
+    const auto it = attachments_[ino].find(index);
+    if (it == attachments_[ino].end() || it->second != id) {
+      return Status::AlreadyExists("typed attachment changed");
+    }
+    auto &inode = inodes_[ino];
+    inode.attr.size = std::max(inode.attr.size, end);
+    return Status::OK();
+  }
+
+  Status ReadFileMappingSnapshot(InodeID ino, swordfs::metadata::FileMappingSnapshot *out) override {
+    if (out == nullptr) {
+      return Status::InvalidArgument("missing typed file mapping snapshot output");
+    }
+    swordfs::metadata::FileMappingSnapshot snapshot;
+    auto status = GetInode(ino, &snapshot.inode);
+    if (!status.ok()) {
+      return status;
+    }
+    for (const auto &[index, id] : attachments_[ino]) {
+      snapshot.mappings.push_back({.index = index, .chunk_id = id});
+    }
+    *out = std::move(snapshot);
+    return Status::OK();
+  }
+
+  Status CommitShrink(InodeID ino, const swordfs::metadata::ChunkSizePlan &plan, const SwordFsAttr &requested,
+                      SetAttrField fields, swordfs::metadata::ChunkSizeCommitResult *out) override {
+    return CommitEmptyMappingSize(ino, plan, requested, fields, out);
+  }
+  Status CommitGrow(InodeID ino, const swordfs::metadata::ChunkSizePlan &plan, const SwordFsAttr &requested,
+                    SetAttrField fields, swordfs::metadata::ChunkSizeCommitResult *out) override {
+    return CommitEmptyMappingSize(ino, plan, requested, fields, out);
+  }
+
+  Status CommitEmptyMappingSize(InodeID ino, const swordfs::metadata::ChunkSizePlan &plan, const SwordFsAttr &requested,
+                                SetAttrField fields, swordfs::metadata::ChunkSizeCommitResult *out) {
+    if (out == nullptr || !swordfs::metadata::HasSetAttrField(fields, SetAttrField::kSize) ||
+        requested.size != plan.target_eof) {
+      return Status::InvalidArgument("invalid typed size transition fixture request");
+    }
+    swordfs::metadata::FileMappingSnapshot snapshot;
+    auto status = ReadFileMappingSnapshot(ino, &snapshot);
+    if (!status.ok()) {
+      return status;
+    }
+    swordfs::metadata::ChunkSizePlan validated;
+    status = swordfs::metadata::ValidateSizeCommitPlan(
+        plan, snapshot.inode.attr.size, swordfs::volume::VolumeImpl::Instance().chunk_size(), snapshot.mappings,
+        requested.size < snapshot.inode.attr.size, &validated);
+    if (!status.ok()) {
+      return status;
+    }
+    out->detached.clear();
+    if (requested.size < snapshot.inode.attr.size) {
+      swordfs::metadata::ChunkSizeLayout layout;
+      status = swordfs::metadata::PlanChunkSizeLayout(requested.size,
+                                                      swordfs::volume::VolumeImpl::Instance().chunk_size(), &layout);
+      if (!status.ok()) {
+        return status;
+      }
+      for (auto it = attachments_[ino].begin(); it != attachments_[ino].end();) {
+        if (layout.ShouldDetach(it->first)) {
+          out->detached.push_back({.index = it->first, .chunk_id = it->second});
+          it = attachments_[ino].erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+    status = SetAttr(ino, requested, fields, &out->inode);
+    if (status.ok()) {
+      out->boundary = validated.boundary;
+    }
+    return status;
+  }
+
   Status Initialize() override {
     return Status::OK();
   }
@@ -615,8 +845,12 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   }
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override {
     auto it = inodes_.find(ino);
-    if (it != inodes_.end() && swordfs::metadata::HasSetAttrField(fields, SetAttrField::kSize)) {
-      it->second.attr.size = attr.size;
+    if (swordfs::metadata::HasSetAttrField(fields, SetAttrField::kSize)) {
+      auto &inode = inodes_[ino];
+      inode.ino = ino;
+      inode.attr.ino = ino;
+      inode.attr.size = attr.size;
+      it = inodes_.find(ino);
     }
     if (out != nullptr) {
       if (it != inodes_.end()) {
@@ -912,6 +1146,9 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   }
 
  private:
+  std::unordered_map<InodeID, std::map<ChunkIndex, swordfs::metadata::ChunkID>> attachments_;
+  std::shared_ptr<swordfs::metadata::MemCOWChunkMetadata> cow_metadata_ =
+      std::make_shared<swordfs::metadata::MemCOWChunkMetadata>();
   Status call_status_{Status::OK()};
   int replace_tmpfile_name_on_unlink_call_ = 0;
   bool unrelated_entry_deleted_ = false;
@@ -2867,16 +3104,16 @@ FIBER_TEST_F(VfsImplIntegrationTest, GetAttrReportsBlocksForCachedUnflushedWrite
 
   auto data = folly::IOBuf::copyBuffer(std::string(kWriteSize, 'x'));
   ASSERT_TRUE(VfsImpl::Write(kFileIno, *data, 0, fi.fh).ok());
+  const int lookups_before_getattr = mock_meta_->get_inode_calls();
 
   struct stat attr{};
   ASSERT_TRUE(VfsImpl::GetAttr(kFileIno, &attr).ok());
   EXPECT_EQ(attr.st_size, static_cast<off_t>(kWriteSize));
   EXPECT_EQ(attr.st_blocks, 1);
 
-  // GETATTR keeps its existing single authoritative refresh; block accounting
-  // must not add another metadata read. Publication is covered independently
-  // at the FileReadWriter layer.
-  EXPECT_EQ(mock_meta_->get_inode_calls(), 1);
+  // GETATTR refreshes the inode once. The prior write now also consults the
+  // typed FileMetadata snapshot; that independent lookup is not a GETATTR cost.
+  EXPECT_EQ(mock_meta_->get_inode_calls(), lookups_before_getattr + 1);
 
   EXPECT_TRUE(VfsImpl::Release(kFileIno, fi.fh).ok());
 }
@@ -3464,6 +3701,10 @@ class RecordingDataEngine : public swordfs::storage::IDataEngine {
 class VfsLastLinkCleanupTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    // This fixture's GC reconciliation crosses from fiber to POSIX thread.
+    // Construct the shared test executor now, in the test runner's thread
+    // domain, rather than initializing it on first use inside a fiber.
+    (void)swordfs::test::BlockingTestExecutor();
     auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<swordfs::metadata::MemMetaImpl>>();
     auto data = std::make_unique<RecordingDataEngine>();
     meta_ = meta.get();

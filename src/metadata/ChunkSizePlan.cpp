@@ -78,6 +78,39 @@ std::optional<RetainedChunkBoundary> MakeRetainedBoundary(const std::optional<Ch
 
 }  // namespace
 
+utils::Status ValidateFileChunkWrite(ChunkIndex index, ChunkID chunk_id, uint64_t end, uint64_t chunk_size) {
+  if (!IsValidChunkID(chunk_id) || chunk_size == 0 || end > kMaxSupportedFileSize) {
+    return utils::Status::InvalidArgument("invalid typed chunk write identity or size");
+  }
+  uint64_t start_offset = 0;
+  auto status = CalculateChunkStartOffset(index, chunk_size, &start_offset);
+  if (!status.ok() || end <= start_offset || end - start_offset > chunk_size) {
+    return utils::Status::InvalidArgument("typed chunk write extends outside its logical position");
+  }
+  return utils::Status::OK();
+}
+
+utils::Status ValidateFileSizePrecondition(const FileSizePrecondition &expected, uint64_t chunk_size) {
+  ChunkSizeLayout layout;
+  auto status = PlanChunkSizeLayout(expected.eof, chunk_size, &layout);
+  if (!status.ok()) {
+    return status;
+  }
+  if (layout.boundary.has_value() != expected.boundary.has_value()) {
+    return utils::Status::InvalidArgument("interior EOF requires an explicit FileMetadata boundary precondition");
+  }
+  if (!layout.boundary.has_value()) {
+    return utils::Status::OK();
+  }
+  const auto &boundary = *expected.boundary;
+  if (!layout.boundary.has_value() || boundary.index != layout.boundary->index ||
+      boundary.visible_prefix != layout.boundary->visible_prefix ||
+      (boundary.chunk_id.has_value() && !IsValidChunkID(*boundary.chunk_id))) {
+    return utils::Status::InvalidArgument("invalid FileMetadata EOF boundary precondition");
+  }
+  return utils::Status::OK();
+}
+
 utils::Status PlanChunkSizeLayout(uint64_t target_eof, uint64_t chunk_size, ChunkSizeLayout *out) {
   if (out == nullptr || chunk_size == 0 || target_eof > kMaxSupportedFileSize) {
     return utils::Status::InvalidArgument("invalid chunk size layout request");
@@ -138,6 +171,34 @@ utils::Status internal::PlanChunkSizeChangeImpl(uint64_t old_size, uint64_t new_
   }
 
   *out = std::move(plan);
+  return utils::Status::OK();
+}
+
+utils::Status ValidateSizeCommitPlan(const ChunkSizePlan &requested, uint64_t actual_eof, uint64_t chunk_size,
+                                     const std::vector<ChunkMapping> &mappings, bool is_shrink,
+                                     ChunkSizePlan *current) {
+  if (current == nullptr || (is_shrink ? requested.target_eof >= requested.expected_old_state.eof
+                                       : requested.target_eof <= requested.expected_old_state.eof)) {
+    return utils::Status::InvalidArgument("invalid typed file size transition");
+  }
+  auto status = ValidateFileSizePrecondition(requested.expected_old_state, chunk_size);
+  if (!status.ok()) {
+    return status;
+  }
+  if (actual_eof != requested.expected_old_state.eof) {
+    return utils::Status::AlreadyExists("stale typed file size precondition");
+  }
+  status = PlanChunkSizeChange(actual_eof, requested.target_eof, chunk_size, mappings, current);
+  if (!status.ok()) {
+    return status;
+  }
+  const auto &expected = requested.expected_old_state.boundary;
+  const auto &actual = current->expected_old_state.boundary;
+  if (expected.has_value() != actual.has_value() ||
+      (expected.has_value() && (expected->index != actual->index || expected->chunk_id != actual->chunk_id ||
+                                expected->visible_prefix != actual->visible_prefix))) {
+    return utils::Status::AlreadyExists("stale typed file EOF boundary attachment");
+  }
   return utils::Status::OK();
 }
 

@@ -34,6 +34,7 @@
 #include <string_view>
 #include <vector>
 
+#include "metadata/ChunkSizePlan.hpp"
 #include "metadata/IChunkIndexTxn.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
@@ -47,6 +48,9 @@ using Status = swordfs::utils::Status;
 namespace swordfs::metadata {
 
 class MemMetaStore;
+struct FileChunkSnapshot;
+struct FileMappingSnapshot;
+struct ChunkSizeCommitResult;
 
 class MemMetaTxn : public IChunkIndexTxn {
  public:
@@ -165,6 +169,20 @@ class MemMetaTxn : public IChunkIndexTxn {
   Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out);
   Status TruncateChunks(InodeID ino, uint64_t new_size);
 
+  // Mechanism-neutral FileMetadata authority; all operations run under the
+  // same transaction lock as inode EOF/attributes.
+  Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out);
+  Status ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out);
+  Status ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out);
+  Status AttachPrepared(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                        const FileSizePrecondition &expected);
+  Status FinalizeAttachedWrite(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                               const FileSizePrecondition &expected);
+  Status CommitShrink(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                      ChunkSizeCommitResult *out);
+  Status CommitGrow(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                    ChunkSizeCommitResult *out);
+
   // ────────────────────────────────────────────────────────────────
   // Reclaim
   // ────────────────────────────────────────────────────────────────
@@ -212,6 +230,8 @@ class MemMetaTxn : public IChunkIndexTxn {
   };
   std::string PrivateHash(std::string_view hash) const;
   void CommitLegacyBridgeWrites();
+  Status CommitSizeChange(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                          bool is_shrink, ChunkSizeCommitResult *out);
 
   // Only MemMetaStore::Transact() may begin a transaction.
   explicit MemMetaTxn(MemMetaStore *store);

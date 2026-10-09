@@ -39,6 +39,10 @@ std::string RedisKey::Chunk(uint64_t ino) const {
   return folly::sformat("{}chunk:{}", prefix_, ino);
 }
 
+std::string RedisKey::ChunkRefs(uint64_t ino) const {
+  return folly::sformat("{}chunk_refs:{}", prefix_, ino);
+}
+
 std::string RedisKey::PrivateChunkIndex(ChunkType mechanism, std::string_view hash) const {
   return folly::sformat("{}private_chunk_index:{}:{}", prefix_, ChunkTypeKey(mechanism), hash);
 }
