@@ -532,20 +532,9 @@ utils::Status FileReadWriter::Truncate(size_t size) {
   if (size > metadata::kMaxSupportedFileSize) {
     return utils::Status::InvalidArgument("FileReadWriter::Truncate: size exceeds supported range");
   }
-  auto status = meta_->Truncate(ino_, size);
-  if (!status.ok()) {
-    return status;
-  }
-  chunks_.TruncateToSize(size, chunk_size_);
-  // Truncate persists the logical size synchronously; after success metadata
-  // is authoritative and no transient size overlay remains necessary.
-  {
-    std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
-    authoritative_size_ = size;
-    live_size_.reset();
-    ++size_state_epoch_;
-  }
-  return utils::Status::OK();
+  metadata::SwordFsAttr requested;
+  requested.size = size;
+  return CommitSizeChangeLocked(requested, metadata::SetAttrField::kSize, nullptr);
 }
 
 utils::Status FileReadWriter::SetAttr(const metadata::SwordFsAttr &attr, metadata::SetAttrField fields,
@@ -554,21 +543,123 @@ utils::Status FileReadWriter::SetAttr(const metadata::SwordFsAttr &attr, metadat
   if (metadata::HasSetAttrField(fields, metadata::SetAttrField::kSize) && attr.size > metadata::kMaxSupportedFileSize) {
     return utils::Status::InvalidArgument("FileReadWriter::SetAttr: size exceeds supported range");
   }
+  if (metadata::HasSetAttrField(fields, metadata::SetAttrField::kSize)) {
+    return CommitSizeChangeLocked(attr, fields, out);
+  }
   auto status = meta_->SetAttr(ino_, attr, fields, out);
   if (!status.ok()) {
     return status;
   }
-  if (metadata::HasSetAttrField(fields, metadata::SetAttrField::kSize)) {
-    chunks_.TruncateToSize(attr.size, chunk_size_);
-    // A successful size setattr has already committed the new logical size.
-    {
-      std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
-      authoritative_size_ = attr.size;
-      live_size_.reset();
-      ++size_state_epoch_;
+  ApplyLiveSize(out);
+  return utils::Status::OK();
+}
+
+utils::Status FileReadWriter::CommitSizeChangeLocked(const metadata::SwordFsAttr &requested,
+                                                     metadata::SetAttrField fields, metadata::SwordFsInode *out) {
+  metadata::FileMappingSnapshot before;
+  auto status = meta_->ReadFileMappingSnapshot(ino_, &before);
+  if (!status.ok()) {
+    return status;
+  }
+  if (requested.size == before.inode.attr.size) {
+    // Size is unchanged. This is an ordinary attribute update, not a COW
+    // boundary transition, and it still needs the requested ctime/flags.
+    status = meta_->SetAttr(ino_, requested, fields, out);
+    if (!status.ok()) {
+      return status;
+    }
+  } else {
+    metadata::ChunkSizePlan plan;
+    status = metadata::PlanChunkSizeChange(before.inode.attr.size, requested.size, chunk_size_, before.mappings, &plan);
+    if (!status.ok()) {
+      return status;
+    }
+
+    const auto *factory = volume::VolumeImpl::Instance().chunk_factory();
+    if (factory == nullptr) {
+      return utils::Status::Internal("missing mounted ChunkFactory for typed size transition");
+    }
+    const bool shrinking = requested.size < before.inode.attr.size;
+    if (!shrinking && plan.boundary.has_value()) {
+      // Sanitize only the still-attached old-EOF boundary before publishing
+      // an explicit grow. The exclusive mount-local barrier excludes a local
+      // writer from republishing the old hidden suffix during this operation.
+      status = factory->SanitizeBoundary(ino_, *plan.boundary);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+
+    metadata::ChunkSizeCommitResult committed;
+    if (shrinking) {
+      status = meta_->CommitShrink(ino_, plan, requested, fields, &committed);
+    } else {
+      status = meta_->CommitGrow(ino_, plan, requested, fields, &committed);
+    }
+    if (!status.ok()) {
+      if (status.IsOutcomeUnknown()) {
+        // Redis may have committed even though its reply was lost. Reconcile
+        // the local cache to the observed authoritative state even on error.
+        metadata::FileMappingSnapshot observed;
+        if (meta_->ReadFileMappingSnapshot(ino_, &observed).ok()) {
+          chunks_.TruncateToSize(static_cast<size_t>(observed.inode.attr.size), chunk_size_);
+          {
+            std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
+            authoritative_size_ = observed.inode.attr.size;
+            live_size_.reset();
+            ++size_state_epoch_;
+          }
+          if (shrinking && observed.inode.attr.size == plan.target_eof && plan.boundary.has_value()) {
+            // A lost CommitShrink reply can still mean EOF and detach were
+            // committed. The retained head must be sanitized just as in the
+            // known-success path; otherwise its cached local size is clamped
+            // while the authoritative private head retains the hidden tail.
+            // Validate the observed attachment before touching private state.
+            const auto &boundary = *plan.boundary;
+            const bool still_attached = std::any_of(
+                observed.mappings.begin(), observed.mappings.end(), [&](const metadata::ChunkMapping &mapping) {
+                  return mapping.index == boundary.index && mapping.chunk_id == boundary.chunk_id;
+                });
+            if (still_attached) {
+              const auto sanitize_status = factory->SanitizeBoundary(ino_, boundary);
+              if (!sanitize_status.ok()) {
+                return sanitize_status;
+              }
+            }
+          }
+        }
+      }
+      return status;
+    }
+    if (out != nullptr) {
+      *out = committed.inode;
+    }
+    if (shrinking && plan.boundary.has_value()) {
+      // The FileMetadata EOF/detach commit cannot be rolled back by a failed
+      // best-effort head clamp. Apply the committed local EOF first.
+      chunks_.TruncateToSize(static_cast<size_t>(committed.inode.attr.size), chunk_size_);
+      {
+        std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
+        authoritative_size_ = committed.inode.attr.size;
+        live_size_.reset();
+        ++size_state_epoch_;
+      }
+      status = factory->SanitizeBoundary(ino_, *plan.boundary);
+      if (!status.ok()) {
+        return status;
+      }
     }
   }
-  ApplyLiveSize(out);
+
+  // A successful size mutation establishes the new visible EOF; the old
+  // dirty/clean cache must never restore detached mappings or hidden bytes.
+  chunks_.TruncateToSize(static_cast<size_t>(requested.size), chunk_size_);
+  {
+    std::lock_guard<utils::FiberMutex> size_lock(size_mutex_);
+    authoritative_size_ = requested.size;
+    live_size_.reset();
+    ++size_state_epoch_;
+  }
   return utils::Status::OK();
 }
 

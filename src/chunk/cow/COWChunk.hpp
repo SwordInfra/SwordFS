@@ -11,7 +11,6 @@
 #include "chunk/Chunk.hpp"
 #include "chunk/cow/WriteBuf.hpp"
 #include "metadata/cow/COWChunkMetadata.hpp"
-#include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "utils/Synchronization.hpp"
 
@@ -37,7 +36,8 @@ class COWChunk final : public Chunk {
 
   COWChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t max_chunk_size,
            metadata::cow::COWChunkMetadataPtr cow_metadata, metadata::IMetaEngine *meta, storage::IDataEngine *data,
-           std::optional<metadata::SwordFsChunk> published_chunk);
+           std::optional<metadata::ChunkID> attached_id,
+           std::optional<metadata::cow::COWChunkHead> published_head = std::nullopt, size_t visible_prefix = 0);
 
   utils::Status Read(size_t offset, size_t len, folly::IOBuf *out) const override;
   utils::Status Write(size_t offset, const folly::IOBuf &data) override;
@@ -46,9 +46,8 @@ class COWChunk final : public Chunk {
   bool HasPendingWrites() const override;
 
  private:
-  metadata::SwordFsChunk BuildMeta(metadata::ChunkRevision revision, size_t size) const;
-  utils::Status LoadPublicationBaseline(std::optional<metadata::SwordFsChunk> *out) const;
-  utils::Status HydrateForWrite(const metadata::SwordFsChunk &published, std::shared_ptr<WriteBuf> *out) const;
+  utils::Status HydrateForWrite(metadata::ChunkID id, const metadata::cow::COWChunkHead &head,
+                                std::shared_ptr<WriteBuf> *out) const;
   utils::Status ReadLocal(const WriteBuf &buffer, size_t offset, size_t len, folly::IOBuf *out) const;
 
  private:
@@ -61,8 +60,9 @@ class COWChunk final : public Chunk {
   metadata::cow::COWChunkMetadataPtr cow_metadata_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
-  std::optional<metadata::SwordFsChunk> published_chunk_;
-  bool refresh_publication_baseline_ = false;
+  std::optional<metadata::ChunkID> attached_id_;
+  std::optional<metadata::cow::COWChunkHead> published_head_;
+  size_t visible_prefix_ = 0;
 };
 
 }  // namespace swordfs::chunk::cow

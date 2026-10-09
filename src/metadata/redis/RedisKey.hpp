@@ -26,6 +26,8 @@ class RedisKey {
   std::string Inode(uint64_t ino) const;
   std::string Directory(uint64_t parent_ino) const;
   std::string Chunk(uint64_t ino) const;
+  // #317 FileMetadata authority: index -> typed ChunkID, no COW state.
+  std::string ChunkRefs(uint64_t ino) const;
   // Generic storage namespace for selected chunk type's private metadata.
   // The stable enum value is part of the beta key layout; the mechanism, not
   // RedisKey, defines the suffix and whether the resulting key is a Hash,

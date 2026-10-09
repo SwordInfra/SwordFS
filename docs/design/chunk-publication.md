@@ -77,6 +77,10 @@ ID. This identity is distinct from `ChunkIndex` (where in the file) and from
 the COW-private revision (which immutable object version backs the current COW
 head).
 
+FileMetadata snapshot, attachment, and size-commit interfaces are mandatory
+for every metadata backend; an omitted implementation cannot silently fall
+back to a default `NotSupported` result at runtime during the typed cutover.
+
 ChunkID allocation is owned by ChunkMetadata and is independent of FileMetadata
 transactions. Memory uses ChunkMetadata-owned synchronization and state rather
 than the `MemMetaStore::Transact()` lock/commit lifecycle. Redis uses a
@@ -314,6 +318,319 @@ absent, logical reclaim is complete even when the detached-ID/object list was
 lost. Any mapping record surviving under an absent inode is unreachable residue,
 not live ChunkID reachability. `ChunkGcWorker` does not own the VFS open-handle
 fence and never turns queue membership into delete permission.
+
+## #317 final authority cutover — normative implementation contract
+
+This section is the authoritative #317 design baseline. It supersedes the
+pre-#394 common `SwordFsChunk` lifecycle-marker/private-head design notes in
+#312 and the *legacy implementation* sections below. The permanent attachment
+root is FileMetadata `ChunkIndex -> ChunkID`, not a presence-only common marker;
+a private COW head without that attachment is unreachable residue, **not**
+published file data. A published attachment with no COW head is an inconsistency,
+**not** a hole. The mechanism-specific publication object/bridge descriptions
+from the earlier staged design are not final public architecture.
+
+### Domain boundaries and proposed semantic operations
+
+`IMetaEngine` remains the VFS-facing facade. It sequences FileMetadata-only
+mutations and independently invokes the injected typed `COWChunkMetadata`
+capability; it does not open a FileMetadata transaction while holding a private
+ChunkMetadata transaction, or vice versa. Exact C++ names are implementation
+choices, but the FileMetadata backend must expose the following **semantics**
+without carrying COW revisions/head sizes:
+
+| FileMetadata operation | Atomic result / conflict condition |
+| --- | --- |
+| `ReadFileChunkSnapshot(ino,index)` | One consistent inode EOF/attributes + optional attached ChunkID at the requested index and the current interior-EOF boundary mapping/hole, even when the boundary is at another index. A missing inode is an error; missing mapping *within* EOF is a hole. No full file-map scan on normal reads. |
+| `ReadFileMappingSnapshot(ino)` | One consistent EOF/attrs + complete typed `ChunkIndex -> ChunkID` mapping snapshot for size planning, with duplicate/out-of-range mapping detection. |
+| `AttachPrepared(ino,index,new_id,visible_end,expected)` | In one FileMetadata transaction: require live regular inode, mapping still absent, satisfy the relevant EOF/boundary preconditions, attach *fresh* ChunkID, and publish needed EOF/mtime/ctime together. A competing attachment is a conflict; never overwrite it. |
+| `FinalizeAttachedWrite(ino,index,id,visible_end,expected)` | Require mapping still equals the stable ChunkID and applicable observed FileMetadata EOF/boundary state is current; update requested inode EOF by max/attrs atomically. Never replace the ChunkID or persist COW revision/size. |
+| `CommitShrink(ino,plan,attrs)` | Validate the *entire* size/SetAttr request before destructive changes. In one FileMetadata transaction replan/revalidate the current snapshot, publish the smaller EOF/attrs and detach **all** whole mappings beyond EOF; return detached IDs and retained boundary as ephemeral output. |
+| `CommitGrow(ino,plan,attrs)` | After boundary sanitation, atomically require the plan's exact observed old EOF and old boundary mapping/hole state, then publish enlarged EOF/attrs. A lost precondition is a conflict, not a successful grow. |
+| `ProbeAttachment(ino,index)` | Return the current FileMetadata mapping for mechanism cleanup and boundary missing-head revalidation. A disappeared/non-revivable inode does not make old mappings live. |
+
+The snapshot and mutation paths are both mechanism-neutral and preserve full
+64-bit `ChunkIndex` and typed `ChunkID` validation. For Mem, keep the map
+and inode under the existing FileMetadata transaction lock, separate from the
+`MemCOWChunkMetadata` lock. For Redis, keep canonical per-inode mapping hash
+fields plus inode inside the FileMetadata WATCH/EXEC domain; use one
+FileMetadata-only optimistic transaction for each atomic operation. Re-read
+inode/mapping on WATCH conflicts. Backend codec/key details stay inside
+Mem/Redis adapters. Do not implement the final contract by projecting a
+`SwordFsChunk` containing stale revision/size.
+
+There is **no file-wide persistent content epoch, distributed lock, publication
+intent or cross-domain transaction**. `FileSizePrecondition` contains the
+observed old EOF and interior-boundary mapping/hole identity, not a COW
+revision. An interior EOF requires a boundary identity, including an explicit
+hole (`chunk_id = nullopt`); omitting it cannot bypass conflict detection.
+Exact-boundary/zero EOF must not carry an interior boundary. Inode attribute-only
+updates can race as usual; a transaction must
+read fresh inode state and apply only the requested fields, without restoring
+unrelated attributes from an older snapshot. `SetAttr` validates all requested
+fields/policy before the first destructive size operation.
+
+### Publication and error ownership
+
+**First attachment / rematerialization**:
+
+1. Observe `FileMetadata(ino,index)` as unmapped and capture the relevant
+   file-visible preconditions.
+2. Allocate fresh volume-scoped `ChunkID`; allocate a fresh COW revision
+   scoped to it; upload the complete immutable `(ChunkID,revision)` object.
+3. Initialize `COWChunkMetadata[ChunkID]` with full head
+   `{revision,size}` via typed CAS from absent. An ambiguous CAS is reconciled
+   by reading the head; do not assume failure or reuse an uncertain ID.
+4. Only **after** the mechanism state is known prepared, conditionally publish
+   the mapping and any EOF/attrs together using `AttachPrepared`.
+5. A competing mapping winner or failed FileMetadata finalization leaves the
+   unused ID/head/object unreachable. Never reattach/reuse that ID; cleanup
+   is best effort and must not delete a live current revision.
+
+**Rewrite of an attached ChunkID**:
+
+1. Validate attachment identity and read the *current* full typed head.
+2. For each outer Flush attempt allocate a **fresh** per-ID revision, upload
+   immutable data, and CAS exactly
+   `{expected_revision,expected_size} -> {new_revision,new_size}`.
+3. Known head-CAS success is the mechanism's publication point. Perform
+   FileMetadata inode/EOF side effects *afterward*, conditional on the stable
+   ChunkID still being attached; before those side effects, re-read the
+   exact candidate typed head. Rewrites never replace the mapping.
+4. Known rejection may register a definitely unused object for best-effort
+   cleanup. `OutcomeUnknown` is **indeterminate**: refresh head/attachment,
+   never delete the candidate based on that error, and a later *outer* Flush
+   uploads under a new revision. If head CAS succeeded but FileMetadata
+   finalization failed, that revision may already be authoritative; keep it.
+5. A lost attachment or new ChunkID rejects the old session; a stale session
+   must not attach its previous ChunkID, or silently copy its formerly
+   hydrated full-chunk image into a newly attached ID.
+
+FileMetadata finalization is idempotently retriable *within the same
+in-process candidate* when only an unrelated EOF/attribute mutation moved
+the FileMetadata snapshot: re-read current FileMetadata and verify the
+same ChunkID is attached **and** the exact candidate typed head is still
+current, then retry the FileMetadata max-EOF/attrs phase with new
+preconditions. This does **not** authorize another COW head CAS using the
+old revision. Different chunks in a parallel Flush may race to advance EOF;
+an observed EOF precondition conflict is not by itself a failed chunk
+publication if this fresh revalidation succeeds. If either candidate head
+or mapping changed, stop that finalization and follow the stale-session
+conflict/retry rule.
+
+FileMetadata finalization publishes EOF/attrs using its own optimistic
+preconditions, **not** as part of COW head CAS. A COW head may contain data
+beyond current EOF after a failed finalization; that suffix is hidden and
+subsequent *explicit grow* must sanitize the retained boundary before
+exposure. Such an error cannot classify the already-successful private CAS
+as a definitely rejected object. If an already attached rewrite requires no
+EOF growth, the head CAS remains the data-publication point; timestamp failure
+does not roll it back.
+
+Multi-chunk Flush remains bounded parallel per-chunk publication, with
+independent results and per-operation FileMetadata conditional finalization;
+it does **not** acquire a file-wide cross-domain transaction. Each attach
+publishes its own mapping and applicable EOF in one FileMetadata transition.
+Partial Flush failure preserves retryable local generations and reports error;
+it does not claim all-or-nothing success across chunks. There is no public
+`SwordFsChunk` revision CAS or two-authority shadow write.
+
+A first attachment can lose its conditional boundary precondition even when
+EOF does not move: another chunk can materialize at the existing interior EOF
+boundary while the requested index stays unattached. After a *definite*
+precondition conflict, a fresh FileMetadata snapshot showing either advanced
+EOF or that changed boundary identity permits preparation under a new
+ChunkID, revision, and object; it never reuses the rejected candidate. An
+unchanged snapshot, shrinking EOF, an occupied requested index, or an
+ambiguous attachment result does not grant this automatic retry.
+
+### Size transitions / crash and ambiguous outcomes
+
+**Shrink**: under the mount-local exclusive inode size/operation barrier,
+validate the requested SetAttr fields, then atomically commit FileMetadata
+EOF/attrs + whole-chunk detach. After the commit, clamp the retained *attached*
+boundary COW head via #318's full-head CAS/revalidation loop. A failed/crashed
+clamp may leave a tail **hidden by EOF**; this is not permission for a future
+grow to expose it. Detached IDs and physical cleanup targets may leak.
+Do not restore detached mappings. If the boundary's mapping still exists but
+its head is absent, fail closed as an inconsistency, while still reconciling
+the already committed FileMetadata EOF into the local session/cache.
+For an ambiguous shrink reply, reread the authoritative EOF and mapping set.
+If the requested smaller EOF is visible and the retained boundary still maps
+to the same ChunkID, perform the same private-head sanitation as for a known
+successful shrink. Reconcile the local dirty/cache state regardless of the
+reply, but do not clamp a different or detached ChunkID when reconciling an
+ambiguous outcome. A failed sanitation remains an error after FileMetadata
+has already crossed its logical point of no return.
+
+**Explicit grow**: while holding the same local exclusive barrier, observe
+FileMetadata old EOF+boundary ID, sanitize **only** that still-attached
+interior boundary to its previously visible prefix (no exact-boundary or hole
+sanitization), and then `CommitGrow` with the exact old FileMetadata
+precondition. Do not scan or reattach detached IDs. If the final grow loses
+the precondition, report/retry from a fresh snapshot as appropriate; do not
+restore removed hidden bytes. A sanitation CAS conflict or ambiguous result
+re-reads the head and reconciles as #318 specifies. Revalidation of
+FileMetadata before a destructive clamp remains necessary when the boundary
+is concurrently replaced/disappears, but an independent FileMetadata read and
+private CAS must **not** be described as a globally atomic guard.
+
+**EOF-extending writes** are *not* explicit file grow: the writer's newly
+uploaded bytes at its chosen offsets must survive publication. In the attached
+old-EOF boundary, hydrate the current **visible** prefix (not any hidden
+head suffix) before applying local writes; do not sanitize away the writer's
+new bytes as a separate explicit-grow step. Its COW head CAS and conditional
+FileMetadata EOF finalization are the publication sequence described above.
+When a concurrent size transition invalidates its FileMetadata precondition,
+the stale candidate cannot silently cause EOF growth; retry the complete
+logical write/flush attempt with fresh attachment/head and a fresh revision,
+or report a conflict while preserving local dirty data.
+
+**Ambiguity**:
+
+- private CAS unknown: re-read that ChunkID's head; if the candidate is
+  current, treat it as potentially authoritative, not rejected; refresh for
+  any next attempt;
+- FileMetadata attach/finalization unknown: re-read inode EOF and mapping
+  under FileMetadata authority; if a first-attach candidate is *currently*
+  mapped to that ID, reconcile its publication, and if a competing ID is
+  mapped, report conflict. If mapping is absent, the uncertain ID may have
+  been attached then detached: do **not** try to attach that ID again;
+  begin a new materialization with a fresh ID. An attached-rewrite
+  candidate may retry *only* its FileMetadata side effects after confirming
+  that mapping and the exact COW head still match; do not blindly replay
+  an uncertain FileMetadata write from stale preconditions;
+- FileMetadata shrink/grow unknown: re-read EOF *and mapping snapshot*, not
+  merely a status flag. Apply local EOF/cache invalidation to the observed
+  authoritative state **even if the syscall reports an error**; this prevents
+  stale dirty sessions republishing after a shrink that actually committed;
+- cleanup registration/physical deletion errors may leak and never revert
+  a known successful logical publication or detach.
+
+### Runtime session identity and cache
+
+The runtime identity is `(ino,ChunkIndex,attached ChunkID)`. A session
+opened on a hole is *unattached* until it wins first materialization; no
+identity is permanently assigned merely by a speculative write. Clean
+sessions contain the typed COW head as a refreshable snapshot, never as a
+FileMetadata copy of revision/size.
+
+`ChunkFactory::Open` resolves a FileMetadata mapping (and visible EOF)
+instead of consulting legacy `FindChunk/SwordFsChunk`. For a mapped entry,
+it resolves the typed head; missing head is an error. For no mapping, a read
+gets a hole and a write may create an unattached dirty session. Hydration
+reads **only** the published visible head prefix and fills holes with zeros;
+exact object-read length and bounds must be verified.
+
+`FileChunkManager` may retain the current index-keyed container for efficient
+same-mount access, but **not** interpret the index as immutable chunk-session
+identity. With the mount-local inode operation barrier held:
+
+- regular cache hits may reuse a validated same-mount session without
+  incurring a new FileMetadata network read for *each* read;
+- local committed shrink detaches/evicts every whole chunk session beyond EOF
+  and clamps/invalidates the boundary local generation **before releasing the
+  exclusive barrier**; following rematerialization opens a new session with a
+  fresh ID. For a retained boundary whose COW head is clamped to the new EOF,
+  synchronize the local session's cached full-head CAS precondition to the
+  same-revision, reduced-size private head. Otherwise a subsequent legal
+  same-mount rewrite of that stable ChunkID will incorrectly fail as a stale
+  head even though the clamp originated from its own completed truncate;
+- local successful grow must refresh the boundary view so an old hidden
+  head suffix cannot reappear as cached data;
+- CAS/retry/attachment conflict refreshes FileMetadata mapping and typed head;
+  if the index now identifies a different/absent ChunkID, invalidate the old
+  session and fail closed or build a **new** session from the current mapping;
+- a stale dirty snapshot cannot silently migrate old hydrated bytes to a
+  different ChunkID. Mount-local size changes discard/truncate affected local
+  pending buffers consistently with POSIX size semantics; stale remote
+  replacement is an explicit conflict/rebase decision, not implicit replay;
+- drop/refresh failed ambiguous-size-operation cache state from authoritative
+  FileMetadata even when the initiating operation returns an error.
+
+The existing `FileReadWriter::operation_mutex_` already gives the same-mount
+exclusive size-change versus shared write/read/flush coordination; retain
+bounded parallel Flush for different chunks. Cache insertion or replacement
+must be ordered under that operation barrier plus the manager's own map
+mutex. Do not add an always-on per-read distributed transaction merely as
+an accidental result of switching authority.
+
+### Concurrency guarantee boundary
+
+Mount-local size changes (truncate/size SetAttr/explicit grow) are serialized
+against mount-local read/write/flush by the existing per-inode operation
+barrier. Redis FileMetadata WATCH/EXEC detects **observed** inode/mapping
+changes, and COW full-head CAS detects **observed** same-ID rewrites; a known
+loss of either precondition is a conflict requiring refresh. Memory maintains
+independent per-domain locks, not one hidden global transaction. Tests must
+cover stale candidate and mapping replacements across the Redis phase
+boundaries, as well as same-mount flush versus shrink and grow.
+
+**Not guaranteed in #317:** full linearizability of arbitrary *cross-mount*
+concurrent write versus shrink/grow, nor read-vs-remote-GC pinning. Without
+a cross-domain atomic predicate, distributed per-inode exclusion/fencing, or a
+durable sequencing protocol, `re-read head -> independent FileMetadata
+commit` and `re-read EOF -> independent head clamp` both have TOCTOU
+windows. For example, an external grow can finalize new visible data after
+the shrink's FileMetadata read but before its later COW clamp. Those reads
+and conditional commits alone cannot prove the later clamp is safe.
+
+This limitation must be treated as an **explicit supported-concurrency
+boundary**, not as an implemented multi-node write guarantee. Do not add a
+content epoch, new distributed coordinator or cross-domain transaction merely
+under #317. If strong cross-mount concurrent mutation is required for this
+release, that requirement is a genuine **design gate** demanding a separate
+fencing/serialization decision before claiming #317 is complete. The
+accepted #312 non-goal of distributed read-vs-GC leases remains separate.
+
+### Contract-first verification matrix for the later TDD phase
+
+No production implementation or tests are introduced by this design-only
+checkpoint. When implementation is approved, test:
+
+1. Mem+Redis snapshots (EOF + mapping), full 64-bit keys, type/range errors;
+   conditional attach winner/loser, atomic attachment+EOF/attrs.
+2. First attach: prepared object/head before mapping, failure/ambiguous
+   attach, no stale-ID reattachment, fresh-ID rematerialization.
+3. Same-ID rewrite: full-head CAS, fresh revision per Flush, same-revision
+   size-only clamp conflict, ambiguous CAS reconcile, later FileMetadata
+   finalization failure never marks published object definitely garbage.
+4. EOF-extending write into a retained boundary with hidden tail: intended
+   new bytes survive, unwritten bytes zero, and a stale finalize cannot extend
+   EOF; multi-chunk Flush preserves partial-success/retry semantics.
+5. Shrink (0/exact/interior/hole) and grow (exact/hole/already-safe/hidden
+   tail) with full detach+EOF atomicity and FileMetadata precondition
+   failures; lost clamp/ambiguous outcome leaves hidden tail, not resurrection.
+6. Redis WATCH loss and ambiguous FileMetadata commit: authoritative
+   resnapshot, correct local cache invalidation even after error; no
+   stale-ChunkID reattachment or live-head object deletion.
+7. Same-mount concurrent read/write/flush/size SetAttr with cached sessions;
+   invalidation on detach, fresh-ID rematerialization, dirty boundary cut,
+   stale session versus new mapping.
+8. Typed GC: revision-only physical liveness, detached ID reachability,
+   reclaim non-revivability and loss-tolerant maintenance work, no legacy
+   cleanup authority emitted after #317.
+9. Remount/read and full FUSE/Redis/fstests regressions. Cross-mount
+   write-vs-size linearizability is **not** asserted without the explicit
+   distributed-fencing design gate described above.
+
+### #317 implementation checkpoint (2026-10-08; not an acceptance declaration)
+
+The first test-first implementation slice introduced typed FileMetadata
+snapshots, `AttachPrepared`, `FinalizeAttachedWrite`, and attachment probes
+for both Memory and Redis. The contract lives in independent mapping tables,
+not in a projected `SwordFsChunk` revision/size. The initial RED evidence is
+Dev Build [#37751219897](https://github.com/SwordInfra/SwordFS/actions/runs/37751219897),
+followed by focused GREEN [#37752467916](https://github.com/SwordInfra/SwordFS/actions/runs/37752467916).
+
+These typed APIs are **not yet** the active runtime authority. No final
+acceptance criterion is complete solely because these tests pass. In
+particular, the COW session/factory, FileMetadata size transitions, typed
+reclaim/GC, and removal of legacy publication paths must be switched together
+before announcing the one-shot authority cutover. During development, the
+legacy common descriptor path remains untouched and the newly introduced
+typed mapping is not populated by that path; never represent both as one
+consistent production view or as a dual-write migration.
 
 The COW publication protocol below describes the transitional
 `cow` implementation. Its object revision and key are private to that
