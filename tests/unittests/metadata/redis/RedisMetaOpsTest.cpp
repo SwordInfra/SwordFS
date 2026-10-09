@@ -90,6 +90,9 @@ TEST(RedisMetaOpsTest, TypedFileMetadataSnapshotsAndAttachmentRejectInvalidTarge
 
   const std::string volume_name = UniqueRedisName("ops-typed-attachments");
   RedisMetaOps ops(config, volume_name);
+  SwordFsVolume volume;
+  volume.name = volume_name;
+  ASSERT_TRUE(ops.FormatVolume(volume).ok());
   const redis::RedisKey key(config.db, volume_name);
   sw::redis::Redis redis(ConnectionOptions(config));
   constexpr InodeID kFileIno = 42;

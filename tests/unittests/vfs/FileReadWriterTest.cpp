@@ -1704,6 +1704,49 @@ TEST_F(FileReadWriterTest, RejectedTypedAttachmentRetryUsesFreshImmutableIdentit
   });
 }
 
+TEST_F(FileReadWriterTest, FirstAttachmentRetriesWhenEofBoundaryAttachesWithoutSizeChange) {
+  // A sibling chunk may materialize inside the existing EOF while this
+  // chunk's first publication is in flight. The EOF remains unchanged, but
+  // the boundary identity observed in the initial snapshot becomes stale.
+  const uint64_t existing_eof = 2 * kChunkSize + 8;
+  auto rw = Make(existing_eof);
+  RunInTestFiber([&] { ASSERT_TRUE(rw.Write(Buf("new"), 0).ok()); });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton commit_started;
+  folly::fibers::Baton release_commit;
+  folly::fibers::Baton flush_done;
+  mock_meta_->BlockNextCommit(&commit_started, &release_commit);
+
+  Status flush_status;
+  Status boundary_status;
+  fm.addTask([&] {
+    flush_status = rw.Flush();
+    flush_done.post();
+  });
+  fm.addTask([&] {
+    commit_started.wait();
+    boundary_status = SeedPersistedChunk(2, "B", 1);
+    release_commit.post();
+  });
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return flush_done.try_wait(); }, "first attachment with unchanged EOF boundary race");
+
+  ASSERT_TRUE(boundary_status.ok()) << boundary_status.message();
+  ASSERT_TRUE(flush_status.ok()) << flush_status.message();
+  EXPECT_EQ(mock_meta_->file_size(), existing_eof);
+  EXPECT_EQ(mock_data_->StoredKeys().size(), 3U)
+      << "the rejected candidate must not be reused after its boundary precondition fails";
+
+  RunInTestFiber([&] {
+    FileReadWriter reopened(kIno, kMaxParallelFlushes);
+    auto out = folly::IOBuf::create(3);
+    ASSERT_TRUE(reopened.Read(3, 0, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "new");
+  });
+}
+
 TEST_F(FileReadWriterTest, RejectedTypedRewriteRetriesWithFreshPrivateRevision) {
   RunInTestFiber([&] {
     auto rw = Make();
