@@ -175,5 +175,85 @@ TEST(ChunkSizePlanTest, RejectsMalformedPlanningInputs) {
   EXPECT_EQ(PlanChunkSizeChange(1, 1, kChunkSize, Mappings({Mapping(overflowing_index, 1)}), &plan).ToErrno(), EINVAL);
 }
 
+TEST(ChunkSizePlanTest, TypedWriteRejectsCrossChunkAndInvalidPhysicalIdentities) {
+  EXPECT_TRUE(ValidateFileChunkWrite(0, ChunkID(1), 1, kChunkSize).ok());
+  EXPECT_TRUE(ValidateFileChunkWrite(3, ChunkID(2), 400, kChunkSize).ok());
+  EXPECT_EQ(ValidateFileChunkWrite(0, kInvalidChunkID, 1, kChunkSize).ToErrno(), EINVAL);
+  EXPECT_EQ(ValidateFileChunkWrite(0, ChunkID(kMaxChunkIDValue + 1), 1, kChunkSize).ToErrno(), EINVAL);
+  EXPECT_EQ(ValidateFileChunkWrite(0, ChunkID(1), 1, 0).ToErrno(), EINVAL);
+  EXPECT_EQ(ValidateFileChunkWrite(0, ChunkID(1), kChunkSize + 1, kChunkSize).ToErrno(), EINVAL);
+  EXPECT_EQ(ValidateFileChunkWrite(3, ChunkID(1), 300, kChunkSize).ToErrno(), EINVAL);
+  EXPECT_EQ(ValidateFileChunkWrite(3, ChunkID(1), 401, kChunkSize).ToErrno(), EINVAL);
+  EXPECT_EQ(
+      ValidateFileChunkWrite(kMaxSupportedFileSize / kChunkSize + 1, ChunkID(1), kMaxSupportedFileSize, kChunkSize)
+          .ToErrno(),
+      EINVAL);
+}
+
+TEST(ChunkSizePlanTest, TypedEofPreconditionRejectsAbsentOrWrongBoundaryGeometry) {
+  EXPECT_TRUE(ValidateFileSizePrecondition({.eof = 100}, kChunkSize).ok());
+  EXPECT_EQ(ValidateFileSizePrecondition({.eof = 150}, kChunkSize).ToErrno(), EINVAL);
+  const FileSizePrecondition hole{
+      .eof = 150, .boundary = ChunkBoundarySnapshot{.index = 1, .chunk_id = std::nullopt, .visible_prefix = 50}};
+  EXPECT_TRUE(ValidateFileSizePrecondition(hole, kChunkSize).ok());
+  EXPECT_EQ(ValidateFileSizePrecondition({.eof = 100, .boundary = hole.boundary}, kChunkSize).ToErrno(), EINVAL);
+  auto wrong_index = hole;
+  wrong_index.boundary->index = 0;
+  EXPECT_EQ(ValidateFileSizePrecondition(wrong_index, kChunkSize).ToErrno(), EINVAL);
+  auto wrong_prefix = hole;
+  wrong_prefix.boundary->visible_prefix = 49;
+  EXPECT_EQ(ValidateFileSizePrecondition(wrong_prefix, kChunkSize).ToErrno(), EINVAL);
+  auto invalid_id = hole;
+  invalid_id.boundary->chunk_id = ChunkID(kMaxChunkIDValue + 1);
+  EXPECT_EQ(ValidateFileSizePrecondition(invalid_id, kChunkSize).ToErrno(), EINVAL);
+  EXPECT_EQ(ValidateFileSizePrecondition(hole, 0).ToErrno(), EINVAL);
+}
+
+TEST(ChunkSizePlanTest, TypedSizeCommitRejectsStaleEofAndBoundaryIdentity) {
+  const auto mappings = Mappings({Mapping(0, 10), Mapping(1, 11), Mapping(2, 12)});
+  ChunkSizePlan shrink;
+  ASSERT_TRUE(PlanChunkSizeChange(250, 125, kChunkSize, mappings, &shrink).ok());
+
+  ChunkSizePlan authoritative;
+  ASSERT_TRUE(ValidateSizeCommitPlan(shrink, 250, kChunkSize, mappings, true, &authoritative).ok());
+  EXPECT_EQ(authoritative.boundary->chunk_id, ChunkID(11));
+  EXPECT_EQ(authoritative.detached_chunk_ids, (std::vector<ChunkID>{ChunkID(12)}));
+  EXPECT_EQ(ValidateSizeCommitPlan(shrink, 251, kChunkSize, mappings, true, &authoritative).ToErrno(), EEXIST);
+  EXPECT_EQ(ValidateSizeCommitPlan(shrink, 250, kChunkSize, Mappings({Mapping(0, 10), Mapping(1, 11), Mapping(2, 13)}),
+                                   true, &authoritative)
+                .ToErrno(),
+            EEXIST)
+      << "even a soon-detached ChunkID may be the old EOF boundary precondition";
+
+  ChunkSizePlan exact_eof_shrink;
+  ASSERT_TRUE(PlanChunkSizeChange(300, 125, kChunkSize, mappings, &exact_eof_shrink).ok());
+  EXPECT_TRUE(ValidateSizeCommitPlan(exact_eof_shrink, 300, kChunkSize,
+                                     Mappings({Mapping(0, 10), Mapping(1, 11), Mapping(2, 13)}), true, &authoritative)
+                  .ok())
+      << "a detached ID outside an exact old-EOF boundary must be classified afresh";
+  EXPECT_EQ(authoritative.detached_chunk_ids, (std::vector<ChunkID>{ChunkID(13)}));
+  EXPECT_EQ(ValidateSizeCommitPlan(shrink, 250, kChunkSize, Mappings({Mapping(0, 10), Mapping(1, 11), Mapping(2, 13)}),
+                                   true, nullptr)
+                .ToErrno(),
+            EINVAL);
+
+  auto stale_boundary = shrink;
+  stale_boundary.expected_old_state.boundary->chunk_id = ChunkID(13);
+  EXPECT_EQ(ValidateSizeCommitPlan(stale_boundary, 250, kChunkSize, mappings, true, &authoritative).ToErrno(), EEXIST);
+  auto missing_boundary = shrink;
+  missing_boundary.expected_old_state.boundary.reset();
+  EXPECT_EQ(ValidateSizeCommitPlan(missing_boundary, 250, kChunkSize, mappings, true, &authoritative).ToErrno(),
+            EINVAL);
+  EXPECT_EQ(ValidateSizeCommitPlan(shrink, 250, kChunkSize, mappings, false, &authoritative).ToErrno(), EINVAL);
+
+  ChunkSizePlan grow;
+  ASSERT_TRUE(PlanChunkSizeChange(125, 250, kChunkSize, Mappings({Mapping(1, 11)}), &grow).ok());
+  ASSERT_TRUE(ValidateSizeCommitPlan(grow, 125, kChunkSize, Mappings({Mapping(1, 11)}), false, &authoritative).ok());
+  EXPECT_EQ(ValidateSizeCommitPlan(grow, 125, kChunkSize, Mappings({Mapping(1, 12)}), false, &authoritative).ToErrno(),
+            EEXIST);
+  EXPECT_EQ(ValidateSizeCommitPlan(grow, 125, kChunkSize, Mappings({Mapping(1, 11)}), true, &authoritative).ToErrno(),
+            EINVAL);
+}
+
 }  // namespace
 }  // namespace swordfs::metadata

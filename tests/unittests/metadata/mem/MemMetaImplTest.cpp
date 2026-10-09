@@ -23,7 +23,9 @@
 #include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/PosixAclTestSupport.hpp"
+#include "metadata/Utils.hpp"
 #include "metadata/mem/MemMetaImpl.hpp"
+#include "metadata/types/BufCodec.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
 #include "utils/Context.hpp"
@@ -50,6 +52,85 @@ static constexpr gid_t kGroup = 100;
 static constexpr gid_t kOtherGroup = 200;
 static constexpr uint64_t kChunkSize = 64ULL * 1024 * 1024;
 static constexpr SetAttrField kKillSuidGidField = SetAttrField::kKillSuidGid;
+
+TEST(MetadataSetAttrPlanningTest, RejectsMissingOutputAndImmutableMutationWithoutChangingInput) {
+  const SwordFsInode current(42, SwordFsAttr(42, S_IFREG | 0644), kRoot);
+  SwordFsAttr requested;
+  requested.size = 64;
+  EXPECT_EQ(swordfs::metadata::PrepareSetAttrMutation(current, requested, SetAttrField::kSize, nullptr).ToErrno(),
+            EINVAL);
+
+  auto immutable = current;
+  immutable.attr.inode_flags = swordfs::metadata::InodeFlag::kImmutable;
+  SwordFsInode unchanged = current;
+  unchanged.attr.size = 999;
+  const auto status = swordfs::metadata::PrepareSetAttrMutation(immutable, requested, SetAttrField::kSize, &unchanged);
+  EXPECT_EQ(status.ToErrno(), EPERM);
+  EXPECT_EQ(unchanged.attr.size, 999U);
+  EXPECT_EQ(immutable.attr.size, 0U);
+}
+
+TEST(MetadataSetAttrPlanningTest, AppliesExplicitFieldMaskAndLeavesUnrequestedFieldsAlone) {
+  const SwordFsInode current(42, SwordFsAttr(42, S_IFREG | S_ISUID | S_ISGID | 0644), kRoot);
+  SwordFsAttr requested;
+  requested.mode = 0700;
+  requested.uid = 501;
+  requested.gid = 502;
+  requested.size = 64;
+  requested.atime = 101;
+  requested.atime_nsec = 123;
+  requested.mtime = 202;
+  requested.mtime_nsec = 234;
+  requested.ctime = 303;
+  requested.ctime_nsec = 345;
+
+  SwordFsInode updated;
+  const SetAttrField kAllExplicit = SetAttrField::kMode | SetAttrField::kUid | SetAttrField::kGid |
+                                    SetAttrField::kSize | SetAttrField::kAtime | SetAttrField::kMtime |
+                                    SetAttrField::kCtime | SetAttrField::kKillSuidGid;
+  ASSERT_TRUE(swordfs::metadata::PrepareSetAttrMutation(current, requested, kAllExplicit, &updated).ok());
+  EXPECT_EQ(updated.attr.mode, (S_IFREG | 0700));
+  EXPECT_EQ(updated.attr.uid, 501U);
+  EXPECT_EQ(updated.attr.gid, 502U);
+  EXPECT_EQ(updated.attr.size, 64U);
+  EXPECT_EQ(updated.attr.atime, 101);
+  EXPECT_EQ(updated.attr.atime_nsec, 123);
+  EXPECT_EQ(updated.attr.mtime, 202);
+  EXPECT_EQ(updated.attr.mtime_nsec, 234);
+  EXPECT_EQ(updated.attr.ctime, 303);
+  EXPECT_EQ(updated.attr.ctime_nsec, 345);
+  EXPECT_EQ(current.attr.size, 0U);
+  EXPECT_EQ(current.attr.mode & (S_ISUID | S_ISGID), (S_ISUID | S_ISGID));
+}
+
+TEST(MetadataSetAttrPlanningTest, NowMasksAndImplicitMtimeRespectRequestedTimeSemantics) {
+  SwordFsInode current(42, SwordFsAttr(42, S_IFREG | 0644), kRoot);
+  current.attr.atime = 11;
+  current.attr.mtime = 22;
+  current.attr.ctime = 33;
+  SwordFsAttr requested;
+  requested.size = 80;
+
+  SwordFsInode enlarged;
+  ASSERT_TRUE(swordfs::metadata::PrepareSetAttrMutation(current, requested, SetAttrField::kSize, &enlarged).ok());
+  EXPECT_EQ(enlarged.attr.size, 80U);
+  EXPECT_NE(enlarged.attr.mtime, current.attr.mtime);
+  EXPECT_NE(enlarged.attr.ctime, current.attr.ctime);
+  EXPECT_EQ(enlarged.attr.atime, current.attr.atime);
+
+  SwordFsInode touched;
+  ASSERT_TRUE(swordfs::metadata::PrepareSetAttrMutation(
+                  current, requested, SetAttrField::kSize | SetAttrField::kAtimeNow | SetAttrField::kMtimeNow, &touched)
+                  .ok());
+  EXPECT_NE(touched.attr.atime, current.attr.atime);
+  EXPECT_NE(touched.attr.mtime, current.attr.mtime);
+  EXPECT_EQ(touched.attr.size, 80U);
+
+  SwordFsInode unchanged_size;
+  ASSERT_TRUE(swordfs::metadata::PrepareSetAttrMutation(current, requested, SetAttrField::kUid, &unchanged_size).ok());
+  EXPECT_EQ(unchanged_size.attr.size, current.attr.size);
+  EXPECT_EQ(unchanged_size.attr.mtime, current.attr.mtime);
+}
 
 #ifndef NDEBUG
 TEST(MemMetaImplDomainTest, RuntimeApiRejectsThreadCaller) {
@@ -184,6 +265,238 @@ class MemMetaImplTest : public ::testing::Test {
   std::unique_ptr<swordfs::chunk::internal::ChunkMetadataBridge> bridge_;
   MemMetaImpl *impl_;
 };
+
+// #317: FileMetadata publishes logical attachment and EOF together, without
+// consulting the COW revision/head. The typed ChunkID is the stable identity.
+FIBER_TEST_F(MemMetaImplTest, PreparedChunkAttachmentPublishesMappingAndEofTogether) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "typed-attach", 0644, &file).ok());
+
+  swordfs::metadata::FileChunkSnapshot before;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 0, &before).ok());
+  EXPECT_EQ(before.inode.attr.size, 0U);
+  EXPECT_FALSE(before.chunk_id.has_value());
+  EXPECT_FALSE(before.eof_boundary.has_value());
+
+  const swordfs::metadata::ChunkID prepared_id(17);
+  const swordfs::metadata::FileSizePrecondition expected{.eof = 0};
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, prepared_id, 32, expected).ok());
+
+  swordfs::metadata::FileChunkSnapshot after;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 0, &after).ok());
+  EXPECT_EQ(after.inode.attr.size, 32U);
+  ASSERT_TRUE(after.chunk_id.has_value());
+  EXPECT_EQ(*after.chunk_id, prepared_id);
+
+  // The requested index need not be the old EOF boundary. One coherent
+  // snapshot must still describe that boundary for the subsequent CAS.
+  swordfs::metadata::FileChunkSnapshot other_index;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 1, &other_index).ok());
+  EXPECT_FALSE(other_index.chunk_id.has_value());
+  ASSERT_TRUE(other_index.eof_boundary.has_value());
+  EXPECT_EQ(other_index.eof_boundary->index, 0U);
+  EXPECT_EQ(other_index.eof_boundary->chunk_id, prepared_id);
+  EXPECT_EQ(other_index.eof_boundary->visible_prefix, 32U);
+
+  std::optional<swordfs::metadata::ChunkID> attachment;
+  ASSERT_TRUE(impl_->ProbeAttachment(file.ino, 0, &attachment).ok());
+  EXPECT_EQ(attachment, prepared_id);
+}
+
+FIBER_TEST_F(MemMetaImplTest, TypedFileMetadataRejectsInvalidTargetsWithoutPublishingAnyChunk) {
+  using swordfs::metadata::ChunkID;
+  using swordfs::metadata::ChunkSizeCommitResult;
+  using swordfs::metadata::ChunkSizePlan;
+  using swordfs::metadata::FileChunkSnapshot;
+  using swordfs::metadata::FileMappingSnapshot;
+
+  constexpr InodeID kMissingIno = 999999;
+  FileChunkSnapshot chunk;
+  FileMappingSnapshot file;
+  std::optional<ChunkID> attached;
+  EXPECT_EQ(impl_->ReadFileChunkSnapshot(kRoot, 0, &chunk).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->ReadFileMappingSnapshot(kRoot, &file).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->ReadFileChunkSnapshot(kMissingIno, 0, &chunk).ToErrno(), ENOENT);
+  EXPECT_EQ(impl_->ReadFileMappingSnapshot(kMissingIno, &file).ToErrno(), ENOENT);
+  EXPECT_EQ(impl_->ProbeAttachment(kMissingIno, 0, &attached).ToErrno(), ENOENT);
+  EXPECT_EQ(impl_->ReadFileChunkSnapshot(kRoot, 0, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->ReadFileMappingSnapshot(kRoot, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->ProbeAttachment(kRoot, 0, nullptr).ToErrno(), EINVAL);
+
+  SwordFsInode regular;
+  ASSERT_TRUE(impl_->Create(kRoot, "typed-reject-invalid", 0644, &regular).ok());
+  const ChunkID valid_id(9001);
+  EXPECT_EQ(impl_->AttachPrepared(regular.ino, 0, ChunkID(0), 1, {.eof = 0}).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->AttachPrepared(regular.ino, 0, valid_id, 1, {.eof = 1}).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->AttachPrepared(kMissingIno, 0, valid_id, 1, {.eof = 0}).ToErrno(), ENOENT);
+  EXPECT_EQ(impl_->AttachPrepared(kRoot, 0, valid_id, 1, {.eof = 0}).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(regular.ino, 0, valid_id, 1, {.eof = 0}).ToErrno(), EEXIST);
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(kRoot, 0, valid_id, 1, {.eof = 0}).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(kMissingIno, 0, valid_id, 1, {.eof = 0}).ToErrno(), ENOENT);
+
+  ChunkSizePlan plan;
+  ASSERT_TRUE(
+      swordfs::metadata::PlanChunkSizeChange(0, 1, kChunkSize, std::vector<swordfs::metadata::ChunkMapping>{}, &plan)
+          .ok());
+  SwordFsAttr requested;
+  requested.size = 1;
+  ChunkSizeCommitResult committed;
+  EXPECT_EQ(impl_->CommitGrow(regular.ino, plan, requested, SetAttrField::kSize, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->CommitGrow(regular.ino, plan, requested, SetAttrField::kMode, &committed).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->CommitGrow(kMissingIno, plan, requested, SetAttrField::kSize, &committed).ToErrno(), ENOENT);
+  EXPECT_EQ(impl_->CommitGrow(kRoot, plan, requested, SetAttrField::kSize, &committed).ToErrno(), EINVAL);
+
+  ASSERT_TRUE(impl_->ReadFileMappingSnapshot(regular.ino, &file).ok());
+  EXPECT_EQ(file.inode.attr.size, 0U);
+  EXPECT_TRUE(file.mappings.empty());
+}
+
+FIBER_TEST_F(MemMetaImplTest, LosingPreparedAttachmentNeverReplacesWinningChunkID) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "typed-conflict", 0644, &file).ok());
+  const swordfs::metadata::FileSizePrecondition expected{.eof = 0};
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, swordfs::metadata::ChunkID(17), 16, expected).ok());
+
+  const auto status = impl_->AttachPrepared(file.ino, 0, swordfs::metadata::ChunkID(18), 4096, expected);
+  EXPECT_EQ(status.ToErrno(), EEXIST);
+
+  swordfs::metadata::FileChunkSnapshot after;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 0, &after).ok());
+  EXPECT_EQ(after.chunk_id, swordfs::metadata::ChunkID(17));
+  EXPECT_EQ(after.inode.attr.size, 16U);
+}
+
+FIBER_TEST_F(MemMetaImplTest, AttachedRewriteKeepsChunkIDAndChecksFilePrecondition) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "typed-rewrite", 0644, &file).ok());
+  const swordfs::metadata::ChunkID stable_id(17);
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, stable_id, 16, {.eof = 0}).ok());
+
+  const swordfs::metadata::FileSizePrecondition at_16{
+      .eof = 16,
+      .boundary = swordfs::metadata::ChunkBoundarySnapshot{.index = 0, .chunk_id = stable_id, .visible_prefix = 16}};
+  ASSERT_TRUE(impl_->FinalizeAttachedWrite(file.ino, 0, stable_id, 48, at_16).ok());
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(file.ino, 0, stable_id, 80, at_16).ToErrno(), EEXIST);
+  const swordfs::metadata::FileSizePrecondition at_48{
+      .eof = 48,
+      .boundary = swordfs::metadata::ChunkBoundarySnapshot{.index = 0, .chunk_id = stable_id, .visible_prefix = 48}};
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(file.ino, 0, swordfs::metadata::ChunkID(18), 80, at_48).ToErrno(), EEXIST);
+
+  swordfs::metadata::FileChunkSnapshot snapshot;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 0, &snapshot).ok());
+  EXPECT_EQ(snapshot.chunk_id, stable_id);
+  EXPECT_EQ(snapshot.inode.attr.size, 48U);
+}
+
+FIBER_TEST_F(MemMetaImplTest, InteriorEofRequiresObservedBoundaryIdentityBeforeFinalization) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "typed-required-boundary", 0644, &file).ok());
+  const swordfs::metadata::ChunkID stable_id(17);
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, stable_id, 24, {.eof = 0}).ok());
+
+  // An EOF-only precondition cannot distinguish an unchanged EOF whose
+  // boundary attachment was replaced between the read and finalization.
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(file.ino, 0, stable_id, 40, {.eof = 24}).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->AttachPrepared(file.ino, 1, swordfs::metadata::ChunkID(18), kChunkSize + 1, {.eof = 24}).ToErrno(),
+            EINVAL);
+  swordfs::metadata::FileChunkSnapshot after;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 0, &after).ok());
+  EXPECT_EQ(after.inode.attr.size, 24U);
+  EXPECT_EQ(after.chunk_id, stable_id);
+}
+
+FIBER_TEST_F(MemMetaImplTest, SameEofWithChangedBoundaryAttachmentRejectsStaleWrite) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "typed-boundary", 0644, &file).ok());
+  SwordFsAttr attr;
+  attr.size = 100;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, attr, SetAttrField::kSize, nullptr).ok());
+
+  const swordfs::metadata::FileSizePrecondition observed{
+      .eof = 100,
+      .boundary = swordfs::metadata::ChunkBoundarySnapshot{.index = 0, .chunk_id = std::nullopt, .visible_prefix = 100},
+  };
+  swordfs::metadata::FileChunkSnapshot old_hole;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 1, &old_hole).ok());
+  ASSERT_TRUE(old_hole.eof_boundary.has_value());
+  EXPECT_EQ(old_hole.eof_boundary->index, 0U);
+  EXPECT_FALSE(old_hole.eof_boundary->chunk_id.has_value());
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, swordfs::metadata::ChunkID(17), 24, observed).ok());
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(file.ino, 0, swordfs::metadata::ChunkID(17), 32, observed).ToErrno(), EEXIST);
+
+  swordfs::metadata::FileChunkSnapshot snapshot;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 0, &snapshot).ok());
+  EXPECT_EQ(snapshot.chunk_id, swordfs::metadata::ChunkID(17));
+  EXPECT_EQ(snapshot.inode.attr.size, 100U);
+}
+
+FIBER_TEST_F(MemMetaImplTest, TypedShrinkAndGrowCommitEofAndAttachmentsAtomically) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "typed-size", 0644, &file).ok());
+  using swordfs::metadata::ChunkID;
+  using swordfs::metadata::ChunkSizeCommitResult;
+  using swordfs::metadata::ChunkSizePlan;
+  using swordfs::metadata::FileMappingSnapshot;
+  const ChunkID tail_id(31);
+  const ChunkID boundary_id(32);
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 2, tail_id, 2 * kChunkSize + 20, {.eof = 0}).ok());
+  const swordfs::metadata::FileSizePrecondition observed{
+      .eof = 2 * kChunkSize + 20,
+      .boundary = swordfs::metadata::ChunkBoundarySnapshot{.index = 2, .chunk_id = tail_id, .visible_prefix = 20}};
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 1, boundary_id, kChunkSize + 30, observed).ok());
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, ChunkID(33), 10, observed).ok());
+
+  FileMappingSnapshot before;
+  ASSERT_TRUE(impl_->ReadFileMappingSnapshot(file.ino, &before).ok());
+  ChunkSizePlan shrink;
+  ASSERT_TRUE(swordfs::metadata::PlanChunkSizeChange(before.inode.attr.size, kChunkSize + 8, kChunkSize,
+                                                     before.mappings, &shrink)
+                  .ok());
+  SwordFsAttr requested;
+  requested.size = kChunkSize + 8;
+  requested.mode = 0600;
+  ChunkSizeCommitResult committed;
+  ASSERT_TRUE(
+      impl_->CommitShrink(file.ino, shrink, requested, SetAttrField::kSize | SetAttrField::kMode, &committed).ok());
+  EXPECT_EQ(committed.inode.attr.size, kChunkSize + 8);
+  EXPECT_EQ(committed.inode.attr.mode & 0777, 0600);
+  ASSERT_EQ(committed.detached.size(), 1U);
+  EXPECT_EQ(committed.detached[0].index, 2U);
+  EXPECT_EQ(committed.detached[0].chunk_id, tail_id);
+  // The logical detach and its optional typed GC handoff must be durable in
+  // the same FileMetadata commit; a stale cleanup is not delete authority.
+  bool has_more = false;
+  std::vector<std::string> cleanup_ids;
+  ASSERT_TRUE(impl_
+                  ->VisitPendingDeletesBatch(
+                      32,
+                      [&](const swordfs::metadata::PendingDelete &work) {
+                        cleanup_ids.push_back(work.id);
+                        return Status::OK();
+                      },
+                      &has_more)
+                  .ok());
+  EXPECT_FALSE(has_more);
+  EXPECT_EQ(cleanup_ids, (std::vector<std::string>{"cow:chunk:31"}));
+  ASSERT_TRUE(committed.boundary.has_value());
+  EXPECT_EQ(committed.boundary->chunk_id, boundary_id);
+  EXPECT_EQ(committed.boundary->visible_prefix, 8U);
+
+  FileMappingSnapshot after;
+  ASSERT_TRUE(impl_->ReadFileMappingSnapshot(file.ino, &after).ok());
+  ASSERT_EQ(after.mappings.size(), 2U);
+  EXPECT_EQ(after.inode.attr.size, kChunkSize + 8);
+  ChunkSizePlan grow;
+  ASSERT_TRUE(
+      swordfs::metadata::PlanChunkSizeChange(after.inode.attr.size, 3 * kChunkSize, kChunkSize, after.mappings, &grow)
+          .ok());
+  requested.size = 3 * kChunkSize;
+  ASSERT_TRUE(impl_->CommitGrow(file.ino, grow, requested, SetAttrField::kSize, &committed).ok());
+  EXPECT_EQ(committed.inode.attr.size, 3 * kChunkSize);
+  EXPECT_TRUE(committed.detached.empty());
+  requested.size = shrink.target_eof;
+  EXPECT_EQ(impl_->CommitShrink(file.ino, shrink, requested, SetAttrField::kSize, &committed).ToErrno(), EEXIST);
+}
 
 FIBER_TEST_F(MemMetaImplTest, ConditionalUnlinkProtectsReplacedTemporaryEntry) {
   SetContext(0, 0);
@@ -1565,6 +1878,41 @@ FIBER_TEST_F(MemMetaImplTest, LinkCancelsOrphanCandidate) {
   SwordFsChunk found;
   ASSERT_TRUE(impl_->FindChunk(f_ino, 0, &found).ok());
   EXPECT_TRUE(PendingReclaims().empty());
+}
+
+FIBER_TEST_F(MemMetaImplTest, TypedReclaimFreezesChunkIDAttachmentsInsteadOfLegacyDescriptors) {
+  SetContext(0, 0);
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRoot, "typed-reclaim", 0644, &file).ok());
+  const swordfs::metadata::ChunkID attached_id(807);
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, attached_id, 24, {.eof = 0}).ok());
+  ASSERT_TRUE(impl_->Unlink(kRoot, "typed-reclaim").ok());
+
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  const auto work = PendingReclaim(file.ino);
+  ASSERT_TRUE(work.has_value());
+  swordfs::metadata::BufDecoder decoded(work->payload);
+  ASSERT_TRUE(decoded.Header(swordfs::metadata::RecordType::kCowTypedCleanup))
+      << "reclaim must freeze the typed attachment, not an empty legacy chunk list";
+  uint32_t kind = 0;
+  uint64_t ino = 0;
+  uint32_t count = 0;
+  uint64_t index = 0;
+  uint64_t chunk_id = 0;
+  ASSERT_TRUE(decoded.U32(&kind));
+  ASSERT_TRUE(decoded.U64(&ino));
+  ASSERT_TRUE(decoded.U32(&count));
+  ASSERT_TRUE(decoded.U64(&index));
+  ASSERT_TRUE(decoded.U64(&chunk_id));
+  EXPECT_TRUE(decoded.Done());
+  EXPECT_EQ(kind, static_cast<uint32_t>(swordfs::chunk::cow::COWCleanupKind::kDetachedReclaim));
+  EXPECT_EQ(ino, file.ino);
+  EXPECT_EQ(count, 1U);
+  EXPECT_EQ(index, 0U);
+  EXPECT_EQ(chunk_id, attached_id.Value());
+  SwordFsInode missing;
+  EXPECT_TRUE(impl_->GetInode(file.ino, &missing).IsNotFound());
+  EXPECT_TRUE(impl_->Link(file.ino, kRoot, "revived", nullptr).IsNotFound());
 }
 
 FIBER_TEST_F(MemMetaImplTest, PrepareReclaimFreezesAuthoritativeRevisionAndFencesLink) {
