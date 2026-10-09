@@ -79,6 +79,83 @@ FIBER_TEST_F(RedisMetaImplTest, PreparedChunkAttachmentIsAtomicAndCannotBeStolen
   EXPECT_EQ(other_index.eof_boundary->visible_prefix, 24U);
 }
 
+FIBER_TEST_F(RedisMetaImplTest, TypedPublicationRejectsDirectoriesAndNonexistentInodes) {
+  using swordfs::metadata::ChunkID;
+  using swordfs::metadata::ChunkSizeCommitResult;
+  using swordfs::metadata::ChunkSizePlan;
+  using swordfs::metadata::FileChunkSnapshot;
+  using swordfs::metadata::FileMappingSnapshot;
+
+  SwordFsInode directory;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "typed-not-regular", 0755, &directory).ok());
+  FileChunkSnapshot chunk;
+  FileMappingSnapshot mappings;
+  EXPECT_EQ(impl_->ReadFileChunkSnapshot(directory.ino, 0, &chunk).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->ReadFileMappingSnapshot(directory.ino, &mappings).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->AttachPrepared(directory.ino, 0, ChunkID(17), 8, {.eof = 0}).ToErrno(), EINVAL);
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(directory.ino, 0, ChunkID(17), 8, {.eof = 0}).ToErrno(), EINVAL);
+
+  constexpr InodeID kMissingInode = std::numeric_limits<InodeID>::max();
+  std::optional<ChunkID> attached;
+  EXPECT_TRUE(impl_->ReadFileChunkSnapshot(kMissingInode, 0, &chunk).IsNotFound());
+  EXPECT_TRUE(impl_->ReadFileMappingSnapshot(kMissingInode, &mappings).IsNotFound());
+  EXPECT_TRUE(impl_->ProbeAttachment(kMissingInode, 0, &attached).IsNotFound());
+  EXPECT_TRUE(impl_->AttachPrepared(kMissingInode, 0, ChunkID(17), 8, {.eof = 0}).IsNotFound());
+  EXPECT_TRUE(impl_->FinalizeAttachedWrite(kMissingInode, 0, ChunkID(17), 8, {.eof = 0}).IsNotFound());
+
+  ChunkSizePlan plan;
+  SwordFsAttr requested;
+  requested.size = 0;
+  ChunkSizeCommitResult result;
+  EXPECT_TRUE(impl_->CommitShrink(kMissingInode, plan, requested, SetAttrField::kSize, &result).IsNotFound());
+  EXPECT_TRUE(impl_->CommitGrow(kMissingInode, plan, requested, SetAttrField::kSize, &result).IsNotFound());
+}
+
+FIBER_TEST_F(RedisMetaImplTest, TypedPublicationRejectsCorruptedAttachmentBackingHash) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "typed-backing-hash", 0644, &file).ok());
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  RunWithRawRedisFromFiber(
+      [&](sw::redis::Redis &redis) { redis.set(key.ChunkRefs(file.ino), "wrong-type-instead-of-a-hash"); });
+
+  // Redis HGET fails before MULTI is committed. Publication must fail closed
+  // rather than treat a wrong-type key as an unattached logical hole.
+  EXPECT_EQ(impl_->AttachPrepared(file.ino, 0, swordfs::metadata::ChunkID(17), 8, {.eof = 0}).ToErrno(), EIO);
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(file.ino, 0, swordfs::metadata::ChunkID(17), 8, {.eof = 0}).ToErrno(), EIO);
+  swordfs::metadata::ChunkSizeCommitResult result;
+  swordfs::metadata::ChunkSizePlan plan;
+  SwordFsAttr requested;
+  requested.size = 0;
+  EXPECT_EQ(impl_->CommitGrow(file.ino, plan, requested, SetAttrField::kSize, &result).ToErrno(), EIO);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, TypedPublicationAndSizeCommitRespectImmutablePolicy) {
+  SwordFsInode immutable;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "typed-immutable", 0644, &immutable).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(immutable.ino, InodeFlag::kImmutable, nullptr).ok());
+  EXPECT_EQ(impl_->AttachPrepared(immutable.ino, 0, swordfs::metadata::ChunkID(17), 8, {.eof = 0}).ToErrno(), EPERM);
+
+  SwordFsInode published;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "typed-immutable-published", 0644, &published).ok());
+  const swordfs::metadata::ChunkID id(18);
+  ASSERT_TRUE(impl_->AttachPrepared(published.ino, 0, id, 8, {.eof = 0}).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(published.ino, InodeFlag::kImmutable, nullptr).ok());
+  const swordfs::metadata::FileSizePrecondition expected{
+      .eof = 8,
+      .boundary = swordfs::metadata::ChunkBoundarySnapshot{.index = 0, .chunk_id = id, .visible_prefix = 8},
+  };
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(published.ino, 0, id, 8, expected).ToErrno(), EPERM);
+
+  swordfs::metadata::FileMappingSnapshot snapshot;
+  ASSERT_TRUE(impl_->ReadFileMappingSnapshot(published.ino, &snapshot).ok());
+  swordfs::metadata::ChunkSizePlan shrink;
+  ASSERT_TRUE(swordfs::metadata::PlanChunkSizeChange(8, 0, kTestChunkSize, snapshot.mappings, &shrink).ok());
+  SwordFsAttr requested;
+  requested.size = 0;
+  swordfs::metadata::ChunkSizeCommitResult result;
+  EXPECT_EQ(impl_->CommitShrink(published.ino, shrink, requested, SetAttrField::kSize, &result).ToErrno(), EPERM);
+}
+
 FIBER_TEST_F(RedisMetaImplTest, AttachedRewriteRequiresCurrentEofAndStableChunkID) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "typed-rewrite", 0644, &file).ok());
