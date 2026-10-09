@@ -7,41 +7,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  change-scope:
-    name: change-scope
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      run_full_ci: ${{ steps.classify.outputs.run_full_ci }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
-          fetch-depth: 0
-
-      - name: Verify documentation classifier
-        run: python3 tests/tooling/test_docs_only.py
-
-      - name: Classify pull request changes
-        id: classify
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          if [ "${EVENT_NAME}" != "pull_request" ]; then
-            # Never skip main branch coverage, conformance or manually requested CI.
-            echo 'run_full_ci=true' >> "${GITHUB_OUTPUT}"
-            echo 'Full CI required for push/workflow_dispatch' >> "${GITHUB_STEP_SUMMARY}"
-          else
-            python3 scripts/ci/docs_only.py \
-              --base "${PR_BASE}" --head "${PR_HEAD}" \
-              --github-output "${GITHUB_OUTPUT}" \
-              --github-summary "${GITHUB_STEP_SUMMARY}"
-          fi
-
   clang-format:
     name: clang-format
     if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -63,34 +28,10 @@ jobs:
       - name: Test fstests classifier tooling
         run: python3 tests/tooling/test_fstests_classify.py
 
-  codecov-docs-only:
-    name: codecov-docs-only
-    needs: [change-scope, clang-format]
-    if: github.event_name == 'pull_request' && needs.change-scope.outputs.run_full_ci == 'false'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-
-      # Codecov's documented empty-upload mode is for non-coverable diffs
-      # with a mandatory codecov/patch check. The force option is safe only
-      # after change-scope has proved the *entire PR* is documentation-only.
-      - name: Satisfy Codecov patch check for documentation-only PR
-        uses: codecov/codecov-action@v5
-        with:
-          run_command: empty-upload
-          force: true
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
-
   minio-test-tools:
     name: minio-test-tools
-    needs: [clang-format, change-scope]
-    if: needs.change-scope.outputs.run_full_ci == 'true'
+    needs: clang-format
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -122,8 +63,8 @@ jobs:
 
   dead-code-audit:
     name: dead-code-audit
-    needs: [clang-format, change-scope]
-    if: needs.change-scope.outputs.run_full_ci == 'true'
+    needs: clang-format
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -184,13 +125,8 @@ jobs:
 
   build-and-test:
     name: build-and-test (${{ matrix.build_type }})
-    needs: [clang-format, minio-test-tools, change-scope]
-    # Required check names include matrix values (Debug/Release). Skipping the
-    # whole job hides those concrete names, so expand both matrix entries and
-    # skip their expensive *steps* for docs-only changes instead.
-    if: >-
-      always() && needs.change-scope.result == 'success' && needs.clang-format.result == 'success' &&
-      (needs.change-scope.outputs.run_full_ci == 'false' || needs.minio-test-tools.result == 'success')
+    needs: [clang-format, minio-test-tools]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -199,47 +135,38 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Documentation-only PR (no native build needed)
-        if: needs.change-scope.outputs.run_full_ci == 'false'
-        run: echo "No source/CI changes in the PR; keep the required matrix check successful without building."
-
       - uses: actions/checkout@v4
-        if: needs.change-scope.outputs.run_full_ci == 'true'
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
           fetch-depth: 0
           submodules: false
 
       - name: Download pinned MinIO tools
-        if: needs.change-scope.outputs.run_full_ci == 'true' && matrix.build_type == 'Debug'
+        if: matrix.build_type == 'Debug'
         uses: actions/download-artifact@v4
         with:
           name: minio-test-tools
           path: .deps/minio
 
       - name: Restore native dependency cache
-        if: needs.change-scope.outputs.run_full_ci == 'true'
         uses: actions/cache@v4
         with:
           path: .deps/install
           key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
 
       - name: Install dependencies
-        if: needs.change-scope.outputs.run_full_ci == 'true'
         run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
 
       - name: Unit test setup
-        if: needs.change-scope.outputs.run_full_ci == 'true'
         run: |
           sudo mkdir -p /etc/swordfs
           sudo chown "$(id -u):$(id -g)" /etc/swordfs
 
       - name: Install Debug CI tools
-        if: needs.change-scope.outputs.run_full_ci == 'true' && matrix.build_type == 'Debug'
+        if: matrix.build_type == 'Debug'
         run: sudo apt-get install -y -qq lcov clang-tidy
 
       - name: Configure
-        if: needs.change-scope.outputs.run_full_ci == 'true'
         run: |
           sudo rm -rf build
           if [ "${{ matrix.build_type }}" = "Debug" ]; then
@@ -253,15 +180,14 @@ jobs:
           fi
 
       - name: Build
-        if: needs.change-scope.outputs.run_full_ci == 'true'
         run: cmake --build build --target swordfs swordfs_test
 
       - name: Build focused Debug E2E coverage target
-        if: needs.change-scope.outputs.run_full_ci == 'true' && matrix.build_type == 'Debug'
+        if: matrix.build_type == 'Debug'
         run: cmake --build build --target swordfs_e2e_test
 
       - name: Run clang-tidy (changed files only)
-        if: needs.change-scope.outputs.run_full_ci == 'true' && matrix.build_type == 'Debug'
+        if: matrix.build_type == 'Debug'
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
@@ -280,7 +206,6 @@ jobs:
           fi
 
       - name: Test (unit)
-        if: needs.change-scope.outputs.run_full_ci == 'true'
         run: |
           bash scripts/testing/run-ut.sh --gtest_color=no --gtest_output=xml:unit-test-results.xml
           if grep -q '<skipped' unit-test-results.xml; then
@@ -290,14 +215,14 @@ jobs:
           fi
 
       - name: Run focused Debug service-backed coverage scenarios
-        if: needs.change-scope.outputs.run_full_ci == 'true' && matrix.build_type == 'Debug'
+        if: matrix.build_type == 'Debug'
         run: |
           bash scripts/testing/run-e2e.sh \
             --gtest_filter='S3DataEngineE2ETest.*:CommandCoverageE2ETest.*' \
             --gtest_color=no
 
       - name: Generate coverage report
-        if: needs.change-scope.outputs.run_full_ci == 'true' && matrix.build_type == 'Debug'
+        if: matrix.build_type == 'Debug'
         run: |
           set -euo pipefail
 
@@ -338,7 +263,7 @@ jobs:
             --line-threshold 90
 
       - name: Upload coverage to Codecov
-        if: needs.change-scope.outputs.run_full_ci == 'true' && matrix.build_type == 'Debug'
+        if: matrix.build_type == 'Debug'
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -349,8 +274,8 @@ jobs:
 
   e2e-test:
     name: e2e-test (Release)
-    needs: [clang-format, minio-test-tools, change-scope]
-    if: needs.change-scope.outputs.run_full_ci == 'true'
+    needs: [clang-format, minio-test-tools]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     env:
       SWORDFS_E2E_DIAGNOSTICS_DIR: /tmp/swordfs-e2e-diagnostics
@@ -467,8 +392,8 @@ jobs:
 
   pjdfstest-conformance:
     name: pjdfstest-conformance (Release)
-    needs: [clang-format, minio-test-tools, change-scope]
-    if: needs.change-scope.outputs.run_full_ci == 'true'
+    needs: [clang-format, minio-test-tools]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -578,8 +503,8 @@ jobs:
 
   fstests-conformance-shard:
     name: fstests-shard (${{ matrix.shard }})
-    needs: [clang-format, minio-test-tools, change-scope]
-    if: needs.change-scope.outputs.run_full_ci == 'true'
+    needs: [clang-format, minio-test-tools]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.job_timeout }}
     permissions:
@@ -722,10 +647,8 @@ jobs:
 
   fstests-conformance:
     name: fstests-conformance (Release)
-    needs: [change-scope, fstests-conformance-shard]
-    # Still aggregate/report shard failures on non-doc PRs, but do not create
-    # misleading missing-evidence failures for a classified docs-only PR.
-    if: always() && needs.change-scope.result == 'success' && needs.change-scope.outputs.run_full_ci == 'true'
+    needs: fstests-conformance-shard
+    if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
