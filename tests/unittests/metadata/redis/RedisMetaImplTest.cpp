@@ -174,6 +174,11 @@ FIBER_TEST_F(RedisMetaImplTest, TypedShrinkAndGrowCommitEofAndAttachmentsAtomica
   ASSERT_EQ(committed.detached.size(), 1U);
   EXPECT_EQ(committed.detached[0].index, 2U);
   EXPECT_EQ(committed.detached[0].chunk_id, tail_id);
+  const swordfs::metadata::redis::RedisKey cleanup_key(config_.db, volume_name_);
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
+    EXPECT_TRUE(redis.hexists(cleanup_key.PendingDeletes(), "cow:chunk:31"))
+        << "a typed shrink must persist a detached-ID cleanup candidate";
+  });
   ASSERT_TRUE(committed.boundary.has_value());
   EXPECT_EQ(committed.boundary->chunk_id, boundary_id);
   EXPECT_EQ(committed.boundary->visible_prefix, 8U);

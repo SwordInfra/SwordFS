@@ -463,6 +463,21 @@ FIBER_TEST_F(MemMetaImplTest, TypedShrinkAndGrowCommitEofAndAttachmentsAtomicall
   ASSERT_EQ(committed.detached.size(), 1U);
   EXPECT_EQ(committed.detached[0].index, 2U);
   EXPECT_EQ(committed.detached[0].chunk_id, tail_id);
+  // The logical detach and its optional typed GC handoff must be durable in
+  // the same FileMetadata commit; a stale cleanup is not delete authority.
+  bool has_more = false;
+  std::vector<std::string> cleanup_ids;
+  ASSERT_TRUE(impl_
+                  ->VisitPendingDeletesBatch(
+                      32,
+                      [&](const swordfs::metadata::PendingDelete &work) {
+                        cleanup_ids.push_back(work.id);
+                        return Status::OK();
+                      },
+                      &has_more)
+                  .ok());
+  EXPECT_FALSE(has_more);
+  EXPECT_EQ(cleanup_ids, (std::vector<std::string>{"cow:chunk:31"}));
   ASSERT_TRUE(committed.boundary.has_value());
   EXPECT_EQ(committed.boundary->chunk_id, boundary_id);
   EXPECT_EQ(committed.boundary->visible_prefix, 8U);
