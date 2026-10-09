@@ -367,6 +367,50 @@ class NullDataEngine final : public IDataEngine {
   folly::fibers::Baton *put_release_{nullptr};
 };
 
+// Inject COW private-domain failures without adding test-only APIs to the
+// production metadata implementation.
+class FaultingCOWChunkMetadata final : public swordfs::metadata::cow::COWChunkMetadata {
+ public:
+  enum class CASFailure { kNone, kAmbiguousApplied, kAmbiguousNotApplied, kRejected };
+
+  Status AllocateChunkID(swordfs::metadata::ChunkID *out) override {
+    if (!allocation_status.ok()) {
+      return allocation_status;
+    }
+    return delegate_.AllocateChunkID(out);
+  }
+  Status AllocateRevision(swordfs::metadata::ChunkID id, swordfs::metadata::cow::COWChunkRevision *out) override {
+    return delegate_.AllocateRevision(id, out);
+  }
+  Status GetHead(swordfs::metadata::ChunkID id, swordfs::metadata::cow::COWChunkHead *out) override {
+    return delegate_.GetHead(id, out);
+  }
+  Status CompareExchangeHead(swordfs::metadata::ChunkID id,
+                             const std::optional<swordfs::metadata::cow::COWChunkHead> &expected,
+                             const swordfs::metadata::cow::COWChunkHead &replacement) override {
+    if (cas_failure == CASFailure::kRejected) {
+      return Status::IOError("private head CAS rejected");
+    }
+    if (cas_failure == CASFailure::kAmbiguousNotApplied) {
+      return Status::OutcomeUnknown("private head CAS outcome lost");
+    }
+    auto status = delegate_.CompareExchangeHead(id, expected, replacement);
+    if (status.ok() && cas_failure == CASFailure::kAmbiguousApplied) {
+      return Status::OutcomeUnknown("private head CAS reply lost after commit");
+    }
+    return status;
+  }
+  Status EraseHead(swordfs::metadata::ChunkID id, const swordfs::metadata::cow::COWChunkHead &expected) override {
+    return delegate_.EraseHead(id, expected);
+  }
+
+  Status allocation_status = Status::OK();
+  CASFailure cas_failure = CASFailure::kNone;
+
+ private:
+  swordfs::metadata::MemCOWChunkMetadata delegate_;
+};
+
 NullDataEngine *InitializeRuntime() {
   SwordFsVolume config;
   config.chunk_size = kChunkTestSize;
@@ -714,6 +758,80 @@ TEST_F(ChunkTest, SuccessfulFlushClearsPendingWritesAndSecondFlushIsNoOp) {
 
     EXPECT_TRUE(chunk->Flush().ok());
     EXPECT_EQ(data_->put_calls, 1);
+  });
+}
+
+TEST_F(ChunkTest, ReadRejectsOversizedPrivateHeadBeforeObjectAccess) {
+  RunInTestFiber([&] {
+    const swordfs::metadata::cow::COWChunkHead invalid{.revision = swordfs::metadata::cow::COWChunkRevision(1),
+                                                       .size = kChunkTestSize + 1};
+    COWChunk chunk(42, 0, kChunkTestSize, cow_metadata_, meta_, data_, swordfs::metadata::ChunkID(87), invalid,
+                   kChunkTestSize);
+    auto out = folly::IOBuf::create(1);
+    EXPECT_EQ(chunk.Read(0, 1, out.get()).ToErrno(), EIO);
+    EXPECT_EQ(out->length(), 0U);
+  });
+}
+
+TEST_F(ChunkTest, FlushRejectsMissingPrivateHeadForStillAttachedChunk) {
+  RunInTestFiber([&] {
+    const swordfs::metadata::ChunkID id(87);
+    ASSERT_TRUE(meta_->AttachPrepared(42, 0, id, 1, {.eof = 0}).ok());
+    const swordfs::metadata::cow::COWChunkHead stale{.revision = swordfs::metadata::cow::COWChunkRevision(1),
+                                                     .size = 0};
+    COWChunk chunk(42, 0, kChunkTestSize, cow_metadata_, meta_, data_, id, stale, 0);
+    ASSERT_TRUE(chunk.Write(0, Buf("x")).ok());
+    EXPECT_EQ(chunk.Flush().ToErrno(), EIO);
+    EXPECT_TRUE(chunk.HasPendingWrites());
+  });
+}
+
+TEST_F(ChunkTest, FlushPreservesDirtyGenerationWhenChunkIDAllocationFails) {
+  RunInTestFiber([&] {
+    auto faulting = std::make_shared<FaultingCOWChunkMetadata>();
+    faulting->allocation_status = Status::IOError("allocator unavailable");
+    COWChunk chunk(42, 0, kChunkTestSize, faulting, meta_, data_, std::nullopt);
+    ASSERT_TRUE(chunk.Write(0, Buf("payload")).ok());
+    EXPECT_EQ(chunk.Flush().ToErrno(), EIO);
+    EXPECT_TRUE(chunk.HasPendingWrites());
+    EXPECT_EQ(data_->put_calls, 0);
+  });
+}
+
+TEST_F(ChunkTest, FlushReconcilesAppliedPrivateHeadCASWithLostReply) {
+  RunInTestFiber([&] {
+    auto faulting = std::make_shared<FaultingCOWChunkMetadata>();
+    faulting->cas_failure = FaultingCOWChunkMetadata::CASFailure::kAmbiguousApplied;
+    COWChunk chunk(42, 0, kChunkTestSize, faulting, meta_, data_, std::nullopt);
+    ASSERT_TRUE(chunk.Write(0, Buf("payload")).ok());
+    EXPECT_TRUE(chunk.Flush().ok());
+    EXPECT_FALSE(chunk.HasPendingWrites());
+    EXPECT_EQ(data_->put_calls, 1);
+  });
+}
+
+TEST_F(ChunkTest, FlushPreservesDirtyGenerationWhenPrivateHeadCASNotApplied) {
+  RunInTestFiber([&] {
+    auto faulting = std::make_shared<FaultingCOWChunkMetadata>();
+    faulting->cas_failure = FaultingCOWChunkMetadata::CASFailure::kAmbiguousNotApplied;
+    COWChunk chunk(42, 0, kChunkTestSize, faulting, meta_, data_, std::nullopt);
+    ASSERT_TRUE(chunk.Write(0, Buf("payload")).ok());
+    EXPECT_TRUE(chunk.Flush().IsOutcomeUnknown());
+    EXPECT_TRUE(chunk.HasPendingWrites());
+    swordfs::metadata::FileChunkSnapshot file;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(42, 0, &file).ok());
+    EXPECT_FALSE(file.chunk_id.has_value());
+  });
+}
+
+TEST_F(ChunkTest, FlushPreservesDirtyGenerationWhenPrivateHeadCASRejects) {
+  RunInTestFiber([&] {
+    auto faulting = std::make_shared<FaultingCOWChunkMetadata>();
+    faulting->cas_failure = FaultingCOWChunkMetadata::CASFailure::kRejected;
+    COWChunk chunk(42, 0, kChunkTestSize, faulting, meta_, data_, std::nullopt);
+    ASSERT_TRUE(chunk.Write(0, Buf("payload")).ok());
+    EXPECT_EQ(chunk.Flush().ToErrno(), EIO);
+    EXPECT_TRUE(chunk.HasPendingWrites());
   });
 }
 
