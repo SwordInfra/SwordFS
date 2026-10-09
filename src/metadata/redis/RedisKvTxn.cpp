@@ -25,12 +25,13 @@ utils::Status ValidateWriteExecReplies(sw::redis::QueuedReplies replies) {
     try {
       (void)replies.get(i);
     } catch (const sw::redis::Error &error) {
-      // Redis MULTI/EXEC does not roll back commands that succeeded before a
-      // later command returned an error. Surface this explicitly so callers
-      // can reconcile authoritative state instead of treating a potentially
-      // partial commit as either success or rollback.
-      return utils::Status::OutcomeUnknown("Redis transaction EXEC command failed; commit may be partial: " +
-                                           std::string(error.what()));
+      // Redis returned a definite per-command error, NOT a lost EXEC reply.
+      // Other queued commands may still have executed; the partial state is
+      // an exceptional metadata consistency fault, never an automatic
+      // publication-repair invitation. Preserve the command index/details.
+      SWORDFS_LOG_ERROR << "Redis EXEC command " << i << " failed (possible partial metadata commit): " << error.what();
+      return utils::Status::IOError("Redis EXEC command " + std::to_string(i) +
+                                    " failed; possible partial metadata commit: " + error.what());
     }
   }
   return utils::Status::OK();

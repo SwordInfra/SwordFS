@@ -18,6 +18,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -25,6 +26,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "FiberTest.hpp"
@@ -32,6 +34,7 @@
 #include "TestCOWChunkMetadata.hpp"
 #include "UnsupportedMetaEngine.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
+#include "chunk/cow/COWChunk.hpp"
 #include "chunk/cow/COWCleanup.hpp"
 #include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkCleanupParticipant.hpp"
@@ -43,6 +46,7 @@
 #include "utils/Context.hpp"
 #include "utils/Status.hpp"
 #include "vfs/FileHandle.hpp"
+#include "vfs/FileReadWriter.hpp"
 #include "vfs/InodeHandle.hpp"
 #include "vfs/OrphanReclaimer.hpp"
 #include "volume/VolumeImpl.hpp"
@@ -181,7 +185,25 @@ class RecordingDataEngine : public swordfs::storage::IDataEngine {
         std::string(reinterpret_cast<const char *>(data->data()), data->length());
     return Status::OK();
   }
-  Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
+  Status Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) override {
+    if (get_started_ != nullptr) {
+      // Suspend before reading the object: concurrent GC must not physically
+      // erase this immutable revision while its reader is in flight.
+      auto *started = std::exchange(get_started_, nullptr);
+      auto *release = std::exchange(get_release_, nullptr);
+      started->post();
+      release->wait();
+    }
+    if (out == nullptr || out->tailroom() < size) {
+      return Status::InvalidArgument("invalid recorded data read");
+    }
+    auto state = state_.rlock();
+    const auto it = state->objects.find(std::string(key));
+    if (it == state->objects.end() || offset > it->second.size() || size > it->second.size() - offset) {
+      return Status::IOError("recorded immutable object unavailable");
+    }
+    std::memcpy(out->writableTail(), it->second.data() + offset, size);
+    out->append(size);
     return Status::OK();
   }
   Status Delete(std::string_view key) override {
@@ -201,6 +223,11 @@ class RecordingDataEngine : public swordfs::storage::IDataEngine {
 
   void Seed(std::string key) {
     state_.wlock()->objects[std::move(key)] = "seeded";
+  }
+
+  void BlockNextGet(folly::fibers::Baton *started, folly::fibers::Baton *release) {
+    get_started_ = started;
+    get_release_ = release;
   }
   bool Contains(std::string_view key) const {
     auto state = state_.rlock();
@@ -232,6 +259,8 @@ class RecordingDataEngine : public swordfs::storage::IDataEngine {
 
   folly::Synchronized<State> state_;
   folly::fibers::Baton failed_delete_seen_;
+  folly::fibers::Baton *get_started_ = nullptr;
+  folly::fibers::Baton *get_release_ = nullptr;
 };
 
 class FaultInjectingCOWChunkMetadata final : public metadata::cow::COWChunkMetadata {
@@ -618,7 +647,12 @@ class ReclaimerRedisTest : public ReclaimerTest {
       GTEST_SKIP() << "Redis metadata service is not configured";
     }
     ReclaimerTest::SetUp();
+    if (!HasFatalFailure()) {
+      ASSERT_TRUE(meta_->OpenChunkMetadata(metadata::ChunkType::kCow, &typed_metadata_).ok());
+    }
   }
+
+  metadata::ChunkMetadataPtr typed_metadata_;
 
   std::unique_ptr<metadata::IMetaEngine> CreateMetaEngine(SwordFsVolume *config) override {
     std::unique_ptr<metadata::RedisMetaImpl> engine;
@@ -732,6 +766,28 @@ FIBER_TEST_F(ReclaimerTest, TypedCOWCleanupRejectsMalformedPersistedIdentity) {
 
   EXPECT_EQ(cleanup->DeletePending(MakeTypedRevisionDelete(chunk_id, revision), nullptr).ToErrno(), EINVAL);
   EXPECT_EQ(cleanup->DeleteReclaim(MakeTypedDetachedReclaim(kIno, {}), nullptr).ToErrno(), EINVAL);
+}
+
+FIBER_TEST_F(ReclaimerTest, TypedCleanupFreezeRejectsInvalidIdentityWithoutPublishingWork) {
+  metadata::ReclaimWork reclaim{.ino = 77, .payload = "unchanged"};
+  EXPECT_EQ(chunk::cow::FreezeCOWDetachedReclaim(0, {}, &reclaim).ToErrno(), EINVAL);
+  EXPECT_EQ(chunk::cow::FreezeCOWDetachedReclaim(42, {}, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(chunk::cow::FreezeCOWDetachedReclaim(42, {{.index = 1, .chunk_id = metadata::kInvalidChunkID}}, &reclaim)
+                .ToErrno(),
+            EINVAL);
+  EXPECT_EQ(reclaim.ino, 77U);
+  EXPECT_EQ(reclaim.payload, "unchanged");
+
+  metadata::PendingDelete pending{.id = "unchanged", .payload = "unchanged"};
+  EXPECT_EQ(chunk::cow::FreezeCOWDetachedDelete(0, {.index = 1, .chunk_id = metadata::ChunkID(17)}, &pending).ToErrno(),
+            EINVAL);
+  EXPECT_EQ(
+      chunk::cow::FreezeCOWDetachedDelete(42, {.index = 1, .chunk_id = metadata::kInvalidChunkID}, &pending).ToErrno(),
+      EINVAL);
+  EXPECT_EQ(chunk::cow::FreezeCOWDetachedDelete(42, {.index = 1, .chunk_id = metadata::ChunkID(17)}, nullptr).ToErrno(),
+            EINVAL);
+  EXPECT_EQ(pending.id, "unchanged");
+  EXPECT_EQ(pending.payload, "unchanged");
 }
 
 FIBER_TEST_F(ReclaimerTest, TypedCOWCleanupRequiresConfiguredAuthority) {
@@ -1148,6 +1204,143 @@ FIBER_TEST_F(ReclaimerRedisTest, RewriteCleanupDeletesOnlySupersededRevision) {
   SwordFsChunk authoritative;
   ASSERT_TRUE(meta_->FindChunk(f_ino, 0, &authoritative).ok());
   EXPECT_EQ(authoritative, replacement);
+}
+
+FIBER_TEST_F(ReclaimerRedisTest, TypedRewriteFlushRegistersAndWorkerDeletesOldRevision) {
+  SwordFsInode file;
+  ASSERT_TRUE(meta_->Create(kRootInodeId, "typed-gc-rewrite", 0644, &file).ok());
+  FileReadWriter writer(file.ino, 2);
+  ASSERT_TRUE(writer.Write(*folly::IOBuf::copyBuffer("hello"), 0).ok());
+  ASSERT_TRUE(writer.Flush().ok());
+
+  metadata::FileChunkSnapshot first;
+  ASSERT_TRUE(meta_->ReadFileChunkSnapshot(file.ino, 0, &first).ok());
+  ASSERT_TRUE(first.chunk_id.has_value());
+  const auto typed = std::dynamic_pointer_cast<metadata::cow::COWChunkMetadata>(typed_metadata_);
+  ASSERT_NE(typed, nullptr);
+  metadata::cow::COWChunkHead original;
+  ASSERT_TRUE(typed->GetHead(*first.chunk_id, &original).ok());
+  const chunk::cow::COWObjectKey old_key(*first.chunk_id, original.revision);
+  ASSERT_TRUE(data_->Contains(static_cast<std::string_view>(old_key)));
+
+  ASSERT_TRUE(writer.Write(*folly::IOBuf::copyBuffer("HELLO"), 0).ok());
+  ASSERT_TRUE(writer.Flush().ok());
+  metadata::cow::COWChunkHead updated;
+  ASSERT_TRUE(typed->GetHead(*first.chunk_id, &updated).ok());
+  const chunk::cow::COWObjectKey new_key(*first.chunk_id, updated.revision);
+  EXPECT_NE(updated.revision, original.revision);
+
+  size_t queued = 0;
+  bool has_more = false;
+  ASSERT_TRUE(meta_
+                  ->VisitPendingDeletesBatch(
+                      16,
+                      [&](const metadata::PendingDelete &pending) {
+                        EXPECT_EQ(pending.id, "cow:revision:" + std::to_string(first.chunk_id->Value()) + ":" +
+                                                  std::to_string(original.revision.Value()));
+                        ++queued;
+                        return Status::OK();
+                      },
+                      &has_more)
+                  .ok());
+  EXPECT_EQ(queued, 1U);
+  EXPECT_FALSE(has_more);
+
+  std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
+  const auto probe = [this](InodeID ino, metadata::ChunkIndex index, std::optional<metadata::ChunkID> *out) {
+    return meta_->ProbeAttachment(ino, index, out);
+  };
+  ASSERT_TRUE(chunk::cow::CreateCOWCleanupParticipant(volume::VolumeImpl::Instance().chunk_size(), typed_metadata_,
+                                                      meta_, data_, probe, &cleanup)
+                  .ok());
+  chunk::internal::ChunkGcWorker worker(meta_, std::move(cleanup));
+  ASSERT_TRUE(worker.Reconcile().ok());
+  EXPECT_FALSE(data_->Contains(static_cast<std::string_view>(old_key)));
+  EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(new_key)));
+}
+
+FIBER_TEST_F(ReclaimerTest, TypedRevisionCleanupDoesNotKeepStaleCachedReadSnapshot) {
+  constexpr InodeID kIno = 42;
+  auto typed = std::make_shared<swordfs::test::TestCOWChunkMetadata>();
+  metadata::ChunkID id;
+  ASSERT_TRUE(typed->AllocateChunkID(&id).ok());
+  metadata::cow::COWChunkRevision first;
+  ASSERT_TRUE(typed->AllocateRevision(id, &first).ok());
+  const metadata::cow::COWChunkHead initial{first, 64};
+  ASSERT_TRUE(typed->CompareExchangeHead(id, std::nullopt, initial).ok());
+  const chunk::cow::COWObjectKey old_key(id, first);
+  data_->Seed(std::string(static_cast<std::string_view>(old_key)));
+
+  auto cached_reader = std::make_unique<chunk::cow::COWChunk>(kIno, 0, 1024, typed, meta_, data_, id, initial, 64);
+  metadata::cow::COWChunkRevision second;
+  ASSERT_TRUE(typed->AllocateRevision(id, &second).ok());
+  ASSERT_TRUE(typed->CompareExchangeHead(id, initial, {second, 64}).ok());
+  const chunk::cow::COWObjectKey new_key(id, second);
+  ASSERT_TRUE(data_->Put(static_cast<std::string_view>(new_key), folly::IOBuf::copyBuffer(std::string(64, 'N'))).ok());
+
+  std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
+  ASSERT_TRUE(chunk::cow::CreateCOWCleanupParticipant(1024, typed, meta_, data_, {}, &cleanup).ok());
+  const auto pending = MakeTypedRevisionDelete(id, first);
+  bool completed = true;
+  ASSERT_TRUE(cleanup->DeletePending(pending, &completed).ok());
+  EXPECT_TRUE(completed) << "a cached clean session must not keep an obsolete immutable revision alive";
+  EXPECT_FALSE(data_->Contains(static_cast<std::string_view>(old_key)));
+  auto out = folly::IOBuf::create(3);
+  ASSERT_TRUE(cached_reader->Read(0, 3, out.get()).ok());
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "NNN");
+}
+
+TEST_F(ReclaimerTest, TypedRevisionReadRetriesNewHeadIfGcDeletedPreviousObjectDuringGet) {
+  folly::EventBase evb;
+  auto &manager = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton get_started;
+  folly::fibers::Baton release_get;
+  folly::fibers::Baton read_done;
+  folly::fibers::Baton finished;
+  constexpr InodeID kIno = 42;
+  auto typed = std::make_shared<swordfs::test::TestCOWChunkMetadata>();
+  metadata::ChunkID id;
+  metadata::cow::COWChunkRevision old_revision;
+  metadata::cow::COWChunkRevision next_revision;
+  std::unique_ptr<chunk::cow::COWChunk> reader;
+  std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
+  Status read_status;
+
+  manager.addTask([&] {
+    ASSERT_TRUE(typed->AllocateChunkID(&id).ok());
+    ASSERT_TRUE(typed->AllocateRevision(id, &old_revision).ok());
+    const metadata::cow::COWChunkHead original{old_revision, 6};
+    ASSERT_TRUE(typed->CompareExchangeHead(id, std::nullopt, original).ok());
+    const chunk::cow::COWObjectKey key(id, old_revision);
+    ASSERT_TRUE(data_->Put(static_cast<std::string_view>(key), folly::IOBuf::copyBuffer("seeded")).ok());
+    reader = std::make_unique<chunk::cow::COWChunk>(kIno, 0, 1024, typed, meta_, data_, id, original, 6);
+    ASSERT_TRUE(typed->AllocateRevision(id, &next_revision).ok());
+    const chunk::cow::COWObjectKey new_key(id, next_revision);
+    ASSERT_TRUE(data_->Put(static_cast<std::string_view>(new_key), folly::IOBuf::copyBuffer("newest")).ok());
+    ASSERT_TRUE(chunk::cow::CreateCOWCleanupParticipant(1024, typed, meta_, data_, {}, &cleanup).ok());
+    data_->BlockNextGet(&get_started, &release_get);
+    auto out = folly::IOBuf::create(6);
+    read_status = reader->Read(0, 6, out.get());
+    if (read_status.ok()) {
+      EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "newest");
+    }
+    read_done.post();
+  });
+  manager.addTask([&] {
+    get_started.wait();
+    const metadata::cow::COWChunkHead expected{old_revision, 6};
+    ASSERT_TRUE(typed->CompareExchangeHead(id, expected, {next_revision, 6}).ok());
+    bool completed = true;
+    const auto work = MakeTypedRevisionDelete(id, old_revision);
+    ASSERT_TRUE(cleanup->DeletePending(work, &completed).ok());
+    EXPECT_TRUE(completed) << "GC can retire old revision without holding a cached read snapshot";
+    release_get.post();
+    read_done.wait();
+    EXPECT_TRUE(read_status.ok()) << read_status.message();
+    finished.post();
+  });
+  swordfs::test::DriveEventBaseUntilOrAbort(
+      evb, [&] { return finished.try_wait(); }, "typed COW retired revision read retry");
 }
 
 FIBER_TEST_F(ReclaimerTest, TypedCOWRevisionCleanupUsesChunkIDRevisionAndIgnoresHeadSize) {

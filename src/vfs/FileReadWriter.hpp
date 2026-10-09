@@ -74,6 +74,10 @@ class FileChunkManager {
   /// Authoritative metadata owns best-effort object cleanup registration.
   void TruncateToSize(size_t size, size_t chunk_size);
 
+  /// Sync an already-sanitized private boundary with the cached publication
+  /// head, without truncating any pending write buffer.
+  void ClampCachedPublishedPrefix(metadata::ChunkIndex index, size_t visible_prefix);
+
  private:
   metadata::InodeID ino_;
   const chunk::ChunkFactory *factory_;
@@ -123,7 +127,13 @@ class FileReadWriter {
                                    int open_flags);
   utils::Status GetVisibleSize(uint64_t *size);
   void ApplyLiveSize(metadata::SwordFsInode *inode) const;
+  // Requires operation_mutex_: a terminal partial size commit cannot be
+  // used as the baseline for further cached reads or publications.
+  utils::Status CheckSizeCommitSafety() const;
   utils::Status FlushPendingWritesLocked();
+  // Called only while the inode operation mutex is held exclusively.
+  utils::Status CommitSizeChangeLocked(const metadata::SwordFsAttr &requested, metadata::SetAttrField fields,
+                                       metadata::SwordFsInode *out);
 
  private:
   InodeID ino_;
@@ -148,6 +158,8 @@ class FileReadWriter {
   uint64_t inode_flag_epoch_ = 0;
   uint64_t size_state_epoch_ = 0;
   uint64_t write_epoch_ = 0;
+  // Mount-local guard only; this is NOT durable metadata repair or quarantine.
+  bool size_commit_failed_closed_ = false;
 };
 
 class LiveAttrGuard {

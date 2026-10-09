@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/redis/RedisMetaOps.hpp"
 #include "metadata/redis/RedisMetaTestSupport.hpp"
 #include "utils/ExecutionDomain.hpp"
@@ -79,6 +80,121 @@ TEST(RedisMetaOpsTest, GetInodeUsesDirectMetadataReadPath) {
 
   const auto invalid_status = RunInFiber([&] { return ops.GetInode(inode.ino, nullptr); });
   EXPECT_EQ(invalid_status.ToErrno(), EINVAL);
+}
+
+TEST(RedisMetaOpsTest, TypedFileMetadataSnapshotsAndAttachmentRejectInvalidTargets) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  const std::string volume_name = UniqueRedisName("ops-typed-attachments");
+  RedisMetaOps ops(config, volume_name);
+  SwordFsVolume volume;
+  volume.name = volume_name;
+  ASSERT_TRUE(ops.FormatVolume(volume).ok());
+  const redis::RedisKey key(config.db, volume_name);
+  sw::redis::Redis redis(ConnectionOptions(config));
+  constexpr InodeID kFileIno = 42;
+  constexpr InodeID kMissingIno = 999999;
+  SwordFsInode file(kFileIno, SwordFsAttr(kFileIno, S_IFREG | 0644), kRootInodeId);
+  ASSERT_TRUE(SeedInode(redis, key, file).ok());
+
+  RunInFiber([&] {
+    FileChunkSnapshot snapshot;
+    FileMappingSnapshot mapping;
+    std::optional<ChunkID> attached;
+    EXPECT_EQ(ops.ReadFileChunkSnapshot(kFileIno, 0, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(ops.ReadFileMappingSnapshot(kFileIno, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(ops.ProbeAttachment(kFileIno, 0, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(ops.ReadFileChunkSnapshot(kMissingIno, 0, &snapshot).ToErrno(), ENOENT);
+    EXPECT_EQ(ops.ReadFileMappingSnapshot(kMissingIno, &mapping).ToErrno(), ENOENT);
+    EXPECT_EQ(ops.ProbeAttachment(kMissingIno, 0, &attached).ToErrno(), ENOENT);
+    ASSERT_TRUE(ops.ReadFileChunkSnapshot(kFileIno, 0, &snapshot).ok());
+    EXPECT_FALSE(snapshot.chunk_id.has_value());
+    ASSERT_TRUE(ops.ReadFileMappingSnapshot(kFileIno, &mapping).ok());
+    EXPECT_TRUE(mapping.mappings.empty());
+    ASSERT_TRUE(ops.ProbeAttachment(kFileIno, 0, &attached).ok());
+    EXPECT_FALSE(attached.has_value());
+
+    const ChunkID id(1001);
+    EXPECT_EQ(ops.AttachPrepared(kFileIno, 0, ChunkID(0), 16, {.eof = 0}).ToErrno(), EINVAL);
+    ASSERT_TRUE(ops.AttachPrepared(kFileIno, 0, id, 16, {.eof = 0}).ok());
+    EXPECT_EQ(ops.AttachPrepared(kFileIno, 0, ChunkID(1002), 16, {.eof = 0}).ToErrno(), EEXIST);
+    ASSERT_TRUE(ops.ReadFileChunkSnapshot(kFileIno, 1, &snapshot).ok());
+    ASSERT_TRUE(snapshot.eof_boundary.has_value());
+    EXPECT_EQ(snapshot.eof_boundary->index, 0U);
+    EXPECT_EQ(snapshot.eof_boundary->chunk_id, id);
+    ASSERT_TRUE(ops.ReadFileMappingSnapshot(kFileIno, &mapping).ok());
+    ASSERT_EQ(mapping.mappings.size(), 1U);
+    EXPECT_EQ(mapping.mappings[0].chunk_id, id);
+    ASSERT_TRUE(ops.ProbeAttachment(kFileIno, 0, &attached).ok());
+    EXPECT_EQ(attached, id);
+
+    ChunkSizePlan grow;
+    ASSERT_TRUE(PlanChunkSizeChange(16, 32, SwordFsVolume{}.chunk_size, mapping.mappings, &grow).ok());
+    SwordFsAttr requested;
+    requested.size = 32;
+    ChunkSizeCommitResult committed;
+    EXPECT_EQ(ops.CommitGrow(kFileIno, grow, requested, SetAttrField::kSize, nullptr).ToErrno(), EINVAL);
+    ASSERT_TRUE(ops.CommitGrow(kFileIno, grow, requested, SetAttrField::kSize, &committed).ok());
+    EXPECT_EQ(committed.inode.attr.size, 32U);
+  });
+}
+
+TEST(RedisMetaOpsTest, TypedSnapshotsRejectMalformedMappingsAndWrongRedisKeyType) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+
+  const std::string volume_name = UniqueRedisName("ops-typed-malformed");
+  RedisMetaOps ops(config, volume_name);
+  SwordFsVolume volume;
+  volume.name = volume_name;
+  ASSERT_TRUE(ops.FormatVolume(volume).ok());
+  const redis::RedisKey key(config.db, volume_name);
+  sw::redis::Redis redis(ConnectionOptions(config));
+  constexpr InodeID kFileIno = 42;
+  SwordFsInode file(kFileIno, SwordFsAttr(kFileIno, S_IFREG | 0644), kRootInodeId);
+  file.attr.size = 24;
+  ASSERT_TRUE(SeedInode(redis, key, file).ok());
+
+  FileMappingSnapshot mappings;
+  FileChunkSnapshot chunk;
+  std::optional<ChunkID> attached;
+  redis.hset(key.ChunkRefs(kFileIno), "not-an-index", "12");
+  EXPECT_EQ(RunInFiber([&] { return ops.ReadFileMappingSnapshot(kFileIno, &mappings); }).ToErrno(), EIO);
+  redis.hdel(key.ChunkRefs(kFileIno), "not-an-index");
+
+  redis.hset(key.ChunkRefs(kFileIno), "0", "bad-id");
+  EXPECT_EQ(RunInFiber([&] { return ops.ReadFileMappingSnapshot(kFileIno, &mappings); }).ToErrno(), EIO);
+  EXPECT_EQ(RunInFiber([&] { return ops.ReadFileChunkSnapshot(kFileIno, 0, &chunk); }).ToErrno(), EIO);
+  EXPECT_EQ(RunInFiber([&] { return ops.ReadFileChunkSnapshot(kFileIno, 1, &chunk); }).ToErrno(), EIO);
+  EXPECT_EQ(RunInFiber([&] { return ops.ProbeAttachment(kFileIno, 0, &attached); }).ToErrno(), EIO);
+  redis.del(key.ChunkRefs(kFileIno));
+
+  // Wrongtype errors from the backing key must be surfaced, never silently
+  // interpreted as a hole or empty file.
+  redis.set(key.ChunkRefs(kFileIno), "wrong-type");
+  EXPECT_EQ(RunInFiber([&] { return ops.ReadFileChunkSnapshot(kFileIno, 0, &chunk); }).ToErrno(), EIO);
+  EXPECT_EQ(RunInFiber([&] { return ops.ReadFileMappingSnapshot(kFileIno, &mappings); }).ToErrno(), EIO);
+  EXPECT_EQ(RunInFiber([&] { return ops.ProbeAttachment(kFileIno, 0, &attached); }).ToErrno(), EIO);
+}
+
+TEST(RedisMetaOpsTest, TypedSnapshotReadConnectionFailureIsNeverReportedAsEmptyFile) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.port = 1;
+  config.retry_attempts = 1;
+
+  RedisMetaOps ops(config, "unreachable-typed-snapshots");
+  FileMappingSnapshot mappings;
+  FileChunkSnapshot chunk;
+  std::optional<ChunkID> attached;
+  EXPECT_EQ(RunInFiber([&] { return ops.ReadFileChunkSnapshot(42, 0, &chunk); }).ToErrno(), EIO);
+  EXPECT_EQ(RunInFiber([&] { return ops.ReadFileMappingSnapshot(42, &mappings); }).ToErrno(), EIO);
+  EXPECT_EQ(RunInFiber([&] { return ops.ProbeAttachment(42, 0, &attached); }).ToErrno(), EIO);
 }
 
 TEST(RedisMetaOpsTest, GetInodesUsesAlignedBatchReadWithMissingEntries) {

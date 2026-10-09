@@ -26,6 +26,11 @@ uint32_t ModeToDt(uint32_t mode);
 /// default_permissions.
 CreateInheritance ResolveCreateInheritance(uint64_t caller_gid, const SwordFsAttr &parent, uint32_t child_mode);
 
+// Construct the complete SetAttr result without changing live metadata.
+// Size publication can validate ACL/policy before detaching any mapping.
+utils::Status PrepareSetAttrMutation(const SwordFsInode &current, const SwordFsAttr &requested, SetAttrField fields,
+                                     SwordFsInode *out);
+
 inline constexpr uint64_t kMaxNameLength = 255;
 
 /// Validate one directory-entry name before backend lookup or mutation.

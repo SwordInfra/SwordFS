@@ -55,8 +55,8 @@ class RedisKvTxn {
   explicit RedisKvTxn(sw::redis::Redis &redis);
 
   void Discard() noexcept;
-  // Returns terminal commit failures as Status. Possible partial/post-EXEC
-  // mutation outcomes are OutcomeUnknown. A WATCH conflict remains private
+  // Returns known per-command EXEC errors as terminal IOError; only an
+  // unobservable EXEC response is OutcomeUnknown. WATCH conflict remains private
   // Redis control flow and is translated to WatchConflict so RedisMetaClient
   // can retry it without conflating it with Status::Busy or with exceptions
   // escaping from callback code.

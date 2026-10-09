@@ -61,6 +61,7 @@ class RedisMetaImpl : public IMetaEngine {
   Status VisitOrphanCandidates(const InodeVisitorFn &visitor) override;
   Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) override;
   Status VisitPendingDeletesBatch(size_t max_items, const PendingDeleteVisitorFn &visitor, bool *has_more) override;
+  Status RegisterPendingDelete(const PendingDelete &work) override;
   Status CompletePendingDelete(std::string_view key) override;
   Status AllocateChunkRevision(ChunkRevision *revision) override;
   Status OpenDir(InodeID ino, DirIteratorPtr *iterator) override;
@@ -70,6 +71,17 @@ class RedisMetaImpl : public IMetaEngine {
                      const ChunkPublishIntent &intent) override;
   Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
   Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out) override;
+  Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out) override;
+  Status ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out) override;
+  Status ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out) override;
+  Status AttachPrepared(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                        const FileSizePrecondition &expected) override;
+  Status FinalizeAttachedWrite(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                               const FileSizePrecondition &expected) override;
+  Status CommitShrink(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                      ChunkSizeCommitResult *out) override;
+  Status CommitGrow(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                    ChunkSizeCommitResult *out) override;
   Status Truncate(InodeID ino, uint64_t size) override;
 
  private:

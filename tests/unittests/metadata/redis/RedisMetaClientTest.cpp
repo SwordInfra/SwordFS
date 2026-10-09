@@ -105,9 +105,10 @@ TEST(RedisMetaClientTest, DetectsExecCommandErrorAndReportsPossiblePartialCommit
     return txn.Set(later_key, "applied");
   });
 
-  EXPECT_TRUE(status.IsOutcomeUnknown());
+  EXPECT_FALSE(status.IsOutcomeUnknown()) << "Redis returned a definite per-command EXEC error";
   EXPECT_EQ(status.ToErrno(), EIO);
-  EXPECT_NE(status.message().find("commit may be partial"), std::string::npos);
+  EXPECT_NE(status.message().find("EXEC command 0"), std::string::npos);
+  EXPECT_NE(status.message().find("WRONGTYPE"), std::string::npos);
   const auto later_value = redis.get(later_key);
   ASSERT_TRUE(later_value.has_value());
   EXPECT_EQ(*later_value, "applied");
@@ -697,6 +698,36 @@ TEST(RedisMetaClientTest, ValidRedisReplyErrorsRemainKnownFailuresWithoutRetry) 
     EXPECT_TRUE(server.exec_received());
     EXPECT_TRUE(server.error().empty()) << server.error();
   }
+}
+
+TEST(RedisMetaClientTest, ExecutedCommandErrorReportsPartialCommitWithoutBlindRetry) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  sw::redis::Redis control(ConnectionOptions(config));
+  const std::string key = UniqueRedisName("partial-exec-command-error");
+  control.del(key);
+  config.retry_attempts = 3;
+  config.retry_backoff = std::chrono::milliseconds(0);
+  RedisMetaClient store(config);
+  int attempts = 0;
+  const auto status = store.Transact([&](RedisKvTxn &transaction) {
+    ++attempts;
+    auto result = transaction.Set(key, "committed-prefix");
+    if (!result.ok()) {
+      return result;
+    }
+    return transaction.HSet(key, "field", "wrongtype");
+  });
+  EXPECT_EQ(status.ToErrno(), EIO);
+  EXPECT_FALSE(status.IsOutcomeUnknown());
+  EXPECT_NE(status.message().find("EXEC command 1"), std::string::npos);
+  EXPECT_NE(status.message().find("WRONGTYPE"), std::string::npos);
+  EXPECT_EQ(attempts, 1);
+  EXPECT_EQ(control.get(key), std::optional<std::string>("committed-prefix"))
+      << "Redis EXEC applied the first command before a later command failed";
+  control.del(key);
 }
 
 TEST(RedisMetaClientTest, PostExecProtocolFailureIsOutcomeUnknownWithoutReplay) {

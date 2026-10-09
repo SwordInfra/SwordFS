@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "metadata/ChunkSizePlan.hpp"
 #include "metadata/IChunkIndexTxn.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/types/Chunk.hpp"
@@ -26,6 +27,9 @@ class ChunkMetadataBridge;
 namespace swordfs::metadata {
 
 class RedisKvTxn;
+struct FileChunkSnapshot;
+struct FileMappingSnapshot;
+struct ChunkSizeCommitResult;
 
 // Metadata operations bound to one optimistic Redis transaction.
 //
@@ -118,8 +122,21 @@ class RedisMetaTxn : public IChunkIndexTxn {
                             utils::Status &publication_result, std::optional<PendingDelete> &cleanup_candidate,
                             const ChunkPublishIntent &intent = {});
   utils::Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out);
+  utils::Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out);
+  utils::Status ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out);
+  utils::Status ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out);
+  utils::Status AttachPrepared(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                               const FileSizePrecondition &expected);
+  utils::Status FinalizeAttachedWrite(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                                      const FileSizePrecondition &expected);
+  utils::Status CommitShrink(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                             ChunkSizeCommitResult *out);
+  utils::Status CommitGrow(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                           ChunkSizeCommitResult *out);
 
  private:
+  utils::Status CommitSizeChange(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
+                                 SetAttrField fields, bool is_shrink, ChunkSizeCommitResult *out);
   utils::Status SetInode(const SwordFsInode &inode);
   utils::Status DeleteInode(InodeID ino);
   utils::Status AdjustNlink(SwordFsInode *inode, int delta, uint64_t *nlink = nullptr);
@@ -135,6 +152,7 @@ class RedisMetaTxn : public IChunkIndexTxn {
                              SwordFsInode *parent);
   utils::Status AdjustInodeCount(int64_t delta);
   utils::Status LookupChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
+  utils::Status LookupAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out);
   utils::Status ScanChunks(InodeID ino, std::vector<std::pair<std::string, SwordFsChunk>> &chunks);
   utils::Status QueuePendingDelete(const PendingDelete &work);
   std::string PrivateHash(std::string_view hash) const;
