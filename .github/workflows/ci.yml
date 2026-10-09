@@ -63,6 +63,9 @@ jobs:
       - name: Test fstests classifier tooling
         run: python3 tests/tooling/test_fstests_classify.py
 
+      - name: Enforce Metadata backend dependency boundaries
+        run: python3 scripts/static-analysis/check-metadata-boundaries.py
+
   codecov-docs-only:
     name: codecov-docs-only
     needs: [change-scope, clang-format]
