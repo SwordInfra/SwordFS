@@ -163,6 +163,9 @@ class COWTestBridge final : public chunk::internal::ChunkMetadataBridge {
                                       ReclaimWork *out) const override {
     return chunk::cow::FreezeCOWDetachedReclaim(file_ino, mappings, out);
   }
+  utils::Status FreezeDetachedDelete(InodeID file_ino, const ChunkMapping &mapping, PendingDelete *out) const override {
+    return chunk::cow::FreezeCOWDetachedDelete(file_ino, mapping, out);
+  }
 };
 
 inline const chunk::internal::ChunkMetadataBridge &COWBridgeForTest() {
@@ -220,6 +223,9 @@ class RecordingRedisBridge final : public chunk::internal::ChunkMetadataBridge {
   utils::Status FreezeDetachedReclaim(InodeID file_ino, const std::vector<ChunkMapping> &mappings,
                                       ReclaimWork *out) const override {
     return chunk::cow::FreezeCOWDetachedReclaim(file_ino, mappings, out);
+  }
+  utils::Status FreezeDetachedDelete(InodeID file_ino, const ChunkMapping &mapping, PendingDelete *out) const override {
+    return chunk::cow::FreezeCOWDetachedDelete(file_ino, mapping, out);
   }
 };
 

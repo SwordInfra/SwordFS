@@ -41,6 +41,8 @@ utils::Status FreezeCOWReclaim(metadata::InodeID ino, const std::vector<metadata
 // FileMetadata map without consulting a legacy descriptor or a COW head.
 utils::Status FreezeCOWDetachedReclaim(metadata::InodeID ino, const std::vector<metadata::ChunkMapping> &mappings,
                                        metadata::ReclaimWork *out);
+utils::Status FreezeCOWDetachedDelete(metadata::InodeID ino, const metadata::ChunkMapping &mapping,
+                                      metadata::PendingDelete *out);
 utils::Status DecodeCOWDelete(const metadata::PendingDelete &work, uint64_t chunk_size, COWRef *out);
 utils::Status DecodeCOWReclaim(const metadata::ReclaimWork &work, uint64_t chunk_size, std::vector<COWRef> *out);
 

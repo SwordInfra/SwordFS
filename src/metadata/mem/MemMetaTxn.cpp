@@ -973,6 +973,22 @@ Status MemMetaTxn::CommitSizeChange(InodeID ino, const ChunkSizePlan &plan, cons
       result.detached.push_back(mapping);
     }
   }
+  if (!result.detached.empty()) {
+    if (store_->chunk_metadata_bridge_ == nullptr) {
+      return Status::Internal("chunk metadata bridge is not bound");
+    }
+    // A detached ChunkID is no longer reachable through FileMetadata after
+    // this transaction. Record maintenance work before mutating the map;
+    // the cleanup worker still revalidates attachment before deletion.
+    for (const auto &mapping : result.detached) {
+      PendingDelete pending;
+      status = store_->chunk_metadata_bridge_->FreezeDetachedDelete(ino, mapping, &pending);
+      if (!status.ok()) {
+        return status;
+      }
+      store_->pending_deletes_.insert_or_assign(pending.id, std::move(pending));
+    }
+  }
   auto refs_it = store_->chunk_refs_.find(ino);
   if (refs_it != store_->chunk_refs_.end()) {
     for (const auto &detached : result.detached) {

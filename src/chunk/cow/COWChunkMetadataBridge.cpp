@@ -63,6 +63,10 @@ class COWChunkMetadataBridge final : public internal::ChunkMetadataBridge {
                                       metadata::ReclaimWork *out) const override {
     return FreezeCOWDetachedReclaim(ino, mappings, out);
   }
+  utils::Status FreezeDetachedDelete(metadata::InodeID ino, const metadata::ChunkMapping &mapping,
+                                     metadata::PendingDelete *out) const override {
+    return FreezeCOWDetachedDelete(ino, mapping, out);
+  }
 };
 
 }  // namespace

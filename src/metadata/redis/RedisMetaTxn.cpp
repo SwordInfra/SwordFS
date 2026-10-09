@@ -1312,6 +1312,25 @@ utils::Status RedisMetaTxn::CommitSizeChange(InodeID ino, const ChunkSizePlan &p
     }
   }
 
+  if (!result.detached.empty()) {
+    if (chunk_metadata_bridge_ == nullptr) {
+      return utils::Status::Internal("chunk metadata bridge is not bound");
+    }
+    // Enqueue immutable identities in the same watched Redis transaction as
+    // detach/EOF. A partial EXEC remains safe: GC must recheck reachability.
+    for (const auto &mapping : result.detached) {
+      PendingDelete pending;
+      status = chunk_metadata_bridge_->FreezeDetachedDelete(ino, mapping, &pending);
+      if (!status.ok()) {
+        return status;
+      }
+      status = QueuePendingDelete(pending);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+  }
+
   const auto detach = [&]() -> utils::Status {
     for (const auto &mapping : result.detached) {
       auto detached_status = txn_.HDel(key_.ChunkRefs(ino), std::to_string(mapping.index));

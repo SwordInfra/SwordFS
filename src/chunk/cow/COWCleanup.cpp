@@ -264,6 +264,24 @@ utils::Status FreezeCOWDetachedReclaim(metadata::InodeID ino, const std::vector<
   return utils::Status::OK();
 }
 
+utils::Status FreezeCOWDetachedDelete(metadata::InodeID ino, const metadata::ChunkMapping &mapping,
+                                      metadata::PendingDelete *out) {
+  if (out == nullptr || ino == 0 || !metadata::cow::internal::IsValidChunkID(mapping.chunk_id)) {
+    return utils::Status::InvalidArgument("invalid detached COW cleanup identity");
+  }
+  metadata::BufEncoder encoded;
+  encoded.Header(metadata::RecordType::kCowTypedCleanup);
+  encoded.U32(static_cast<uint32_t>(COWCleanupKind::kDetachedChunk));
+  encoded.U64(ino);
+  encoded.U64(mapping.index);
+  encoded.U64(mapping.chunk_id.Value());
+  metadata::PendingDelete pending;
+  pending.id = "cow:chunk:" + std::to_string(mapping.chunk_id.Value());
+  encoded.Finish(&pending.payload);
+  *out = std::move(pending);
+  return utils::Status::OK();
+}
+
 utils::Status DecodeCOWDelete(const metadata::PendingDelete &work, uint64_t chunk_size, COWRef *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("COW delete output is null");

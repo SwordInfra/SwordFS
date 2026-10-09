@@ -46,6 +46,8 @@ class ChunkMetadataBridge {
   virtual utils::Status FreezeDetachedReclaim(metadata::InodeID ino,
                                               const std::vector<metadata::ChunkMapping> &mappings,
                                               metadata::ReclaimWork *out) const = 0;
+  virtual utils::Status FreezeDetachedDelete(metadata::InodeID ino, const metadata::ChunkMapping &mapping,
+                                             metadata::PendingDelete *out) const = 0;
 };
 
 utils::Status CreateChunkMetadataBridge(metadata::ChunkType chunk_type, std::unique_ptr<ChunkMetadataBridge> *out);

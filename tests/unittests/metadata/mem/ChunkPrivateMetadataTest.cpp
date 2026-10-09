@@ -119,6 +119,9 @@ class RecordingBridge final : public chunk::internal::ChunkMetadataBridge {
   utils::Status FreezeDetachedReclaim(InodeID, const std::vector<ChunkMapping> &, ReclaimWork *) const override {
     return utils::Status::NotSupported("recording legacy bridge has no typed cleanup codec");
   }
+  utils::Status FreezeDetachedDelete(InodeID, const ChunkMapping &, PendingDelete *) const override {
+    return utils::Status::NotSupported("recording legacy bridge has no typed cleanup codec");
+  }
 };
 
 class ChunkPrivateMetadataTest : public ::testing::Test {
