@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <charconv>
 #include <map>
 #include <string>
 #include <utility>
@@ -15,12 +16,29 @@
 
 #include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "metadata/ChunkSizePlan.hpp"
+#include "metadata/IMetaEngine.hpp"
 #include "metadata/InodePolicy.hpp"
 #include "metadata/PosixAcl.hpp"
 #include "metadata/Utils.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 
 namespace swordfs::metadata {
+namespace {
+
+utils::Status ParseAttachedChunkID(std::string_view encoded, ChunkID *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("attached ChunkID output is null");
+  }
+  uint64_t value = 0;
+  const auto [end, error] = std::from_chars(encoded.data(), encoded.data() + encoded.size(), value);
+  if (error != std::errc{} || end != encoded.data() + encoded.size() || value == 0 || value > kMaxChunkIDValue) {
+    return utils::Status::Malformed("FileMetadata contains an invalid ChunkID");
+  }
+  *out = ChunkID(value);
+  return utils::Status::OK();
+}
+
+}  // namespace
 
 RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size, ChunkType chunk_type,
                            const chunk::internal::ChunkMetadataBridge *bridge)
@@ -409,30 +427,45 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     return utils::Status::OK();
   }
 
-  std::vector<std::pair<std::string, SwordFsChunk>> scanned;
-  status = ScanChunks(ino, scanned);
-  if (!status.ok()) {
-    return status;
+  FileMappingSnapshot typed;
+  if (inode.IsRegular()) {
+    // Scan and WATCH the authoritative map under the same transaction as the
+    // inode's last-link fence; a competing attachment must abort EXEC.
+    status = ReadFileMappingSnapshot(ino, &typed);
+    if (!status.ok()) {
+      return status;
+    }
   }
 
   std::vector<SwordFsChunk> heads;
-  heads.reserve(scanned.size());
-  for (const auto &[field, descriptor] : scanned) {
-    (void)field;
-    heads.push_back(descriptor);
+  if (typed.mappings.empty()) {
+    std::vector<std::pair<std::string, SwordFsChunk>> scanned;
+    status = ScanChunks(ino, scanned);
+    if (!status.ok()) {
+      return status;
+    }
+    heads.reserve(scanned.size());
+    for (const auto &[field, descriptor] : scanned) {
+      (void)field;
+      heads.push_back(descriptor);
+    }
+    std::sort(heads.begin(), heads.end(),
+              [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
   }
-  std::sort(heads.begin(), heads.end(), [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
   if (chunk_metadata_bridge_ == nullptr) {
     return utils::Status::Internal("chunk metadata bridge is not bound");
   }
   ReclaimWork pending;
-  status = chunk_metadata_bridge_->FreezeReclaim(*this, ino, heads, chunk_size_, &pending);
+  status = !typed.mappings.empty() ? chunk_metadata_bridge_->FreezeDetachedReclaim(ino, typed.mappings, &pending)
+                                   : chunk_metadata_bridge_->FreezeReclaim(*this, ino, heads, chunk_size_, &pending);
   if (!status.ok()) {
     return status;
   }
-  status = chunk_metadata_bridge_->PrepareReclaim(*this, ino, heads);
-  if (!status.ok()) {
-    return status;
+  if (typed.mappings.empty()) {
+    status = chunk_metadata_bridge_->PrepareReclaim(*this, ino, heads);
+    if (!status.ok()) {
+      return status;
+    }
   }
 
   std::string serialized;
@@ -446,6 +479,10 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
   // a later auxiliary command failure cannot leave a revivable inode whose
   // mappings were already destroyed.
   status = txn_.Del(key_.Inode(ino));
+  if (!status.ok()) {
+    return status;
+  }
+  status = txn_.Del(key_.ChunkRefs(ino));
   if (!status.ok()) {
     return status;
   }
@@ -1011,6 +1048,316 @@ utils::Status RedisMetaTxn::RegisterPendingDeletes(const std::vector<PendingDele
       return status;
     }
   }
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaTxn::LookupAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("attachment output is null");
+  }
+  out->reset();
+  std::string encoded;
+  auto status = txn_.HGet(key_.ChunkRefs(ino), std::to_string(index), &encoded);
+  if (status.IsNotFound()) {
+    return utils::Status::OK();
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  ChunkID chunk_id;
+  status = ParseAttachedChunkID(encoded, &chunk_id);
+  if (status.ok()) {
+    *out = chunk_id;
+  }
+  return status;
+}
+
+utils::Status RedisMetaTxn::ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("file chunk snapshot output is null");
+  }
+  FileChunkSnapshot result;
+  auto status = LookupInode(ino, &result.inode);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!result.inode.IsRegular()) {
+    return utils::Status::InvalidArgument("not a regular file");
+  }
+  status = LookupAttachment(ino, index, &result.chunk_id);
+  if (!status.ok()) {
+    return status;
+  }
+  ChunkSizeLayout eof_layout;
+  status = PlanChunkSizeLayout(result.inode.attr.size, chunk_size_, &eof_layout);
+  if (!status.ok()) {
+    return status;
+  }
+  if (eof_layout.boundary.has_value()) {
+    const auto &boundary = *eof_layout.boundary;
+    std::optional<ChunkID> boundary_id;
+    if (boundary.index == index) {
+      boundary_id = result.chunk_id;
+    } else {
+      status = LookupAttachment(ino, boundary.index, &boundary_id);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+    result.eof_boundary = ChunkBoundarySnapshot{
+        .index = boundary.index, .chunk_id = boundary_id, .visible_prefix = boundary.visible_prefix};
+  }
+  *out = std::move(result);
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaTxn::ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("file mapping snapshot output is null");
+  }
+  FileMappingSnapshot result;
+  auto status = LookupInode(ino, &result.inode);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!result.inode.IsRegular()) {
+    return utils::Status::InvalidArgument("not a regular file");
+  }
+  uint64_t cursor = 0;
+  do {
+    std::vector<std::pair<std::string, std::string>> page;
+    uint64_t next_cursor = 0;
+    status = txn_.HScan(key_.ChunkRefs(ino), cursor, 128, &page, &next_cursor);
+    if (!status.ok()) {
+      return status;
+    }
+    for (const auto &[index_field, id_value] : page) {
+      ChunkIndex index = 0;
+      const auto [end, error] = std::from_chars(index_field.data(), index_field.data() + index_field.size(), index);
+      if (error != std::errc{} || end != index_field.data() + index_field.size()) {
+        return utils::Status::Malformed("FileMetadata contains an invalid chunk index");
+      }
+      ChunkID chunk_id;
+      status = ParseAttachedChunkID(id_value, &chunk_id);
+      if (!status.ok()) {
+        return status;
+      }
+      result.mappings.push_back({.index = index, .chunk_id = chunk_id});
+    }
+    cursor = next_cursor;
+  } while (cursor != 0);
+  std::sort(result.mappings.begin(), result.mappings.end(),
+            [](const ChunkMapping &lhs, const ChunkMapping &rhs) { return lhs.index < rhs.index; });
+  for (size_t i = 1; i < result.mappings.size(); ++i) {
+    if (result.mappings[i - 1].index == result.mappings[i].index) {
+      return utils::Status::Malformed("duplicate FileMetadata chunk index");
+    }
+  }
+  *out = std::move(result);
+  return utils::Status::OK();
+}
+
+utils::Status RedisMetaTxn::ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("attachment output is null");
+  }
+  SwordFsInode inode;
+  auto status = LookupInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  return LookupAttachment(ino, index, out);
+}
+
+utils::Status RedisMetaTxn::AttachPrepared(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                                           const FileSizePrecondition &expected) {
+  auto status = ValidateFileChunkWrite(index, chunk_id, end, chunk_size_);
+  if (!status.ok()) {
+    return status;
+  }
+  status = ValidateFileSizePrecondition(expected, chunk_size_);
+  if (!status.ok()) {
+    return status;
+  }
+  SwordFsInode inode;
+  status = LookupInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!inode.IsRegular()) {
+    return utils::Status::InvalidArgument("not a regular file");
+  }
+  status = CheckContentMetadataMutationPolicy(inode.attr, "attach chunk");
+  if (!status.ok()) {
+    return status;
+  }
+  std::optional<ChunkID> current;
+  status = LookupAttachment(ino, index, &current);
+  if (!status.ok()) {
+    return status;
+  }
+  if (inode.attr.size != expected.eof || current.has_value()) {
+    return utils::Status::AlreadyExists("FileMetadata changed before chunk attachment");
+  }
+  if (expected.boundary.has_value()) {
+    std::optional<ChunkID> observed;
+    status = LookupAttachment(ino, expected.boundary->index, &observed);
+    if (!status.ok()) {
+      return status;
+    }
+    if (observed != expected.boundary->chunk_id) {
+      return utils::Status::AlreadyExists("FileMetadata EOF boundary changed before attachment");
+    }
+  }
+  status = txn_.HSet(key_.ChunkRefs(ino), std::to_string(index), std::to_string(chunk_id.Value()));
+  if (!status.ok()) {
+    return status;
+  }
+  inode.attr.size = std::max(inode.attr.size, end);
+  inode.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  return SetInode(inode);
+}
+
+utils::Status RedisMetaTxn::FinalizeAttachedWrite(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                                                  const FileSizePrecondition &expected) {
+  auto status = ValidateFileChunkWrite(index, chunk_id, end, chunk_size_);
+  if (!status.ok()) {
+    return status;
+  }
+  status = ValidateFileSizePrecondition(expected, chunk_size_);
+  if (!status.ok()) {
+    return status;
+  }
+  SwordFsInode inode;
+  status = LookupInode(ino, &inode);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!inode.IsRegular()) {
+    return utils::Status::InvalidArgument("not a regular file");
+  }
+  status = CheckContentMetadataMutationPolicy(inode.attr, "finalize chunk write");
+  if (!status.ok()) {
+    return status;
+  }
+  std::optional<ChunkID> current;
+  status = LookupAttachment(ino, index, &current);
+  if (!status.ok()) {
+    return status;
+  }
+  if (inode.attr.size != expected.eof || current != chunk_id) {
+    return utils::Status::AlreadyExists("FileMetadata changed before chunk write finalization");
+  }
+  if (expected.boundary.has_value()) {
+    std::optional<ChunkID> observed;
+    status = LookupAttachment(ino, expected.boundary->index, &observed);
+    if (!status.ok()) {
+      return status;
+    }
+    if (observed != expected.boundary->chunk_id) {
+      return utils::Status::AlreadyExists("FileMetadata EOF boundary changed before finalization");
+    }
+  }
+  inode.attr.size = std::max(inode.attr.size, end);
+  inode.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
+  return SetInode(inode);
+}
+
+utils::Status RedisMetaTxn::CommitShrink(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
+                                         SetAttrField fields, ChunkSizeCommitResult *out) {
+  return CommitSizeChange(ino, plan, requested, fields, /*is_shrink=*/true, out);
+}
+
+utils::Status RedisMetaTxn::CommitGrow(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
+                                       SetAttrField fields, ChunkSizeCommitResult *out) {
+  return CommitSizeChange(ino, plan, requested, fields, /*is_shrink=*/false, out);
+}
+
+utils::Status RedisMetaTxn::CommitSizeChange(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
+                                             SetAttrField fields, bool is_shrink, ChunkSizeCommitResult *out) {
+  if (out == nullptr || !HasSetAttrField(fields, SetAttrField::kSize) || requested.size != plan.target_eof) {
+    return utils::Status::InvalidArgument("typed size commit requires matching SetAttr size and result");
+  }
+  FileMappingSnapshot snapshot;
+  auto status = ReadFileMappingSnapshot(ino, &snapshot);
+  if (!status.ok()) {
+    return status;
+  }
+  ChunkSizePlan current;
+  status = ValidateSizeCommitPlan(plan, snapshot.inode.attr.size, chunk_size_, snapshot.mappings, is_shrink, &current);
+  if (!status.ok()) {
+    return status;
+  }
+  SwordFsInode updated;
+  status = PrepareSetAttrMutation(snapshot.inode, requested, fields, &updated);
+  if (!status.ok()) {
+    return status;
+  }
+
+  ChunkSizeCommitResult result{.inode = updated, .boundary = current.boundary};
+  ChunkSizeLayout old_layout;
+  status = PlanChunkSizeLayout(snapshot.inode.attr.size, chunk_size_, &old_layout);
+  if (!status.ok()) {
+    return status;
+  }
+  ChunkSizeLayout new_layout;
+  status = PlanChunkSizeLayout(plan.target_eof, chunk_size_, &new_layout);
+  if (!status.ok()) {
+    return status;
+  }
+  for (const auto &mapping : snapshot.mappings) {
+    if ((is_shrink && new_layout.ShouldDetach(mapping.index)) ||
+        (!is_shrink && old_layout.ShouldDetach(mapping.index))) {
+      result.detached.push_back(mapping);
+    }
+  }
+
+  if (!result.detached.empty()) {
+    if (chunk_metadata_bridge_ == nullptr) {
+      return utils::Status::Internal("chunk metadata bridge is not bound");
+    }
+    // Enqueue immutable identities in the same watched Redis transaction as
+    // detach/EOF. A partial EXEC remains safe: GC must recheck reachability.
+    for (const auto &mapping : result.detached) {
+      PendingDelete pending;
+      status = chunk_metadata_bridge_->FreezeDetachedDelete(ino, mapping, &pending);
+      if (!status.ok()) {
+        return status;
+      }
+      status = QueuePendingDelete(pending);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+  }
+
+  const auto detach = [&]() -> utils::Status {
+    for (const auto &mapping : result.detached) {
+      auto detached_status = txn_.HDel(key_.ChunkRefs(ino), std::to_string(mapping.index));
+      if (!detached_status.ok()) {
+        return detached_status;
+      }
+    }
+    return utils::Status::OK();
+  };
+  // Queue shrink's new EOF first: a partial Redis EXEC cannot make the old
+  // EOF expose missing mappings. For grow, remove any stale detached mappings
+  // left outside the old EOF *before* publishing a larger EOF.
+  if (is_shrink) {
+    status = SetInode(updated);
+    if (status.ok()) {
+      status = detach();
+    }
+  } else {
+    status = detach();
+    if (status.ok()) {
+      status = SetInode(updated);
+    }
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  *out = std::move(result);
   return utils::Status::OK();
 }
 

@@ -11,7 +11,9 @@
 #include <limits>
 #include <thread>
 
+#include "chunk/cow/COWCleanup.hpp"
 #include "metadata/redis/RedisMetaImplTestBase.hpp"
+#include "metadata/types/BufCodec.hpp"
 
 namespace {
 
@@ -146,6 +148,42 @@ FIBER_TEST_F(RedisMetaImplTest, UnlinkPublishesDurableOrphanCandidate) {
   SwordFsInode stored;
   ASSERT_TRUE(impl_->GetInode(file.ino, &stored).ok());
   EXPECT_EQ(stored.attr.nlink, 0U);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, TypedReclaimFreezesChunkIDAttachmentsInsteadOfLegacyDescriptors) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "typed-reclaim", 0644, &file).ok());
+  const swordfs::metadata::ChunkID attached_id(807);
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, attached_id, 24, {.eof = 0}).ok());
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "typed-reclaim").ok());
+
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  const auto work = PendingReclaim(file.ino);
+  ASSERT_TRUE(work.has_value());
+  swordfs::metadata::BufDecoder decoded(work->payload);
+  ASSERT_TRUE(decoded.Header(swordfs::metadata::RecordType::kCowTypedCleanup))
+      << "reclaim must freeze typed mappings instead of the empty legacy chunk table";
+  uint32_t kind = 0;
+  uint64_t ino = 0;
+  uint32_t count = 0;
+  uint64_t index = 0;
+  uint64_t chunk_id = 0;
+  ASSERT_TRUE(decoded.U32(&kind));
+  ASSERT_TRUE(decoded.U64(&ino));
+  ASSERT_TRUE(decoded.U32(&count));
+  ASSERT_TRUE(decoded.U64(&index));
+  ASSERT_TRUE(decoded.U64(&chunk_id));
+  EXPECT_TRUE(decoded.Done());
+  EXPECT_EQ(kind, static_cast<uint32_t>(swordfs::chunk::cow::COWCleanupKind::kDetachedReclaim));
+  EXPECT_EQ(ino, file.ino);
+  EXPECT_EQ(count, 1U);
+  EXPECT_EQ(index, 0U);
+  EXPECT_EQ(chunk_id, attached_id.Value());
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
+    EXPECT_FALSE(redis.exists(key.Inode(file.ino)));
+    EXPECT_FALSE(redis.exists(key.ChunkRefs(file.ino)));
+  });
 }
 
 FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimFreezesRecordAndRemovesLiveMetadata) {
