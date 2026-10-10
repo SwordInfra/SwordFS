@@ -86,18 +86,15 @@ bool Fixture::SetUp() {
 
   if (!volume_formatted_) {
     if (!FormatVolume()) {
-      RemoveVolumeConfig();
       return false;
     }
     volume_formatted_ = true;
   }
   if (!StartMount()) {
-    RemoveVolumeConfig();
     return false;
   }
   if (!WaitForMount()) {
     StopMount();
-    RemoveVolumeConfig();
     return false;
   }
 
@@ -277,7 +274,6 @@ bool Fixture::IsDaemonGone() const {
 
 bool Fixture::CleanupRuntimeState() {
   const bool mount_stopped = StopMount();
-  RemoveVolumeConfig();
   CleanupWorkDir();
   return mount_stopped;
 }
@@ -584,16 +580,6 @@ std::string Fixture::FormatLogPath() const {
 std::string Fixture::NextMountLogPath() {
   ++mount_generation_;
   return diagnostics_dir_ + "/mount-" + std::to_string(mount_generation_) + ".log";
-}
-
-void Fixture::RemoveVolumeConfig() {
-  constexpr std::string_view kConfigRoot = "/etc/swordfs";
-  const std::filesystem::path volume_dir = std::filesystem::path(kConfigRoot) / volume_name_;
-  std::error_code ec;
-  std::filesystem::remove_all(volume_dir, ec);
-  if (ec) {
-    std::fprintf(stderr, "E2E: failed to remove volume config %s: %s\n", volume_dir.c_str(), ec.message().c_str());
-  }
 }
 
 void Fixture::InitPaths() {

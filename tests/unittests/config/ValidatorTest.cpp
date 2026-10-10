@@ -69,6 +69,10 @@ TEST(ValidateMetaUrlTest, UnknownValue) {
   EXPECT_NE(err.find("Unsupported metadata engine 'not-a-valid-url'"), std::string::npos);
 }
 
+TEST(ValidateMetaUrlTest, RemovedMemoryEngineIsUnsupported) {
+  EXPECT_EQ(ValidateMetaUrl("memory://local"), "Unsupported metadata engine 'memory'");
+}
+
 TEST(ValidateMetaUrlTest, InvalidRedisUrlHasHelpfulError) {
   std::string err = ValidateMetaUrl("redis://localhost:0");
   EXPECT_NE(err.find("invalid port"), std::string::npos) << "Error should describe the invalid Redis URL: " << err;

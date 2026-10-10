@@ -13,7 +13,7 @@ namespace swordfs::config {
 /// Validates a volume name: non-empty, ASCII alphanumeric, and starts with a letter.
 extern const CLI::Validator ValidateVolumeName;
 
-/// Validates --meta URL format and scheme (e.g. memory://local).
+/// Validates --meta URL format and scheme (e.g. redis://localhost:6379).
 extern const CLI::Validator ValidateMetaUrl;
 
 /// Validates --bucket URL has a recognised storage scheme (e.g. s3://).
