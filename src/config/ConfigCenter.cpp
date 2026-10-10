@@ -40,7 +40,7 @@ void ConfigCenter::RegisterMountOptions(CLI::App &app) {
   cmd->add_flag("-f,--foreground", foreground_, "Run in foreground");
   cmd->add_option("mountpoint", mountpoint_, "Mount point directory (created if needed)")->required();
   cmd->add_option("--volume", volume_, "Volume name to mount")->required();
-  cmd->add_option("--meta", meta_url_, "Metadata engine URL (e.g. memory://local, redis://...)")
+  cmd->add_option("--meta", meta_url_, "Metadata engine URL (e.g. redis://localhost:6379)")
       ->required()
       ->check(swordfs::config::ValidateMetaUrl);
   cmd->add_option("-o", fuse_opts_, "FUSE mount options (e.g. -o allow_other,ro)")->allow_extra_args(false);
@@ -65,7 +65,7 @@ void ConfigCenter::RegisterFormatOptions(CLI::App &app) {
   auto cmd = app.add_subcommand("format", "Initialise a new SwordFS volume");
 
   cmd->add_option("--volume", volume_, "Volume name")->required()->check(swordfs::config::ValidateVolumeName);
-  cmd->add_option("--meta", meta_url_, "Metadata engine URL (e.g. memory://local)")
+  cmd->add_option("--meta", meta_url_, "Metadata engine URL (e.g. redis://localhost:6379)")
       ->required()
       ->check(swordfs::config::ValidateMetaUrl);
   cmd->add_option("--bucket", bucket_url_, "Bucket URL (e.g. s3://mybucket.s3.amazonaws.com/chunks)")

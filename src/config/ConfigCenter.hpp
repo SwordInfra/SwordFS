@@ -77,7 +77,7 @@ class ConfigCenter {
     return mountpoint_;
   }
 
-  /// Returns the metadata engine URL (e.g. memory://local, redis://host:port).
+  /// Returns the metadata engine URL (e.g. redis://host:port).
   const std::string &meta_url() const {
     return meta_url_;
   }

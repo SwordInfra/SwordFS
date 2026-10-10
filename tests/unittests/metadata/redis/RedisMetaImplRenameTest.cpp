@@ -117,6 +117,48 @@ FIBER_TEST_F(RedisMetaImplTest, RenameCoversMoveOverwriteNoReplaceAndExchange) {
                   .IsNotFound());
 }
 
+// #439 B030: overwriting a name publishes the old inode as a candidate;
+// the VFS can continue accessing it until the reclaim lifecycle completes.
+FIBER_TEST_F(RedisMetaImplTest, RenameOverwriteVictimCompletesReclaimLifecycle) {
+  SwordFsInode source;
+  SwordFsInode victim;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "source", 0644, &source).ok());
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "victim", 0644, &victim).ok());
+  ASSERT_TRUE(impl_->Rename(kRootInodeId, "source", kRootInodeId, "victim", swordfs::metadata::RenameFlag::kNone).ok());
+
+  SwordFsInode renamed;
+  ASSERT_TRUE(impl_->Lookup(kRootInodeId, "victim", &renamed).ok());
+  EXPECT_EQ(renamed.ino, source.ino);
+
+  // The overwritten inode remains readable until preparation freezes it.
+  SwordFsInode displaced;
+  ASSERT_TRUE(impl_->GetInode(victim.ino, &displaced).ok());
+  EXPECT_EQ(displaced.attr.nlink, 0U);
+  std::vector<InodeID> orphans;
+  ASSERT_TRUE(impl_
+                  ->VisitOrphanCandidates([&](InodeID ino) {
+                    orphans.push_back(ino);
+                    return Status::OK();
+                  })
+                  .ok());
+  EXPECT_EQ(orphans, std::vector<InodeID>{victim.ino});
+
+  ASSERT_TRUE(impl_->PrepareReclaim(victim.ino).ok());
+  std::vector<InodeID> pending;
+  ASSERT_TRUE(impl_
+                  ->VisitPendingReclaims([&](const ReclaimWork &work) {
+                    pending.push_back(work.ino);
+                    return Status::OK();
+                  })
+                  .ok());
+  EXPECT_EQ(pending, std::vector<InodeID>{victim.ino});
+
+  ASSERT_TRUE(impl_->CompleteReclaim(victim.ino).ok());
+  EXPECT_TRUE(impl_->GetInode(victim.ino, &displaced).IsNotFound());
+  ASSERT_TRUE(impl_->Lookup(kRootInodeId, "victim", &renamed).ok());
+  EXPECT_EQ(renamed.ino, source.ino);
+}
+
 FIBER_TEST_F(RedisMetaImplTest, RenameRejectsOrdinaryTypeMismatchAndDirectoryCycles) {
   SwordFsInode dir;
   SwordFsInode file;

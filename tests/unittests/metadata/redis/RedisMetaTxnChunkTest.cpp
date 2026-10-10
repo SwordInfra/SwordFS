@@ -84,6 +84,29 @@ TEST(RedisMetaTxnTest, PrivateIndexPublicationCommitsAndRejectsWithLogicalHead) 
   ASSERT_TRUE(encoded.has_value());
   ASSERT_TRUE(head.ParseFrom(*encoded).ok());
   EXPECT_EQ(head, first);
+
+  // #439 B005: a failed replacement must not poison the next valid
+  // publication. Verify the public head and private snapshot advance
+  // together, and that the old head becomes the cleanup candidate.
+  bridge.reject_publish = false;
+  ASSERT_TRUE(publish(first, replacement, ChunkPublishIntent{.payload = "manifest-two"}).ok());
+  ASSERT_TRUE(last_cleanup.has_value());
+  swordfs::chunk::cow::COWRef old_ref;
+  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWDelete(*last_cleanup, 4096, &old_ref).ok());
+  EXPECT_EQ(old_ref.descriptor, first);
+  ASSERT_TRUE(store
+                  .Transact([&](RedisKvTxn &kv_txn) {
+                    RedisMetaTxn txn(kv_txn, key, 4096, bridge.mechanism(), &bridge);
+                    ChunkView view;
+                    auto status = txn.LoadChunkView(file.ino, 0, &view);
+                    if (!status.ok()) {
+                      return status;
+                    }
+                    EXPECT_EQ(view.head, replacement);
+                    EXPECT_EQ(view.private_snapshot, "manifest-two");
+                    return utils::Status::OK();
+                  })
+                  .ok());
 }
 
 TEST(RedisMetaTxnTest, ChunkPublicContractsRejectInvalidDescriptorsAndViews) {

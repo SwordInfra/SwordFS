@@ -1,9 +1,8 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-// SwordFS metadata — abstract interface for inode and directory
-// operations. First implementation is in-memory (MemMetaImpl); a TiKV-backed
-// implementation will follow.
+// SwordFS metadata — backend-neutral interface for inode and directory
+// operations. The production metadata implementation is Redis-backed.
 
 #pragma once
 
@@ -56,9 +55,6 @@ using DirIteratorPtr = std::shared_ptr<DirIterator>;
 using InodeVisitorFn = std::function<Status(InodeID)>;
 using ReclaimVisitorFn = std::function<Status(const ReclaimWork &)>;
 using PendingDeleteVisitorFn = std::function<Status(const PendingDelete &)>;
-
-/// Well-known metadata engine URLs.
-constexpr std::string_view kMemoryMetaUrl = "memory://local";
 
 /// Concurrency and execution-domain contract:
 ///
@@ -214,8 +210,8 @@ class IMetaEngine {
   /// every inode whose nlink dropped to zero and which has not been reclaimed
   /// or revived since. The candidate is published atomically by the mutation
   /// that reached nlink == 0 (unlink, rename-overwrite), so a crash before
-  /// the caller reclaims it cannot lose the inode. Persisted by persistent
-  /// backends; process-lifetime for the memory backend. If |visitor| aborts,
+  /// the caller reclaims it cannot lose the inode. Redis persists these
+  /// candidates across mount lifetimes. If |visitor| aborts,
   /// the next invocation resumes the interrupted backend scan rather than
   /// intentionally restarting it from the beginning. Cursor-backed stores may
   /// still have their normal duplicate/weak-consistency scan semantics, so

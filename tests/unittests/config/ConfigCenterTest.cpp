@@ -61,6 +61,12 @@ TEST(FormatParamsTest, MinimalRedisFormat) {
   EXPECT_TRUE(ParseOptions(args).empty());
 }
 
+TEST(FormatParamsTest, RejectsRetiredMemoryMetadataUrl) {
+  const auto error = ParseOptions({"swordfs", "format", "--volume", "myvol", "--meta", "memory://local", "--bucket",
+                                   "s3://endpoint.example.com/chunks"});
+  EXPECT_NE(error.find("Unsupported metadata engine 'memory'"), std::string::npos) << error;
+}
+
 TEST(ConfigCenterTest, SelectsParsedSubcommandWithoutRetainingCliPointers) {
   CLI::App app{"SwordFS test"};
   auto &cfg = swordfs::config::ConfigCenter::Instance();
@@ -120,6 +126,11 @@ TEST(MountParamsTest, MinimalRedisMount) {
       "swordfs", "mount", "--volume", "myvol", "--meta", "redis://localhost:6379", "/mnt/point",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
+}
+
+TEST(MountParamsTest, RejectsRetiredMemoryMetadataUrl) {
+  const auto error = ParseOptions({"swordfs", "mount", "--volume", "myvol", "--meta", "memory://local", "/mnt/point"});
+  EXPECT_NE(error.find("Unsupported metadata engine 'memory'"), std::string::npos) << error;
 }
 
 TEST(MountParamsTest, MountWithIndependentThreadCounts) {

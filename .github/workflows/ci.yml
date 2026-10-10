@@ -231,11 +231,6 @@ jobs:
         if: needs.change-scope.outputs.run_full_ci == 'true'
         run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
 
-      - name: Unit test setup
-        if: needs.change-scope.outputs.run_full_ci == 'true'
-        run: |
-          sudo mkdir -p /etc/swordfs
-          sudo chown "$(id -u):$(id -g)" /etc/swordfs
 
       - name: Install Debug CI tools
         if: needs.change-scope.outputs.run_full_ci == 'true' && matrix.build_type == 'Debug'
@@ -384,8 +379,6 @@ jobs:
       - name: E2E test setup
         run: |
           sudo apt-get install -y -qq lcov
-          sudo mkdir -p /etc/swordfs
-          sudo chown "$(id -u):$(id -g)" /etc/swordfs
           sudo modprobe fuse
           sudo chmod 666 /dev/fuse
           getent group fuse || sudo groupadd fuse
@@ -502,8 +495,6 @@ jobs:
 
       - name: Conformance test setup
         run: |
-          sudo mkdir -p /etc/swordfs
-          sudo chown "$(id -u):$(id -g)" /etc/swordfs
           sudo modprobe fuse
           sudo chmod 666 /dev/fuse
           if ! grep -Eq '^[[:space:]]*user_allow_other([[:space:]]|$)' /etc/fuse.conf 2>/dev/null; then
@@ -658,8 +649,6 @@ jobs:
 
       - name: Conformance test setup
         run: |
-          sudo mkdir -p /etc/swordfs
-          sudo chown "$(id -u):$(id -g)" /etc/swordfs
           sudo modprobe fuse
           sudo chmod 666 /dev/fuse
           if ! grep -Eq '^[[:space:]]*user_allow_other([[:space:]]|$)' /etc/fuse.conf 2>/dev/null; then

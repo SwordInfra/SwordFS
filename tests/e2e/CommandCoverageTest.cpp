@@ -148,7 +148,6 @@ class CommandCoverageE2ETest : public ::testing::Test {
     }
 
     std::error_code ec;
-    std::filesystem::remove_all(std::filesystem::path("/etc/swordfs") / volume_, ec);
     std::filesystem::remove_all(work_dir_, ec);
   }
 

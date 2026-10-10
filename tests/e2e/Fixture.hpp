@@ -159,7 +159,6 @@ class Fixture {
   void CleanupWorkDir();
   bool DaemonMissingBeforeTeardown() const;
   void InitPaths();
-  void RemoveVolumeConfig();
   std::string FormatLogPath() const;
   std::string NextMountLogPath();
   std::string FindSwordfsBin() const;
