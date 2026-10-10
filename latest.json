@@ -11,7 +11,7 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "03ac4bb0d83fbd2c5ebc04eebc3cef567358e2b3"
+    "swordfs_commit": "84ca5d185e65cc2d48830d6616396dfa1b00cc00"
   },
   "summary": {
     "blocking_count": 0,
