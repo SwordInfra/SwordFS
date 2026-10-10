@@ -1,5 +1,11 @@
-# Patch coverage is a gate for production code. Test sources are execution
-# drivers and assertions; requiring tests to cover their own gtest control
-# flow would measure the harness rather than SwordFS production behavior.
+# Codecov patch coverage is advisory; the existing required status remains
+# present but succeeds independently of Codecov's aggregate percentage.
+# Debug CI separately gates per-file production changed-line coverage >=90%.
+# Exclude test sources, whose assertions do not measure production behavior.
+coverage:
+  status:
+    patch:
+      default:
+        informational: true
 ignore:
   - "tests/**/*"

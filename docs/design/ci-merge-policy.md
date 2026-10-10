@@ -22,6 +22,19 @@ The required PR checks are:
 - `fstests-conformance (Release)`
 - `codecov/patch`
 
+`codecov/patch` is **required to report**, but its **aggregate percentage is
+informational**, configured by `informational: true` under
+`coverage.status.patch.default` in `codecov.yml`. This means a patch percentage below the
+existing baseline cannot by itself fail the required status or block merging.
+Codecov's actual report remains visible to reviewers and should be examined
+for meaningful uncovered behavior, not treated as a fixed numeric target.
+
+The mandatory `build-and-test (Debug)` job independently checks **per-file
+changed-line coverage >=90%** for each changed production C/C++ file with
+executable changed lines, via `scripts/coverage/check-diff-coverage.py`.
+This quality gate and all test, audit, E2E, pjdfstest and fstests gates remain
+fully enforced. Debug and E2E Codecov coverage uploads remain enabled.
+
 A required check that fails, is cancelled, is still pending, or does not report
 an accepted conclusion keeps the ruleset unsatisfied and prevents a normal
 merge to `main`. GitHub treats an explicitly skipped **job** as a successful
@@ -162,7 +175,9 @@ optional; it prevents an impossible required-check state during rollout.
 
 GitHub Actions checks should be bound to the GitHub Actions app when the
 ruleset supports an integration ID. External checks such as `codecov/patch`
-remain bound to their reporting integration/status context.
+remain bound to their reporting integration/status context. Being required
+to report does not imply enforcing Codecov's aggregate numeric patch target;
+the informational status intentionally separates these concerns.
 
 ## Bypass policy
 
