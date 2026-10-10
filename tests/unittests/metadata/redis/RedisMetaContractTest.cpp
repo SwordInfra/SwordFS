@@ -1,8 +1,10 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
+#include <folly/ScopeGuard.h>
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <barrier>
 #include <thread>
@@ -300,33 +302,41 @@ FIBER_TEST_F(RedisMetaImplTest, ConcurrentUnlinkAndCreateAcrossEnginesCannotLose
 
 FIBER_TEST_F(RedisMetaImplTest, ConcurrentIndependentNamesAcrossEnginesAreAllReachable) {
   auto peer = NewPeer(config_, volume_name_);
+  // A fatal GTest assertion returns before the explicit end-of-test reset.
+  // Redis connections must still be destructed in the POSIX-thread domain.
+  auto peer_cleanup = folly::makeGuard([&] { swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); }); });
   ASSERT_NE(peer, nullptr);
+  constexpr int kCreatesPerEngine = 20;
   std::barrier gate(3);
-  std::atomic<int> failures{0};
-  auto create_many = [&](RedisMetaImpl *engine, const char *prefix) {
+  std::array<Status, kCreatesPerEngine> first_statuses;
+  std::array<Status, kCreatesPerEngine> second_statuses;
+  auto create_many = [&](RedisMetaImpl *engine, const char *prefix, std::array<Status, kCreatesPerEngine> *statuses) {
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
     gate.arrive_and_wait();
-    for (int i = 0; i < 20; ++i) {
-      auto status = engine->Create(kRootInodeId, std::string(prefix) + std::to_string(i), 0644, nullptr);
-      if (!status.ok()) {
-        failures.fetch_add(1, std::memory_order_relaxed);
-      }
+    for (int i = 0; i < kCreatesPerEngine; ++i) {
+      (*statuses)[i] = engine->Create(kRootInodeId, std::string(prefix) + std::to_string(i), 0644, nullptr);
     }
   };
-  auto first_thread = swordfs::test::StartFiberTestThread(create_many, impl_.get(), "first-");
-  auto second_thread = swordfs::test::StartFiberTestThread(create_many, peer.get(), "second-");
+  auto first_thread = swordfs::test::StartFiberTestThread(create_many, impl_.get(), "first-", &first_statuses);
+  auto second_thread = swordfs::test::StartFiberTestThread(create_many, peer.get(), "second-", &second_statuses);
   gate.arrive_and_wait();
   first_thread.join();
   second_thread.join();
-  EXPECT_EQ(failures.load(), 0);
-  for (int i = 0; i < 20; ++i) {
+  for (int i = 0; i < kCreatesPerEngine; ++i) {
+    EXPECT_TRUE(first_statuses[i].ok()) << "first-" << i << ": " << first_statuses[i].message();
+    EXPECT_TRUE(second_statuses[i].ok()) << "second-" << i << ": " << second_statuses[i].message();
     SwordFsInode first;
     SwordFsInode second;
-    ASSERT_TRUE(impl_->Lookup(kRootInodeId, "first-" + std::to_string(i), &first).ok());
-    ASSERT_TRUE(impl_->Lookup(kRootInodeId, "second-" + std::to_string(i), &second).ok());
-    EXPECT_NE(first.ino, second.ino);
+    auto status = impl_->Lookup(kRootInodeId, "first-" + std::to_string(i), &first);
+    const bool first_found = status.ok();
+    EXPECT_TRUE(first_found) << "first-" << i << ": " << status.message();
+    status = impl_->Lookup(kRootInodeId, "second-" + std::to_string(i), &second);
+    const bool second_found = status.ok();
+    EXPECT_TRUE(second_found) << "second-" << i << ": " << status.message();
+    if (first_found && second_found) {
+      EXPECT_NE(first.ino, second.ino);
+    }
   }
-  swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
 }
 
 FIBER_TEST_F(RedisMetaImplTest, ConcurrentRenamesToSameDestinationKeepOneLiveWinner) {

@@ -30,7 +30,10 @@ struct RedisMetaConfig {
   std::chrono::milliseconds pool_wait_timeout = std::chrono::seconds(1);
 
   // Transaction retry policy.
-  int retry_attempts = 3;
+  // Shared-parent namespace writers can invalidate several successive WATCH
+  // snapshots; three attempts have proven insufficient even for two clients.
+  // Keep the budget bounded while letting randomized backoff break contention.
+  int retry_attempts = 8;
   std::chrono::milliseconds retry_backoff = std::chrono::milliseconds(20);
 };
 
