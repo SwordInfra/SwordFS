@@ -193,6 +193,16 @@ external object-store side effects. A valid Redis command-error reply is a
 known failure, not a transport retry signal. Exhausting the safe retry budget
 returns `Unavailable`.
 
+The default budget is **eight attempts** (with randomized exponential backoff,
+20ms base and a 1s per-attempt cap). The previous three-attempt default could
+return `Unavailable` while two independent Redis metadata engines created
+distinct entries in the same directory: both writes legitimately contend on
+the watched parent inode even though their names differ. The larger, still
+bounded budget lets normal short-lived WATCH conflicts converge without adding
+outer retries in VFS or in the test harness. Explicit URL `retry_attempts`
+overrides remain authoritative, including small budgets needed by
+retry-exhaustion tests. This does not change pre/post-EXEC ambiguity rules.
+
 Failure classification follows the protocol boundary where outcome certainty
 is lost rather than the redis++ exception class. With the pinned redis++
 implementation, queued transaction commands run under `MULTI` and only take

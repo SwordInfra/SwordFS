@@ -20,7 +20,7 @@ TEST(RedisMetaConfigTest, ParsesHostWithDefaults) {
   EXPECT_EQ(config.socket_timeout, std::chrono::seconds(5));
   EXPECT_EQ(config.pool_size, 8);
   EXPECT_EQ(config.pool_wait_timeout, std::chrono::seconds(1));
-  EXPECT_EQ(config.retry_attempts, 3);
+  EXPECT_EQ(config.retry_attempts, 8);
   EXPECT_EQ(config.retry_backoff, std::chrono::milliseconds(20));
 
   status = ParseRedisMetaUrl("redis://localhost/", &config);
