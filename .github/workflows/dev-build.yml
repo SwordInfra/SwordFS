@@ -64,11 +64,6 @@ jobs:
       - name: Install dependencies
         run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
 
-      - name: Unit test setup
-        if: ${{ inputs.run_unit_tests }}
-        run: |
-          sudo mkdir -p /etc/swordfs
-          sudo chown "$(id -u):$(id -g)" /etc/swordfs
 
       - name: Configure
         env:

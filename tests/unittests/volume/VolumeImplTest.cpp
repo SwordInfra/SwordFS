@@ -16,6 +16,7 @@
 #include "UnsupportedMetaEngine.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "config/ConfigCenter.hpp"
+#include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/redis/RedisTestUtils.hpp"
 #include "storage/IDataEngine.hpp"
 #include "volume/VolumeImpl.hpp"
@@ -557,6 +558,27 @@ TEST_F(VolumeImplTest, LoadFromUnsupportedEngine) {
   VolumeImpl volume;
   const auto status = volume.LoadFrom(makeMountOptions("unregistered://localhost"));
   EXPECT_EQ(status.ToErrno(), ENOSYS) << status.message();
+}
+
+TEST_F(VolumeImplTest, RemovedMemoryEngineCannotFormatOrMount) {
+  auto &registry = swordfs::metadata::MetaEngineRegistry::Instance();
+  EXPECT_FALSE(registry.Available("memory"));
+
+  std::unique_ptr<swordfs::metadata::IMetaEngine> engine;
+  const auto registry_status = registry.CreateInstance("memory", "memory://local", makeVolumeName("retired"), &engine);
+  EXPECT_EQ(registry_status.ToErrno(), ENOSYS) << registry_status.message();
+  EXPECT_EQ(engine, nullptr);
+
+  auto options = makeFormatOptions("memory://local", "retired");
+  VolumeImpl formatter;
+  const auto format_status = formatter.CreateFrom(options);
+  EXPECT_EQ(format_status.ToErrno(), ENOSYS) << format_status.message();
+  EXPECT_EQ(formatter.meta_engine(), nullptr);
+
+  VolumeImpl mounted;
+  const auto load_status = mounted.LoadFrom(makeMountOptions("memory://local", "retired"));
+  EXPECT_EQ(load_status.ToErrno(), ENOSYS) << load_status.message();
+  EXPECT_EQ(mounted.meta_engine(), nullptr);
 }
 
 TEST_F(VolumeImplRedisTest, LoadFromMissingFile) {

@@ -59,8 +59,9 @@ gaps include:
 - `src/storage/s3/S3DataEngine.cpp`: 37.20%, with storage request/error paths
   that require careful separation between deterministic unit behavior and
   service-backed verification;
-- `src/metadata/mem/MemMetaImpl.cpp`: 78.15%, with remaining metadata error and
-  boundary paths useful for checking parity with Redis-backed semantics.
+- Historical at baseline `803b2b4`: `src/metadata/mem/MemMetaImpl.cpp`
+  was 78.15% covered. The beta Memory backend was retired by #443; it is
+  not a current production coverage target.
 
 Prioritization is based on semantic risk and the probability of finding real
 production defects, not on the cheapest way to increase the aggregate number.
@@ -135,10 +136,9 @@ Its baseline on `c39a82d` is 52.77% for `mem/VolumeFile.cpp`, 69.88% for
 The metadata slice treats the remaining lines as missing contract evidence,
 not as a list of statements to execute. In particular:
 
-- `VolumeFile` tests cover persistence input/error behavior through the real
-  filesystem boundary, including null output, invalid volume paths, overwrite
-  behavior, and write failures, without replacing filesystem calls with test
-  doubles;
+- Historically, `VolumeFile` tests covered the beta Memory backend's local
+  filesystem persistence; #441 retired these private tests as part of the
+  Redis-only fixture migration, so they are not a current regression gate;
 - `RedisMetaTxn` tests exercise public transaction preconditions and metadata
   invariants such as parent identity, inode type, rename/exchange state,
   hard-link restrictions, and chunk descriptor identity through the existing
@@ -149,12 +149,10 @@ not as a list of statements to execute. In particular:
   thread-domain owner must shut the backend down before destruction, and
   clients/executors are unavailable after shutdown.
 
-Review of the `VolumeFile` coverage gap removed a redundant production state
-machine rather than adding a test seam: creating the complete per-volume
-directory already creates the config root when necessary, so separately
-probing/creating `/etc/swordfs` duplicated filesystem behavior and introduced
-extra host-permission-only branches. The implementation now has one directory
-creation path with the same success/failure contract.
+Historical #298 review simplified the old Memory-only `VolumeFile` directory
+creation path. That filesystem persistence implementation was subsequently
+retired under #443; Redis volume formatting has no local directory creation
+or permission prerequisite.
 
 `RedisBackendContext.cpp` has a narrow instrumentation limitation around
 fatal ownership guards. The destructor and post-shutdown access contracts are

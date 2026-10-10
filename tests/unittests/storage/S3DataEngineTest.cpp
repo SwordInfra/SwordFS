@@ -12,7 +12,7 @@ namespace swordfs::storage {
 namespace {
 
 TEST(S3DataEngineTest, RejectsInvalidBucketLocations) {
-  S3DataEngine wrong_scheme(DataEngineOptions{.location = "memory://local"});
+  S3DataEngine wrong_scheme(DataEngineOptions{.location = "unregistered://local"});
   EXPECT_EQ(wrong_scheme.Initialize().ToErrno(), EINVAL);
 
   S3DataEngine missing_bucket(DataEngineOptions{.location = "s3://endpoint.example.com"});
