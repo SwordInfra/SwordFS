@@ -628,7 +628,7 @@ class FileReadWriterTest : public ::testing::Test {
     config.chunk_size = kChunkSize;
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
-    cow_metadata_ = std::make_shared<swordfs::metadata::MemCOWChunkMetadata>();
+    cow_metadata_ = std::make_shared<swordfs::test::TestCOWChunkMetadata>();
   }
 
   FileReadWriter Make(off_t file_size = 0) {
@@ -638,7 +638,7 @@ class FileReadWriterTest : public ::testing::Test {
 
   static constexpr size_t kChunkSize = kTestChunkSize;
   static constexpr InodeID kIno = 42;
-  std::shared_ptr<swordfs::metadata::MemCOWChunkMetadata> cow_metadata_;
+  std::shared_ptr<swordfs::test::TestCOWChunkMetadata> cow_metadata_;
   MockDataEngine *mock_data_ = nullptr;
   MockMetaEngine *mock_meta_ = nullptr;
 };

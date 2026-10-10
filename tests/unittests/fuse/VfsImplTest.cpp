@@ -23,6 +23,7 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -35,6 +36,7 @@
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "RedisTestVolumeUtils.hpp"
 #include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/cow/COWObjectKey.hpp"
@@ -42,7 +44,6 @@
 #include "chunk/internal/ChunkGcWorker.hpp"
 #include "fuse/Vfs.hpp"
 #include "metadata/IMetaEngine.hpp"
-#include "metadata/mem/MemMetaImpl.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/FiberRuntime.hpp"
@@ -3418,8 +3419,10 @@ FIBER_TEST_F(VfsImplIntegrationTest, LinkSuccessIsNotReversedByAttributeRefreshF
 // Unlink and rename-overwrite both end with the same decision: is this the
 // inode's last name (nlink == 0), is a descriptor still holding it open, and
 // did the cleanup that follows the committed metadata actually finish? The
-// decision only exists against real nlink bookkeeping, so this fixture runs
-// the real in-memory metadata engine and a data engine that can fail deletes.
+// decision only exists against authoritative nlink bookkeeping, so this
+// fixture uses an isolated Redis metadata volume and a controllable data
+// engine that can fail deletes. Pure VFS failure-injection tests above remain
+// offline and use their existing IMetaEngine doubles.
 
 namespace {
 
@@ -3464,12 +3467,17 @@ class RecordingDataEngine : public swordfs::storage::IDataEngine {
 class VfsLastLinkCleanupTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<swordfs::metadata::MemMetaImpl>>();
+    if (std::getenv("SWORDFS_REDIS_TEST_URL") == nullptr) {
+      GTEST_SKIP() << "Redis metadata service is not configured";
+    }
+    swordfs::metadata::SwordFsVolume config;
+    std::unique_ptr<swordfs::metadata::RedisMetaImpl> meta;
+    auto status = swordfs::test::MakeFormattedRedisMetaEngine("fuse-last-link", &config, &meta);
+    ASSERT_TRUE(status.ok()) << status.message();
     auto data = std::make_unique<RecordingDataEngine>();
     meta_ = meta.get();
     data_ = data.get();
-    swordfs::metadata::SwordFsVolume config;
-    const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
+    status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
     swordfs::test::RunInTestFiber([&] {
       swordfs::vfs::InodeHandleManager::Instance().Initialize();
@@ -3493,6 +3501,11 @@ class VfsLastLinkCleanupTest : public ::testing::Test {
       swordfs::vfs::FuseInodeCache::Instance().Initialize();
     });
     swordfs::volume::VolumeImpl::Initialize();
+  }
+
+  swordfs::utils::Status ReadInodeStatus(InodeID ino) {
+    swordfs::metadata::SwordFsInode inode;
+    return meta_->GetInode(ino, &inode);
   }
 
   // Create a regular file with one published chunk and seed its object.
@@ -3561,7 +3574,7 @@ class VfsLastLinkCleanupTest : public ::testing::Test {
     return entries;
   }
 
-  swordfs::metadata::MemMetaImpl *meta_ = nullptr;
+  swordfs::metadata::IMetaEngine *meta_ = nullptr;
   RecordingDataEngine *data_ = nullptr;
   std::vector<uint64_t> fhs_;
 };
@@ -3603,7 +3616,7 @@ TEST_F(VfsLastLinkCleanupTest, TmpfileIsAnonymousUsableAndReclaimedAfterFinalClo
 
     ASSERT_TRUE(VfsImpl::Release(capture.entry->ino, *capture.fh).ok());
     ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
-    EXPECT_TRUE(meta_->GetInode(capture.entry->ino, nullptr).IsNotFound());
+    EXPECT_TRUE(ReadInodeStatus(capture.entry->ino).IsNotFound());
     EXPECT_TRUE(OrphanCandidates().empty());
   });
 }
@@ -3658,7 +3671,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwriteKeepsLookedUpDirectoryVictim
   ASSERT_TRUE(VfsImpl::OpenDir(victim.ino, &dir_fh).ok());
   ASSERT_TRUE(VfsImpl::Rename(kRoot, "source-dir", kRoot, "victim-dir", 0).ok());
 
-  EXPECT_TRUE(meta_->GetInode(victim.ino, nullptr).IsNotFound())
+  EXPECT_TRUE(ReadInodeStatus(victim.ino).IsNotFound())
       << "durable namespace state does not retain the overwritten directory";
 
   struct stat attr{};
@@ -3927,7 +3940,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkPublishesBackgroundCleanupAndOpenDesc
   ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
   EXPECT_EQ(data_->delete_calls, (std::vector<std::string>{key}));
   EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(meta_->GetInode(ino, nullptr).IsNotFound());
+  EXPECT_TRUE(ReadInodeStatus(ino).IsNotFound());
   EXPECT_TRUE(OrphanCandidates().empty());
   EXPECT_TRUE(PendingReclaims().empty());
 }
@@ -3952,7 +3965,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkReturnsBeforeBackgroundCleanupAndRetr
   // The worker prepares the inode, then the injected object-delete failure
   // leaves the frozen record durable for retry.
   EXPECT_EQ(ReconcileBackgroundCleanup(data_).ToErrno(), EIO);
-  EXPECT_TRUE(meta_->GetInode(ino, nullptr).IsNotFound());
+  EXPECT_TRUE(ReadInodeStatus(ino).IsNotFound());
   EXPECT_EQ(PendingReclaims(), (std::vector<InodeID>{ino}));
   EXPECT_TRUE(OrphanCandidates().empty());
 
@@ -3990,7 +4003,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkOfAHardlinkedNameDeletesNothing) {
 
   ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
   EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(meta_->GetInode(ino, nullptr).IsNotFound());
+  EXPECT_TRUE(ReadInodeStatus(ino).IsNotFound());
 }
 
 FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwritePublishesBackgroundCleanupForReplacedInode) {
@@ -4014,7 +4027,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwritePublishesBackgroundCleanupFo
   EXPECT_EQ(data_->delete_calls, (std::vector<std::string>{victim_key}));
   EXPECT_FALSE(data_->Contains(victim_key));
   EXPECT_TRUE(data_->Contains(moved_key));
-  EXPECT_TRUE(meta_->GetInode(victim, nullptr).IsNotFound());
+  EXPECT_TRUE(ReadInodeStatus(victim).IsNotFound());
   EXPECT_TRUE(OrphanCandidates().empty());
   EXPECT_TRUE(PendingReclaims().empty());
 
@@ -4055,7 +4068,7 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwritePublishesBackgroundCleanupAn
   ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
   EXPECT_EQ(data_->delete_calls, (std::vector<std::string>{victim_key}));
   EXPECT_FALSE(data_->Contains(victim_key));
-  EXPECT_TRUE(meta_->GetInode(victim, nullptr).IsNotFound());
+  EXPECT_TRUE(ReadInodeStatus(victim).IsNotFound());
   EXPECT_TRUE(OrphanCandidates().empty());
 }
 

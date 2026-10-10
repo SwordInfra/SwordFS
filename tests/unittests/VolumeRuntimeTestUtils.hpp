@@ -8,9 +8,9 @@
 #include <string>
 #include <utility>
 
+#include "TestCOWChunkMetadata.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
-#include "metadata/mem/MemCOWChunkMetadata.hpp"
 #include "metadata/types/Volume.hpp"
 #include "storage/DataEngineRegistry.hpp"
 #include "storage/IDataEngine.hpp"
@@ -108,7 +108,7 @@ class ConfiguredMetaEngine final : public Base {
     if (chunk_type != metadata::ChunkType::kCow) {
       return utils::Status::NotSupported("test chunk metadata type is not implemented");
     }
-    *out = std::make_shared<metadata::MemCOWChunkMetadata>();
+    *out = std::make_shared<TestCOWChunkMetadata>();
     return utils::Status::OK();
   }
 

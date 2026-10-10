@@ -24,7 +24,6 @@
 #include "chunk/cow/COWObjectKey.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
-#include "metadata/mem/MemMetaImpl.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Context.hpp"
 #include "utils/Logging.hpp"

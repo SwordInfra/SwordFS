@@ -256,7 +256,7 @@ class ChunkTest : public ::testing::Test {
     data_ = InitializeRuntime();
     meta_ = dynamic_cast<MissingMetaEngine *>(swordfs::volume::VolumeImpl::Instance().meta_engine());
     ASSERT_NE(meta_, nullptr);
-    cow_metadata_ = std::make_shared<swordfs::metadata::MemCOWChunkMetadata>();
+    cow_metadata_ = std::make_shared<swordfs::test::TestCOWChunkMetadata>();
   }
 
   std::unique_ptr<COWChunk> MakeChunk(ChunkIndex index = 0) {
@@ -264,7 +264,7 @@ class ChunkTest : public ::testing::Test {
                                       swordfs::volume::VolumeImpl::Instance().meta_engine(), data_, std::nullopt);
   }
 
-  std::shared_ptr<swordfs::metadata::MemCOWChunkMetadata> cow_metadata_;
+  std::shared_ptr<swordfs::test::TestCOWChunkMetadata> cow_metadata_;
   MissingMetaEngine *meta_ = nullptr;
   NullDataEngine *data_ = nullptr;
 };
