@@ -6,6 +6,7 @@
 // regression scenarios need to observe the complete durable sequence.
 
 #include <fcntl.h>
+#include <folly/Synchronized.h>
 #include <folly/fibers/Baton.h>
 #include <folly/io/IOBuf.h>
 #include <gtest/gtest.h>
@@ -176,7 +177,8 @@ class RecordingDataEngine : public swordfs::storage::IDataEngine {
     return Status::OK();
   }
   Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) override {
-    objects_[std::string(key)] = std::string(reinterpret_cast<const char *>(data->data()), data->length());
+    state_.wlock()->objects[std::string(key)] =
+        std::string(reinterpret_cast<const char *>(data->data()), data->length());
     return Status::OK();
   }
   Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
@@ -184,27 +186,52 @@ class RecordingDataEngine : public swordfs::storage::IDataEngine {
   }
   Status Delete(std::string_view key) override {
     const std::string owned(key);
-    delete_calls.push_back(owned);
-    auto it = fail_keys.find(owned);
-    if (it != fail_keys.end()) {
+    auto state = state_.wlock();
+    state->delete_calls.push_back(owned);
+    auto it = state->fail_keys.find(owned);
+    if (it != state->fail_keys.end()) {
+      // The worker has observed an actual failed Delete, not merely entered
+      // the callback. The test also checks that reclaim work stays durable.
+      failed_delete_seen_.post();
       return it->second;
     }
-    objects_.erase(owned);
+    state->objects.erase(owned);
     return Status::OK();
   }
 
   void Seed(std::string key) {
-    objects_[std::move(key)] = "seeded";
+    state_.wlock()->objects[std::move(key)] = "seeded";
   }
   bool Contains(std::string_view key) const {
-    return objects_.find(std::string(key)) != objects_.end();
+    auto state = state_.rlock();
+    return state->objects.find(std::string(key)) != state->objects.end();
   }
 
-  std::vector<std::string> delete_calls;
-  std::unordered_map<std::string, Status> fail_keys;
+  void SetDeleteFailure(std::string key, Status status) {
+    state_.wlock()->fail_keys[std::move(key)] = std::move(status);
+  }
+  void ClearDeleteFailures() {
+    state_.wlock()->fail_keys.clear();
+  }
+  std::vector<std::string> DeleteCalls() const {
+    return state_.rlock()->delete_calls;
+  }
+  size_t DeleteCallCount() const {
+    return state_.rlock()->delete_calls.size();
+  }
+  bool WaitForFailedDelete(std::chrono::steady_clock::duration timeout) {
+    return failed_delete_seen_.try_wait_for(timeout);
+  }
 
  private:
-  std::unordered_map<std::string, std::string> objects_;
+  struct State {
+    std::unordered_map<std::string, std::string> objects;
+    std::vector<std::string> delete_calls;
+    std::unordered_map<std::string, Status> fail_keys;
+  };
+
+  folly::Synchronized<State> state_;
+  folly::fibers::Baton failed_delete_seen_;
 };
 
 class FaultInjectingCOWChunkMetadata final : public metadata::cow::COWChunkMetadata {
@@ -741,12 +768,12 @@ FIBER_TEST_F(ReclaimerTest, TypedCOWRevisionCleanupFailsClosedOnMetadataAndDelet
   bool completed = false;
   EXPECT_EQ(cleanup->DeletePending(pending, &completed).ToErrno(), EIO);
   EXPECT_FALSE(completed);
-  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->DeleteCalls().empty());
 
   chunk_metadata->SetGetHeadStatus(Status::OK());
   const chunk::cow::COWObjectKey key(chunk_id, revision);
   data_->Seed(std::string(static_cast<std::string_view>(key)));
-  data_->fail_keys[std::string(static_cast<std::string_view>(key))] = Status::IOError("delete failed");
+  data_->SetDeleteFailure(std::string(static_cast<std::string_view>(key)), Status::IOError("delete failed"));
   EXPECT_EQ(cleanup->DeletePending(pending, &completed).ToErrno(), EIO);
   EXPECT_FALSE(completed);
   EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(key)));
@@ -774,7 +801,7 @@ FIBER_TEST_F(ReclaimerTest, TypedCOWDetachedCleanupFailsClosedOnAuthorityAndStor
   bool completed = false;
   EXPECT_EQ(cleanup->DeletePending(MakeTypedDetachedDelete(kFile_ino, kIndex, chunk_id), &completed).ToErrno(), EIO);
   EXPECT_FALSE(completed);
-  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->DeleteCalls().empty());
 
   chunk::internal::ChunkReachabilityProbeFn detached_probe = [](InodeID, metadata::ChunkIndex,
                                                                 std::optional<metadata::ChunkID> *out) {
@@ -798,12 +825,12 @@ FIBER_TEST_F(ReclaimerTest, TypedCOWDetachedCleanupFailsClosedOnAuthorityAndStor
   EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(key)));
 
   chunk_metadata->SetGetHeadStatus(Status::OK());
-  data_->fail_keys[std::string(static_cast<std::string_view>(key))] = Status::IOError("delete failed");
+  data_->SetDeleteFailure(std::string(static_cast<std::string_view>(key)), Status::IOError("delete failed"));
   EXPECT_EQ(cleanup->DeletePending(MakeTypedDetachedDelete(kFile_ino, kIndex, chunk_id), &completed).ToErrno(), EIO);
   EXPECT_FALSE(completed);
   EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(key)));
 
-  data_->fail_keys.clear();
+  data_->ClearDeleteFailures();
   chunk_metadata->SetEraseHeadStatus(Status::IOError("erase head failed"));
   EXPECT_EQ(cleanup->DeletePending(MakeTypedDetachedDelete(kFile_ino, kIndex, chunk_id), &completed).ToErrno(), EIO);
   EXPECT_FALSE(completed);
@@ -834,7 +861,7 @@ FIBER_TEST_F(ReclaimerTest, TypedCOWReclaimPropagatesReachabilityAndDeleteFailur
   bool completed = false;
   EXPECT_EQ(cleanup->DeleteReclaim(work, &completed).ToErrno(), EIO);
   EXPECT_FALSE(completed);
-  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->DeleteCalls().empty());
 
   chunk::internal::ChunkReachabilityProbeFn detached_probe = [](InodeID, metadata::ChunkIndex,
                                                                 std::optional<metadata::ChunkID> *out) {
@@ -842,7 +869,7 @@ FIBER_TEST_F(ReclaimerTest, TypedCOWReclaimPropagatesReachabilityAndDeleteFailur
     return Status::OK();
   };
   ASSERT_TRUE(chunk::cow::CreateCOWCleanupParticipant(0, chunk_metadata, meta_, data_, detached_probe, &cleanup).ok());
-  data_->fail_keys[std::string(static_cast<std::string_view>(key))] = Status::IOError("delete failed");
+  data_->SetDeleteFailure(std::string(static_cast<std::string_view>(key)), Status::IOError("delete failed"));
   EXPECT_EQ(cleanup->DeleteReclaim(work, &completed).ToErrno(), EIO);
   EXPECT_FALSE(completed);
   EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(key)));
@@ -866,7 +893,7 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsMalformedPendingDeleteWork) {
   chunk::internal::ChunkGcWorker worker(raw_meta, MakeLegacyCleanupParticipant(raw_meta, data_));
   const auto status = worker.Reconcile();
   EXPECT_EQ(status.ToErrno(), EIO);
-  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->DeleteCalls().empty());
 }
 
 FIBER_TEST_F(ReclaimerTest, ChunkGcDelegatesReclaimPolicyAndOwnsAcknowledgement) {
@@ -955,7 +982,7 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcFailsClosedWhenReclaimReachabilityLookupFails
 
   const auto status = ReconcilePhysicalCleanup(data_);
   EXPECT_EQ(status.ToErrno(), EIO);
-  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->DeleteCalls().empty());
   EXPECT_FALSE(pending_meta->completed);
 }
 
@@ -965,7 +992,7 @@ FIBER_TEST_F(ReclaimerRedisTest, ReconcileDeletesFrozenObjectsAndCompletes) {
   ASSERT_TRUE(ReconcileAll(data_).ok());
 
   const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-  EXPECT_EQ(data_->delete_calls, std::vector<std::string>{key});
+  EXPECT_EQ(data_->DeleteCalls(), std::vector<std::string>{key});
   EXPECT_FALSE(data_->Contains(key));
   EXPECT_TRUE(ReadInodeStatus(f_ino).IsNotFound());
   EXPECT_TRUE(PendingReclaims().empty());
@@ -973,7 +1000,7 @@ FIBER_TEST_F(ReclaimerRedisTest, ReconcileDeletesFrozenObjectsAndCompletes) {
 
   // Nothing left to do: a second pass is a no-op.
   ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_EQ(data_->delete_calls.size(), 1U);
+  EXPECT_EQ(data_->DeleteCallCount(), 1U);
 
   // The prepared output is optional; omitting it must not change the reclaim
   // sequence or leave the frozen record behind.
@@ -1011,7 +1038,7 @@ FIBER_TEST_F(ReclaimerTest, FrozenWorkDoesNotAuthorizeDeletingALiveInodeAndMayBe
   const auto live_status = ReconcilePhysicalCleanup(data_);
   EXPECT_TRUE(live_status.ok()) << live_status.message();
   EXPECT_TRUE(data_->Contains(key));
-  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->DeleteCalls().empty());
   EXPECT_TRUE(pending_meta->completed);
 
   // The maintenance handoff was stale and has been acknowledged. If logical
@@ -1020,7 +1047,7 @@ FIBER_TEST_F(ReclaimerTest, FrozenWorkDoesNotAuthorizeDeletingALiveInodeAndMayBe
   pending_meta->SetInodeLive(false);
   ASSERT_TRUE(ReconcilePhysicalCleanup(data_).ok());
   EXPECT_TRUE(data_->Contains(key));
-  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->DeleteCalls().empty());
 }
 
 TEST_F(ReclaimerTest, PendingReclaimContinuesDirectlyToDeletion) {
@@ -1047,20 +1074,20 @@ FIBER_TEST_F(ReclaimerRedisTest, ReconcileRetriesFailedObjectDeletes) {
   const InodeID f_ino = CreateChunkedFile("f");
   const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
   ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
-  data_->fail_keys[key] = Status::IOError("injected delete failure");
+  data_->SetDeleteFailure(key, Status::IOError("injected delete failure"));
 
   const auto first = ReconcileAll(data_);
   EXPECT_FALSE(first.ok());
-  EXPECT_EQ(data_->delete_calls.size(), 1U);
+  EXPECT_EQ(data_->DeleteCallCount(), 1U);
   // The frozen record survives the failed delete...
   EXPECT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
 
   // ... and reconciliation completes it (idempotently) once the backend
   // recovers.
-  data_->fail_keys.clear();
+  data_->ClearDeleteFailures();
   ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_EQ(data_->delete_calls.size(), 2U);
-  EXPECT_EQ(data_->delete_calls[1], key);
+  EXPECT_EQ(data_->DeleteCallCount(), 2U);
+  EXPECT_EQ(data_->DeleteCalls()[1], key);
   EXPECT_FALSE(data_->Contains(key));
   EXPECT_TRUE(PendingReclaims().empty());
   EXPECT_TRUE(ReadInodeStatus(f_ino).IsNotFound());
@@ -1085,13 +1112,13 @@ FIBER_TEST_F(ReclaimerRedisTest, TruncateCleanupRetriesFailedDelete) {
   const InodeID f_ino = CreateChunkedFile("truncate-retry");
   const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
   ASSERT_TRUE(meta_->Truncate(f_ino, 0).ok());
-  data_->fail_keys[key] = Status::IOError("injected delete failure");
+  data_->SetDeleteFailure(key, Status::IOError("injected delete failure"));
 
   EXPECT_EQ(ReconcileAll(data_).ToErrno(), EIO);
   EXPECT_EQ(PendingDeletes(), std::vector<std::string>{key});
   EXPECT_TRUE(data_->Contains(key));
 
-  data_->fail_keys.clear();
+  data_->ClearDeleteFailures();
   ASSERT_TRUE(ReconcileAll(data_).ok());
   EXPECT_TRUE(PendingDeletes().empty());
   EXPECT_FALSE(data_->Contains(key));
@@ -1264,7 +1291,7 @@ FIBER_TEST_F(ReclaimerTest, TypedCOWReclaimPrevalidatesEveryDetachedChunkBeforeD
   bool completed = false;
   ASSERT_TRUE(cleanup->DeleteReclaim(work, &completed).ok());
   EXPECT_TRUE(completed);
-  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->DeleteCalls().empty());
   EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(first_key)));
   EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(second_key)));
 
@@ -1303,7 +1330,7 @@ FIBER_TEST_F(ReclaimerTest, PendingDeleteCandidateDoesNotDeleteStillAuthoritativ
   // is still authoritative.
   ASSERT_TRUE(ReconcileAll(data_).ok());
   EXPECT_TRUE(data_->Contains(key));
-  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->DeleteCalls().empty());
   EXPECT_TRUE(staged->completed_keys.empty());
 
   // Once authoritative metadata no longer names that immutable object, the
@@ -1311,7 +1338,7 @@ FIBER_TEST_F(ReclaimerTest, PendingDeleteCandidateDoesNotDeleteStillAuthoritativ
   staged->SetCurrent(std::nullopt);
   ASSERT_TRUE(ReconcileAll(data_).ok());
   EXPECT_FALSE(data_->Contains(key));
-  EXPECT_EQ(data_->delete_calls, std::vector<std::string>{key});
+  EXPECT_EQ(data_->DeleteCalls(), std::vector<std::string>{key});
   EXPECT_EQ(staged->completed_keys, std::vector<std::string>{pending.id});
 }
 
@@ -1338,7 +1365,7 @@ FIBER_TEST_F(ReclaimerTest, PendingDeleteFailsClosedWhenAuthoritativeChunkLookup
   const auto status = ReconcileAll(data_);
   EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_TRUE(data_->Contains(key));
-  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->DeleteCalls().empty());
   EXPECT_TRUE(staged->completed_keys.empty());
 }
 
@@ -1364,7 +1391,7 @@ FIBER_TEST_F(ReclaimerTest, PendingDeleteRemovesSupersededRevisionWhileNewRevisi
 
   ASSERT_TRUE(ReconcileAll(data_).ok());
   EXPECT_FALSE(data_->Contains(old_key));
-  EXPECT_EQ(data_->delete_calls, std::vector<std::string>{old_key});
+  EXPECT_EQ(data_->DeleteCalls(), std::vector<std::string>{old_key});
   EXPECT_EQ(staged->completed_keys, std::vector<std::string>{pending.id});
 }
 
@@ -1400,7 +1427,7 @@ FIBER_TEST_F(ReclaimerRedisTest, ReconcileLeavesRevivedInodeAlone) {
   ASSERT_TRUE(ReconcileAll(data_).ok());
 
   const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-  EXPECT_TRUE(data_->delete_calls.empty()) << "no object may be deleted while a name references the inode";
+  EXPECT_TRUE(data_->DeleteCalls().empty()) << "no object may be deleted while a name references the inode";
   EXPECT_TRUE(data_->Contains(key));
   ASSERT_TRUE(meta_->GetInode(f_ino, &revived).ok());
   EXPECT_EQ(revived.attr.nlink, 1U);
@@ -1416,13 +1443,13 @@ FIBER_TEST_F(ReclaimerRedisTest, ReconcileDefersUntilAfterTheLastDescriptorClose
   ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
 
   ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_TRUE(data_->delete_calls.empty()) << "an open descriptor must defer the cleanup";
+  EXPECT_TRUE(data_->DeleteCalls().empty()) << "an open descriptor must defer the cleanup";
   ASSERT_TRUE(ReadInodeStatus(f_ino).ok());
 
   // Close only releases the local reference; background reclaim remains the
   // sole executor and completes on the next pass.
   ASSERT_TRUE(handle->Release().ok());
-  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->DeleteCalls().empty());
   ASSERT_TRUE(ReconcileAll(data_).ok());
   const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
   EXPECT_FALSE(data_->Contains(key));
@@ -1450,7 +1477,7 @@ FIBER_TEST_F(ReclaimerRedisTest, ReconcileDefersAnUnlinkedInodeWithAnOpenDescrip
 
   // Nothing was reclaimed: the candidate is still durable, the inode still
   // resolves, and the object the open descriptor can still read is untouched.
-  EXPECT_TRUE(data_->delete_calls.empty()) << "reconciliation must not reclaim an inode a descriptor still holds";
+  EXPECT_TRUE(data_->DeleteCalls().empty()) << "reconciliation must not reclaim an inode a descriptor still holds";
   EXPECT_TRUE(data_->Contains(key));
   ASSERT_TRUE(ReadInodeStatus(f_ino).ok()) << "the inode must survive while the descriptor is open";
   EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{f_ino}));
@@ -1459,9 +1486,9 @@ FIBER_TEST_F(ReclaimerRedisTest, ReconcileDefersAnUnlinkedInodeWithAnOpenDescrip
   // Last close only releases the local reference. The next worker pass owns
   // preparation/deletion/completion.
   ASSERT_TRUE(handle->Release().ok());
-  EXPECT_TRUE(data_->delete_calls.empty());
+  EXPECT_TRUE(data_->DeleteCalls().empty());
   ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_EQ(data_->delete_calls, (std::vector<std::string>{key}));
+  EXPECT_EQ(data_->DeleteCalls(), (std::vector<std::string>{key}));
   EXPECT_FALSE(data_->Contains(key));
   EXPECT_TRUE(ReadInodeStatus(f_ino).IsNotFound());
   EXPECT_TRUE(OrphanCandidates().empty());
@@ -1590,11 +1617,11 @@ FIBER_TEST_F(ReclaimerRedisTest, ReconcileCountsEveryFailedCleanupItem) {
   // Freeze one directly through metadata to model a crash-left pending record
   // without involving the worker path under test.
   ASSERT_TRUE(meta_->PrepareReclaim(frozen).ok());
-  data_->fail_keys[frozen_key] = Status::IOError("injected delete failure");
+  data_->SetDeleteFailure(frozen_key, Status::IOError("injected delete failure"));
   ASSERT_EQ(PendingReclaims(), std::vector<InodeID>{frozen});
 
-  data_->fail_keys[truncated_key] = Status::IOError("injected delete failure");
-  data_->fail_keys[orphan_key] = Status::IOError("injected delete failure");
+  data_->SetDeleteFailure(truncated_key, Status::IOError("injected delete failure"));
+  data_->SetDeleteFailure(orphan_key, Status::IOError("injected delete failure"));
   const auto status = ReconcileAll(data_);
   EXPECT_EQ(status.ToErrno(), EIO) << status.message();
   EXPECT_NE(status.message().find("left 3 cleanup item(s) pending"), std::string::npos) << status.message();
@@ -1609,7 +1636,7 @@ FIBER_TEST_F(ReclaimerRedisTest, ReconcileCountsEveryFailedCleanupItem) {
 
   // With the backend healthy the next pass finishes all work: the failed pass
   // lost nothing.
-  data_->fail_keys.clear();
+  data_->ClearDeleteFailures();
   ASSERT_TRUE(ReconcileAll(data_).ok());
   EXPECT_TRUE(PendingDeletes().empty());
   EXPECT_TRUE(PendingReclaims().empty());
@@ -1910,25 +1937,22 @@ FIBER_TEST_F(ReclaimerRedisTest, WorkerSurvivesAFailedPassAndRecoversOnWake) {
   // Freeze the reclaim first, and keep the backend failing so the first worker
   // pass reports an error instead of completing the record.
   ASSERT_TRUE(meta_->PrepareReclaim(f_ino).ok());
-  data_->fail_keys[key] = Status::IOError("injected persistent delete failure");
+  data_->SetDeleteFailure(key, Status::IOError("injected persistent delete failure"));
   ASSERT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
-  const auto initial_delete_calls = data_->delete_calls.size();
 
   auto worker = MakeChunkGcWorker(data_);
   swordfs::test::RunInTestThreadFromFiber([&] { worker->Start(); });
 
-  const auto failed_pass_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-  while (std::chrono::steady_clock::now() < failed_pass_deadline &&
-         data_->delete_calls.size() == initial_delete_calls) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  }
-  const bool failed_pass_ran = data_->delete_calls.size() > initial_delete_calls;
-  EXPECT_TRUE(failed_pass_ran) << "the first worker pass must retry the still-failing delete";
+  // Observe an actual failed Delete result rather than racing against the
+  // worker's public call log. Durable reclaim state proves the failed
+  // attempt cannot have completed deletion.
+  const bool failed_delete_observed = data_->WaitForFailedDelete(std::chrono::seconds(15));
+  EXPECT_TRUE(failed_delete_observed) << "the worker must attempt the failing delete";
   EXPECT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
 
   // Recover the backend and explicitly wake the same worker; the failed pass
   // must not terminate it and wakeup must not wait for the safety interval.
-  data_->fail_keys.clear();
+  data_->ClearDeleteFailures();
   worker->Wake();
   const auto recovery_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
   while (std::chrono::steady_clock::now() < recovery_deadline && !PendingReclaims().empty()) {
