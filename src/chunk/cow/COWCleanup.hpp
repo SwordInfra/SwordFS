@@ -10,6 +10,7 @@
 
 #include "chunk/internal/ChunkCleanupParticipant.hpp"
 #include "metadata/ChunkMetadata.hpp"
+#include "metadata/ChunkSizePlan.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Reclaim.hpp"
 #include "utils/Status.hpp"
@@ -36,6 +37,12 @@ utils::Status FreezeCOWDelete(metadata::InodeID ino, const metadata::SwordFsChun
                               metadata::PendingDelete *out);
 utils::Status FreezeCOWReclaim(metadata::InodeID ino, const std::vector<metadata::SwordFsChunk> &chunks,
                                uint64_t chunk_size, metadata::ReclaimWork *out);
+// Freeze mechanism-private cleanup identities from the authoritative typed
+// FileMetadata map without consulting a legacy descriptor or a COW head.
+utils::Status FreezeCOWDetachedReclaim(metadata::InodeID ino, const std::vector<metadata::ChunkMapping> &mappings,
+                                       metadata::ReclaimWork *out);
+utils::Status FreezeCOWDetachedDelete(metadata::InodeID ino, const metadata::ChunkMapping &mapping,
+                                      metadata::PendingDelete *out);
 utils::Status DecodeCOWDelete(const metadata::PendingDelete &work, uint64_t chunk_size, COWRef *out);
 utils::Status DecodeCOWReclaim(const metadata::ReclaimWork &work, uint64_t chunk_size, std::vector<COWRef> *out);
 

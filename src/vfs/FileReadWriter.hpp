@@ -124,6 +124,9 @@ class FileReadWriter {
   utils::Status GetVisibleSize(uint64_t *size);
   void ApplyLiveSize(metadata::SwordFsInode *inode) const;
   utils::Status FlushPendingWritesLocked();
+  // Called only while the inode operation mutex is held exclusively.
+  utils::Status CommitSizeChangeLocked(const metadata::SwordFsAttr &requested, metadata::SetAttrField fields,
+                                       metadata::SwordFsInode *out);
 
  private:
   InodeID ino_;

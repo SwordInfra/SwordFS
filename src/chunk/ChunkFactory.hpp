@@ -9,6 +9,7 @@
 
 #include "chunk/Chunk.hpp"
 #include "metadata/ChunkMetadata.hpp"
+#include "metadata/ChunkSizePlan.hpp"
 #include "metadata/types/Volume.hpp"
 
 namespace swordfs::metadata {
@@ -33,6 +34,10 @@ class ChunkFactory {
 
   utils::Status Open(metadata::InodeID ino, metadata::ChunkIndex index, bool create_if_missing,
                      std::shared_ptr<Chunk> *out) const;
+
+  // The VFS owns size ordering but not the mechanism's private head CAS.
+  // Keep boundary sanitation behind the mount-selected chunk factory.
+  utils::Status SanitizeBoundary(metadata::InodeID ino, const metadata::RetainedChunkBoundary &boundary) const;
 
  private:
   metadata::ChunkType chunk_type_;

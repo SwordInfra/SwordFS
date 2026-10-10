@@ -63,12 +63,26 @@ struct FileSizePrecondition {
   std::optional<ChunkBoundarySnapshot> boundary;
 };
 
+// Validate the logical extent of one typed chunk write without inspecting
+// any mechanism-private data. `end` is an absolute, exclusive file offset.
+utils::Status ValidateFileChunkWrite(ChunkIndex index, ChunkID chunk_id, uint64_t end, uint64_t chunk_size);
+
+// Validate the caller's claimed old EOF boundary geometry before testing
+// its attachment identity in an atomic FileMetadata backend transaction.
+utils::Status ValidateFileSizePrecondition(const FileSizePrecondition &expected, uint64_t chunk_size);
+
 struct ChunkSizePlan {
   uint64_t target_eof = 0;
   FileSizePrecondition expected_old_state;
   std::optional<RetainedChunkBoundary> boundary;
   std::vector<ChunkID> detached_chunk_ids;
 };
+
+// Recompute from the authoritative transaction snapshot rather than trusting
+// a caller's stale detached-ID list. A changed old EOF/boundary is a conflict;
+// other mappings are freshly classified so shrink cannot miss an attachment.
+utils::Status ValidateSizeCommitPlan(const ChunkSizePlan &requested, uint64_t actual_eof, uint64_t chunk_size,
+                                     const std::vector<ChunkMapping> &mappings, bool is_shrink, ChunkSizePlan *current);
 
 namespace internal {
 

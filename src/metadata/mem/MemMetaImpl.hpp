@@ -51,6 +51,17 @@ class MemMetaImpl : public IMetaEngine {
   Status VisitPendingReclaims(const ReclaimVisitorFn &visitor) override;
   Status VisitPendingDeletesBatch(size_t max_items, const PendingDeleteVisitorFn &visitor, bool *has_more) override;
   Status CompletePendingDelete(std::string_view key) override;
+  Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out) override;
+  Status ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out) override;
+  Status ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out) override;
+  Status AttachPrepared(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                        const FileSizePrecondition &expected) override;
+  Status FinalizeAttachedWrite(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                               const FileSizePrecondition &expected) override;
+  Status CommitShrink(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                      ChunkSizeCommitResult *out) override;
+  Status CommitGrow(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                    ChunkSizeCommitResult *out) override;
   Status AllocateChunkRevision(ChunkRevision *revision) override;
 
   // Directory operations

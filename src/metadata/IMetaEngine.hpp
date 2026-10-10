@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "metadata/ChunkMetadata.hpp"
+#include "metadata/ChunkSizePlan.hpp"
 #include "metadata/IChunkIndexTxn.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
@@ -34,6 +35,29 @@ class ChunkMetadataBridge;
 }
 
 namespace swordfs::metadata {
+
+// Coherent FileMetadata snapshot: the attachment is only a stable identity,
+// never a mechanism-specific COW revision or valid-object size.
+struct FileChunkSnapshot {
+  SwordFsInode inode;
+  std::optional<ChunkID> chunk_id;
+  // Required old-EOF identity for a later conditional publication. This is
+  // captured with the requested mapping even when the boundary is elsewhere.
+  std::optional<ChunkBoundarySnapshot> eof_boundary;
+};
+
+struct FileMappingSnapshot {
+  SwordFsInode inode;
+  std::vector<ChunkMapping> mappings;
+};
+
+// Result of one committed FileMetadata EOF transition. Detached ChunkIDs are
+// no longer authoritative; private mechanism GC handles physical cleanup.
+struct ChunkSizeCommitResult {
+  SwordFsInode inode;
+  std::vector<ChunkMapping> detached;
+  std::optional<RetainedChunkBoundary> boundary;
+};
 
 // Backend-neutral directory iteration state. The iterator is an independent
 // view of a directory enumeration; backend implementations may share the
@@ -76,6 +100,19 @@ constexpr std::string_view kMemoryMetaUrl = "memory://local";
 class IMetaEngine {
  public:
   virtual ~IMetaEngine() = default;
+
+  // #317's typed logical attachment contract. FileMetadata mutations are
+  // atomic only within this domain; callers prepare/update COWChunkMetadata
+  // independently and never persist a COW revision in these operations.
+  virtual Status ReadFileChunkSnapshot(InodeID, ChunkIndex, FileChunkSnapshot *) = 0;
+  virtual Status ReadFileMappingSnapshot(InodeID, FileMappingSnapshot *) = 0;
+  virtual Status ProbeAttachment(InodeID, ChunkIndex, std::optional<ChunkID> *) = 0;
+  virtual Status AttachPrepared(InodeID, ChunkIndex, ChunkID, uint64_t, const FileSizePrecondition &) = 0;
+  virtual Status FinalizeAttachedWrite(InodeID, ChunkIndex, ChunkID, uint64_t, const FileSizePrecondition &) = 0;
+  virtual Status CommitShrink(InodeID, const ChunkSizePlan &, const SwordFsAttr &, SetAttrField,
+                              ChunkSizeCommitResult *) = 0;
+  virtual Status CommitGrow(InodeID, const ChunkSizePlan &, const SwordFsAttr &, SetAttrField,
+                            ChunkSizeCommitResult *) = 0;
 
   /// Open the mount-selected mechanism's independent ChunkMetadata domain.
   /// Concrete mechanisms extend this narrow root with typed ChunkID-keyed
