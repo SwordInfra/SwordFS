@@ -43,6 +43,12 @@ choice, not permission for other consumers to introduce concrete Redis logic.
 The Memory scheme branch can be removed during #443; do not add a new factory or
 parser abstraction for the sake of this audit.
 
+The checker matches the Redis namespaces themselves, not merely specific
+concrete type names, so namespace aliases cannot hide Redis client or metadata
+imports. It also joins C/C++ backslash-continued logical lines before checking
+preprocessor directives. This remains a deliberately narrow **direct source
+dependency** check, not a transitive C++ include-graph or compiler AST audit.
+
 ## Semantics and limitations
 
 - Namespace mutations must be externally atomic. A success must leave one

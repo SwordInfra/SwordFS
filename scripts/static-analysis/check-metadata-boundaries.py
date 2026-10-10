@@ -19,9 +19,9 @@ SUFFIXES = {".cpp", ".hpp", ".cc", ".h"}
 # name rather than access to a Redis metadata backend.
 FORBIDDEN = (
     re.compile(r'#\s*include\s*[<"][^">]*(?:metadata/redis/|sw/redis\+\+/|hiredis/)'),
-    re.compile(r'\b(?:swordfs::)?metadata::(?:redis::|Redis(?:Meta|Key|Kv|Codec|Backend|COWChunk))'),
+    re.compile(r'\b(?:swordfs::)?metadata::(?:redis\b|Redis(?:Meta|Key|Kv|Codec|Backend|COWChunk))'),
     re.compile(r'\busing\s+(?:namespace\s+)?(?:swordfs::)?metadata::redis\b'),
-    re.compile(r'\bsw::redis::'),
+    re.compile(r'\bsw::redis\b'),
     re.compile(r'\b(?:RedisMeta(?:Impl|Ops|Txn|Client|Config)|RedisBackendContext|RedisKvTxn|RedisCOWChunkMetadata)\b'),
 )
 
@@ -33,12 +33,24 @@ def check(root: Path) -> list[str]:
             if not path.is_file() or path.suffix not in SUFFIXES:
                 continue
             relative = path.relative_to(root)
+            logical_line = ""
+            start_line = 0
             for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if not logical_line:
+                    start_line = number
+                # C/C++ removes backslash-newline before preprocessing.
+                # A forbidden include split across physical lines is still an
+                # include, so check the resulting logical source line.
+                if line.endswith("\\"):
+                    logical_line += line[:-1]
+                    continue
+                logical_line += line
                 # Comments cannot create a source dependency. This is a focused
                 # guard, not a C++ parser; production code checks still apply.
-                code = line.split("//", 1)[0]
+                code = logical_line.split("//", 1)[0]
                 if any(pattern.search(code) for pattern in FORBIDDEN):
-                    violations.append(f"{relative}:{number}: {line.strip()}")
+                    violations.append(f"{relative}:{start_line}: {logical_line.strip()}")
+                logical_line = ""
     return violations
 
 
