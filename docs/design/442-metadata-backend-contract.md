@@ -55,6 +55,11 @@ dependency** check, not a transitive C++ include-graph or compiler AST audit.
   authoritative namespace state; no observer can see a partially completed
   rename/exchange. A missing parent/name or incompatible type is rejected
   without changing unrelated entries.
+- Concurrent namespace tests must establish that their observers actually ran
+  while validating each individual entry. Two separate lookups are not an
+  atomic snapshot of a multi-entry namespace and must not be compared as one.
+- Rejected ACL updates leave the published inode mode, ctime and ACL payload
+  unchanged; checking an error status alone is not a rollback assertion.
 - Directory cookies belong to the **individual opened iterator**; callers
   must not infer underlying Redis cursor or ordering behavior.
 - Last-link unlink publishes an orphan candidate; reclaim only crosses its
@@ -142,7 +147,7 @@ are identified by the `Contract...`, `Concurrent...`, or
 | 132 (G09) | `MemMetaStoreSwapTest.SwapMissingParentB` | Redis witness | `RedisMetaImplTest.ContractNamespaceMissingParentsDoNotPartiallyMutate` — rename with nonexistent target parent is rejected |
 | 133 (G09) | `MemMetaStoreSwapTest.ConcurrentSwapConsistency` | Redis witness | `RedisMetaImplTest.ConcurrentCrossEngineExchangeKeepsBothEntries` — cross-engine exchange contention preserves both original inode identities |
 | 134 (G09) | `MemMetaStoreSwapTest.SwapSameEntryNoOp` | Redis witness | `RedisMetaImplTest.RenameSameInodeThroughHardLinkIsNoOp` — identity-preserving no-op when source/target alias same inode |
-| 135 (G09) | `MemMetaStoreSwapTest.SwapDirectoriesCrossDirectory` | Redis witness | `RedisMetaImplTest.RenameExchangeDirectoryAndFileAcrossParentsUpdatesTopology` — actual public exchange preserves identity, parent inode and directory topology |
+| 135 (G09) | `MemMetaStoreSwapTest.SwapDirectoriesCrossDirectory` | Redis witness | `RedisMetaImplTest.ContractDirectoryExchangeRetainsBothChildNamespaces` — real public exchange of two non-empty directories preserves both directory identities and their children |
 | 136 (G09) | `MemMetaStoreSwapTest.SwapAcrossDifferentParentsUpdatesParentIno` | Redis witness | `RedisMetaImplTest.RenameExchangeDirectoryAndFileAcrossParentsUpdatesTopology` — actual public exchange preserves identity, parent inode and directory topology |
 | 137 (G09) | `MemMetaStoreSwapTest.SwapDirectoryIntoOwnSubtreeFails` | Redis witness | `RedisMetaImplTest.RenameExchangeRejectsCycleWhenOnlySourceIsDirectory` — invalid exchange cycle rejected with namespace unchanged |
 | 139 (G10) | `MemMetaStoreTest.PrivateChunkIndexReadsStagedWritesAndDropsRejectedChanges` | Retire internal assertion | **Memory-only mechanism** — private MemMetaTxn write staging and rollback is an implementation-specific mechanism; RedisMetaTxnTest.PrivateIndexPublicationCommitsAndRejectsWithLogicalHead protects observable Redis publication atomicity |
