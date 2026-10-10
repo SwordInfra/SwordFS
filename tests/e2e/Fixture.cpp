@@ -544,13 +544,16 @@ std::string Fixture::GenerateRandomData(size_t len, RandomMode mode) {
 
 metadata::Limits Fixture::GetLimits() const {
   const char *metadata_url = std::getenv("SWORDFS_METADATA_URL");
-  const auto url = metadata_url && metadata_url[0] != '\0' ? metadata_url : "memory://local";
+  if (metadata_url == nullptr || metadata_url[0] == '\0') {
+    ADD_FAILURE() << "E2E: SWORDFS_METADATA_URL must be set for Redis metadata E2E";
+    return {};
+  }
 
   std::unique_ptr<metadata::IMetaEngine> engine;
   std::string scheme;
-  auto status = metadata::ParseUrlScheme(url, &scheme);
+  auto status = metadata::ParseUrlScheme(metadata_url, &scheme);
   if (status.ok()) {
-    status = metadata::MetaEngineRegistry::Instance().CreateInstance(scheme, url, volume_name_, &engine);
+    status = metadata::MetaEngineRegistry::Instance().CreateInstance(scheme, metadata_url, volume_name_, &engine);
   }
   if (!status.ok()) {
     ADD_FAILURE() << "Failed to create metadata engine: " << status.message();

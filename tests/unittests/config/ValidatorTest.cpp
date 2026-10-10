@@ -43,13 +43,12 @@ TEST(ValidateVolumeNameTest, OnlyAsciiLettersAndDigits) {
 // ValidateMetaUrl
 // ================================================================
 
-TEST(ValidateMetaUrlTest, ValidMemoryUrl) {
-  // "memory://local" is the only supported scheme.
-  EXPECT_TRUE(ValidateMetaUrl("memory://local").empty());
+TEST(ValidateMetaUrlTest, ValidRedisUrlWithExplicitDatabase) {
+  EXPECT_TRUE(ValidateMetaUrl("redis://localhost:6379/0").empty());
 }
 
-TEST(ValidateMetaUrlTest, ValidMemoryUrlWithPath) {
-  EXPECT_FALSE(ValidateMetaUrl("memory://local/path/to/data").empty());
+TEST(ValidateMetaUrlTest, RejectsMalformedRedisDatabase) {
+  EXPECT_FALSE(ValidateMetaUrl("redis://localhost:6379/not-a-db").empty());
 }
 
 TEST(ValidateMetaUrlTest, EmptyString) {

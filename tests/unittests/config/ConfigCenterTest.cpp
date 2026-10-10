@@ -51,10 +51,12 @@ std::string ParseOptions(std::vector<std::string> args,
 // format — valid parameter combinations
 // ================================================================
 
-TEST(FormatParamsTest, MinimalMemoryFormat) {
+TEST(FormatParamsTest, MinimalRedisFormat) {
   std::vector<std::string> args = {
-      "swordfs", "format",         "--volume", "myvol",
-      "--meta",  "memory://local", "--bucket", "s3://mybucket.s3.amazonaws.com/chunks",
+      "swordfs",  "format",
+      "--volume", "myvol",
+      "--meta",   "redis://localhost:6379",
+      "--bucket", "s3://mybucket.s3.amazonaws.com/chunks",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
 }
@@ -64,8 +66,10 @@ TEST(ConfigCenterTest, SelectsParsedSubcommandWithoutRetainingCliPointers) {
   auto &cfg = swordfs::config::ConfigCenter::Instance();
   cfg.ConfigureOptions(app);
   std::vector<std::string> args = {
-      "swordfs", "format",         "--volume", "myvol",
-      "--meta",  "memory://local", "--bucket", "s3://mybucket.s3.amazonaws.com/chunks",
+      "swordfs",  "format",
+      "--volume", "myvol",
+      "--meta",   "redis://localhost:6379",
+      "--bucket", "s3://mybucket.s3.amazonaws.com/chunks",
   };
   std::vector<const char *> argv;
   argv.reserve(args.size());
@@ -79,10 +83,12 @@ TEST(ConfigCenterTest, SelectsParsedSubcommandWithoutRetainingCliPointers) {
   EXPECT_EQ(sub_command->name, "format");
 }
 
-TEST(FormatParamsTest, MemoryFormatWithRegion) {
+TEST(FormatParamsTest, RedisFormatWithRegion) {
   std::vector<std::string> args = {
-      "swordfs",          "format",         "--volume", "myvol",
-      "--meta",           "memory://local", "--bucket", "s3://mybucket.s3.amazonaws.com/chunks",
+      "swordfs",          "format",
+      "--volume",         "myvol",
+      "--meta",           "redis://localhost:6379",
+      "--bucket",         "s3://mybucket.s3.amazonaws.com/chunks",
       "--storage-region", "us-east-1",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
@@ -95,7 +101,7 @@ TEST(FormatParamsTest, PosixAclIsExplicitVolumeFormatOptIn) {
       "--volume",
       "myvol",
       "--meta",
-      "memory://local",
+      "redis://localhost:6379",
       "--bucket",
       "s3://mybucket.s3.amazonaws.com/chunks",
       "--enable-posix-acl",
@@ -109,9 +115,9 @@ TEST(FormatParamsTest, PosixAclIsExplicitVolumeFormatOptIn) {
 // mount — valid parameter combinations
 // ================================================================
 
-TEST(MountParamsTest, MinimalMemoryMount) {
+TEST(MountParamsTest, MinimalRedisMount) {
   std::vector<std::string> args = {
-      "swordfs", "mount", "--volume", "myvol", "--meta", "memory://local", "/mnt/point",
+      "swordfs", "mount", "--volume", "myvol", "--meta", "redis://localhost:6379", "/mnt/point",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
 }
@@ -124,7 +130,7 @@ TEST(MountParamsTest, MountWithIndependentThreadCounts) {
           "--volume",
           "myvol",
           "--meta",
-          "memory://local",
+          "redis://localhost:6379",
           "--storage-thread-count",
           "4",
           "--meta-thread-count",
@@ -140,7 +146,7 @@ TEST(MountParamsTest, MountWithIndependentThreadCounts) {
 
 TEST(MountParamsTest, MountWithFuseOpts) {
   std::vector<std::string> args = {
-      "swordfs", "mount", "--volume", "myvol", "--meta", "memory://local", "-o", "allow_other,ro", "/mnt/point",
+      "swordfs", "mount", "--volume", "myvol", "--meta", "redis://localhost:6379", "-o", "allow_other,ro", "/mnt/point",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
 }
@@ -153,7 +159,7 @@ TEST(MountParamsTest, IoctlControlSurfaceIsExplicitlyOptIn) {
           "--volume",
           "myvol",
           "--meta",
-          "memory://local",
+          "redis://localhost:6379",
           "--enable-ioctl",
           "/mnt/point",
       },
@@ -196,7 +202,7 @@ TEST(FormatParamsTest, MissingBucket) {
       "--volume",
       "myvol",
       "--meta",
-      "memory://local",
+      "redis://localhost:6379",
   });
   EXPECT_FALSE(err.empty());
   EXPECT_NE(err.find("--bucket"), std::string::npos) << err;
@@ -207,7 +213,7 @@ TEST(FormatParamsTest, MissingVolume) {
       "swordfs",
       "format",
       "--meta",
-      "memory://local",
+      "redis://localhost:6379",
       "--bucket",
       "s3://mybucket.s3.amazonaws.com/chunks",
   });
@@ -222,7 +228,7 @@ TEST(FormatParamsTest, InvalidBucketScheme) {
       "--volume",
       "myvol",
       "--meta",
-      "memory://local",
+      "redis://localhost:6379",
       "--bucket",
       "https://example.com/bucket",
   });
@@ -237,7 +243,7 @@ TEST(FormatParamsTest, BucketWithoutScheme) {
       "--volume",
       "myvol",
       "--meta",
-      "memory://local",
+      "redis://localhost:6379",
       "--bucket",
       "no-scheme-bucket",
   });
@@ -252,7 +258,7 @@ TEST(FormatParamsTest, UnknownFlag) {
       "--volume",
       "myvol",
       "--meta",
-      "memory://local",
+      "redis://localhost:6379",
       "--bucket",
       "s3://mybucket.s3.amazonaws.com/chunks",
       "--not-a-real-option",
@@ -274,7 +280,7 @@ TEST(MountParamsTest, MissingMountpoint) {
       "--volume",
       "myvol",
       "--meta",
-      "memory://local",
+      "redis://localhost:6379",
   });
   EXPECT_FALSE(err.empty());
   EXPECT_NE(err.find("mountpoint"), std::string::npos) << err;
@@ -285,7 +291,7 @@ TEST(MountParamsTest, MissingVolume) {
       "swordfs",
       "mount",
       "--meta",
-      "memory://local",
+      "redis://localhost:6379",
       "/mnt/point",
   });
   EXPECT_FALSE(err.empty());

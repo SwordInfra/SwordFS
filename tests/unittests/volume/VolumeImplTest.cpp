@@ -7,22 +7,21 @@
 #include <CLI/CLI.hpp>
 #include <cctype>
 #include <cerrno>
-#include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "UnsupportedMetaEngine.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "config/ConfigCenter.hpp"
-#include "metadata/mem/MemMetaImpl.hpp"
-#include "metadata/mem/VolumeFile.hpp"
+#include "metadata/redis/RedisTestUtils.hpp"
 #include "storage/IDataEngine.hpp"
 #include "volume/VolumeImpl.hpp"
 
 using swordfs::metadata::ChunkType;
 using swordfs::metadata::SwordFsVolume;
-using swordfs::metadata::mem::VolumeFile;
 using swordfs::utils::Status;
 using swordfs::volume::FormatOptions;
 using swordfs::volume::MountOptions;
@@ -58,7 +57,7 @@ class NoopDataEngine final : public swordfs::storage::IDataEngine {
   }
 };
 
-class InvalidChunkMetadataEngine final : public swordfs::metadata::MemMetaImpl {
+class InvalidChunkMetadataEngine final : public swordfs::test::UnsupportedMetaEngine {
  public:
   enum class Result {
     kNullCapability,
@@ -87,8 +86,40 @@ class InvalidChunkMetadataEngine final : public swordfs::metadata::MemMetaImpl {
     return Status::OK();
   }
 
+  Status BindChunkMetadataBridge(swordfs::chunk::internal::ChunkMetadataBridge *) override {
+    return Status::OK();
+  }
+
  private:
   Result result_;
+};
+
+// Keep mount argument / error-path tests offline; an injected LoadVolume is
+// not a substitute for the Redis persistence tests below.
+MountOptions PrepareInjectedMount(
+    SwordFsVolume config,
+    std::unique_ptr<swordfs::metadata::IMetaEngine> engine =
+        std::make_unique<swordfs::test::ConfiguredMetaEngine<swordfs::test::UnsupportedMetaEngine>>()) {
+  swordfs::test::RegisterTestVolumeEngines();
+  swordfs::test::pending_volume = std::move(config);
+  swordfs::test::pending_meta_engine = std::move(engine);
+  swordfs::test::pending_data_engine.reset();
+  return swordfs::test::MakeTestMountOptions(swordfs::test::pending_volume.name);
+}
+
+// Models decoding an invalid volume record on LoadVolume without implementing
+// a second persistent metadata backend; the canonical decoder is production.
+class EncodedVolumeMetaEngine final : public swordfs::test::UnsupportedMetaEngine {
+ public:
+  explicit EncodedVolumeMetaEngine(std::string encoded) : encoded_(std::move(encoded)) {
+  }
+
+  Status LoadVolume(SwordFsVolume *out) override {
+    return out->ParseFrom(encoded_);
+  }
+
+ private:
+  std::string encoded_;
 };
 
 }  // namespace
@@ -172,7 +203,7 @@ TEST(VolumeImplConfigAdapterTest, LoadFromUsesParsedMountRuntimeConfiguration) {
       .region = "persisted-region",
   };
   swordfs::test::pending_meta_engine =
-      std::make_unique<swordfs::test::ConfiguredMetaEngine<swordfs::metadata::MemMetaImpl>>();
+      std::make_unique<swordfs::test::ConfiguredMetaEngine<swordfs::test::UnsupportedMetaEngine>>();
   swordfs::test::pending_data_engine = std::make_unique<NoopDataEngine>();
   ParseConfig({
       "swordfs",
@@ -216,14 +247,7 @@ TEST(VolumeImplConfigAdapterTest, CreateFromRejectsUnknownChunkTypeName) {
 class VolumeImplTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    if (::mkdir("/etc/swordfs", 0755) != 0 && errno != EEXIST) {
-      FAIL() << "failed to create /etc/swordfs: " << strerror(errno);
-    }
-    tmpdir_ = "/tmp/swordfs_volimpl_test_" + std::to_string(::getpid());
-    std::system(("mkdir -p " + tmpdir_).c_str());
-  }
-  void TearDown() override {
-    std::system(("rm -rf " + tmpdir_).c_str());
+    run_token_ = swordfs::test::UniqueRedisTestNamespace("volumeimpl");
   }
 
   std::string makeVolumeName(const std::string &vol_name) const {
@@ -241,7 +265,7 @@ class VolumeImplTest : public ::testing::Test {
       }
       return out;
     };
-    return sanitize(vol_name) + sanitize(test_name) + std::to_string(::getpid());
+    return sanitize(vol_name) + sanitize(test_name) + sanitize(run_token_);
   }
 
   FormatOptions makeFormatOptions(const std::string &meta_url, const std::string &vol_name = "testvol",
@@ -263,7 +287,24 @@ class VolumeImplTest : public ::testing::Test {
     };
   }
 
-  std::string tmpdir_;
+  std::string run_token_;
+};
+
+// Only the real lifecycle tests require a Redis service; parser/error-path
+// tests remain executable without one.
+class VolumeImplRedisTest : public VolumeImplTest {
+ protected:
+  void SetUp() override {
+    VolumeImplTest::SetUp();
+    const char *url = std::getenv("SWORDFS_REDIS_TEST_URL");
+    if (url == nullptr || url[0] == '\0') {
+      GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+    }
+  }
+
+  std::string RedisUrl() const {
+    return std::getenv("SWORDFS_REDIS_TEST_URL");
+  }
 };
 
 #ifndef NDEBUG
@@ -277,15 +318,19 @@ TEST(VolumeImplDomainTest, LifecycleRejectsFiberCaller) {
 // ── CreateFrom ──────────────────────────────────────────────────────
 
 TEST_F(VolumeImplTest, CreateFromSucceeds) {
-  auto options = makeFormatOptions("memory://local");
-  VolumeImpl vol;
-  const auto status = vol.CreateFrom(options);
-  EXPECT_TRUE(status.ok()) << status.message();
-  EXPECT_EQ(vol.config().chunk_type, ChunkType::kCow);
+  swordfs::test::RegisterTestVolumeEngines();
+  swordfs::test::pending_meta_engine =
+      std::make_unique<swordfs::test::ConfiguredMetaEngine<swordfs::test::UnsupportedMetaEngine>>();
+  auto options = makeFormatOptions("swordfs-test-meta://local");
+  VolumeImpl volume;
+  const auto status = volume.CreateFrom(options);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(volume.config().name, options.name);
+  EXPECT_EQ(volume.config().chunk_type, ChunkType::kCow);
 }
 
 TEST_F(VolumeImplTest, CreateFromRejectsInvalidBucketUrl) {
-  auto options = makeFormatOptions("memory://local", "testvol", "not-a-storage-url");
+  auto options = makeFormatOptions("swordfs-test-meta://local", "testvol", "not-a-storage-url");
   VolumeImpl volume;
 
   const auto status = volume.CreateFrom(options);
@@ -302,34 +347,41 @@ TEST_F(VolumeImplTest, CreateFromRejectsInvalidMetadataUrl) {
   EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
 }
 
-TEST_F(VolumeImplTest, FormatRejectsUnimplementedChunkType) {
+TEST_F(VolumeImplRedisTest, FormatRejectsUnimplementedChunkType) {
   auto options =
-      makeFormatOptions("memory://local", "testvol", "s3://endpoint.example.com/bucket", "", ChunkType::kRedisCache);
-  VolumeImpl vol;
-  const auto status = vol.CreateFrom(options);
-  EXPECT_TRUE(status.ToErrno() == ENOSYS) << status.message();
-  EXPECT_FALSE(VolumeFile{options.name}.Exists());
+      makeFormatOptions(RedisUrl(), "unimplemented", "s3://endpoint.example.com/bucket", "", ChunkType::kRedisCache);
+  VolumeImpl volume;
+  const auto status = volume.CreateFrom(options);
+  EXPECT_EQ(status.ToErrno(), ENOSYS) << status.message();
+
+  // Replacing VolumeFile with Redis must not weaken the former assertion:
+  // an unsuccessful Format must leave no authoritative volume record.
+  VolumeImpl reader;
+  const auto load_status = reader.LoadFrom(makeMountOptions(RedisUrl(), "unimplemented"));
+  EXPECT_EQ(load_status.ToErrno(), ENOENT) << load_status.message();
 }
 
-TEST_F(VolumeImplTest, MountUsesPersistedChunkTypeAndRejectsUnimplementedType) {
-  auto format_options = makeFormatOptions("memory://local");
+TEST_F(VolumeImplRedisTest, MountUsesPersistedChunkTypeAndRejectsUnimplementedType) {
+  auto format_options = makeFormatOptions(RedisUrl());
   VolumeImpl formatted;
-  const auto format_status = formatted.CreateFrom(format_options);
-  ASSERT_TRUE(format_status.ok()) << format_status.message();
+  auto status = formatted.CreateFrom(format_options);
+  ASSERT_TRUE(status.ok()) << status.message();
 
   VolumeImpl mounted;
-  auto mount_options = makeMountOptions("memory://local");
-  ASSERT_TRUE(mounted.LoadFrom(mount_options).ok());
+  status = mounted.LoadFrom(makeMountOptions(RedisUrl()));
+  ASSERT_TRUE(status.ok()) << status.message();
   ASSERT_NE(mounted.chunk_factory(), nullptr);
   EXPECT_EQ(mounted.config().chunk_type, ChunkType::kCow);
+  EXPECT_EQ(mounted.config().name, format_options.name);
 
-  SwordFsVolume stored = mounted.config();
-  stored.chunk_type = ChunkType::kRedisCache;
-  const auto unsupported_options = makeMountOptions("memory://local");
-  stored.name = unsupported_options.name;
-  ASSERT_TRUE(VolumeFile{stored.name}.Write(stored).ok());
-  VolumeImpl unsupported;
-  EXPECT_TRUE(unsupported.LoadFrom(unsupported_options).ToErrno() == ENOSYS);
+  // Check unsupported persisted chunk selection in isolation: the real
+  // Redis round trip above proves the canonical persisted COW selection.
+  SwordFsVolume unsupported = mounted.config();
+  unsupported.chunk_type = ChunkType::kRedisCache;
+  const auto mount_options = PrepareInjectedMount(unsupported);
+  VolumeImpl rejected;
+  status = rejected.LoadFrom(mount_options);
+  EXPECT_EQ(status.ToErrno(), ENOSYS) << status.message();
 }
 
 TEST_F(VolumeImplTest, MountRejectsInvalidChunkMetadataCapability) {
@@ -372,146 +424,143 @@ TEST_F(VolumeImplTest, MountRejectsCleanupMetadataClassMismatch) {
 }
 
 TEST_F(VolumeImplTest, CreateFromNormalizesDataEngineIdentity) {
-  auto options = makeFormatOptions("memory://local", "testvol", "S3://endpoint.example.com/bucket");
-  VolumeImpl vol;
-  ASSERT_TRUE(vol.CreateFrom(options).ok());
-  EXPECT_EQ(vol.config().storage, "s3");
+  swordfs::test::RegisterTestVolumeEngines();
+  swordfs::test::pending_meta_engine =
+      std::make_unique<swordfs::test::ConfiguredMetaEngine<swordfs::test::UnsupportedMetaEngine>>();
+  auto options = makeFormatOptions("swordfs-test-meta://local", "testvol", "S3://endpoint.example.com/bucket");
+  VolumeImpl volume;
+  ASSERT_TRUE(volume.CreateFrom(options).ok());
+  EXPECT_EQ(volume.config().storage, "s3");
 }
 
-TEST_F(VolumeImplTest, CreateFromRedisEngine) {
-  const char *redis_url = std::getenv("SWORDFS_REDIS_TEST_URL");
-  if (redis_url == nullptr) {
-    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
-  }
-  auto format_options =
-      makeFormatOptions(redis_url, "redis-" + tmpdir_, "s3://endpoint.example.com/bucket", "us-east-1");
+TEST_F(VolumeImplRedisTest, CreateFromRedisEngine) {
+  auto format_options = makeFormatOptions(RedisUrl(), "redis", "s3://endpoint.example.com/bucket", "us-east-1");
 
-  VolumeImpl::Initialize();
-  Status status = VolumeImpl::Instance().CreateFrom(format_options);
+  VolumeImpl formatted;
+  auto status = formatted.CreateFrom(format_options);
   ASSERT_TRUE(status.ok()) << status.message();
 
-  auto mount_options = makeMountOptions(redis_url, "redis-" + tmpdir_);
-  VolumeImpl::Initialize();
-  status = VolumeImpl::Instance().LoadFrom(mount_options);
-  EXPECT_TRUE(status.ok()) << status.message();
-  EXPECT_FALSE(VolumeFile{tmpdir_}.Exists());
+  VolumeImpl mounted;
+  status = mounted.LoadFrom(makeMountOptions(RedisUrl(), "redis"));
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(mounted.config().name, format_options.name);
+  EXPECT_EQ(mounted.config().storage, "s3");
+  EXPECT_EQ(mounted.config().bucket, format_options.bucket);
+  EXPECT_EQ(mounted.config().region, "us-east-1");
+  EXPECT_EQ(mounted.config().chunk_type, ChunkType::kCow);
 
-  VolumeImpl::Initialize();
-  status = VolumeImpl::Instance().CreateFrom(format_options);
-  EXPECT_TRUE(status.ToErrno() == EEXIST) << status.message();
+  VolumeImpl duplicate;
+  status = duplicate.CreateFrom(format_options);
+  EXPECT_EQ(status.ToErrno(), EEXIST) << status.message();
 }
 
-TEST_F(VolumeImplTest, LoadFromS3Engine) {
-  auto format_options = makeFormatOptions("memory://local", "testvol", "s3://myhost.example.com/mybucket", "us-west-2");
+TEST_F(VolumeImplRedisTest, LoadFromS3Engine) {
+  auto format_options = makeFormatOptions(RedisUrl(), "s3", "s3://myhost.example.com/mybucket", "us-west-2");
+  VolumeImpl formatted;
+  ASSERT_TRUE(formatted.CreateFrom(format_options).ok());
 
-  VolumeImpl vol;
-  ASSERT_TRUE(vol.CreateFrom(format_options).ok());
-
-  VolumeImpl::Initialize();
-  auto mount_options = makeMountOptions("memory://local", "testvol");
-  Status st = VolumeImpl::Instance().LoadFrom(mount_options);
-  ASSERT_TRUE(st.ok()) << st.message();
-  VolumeImpl::Instance().Shutdown();
+  VolumeImpl loaded;
+  const auto status = loaded.LoadFrom(makeMountOptions(RedisUrl(), "s3"));
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(loaded.config().bucket, format_options.bucket);
+  EXPECT_EQ(loaded.config().region, "us-west-2");
+  loaded.Shutdown();
 }
 
 TEST_F(VolumeImplTest, LoadFromUnknownDataEngine) {
-  auto options = makeMountOptions("memory://local", "testvol");
   SwordFsVolume stored;
-  stored.name = options.name;
+  stored.name = makeVolumeName("unknown-data-engine");
   stored.storage = "does-not-exist";
   stored.bucket = "s3://endpoint.example.com/bucket";
-  ASSERT_TRUE(VolumeFile{options.name}.Write(stored).ok());
+  const auto options = PrepareInjectedMount(stored);
 
-  VolumeImpl vol;
-  Status st = vol.LoadFrom(options);
-  EXPECT_TRUE(st.ToErrno() == ENOSYS) << st.message();
+  VolumeImpl volume;
+  const auto status = volume.LoadFrom(options);
+  EXPECT_EQ(status.ToErrno(), ENOSYS) << status.message();
 }
 
 TEST_F(VolumeImplTest, LoadFromUsesPersistedDataEngineIdentity) {
-  auto options = makeMountOptions("memory://local", "testvol");
+  // The configured identity, not the bucket URL scheme, selects the engine.
   SwordFsVolume stored;
-  stored.name = options.name;
+  stored.name = makeVolumeName("stored-engine-identity");
   stored.storage = "does-not-exist";
   stored.bucket = "s3://endpoint.example.com/bucket";
-  ASSERT_TRUE(VolumeFile{options.name}.Write(stored).ok());
+  const auto options = PrepareInjectedMount(stored);
 
-  VolumeImpl vol;
-  Status st = vol.LoadFrom(options);
-  EXPECT_TRUE(st.ToErrno() == ENOSYS) << st.message();
+  VolumeImpl volume;
+  const auto status = volume.LoadFrom(options);
+  EXPECT_EQ(status.ToErrno(), ENOSYS) << status.message();
+  EXPECT_EQ(volume.config().storage, "does-not-exist");
 }
 
 TEST_F(VolumeImplTest, LoadFromRejectsMissingDataEngineIdentity) {
-  auto options = makeMountOptions("memory://local", "testvol");
   SwordFsVolume stored;
-  stored.name = options.name;
+  stored.name = makeVolumeName("missing-storage-identity");
   stored.bucket = "s3://endpoint.example.com/bucket";
-  ASSERT_TRUE(VolumeFile{options.name}.Write(stored).ok());
+  const auto options = PrepareInjectedMount(stored, std::make_unique<EncodedVolumeMetaEngine>(stored.SerializeTo()));
 
-  VolumeImpl vol;
-  Status st = vol.LoadFrom(options);
-  EXPECT_TRUE(st.ToErrno() == EIO) << st.message();
+  VolumeImpl volume;
+  const auto status = volume.LoadFrom(options);
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
 }
 
 TEST_F(VolumeImplTest, LoadFromRejectsMissingDataEngineLocation) {
-  auto options = makeMountOptions("memory://local", "testvol");
   SwordFsVolume stored;
-  stored.name = options.name;
+  stored.name = makeVolumeName("missing-storage-location");
   stored.storage = "s3";
-  ASSERT_TRUE(VolumeFile{options.name}.Write(stored).ok());
+  const auto options = PrepareInjectedMount(stored, std::make_unique<EncodedVolumeMetaEngine>(stored.SerializeTo()));
 
-  VolumeImpl vol;
-  Status status = vol.LoadFrom(options);
-  EXPECT_TRUE(status.ToErrno() == EIO) << status.message();
+  VolumeImpl volume;
+  const auto status = volume.LoadFrom(options);
+  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
 }
 
 TEST_F(VolumeImplTest, LoadFromS3UrlMissingBucketName) {
-  auto options = makeMountOptions("memory://local", "testvol");
   SwordFsVolume stored;
-  stored.name = options.name;
+  stored.name = makeVolumeName("missing-bucket-name");
   stored.storage = "s3";
   stored.bucket = "s3://endpoint.example.com";
-  ASSERT_TRUE(VolumeFile{options.name}.Write(stored).ok());
+  const auto options = PrepareInjectedMount(stored);
 
-  VolumeImpl vol;
-  Status st = vol.LoadFrom(options);
-  EXPECT_FALSE(st.ok());
-  EXPECT_NE(st.message().find("missing bucket name"), std::string::npos) << st.message();
+  VolumeImpl volume;
+  const auto status = volume.LoadFrom(options);
+  EXPECT_FALSE(status.ok());
+  EXPECT_NE(status.message().find("missing bucket name"), std::string::npos) << status.message();
 }
 
-TEST_F(VolumeImplTest, CreateFromVolumeAlreadyExists) {
-  auto options = makeFormatOptions("memory://local", tmpdir_);
-  VolumeImpl vol;
-  ASSERT_TRUE(vol.CreateFrom(options).ok());
+TEST_F(VolumeImplRedisTest, CreateFromVolumeAlreadyExists) {
+  auto options = makeFormatOptions(RedisUrl());
+  VolumeImpl first;
+  ASSERT_TRUE(first.CreateFrom(options).ok());
 
-  // Second format on the same path must fail.
-  VolumeImpl vol2;
-  Status st = vol2.CreateFrom(options);
-  EXPECT_FALSE(st.ok());
+  VolumeImpl second;
+  const auto status = second.CreateFrom(options);
+  EXPECT_EQ(status.ToErrno(), EEXIST) << status.message();
 }
 
 // ── LoadFrom ────────────────────────────────────────────────────────
 
-TEST_F(VolumeImplTest, LoadFromSucceeds) {
-  auto format_options = makeFormatOptions("memory://local", tmpdir_);
-  VolumeImpl vol;
-  ASSERT_TRUE(vol.CreateFrom(format_options).ok());
+TEST_F(VolumeImplRedisTest, LoadFromSucceeds) {
+  auto options = makeFormatOptions(RedisUrl());
+  VolumeImpl formatted;
+  ASSERT_TRUE(formatted.CreateFrom(options).ok());
 
-  VolumeImpl vol2;
-  auto mount_options = makeMountOptions("memory://local", tmpdir_);
-  Status st = vol2.LoadFrom(mount_options);
-  EXPECT_TRUE(st.ok()) << st.message();
+  VolumeImpl loaded;
+  const auto status = loaded.LoadFrom(makeMountOptions(RedisUrl()));
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(loaded.config().name, options.name);
+  EXPECT_EQ(loaded.config().chunk_type, ChunkType::kCow);
+  EXPECT_NE(loaded.chunk_factory(), nullptr);
 }
 
 TEST_F(VolumeImplTest, LoadFromUnsupportedEngine) {
-  auto options = makeMountOptions("redis://localhost:6379/0", tmpdir_);
-  VolumeImpl vol;
-  Status st = vol.LoadFrom(options);
-  EXPECT_FALSE(st.ok());
+  VolumeImpl volume;
+  const auto status = volume.LoadFrom(makeMountOptions("unregistered://localhost"));
+  EXPECT_EQ(status.ToErrno(), ENOSYS) << status.message();
 }
 
-TEST_F(VolumeImplTest, LoadFromMissingFile) {
-  auto options = makeMountOptions("memory://local", "nonexistent_vol_impl_test");
-  VolumeImpl vol;
-  Status st = vol.LoadFrom(options);
-  EXPECT_FALSE(st.ok());
+TEST_F(VolumeImplRedisTest, LoadFromMissingFile) {
+  VolumeImpl volume;
+  const auto status = volume.LoadFrom(makeMountOptions(RedisUrl(), "never-formatted"));
+  EXPECT_EQ(status.ToErrno(), ENOENT) << status.message();
 }
