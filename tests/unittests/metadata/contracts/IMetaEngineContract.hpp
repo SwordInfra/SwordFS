@@ -207,6 +207,30 @@ inline void RenameSameInodeAcrossParentsIsNoOp(metadata::IMetaEngine &meta) {
   EXPECT_EQ(after.attr.nlink, before.attr.nlink);
 }
 
+inline void RenameExchangePreservesDirectoryChildren(metadata::IMetaEngine &meta) {
+  using namespace metadata;
+  SwordFsInode first_dir;
+  SwordFsInode second_dir;
+  SwordFsInode first_child;
+  SwordFsInode second_child;
+  ASSERT_TRUE(meta.MkDir(kRootInodeId, "exchange-dir-a", 0755, &first_dir).ok());
+  ASSERT_TRUE(meta.MkDir(kRootInodeId, "exchange-dir-b", 0755, &second_dir).ok());
+  ASSERT_TRUE(meta.Create(first_dir.ino, "a-child", 0644, &first_child).ok());
+  ASSERT_TRUE(meta.Create(second_dir.ino, "b-child", 0644, &second_child).ok());
+
+  ASSERT_TRUE(meta.Rename(kRootInodeId, "exchange-dir-a", kRootInodeId, "exchange-dir-b", RenameFlag::kExchange).ok());
+
+  SwordFsInode observed;
+  ASSERT_TRUE(meta.Lookup(kRootInodeId, "exchange-dir-a", &observed).ok());
+  EXPECT_EQ(observed.ino, second_dir.ino);
+  ASSERT_TRUE(meta.Lookup(kRootInodeId, "exchange-dir-b", &observed).ok());
+  EXPECT_EQ(observed.ino, first_dir.ino);
+  ASSERT_TRUE(meta.Lookup(second_dir.ino, "b-child", &observed).ok());
+  EXPECT_EQ(observed.ino, second_child.ino);
+  ASSERT_TRUE(meta.Lookup(first_dir.ino, "a-child", &observed).ok());
+  EXPECT_EQ(observed.ino, first_child.ino);
+}
+
 inline void StickyOwnerExceptionsPreserveNamespace(metadata::IMetaEngine &meta) {
   using namespace metadata;
   SwordFsInode dir;
@@ -262,7 +286,21 @@ inline void AclRejectsMalformedLinuxEncoding(metadata::IMetaEngine &meta) {
   SwordFsInode file;
   ASSERT_TRUE(meta.Create(kRootInodeId, "contract-acl-invalid", 0644, &file).ok());
 
-  const auto valid = acl::Encode({{acl::kUserObj, 7}, {acl::kGroupObj, 5}, {acl::kOther, 5}});
+  // A minimal ACL is folded into mode bits and has no persistent xattr.
+  // Use an extended ACL to exercise rollback of an actual published payload.
+  const auto valid = acl::Encode({
+      {acl::kUserObj, 7},
+      {acl::kUser, 6, 1001},
+      {acl::kGroupObj, 5},
+      {acl::kMask, 5},
+      {acl::kOther, 5},
+  });
+  // Rejected replacements must not alter an already-published ACL or mode.
+  ASSERT_TRUE(meta.SetXAttr(file.ino, "system.posix_acl_access", valid, XAttrSetMode::kUpsert).ok());
+  SwordFsInode before;
+  ASSERT_TRUE(meta.GetInode(file.ino, &before).ok());
+  std::string published_acl;
+  ASSERT_TRUE(meta.GetXAttr(file.ino, "system.posix_acl_access", &published_acl).ok());
   std::string bad_version = valid;
   bad_version[0] = 1;
   std::string truncated = valid;
@@ -284,8 +322,26 @@ inline void AclRejectsMalformedLinuxEncoding(metadata::IMetaEngine &meta) {
   };
   for (const auto &encoding : malformed) {
     EXPECT_EQ(meta.SetXAttr(file.ino, "system.posix_acl_access", encoding, XAttrSetMode::kUpsert).ToErrno(), EINVAL);
+    SwordFsInode after;
+    ASSERT_TRUE(meta.GetInode(file.ino, &after).ok());
+    EXPECT_EQ(after.attr.mode, before.attr.mode);
+    EXPECT_EQ(after.attr.ctime, before.attr.ctime);
+    EXPECT_EQ(after.attr.ctime_nsec, before.attr.ctime_nsec);
+    EXPECT_EQ(after.xattrs, before.xattrs);
+    std::string observed_acl;
+    ASSERT_TRUE(meta.GetXAttr(file.ino, "system.posix_acl_access", &observed_acl).ok());
+    EXPECT_EQ(observed_acl, published_acl);
   }
   EXPECT_EQ(meta.SetXAttr(file.ino, "system.posix_acl_default", valid, XAttrSetMode::kUpsert).ToErrno(), EACCES);
+  SwordFsInode after;
+  ASSERT_TRUE(meta.GetInode(file.ino, &after).ok());
+  EXPECT_EQ(after.attr.mode, before.attr.mode);
+  EXPECT_EQ(after.attr.ctime, before.attr.ctime);
+  EXPECT_EQ(after.attr.ctime_nsec, before.attr.ctime_nsec);
+  EXPECT_EQ(after.xattrs, before.xattrs);
+  std::string observed_acl;
+  ASSERT_TRUE(meta.GetXAttr(file.ino, "system.posix_acl_access", &observed_acl).ok());
+  EXPECT_EQ(observed_acl, published_acl);
 }
 
 inline void ChunkPublicationValidatesMaximumFileExtent(metadata::IMetaEngine &meta) {
