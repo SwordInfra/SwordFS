@@ -91,7 +91,7 @@ utils::Status PlanChunkSizeChangeImpl(uint64_t old_size, uint64_t new_size, uint
 // boundary, whether that logical position was a hole or mapped to one ChunkID.
 //
 // Keep this entry point generic over the FileMetadata snapshot container so
-// the final Memory/Redis adapters can pass their natural snapshot shape
+// the FileMetadata implementation can pass its natural snapshot shape
 // without introducing another externally linked staging-only symbol before
 // #317 activates the ChunkID mapping in production.
 template <typename MappingRange>

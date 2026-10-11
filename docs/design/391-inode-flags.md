@@ -15,8 +15,8 @@ Linux ioctl surface when that surface is enabled for a mount.
 
 Linux UAPI values (`FS_IMMUTABLE_FL`, `FS_APPEND_FL`, `FS_XFLAG_IMMUTABLE`,
 and `FS_XFLAG_APPEND`) are never persisted.  The inode codec serializes the
-SwordFS representation together with the other inode attributes, so Memory and
-Redis observe the same durable state.  SwordFS is beta; this layout change has
+SwordFS representation together with the other inode attributes, so Redis
+persists the canonical state.  SwordFS is beta; this layout change has
 no compatibility or migration path for older metadata.
 
 Flag changes use a dedicated metadata operation rather than overloading
@@ -160,7 +160,7 @@ rather than pretending the daemon can bypass the kernel boundary.
 JuiceFS provides the closest peer implementation.  SwordFS adopts inode-centric
 persistent policy, a compact internal flag representation, a narrow ioctl
 surface, an explicit capability gate, and kernel-owned authorization.  SwordFS
-adapts those principles to its own `SwordFsAttr`, Memory/Redis transaction
+adapts those principles to its own `SwordFsAttr`, Redis transaction
 boundaries, local buffered-write model, and statx projection.  It does not copy
 JuiceFS internal numeric flag layout or broaden ioctl support beyond the four
 selected commands.  The explicit same-mount write/flag ordering above is a
@@ -168,8 +168,8 @@ SwordFS-specific consequence of its shared `FileReadWriter` buffering model.
 
 ## Verification invariants
 
-Tests cover typed flag persistence and statx projection, Memory/Redis mutation
-parity, mount gating, ioctl translation/buffer behavior, directory and inode
+Tests cover typed flag persistence and statx projection, Redis mutation
+semantics, mount gating, ioctl translation/buffer behavior, directory and inode
 mutation policy, open/write rules including existing local handles, ctime on
 effective flag changes, and the conformance mount wiring.  Formal fstests then
 re-evaluates `generic/079`, `424`, `545`, and `555`; `generic/553` is reconciled

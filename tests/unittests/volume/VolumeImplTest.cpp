@@ -355,8 +355,7 @@ TEST_F(VolumeImplRedisTest, FormatRejectsUnimplementedChunkType) {
   const auto status = volume.CreateFrom(options);
   EXPECT_EQ(status.ToErrno(), ENOSYS) << status.message();
 
-  // Replacing VolumeFile with Redis must not weaken the former assertion:
-  // an unsuccessful Format must leave no authoritative volume record.
+  // A failed format must not leave a partial authoritative volume record.
   VolumeImpl reader;
   const auto load_status = reader.LoadFrom(makeMountOptions(RedisUrl(), "unimplemented"));
   EXPECT_EQ(load_status.ToErrno(), ENOENT) << load_status.message();
@@ -560,23 +559,24 @@ TEST_F(VolumeImplTest, LoadFromUnsupportedEngine) {
   EXPECT_EQ(status.ToErrno(), ENOSYS) << status.message();
 }
 
-TEST_F(VolumeImplTest, RemovedMemoryEngineCannotFormatOrMount) {
+TEST_F(VolumeImplTest, UnregisteredEngineCannotFormatOrMount) {
   auto &registry = swordfs::metadata::MetaEngineRegistry::Instance();
-  EXPECT_FALSE(registry.Available("memory"));
+  EXPECT_FALSE(registry.Available("unsupported"));
 
   std::unique_ptr<swordfs::metadata::IMetaEngine> engine;
-  const auto registry_status = registry.CreateInstance("memory", "memory://local", makeVolumeName("retired"), &engine);
+  const auto registry_status =
+      registry.CreateInstance("unsupported", "unsupported://local", makeVolumeName("unknown"), &engine);
   EXPECT_EQ(registry_status.ToErrno(), ENOSYS) << registry_status.message();
   EXPECT_EQ(engine, nullptr);
 
-  auto options = makeFormatOptions("memory://local", "retired");
+  auto options = makeFormatOptions("unsupported://local", "unknown");
   VolumeImpl formatter;
   const auto format_status = formatter.CreateFrom(options);
   EXPECT_EQ(format_status.ToErrno(), ENOSYS) << format_status.message();
   EXPECT_EQ(formatter.meta_engine(), nullptr);
 
   VolumeImpl mounted;
-  const auto load_status = mounted.LoadFrom(makeMountOptions("memory://local", "retired"));
+  const auto load_status = mounted.LoadFrom(makeMountOptions("unsupported://local", "unknown"));
   EXPECT_EQ(load_status.ToErrno(), ENOSYS) << load_status.message();
   EXPECT_EQ(mounted.meta_engine(), nullptr);
 }

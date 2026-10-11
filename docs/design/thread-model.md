@@ -64,7 +64,6 @@ same as the boundary between filesystem policy and backend code.
 | Open count and reclaim fence | `FiberMutex` | Fence check and reference acquisition must be atomic |
 | Per-inode operations | `FiberRWMutex` | Reads share access; writes, flushes, and size changes exclude incompatible transitions |
 | Local chunk map | `FiberMutex` | Protect lookup, insertion, and snapshots |
-| Memory metadata store | Transaction-wide `FiberMutex` | Atomic composite metadata changes |
 | Runtime registry and shutdown ownership | `ThreadMutex` | Control-thread state |
 | Admission and drain count | Atomics plus baton | Cross-domain submission/completion/shutdown coordination |
 

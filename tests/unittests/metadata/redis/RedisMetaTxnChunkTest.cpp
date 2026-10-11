@@ -85,7 +85,7 @@ TEST(RedisMetaTxnTest, PrivateIndexPublicationCommitsAndRejectsWithLogicalHead) 
   ASSERT_TRUE(head.ParseFrom(*encoded).ok());
   EXPECT_EQ(head, first);
 
-  // #439 B005: a failed replacement must not poison the next valid
+  // a failed replacement must not poison the next valid
   // publication. Verify the public head and private snapshot advance
   // together, and that the old head becomes the cleanup candidate.
   bridge.reject_publish = false;

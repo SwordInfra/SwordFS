@@ -70,7 +70,7 @@ ChunkMetadata adapter uses one atomic Lua command that rejects a negative
 persisted counter before mutation and otherwise executes Redis `INCR`.
 Malformed values and signed-64-bit overflow are Redis command errors and
 likewise leave the counter unchanged. SwordFS accepts successful ChunkID values
-only in `1..INT64_MAX`, matching the Memory backend. The counter is created
+only in `1..INT64_MAX`. The counter is created
 lazily by the first allocation rather than by the FileMetadata format
 transaction. A lost acknowledgement
 after the script may have executed is `OutcomeUnknown`; a later allocation
@@ -386,8 +386,8 @@ discard stale cleanup work that conflicts with a live inode. Completion removes
 retained maintenance after the selected mechanism reports it safe to
 acknowledge.
 
-StatFs follows the same advisory-accounting rule. Both Redis and memory
-backends report a positive virtual inode capacity from their backend limits,
+StatFs follows the same advisory-accounting rule. Redis reports a
+positive virtual inode capacity from its backend limits,
 with `files_free <= files`, rather than promising that `files` equals the
 current live inode population. Missing, stale, malformed, noncanonical, or
 wrong-typed `inode_count` state therefore cannot make StatFs fail.

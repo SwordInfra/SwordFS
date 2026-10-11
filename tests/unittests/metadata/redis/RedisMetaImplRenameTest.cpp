@@ -117,7 +117,7 @@ FIBER_TEST_F(RedisMetaImplTest, RenameCoversMoveOverwriteNoReplaceAndExchange) {
                   .IsNotFound());
 }
 
-// #439 B030: overwriting a name publishes the old inode as a candidate;
+// overwriting a name publishes the old inode as a candidate;
 // the VFS can continue accessing it until the reclaim lifecycle completes.
 FIBER_TEST_F(RedisMetaImplTest, RenameOverwriteVictimCompletesReclaimLifecycle) {
   SwordFsInode source;

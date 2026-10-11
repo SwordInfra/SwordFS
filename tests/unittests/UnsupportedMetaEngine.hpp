@@ -8,7 +8,7 @@
 namespace swordfs::test {
 
 // Default-failing interface adapter for isolated upper-layer tests. Unlike a
-// memory filesystem it implements no namespace, persistence or transactions.
+// production backend, it implements no namespace, persistence or transactions.
 // A derived fixture overrides only the exact methods the component consumes.
 class UnsupportedMetaEngine : public metadata::IMetaEngine {
  public:
