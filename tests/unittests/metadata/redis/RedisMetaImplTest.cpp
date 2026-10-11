@@ -347,7 +347,7 @@ FIBER_TEST_F(RedisMetaImplTest, VolumeAndBasicLookupOperations) {
   EXPECT_TRUE(impl_->Lookup(file.ino, "child", &found).ToErrno() == ENOTDIR);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, XAttrsMatchMemorySemanticsAndSurviveRemount) {
+FIBER_TEST_F(RedisMetaImplTest, XAttrsPreserveAtomicModesAndSurviveRemount) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "xattrs", 0644, &file).ok());
 
@@ -403,7 +403,7 @@ FIBER_TEST_F(RedisMetaImplTest, XAttrsMatchMemorySemanticsAndSurviveRemount) {
   EXPECT_EQ(impl_->RemoveXAttr(kMissing, "user.key").ToErrno(), ENOENT);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, PosixAclSemanticsMatchMemoryAndPersist) {
+FIBER_TEST_F(RedisMetaImplTest, PosixAclSemanticsAndPersistence) {
   SwordFsInode parent;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "acl-parent", 0777, &parent).ok());
   const std::string default_acl = acl_test::Encode({
@@ -470,7 +470,7 @@ FIBER_TEST_F(RedisMetaImplTest, PosixAclSemanticsMatchMemoryAndPersist) {
             EINVAL);
 }
 
-// #439 B067: preserve the non-inheritance and mode behavior that is not
+// preserve the non-inheritance and mode behavior that is not
 // exercised by the persisted-ACL roundtrip above.
 FIBER_TEST_F(RedisMetaImplTest, PosixDefaultAclDistinguishesFilesDirectoriesAndSymlinks) {
   auto &context = folly::fibers::local<SwordFsContext>();
@@ -1659,7 +1659,7 @@ FIBER_TEST_F(RedisMetaImplTest, CreatePreservesRequestUidAcrossRedisWorker) {
   EXPECT_EQ(file.attr.uid, 1234U);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, ImmutableAndAppendOnlyPolicyMatchesMemoryBackend) {
+FIBER_TEST_F(RedisMetaImplTest, ImmutableAndAppendOnlyPolicyIsEnforced) {
   SwordFsInode immutable_file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "immutable", 0644, &immutable_file).ok());
   ASSERT_TRUE(impl_->SetXAttr(immutable_file.ino, "user.seed", "value", XAttrSetMode::kUpsert).ok());
@@ -1695,7 +1695,7 @@ FIBER_TEST_F(RedisMetaImplTest, ImmutableAndAppendOnlyPolicyMatchesMemoryBackend
   EXPECT_TRUE(impl_->SetInodeFlags(999999, InodeFlag::kImmutable, nullptr).IsNotFound());
 }
 
-FIBER_TEST_F(RedisMetaImplTest, DirectoryInodePolicyMatchesMemoryBackend) {
+FIBER_TEST_F(RedisMetaImplTest, DirectoryInodePolicyIsEnforced) {
   SwordFsInode immutable_dir;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "immutable-dir", 0755, &immutable_dir).ok());
   SwordFsInode visible_child;

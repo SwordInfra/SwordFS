@@ -22,8 +22,8 @@ producing a *second* execution-domain fatal error in its cleanup path.
 - Guarantee Redis peer destruction in the correct POSIX-thread domain even
   after a failed/fatal GTest assertion via a local scope guard.
 - Run the exact test in dedicated Debug CI to identify the root status before
-  determining if any Redis implementation change is required. Keep #440's
-  unrelated upper-layer fixture migration out of this PR.
+  determining if any Redis implementation change is required. Keep
+  unrelated upper-layer fixture changes out of this scope.
 
 ## Root cause and bounded remediation
 

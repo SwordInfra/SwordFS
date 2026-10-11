@@ -17,7 +17,7 @@ later error such as `ENOENT`.
 
 The rule applies consistently to lookup, create, mkdir, unlink, rmdir,
 symlink, hard-link destination names, and both source and destination names of
-rename. Memory and persistent metadata backends share the same limit and
+rename. Metadata entry points share the same limit and
 validation contract; backend-specific storage or lookup behavior must not
 change this error precedence.
 
@@ -115,15 +115,14 @@ design, implementation, test and review evidence. Use the repository's
 | --- | --- | --- |
 | #428 | Verify Linux/libfuse owners, close and interrupt behavior; classify OFD | — |
 | #429 | Minimal mount-owner lease identity, liveness and fail-closed loss protocol | #428 for finalized transport identity |
-| #430 | Memory/Redis atomic lock authority, expired-owner filtering, optional lazy GC and uncertainty recovery | #428, #429 |
+| #430 | Redis atomic lock authority, expired-owner filtering, optional lazy GC and uncertainty recovery | #428, #429 |
 | #431 | Traditional POSIX `getlk`/`setlk` and any-close release | #428–#430 |
 | #432 | BSD `flock` and open-file-description last-close release | #428–#430 |
 | #433 | Interruptible waits, cancellation, cross-mount integration and activation | #431, #432 (and the shared prerequisites) |
 
 The actual changes may be reviewed separately as each child reaches its own
-design-readiness checkpoint. The parent remains open until integration on
-both backends, relevant fstests classification, post-merge main CI and review
-are reconciled. #429 establishes **owner lease validity**, not a general
+design-readiness checkpoint. The parent remains open until Redis integration, relevant fstests
+classification, post-merge main CI and review are reconciled. #429 establishes **owner lease validity**, not a general
 Redis metadata session or a lock cleanup service. #430 owns actual lock
 records, atomic owner-validity checks and optional lazy reclamation. No
 intermediate child permits enabling incomplete remote-lock support or
@@ -138,9 +137,8 @@ The intended first stage supports traditional **process-associated POSIX
 record locks** (`F_GETLK`, `F_SETLK`, `F_SETLKW`) and **BSD `flock`**
 (`LOCK_SH`, `LOCK_EX`, `LOCK_UN`, `LOCK_NB`). They are advisory: an application
 that does not lock may still read/write. Locks on separate mounts of one
-Redis-backed volume must observe the same conflicts. The Memory backend
-implements the equivalent contract within its one in-process authority;
-Memory is not a cross-process distributed metadata service.
+Redis-backed volume must observe the same conflicts. The lock authority
+must remain consistent across mounts.
 
 Traditional POSIX locks belong to the **process lock owner and inode**, not
 the descriptor used to create the lock. Closing **any** descriptor for that
@@ -206,9 +204,8 @@ identities. `fh` still validates legitimate inode access.
 The lock authority stores:
 
 - One bounded **owner lease record** per mount incarnation: identity, explicit
-  active/revoked status and a deadline decided by authoritative Redis time
-  (Memory uses its equivalent local authority clock). An absent, revoked or
-  expired record is **invalid**. Renew never creates a missing lease and cannot
+  active/revoked status and a deadline decided by authoritative Redis time.
+  An absent, revoked or expired record is **invalid**. Renew never creates a missing lease and cannot
   change its incarnation. An expired identity cannot re-register.
 - Per-inode POSIX record locks: canonical owner-keyed, nonoverlapping
   `[start,end]` intervals with read/write mode and optional diagnostic PID.
@@ -413,7 +410,7 @@ lock initialization must not add a heartbeat to mounts on which remote
 locking is intentionally disabled.
 
 **#429 TDD entry contract (designed, not yet verified):** deterministic
-Memory/Redis tests for `INCR` allocation gaps, unconfirmed registration,
+Redis tests for `INCR` allocation gaps, unconfirmed registration,
 single-use `SET NX PX`, on-time/late `PEXPIRE XX`, expiry without sweeper,
 revoke-vs-renew, delayed/unknown results, old/new generation isolation,
 Redis outage longer than 45 seconds, FUSE admission/reply cutoff and
@@ -437,7 +434,7 @@ before making a stronger claim.
 
 ### Atomic grant, unlock and ambiguous outcomes
 
-The **linearization point** is one Memory serialized transition or a
+The **linearization point** is a
 successfully executed Redis transaction (prefer native WATCH/EXEC once its
 expiry predicate is proven; narrowly scoped Lua remains an alternative).
 Lock operations atomically:
@@ -684,7 +681,7 @@ optimistic transactions fail their proof). Document the bounded
 waiter resource policy, **conversion
 compensation**, and exact failure responses before the implementation is
 deemed ready. Protect the following
-with Memory/Redis tests and end-to-end / two-mount tests: lock range
+with Redis tests and end-to-end / two-mount tests: lock range
 split/merge, read/read and read/write, owner upgrades, `GETLK` PID
 limitations, POSIX any-close, flock last-close, `LOCK_NB`, wait and wake,
 missed wakeup, cancel-before/after grant, ambiguous commit, stale owner
@@ -726,7 +723,7 @@ The temporary name is briefly visible, so another actor can rename the
 created inode away and replace that name before internal unlink. To avoid
 deleting an unrelated replacement, tmpfile removal and its failure cleanup
 pass the created `InodeID` as an expected-identity precondition to metadata
-Unlink. Memory/Redis compare the current directory entry to this identity
+Unlink. Redis compares the current directory entry to this identity
 atomically with deletion. A replaced name fails without being removed.
 Ordinary user unlink has no such precondition. This guard does not remove the
 accepted brief visibility of the temporary name.
@@ -747,9 +744,8 @@ handle; the already-committed orphan remains owned by normal background
 reclamation rather than being synchronously deleted by the reply path.
 
 Large tmpfile workloads can publish many orphan candidates at once. Orphan
-preparation therefore runs in resumable bounded batches. Memory metadata keeps
-a snapshot continuation and Redis keeps an HSCAN page/cursor continuation
-across worker batch boundaries. The worker can abort an in-flight candidate
+preparation therefore runs in resumable bounded batches. Redis metadata
+keeps an HSCAN page/cursor continuation across worker batch boundaries. The worker can abort an in-flight candidate
 walk promptly during unmount and self-wakes to continue a non-terminal batch,
 so a stress-created orphan backlog cannot make daemon shutdown wait for a full
 queue scan.

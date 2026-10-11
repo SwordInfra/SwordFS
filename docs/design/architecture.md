@@ -131,8 +131,8 @@ The original option string is still passed to libfuse unchanged. This runtime
 behavior is not persistent volume metadata. `RunMount` initializes the
 singleton before request processing begins, and runtime components read the
 normalized policy directly. `VolumeImpl`, metadata factories, and operation
-interfaces do not carry mount-policy arguments. Memory and Redis therefore
-consume typed runtime policy without parsing raw FUSE options or reaching back
+interfaces do not carry mount-policy arguments. The metadata runtime therefore
+consumes typed runtime policy without parsing raw FUSE options or reaching back
 into `ConfigCenter`.
 
 Persistent volume features follow a different authority path. POSIX ACL
@@ -454,14 +454,13 @@ The reclaim fence prevents a background reclaim from crossing the metadata point
 
 The final close keeps its descriptor reference counted until its flush completes. This prevents reclaim from freezing/removing the inode while dirty data is still being flushed.
 
-Directory handles follow the same separation of runtime and backend state. `DirHandle` owns a backend-neutral `DirIterator`; Memory can iterate an in-memory view while Redis keeps its private `HSCAN` cursor/prefetch state behind the iterator. The FUSE directory offset is a logical cookie and is not exposed as a Redis cursor.
+Directory handles follow the same separation of runtime and backend state. `DirHandle` owns a backend-neutral `DirIterator`; Redis keeps its private `HSCAN` cursor/prefetch state behind the iterator. The FUSE directory offset is a logical cookie and is not exposed as a Redis cursor.
 
 READDIR and READDIRPLUS deliberately diverge only after entry enumeration. Plain
 READDIR encodes `SwordFsEntry` records directly and never fetches inode metadata.
 READDIRPLUS gathers a bounded batch of entries, asks `IMetaEngine::GetInodes()`
 for the corresponding persistent inode records, composes any tracked/open local
-inode overlay, and only then encodes `fuse_entry_param`. Memory serves the batch
-under one metadata transaction; Redis uses one ordered `MGET` for the batch, so
+inode overlay, and only then encodes `fuse_entry_param`. Redis uses one ordered `MGET` for the batch, so
 PLUS does not create a per-entry metadata round trip.
 
 The directory scan and attribute read are not one transaction-wide snapshot.
@@ -547,7 +546,7 @@ chunk construction or physical-delete API and retains no
 legacy/common-authority adapter. `VolumeImpl` validates that the opened typed
 ChunkMetadata capability matches the persisted chunk type and owns that
 capability for the mount lifetime. `ChunkFactory` receives the capability
-explicitly, while Memory and Redis retain only a non-owning bridge pointer. This bridge
+explicitly, while the Redis backend retains only a non-owning bridge pointer. This bridge
 preserves the existing transaction ordering while later mechanism-specific
 metadata work moves behind typed ChunkMetadata implementations. #318 retires truncate
 callbacks, #319 retires cleanup/reclaim callbacks, #317 retires
@@ -565,14 +564,14 @@ construction, and diagnostics. For COW, `COWChunkMetadata` now owns the staged
 `ChunkID -> COWChunkHead{revision,size}` model and an independent monotonic
 `COWChunkRevision` allocator per ChunkID. Full-head CAS compares revision and
 size; a retained-boundary clamp keeps the same revision and reduces only size.
-ChunkMetadata allocation and typed mutation do not participate in `MemMetaTxn`
-or `RedisMetaTxn`; Memory owns separate synchronization and Redis may share
-backend infrastructure without sharing a correctness transaction. The raw
+ChunkMetadata allocation and typed mutation do not participate in
+`RedisMetaTxn`; Redis may share backend infrastructure without sharing
+a correctness transaction. The raw
 `IChunkIndexTxn` record operations that remain today are solely legacy
 `ChunkMetadataBridge` plumbing until the staged authority cutover removes
 them. The implemented COW path is represented by the typed
-`COWChunkMetadata` root; Memory and Redis provide COW-specific backend
-implementations. Other chunk types remain unsupported until their own typed
+`COWChunkMetadata` root; Redis provides the COW-specific backend
+implementation. Other chunk types remain unsupported until their own typed
 metadata roots exist rather than falling back to a generic backend capability.
 
 `ChunkFactory` narrows the mount-owned generic capability to
@@ -1068,7 +1067,7 @@ authorization remains owned by the kernel/FUSE boundary.
 
 The current open-source backend set is also intentionally narrower than possible future architecture:
 
-- metadata: Memory and Redis;
+- metadata: Redis;
 - data: S3-compatible object storage.
 
 Additional metadata/data engines are extension opportunities through the registries, not current capabilities unless present in the repository.

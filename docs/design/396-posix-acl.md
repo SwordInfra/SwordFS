@@ -82,7 +82,7 @@ killpriv/setid contract explicitly changes them.
 `chmod` on an inode with an extended access ACL updates
 `ACL_USER_OBJ`, `ACL_MASK`, and `ACL_OTHER` to the requested owner/group/
 other classes while preserving named entries and `ACL_GROUP_OBJ`. Mode and
-rewritten ACL are committed through the same Memory/Redis inode transaction.
+rewritten ACL are committed through the same Redis inode transaction.
 
 Removing an access ACL leaves the already synchronized mode as the authority.
 Successful effective ACL/mode mutations update ctime through the existing inode
@@ -111,19 +111,19 @@ Directories inherit access plus default ACLs. Symlinks inherit neither ACL and
 keep the existing symlink-mode behavior.
 
 Child mode, ACL xattrs, gid/SGID inheritance, and namespace publication cross
-one Memory/Redis transaction boundary.
+one Redis transaction boundary.
 
 ## Backend boundaries
 
-The ACL parser/transformation layer is backend-neutral. Memory and Redis invoke
-the same semantic helpers from their existing inode transaction primitives:
+The ACL parser/transformation layer is backend-neutral. Redis invokes
+the shared semantic helpers from its inode transaction primitives:
 
 - `SetXAttr` / `RemoveXAttr` for ACL mutation;
 - `SetAttr` for chmod synchronization;
 - create/mkdir/mknod transaction paths for inheritance.
 
-Redis continues to rewrite the single serialized `inode:<ino>` record.
-Memory mutates the same in-memory `SwordFsInode`. Rename, hard links, unlink,
+Redis rewrites the single serialized `inode:<ino>` record.
+Rename, hard links, unlink,
 and final reclaim therefore inherit the #378 lifecycle guarantees without
 ACL-specific lifecycle code.
 
@@ -137,7 +137,7 @@ introduced.
 
 The implementation follows test-first development. Unit tests cover malformed
 ACL rejection, canonicalization, mode projection, chmod synchronization,
-default-ACL placement, umask/default-ACL inheritance, Memory/Redis parity, and
+default-ACL placement, umask/default-ACL inheritance, Redis correctness, and
 FUSE capability/namespace routing. Formal CI then reruns the selected ACL-gated
 fstests and reconciles the conformance baseline only from fresh raw outcomes.
 
