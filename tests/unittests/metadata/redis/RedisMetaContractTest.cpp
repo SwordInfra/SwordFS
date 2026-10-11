@@ -64,6 +64,10 @@ FIBER_TEST_F(RedisMetaImplTest, ContractCrossParentSameInodeExchangeIsNoOp) {
   swordfs::test::meta_contract::RenameSameInodeAcrossParentsIsNoOp(static_cast<IMetaEngine &>(*impl_));
 }
 
+FIBER_TEST_F(RedisMetaImplTest, ContractDirectoryExchangeRetainsBothChildNamespaces) {
+  swordfs::test::meta_contract::RenameExchangePreservesDirectoryChildren(static_cast<IMetaEngine &>(*impl_));
+}
+
 FIBER_TEST_F(RedisMetaImplTest, ContractStickyDirectoryAllowsAuthorizedOwners) {
   swordfs::test::meta_contract::StickyOwnerExceptionsPreserveNamespace(static_cast<IMetaEngine &>(*impl_));
 }
@@ -123,12 +127,14 @@ FIBER_TEST_F(RedisMetaImplTest, ConcurrentNameCreationAcrossIndependentEnginesHa
 
 FIBER_TEST_F(RedisMetaImplTest, ConcurrentRenameOverwriteHasNoCrossEngineCreateGap) {
   auto peer = NewPeer(config_, volume_name_);
+  auto peer_cleanup = folly::makeGuard([&] { swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); }); });
   ASSERT_NE(peer, nullptr);
 
   ASSERT_TRUE(impl_->Create(kRootInodeId, "target", 0644, nullptr).ok());
   std::atomic<bool> stop{false};
   std::atomic<int> unexpected_creates{0};
   std::atomic<int> probe_errors{0};
+  std::atomic<int> probe_attempts{0};
   std::atomic<int> rename_errors{0};
   std::barrier gate(3);
 
@@ -137,6 +143,7 @@ FIBER_TEST_F(RedisMetaImplTest, ConcurrentRenameOverwriteHasNoCrossEngineCreateG
     gate.arrive_and_wait();
     while (!stop.load(std::memory_order_acquire)) {
       auto status = peer->Create(kRootInodeId, "target", 0644, nullptr);
+      probe_attempts.fetch_add(1, std::memory_order_relaxed);
       if (status.ok()) {
         unexpected_creates.fetch_add(1, std::memory_order_relaxed);
       } else if (status.ToErrno() != EEXIST) {
@@ -163,12 +170,12 @@ FIBER_TEST_F(RedisMetaImplTest, ConcurrentRenameOverwriteHasNoCrossEngineCreateG
   renamer.join();
   observer.join();
   EXPECT_EQ(rename_errors.load(), 0);
+  EXPECT_GT(probe_attempts.load(), 0) << "no cross-engine observation occurred";
   EXPECT_EQ(probe_errors.load(), 0) << "the observer must not silently ignore backend failures";
   EXPECT_EQ(unexpected_creates.load(), 0) << "rename-overwrite exposed a transient missing target";
   SwordFsInode target;
   ASSERT_TRUE(impl_->Lookup(kRootInodeId, "target", &target).ok());
   EXPECT_TRUE(impl_->GetInode(target.ino, &target).ok());
-  swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
 }
 
 FIBER_TEST_F(RedisMetaImplTest, ConcurrentCrossEngineRenameOfSameSourceHasOneWinner) {
@@ -228,14 +235,23 @@ FIBER_TEST_F(RedisMetaImplTest, ReclaimUsesLatestPublishedRevisionAfterRewrite) 
 
 FIBER_TEST_F(RedisMetaImplTest, ConcurrentCrossEngineExchangeKeepsBothEntries) {
   auto peer = NewPeer(config_, volume_name_);
+  auto peer_cleanup = folly::makeGuard([&] { swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); }); });
   ASSERT_NE(peer, nullptr);
+  auto observer_peer = NewPeer(config_, volume_name_);
+  auto observer_cleanup =
+      folly::makeGuard([&] { swordfs::test::RunInTestThreadFromFiber([&] { observer_peer.reset(); }); });
+  ASSERT_NE(observer_peer, nullptr);
   SwordFsInode first;
   SwordFsInode second;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "exchange-a", 0644, &first).ok());
   ASSERT_TRUE(impl_->Create(kRootInodeId, "exchange-b", 0644, &second).ok());
 
   std::atomic<int> failures{0};
-  std::barrier gate(3);
+  std::atomic<int> observation_failures{0};
+  std::atomic<int> observations{0};
+  std::atomic<int> completed_writers{0};
+  std::atomic<bool> stop{false};
+  std::barrier gate(4);
   auto exchange = [&](RedisMetaImpl *engine, const char *from, const char *to) {
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
     gate.arrive_and_wait();
@@ -245,13 +261,33 @@ FIBER_TEST_F(RedisMetaImplTest, ConcurrentCrossEngineExchangeKeepsBothEntries) {
         failures.fetch_add(1, std::memory_order_relaxed);
       }
     }
+    if (completed_writers.fetch_add(1, std::memory_order_acq_rel) == 1) {
+      stop.store(true, std::memory_order_release);
+    }
   };
   auto first_thread = swordfs::test::StartFiberTestThread(exchange, impl_.get(), "exchange-a", "exchange-b");
   auto second_thread = swordfs::test::StartFiberTestThread(exchange, peer.get(), "exchange-b", "exchange-a");
+  auto observer = swordfs::test::StartFiberTestThread([&] {
+    folly::fibers::local<SwordFsContext>() = SwordFsContext{};
+    gate.arrive_and_wait();
+    while (!stop.load(std::memory_order_acquire)) {
+      for (const char *name : {"exchange-a", "exchange-b"}) {
+        SwordFsInode found;
+        const auto status = observer_peer->Lookup(kRootInodeId, name, &found);
+        observations.fetch_add(1, std::memory_order_relaxed);
+        if (!status.ok() || (found.ino != first.ino && found.ino != second.ino)) {
+          observation_failures.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    }
+  });
   gate.arrive_and_wait();
   first_thread.join();
   second_thread.join();
+  observer.join();
   EXPECT_EQ(failures.load(), 0);
+  EXPECT_GT(observations.load(), 0) << "the cross-engine exchange was never observed";
+  EXPECT_EQ(observation_failures.load(), 0) << "an exchange exposed a missing or invalid entry";
 
   SwordFsInode found_a;
   SwordFsInode found_b;
@@ -260,7 +296,6 @@ FIBER_TEST_F(RedisMetaImplTest, ConcurrentCrossEngineExchangeKeepsBothEntries) {
   EXPECT_NE(found_a.ino, found_b.ino);
   EXPECT_TRUE((found_a.ino == first.ino && found_b.ino == second.ino) ||
               (found_a.ino == second.ino && found_b.ino == first.ino));
-  swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
 }
 
 FIBER_TEST_F(RedisMetaImplTest, ConcurrentUnlinkAndCreateAcrossEnginesCannotLoseSuccessfulCreate) {
