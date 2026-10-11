@@ -16,7 +16,7 @@ The major differences between SwordFS and other distributed file systems are as 
 ## Architecture
 SwordFS uses a **client-heavy architecture**: filesystem semantics and most data-path logic live in the client, while durable metadata and file data are stored in external systems.
 
-The current open-source implementation separates metadata from file data. Metadata can be backed by Memory or Redis, while file data is stored in S3-compatible object storage. This separation keeps filesystem logic independent from a particular storage service and leaves room for additional backends over time.
+The current open-source implementation separates metadata from file data. Metadata is persisted in Redis, while file data is stored in S3-compatible object storage. This separation keeps filesystem logic independent from a particular storage service and leaves room for additional backends over time.
 
 For architecture, core data structures, the thread model, and key workflow state machines, start with the **[design documentation](docs/README.md)**.
 

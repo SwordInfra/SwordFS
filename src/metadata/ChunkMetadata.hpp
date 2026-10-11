@@ -13,17 +13,8 @@
 
 namespace swordfs::metadata {
 
-// Redis INCR is signed 64-bit. Keeping ChunkID in this range lets Memory and
-// Redis expose one portable volume-scoped identity contract.
+// Redis INCR is signed 64-bit. Keep ChunkID within its volume-scoped range.
 inline constexpr uint64_t kMaxChunkIDValue = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
-
-namespace internal {
-
-// Checked in-memory transition shared by the Memory implementation and unit
-// tests. Production callers allocate through ChunkMetadata.
-utils::Status AllocateChunkIDValue(uint64_t *current, ChunkID *out);
-
-}  // namespace internal
 
 // Mount-scoped root for the selected mechanism's metadata domain.
 //

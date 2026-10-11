@@ -59,8 +59,6 @@ gaps include:
 - `src/storage/s3/S3DataEngine.cpp`: 37.20%, with storage request/error paths
   that require careful separation between deterministic unit behavior and
   service-backed verification;
-- `src/metadata/mem/MemMetaImpl.cpp`: 78.15%, with remaining metadata error and
-  boundary paths useful for checking parity with Redis-backed semantics.
 
 Prioritization is based on semantic risk and the probability of finding real
 production defects, not on the cheapest way to increase the aggregate number.
@@ -98,16 +96,10 @@ Storage error paths follow after the metadata transaction slice is reconciled.
 
 ## Defects discovered by coverage work
 
-The in-memory metadata audit found a real backend-contract defect while adding
-`Readlink` coverage. `RedisMetaImpl::Readlink` rejects a null output pointer
-with `EINVAL`, while `MemMetaImpl::Readlink` previously dereferenced that
-pointer after successfully resolving a symlink. The behavior-validating
-regression test was submitted first and produced the required Draft-PR RED
-evidence in GitHub CI (Issue #300); a focused local run also terminated with
-`SIGSEGV`. Only after that evidence was captured was the production null check
-added. The same tests now validate normal target round-tripping and rejection
-of non-symlink/missing inodes, so the fix is anchored in the public metadata
-contract rather than the crash alone.
+The metadata coverage review established a public `Readlink` contract:
+null outputs return `EINVAL`, valid targets round-trip correctly, and missing
+or non-symlink inodes are rejected. Regression tests exercise these observable
+behaviors directly through the Redis metadata interface.
 
 This is the intended outcome of the coverage program: uncovered code led to a
 production correctness defect, and the production behavior was corrected
@@ -128,17 +120,13 @@ an implementation accident as expected behavior, or introduce production
 surfaces whose only consumer is a test.
 
 The first bounded slice under this floor is Issue #303 for metadata backends.
-Its baseline on `c39a82d` is 52.77% for `mem/VolumeFile.cpp`, 69.88% for
-`redis/RedisMetaTxn.cpp`, 73.68% for `redis/RedisBackendContext.cpp`, and
-76.47% for `redis/RedisDirIterator.cpp`.
+Its baseline on `c39a82d` includes 69.88% for `redis/RedisMetaTxn.cpp`,
+73.68% for `redis/RedisBackendContext.cpp`, and 76.47% for
+`redis/RedisDirIterator.cpp`.
 
 The metadata slice treats the remaining lines as missing contract evidence,
 not as a list of statements to execute. In particular:
 
-- `VolumeFile` tests cover persistence input/error behavior through the real
-  filesystem boundary, including null output, invalid volume paths, overwrite
-  behavior, and write failures, without replacing filesystem calls with test
-  doubles;
 - `RedisMetaTxn` tests exercise public transaction preconditions and metadata
   invariants such as parent identity, inode type, rename/exchange state,
   hard-link restrictions, and chunk descriptor identity through the existing
@@ -148,13 +136,6 @@ not as a list of statements to execute. In particular:
 - `RedisBackendContext` tests validate its explicit lifecycle contract: the
   thread-domain owner must shut the backend down before destruction, and
   clients/executors are unavailable after shutdown.
-
-Review of the `VolumeFile` coverage gap removed a redundant production state
-machine rather than adding a test seam: creating the complete per-volume
-directory already creates the config root when necessary, so separately
-probing/creating `/etc/swordfs` duplicated filesystem behavior and introduced
-extra host-permission-only branches. The implementation now has one directory
-creation path with the same success/failure contract.
 
 `RedisBackendContext.cpp` has a narrow instrumentation limitation around
 fatal ownership guards. The destructor and post-shutdown access contracts are

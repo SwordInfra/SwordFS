@@ -19,9 +19,7 @@ another projection of that authority, not a second metadata model.
 - Namespace changes, hard links, attribute changes, writes, and truncation
   preserve birth time because they mutate or copy the same inode attributes
   rather than recreating inode identity.
-- Memory metadata and Redis metadata expose the same contract. Redis persistence
-  comes from the normal inode codec; Memory persistence is the in-memory inode
-  object itself.
+- Redis persists birth time through the canonical inode codec.
 - `getattr` and `statx` resolve the same live inode state before projecting
   it. This includes mount-local live size overlays and the retained detached
   inode behavior used after unlink.
@@ -112,7 +110,7 @@ The feature is verified test-first at three boundaries:
 
 - metadata type/codec tests: statx projection, current-layout birth-time round
   trip, malformed-record rejection, and nanosecond validation;
-- Memory and Redis metadata tests: inode creation assigns birth time and common
+- Redis metadata tests: inode creation assigns birth time and common
   identity/attribute mutations preserve it;
 - VFS/FUSE tests: statx observes the same live inode state as getattr, preserves
   nullable file-info handling, replies with statx data on success, and forwards

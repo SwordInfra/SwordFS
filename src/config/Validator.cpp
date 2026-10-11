@@ -42,9 +42,6 @@ const CLI::Validator ValidateMetaUrl = CLI::Validator(
       if (!swordfs::metadata::MetaEngineRegistry::Instance().Available(scheme)) {
         return "Unsupported metadata engine '" + scheme + "'";
       }
-      if (scheme == "memory") {
-        return input == swordfs::metadata::kMemoryMetaUrl ? "" : "Invalid memory metadata URL: " + input;
-      }
       if (scheme == "redis") {
         swordfs::metadata::RedisMetaConfig config;
         status = swordfs::metadata::ParseRedisMetaUrl(input, &config);

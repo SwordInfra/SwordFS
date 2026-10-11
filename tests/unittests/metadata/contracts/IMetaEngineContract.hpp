@@ -18,7 +18,7 @@
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/PosixAclTestSupport.hpp"
 
-// These reusable assertions intentionally know nothing about Redis or Memory.
+// These reusable assertions are independent of concrete metadata backends.
 // A backend fixture owns format/connection lifecycle, then runs them in a fiber.
 namespace swordfs::test::meta_contract {
 

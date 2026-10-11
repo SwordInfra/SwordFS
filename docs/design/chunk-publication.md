@@ -70,16 +70,14 @@ logical file position. It is a strong numeric identity, volume-scoped, stable
 for one attached materialization lifetime, and never reused after detach. Its
 numeric representation may be used for stable persistence/key encoding and
 diagnostics but carries no mechanism semantics. Value zero is invalid;
-allocated values are in `1..INT64_MAX` so Memory and Redis share one portable
-representation. Ordinary COW rewrites and retained-boundary truncates do not
+allocated values are in `1..INT64_MAX`, a portable representation. Ordinary COW rewrites and retained-boundary truncates do not
 allocate a new ChunkID. A later rematerialization after detach receives a fresh
 ID. This identity is distinct from `ChunkIndex` (where in the file) and from
 the COW-private revision (which immutable object version backs the current COW
 head).
 
 ChunkID allocation is owned by ChunkMetadata and is independent of FileMetadata
-transactions. Memory uses ChunkMetadata-owned synchronization and state rather
-than the `MemMetaStore::Transact()` lock/commit lifecycle. Redis uses a
+transactions. Redis uses a
 standalone volume-scoped counter through its backend executor rather than
 joining `RedisMetaTxn` / `MULTI/EXEC` for correctness. Allocation may leave
 gaps, exhaustion fails closed, and a Redis increment whose acknowledgement is
@@ -132,7 +130,7 @@ boundary at all.
 The boundary/whole-detach arithmetic itself is shared with the legacy
 authority path through a smaller ChunkSizeLayout classification containing
 only the interior boundary (ChunkIndex, visible_prefix) and the first wholly
-detached ChunkIndex. Memory and Redis legacy truncate consume that layout
+detached ChunkIndex. The legacy Redis truncate uses that layout
 instead of independently deriving offsets from SwordFsChunk; the final
 FileMetadata planner applies the same layout to ChunkIndex -> ChunkID mappings.
 This transitional reuse does not invent ChunkIDs for legacy descriptors and
@@ -190,8 +188,7 @@ mechanism-private residue for independent cleanup, but public descriptor
 removal/clamp continues to determine visibility until the coherent #317
 authority cutover.
 
-Memory stores the typed COW head map and per-ChunkID revision counters behind
-its own `FiberMutex`, independent of `MemMetaStore::Transact()`. Redis stores
+Redis stores
 each ChunkID head and revision counter under COW-private per-ID keys and uses
 its own backend executor/optimistic transaction for head CAS/erase. Per-ID
 keys keep unrelated ChunkIDs out of one Redis WATCH conflict domain. Redis
@@ -232,7 +229,7 @@ data durable. `CommitChunk` passes those bytes unchanged to the transitional
 that intent to freeze cleanup for a definitely rejected upload, which may never
 have appeared in the live private index. Reads use `LoadChunkView`: the
 metadata backend reads the public head and asks the bridge to copy its private
-snapshot in one Memory lock or validated Redis WATCH/EXEC read transaction.
+snapshot in one validated Redis WATCH/EXEC read transaction.
 The concrete chunk interprets the snapshot after that transaction;
 object-store I/O does not hold a metadata transaction open.
 
@@ -299,8 +296,7 @@ detach all authoritative ChunkIndex -> ChunkID mappings
 best-effort cleanup handoff / mechanism cleanup / object deletion
 ```
 
-Memory expresses the non-revivability and detach transition atomically. Redis
-uses the inode key itself as the fence: `Link` and reclaim WATCH the same inode
+Redis uses the inode key itself as the fence: `Link` and reclaim WATCH the same inode
 key. Inside `MULTI/EXEC`, critical destructive commands are queued in
 non-revivability-before-detach order: delete the inode first, then delete its
 mapping state. Auxiliary orphan markers and optional cleanup envelopes are not

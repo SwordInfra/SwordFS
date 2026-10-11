@@ -102,7 +102,7 @@ VFS/FUSE `default_permissions` decides whether the caller may create the entry;
 after that decision, SwordFS persists the Linux create-time ownership side
 effects from the request identity and the authoritative parent inode.
 
-For all inode-creating namespace operations, Memory and Redis use the same
+For all inode-creating namespace operations, Redis enforces the following
 rule:
 
 ```text

@@ -1,8 +1,8 @@
 # Data structures and ownership
 
 SwordFS separates authoritative metadata, immutable object bytes, and
-per-mount runtime state. Redis persists metadata; Memory retains the same
-logical records for the process lifetime, except for saved volume configuration.
+per-mount runtime state. Redis owns authoritative persisted metadata;
+per-mount runtime state remains local to the client.
 
 ## Logical records
 

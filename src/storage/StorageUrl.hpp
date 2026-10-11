@@ -6,7 +6,6 @@
 // Used by --meta and --bucket to express backend type and address
 // in a single parameter, e.g.:
 //
-//   memory://local
 //   redis://127.0.0.1:6379/0
 //   s3://mybucket.s3.amazonaws.com/chunks
 
@@ -18,9 +17,8 @@
 namespace swordfs::utils {
 
 struct StorageUrl {
-  std::string scheme;  // e.g. "memory", "redis", "s3"
-  std::string host;    // e.g. "local", "127.0.0.1:6379",
-                       //       "mybucket.s3.amazonaws.com"
+  std::string scheme;  // e.g. "redis", "s3"
+  std::string host;    // e.g. "127.0.0.1:6379", "mybucket.s3.amazonaws.com"
   std::string path;    // e.g. "/0", "/chunks"
 
   /// Parse a URL of the form scheme://host/path.  Returns true on success.

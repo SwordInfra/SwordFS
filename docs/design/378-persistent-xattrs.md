@@ -6,8 +6,8 @@ record for investigation, TDD evidence, CI, review, and rollout progress.
 
 ## Scope
 
-The first version implements raw `user.*` extended attributes for the Memory
-and Redis metadata engines and exposes them through low-level FUSE
+The metadata implementation supports raw `user.*` extended attributes
+and exposes them through low-level FUSE
 `setxattr(2)`, `getxattr(2)`, `listxattr(2)`, and `removexattr(2)` callbacks.
 
 This layer is deliberately only the raw xattr foundation. POSIX ACL parsing,
@@ -76,8 +76,7 @@ The repository describes only the current format.
 For Redis, xattrs remain part of the existing `inode:<ino>` String. A Redis
 xattr mutation WATCHes and rewrites that inode record through the same
 optimistic transaction machinery used by other inode mutations. There is no
-new Redis Hash or key family. The Memory backend mutates the same logical
-record while holding its transaction mutex.
+new Redis Hash or key family.
 
 ## API boundaries
 
@@ -226,7 +225,7 @@ This is a C++ production feature and follows test-first development.
 Before production implementation, focused tests establish RED for:
 
 1. inode codec round-trip with binary xattr values and deterministic encoding;
-2. Memory and Redis semantic parity for upsert/create-only/replace-only,
+2. Redis semantic correctness for upsert/create-only/replace-only,
    missing inode/attribute results, ordered listing, remove, and `ctime`;
 3. inode-identity lifecycle across hard link, rename, unlink, and reclaim;
 4. VFS flag and namespace translation;

@@ -347,7 +347,7 @@ FIBER_TEST_F(RedisMetaImplTest, VolumeAndBasicLookupOperations) {
   EXPECT_TRUE(impl_->Lookup(file.ino, "child", &found).ToErrno() == ENOTDIR);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, XAttrsMatchMemorySemanticsAndSurviveRemount) {
+FIBER_TEST_F(RedisMetaImplTest, XAttrsPreserveAtomicModesAndSurviveRemount) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "xattrs", 0644, &file).ok());
 
@@ -403,7 +403,7 @@ FIBER_TEST_F(RedisMetaImplTest, XAttrsMatchMemorySemanticsAndSurviveRemount) {
   EXPECT_EQ(impl_->RemoveXAttr(kMissing, "user.key").ToErrno(), ENOENT);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, PosixAclSemanticsMatchMemoryAndPersist) {
+FIBER_TEST_F(RedisMetaImplTest, PosixAclSemanticsAndPersistence) {
   SwordFsInode parent;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "acl-parent", 0777, &parent).ok());
   const std::string default_acl = acl_test::Encode({
@@ -468,6 +468,56 @@ FIBER_TEST_F(RedisMetaImplTest, PosixAclSemanticsMatchMemoryAndPersist) {
   });
   EXPECT_EQ(impl_->SetXAttr(file.ino, "system.posix_acl_access", missing_mask, XAttrSetMode::kUpsert).ToErrno(),
             EINVAL);
+}
+
+// preserve the non-inheritance and mode behavior that is not
+// exercised by the persisted-ACL roundtrip above.
+FIBER_TEST_F(RedisMetaImplTest, PosixDefaultAclDistinguishesFilesDirectoriesAndSymlinks) {
+  auto &context = folly::fibers::local<SwordFsContext>();
+  context.umask = 0027;
+
+  SwordFsInode parent;
+  ASSERT_TRUE(impl_->MkDir(kRootInodeId, "acl-inheritance-parent", 0777, &parent).ok());
+  SwordFsInode plain;
+  ASSERT_TRUE(impl_->Create(parent.ino, "plain", 0666, &plain).ok());
+  EXPECT_EQ(plain.attr.mode & 0777u, 0640u);
+
+  const std::string default_acl = acl_test::Encode({
+      {acl_test::kUserObj, 7},
+      {acl_test::kUser, 6, 1001},
+      {acl_test::kGroupObj, 5},
+      {acl_test::kGroup, 4, 2001},
+      {acl_test::kMask, 7},
+      {acl_test::kOther, 3},
+  });
+  ASSERT_TRUE(impl_->SetXAttr(parent.ino, "system.posix_acl_default", default_acl, XAttrSetMode::kUpsert).ok());
+
+  std::string value;
+  SwordFsInode child_dir;
+  ASSERT_TRUE(impl_->MkDir(parent.ino, "child-dir", 0777, &child_dir).ok());
+  ASSERT_TRUE(impl_->GetXAttr(child_dir.ino, "system.posix_acl_default", &value).ok());
+  EXPECT_EQ(value, default_acl);
+
+  const auto directory_mode = child_dir.attr.mode;
+  ASSERT_TRUE(impl_->RemoveXAttr(child_dir.ino, "system.posix_acl_default").ok());
+  ASSERT_TRUE(impl_->GetInode(child_dir.ino, &child_dir).ok());
+  EXPECT_EQ(child_dir.attr.mode, directory_mode);
+  EXPECT_EQ(impl_->GetXAttr(child_dir.ino, "system.posix_acl_default", &value).ToErrno(), ENODATA);
+
+  SwordFsInode child_file;
+  ASSERT_TRUE(impl_->Create(parent.ino, "child-file", 0660, &child_file).ok());
+  EXPECT_EQ(child_file.attr.mode & 0777u, 0660u);
+  EXPECT_EQ(impl_->GetXAttr(child_file.ino, "system.posix_acl_default", &value).ToErrno(), ENODATA);
+  EXPECT_EQ(impl_->SetXAttr(child_file.ino, "system.posix_acl_default", default_acl, XAttrSetMode::kUpsert).ToErrno(),
+            EACCES);
+
+  SwordFsInode symlink;
+  ASSERT_TRUE(impl_->Symlink(parent.ino, "child-link", "target", &symlink).ok());
+  EXPECT_EQ(symlink.attr.mode & 0777u, 0777u);
+  EXPECT_EQ(impl_->GetXAttr(symlink.ino, "system.posix_acl_access", &value).ToErrno(), ENODATA);
+  EXPECT_EQ(impl_->GetXAttr(symlink.ino, "system.posix_acl_default", &value).ToErrno(), ENODATA);
+  EXPECT_EQ(impl_->SetXAttr(symlink.ino, "system.posix_acl_access", default_acl, XAttrSetMode::kUpsert).ToErrno(),
+            EOPNOTSUPP);
 }
 
 FIBER_TEST_F(RedisMetaImplTest, PosixAclCorruptionRejectsModeSyncAndCreateWithoutPublication) {
@@ -1609,7 +1659,7 @@ FIBER_TEST_F(RedisMetaImplTest, CreatePreservesRequestUidAcrossRedisWorker) {
   EXPECT_EQ(file.attr.uid, 1234U);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, ImmutableAndAppendOnlyPolicyMatchesMemoryBackend) {
+FIBER_TEST_F(RedisMetaImplTest, ImmutableAndAppendOnlyPolicyIsEnforced) {
   SwordFsInode immutable_file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "immutable", 0644, &immutable_file).ok());
   ASSERT_TRUE(impl_->SetXAttr(immutable_file.ino, "user.seed", "value", XAttrSetMode::kUpsert).ok());
@@ -1645,7 +1695,7 @@ FIBER_TEST_F(RedisMetaImplTest, ImmutableAndAppendOnlyPolicyMatchesMemoryBackend
   EXPECT_TRUE(impl_->SetInodeFlags(999999, InodeFlag::kImmutable, nullptr).IsNotFound());
 }
 
-FIBER_TEST_F(RedisMetaImplTest, DirectoryInodePolicyMatchesMemoryBackend) {
+FIBER_TEST_F(RedisMetaImplTest, DirectoryInodePolicyIsEnforced) {
   SwordFsInode immutable_dir;
   ASSERT_TRUE(impl_->MkDir(kRootInodeId, "immutable-dir", 0755, &immutable_dir).ok());
   SwordFsInode visible_child;

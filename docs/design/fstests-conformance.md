@@ -169,8 +169,7 @@ traverse to TEST/SCRATCH. A fail-fast setup check executes `test -x` as
 `fsgqa`; otherwise parent-directory permissions would manufacture `EACCES`
 results before SwordFS authorization semantics are reached.
 
-The authoritative fstests result never uses the in-memory metadata backend.
-The runner starts Redis and MinIO through the same project-owned compose stack
+The authoritative fstests runner starts Redis and MinIO through the same project-owned compose stack
 used by other persistent-backend tests, formats two unique SwordFS volumes,
 and mounts them through the normal SwordFS CLI and low-level FUSE path.
 The artifact records both startup identity and teardown-time backend evidence:

@@ -3,9 +3,8 @@
 
 // SwordFS format subcommand — initialise a new volume.
 //
-// Creates volume metadata (volume.fmt) at the given path when
-// --meta memory://local is used.  For persistent metadata engines
-// (e.g. Redis), volume config is stored in the engine itself.
+// Creates persistent volume metadata through the selected metadata backend.
+// The Redis backend stores volume configuration and the root inode atomically.
 
 #include "cmd/Format.hpp"
 

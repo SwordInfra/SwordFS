@@ -84,8 +84,8 @@ class VolumeImpl {
   Status CreateFrom(const config::ConfigCenter &config);
   Status CreateFrom(const FormatOptions &options);
 
-  /// Load volume configuration from the metadata backend or volume.fmt for
-  /// memory mode, then initialise both engines.
+  /// Load authoritative volume configuration from the metadata backend,
+  /// then initialise both engines.
   Status LoadFrom(const config::ConfigCenter &config);
   Status LoadFrom(const MountOptions &options);
 
