@@ -291,7 +291,7 @@ jobs:
         if: needs.change-scope.outputs.run_full_ci == 'true' && matrix.build_type == 'Debug'
         run: |
           bash scripts/testing/run-e2e.sh \
-            --gtest_filter='S3DataEngineE2ETest.*:CommandCoverageE2ETest.*' \
+            --gtest_filter='S3DataEngineE2ETest.*:CommandCoverageE2ETest.*:OwnerLeaseE2ETest.*' \
             --gtest_color=no
 
       - name: Generate coverage report

@@ -110,6 +110,21 @@ class ConfigCenter {
   bool enable_ioctl() const {
     return enable_ioctl_;
   }
+  bool enable_lock_owner_lease() const {
+    return enable_lock_owner_lease_;
+  }
+  const std::string &lock_lease_ttl() const {
+    return lock_lease_ttl_;
+  }
+  const std::string &lock_lease_renew_interval() const {
+    return lock_lease_renew_interval_;
+  }
+  const std::string &lock_lease_safety_margin() const {
+    return lock_lease_safety_margin_;
+  }
+  const std::string &lock_lease_io_timeout() const {
+    return lock_lease_io_timeout_;
+  }
 
  private:
   ConfigCenter() = default;
@@ -140,9 +155,16 @@ class ConfigCenter {
   std::string storage_region_;  // --storage-region
 
   // Volume configuration (format subcommand)
-  std::string volume_;                       // --volume (required for format)
-  std::string fuse_opts_;                    // -o FUSE mount options (e.g. allow_other,ro)
-  bool enable_ioctl_ = false;                // --enable-ioctl
+  std::string volume_;         // --volume (required for format)
+  std::string fuse_opts_;      // -o FUSE mount options (e.g. allow_other,ro)
+  bool enable_ioctl_ = false;  // --enable-ioctl
+  // Advisory-lock owner identity only; no kernel lock capability is enabled
+  // until the Redis lock authority (#430) is integrated.
+  bool enable_lock_owner_lease_ = false;
+  std::string lock_lease_ttl_ = "60s";
+  std::string lock_lease_renew_interval_ = "10s";
+  std::string lock_lease_safety_margin_ = "15s";
+  std::string lock_lease_io_timeout_ = "5s";
   std::string pidfile_;                      // --pidfile (mount daemon PID file)
   size_t chunk_size_ = 64ULL * 1024 * 1024;  // --chunk-size
   std::string chunk_type_ = "cow";

@@ -189,8 +189,9 @@ lock record = (inode_id, owner, class, mode, byte_range_or_whole_file)
 Every new mount registers a **never-reused** owner incarnation with the shared
 lock authority before any remote lock operation. The first-stage single-primary
 Redis design allocates a monotonically increasing per-volume generation via
-native `INCR`, then creates its own lease via native `SET NX PX`. These are
-**two operations, not an atomic pair**: losing an allocated generation or
+validated `WATCH`/`GET`/`MULTI`/`INCRBY`/`EXEC`, then creates its own lease
+via native `SET NX PX`. These are **two distinct atomic operations, not one
+atomic registration**: losing an allocated generation or
 leaving an unconfirmed, unused lease is safe, because neither may ever issue
 a lock operation. A counter overflow or uncertain authority history fails closed.
 Random client IDs alone are not proof of strict non-reuse: if an expired
@@ -203,10 +204,11 @@ identities. `fh` still validates legitimate inode access.
 
 The lock authority stores:
 
-- One bounded **owner lease record** per mount incarnation: identity, explicit
-  active/revoked status and a deadline decided by authoritative Redis time.
-  An absent, revoked or expired record is **invalid**. Renew never creates a missing lease and cannot
-  change its incarnation. An expired identity cannot re-register.
+- One bounded **owner lease key** per mount incarnation: a nonce and
+  authoritative Redis TTL. No separate active/revoked flag is needed: an
+  absent, expired or explicitly deleted key is **invalid**. Renewal never
+  creates a missing lease and cannot change its incarnation. An expired
+  identity cannot re-register.
 - Per-inode POSIX record locks: canonical owner-keyed, nonoverlapping
   `[start,end]` intervals with read/write mode and optional diagnostic PID.
   End-of-file (`l_len == 0`) has an explicit infinity sentinel; validate
@@ -251,24 +253,33 @@ claim a mount lease provides bounded per-inode/per-process close cleanup.
 automatic failover; exact key namespace is owned by #430):
 
 1. `RegisterOwner` allocates a new per-volume numeric generation using
-   `INCR owner_generation_key` (persistent, never TTL'd; reject non-positive,
-   overflow or invalid state). The existing `RedisMetaClient::Incr()` offers
-   native INCR, but exposes an unsigned result: the caller/adapter **must
-   reject zero or values above `INT64_MAX`**, which can encode a negative
-   Redis counter. Do not use the separate, Lua-backed
-   `IncrNonNegative()` helper merely to avoid a simple post-result safety
-   guard: a corrupt/negative counter is fatal rather than silently repaired.
-   It issues a **single** `SET owner_lease:{generation}
-   <incarnation_nonce> NX PX 60000` for that fresh key. `SET` must return
-   confirmed `OK` before the mount can acquire locks; a collision is an
-   authority integrity failure. Lost `INCR`/`SET` responses cause a **fresh
-   generation allocation**, never another `SET` against the abandoned key;
-   the client must not automatically retry that SET on connection recovery.
+   native `WATCH owner_generation_key`, a validated `GET`, then
+   `MULTI`/`INCRBY 1`/`EXEC`. Parse the **previous** value strictly as a
+   canonical nonnegative integer below `INT64_MAX` before enqueuing the
+   increment; a missing, malformed, negative or exhausted counter fails
+   closed without mutating the authority. WATCH prevents concurrent owner
+   allocation or counter removal from invalidating the validated snapshot.
+   The existing `RedisMetaClient::Transact` and `RedisKvTxn::IncrBy` provide
+   this protocol; the Lua-based `IncrNonNegative()` is not needed.
+   After a confirmed generation increment, issue a **single**
+   `SET owner_lease:{generation} <incarnation_nonce> NX PX <lease_ttl_ms>`.
+   Counter allocation and lease creation are intentionally separate
+   operations: a lost response never authorizes an unconfirmed generation;
+   abandon any unconfirmed owner attempt rather than retrying SET against
+   the same key. A collision is an authority-integrity failure. An instance
+   registers at most once and must not silently adopt another generation.
    No client-supplied `register(old_incarnation)` endpoint exists; abandoned
-   lease keys expire normally. A lost/rolled-back generation counter is
-   outside the supported authority-history model and requires fail-closed.
+   lease keys expire normally. Lost/rolled-back generation history remains
+   unsupported and requires fail-closed.
+
+   **Redis-only beta format invariant:** `RedisMetaOps::FormatVolume` writes
+   the non-expiring `owner_generation=0` in the **same transaction** as the
+   volume `format` key. Registration must not create, repair or migrate a
+   missing or invalid generation counter. A previously formatted volume
+   without this key must be reformatted before enabling shared locks;
+   ordinary non-lock I/O remains independent of lock initialization errors.
 2. `RenewOwner(generation)` uses native `PEXPIRE owner_lease:{generation}
-   60000 XX` (Redis 7.x). `XX` requires an existing TTL and does **not**
+   <lease_ttl_ms> XX` (Redis 7.x). `XX` requires an existing TTL and does **not**
    create a missing lease; expiration or explicit revocation therefore
    cannot be undone by a late renewal. Return `1` confirms extension, `0`
    is terminal loss, and a missing reply is **unknown**, not success. A
@@ -312,14 +323,16 @@ operational review are part of #429 TDD):
 | Owner lease TTL | **60 s** (`PX 60000`) | Bounded orphan validity once the last renewal reaches the server; no lock-by-lock TTL. |
 | Heartbeat period | **10 s** | Dedicated mount-lifetime control worker, independent of application lock traffic; jitter/bounded retry must not postpone local cutoff. |
 | Local safety reserve | **15 s** | Self-stop no later than `CLOCK_BOOTTIME(send) + 45 s` after the **last confirmed** create/renew dispatch. Covers an explicit assumed bound on Redis wall-clock acceleration/step and local clock drift; not arbitrary unbounded clock adjustments. |
-| Redis request timeout | **5 s maximum per lease attempt** | Socket/pool/connect retries must obey the earlier absolute local deadline; never enqueue unbounded renewal work. Existing Redis settings may require a tighter lease-specific total timeout. |
+| Redis I/O budget | **5 s per individual Redis command's I/O phases** | `--lock-lease-io-timeout` caps pool-wait, connect and socket timeouts individually to at most one-third of this budget (and disables internal transaction retries). This is **not** a single end-to-end deadline spanning registration, renewal, or unmount. |
 
 The client samples **Linux `CLOCK_BOOTTIME` at request dispatch**, not at
 response arrival, and after a confirmed registration/renewal sets
 `local_cutoff = send_boottime + 60 s - 15 s`. A delayed success after the
 previous cutoff must **not** rescue a terminal mount; a success observed
 before cutoff may extend confidence only up to its *own dispatch-based*
-cutoff. `CLOCK_BOOTTIME` accounts for suspend, unlike an assumed
+cutoff. Failed, negative or otherwise invalid local clock samples must
+immediately fail the lock-only owner state closed; clock recovery never
+reactivates a terminal generation. `CLOCK_BOOTTIME` accounts for suspend, unlike an assumed
 `std::chrono::steady_clock`. Redis key TTL uses its **own wall clock**;
 the 15-second reserve is a bound **only when Redis clock steps/drift and
 host suspend behavior obey the documented deployment assumptions**. An
@@ -346,16 +359,50 @@ incarnation. Register before advertising FUSE mount readiness **once remote
 lock capabilities are eventually enabled**; do not add Redis work to ordinary
 mounts while those capabilities remain disabled. The blocking/control-thread
 heartbeat uses the existing execution-domain boundaries; publish a terminal
-atomic state visible at **FUSE callback admission** and again **before a
-successful lock-operation reply**. Post-terminal new requests fail with EIO
-or are rejected by disconnect, not falsely acknowledged. Signal
-`fuse_session_exit` to stop the multithreaded loop, allow bounded in-flight
-drain and use existing `FuseSessionGuard` unmount/destroy, runtime-service
-stop and Volume shutdown order. No unbounded drain or invented asynchronous
-cleanup guarantee; already executing filesystem/application I/O cannot be
-retroactively fenced. The shutdown path must not call libfuse reply APIs
-from the lease-heartbeat callback. Existing FUSE `RunFuseInFiber` and mount
-INIT/destroy code require integration tests before readiness is claimed.
+atomic state visible at **FUSE lock callback admission** and again **before a
+successful lock-operation reply**. Post-terminal new lock requests fail with
+EIO, not falsely acknowledged. **A lease-loss event does not call
+`fuse_session_exit` or trigger unmount.** Ordinary FUSE requests and healthy
+metadata/data I/O continue. Only on an explicit user unmount do we stop new
+lock admissions, quiesce lock work, join the renewal worker, and attempt a
+single-attempt `DEL` of the exact owner lease key before ordinary
+`FuseSessionGuard`/Volume teardown. No enumerating per-inode lock records or
+invented asynchronous cleanup guarantee; already executing application I/O
+cannot be retroactively fenced. The heartbeat must never call libfuse reply
+APIs or borrow a destroyed mount/session reference. Existing FUSE
+`RunFuseInFiber` and mount INIT/destroy paths need integration tests before
+readiness is claimed.
+
+**Current Redis-only implementation staging (#429):** The `mount` command
+offers `--enable-lock-owner-lease` (off by default) and four independent
+duration controls: `--lock-lease-ttl` (60s),
+`--lock-lease-renew-interval` (10s), `--lock-lease-safety-margin` (15s) and
+`--lock-lease-io-timeout` (5s). Positive integral `ms`, `s` and `m`
+suffixes are accepted; combinations must leave room for one bounded renewal
+before local cutoff. **I/O timeout semantics:** registration performs several
+sequential Redis protocol steps (WATCH, GET, EXEC and a separate SET), so a
+5-second per-command I/O budget does **not** mean registration completes
+within 5 seconds. We conservatively split each command's allowance over
+pool wait, connect and socket response; the Redis client has a single-slot
+pool and one transaction attempt. A normal shutdown can wait for at most
+one in-flight heartbeat PEXPIRE, then issue one native DEL with no retry.
+Under operating-system/redis++ timeout behavior, each of those individual
+commands is transport-bounded; the sequential total may exceed the
+configured I/O budget. No hard wall-clock deadline or arbitrary kernel
+stall bound is promised. The local grant cutoff is independently checked
+and never extended by an unconfirmed or late Redis response.
+
+The opt-in path registers a Redis generation **after
+volume initialization and before FUSE mount**, with the owner heartbeat
+independent from ordinary I/O. A failed lease registration is terminal for
+that mount's *lock authority*, not its ordinary FUSE service. The normal
+FUSE loop exit joins the heartbeat and revokes only its own generation
+before session destruction; a Redis failure during this bounded cleanup
+falls back to expiry. Until #430 supplies server-authoritative grant checks,
+this opt-in option is for lifecycle verification only, and it does **not**
+enable POSIX or flock FUSE capabilities. The native Redis generation counter
+is required for lock use on beta volumes; no compatibility migration is
+attempted.
 
 **Crash/partition/safety boundary:** if the process is paused indefinitely
 or the OS permits applications to modify other resources after their advisory
@@ -371,8 +418,8 @@ acknowledged lease/lock history is also outside a lone Redis authority's
 guarantee: prohibit grant continuation when authority lineage is uncertain.
 
 **Native Redis decision and #430 handoff:** do **not** add Lua to #429.
-Native `INCR`, `SET NX PX`, `PEXPIRE XX`, `DEL` have the required server-side
-atomic conditions individually; two-phase registration is safe under the
+Native `WATCH`/`MULTI`/`INCRBY`/`EXEC`, `SET NX PX`, `PEXPIRE XX`, and `DEL`
+provide the required atomic checks; two-phase registration is safe under the
 specified "unconfirmed generation cannot hold locks" rule. Existing
 `RedisMetaClient` must gain a **narrow lock-owner-lease adapter** for these
 commands; do not put a generic Redis Session service in `IMetaEngine`.
@@ -398,7 +445,7 @@ and [expiry-versus-WATCH](https://redis.io/faq/doc/11ed4zroc6/can-a-key-expire-w
 **Integration and replay details:** per-mount generation allocation and
 confirmed registration must be completed once for the owner-enabled FUSE
 mount startup path; while #429/#430/#431/#432/#433 are unfinished, keep
-`FUSE_CAP_POSIX_LOCKS` and `FUSE_CAP_FLOCK_LOCKS` disabled. The `INCR` counter
+`FUSE_CAP_POSIX_LOCKS` and `FUSE_CAP_FLOCK_LOCKS` disabled. The generation counter
 is a durability-critical value, so `FLUSHDB`, failed restoration of that
 counter, or Redis failover to stale history invalidates the single-authority
 assumption. A routine reconnect to the *same trusted primary* may reissue
@@ -409,17 +456,18 @@ multi-primary failover or Redis Cluster guarantee is advertised. Remote
 lock initialization must not add a heartbeat to mounts on which remote
 locking is intentionally disabled.
 
-**#429 TDD entry contract (designed, not yet verified):** deterministic
-Redis tests for `INCR` allocation gaps, unconfirmed registration,
-single-use `SET NX PX`, on-time/late `PEXPIRE XX`, expiry without sweeper,
-revoke-vs-renew, delayed/unknown results, old/new generation isolation,
-Redis outage longer than 45 seconds, FUSE admission/reply cutoff and
-simulated clock drift/suspend. Test the 10/60/15-second defaults with an
-injected clock rather than magic sleeps. Verify `CLOCK_BOOTTIME` and bounded
-shutdown under the real Linux FUSE runner. #430 must separately prove
-watched-key TTL expiry aborts stale grants, expired-holder filtering is
-atomic with grant and cleanup cannot erase newer records. No FUSE remote-lock
-capability is enabled by #429.
+**#429 verification boundary:** Redis-backed tests exercise format-time
+counter initialization, strict counter rejection, non-reused generations,
+single-use `SET NX PX`, renewal and expiry, exact-generation revoke,
+known vs unknown Redis replies, injected-clock deadline boundaries, and
+terminal old/new epoch isolation. Linux FUSE E2E covers owner revocation
+without ordinary mount loss, normal unmount cleanup, invalid timing, and
+fresh generation on remount. The opt-in lifecycle does **not** yet send
+remote POSIX/flock grants, so no claim is made about FUSE lock-reply cutoff,
+blocking waiters, or G2/G4 enforcement by #429 alone. #430 must prove
+watch-all-relevant-key TTL expiry at EXEC, old-owner grant rejection,
+expired-holder filtering, and safe cleanup of prior generations. No FUSE
+remote-lock capability is enabled by #429.
 
 **Peer source review:** JuiceFS `pkg/meta/base.go::{NewSession,refresh}` and
 `pkg/meta/redis.go::{doRefreshSession,doCleanStaleSession}` use metadata
@@ -669,12 +717,12 @@ race. Revalidate on materially different target kernel/libfuse versions
 before claiming the same transport contract. The probe did **not** enable
 unsupported lock classes in SwordFS.
 
-For #429 the first-stage *design* fixes native Redis 7.x `INCR`/`SET NX PX`/
-`PEXPIRE XX`/`DEL`, a 60-second owner TTL, 10-second renew cadence and a
-15-second conservative self-stop reserve; the terminal FUSE handoff and
-unknown-outcome/restart policy are specified above. Validate these against
-Redis 7.x and actual FUSE shutdown through TDD before treating the protocol
-as implemented. For #430, prove `WATCH` expiry-at-`EXEC` plus full watched
+For #429 the implemented Redis 7.x owner-lifecycle design uses validated
+`WATCH`/`GET`/`MULTI`/`INCRBY`/`EXEC`, `SET NX PX`, `PEXPIRE XX`, and `DEL`,
+with default 60-second owner TTL, 10-second renew cadence, and 15-second
+conservative self-stop reserve. Native Redis and FUSE-lifecycle tests verify
+these owner operations; the separate #430 lock-grant protocol and its FUSE
+integration remain future work. For #430, prove `WATCH` expiry-at-`EXEC` plus full watched
 lease set under load, then finalize operation-ID retention, lazy-expired-lock
 filtering and bounded physical GC (or justify narrowly scoped Lua if native
 optimistic transactions fail their proof). Document the bounded

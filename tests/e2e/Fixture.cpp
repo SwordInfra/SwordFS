@@ -199,7 +199,7 @@ bool Fixture::StartMount() {
   std::ostringstream cmd;
   cmd << FindSwordfsBin() << " --log-file " << log_path << " mount " << " --volume " << volume_name_ << " --meta "
       << metadata_url << " --fuse-threads 2" << " --storage-thread-count 2" << " --pidfile " << work_dir_
-      << "/swordfs.pid" << " " << mountpoint_ << " 2>&1";
+      << "/swordfs.pid" << " " << extra_mount_options_ << " " << mountpoint_ << " 2>&1";
 
   int ret = std::system(cmd.str().c_str());
   if (ret != 0) {

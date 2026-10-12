@@ -20,6 +20,10 @@ class RedisKey {
   RedisKey(int db, std::string_view volume_name);
 
   std::string Format() const;
+  // Non-expiring per-volume lock-owner incarnation counter.
+  std::string OwnerGeneration() const;
+  // Exact generation identity; never reuse or rename a previously issued key.
+  std::string OwnerLease(uint64_t generation) const;
   std::string NextIno() const;
   std::string NextChunkRevision() const;
   std::string NextChunkID() const;

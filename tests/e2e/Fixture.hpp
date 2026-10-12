@@ -18,6 +18,7 @@
 #include <sys/statvfs.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "metadata/IMetaEngine.hpp"
@@ -53,6 +54,15 @@ class Fixture {
   /// Kill the SwordFS daemon without a clean unmount, recover the stale FUSE
   /// mount, then start a fresh daemon against the same persistent backends.
   bool CrashAndRemount();
+
+  // Opt-in mount options for lifecycle tests; ordinary E2E mounts are unchanged.
+  void SetExtraMountOptions(std::string options) {
+    extra_mount_options_ = std::move(options);
+  }
+
+  const std::string &VolumeName() const {
+    return volume_name_;
+  }
 
   // ── POSIX wrappers ───────────────────────────────────────────
 
@@ -166,6 +176,7 @@ class Fixture {
  private:
   std::string work_dir_;
   std::string mountpoint_;
+  std::string extra_mount_options_;
   std::string diagnostics_dir_;
   std::string volume_name_;
   // Keep the formatted Redis volume across unmount/remount cycles within a test.

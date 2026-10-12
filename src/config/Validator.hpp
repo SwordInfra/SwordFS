@@ -7,6 +7,9 @@
 #pragma once
 
 #include <CLI/CLI.hpp>
+#include <chrono>
+#include <optional>
+#include <string_view>
 
 namespace swordfs::config {
 
@@ -18,5 +21,9 @@ extern const CLI::Validator ValidateMetaUrl;
 
 /// Validates --bucket URL has a recognised storage scheme (e.g. s3://).
 extern const CLI::Validator ValidateBucketUrl;
+
+/// Positive, non-overflowing integer durations in ms, s or m.
+std::optional<std::chrono::milliseconds> ParseLockLeaseDuration(std::string_view value);
+extern const CLI::Validator ValidateLockLeaseDuration;
 
 }  // namespace swordfs::config

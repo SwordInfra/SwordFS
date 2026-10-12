@@ -3,7 +3,11 @@
 
 #include "config/Validator.hpp"
 
+#include <charconv>
+#include <cstdint>
+#include <limits>
 #include <string>
+#include <system_error>
 
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
@@ -13,6 +17,36 @@
 #include "storage/StorageUrl.hpp"
 
 namespace swordfs::config {
+
+std::optional<std::chrono::milliseconds> ParseLockLeaseDuration(std::string_view value) {
+  uint64_t scale = 0;
+  if (value.ends_with("ms")) {
+    scale = 1;
+    value.remove_suffix(2);
+  } else if (value.ends_with('s')) {
+    scale = 1000;
+    value.remove_suffix(1);
+  } else if (value.ends_with('m')) {
+    scale = 60000;
+    value.remove_suffix(1);
+  } else {
+    return std::nullopt;
+  }
+  uint64_t number = 0;
+  const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), number);
+  if (value.empty() || error != std::errc{} || end != value.data() + value.size() || number == 0 ||
+      number > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / scale) {
+    return std::nullopt;
+  }
+  return std::chrono::milliseconds(number * scale);
+}
+
+const CLI::Validator ValidateLockLeaseDuration = CLI::Validator(
+    [](const std::string &value) -> std::string {
+      return ParseLockLeaseDuration(value).has_value() ? ""
+                                                       : "Expected a positive integer duration with ms, s or m suffix";
+    },
+    "LEASE_DURATION");
 
 const CLI::Validator ValidateVolumeName = CLI::Validator(
     [](const std::string &input) -> std::string {
