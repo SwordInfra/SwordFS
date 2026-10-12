@@ -62,7 +62,9 @@ jobs:
           key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
 
       - name: Install dependencies
-        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
+        # Keep the same bounded APT behavior as required CI. A cold runner
+        # previously stalled for >32 minutes in apt-get update.
+        run: sudo SWORDFS_CI_APT_TIMEOUT_SECONDS=180 DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
 
 
       - name: Configure

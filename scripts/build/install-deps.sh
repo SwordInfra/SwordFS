@@ -21,6 +21,32 @@
 
 set -e
 
+# Phase boundaries make slow APT mirrors distinguishable from a native cache
+# miss, even when the GitHub Actions step itself appears as one long install.
+DEPS_PHASE=initialization
+DEPS_PHASE_STARTED=$(date +%s)
+deps_phase() {
+  now=$(date +%s)
+  echo "ci-deps phase=${DEPS_PHASE} seconds=$((now - DEPS_PHASE_STARTED))"
+  DEPS_PHASE=$1
+  DEPS_PHASE_STARTED=$now
+  echo "ci-deps begin=${DEPS_PHASE}"
+}
+trap 'status=$?; now=$(date +%s); echo "ci-deps phase=${DEPS_PHASE} seconds=$((now - DEPS_PHASE_STARTED)) exit_status=${status}"' 0
+
+# A cold runner once spent >17 minutes between the system-package cache miss
+# and the first APT package output (run 38227069396). Bound that opaque
+# network/provisioning tail in CI; a timeout fails visibly, never retries or
+# silently uses an incomplete dependency set.
+deps_apt() {
+  if [ -n "${SWORDFS_CI_APT_TIMEOUT_SECONDS:-}" ]; then
+    timeout --signal=TERM --kill-after=10s "${SWORDFS_CI_APT_TIMEOUT_SECONDS}" \
+      apt-get -o Acquire::http::Timeout=45 -o Acquire::https::Timeout=45 "$@"
+  else
+    apt-get "$@"
+  fi
+}
+
 FORCE=false
 SKIP_HEAVY=false
 ONLY_HEAVY=false
@@ -39,13 +65,18 @@ DEPS_PREFIX="${DEPS_PREFIX:-/usr/local}"
 . "$SCRIPT_DIR/native-deps-cache.env"
 FOLLY_SRC="$PROJECT_DIR/build/folly-src"
 
+deps_phase system-package-inventory
 echo "==> Checking system packages..."
 
 if [ "$ONLY_HEAVY" = true ]; then
   echo "==> --only-heavy: skipping system packages."
 else
 
-SYSTEM_PKGS="libfuse3-dev fuse3 libfmt-dev libboost-all-dev libssl-dev libevent-dev libdouble-conversion-dev libgoogle-glog-dev libgtest-dev libcli11-dev libcurl4-openssl-dev zlib1g-dev curl g++ cmake ninja-build git"
+# Pinned Folly exports exactly context/filesystem/program_options/regex/thread
+# in folly-config.cmake.  Installing libboost-all-dev also pulls unrelated
+# MPI, Python, graph and RDMA development packages onto every clean CI runner.
+# Keep the required Folly components (and their transitive Boost headers).
+SYSTEM_PKGS="libfuse3-dev fuse3 libfmt-dev libboost-context-dev libboost-filesystem-dev libboost-program-options-dev libboost-regex-dev libboost-thread-dev libssl-dev libevent-dev libdouble-conversion-dev libgoogle-glog-dev libgtest-dev libcli11-dev libcurl4-openssl-dev zlib1g-dev curl g++ cmake ninja-build git"
 
 TO_INSTALL=""
 for pkg in $SYSTEM_PKGS; do
@@ -59,9 +90,11 @@ done
 
 if [ -n "$TO_INSTALL" ]; then
   echo "==> Installing missing system packages:$TO_INSTALL"
-  apt-get update -qq
+  deps_phase system-apt-index
+  deps_apt update -qq
+  deps_phase system-apt-install
   # shellcheck disable=SC2086
-  apt-get install -y -qq $TO_INSTALL
+  deps_apt install -y -qq $TO_INSTALL
 else
   echo "==> All system packages already installed."
 fi
@@ -70,31 +103,34 @@ fi
 # Add ubuntu resolute (25.04) via a dedicated .list file so we can
 # pin specific packages with -t resolute.  Using a new file avoids
 # mutating the system's existing sources.list.
+deps_phase resolute-source-and-index
 echo "==> Adding resolute source for newer packages..."
 if [ -f /etc/apt/sources.list.d/resolute.list ]; then
   echo "  [ok] resolute source already configured"
 else
   echo "deb http://archive.ubuntu.com/ubuntu resolute main universe" \
     > /etc/apt/sources.list.d/resolute.list
-  apt-get update -qq
+  deps_apt update -qq
 fi
 
 # fast_float: folly v2026.07.20.00 requires fast_float >= 7.0.0
 # (needs chars_format::allow_leading_plus). Ubuntu 24.04 ships 6.1.0.
+deps_phase resolute-fast-float
 echo "==> Checking fast_float version..."
 if ! dpkg-query -W -f='${Version}' libfast-float-dev 2>/dev/null | grep -qE '^([89]|[1-9][0-9])\.'; then
   echo "  ==> Installing libfast-float-dev from resolute..."
-  apt-get install -y -qq -t resolute libfast-float-dev
+  deps_apt install -y -qq -t resolute libfast-float-dev
 else
   echo "  [ok] libfast-float-dev >= 8.0.0"
 fi
 
 # libfuse3-dev: SwordFS README requires >= 3.18 (for no_interrupt, tmpfile).
 # Ubuntu 24.04 ships 3.14.1 which is too old.
+deps_phase resolute-fuse
 echo "==> Checking libfuse3-dev version..."
 if ! dpkg-query -W -f='${Version}' libfuse3-dev 2>/dev/null | grep -qE '^3\.(1[89]|[2-9])'; then
   echo "  ==> Installing libfuse3-dev from resolute..."
-  apt-get install -y -qq -t resolute libfuse3-dev
+  deps_apt install -y -qq -t resolute libfuse3-dev
 else
   echo "  [ok] libfuse3-dev >= 3.18"
 fi
@@ -102,10 +138,11 @@ fi
 # binutils: GCC >= 15 emits .base64 string encoding which requires
 # binutils >= 2.43.  Ubuntu 24.04 ships binutils 2.42 which is too old.
 # Upgrading from resolute (25.04) ensures ABI compatibility with GCC 15.
+deps_phase resolute-binutils
 echo "==> Checking binutils version..."
 if ! as --version 2>/dev/null | grep -qE '2\.(4[3-9]|[5-9][0-9])'; then
   echo "  ==> Installing binutils from resolute..."
-  apt-get install -y -qq -t resolute binutils
+  deps_apt install -y -qq -t resolute binutils
 else
   echo "  [ok] binutils >= 2.43"
 fi
@@ -175,6 +212,7 @@ CMEOF
 # folly
 # ────────────────────────────────────────────────────────────────
 
+deps_phase folly-cache-verification
 echo "==> Checking folly..."
 
 if [ "$SKIP_HEAVY" = true ]; then
@@ -200,6 +238,7 @@ if [ "$FORCE" = false ]; then
 fi
 
 if [ "$FOLLY_INSTALLED" = false ]; then
+  deps_phase folly-download-build-install
   # ── Step 1: Download ─────────────────────────────────────────
 
   FOLLY_TARBALL="$PROJECT_DIR/build/folly-${FOLLY_VER}.tar.gz"
@@ -247,12 +286,15 @@ if [ "$FOLLY_INSTALLED" = false ]; then
   cmake --install .
 fi
 
+echo "ci-deps cache=folly hit=${FOLLY_INSTALLED}"
+
 fi  # --skip-heavy
 
 # ────────────────────────────────────────────────────────────────
 # AWS SDK for C++
 # ────────────────────────────────────────────────────────────────
 
+deps_phase aws-sdk-cache-verification
 echo "==> Checking AWS SDK for C++..."
 
 AWS_SDK_SRC="$PROJECT_DIR/build/aws-sdk-src"
@@ -281,6 +323,7 @@ if [ "$FORCE" = false ]; then
 fi
 
 if [ "$AWS_SDK_INSTALLED" = false ]; then
+  deps_phase aws-sdk-download-build-install
   # ── Step 1: Clone with submodules ──────────────────────────
 
   if [ -f "$AWS_SDK_SRC/CMakeLists.txt" ]; then
@@ -321,12 +364,15 @@ if [ "$AWS_SDK_INSTALLED" = false ]; then
   cmake --install .
 fi
 
+echo "ci-deps cache=aws-sdk hit=${AWS_SDK_INSTALLED}"
+
 fi  # --skip-heavy
 
 # ────────────────────────────────────────────────────────────────
 # hiredis + redis-plus-plus
 # ────────────────────────────────────────────────────────────────
 
+deps_phase redis-plus-plus-cache-verification
 echo "==> Checking redis-plus-plus..."
 
 REDIS_PLUS_PLUS_INSTALLED=false
@@ -344,6 +390,7 @@ if [ "$FORCE" = false ]; then
 fi
 
 if [ "$REDIS_PLUS_PLUS_INSTALLED" = false ]; then
+  deps_phase redis-plus-plus-download-build-install
   HIREDIS_SRC="$PROJECT_DIR/build/hiredis-src"
   REDIS_PLUS_PLUS_SRC="$PROJECT_DIR/build/redis-plus-plus-src"
 
@@ -402,5 +449,8 @@ if [ "$REDIS_PLUS_PLUS_INSTALLED" = false ]; then
   cmake --install .
 fi
 
+echo "ci-deps cache=redis-plus-plus hit=${REDIS_PLUS_PLUS_INSTALLED}"
+
+deps_phase complete
 echo "==> Done. Dependencies installed under: $DEPS_PREFIX"
 echo "==> You can now build SwordFS with: cmake --preset default"

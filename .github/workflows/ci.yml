@@ -144,7 +144,7 @@ jobs:
           key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
 
       - name: Install dependencies
-        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
+        run: sudo SWORDFS_CI_APT_TIMEOUT_SECONDS=240 DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
 
       - name: Install dead-code audit tools
         run: |
@@ -184,6 +184,60 @@ jobs:
           name: static-audit-report
           path: build/static-audit.json
           if-no-files-found: warn
+
+  build-release-core:
+    name: build-release-core
+    # The documentation-only path must not start an unnecessary native build.
+    # This producer deliberately does not wait for clang-format or MinIO tools.
+    needs: change-scope
+    if: needs.change-scope.outputs.run_full_ci == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      archive_sha: ${{ steps.package.outputs.archive_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Restore native dependency cache
+        uses: actions/cache@v4
+        with:
+          path: .deps/install
+          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
+
+      - name: Install build dependencies and ELF packaging tool
+        run: |
+          sudo SWORDFS_CI_APT_TIMEOUT_SECONDS=240 DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
+          sudo apt-get install -y -qq patchelf
+
+      - name: Configure non-instrumented Release
+        run: cmake --preset release -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install"
+
+      - name: Build swordfs only
+        run: cmake --build build --target swordfs
+
+      - name: Package verified runtime closure
+        id: package
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 scripts/ci/release_artifact.py pack \
+            --binary build/swordfs --output "${RUNNER_TEMP}/swordfs-release.tar.gz" \
+            --sha "${SOURCE_SHA}" --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" --runner-image ubuntu-24.04
+          echo "archive_sha=$(sha256sum "${RUNNER_TEMP}/swordfs-release.tar.gz" | cut -d ' ' -f1)" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish immutable same-run Release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: swordfs-release-core
+          path: ${{ runner.temp }}/swordfs-release.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
   build-and-test:
     name: build-and-test (${{ matrix.build_type }})
@@ -229,7 +283,7 @@ jobs:
 
       - name: Install dependencies
         if: needs.change-scope.outputs.run_full_ci == 'true'
-        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
+        run: sudo SWORDFS_CI_APT_TIMEOUT_SECONDS=240 DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
 
 
       - name: Install Debug CI tools
@@ -377,7 +431,7 @@ jobs:
           key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
 
       - name: Install dependencies
-        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
+        run: sudo SWORDFS_CI_APT_TIMEOUT_SECONDS=240 DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
 
       - name: E2E test setup
         run: |
@@ -466,12 +520,24 @@ jobs:
 
   pjdfstest-conformance:
     name: pjdfstest-conformance (Release)
-    needs: [clang-format, minio-test-tools, change-scope]
-    if: needs.change-scope.outputs.run_full_ci == 'true'
-    runs-on: ubuntu-latest
+    needs: [clang-format, minio-test-tools, change-scope, build-release-core]
+    if: always() && needs.change-scope.result == 'success' && needs.change-scope.outputs.run_full_ci == 'true'
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
+      - name: Fail closed when a prerequisite is missing
+        env:
+          FORMAT_RESULT: ${{ needs.clang-format.result }}
+          TOOLS_RESULT: ${{ needs.minio-test-tools.result }}
+          RELEASE_RESULT: ${{ needs.build-release-core.result }}
+          RELEASE_SHA: ${{ needs.build-release-core.outputs.archive_sha }}
+        run: |
+          test "${FORMAT_RESULT}" = success
+          test "${TOOLS_RESULT}" = success
+          test "${RELEASE_RESULT}" = success
+          test -n "${RELEASE_SHA}"
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
@@ -484,17 +550,25 @@ jobs:
           name: minio-test-tools
           path: .deps/minio
 
-      - name: Restore native dependency cache
-        uses: actions/cache@v4
+      - name: Download shared Release binary
+        uses: actions/download-artifact@v4
         with:
-          path: .deps/install
-          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
+          name: swordfs-release-core
+          path: ${{ runner.temp }}/release-core
 
-      - name: Install dependencies
-        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
+      - name: Verify and smoke-test Release runtime
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          ARCHIVE_SHA: ${{ needs.build-release-core.outputs.archive_sha }}
+        run: |
+          python3 scripts/ci/release_artifact.py verify \
+            --archive "${RUNNER_TEMP}/release-core/swordfs-release.tar.gz" \
+            --artifact-sha "${ARCHIVE_SHA}" --destination "${GITHUB_WORKSPACE}" \
+            --sha "${SOURCE_SHA}" --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" --runner-image ubuntu-24.04
 
-      - name: Install pjdfstest tools
-        run: sudo apt-get install -y -qq autoconf automake perl
+      - name: Restore pinned conformance runtime
+        run: sudo bash scripts/ci/install-conformance-runtime.sh pjdfstest
 
       - name: Conformance test setup
         run: |
@@ -503,14 +577,6 @@ jobs:
           if ! grep -Eq '^[[:space:]]*user_allow_other([[:space:]]|$)' /etc/fuse.conf 2>/dev/null; then
             echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
           fi
-
-      - name: Configure Release
-        run: |
-          cmake --preset release \
-            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install"
-
-      - name: Build SwordFS
-        run: cmake --build build --target swordfs
 
       - name: Run pinned pjdfstest suite
         id: pjdfstest-harness
@@ -573,11 +639,69 @@ jobs:
           path: build/pjdfstest-conformance
           if-no-files-found: warn
 
+  build-fstests-tools:
+    name: build-fstests-tools
+    # Run alongside the Release producer. The eleven shard consumers must not
+    # each fetch/build liburing and xfstests against independent runners.
+    needs: change-scope
+    if: needs.change-scope.outputs.run_full_ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      archive_sha: ${{ steps.package.outputs.archive_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Install pinned upstream runtime and build tools
+        run: sudo bash scripts/ci/install-conformance-runtime.sh fstests-build
+
+      - name: Build once at fixed RPATH prefix
+        run: |
+          sudo bash scripts/conformance/fstests/build-tools.sh \
+            /opt/swordfs-fstests-tools "${RUNNER_TEMP}/fstests-tool-build"
+
+      - name: Package same-run pinned toolchain
+        id: package
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          source conformance/fstests/version.env
+          patch_sha="$(sha256sum conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch | cut -d ' ' -f1)"
+          sudo python3 scripts/ci/fstests_tools_artifact.py pack \
+            --archive "${RUNNER_TEMP}/fstests-tools.tar.gz" \
+            --sha "${SOURCE_SHA}" --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --fstests-commit "${FSTESTS_COMMIT}" --liburing-commit "${LIBURING_COMMIT}" \
+            --patch-sha "${patch_sha}"
+          echo "archive_sha=$(sha256sum "${RUNNER_TEMP}/fstests-tools.tar.gz" | cut -d ' ' -f1)" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish same-run fstests toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: fstests-tools
+          path: ${{ runner.temp }}/fstests-tools.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload tool build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fstests-tools-build-logs
+          path: ${{ runner.temp }}/fstests-tool-build
+          if-no-files-found: ignore
+
   fstests-conformance-shard:
     name: fstests-shard (${{ matrix.shard }})
-    needs: [clang-format, minio-test-tools, change-scope]
-    if: needs.change-scope.outputs.run_full_ci == 'true'
-    runs-on: ubuntu-latest
+    needs: [clang-format, minio-test-tools, change-scope, build-release-core, build-fstests-tools]
+    if: always() && needs.change-scope.result == 'success' && needs.change-scope.outputs.run_full_ci == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.job_timeout }}
     permissions:
       contents: read
@@ -598,6 +722,14 @@ jobs:
             suite_timeout: 75m
             test_timeout: 10m
           - shard: supported-3
+            job_timeout: 90
+            suite_timeout: 75m
+            test_timeout: 10m
+          - shard: supported-4
+            job_timeout: 90
+            suite_timeout: 75m
+            test_timeout: 10m
+          - shard: supported-5
             job_timeout: 90
             suite_timeout: 75m
             test_timeout: 10m
@@ -622,6 +754,22 @@ jobs:
             suite_timeout: 15m
             test_timeout: 15m
     steps:
+      - name: Fail closed when a prerequisite is missing
+        env:
+          FORMAT_RESULT: ${{ needs.clang-format.result }}
+          TOOLS_RESULT: ${{ needs.minio-test-tools.result }}
+          RELEASE_RESULT: ${{ needs.build-release-core.result }}
+          RELEASE_SHA: ${{ needs.build-release-core.outputs.archive_sha }}
+          FSTESTS_TOOLS_RESULT: ${{ needs.build-fstests-tools.result }}
+          FSTESTS_TOOLS_SHA: ${{ needs.build-fstests-tools.outputs.archive_sha }}
+        run: |
+          test "${FORMAT_RESULT}" = success
+          test "${TOOLS_RESULT}" = success
+          test "${RELEASE_RESULT}" = success
+          test -n "${RELEASE_SHA}"
+          test "${FSTESTS_TOOLS_RESULT}" = success
+          test -n "${FSTESTS_TOOLS_SHA}"
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
@@ -634,21 +782,46 @@ jobs:
           name: minio-test-tools
           path: .deps/minio
 
-      - name: Restore native dependency cache
-        uses: actions/cache@v4
+      - name: Download shared Release binary
+        uses: actions/download-artifact@v4
         with:
-          path: .deps/install
-          key: swordfs-native-deps-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build/native-deps-cache.env') }}
+          name: swordfs-release-core
+          path: ${{ runner.temp }}/release-core
 
-      - name: Install dependencies
-        run: sudo DEPS_PREFIX="${{ github.workspace }}/.deps/install" bash scripts/build/install-deps.sh
-
-      - name: Install fstests tools
+      - name: Verify and smoke-test Release runtime
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          ARCHIVE_SHA: ${{ needs.build-release-core.outputs.archive_sha }}
         run: |
-          sudo apt-get install -y -qq \
-            acct acl attr autoconf automake bc e2fsprogs fio fsverity gawk \
-            libacl1-dev libaio-dev libcap-dev libtool libtool-bin \
-            lvm2 psmisc quota sqlite3 uuid-dev uuid-runtime xfslibs-dev xfsprogs
+          python3 scripts/ci/release_artifact.py verify \
+            --archive "${RUNNER_TEMP}/release-core/swordfs-release.tar.gz" \
+            --artifact-sha "${ARCHIVE_SHA}" --destination "${GITHUB_WORKSPACE}" \
+            --sha "${SOURCE_SHA}" --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" --runner-image ubuntu-24.04
+
+      - name: Restore pinned conformance runtime
+        run: sudo bash scripts/ci/install-conformance-runtime.sh fstests
+
+      - name: Download pinned fstests toolchain
+        uses: actions/download-artifact@v4
+        with:
+          name: fstests-tools
+          path: ${{ runner.temp }}/fstests-tools
+
+      - name: Verify and install same-run fstests toolchain
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          TOOLS_SHA: ${{ needs.build-fstests-tools.outputs.archive_sha }}
+        run: |
+          source conformance/fstests/version.env
+          patch_sha="$(sha256sum conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch | cut -d ' ' -f1)"
+          sudo python3 scripts/ci/fstests_tools_artifact.py verify \
+            --archive "${RUNNER_TEMP}/fstests-tools/fstests-tools.tar.gz" \
+            --artifact-sha "${TOOLS_SHA}" \
+            --sha "${SOURCE_SHA}" --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --fstests-commit "${FSTESTS_COMMIT}" --liburing-commit "${LIBURING_COMMIT}" \
+            --patch-sha "${patch_sha}"
 
       - name: Conformance test setup
         run: |
@@ -657,17 +830,6 @@ jobs:
           if ! grep -Eq '^[[:space:]]*user_allow_other([[:space:]]|$)' /etc/fuse.conf 2>/dev/null; then
             echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
           fi
-
-      - name: Configure Release
-        run: |
-          cmake --preset release \
-            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/.deps/install"
-
-      - name: Build SwordFS
-        run: cmake --build build --target swordfs
-
-      - name: Install fstests timeout diagnostics
-        run: sudo apt-get install -y -qq gdb strace
 
       - name: Build deterministic fstests shard
         run: |
@@ -694,6 +856,7 @@ jobs:
           set +e
           sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
             SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
+            FSTESTS_PREBUILT_TOOLS=1 FSTESTS_TOOL_ROOT=/opt/swordfs-fstests-tools \
             bash scripts/conformance/fstests/run.sh \
               --tests-file "${RUNNER_TEMP}/fstests-tests.txt" \
               --shard-name "${FSTESTS_SHARD}" \
@@ -809,6 +972,39 @@ jobs:
           name: fstests-conformance
           path: build/fstests-conformance
           if-no-files-found: warn
+
+  ci-duration-report:
+    name: ci-duration-report
+    needs:
+      - change-scope
+      - build-release-core
+      - build-and-test
+      - dead-code-audit
+      - e2e-test
+      - pjdfstest-conformance
+      - fstests-conformance
+    if: always() && needs.change-scope.outputs.run_full_ci == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Download all fstests XUnit reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fstests-conformance-*
+          path: build/fstests-timing
+
+      - name: Report job, step, queue, artifact and testcase durations
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/report_ci_timing.py build/fstests-timing
 
   publish-pjdfstest-status:
     name: publish-pjdfstest-status

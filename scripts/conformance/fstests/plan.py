@@ -13,7 +13,10 @@ import sys
 import xml.etree.ElementTree as ET
 
 TEST_RE = re.compile(r"^[a-z0-9_-]+/[0-9]+$")
-SUPPORTED_SHARD_COUNT = 4
+# Six shards reduce the non-tail supported workload from about 510s to 306s
+# per shard. Further shards cannot shorten the isolated generic/531 (~526s)
+# critical path and would add runner setup/queue cost.
+SUPPORTED_SHARD_COUNT = 6
 SUPPORTED_SHARDS = tuple(f"supported-{index}" for index in range(SUPPORTED_SHARD_COUNT))
 REST_SHARD_COUNT = 2
 REST_SHARDS = tuple(f"baseline-rest-{index}" for index in range(REST_SHARD_COUNT))
