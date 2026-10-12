@@ -124,8 +124,10 @@ The actual changes may be reviewed separately as each child reaches its own
 design-readiness checkpoint. The parent remains open until Redis integration, relevant fstests
 classification, post-merge main CI and review are reconciled. #429 establishes **owner lease validity**, not a general
 Redis metadata session or a lock cleanup service. #430 owns actual lock
-records, atomic owner-validity checks and optional lazy reclamation. No
-intermediate child permits enabling incomplete remote-lock support or
+records, atomic owner-validity checks and optional lazy reclamation. The
+#430-specific design review, candidate Redis schema and unresolved gates are
+tracked in [`430-redis-lock-authority.md`](430-redis-lock-authority.md).
+No intermediate child permits enabling incomplete remote-lock support or
 claiming OFD/delegation compatibility. The known
 conversion/reply-delivery ambiguity is a mandatory #430 authority decision,
 then an integration regression case in #433; do not leave it as an orphan

@@ -451,8 +451,13 @@ TEST(RedisMetaClientTest, KvTransactionValidatesOutputsAndRejectsReadAfterWrite)
     EXPECT_EQ(txn.Get(key, nullptr).ToErrno(), EINVAL);
     EXPECT_EQ(txn.HGet(key, "field", nullptr).ToErrno(), EINVAL);
     EXPECT_EQ(txn.HLen(key, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.HGetAll(key, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.PttlBatch({key}, nullptr).ToErrno(), EINVAL);
     uint64_t next_cursor = 0;
     std::vector<std::pair<std::string, std::string>> values;
+    std::vector<int64_t> ttl_values{123};
+    EXPECT_TRUE(txn.PttlBatch({}, &ttl_values).ok());
+    EXPECT_TRUE(ttl_values.empty());
     EXPECT_EQ(txn.HScan(key, 0, 16, nullptr, &next_cursor).ToErrno(), EINVAL);
     EXPECT_EQ(txn.HScan(key, 0, 16, &values, nullptr).ToErrno(), EINVAL);
 
@@ -465,6 +470,8 @@ TEST(RedisMetaClientTest, KvTransactionValidatesOutputsAndRejectsReadAfterWrite)
     EXPECT_EQ(txn.Get(key, &value).ToErrno(), EINVAL);
     EXPECT_EQ(txn.HGet(key, "field", &value).ToErrno(), EINVAL);
     EXPECT_EQ(txn.HLen(key, &length).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.HGetAll(key, &values).ToErrno(), EINVAL);
+    EXPECT_EQ(txn.PttlBatch({key}, &ttl_values).ToErrno(), EINVAL);
     EXPECT_EQ(txn.HScan(key, 0, 16, &values, &next_cursor).ToErrno(), EINVAL);
     return utils::Status::OK();
   });

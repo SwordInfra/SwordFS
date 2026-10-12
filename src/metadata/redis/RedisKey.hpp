@@ -24,6 +24,8 @@ class RedisKey {
   std::string OwnerGeneration() const;
   // Exact generation identity; never reuse or rename a previously issued key.
   std::string OwnerLease(uint64_t generation) const;
+  std::string PosixLock(uint64_t inode_ino) const;
+  std::string FlockLock(uint64_t inode_ino) const;
   std::string NextIno() const;
   std::string NextChunkRevision() const;
   std::string NextChunkID() const;
