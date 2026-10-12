@@ -118,6 +118,56 @@ utils::Status RedisKvTxn::HLen(std::string_view key, uint64_t *length) {
   });
 }
 
+utils::Status RedisKvTxn::HGetAll(std::string_view key, std::vector<std::pair<std::string, std::string>> *values) {
+  if (values == nullptr) {
+    return utils::Status::InvalidArgument("Redis HGETALL output is null");
+  }
+  if (has_writes_) {
+    return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
+  }
+  return RunRedisCommand("HGETALL", &retryable_pre_exec_failure_, [&] {
+    redis_->watch(key);
+    values->clear();
+    redis_->hgetall(std::string(key), std::back_inserter(*values));
+    return utils::Status::OK();
+  });
+}
+
+utils::Status RedisKvTxn::PttlBatch(const std::vector<std::string> &keys, std::vector<int64_t> *ttl_ms) {
+  if (ttl_ms == nullptr) {
+    return utils::Status::InvalidArgument("Redis PTTL output is null");
+  }
+  if (has_writes_) {
+    return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
+  }
+  ttl_ms->clear();
+  if (keys.empty()) {
+    return utils::Status::OK();
+  }
+  return RunRedisCommand("batched PTTL", &retryable_pre_exec_failure_, [&] {
+    // The read-only Lua evaluation cannot mutate lease state. WATCH is on
+    // the same transaction connection, so EXEC aborts on a subsequent
+    // renewal, revocation or expiry of any observed generation key.
+    constexpr std::string_view kScript = R"lua(
+local result = {}
+for i = 1, #KEYS do
+  result[i] = redis.call('PTTL', KEYS[i])
+end
+return result
+)lua";
+    redis_->watch(keys.begin(), keys.end());
+    std::vector<std::string> command{"EVAL", std::string(kScript), std::to_string(keys.size())};
+    command.insert(command.end(), keys.begin(), keys.end());
+    std::vector<long long> replies;
+    redis_->command(command.begin(), command.end(), std::back_inserter(replies));
+    if (replies.size() != keys.size()) {
+      return utils::Status::Malformed("batched Redis PTTL reply cardinality mismatch");
+    }
+    ttl_ms->assign(replies.begin(), replies.end());
+    return utils::Status::OK();
+  });
+}
+
 utils::Status RedisKvTxn::HScan(std::string_view key, uint64_t cursor, size_t count,
                                 std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor) {
   if (values == nullptr || next_cursor == nullptr) {

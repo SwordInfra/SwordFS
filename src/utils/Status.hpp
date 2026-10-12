@@ -32,6 +32,8 @@ class Status {
     kUnavailable,            // internal backend availability failure; maps to EIO
     kOutcomeUnknown,         // internal ambiguous remote mutation outcome; maps to EIO
     kBusy,                   // EBUSY
+    kWouldBlock,             // EAGAIN (nonblocking lock conflict)
+    kNoLocks,                // ENOLCK (bounded lock authority overflow)
     kNotPermitted,           // EPERM
     kPermission,             // EACCES
     kNoMemory,               // ENOMEM
@@ -117,6 +119,12 @@ class Status {
   }
   static Status Busy(std::string msg) {
     return Status(kBusy, std::move(msg));
+  }
+  static Status WouldBlock(std::string msg) {
+    return Status(kWouldBlock, std::move(msg));
+  }
+  static Status NoLocks(std::string msg) {
+    return Status(kNoLocks, std::move(msg));
   }
   static Status NotEmpty(std::string msg) {
     return Status(kNotEmpty, std::move(msg));

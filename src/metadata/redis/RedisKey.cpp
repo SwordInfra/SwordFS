@@ -23,6 +23,14 @@ std::string RedisKey::OwnerLease(uint64_t generation) const {
   return folly::sformat("{}owner_lease:{}", prefix_, generation);
 }
 
+std::string RedisKey::PosixLock(uint64_t inode_ino) const {
+  return folly::sformat("{}lock:posix:{}", prefix_, inode_ino);
+}
+
+std::string RedisKey::FlockLock(uint64_t inode_ino) const {
+  return folly::sformat("{}lock:flock:{}", prefix_, inode_ino);
+}
+
 std::string RedisKey::NextIno() const {
   return prefix_ + "next_ino";
 }

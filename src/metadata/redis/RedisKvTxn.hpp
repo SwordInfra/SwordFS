@@ -34,6 +34,12 @@ class RedisKvTxn {
   utils::Status HGet(std::string_view key, std::string_view field, std::string *value,
                      ReadMode mode = ReadMode::kWatched);
   utils::Status HLen(std::string_view key, uint64_t *length);
+  // Complete, WATCHed snapshot. Used only for bounded advisory-lock Hashes.
+  utils::Status HGetAll(std::string_view key, std::vector<std::pair<std::string, std::string>> *values);
+  // WATCH all generation keys in one command, then read their PTTLs in a
+  // single read-only script/round trip. This is essential for large lock
+  // Hashes: N separate WATCH/PTTL pairs amplify latency by O(N) RTTs.
+  utils::Status PttlBatch(const std::vector<std::string> &keys, std::vector<int64_t> *ttl_ms);
   utils::Status HScan(std::string_view key, uint64_t cursor, size_t count,
                       std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor);
   utils::Status Set(std::string_view key, std::string_view value);

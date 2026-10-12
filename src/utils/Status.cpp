@@ -34,6 +34,10 @@ int Status::ToErrno() const {
       return ENODATA;
     case kBusy:
       return EBUSY;
+    case kWouldBlock:
+      return EAGAIN;
+    case kNoLocks:
+      return ENOLCK;
     case kNotEmpty:
       return ENOTEMPTY;
     case kNotPermitted:
