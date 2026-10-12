@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <string>
 #include <utility>
@@ -111,23 +112,25 @@ utils::Status RedisMetaOps::FormatVolume(const SwordFsVolume &config) {
       if (!txn_status.IsNotFound()) {
         return txn_status;
       }
-      txn_status = txn.Set(key_.Format(), config.SerializeTo());
-      if (!txn_status.ok()) {
-        return txn_status;
+      // The counter must never be bootstrapped at mount: formatting defines
+      // its history in the same atomic commit as the volume identity. Keep
+      // all initialization keys together so every SET has the same error
+      // handling and none can be omitted from the atomic format transaction.
+      const std::array<std::pair<std::string, std::string>, 6> initial_keys{{
+          {key_.Format(), config.SerializeTo()},
+          {key_.Inode(kRootInodeId), root_value},
+          {key_.NextIno(), std::to_string(kRootInodeId)},
+          {key_.NextChunkRevision(), "0"},
+          {key_.InodeCount(), "1"},
+          {key_.OwnerGeneration(), "0"},
+      }};
+      for (const auto &[key, value] : initial_keys) {
+        auto queued = txn.Set(key, value);
+        if (!queued.ok()) {
+          return queued;
+        }
       }
-      txn_status = txn.Set(key_.NextIno(), std::to_string(kRootInodeId));
-      if (!txn_status.ok()) {
-        return txn_status;
-      }
-      txn_status = txn.Set(key_.NextChunkRevision(), "0");
-      if (!txn_status.ok()) {
-        return txn_status;
-      }
-      txn_status = txn.Set(key_.InodeCount(), "1");
-      if (!txn_status.ok()) {
-        return txn_status;
-      }
-      return txn.Set(key_.Inode(kRootInodeId), root_value);
+      return utils::Status::OK();
     });
   });
   if (status.ok()) {

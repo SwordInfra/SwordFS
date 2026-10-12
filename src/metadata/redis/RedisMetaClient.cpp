@@ -211,6 +211,54 @@ utils::Status RedisMetaClient::IncrNonNegative(std::string_view key, uint64_t *v
   }
 }
 
+utils::Status RedisMetaClient::CreateOwnerLease(std::string_view key, std::string_view nonce,
+                                                std::chrono::milliseconds ttl) {
+  utils::ExpectInThreadDomain();
+  if (ttl <= std::chrono::milliseconds::zero()) {
+    return utils::Status::InvalidArgument("owner lease TTL must be positive");
+  }
+  try {
+    if (!redis_->set(std::string(key), std::string(nonce), ttl, sw::redis::UpdateType::NOT_EXIST)) {
+      return utils::Status::AlreadyExists("owner lease generation key unexpectedly exists");
+    }
+    return utils::Status::OK();
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError("owner SET NX PX", error);
+  } catch (const sw::redis::Error &error) {
+    return utils::Status::OutcomeUnknown("Redis owner SET NX PX outcome is ambiguous: " + std::string(error.what()));
+  }
+}
+
+utils::Status RedisMetaClient::RenewOwnerLease(std::string_view key, std::chrono::milliseconds ttl) {
+  utils::ExpectInThreadDomain();
+  if (ttl <= std::chrono::milliseconds::zero()) {
+    return utils::Status::InvalidArgument("owner lease TTL must be positive");
+  }
+  try {
+    // PEXPIRE XX never creates a missing key or an expiry-less string.
+    if (redis_->command<long long>("PEXPIRE", std::string(key), ttl.count(), "XX") != 1) {
+      return utils::Status::Unavailable("owner lease expired or was revoked");
+    }
+    return utils::Status::OK();
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError("owner PEXPIRE XX", error);
+  } catch (const sw::redis::Error &error) {
+    return utils::Status::OutcomeUnknown("Redis owner PEXPIRE XX outcome is ambiguous: " + std::string(error.what()));
+  }
+}
+
+utils::Status RedisMetaClient::RevokeOwnerLease(std::string_view key) {
+  utils::ExpectInThreadDomain();
+  try {
+    (void)redis_->del(std::string(key));
+    return utils::Status::OK();
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError("owner DEL", error);
+  } catch (const sw::redis::Error &error) {
+    return utils::Status::OutcomeUnknown("Redis owner DEL outcome is ambiguous: " + std::string(error.what()));
+  }
+}
+
 utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisKvTxn &)> &callback) {
   utils::ExpectInThreadDomain();
   for (int attempt = 0; attempt < retry_attempts_; ++attempt) {

@@ -36,6 +36,17 @@ enum class RedisFaultScenario {
   kIncrProtocolFailureApplied,
   kIncrDisconnectNotApplied,
   kIncrProtocolFailureAppliedThenFreshValue,
+  kOwnerSetReplyError,
+  kOwnerRenewReplyError,
+  kOwnerRevokeReplyError,
+  kOwnerSetProtocolFailure,
+  kOwnerRenewProtocolFailure,
+  kOwnerRevokeProtocolFailure,
+  kOwnerStalledReply,
+  kOwnerLifecycleRenewError,
+  kOwnerLifecycleRenewLostReply,
+  kOwnerLifecycleRevokeError,
+  kFormatQueueRejected,
 };
 
 class ScriptedRedisServer {
@@ -302,6 +313,92 @@ class ScriptedRedisServer {
     ::close(client);
   }
 
+  void ServeOwnerCommand(std::string_view command, bool ambiguous_reply) {
+    const int client = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+    if (client < 0) {
+      error_ = "accept failed";
+      return;
+    }
+    connection_count_.fetch_add(1, std::memory_order_relaxed);
+    RespReader reader(client);
+    if (ReadExpected(&reader, command)) {
+      // A broken acknowledgement cannot tell the client whether the
+      // authoritative mutation ran. No automatic replay is safe here.
+      mutation_applied_.store(ambiguous_reply, std::memory_order_relaxed);
+      (void)Reply(client, ambiguous_reply ? "x\r\n" : "-ERR scripted failure\r\n");
+    }
+    ::close(client);
+  }
+
+  void ServeOwnerStalledReply() {
+    const int client = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+    if (client < 0) {
+      error_ = "accept failed";
+      return;
+    }
+    connection_count_.fetch_add(1, std::memory_order_relaxed);
+    RespReader reader(client);
+    std::vector<std::string> command;
+    if (reader.ReadCommand(&command)) {
+      // A server that receives a Redis command but never acknowledges it:
+      // the per-command socket deadline, not server timing, ends the wait.
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+    ::close(client);
+  }
+
+  // Exercise the complete Redis-only owner lifecycle through the native
+  // redis++ connection. Unlike standalone command faults, the owner must
+  // first allocate a generation and successfully register before a renewal
+  // or revoke reply can be faulted.
+  void ServeOwnerLifecycle() {
+    while (true) {
+      const int client = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+      if (client < 0) {
+        break;  // Wait() closed the listening socket.
+      }
+      connection_count_.fetch_add(1, std::memory_order_relaxed);
+      RespReader reader(client);
+      std::vector<std::string> command;
+      while (reader.ReadCommand(&command)) {
+        if (command.empty()) {
+          error_ = "empty owner lifecycle Redis command";
+          break;
+        }
+        const auto &name = command.front();
+        std::string_view reply;
+        if (name == "GET") {
+          reply = scenario_ == RedisFaultScenario::kFormatQueueRejected ? "$-1\r\n" : "$1\r\n0\r\n";
+        } else if (name == "PING") {
+          reply = "+PONG\r\n";
+        } else if (name == "SET" && scenario_ == RedisFaultScenario::kFormatQueueRejected) {
+          reply = "-ERR scripted queue rejection\r\n";
+        } else if (name == "WATCH" || name == "MULTI" || name == "UNWATCH" || name == "DISCARD" || name == "SET") {
+          reply = "+OK\r\n";
+        } else if (name == "INCRBY") {
+          reply = "+QUEUED\r\n";
+        } else if (name == "EXEC") {
+          exec_received_.store(true, std::memory_order_relaxed);
+          reply = "*1\r\n:1\r\n";
+        } else if (name == "PEXPIRE") {
+          mutation_applied_.store(scenario_ == RedisFaultScenario::kOwnerLifecycleRenewLostReply,
+                                  std::memory_order_relaxed);
+          reply =
+              scenario_ == RedisFaultScenario::kOwnerLifecycleRenewLostReply ? "x\r\n" : "-ERR renewal rejected\r\n";
+        } else if (name == "DEL") {
+          reply = scenario_ == RedisFaultScenario::kOwnerLifecycleRevokeError ? "-ERR revoke rejected\r\n" : ":1\r\n";
+        } else {
+          error_ = "unexpected owner lifecycle Redis command " + name;
+          break;
+        }
+        if (!Reply(client, reply)) {
+          break;
+        }
+      }
+      ::close(client);
+    }
+  }
+
   void ServeWriteExecReplyError() {
     const int client = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
     if (client < 0) {
@@ -438,6 +535,33 @@ class ScriptedRedisServer {
         break;
       case RedisFaultScenario::kIncrProtocolFailureAppliedThenFreshValue:
         ServeIncrProtocolFailureAppliedThenFreshValue();
+        break;
+      case RedisFaultScenario::kOwnerSetReplyError:
+        ServeOwnerCommand("SET", false);
+        break;
+      case RedisFaultScenario::kOwnerRenewReplyError:
+        ServeOwnerCommand("PEXPIRE", false);
+        break;
+      case RedisFaultScenario::kOwnerRevokeReplyError:
+        ServeOwnerCommand("DEL", false);
+        break;
+      case RedisFaultScenario::kOwnerSetProtocolFailure:
+        ServeOwnerCommand("SET", true);
+        break;
+      case RedisFaultScenario::kOwnerRenewProtocolFailure:
+        ServeOwnerCommand("PEXPIRE", true);
+        break;
+      case RedisFaultScenario::kOwnerRevokeProtocolFailure:
+        ServeOwnerCommand("DEL", true);
+        break;
+      case RedisFaultScenario::kOwnerStalledReply:
+        ServeOwnerStalledReply();
+        break;
+      case RedisFaultScenario::kOwnerLifecycleRenewError:
+      case RedisFaultScenario::kOwnerLifecycleRenewLostReply:
+      case RedisFaultScenario::kOwnerLifecycleRevokeError:
+      case RedisFaultScenario::kFormatQueueRejected:
+        ServeOwnerLifecycle();
         break;
     }
   }

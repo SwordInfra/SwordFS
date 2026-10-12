@@ -39,6 +39,11 @@ class RedisMetaClient {
   // Transport/protocol loss after the script may have executed is
   // OutcomeUnknown, matching standalone INCR allocation semantics.
   utils::Status IncrNonNegative(std::string_view key, uint64_t *value);
+  // Native Redis 7 owner-lease operations. No retry after an ambiguous
+  // mutation: a lost SET/PEXPIRE/DEL reply is not a confirmed new lease.
+  utils::Status CreateOwnerLease(std::string_view key, std::string_view nonce, std::chrono::milliseconds ttl);
+  utils::Status RenewOwnerLease(std::string_view key, std::chrono::milliseconds ttl);
+  utils::Status RevokeOwnerLease(std::string_view key);
   utils::Status HScan(std::string_view key, uint64_t cursor, size_t count,
                       std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor);
 

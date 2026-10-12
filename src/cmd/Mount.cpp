@@ -5,6 +5,7 @@
 
 #include <fcntl.h>
 #include <folly/String.h>
+#include <folly/logging/xlog.h>
 #include <folly/portability/Filesystem.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -12,9 +13,11 @@
 
 #include <CLI/CLI.hpp>
 #include <algorithm>
+#include <cassert>
 #include <cerrno>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -24,7 +27,10 @@
 
 #include "cmd/Mount.hpp"
 #include "config/ConfigCenter.hpp"
+#include "config/Validator.hpp"
 #include "fuse/Vfs.hpp"
+#include "metadata/redis/RedisMetaConfig.hpp"
+#include "metadata/redis/RedisOwnerLease.hpp"
 #include "utils/Fuse.hpp"
 #include "utils/Logging.hpp"
 #include "vfs/InodeHandle.hpp"
@@ -177,7 +183,8 @@ static FuseArgsGuard BuildFuseArgs(const std::vector<std::string> &extras) {
 }
 
 // Mount the filesystem via libfuse low-level API. Blocks until unmounted.
-static int Mount(const std::string &mountpoint, const std::vector<std::string> &extras, int signal_fd) {
+static int Mount(const std::string &mountpoint, const std::vector<std::string> &extras, int signal_fd,
+                 swordfs::metadata::RedisOwnerLease *lease) {
   FuseArgsGuard args(BuildFuseArgs(extras));
   ::swordfs::fuse::MountInitContext init_context(signal_fd);
 
@@ -200,6 +207,13 @@ static int Mount(const std::string &mountpoint, const std::vector<std::string> &
   fuse_loop_cfg_set_max_threads(loop_cfg, ConfigCenter::Instance().fuse_threads());
   int ret = fuse_session_loop_mt(se.get(), loop_cfg);
   fuse_loop_cfg_destroy(loop_cfg);
+  // Normal unmount is the lock authority's quiescence barrier. Revoke its
+  // exact generation while the FUSE session still exists, before teardown.
+  // A lease expiring on its own must NEVER terminate this FUSE loop.
+  if (lease != nullptr) {
+    // Revoke logs an unconfirmed DEL and falls back to the Redis TTL.
+    (void)lease->Revoke();
+  }
   return init_context.failed ? 1 : ret;
 }
 
@@ -240,6 +254,34 @@ int RunMount() {
     return 1;
   }
 
+  // Lock ownership is opt-in until the Redis lock authority has implemented
+  // POSIX/flock operations (#430). This lifecycle is independent of normal
+  // metadata I/O: a failed lease registration must not unmount the volume.
+  std::unique_ptr<swordfs::metadata::RedisOwnerLease> lease;
+  if (cfg.enable_lock_owner_lease()) {
+    swordfs::metadata::RedisMetaConfig redis_config;
+    status = swordfs::metadata::ParseRedisMetaUrl(cfg.meta_url(), &redis_config);
+    // ConfigCenter's CLI validators reject malformed URLs and durations
+    // before RunMount is dispatched. Don't duplicate an unreachable mount
+    // failure/volume-shutdown branch for an already validated parse snapshot.
+    assert(status.ok());
+    const auto ttl = ParseLockLeaseDuration(cfg.lock_lease_ttl());
+    const auto renew = ParseLockLeaseDuration(cfg.lock_lease_renew_interval());
+    const auto margin = ParseLockLeaseDuration(cfg.lock_lease_safety_margin());
+    const auto timeout = ParseLockLeaseDuration(cfg.lock_lease_io_timeout());
+    assert(ttl && renew && margin && timeout);
+    swordfs::metadata::RedisOwnerLease::Timing timing{*ttl, *renew, *margin, *timeout};
+    lease = std::make_unique<swordfs::metadata::RedisOwnerLease>(redis_config, cfg.volume(), timing);
+    status = lease->Register();
+    if (status.ok()) {
+      SWORDFS_LOG_INFO << "lock owner lease registered generation " << lease->generation();
+    } else {
+      // Fail only the advisory-lock service closed; ordinary FUSE remains
+      // available. A failed generation cannot be reused within this mount.
+      SWORDFS_LOG_WARN << "lock owner lease unavailable: " << status.message();
+    }
+  }
+
   // Mount via libfuse low-level API
   //
   // Signal handling is managed by fuse_set_signal_handlers() inside Mount().
@@ -251,7 +293,9 @@ int RunMount() {
   // than depending on callers to remember a mount option; SwordFS metadata
   // intentionally does not duplicate the kernel's credential engine.
   auto fuse_extras = detail::BuildFuseExtras(cfg.fuse_opts());
-  int ret = Mount(mountpoint, fuse_extras, signal_fd);
+  int ret = Mount(mountpoint, fuse_extras, signal_fd, lease.get());
+  // The heartbeat and Redis client must not outlive the volume engines.
+  lease.reset();
   if (ret != 0) {
     SWORDFS_PROMPT_FMT("Error: mount failed (code {})", ret);
   }

@@ -12,6 +12,7 @@
 
 #include "cmd/Mount.hpp"
 #include "config/ConfigCenter.hpp"
+#include "config/Validator.hpp"
 
 namespace {
 
@@ -126,6 +127,69 @@ TEST(MountParamsTest, MinimalRedisMount) {
       "swordfs", "mount", "--volume", "myvol", "--meta", "redis://localhost:6379", "/mnt/point",
   };
   EXPECT_TRUE(ParseOptions(args).empty());
+}
+
+TEST(MountParamsTest, LockOwnerLeaseIsOffForOrdinaryMounts) {
+  const auto err =
+      ParseOptions({"swordfs", "mount", "--volume", "myvol", "--meta", "redis://localhost:6379", "/mnt/point"},
+                   [](const swordfs::config::ConfigCenter &cfg) { EXPECT_FALSE(cfg.enable_lock_owner_lease()); });
+  EXPECT_TRUE(err.empty()) << err;
+}
+
+TEST(MountParamsTest, LockOwnerLeaseCanBeExplicitlyEnabledWithIndependentTimings) {
+  const auto err =
+      ParseOptions({"swordfs", "mount", "--volume", "myvol", "--meta", "redis://localhost:6379",
+                    "--enable-lock-owner-lease", "--lock-lease-ttl", "2m", "--lock-lease-renew-interval", "12s",
+                    "--lock-lease-safety-margin", "18s", "--lock-lease-io-timeout", "2s", "/mnt/point"},
+                   [](const swordfs::config::ConfigCenter &cfg) {
+                     EXPECT_TRUE(cfg.enable_lock_owner_lease());
+                     EXPECT_EQ(cfg.lock_lease_ttl(), "2m");
+                     EXPECT_EQ(cfg.lock_lease_renew_interval(), "12s");
+                     EXPECT_EQ(cfg.lock_lease_safety_margin(), "18s");
+                     EXPECT_EQ(cfg.lock_lease_io_timeout(), "2s");
+                   });
+  EXPECT_TRUE(err.empty()) << err;
+}
+
+TEST(MountParamsTest, LockLeaseIoTimeoutNamesPerOperationBudget) {
+  auto err =
+      ParseOptions({"swordfs", "mount", "--volume", "myvol", "--meta", "redis://localhost:6379",
+                    "--enable-lock-owner-lease", "--lock-lease-io-timeout", "750ms", "/mnt/point"},
+                   [](const swordfs::config::ConfigCenter &cfg) { EXPECT_EQ(cfg.lock_lease_io_timeout(), "750ms"); });
+  EXPECT_TRUE(err.empty()) << err;
+}
+
+TEST(MountParamsTest, LockOwnerLeaseRejectsMalformedTimeUnit) {
+  const auto error = ParseOptions({"swordfs", "mount", "--volume", "myvol", "--meta", "redis://localhost:6379",
+                                   "--enable-lock-owner-lease", "--lock-lease-ttl", "sixty", "/mnt/point"});
+  EXPECT_FALSE(error.empty());
+}
+
+TEST(MountParamsTest, LockLeaseDurationAcceptsOnlyBoundedPositiveIntegerUnits) {
+  using swordfs::config::ParseLockLeaseDuration;
+  using namespace std::chrono_literals;
+
+  EXPECT_EQ(ParseLockLeaseDuration("250ms"), 250ms);
+  EXPECT_EQ(ParseLockLeaseDuration("5s"), 5s);
+  EXPECT_EQ(ParseLockLeaseDuration("2m"), 2min);
+  for (const char *invalid : {"", "0s", "0ms", "-1s", "+1s", "1.5s", "s", "12", "1h", "1 s", "18446744073709551615m",
+                              "999999999999999999999999999ms"}) {
+    EXPECT_FALSE(ParseLockLeaseDuration(invalid).has_value()) << invalid;
+  }
+}
+
+TEST(MountParamsTest, LockOwnerLeaseOptInDoesNotLeakIntoNextMountParse) {
+  auto error =
+      ParseOptions({"swordfs", "mount", "--volume", "myvol", "--meta", "redis://localhost:6379",
+                    "--enable-lock-owner-lease", "/mnt/point"},
+                   [](const swordfs::config::ConfigCenter &cfg) { EXPECT_TRUE(cfg.enable_lock_owner_lease()); });
+  EXPECT_TRUE(error.empty()) << error;
+  error = ParseOptions({"swordfs", "mount", "--volume", "myvol", "--meta", "redis://localhost:6379", "/mnt/point"},
+                       [](const swordfs::config::ConfigCenter &cfg) {
+                         EXPECT_FALSE(cfg.enable_lock_owner_lease());
+                         EXPECT_EQ(cfg.lock_lease_ttl(), "60s");
+                       });
+  EXPECT_TRUE(error.empty()) << error;
 }
 
 TEST(MountParamsTest, RejectsUnregisteredMetadataEngine) {

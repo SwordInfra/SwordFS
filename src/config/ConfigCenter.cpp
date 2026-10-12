@@ -45,6 +45,18 @@ void ConfigCenter::RegisterMountOptions(CLI::App &app) {
       ->check(swordfs::config::ValidateMetaUrl);
   cmd->add_option("-o", fuse_opts_, "FUSE mount options (e.g. -o allow_other,ro)")->allow_extra_args(false);
   cmd->add_flag("--enable-ioctl", enable_ioctl_, "Enable the restricted inode-policy ioctl control surface");
+  cmd->add_flag("--enable-lock-owner-lease", enable_lock_owner_lease_,
+                "Register a Redis advisory-lock owner lease (does not enable POSIX/flock yet)");
+  cmd->add_option("--lock-lease-ttl", lock_lease_ttl_, "Lock owner Redis TTL (default: 60s)")
+      ->check(ValidateLockLeaseDuration);
+  cmd->add_option("--lock-lease-renew-interval", lock_lease_renew_interval_, "Lease heartbeat interval (default: 10s)")
+      ->check(ValidateLockLeaseDuration);
+  cmd->add_option("--lock-lease-safety-margin", lock_lease_safety_margin_, "Local expiry reserve (default: 15s)")
+      ->check(ValidateLockLeaseDuration);
+  cmd->add_option(
+         "--lock-lease-io-timeout", lock_lease_io_timeout_,
+         "Per-command Redis pool/connect/socket I/O budget, NOT a total lease operation deadline (default: 5s)")
+      ->check(ValidateLockLeaseDuration);
   cmd->add_option("--storage-thread-count", storage_thread_count_, "Storage engine thread count (default: CPU count)")
       ->check(CLI::PositiveNumber);
   cmd->add_option("--meta-thread-count", meta_thread_count_, "Metadata engine thread count (default: CPU count)")

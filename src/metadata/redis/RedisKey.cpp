@@ -15,6 +15,14 @@ std::string RedisKey::Format() const {
   return prefix_ + "format";
 }
 
+std::string RedisKey::OwnerGeneration() const {
+  return prefix_ + "owner_generation";
+}
+
+std::string RedisKey::OwnerLease(uint64_t generation) const {
+  return folly::sformat("{}owner_lease:{}", prefix_, generation);
+}
+
 std::string RedisKey::NextIno() const {
   return prefix_ + "next_ino";
 }

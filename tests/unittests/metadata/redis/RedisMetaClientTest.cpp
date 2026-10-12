@@ -792,6 +792,73 @@ TEST(RedisMetaClientTest, DirectIncrLostAcknowledgementIsOutcomeUnknownForBothDu
   }
 }
 
+TEST(RedisMetaClientTest, OwnerLeaseNativeCommandsRejectInvalidTtlBeforeRedisIo) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.port = 1;
+  RedisMetaClient client(config);
+  EXPECT_EQ(client.CreateOwnerLease("lease", "nonce", std::chrono::milliseconds(0)).ToErrno(), EINVAL);
+  EXPECT_EQ(client.RenewOwnerLease("lease", std::chrono::milliseconds(-1)).ToErrno(), EINVAL);
+}
+
+TEST(RedisMetaClientTest, OwnerLeaseCreateNeverReplacesExistingGeneration) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  RedisMetaClient client(config);
+  sw::redis::Redis redis(ConnectionOptions(config));
+  const auto key = UniqueRedisName("owner-set-nx");
+  ASSERT_TRUE(client.CreateOwnerLease(key, "first", std::chrono::seconds(60)).ok());
+  EXPECT_EQ(client.CreateOwnerLease(key, "second", std::chrono::seconds(60)).ToErrno(), EEXIST);
+  EXPECT_EQ(redis.get(key), "first");
+  EXPECT_GT(redis.pttl(key), 0);
+  EXPECT_TRUE(client.RevokeOwnerLease(key).ok());
+}
+
+TEST(RedisMetaClientTest, OwnerLeaseNativeCommandErrorsHaveKnownOutcomes) {
+  for (const auto scenario : {RedisFaultScenario::kOwnerSetReplyError, RedisFaultScenario::kOwnerRenewReplyError,
+                              RedisFaultScenario::kOwnerRevokeReplyError}) {
+    ScriptedRedisServer server(scenario);
+    RedisMetaClient client(ScriptedConfig(server));
+    utils::Status status;
+    if (scenario == RedisFaultScenario::kOwnerSetReplyError) {
+      status = client.CreateOwnerLease("lease", "nonce", std::chrono::seconds(30));
+    } else if (scenario == RedisFaultScenario::kOwnerRenewReplyError) {
+      status = client.RenewOwnerLease("lease", std::chrono::seconds(30));
+    } else {
+      status = client.RevokeOwnerLease("lease");
+    }
+    server.Wait();
+    EXPECT_EQ(status.ToErrno(), EIO);
+    EXPECT_FALSE(status.IsOutcomeUnknown());
+    EXPECT_EQ(server.connection_count(), 1);
+    EXPECT_TRUE(server.error().empty()) << server.error();
+  }
+}
+
+TEST(RedisMetaClientTest, OwnerLeaseNativeCommandLostRepliesAreNeverReplayed) {
+  for (const auto scenario :
+       {RedisFaultScenario::kOwnerSetProtocolFailure, RedisFaultScenario::kOwnerRenewProtocolFailure,
+        RedisFaultScenario::kOwnerRevokeProtocolFailure}) {
+    ScriptedRedisServer server(scenario);
+    RedisMetaClient client(ScriptedConfig(server));
+    utils::Status status;
+    if (scenario == RedisFaultScenario::kOwnerSetProtocolFailure) {
+      status = client.CreateOwnerLease("lease", "nonce", std::chrono::seconds(30));
+    } else if (scenario == RedisFaultScenario::kOwnerRenewProtocolFailure) {
+      status = client.RenewOwnerLease("lease", std::chrono::seconds(30));
+    } else {
+      status = client.RevokeOwnerLease("lease");
+    }
+    server.Wait();
+    EXPECT_TRUE(status.IsOutcomeUnknown()) << status.message();
+    EXPECT_TRUE(server.mutation_applied());
+    EXPECT_EQ(server.connection_count(), 1);
+    EXPECT_TRUE(server.error().empty()) << server.error();
+  }
+}
+
 TEST(RedisMetaClientTest, StandaloneReadOnlyConnectionFailuresReturnUnavailable) {
   RedisMetaConfig config;
   config.host = "127.0.0.1";
