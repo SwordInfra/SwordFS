@@ -20,6 +20,57 @@ SPEC.loader.exec_module(CLASSIFY)
 
 
 class FstestsFailureEvidenceTest(unittest.TestCase):
+    def test_kernel_local_only_pass_does_not_promote_distributed_support(self) -> None:
+        for test in ("generic/131", "generic/478"):
+            with self.subTest(test=test):
+                gap = CLASSIFY.Gap("kernel_local_only", "#433", "PASS", "-", "-", "Only local locks are verified")
+                for result, expected in (
+                    ("PASS", "KERNEL_LOCAL_ONLY"),
+                    ("FAIL", "BASELINE_RESULT_MISMATCH"),
+                    ("NOTRUN", "BASELINE_RESULT_MISMATCH"),
+                ):
+                    actual = {test: CLASSIFY.RawResult(test, result)}
+                    obs = CLASSIFY.classify({test}, actual, set(), {test: gap})[0]
+                    self.assertEqual(expected, obs.classification)
+                    self.assertEqual(result != "PASS", obs.classification in CLASSIFY.BLOCKING)
+
+                for kwargs, expected in (
+                    ({"crash_tests": {test}}, "SWORD_FS_CRASH"),
+                    ({"isolation_failure_tests": {test}}, "INFRASTRUCTURE"),
+                ):
+                    obs = CLASSIFY.classify(
+                        {test}, {test: CLASSIFY.RawResult(test, "PASS")}, set(), {test: gap}, **kwargs
+                    )[0]
+                    self.assertEqual(expected, obs.classification)
+
+    def test_kernel_local_only_manifest_validation_and_true_xpass(self) -> None:
+        header = "test\tcategory\tissue\texpected_result\texpected_message\texpected_evidence\treason\n"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = pathlib.Path(temp_dir) / "known-gaps.tsv"
+            for issue, result, message, evidence, valid in (
+                ("#433", "PASS", "-", "-", True),
+                ("-", "PASS", "-", "-", False),
+                ("#433", "FAIL", "-", "-", False),
+                ("#433", "NOTRUN", "-", "-", False),
+                ("#433", "PASS", "unexpected", "-", False),
+                ("#433", "PASS", "-", "generic/131.out.bad", False),
+            ):
+                with self.subTest(issue=issue, result=result, message=message, evidence=evidence):
+                    path.write_text(
+                        header + f"generic/131\tkernel_local_only\t{issue}\t{result}\t{message}\t{evidence}\tlocal pass only\n",
+                        encoding="utf-8",
+                    )
+                    if valid:
+                        self.assertEqual("PASS", CLASSIFY.load_gaps(path)["generic/131"].expected_result)
+                    else:
+                        with self.assertRaises(CLASSIFY.BaselineError):
+                            CLASSIFY.load_gaps(path)
+
+        test = "generic/999"
+        gap = CLASSIFY.Gap("known_unsupported", "#255", "FAIL", "some failure", "-", "missing capability")
+        actual = {test: CLASSIFY.RawResult(test, "PASS")}
+        self.assertEqual("XPASS", CLASSIFY.classify({test}, actual, set(), {test: gap})[0].classification)
+
     def test_shared_upstream_tool_root_normalizes_to_original_harness_evidence(self) -> None:
         # Reusing the exact pinned tools must not require changing the known
         # semantic baseline: only the upstream executable's location moved.

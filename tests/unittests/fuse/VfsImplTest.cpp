@@ -44,10 +44,15 @@
 #include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkCleanupParticipant.hpp"
 #include "chunk/internal/ChunkGcWorker.hpp"
+#include "fuse/PosixRecordLocks.hpp"
 #include "fuse/Vfs.hpp"
 #include "metadata/IMetaEngine.hpp"
+#include "metadata/redis/RedisLockAuthority.hpp"
+#include "metadata/redis/RedisMetaTestSupport.hpp"
+#include "metadata/redis/RedisOwnerLease.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
 #include "storage/IDataEngine.hpp"
+#include "utils/BlockingExecutor.hpp"
 #include "utils/FiberRuntime.hpp"
 #include "vfs/DirHandle.hpp"
 #include "vfs/FileHandle.hpp"
@@ -75,12 +80,14 @@ namespace {
 
 struct FuseReplyCapture {
   fuse_ctx context{};
+  void *user_data = nullptr;
   std::mutex mutex;
   std::condition_variable cv;
   bool replied = false;
   std::optional<int> error;
   std::optional<fuse_entry_param> entry;
   std::optional<struct stat> attr;
+  std::optional<struct flock> lock_reply;
   std::optional<struct statx> statx_attr;
   std::optional<int> statx_flags;
   std::optional<double> attr_timeout;
@@ -155,16 +162,35 @@ extern "C" const fuse_ctx *fuse_req_ctx(fuse_req_t req) {
   return &CaptureFor(req)->context;
 }
 
+extern "C" void *fuse_req_userdata(fuse_req_t req) {
+  return CaptureFor(req)->user_data;
+}
+
+extern "C" int fuse_reply_lock(fuse_req_t req, const struct flock *lock) {
+  auto *capture = CaptureFor(req);
+  int reply_result = 0;
+  {
+    std::lock_guard guard(capture->mutex);
+    capture->lock_reply = *lock;
+    capture->replied = true;
+    reply_result = capture->reply_result;
+  }
+  capture->cv.notify_one();
+  return reply_result;
+}
+
 extern "C" int fuse_reply_err(fuse_req_t req, int err) {
   auto *capture = CaptureFor(req);
+  int reply_result = 0;
   {
     std::lock_guard lock(capture->mutex);
     ++capture->error_reply_calls;
     capture->error = err;
     capture->replied = true;
+    reply_result = capture->reply_result;
   }
   capture->cv.notify_one();
-  return 0;
+  return reply_result;
 }
 
 extern "C" int fuse_reply_entry(fuse_req_t req, const fuse_entry_param *entry) {
@@ -2506,10 +2532,36 @@ TEST_F(VfsImplIntegrationTest, FuseUnsupportedHooksReplyWithEnosys) {
     EXPECT_EQ(*capture.error, ENOSYS);
   };
 
+  auto expect_no_remote_lock = [](auto &&invoke) {
+    FuseReplyCapture capture;
+    invoke(reinterpret_cast<fuse_req_t>(&capture));
+    ASSERT_TRUE(capture.Wait());
+    ASSERT_TRUE(capture.error.has_value());
+    EXPECT_EQ(*capture.error, ENOSYS);
+  };
+
   fuse_file_info fi{};
   struct flock lock{};
-  expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsGetlk(req, 1, &fi, &lock); });
-  expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsSetlk(req, 1, &fi, &lock, 0); });
+  // Preserve the pre-#431 unadvertised-lock behavior. Returning EOPNOTSUPP
+  // here makes generic/131 and generic/478 XPASS without enabling remote
+  // POSIX locks; #433 must negotiate/validate the feature before promotion.
+  expect_no_remote_lock([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsGetlk(req, 1, &fi, &lock); });
+  expect_no_remote_lock([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsSetlk(req, 1, &fi, &lock, 0); });
+
+  swordfs::fuse::MountInitContext disabled_mount;
+  disabled_mount.posix_locks_negotiated = false;
+  auto expect_disabled_mount_enosys = [&](auto &&invoke) {
+    FuseReplyCapture capture;
+    capture.user_data = &disabled_mount;
+    invoke(reinterpret_cast<fuse_req_t>(&capture));
+    ASSERT_TRUE(capture.Wait());
+    ASSERT_TRUE(capture.error.has_value());
+    EXPECT_EQ(*capture.error, ENOSYS);
+  };
+  expect_disabled_mount_enosys(
+      [&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsGetlk(req, 1, &fi, &lock); });
+  expect_disabled_mount_enosys(
+      [&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsSetlk(req, 1, &fi, &lock, 0); });
   expect_enosys([](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsBmap(req, 1, 4096, 0); });
   expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsPoll(req, 1, &fi, nullptr); });
   expect_enosys(
@@ -2519,6 +2571,203 @@ TEST_F(VfsImplIntegrationTest, FuseUnsupportedHooksReplyWithEnosys) {
   expect_enosys(
       [&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsCopyFileRange(req, 1, 0, &fi, 2, 0, &fi, 4096, 0); });
   expect_enosys([&](fuse_req_t req) { swordfs::fuse::VfsHookFactory::SwordFsLseek(req, 1, 0, SEEK_SET, &fi); });
+}
+
+TEST_F(VfsImplIntegrationTest, FusePosixLockCallbacksPreservePidAndFlushReleasesDespiteInvalidFileHandle) {
+  swordfs::metadata::RedisMetaConfig config;
+  if (!swordfs::metadata::ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  const auto volume = swordfs::metadata::UniqueRedisName("fuse-posix-locks");
+  const swordfs::metadata::redis::RedisKey key(config.db, volume);
+  sw::redis::Redis redis(swordfs::metadata::ConnectionOptions(config));
+  redis.set(key.OwnerGeneration(), "0");
+  swordfs::metadata::RedisOwnerLease first_lease(config, volume);
+  swordfs::metadata::RedisOwnerLease second_lease(config, volume);
+  ASSERT_TRUE(first_lease.Register().ok());
+  ASSERT_TRUE(second_lease.Register().ok());
+  swordfs::metadata::RedisLockAuthority first_authority(config, volume, first_lease);
+  swordfs::metadata::RedisLockAuthority second_authority(config, volume, second_lease);
+  swordfs::utils::BlockingExecutor executor(2, "fuse-posix-test");
+  swordfs::fuse::PosixRecordLocks first(first_authority, executor);
+  swordfs::fuse::PosixRecordLocks second(second_authority, executor);
+  swordfs::fuse::MountInitContext first_mount;
+  first_mount.posix_locks = &first;
+  first_mount.posix_locks_negotiated = true;  // Test the adapter, not production capability negotiation.
+  swordfs::fuse::MountInitContext second_mount;
+  second_mount.posix_locks = &second;
+  second_mount.posix_locks_negotiated = true;
+
+  fuse_file_info fi{};
+  fi.lock_owner = 201;
+  struct flock request{};
+  request.l_type = F_WRLCK;
+  request.l_whence = SEEK_SET;
+  request.l_start = 10;
+  request.l_len = 30;
+  request.l_pid = 4521;
+
+  FuseReplyCapture set;
+  set.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsSetlk(reinterpret_cast<fuse_req_t>(&set), 123, &fi, &request, 0);
+  ASSERT_TRUE(set.Wait());
+  ASSERT_TRUE(set.error.has_value());
+  EXPECT_EQ(*set.error, 0);
+
+  fuse_file_info other_fi{};
+  other_fi.lock_owner = 201;  // Same opaque owner on another Mount is still distinct.
+  FuseReplyCapture get;
+  get.user_data = &second_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsGetlk(reinterpret_cast<fuse_req_t>(&get), 123, &other_fi, &request);
+  ASSERT_TRUE(get.Wait());
+  ASSERT_TRUE(get.lock_reply.has_value());
+  EXPECT_EQ(get.lock_reply->l_type, F_WRLCK);
+  EXPECT_EQ(get.lock_reply->l_pid, 4521);
+  EXPECT_EQ(get.lock_reply->l_start, 10);
+  EXPECT_EQ(get.lock_reply->l_len, 30);
+
+  FuseReplyCapture self;
+  self.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsGetlk(reinterpret_cast<fuse_req_t>(&self), 123, &fi, &request);
+  ASSERT_TRUE(self.Wait());
+  ASSERT_TRUE(self.lock_reply.has_value());
+  EXPECT_EQ(self.lock_reply->l_type, F_UNLCK);
+
+  FuseReplyCapture blocked;
+  blocked.user_data = &second_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsSetlk(reinterpret_cast<fuse_req_t>(&blocked), 123, &other_fi, &request, 0);
+  ASSERT_TRUE(blocked.Wait());
+  ASSERT_TRUE(blocked.error.has_value());
+  EXPECT_EQ(*blocked.error, EAGAIN);
+
+  // Invalid FUSE lock arguments must fail rather than publish an unverified
+  // GETLK result. Blocking requests are a separate #433 feature.
+  struct flock invalid = request;
+  invalid.l_whence = SEEK_END;
+  FuseReplyCapture invalid_get;
+  invalid_get.user_data = &second_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsGetlk(reinterpret_cast<fuse_req_t>(&invalid_get), 123, &other_fi, &invalid);
+  ASSERT_TRUE(invalid_get.Wait());
+  ASSERT_TRUE(invalid_get.error.has_value());
+  EXPECT_EQ(*invalid_get.error, EINVAL);
+  EXPECT_FALSE(invalid_get.lock_reply.has_value());
+
+  FuseReplyCapture blocking;
+  blocking.user_data = &second_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsSetlk(reinterpret_cast<fuse_req_t>(&blocking), 123, &other_fi, &request, 1);
+  ASSERT_TRUE(blocking.Wait());
+  ASSERT_TRUE(blocking.error.has_value());
+  EXPECT_EQ(*blocking.error, EOPNOTSUPP);
+
+  swordfs::fuse::MountInitContext no_authority;
+  no_authority.posix_locks_negotiated = true;
+  FuseReplyCapture unavailable_get;
+  unavailable_get.user_data = &no_authority;
+  swordfs::fuse::VfsHookFactory::SwordFsGetlk(reinterpret_cast<fuse_req_t>(&unavailable_get), 123, &other_fi, &request);
+  ASSERT_TRUE(unavailable_get.Wait());
+  ASSERT_TRUE(unavailable_get.error.has_value());
+  EXPECT_EQ(*unavailable_get.error, EIO);
+  FuseReplyCapture unavailable_set;
+  unavailable_set.user_data = &no_authority;
+  swordfs::fuse::VfsHookFactory::SwordFsSetlk(reinterpret_cast<fuse_req_t>(&unavailable_set), 123, &other_fi, &request,
+                                              0);
+  ASSERT_TRUE(unavailable_set.Wait());
+  ASSERT_TRUE(unavailable_set.error.has_value());
+  EXPECT_EQ(*unavailable_set.error, EIO);
+
+  // A different fd (including a missing one) must still unlock on a delivered
+  // FLUSH; the original SETLK's fh has no role in POSIX ownership.
+  fuse_file_info unrelated_fd{};
+  unrelated_fd.fh = UINT64_MAX;
+  unrelated_fd.lock_owner = fi.lock_owner;
+  first_mount.posix_locks_negotiated = false;
+  FuseReplyCapture disabled_close;
+  disabled_close.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsFlush(reinterpret_cast<fuse_req_t>(&disabled_close), 123, &unrelated_fd);
+  ASSERT_TRUE(disabled_close.Wait());
+  ASSERT_TRUE(disabled_close.error.has_value());
+  EXPECT_EQ(*disabled_close.error, EINVAL);
+  EXPECT_EQ(
+      second_authority.SetPosix(123, 201, {10, 30, swordfs::metadata::ILockAuthority::PosixType::kWrite}).ToErrno(),
+      EAGAIN);
+
+  first_mount.posix_locks_negotiated = true;
+  FuseReplyCapture close;
+  close.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsFlush(reinterpret_cast<fuse_req_t>(&close), 123, &unrelated_fd);
+  ASSERT_TRUE(close.Wait());
+  ASSERT_TRUE(close.error.has_value());
+  EXPECT_EQ(*close.error, EINVAL);  // Data flush failed, but remote release still ran.
+
+  FuseReplyCapture granted;
+  granted.user_data = &second_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsSetlk(reinterpret_cast<fuse_req_t>(&granted), 123, &other_fi, &request, 0);
+  ASSERT_TRUE(granted.Wait());
+  ASSERT_TRUE(granted.error.has_value());
+  EXPECT_EQ(*granted.error, 0);
+
+  // A successful WRITE->READ conversion must not be reverted when the FUSE
+  // success reply fails: a second reader may have joined in the meantime.
+  struct flock convert = request;
+  convert.l_start = 128;
+  convert.l_len = 10;
+  FuseReplyCapture first_write;
+  first_write.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsSetlk(reinterpret_cast<fuse_req_t>(&first_write), 123, &fi, &convert, 0);
+  ASSERT_TRUE(first_write.Wait());
+  EXPECT_EQ(first_write.error.value_or(-1), 0);
+
+  convert.l_type = F_RDLCK;
+  FuseReplyCapture failed_reply;
+  failed_reply.user_data = &first_mount;
+  failed_reply.reply_result = -EIO;
+  swordfs::fuse::VfsHookFactory::SwordFsSetlk(reinterpret_cast<fuse_req_t>(&failed_reply), 123, &fi, &convert, 0);
+  ASSERT_TRUE(failed_reply.Wait());
+  EXPECT_EQ(failed_reply.error.value_or(-1), 0);
+  FuseReplyCapture joining_reader;
+  joining_reader.user_data = &second_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsSetlk(reinterpret_cast<fuse_req_t>(&joining_reader), 123, &other_fi, &convert,
+                                              0);
+  ASSERT_TRUE(joining_reader.Wait());
+  EXPECT_EQ(joining_reader.error.value_or(-1), 0);
+
+  convert.l_type = F_WRLCK;
+  FuseReplyCapture forbidden_rollback;
+  forbidden_rollback.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsSetlk(reinterpret_cast<fuse_req_t>(&forbidden_rollback), 123, &fi, &convert, 0);
+  ASSERT_TRUE(forbidden_rollback.Wait());
+  EXPECT_EQ(forbidden_rollback.error.value_or(-1), EAGAIN);
+
+  // With a valid fh, data FLUSH succeeds; remote unlock failure must still
+  // surface as EIO. A lease cannot be used for a new grant after revocation.
+  fuse_file_info create_info{};
+  create_info.flags = O_RDWR;
+  FuseReplyCapture create;
+  swordfs::fuse::VfsHookFactory::SwordFsCreate(reinterpret_cast<fuse_req_t>(&create), 1, "posix-lock-close", 0644,
+                                               &create_info);
+  ASSERT_TRUE(create.Wait());
+  ASSERT_TRUE(create.entry.has_value());
+  ASSERT_TRUE(create.fh.has_value());
+  fuse_file_info valid_fh{};
+  valid_fh.fh = *create.fh;
+  valid_fh.lock_owner = fi.lock_owner;
+
+  // Lease teardown happens only after all FUSE fibers have completed.
+  ASSERT_TRUE(second_lease.Revoke().ok());
+  ASSERT_TRUE(first_lease.Revoke().ok());
+
+  FuseReplyCapture revoked_flush;
+  revoked_flush.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsFlush(reinterpret_cast<fuse_req_t>(&revoked_flush), create.entry->ino,
+                                              &valid_fh);
+  ASSERT_TRUE(revoked_flush.Wait());
+  ASSERT_TRUE(revoked_flush.error.has_value());
+  EXPECT_EQ(*revoked_flush.error, EIO);
+
+  FuseReplyCapture release;
+  swordfs::fuse::VfsHookFactory::SwordFsRelease(reinterpret_cast<fuse_req_t>(&release), create.entry->ino, &valid_fh);
+  ASSERT_TRUE(release.Wait());
+  EXPECT_EQ(release.error.value_or(-1), 0);
 }
 
 TEST_F(VfsImplIntegrationTest, IoctlControlSurfaceIsGatedAndUsesRestrictedBuffers) {

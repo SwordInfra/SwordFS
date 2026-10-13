@@ -20,12 +20,14 @@ class ILockAuthority {
     uint64_t start;
     uint64_t length;  // zero means through EOF
     PosixType type;
+    int32_t pid = 0;  // Kernel-supplied process PID; never used as owner identity.
   };
   struct PosixConflict {
     uint64_t start;
     uint64_t length;
     uint64_t kernel_owner;
     PosixType type;
+    int32_t pid = 0;
   };
   enum class FlockType { kShared, kExclusive, kUnlock };
 
@@ -35,6 +37,10 @@ class ILockAuthority {
   virtual utils::Status GetPosix(uint64_t inode_ino, uint64_t kernel_owner, PosixRange request,
                                  std::optional<PosixConflict> *conflict) = 0;
   virtual utils::Status SetFlock(uint64_t inode_ino, uint64_t kernel_owner, FlockType type) = 0;
+
+  // Fiber-safe, nonblocking pre-reply gate. A successful Redis mutation is
+  // not a grant if its mount generation became invalid before FUSE replied.
+  virtual bool CanGrant() const = 0;
 };
 
 }  // namespace swordfs::metadata

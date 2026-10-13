@@ -310,6 +310,14 @@ Issue. Known-gap categories are:
   contract;
 - `known_unsupported` — the testcase requires a SwordFS capability that is not
   implemented yet;
+- `kernel_local_only` — an explicitly reviewed PASS proves only kernel-local
+  behavior while the SwordFS distributed capability remains unadvertised. This
+  category requires an Issue, an exact `PASS` expectation and no FAIL evidence;
+  it does **not** increase `supported.txt` or the supported-pass count. The
+  specific upstream assertion must be inspected before admitting this category;
+  `generic/131` and `generic/478` currently exercise mount-local POSIX/OFD
+  locks even with `FUSE_CAP_POSIX_LOCKS` disabled, while remote cross-Mount
+  validation and activation remain #433/#464 work;
 - `upstream_not_applicable` — the testcase fundamentally cannot apply to the
   SwordFS FUSE/distributed model for a concrete upstream capability reason;
 - `upstream_test_defect` — the tested semantic applies, but the pinned upstream
@@ -417,8 +425,10 @@ supported + PASS       -> PASS
 supported + FAIL       -> REGRESSION                 (blocking)
 supported + NOTRUN     -> BASELINE_NOT_APPLICABLE    (blocking)
 
-known gap + expected observed result -> KNOWN_* / ENVIRONMENT / UPSTREAM_TEST_DEFECT
-known gap + PASS                    -> XPASS          (blocking)
+known gap + expected FAIL/NOTRUN    -> KNOWN_* / ENVIRONMENT / UPSTREAM_TEST_DEFECT
+known gap + unexpected PASS         -> XPASS          (blocking)
+kernel_local_only + PASS            -> KERNEL_LOCAL_ONLY (not remote support)
+kernel_local_only + FAIL/NOTRUN     -> BASELINE_RESULT_MISMATCH (blocking)
 known gap + different FAIL/NOTRUN   -> BASELINE_RESULT_MISMATCH
 known NOTRUN + changed skip reason  -> BASELINE_REASON_MISMATCH
 known FAIL + changed failure reason -> BASELINE_REASON_MISMATCH
@@ -471,8 +481,10 @@ Once the baseline is established:
 - supported coverage is monotonic by default;
 - removing supported coverage requires the explicitly reviewed
   `conformance-semantic-change` PR label;
-- a known gap that starts passing is XPASS and blocks until it is moved into
-  `supported.txt`;
+- a FAIL/NOTRUN known gap that starts passing is XPASS and blocks until its
+  authoritative contract is reviewed. A demonstrated kernel-local-only PASS
+  may instead be recorded with its exact test ID, issue and evidence, while
+  retaining mandatory PASS and excluding it from distributed support metrics;
 - a known NOTRUN whose reason changes blocks until the classification is
   re-evaluated;
 - a known FAIL whose required detailed evidence disappears or changes after
