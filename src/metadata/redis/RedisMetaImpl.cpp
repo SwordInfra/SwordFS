@@ -557,6 +557,11 @@ Status RedisMetaImpl::VisitPendingDeletesBatch(size_t max_items, const PendingDe
   return ops_.VisitPendingDeletesBatch(max_items, visitor, has_more);
 }
 
+Status RedisMetaImpl::RegisterPendingDelete(const PendingDelete &work) {
+  utils::ExpectInFiberDomain();
+  return ops_.RegisterPendingDelete(work);
+}
+
 Status RedisMetaImpl::CompletePendingDelete(std::string_view key) {
   utils::ExpectInFiberDomain();
   return ops_.CompletePendingDelete(key);
@@ -575,6 +580,45 @@ Status RedisMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk>
                                   const SwordFsChunk &replacement, const ChunkPublishIntent &intent) {
   utils::ExpectInFiberDomain();
   return ops_.CommitChunk(ino, expected, replacement, intent);
+}
+
+Status RedisMetaImpl::ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out) {
+  utils::ExpectInFiberDomain();
+  return ops_.ReadFileChunkSnapshot(ino, index, out);
+}
+
+Status RedisMetaImpl::ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out) {
+  utils::ExpectInFiberDomain();
+  return ops_.ReadFileMappingSnapshot(ino, out);
+}
+
+Status RedisMetaImpl::ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out) {
+  utils::ExpectInFiberDomain();
+  return ops_.ProbeAttachment(ino, index, out);
+}
+
+Status RedisMetaImpl::AttachPrepared(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                                     const FileSizePrecondition &expected) {
+  utils::ExpectInFiberDomain();
+  return ops_.AttachPrepared(ino, index, chunk_id, end, expected);
+}
+
+Status RedisMetaImpl::FinalizeAttachedWrite(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                                            const FileSizePrecondition &expected) {
+  utils::ExpectInFiberDomain();
+  return ops_.FinalizeAttachedWrite(ino, index, chunk_id, end, expected);
+}
+
+Status RedisMetaImpl::CommitShrink(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
+                                   SetAttrField fields, ChunkSizeCommitResult *out) {
+  utils::ExpectInFiberDomain();
+  return ops_.CommitShrink(ino, plan, requested, fields, out);
+}
+
+Status RedisMetaImpl::CommitGrow(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
+                                 SetAttrField fields, ChunkSizeCommitResult *out) {
+  utils::ExpectInFiberDomain();
+  return ops_.CommitGrow(ino, plan, requested, fields, out);
 }
 
 Status RedisMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {

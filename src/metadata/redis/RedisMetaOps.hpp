@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "metadata/ChunkMetadata.hpp"
+#include "metadata/ChunkSizePlan.hpp"
 #include "metadata/IChunkIndexTxn.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
@@ -33,6 +34,9 @@ namespace swordfs::metadata {
 class DirIterator;
 class RedisBackendContext;
 class RedisMetaTxn;
+struct FileChunkSnapshot;
+struct FileMappingSnapshot;
+struct ChunkSizeCommitResult;
 
 // Redis-backed SwordFS metadata operations.
 //
@@ -80,11 +84,23 @@ class RedisMetaOps {
   utils::Status VisitPendingDeletesBatch(size_t max_items,
                                          const std::function<utils::Status(const PendingDelete &)> &visitor,
                                          bool *has_more);
+  utils::Status RegisterPendingDelete(const PendingDelete &work);
   utils::Status CompletePendingDelete(std::string_view object_key);
   utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
                             const ChunkPublishIntent &intent = {});
   utils::Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
   utils::Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out);
+  utils::Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out);
+  utils::Status ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out);
+  utils::Status ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out);
+  utils::Status AttachPrepared(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                               const FileSizePrecondition &expected);
+  utils::Status FinalizeAttachedWrite(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,
+                                      const FileSizePrecondition &expected);
+  utils::Status CommitShrink(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                             ChunkSizeCommitResult *out);
+  utils::Status CommitGrow(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
+                           ChunkSizeCommitResult *out);
   utils::Status AllocateInode(InodeID *ino);
   utils::Status AllocateChunkRevision(ChunkRevision *revision);
 

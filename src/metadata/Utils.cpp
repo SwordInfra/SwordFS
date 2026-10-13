@@ -8,11 +8,77 @@
 #include <unistd.h>
 
 #include <cctype>
+#include <utility>
 
 #include "dirent.h"
+#include "metadata/InodePolicy.hpp"
+#include "metadata/PosixAcl.hpp"
 #include "metadata/types/Common.hpp"
 
 namespace swordfs::metadata {
+
+utils::Status PrepareSetAttrMutation(const SwordFsInode &current, const SwordFsAttr &requested, SetAttrField fields,
+                                     SwordFsInode *out) {
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("SetAttr mutation output is null");
+  }
+  auto status = CheckSetAttrPolicy(current.attr, fields);
+  if (!status.ok()) {
+    return status;
+  }
+
+  SwordFsInode next = current;
+  auto &attr = next.attr;
+  const bool size_changed = HasSetAttrField(fields, SetAttrField::kSize) && requested.size != attr.size;
+  if (HasSetAttrField(fields, SetAttrField::kMode)) {
+    attr.mode = (attr.mode & S_IFMT) | (requested.mode & 07777);
+  }
+  if (HasSetAttrField(fields, SetAttrField::kUid)) {
+    attr.uid = requested.uid;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kGid)) {
+    attr.gid = requested.gid;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kSize)) {
+    attr.size = requested.size;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kAtime)) {
+    attr.atime = requested.atime;
+    attr.atime_nsec = requested.atime_nsec;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kMtime)) {
+    attr.mtime = requested.mtime;
+    attr.mtime_nsec = requested.mtime_nsec;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kAtimeNow)) {
+    next.Touch(SetAttrField::kAtime);
+  }
+  if (HasSetAttrField(fields, SetAttrField::kMtimeNow)) {
+    next.Touch(SetAttrField::kMtime);
+  }
+  if (HasSetAttrField(fields, SetAttrField::kCtime)) {
+    attr.ctime = requested.ctime;
+    attr.ctime_nsec = requested.ctime_nsec;
+  }
+  if (HasSetAttrField(fields, SetAttrField::kKillSuidGid)) {
+    attr.ClearSetidForKillPriv();
+  }
+  if (size_changed && !HasSetAttrField(fields, SetAttrField::kMtime) &&
+      !HasSetAttrField(fields, SetAttrField::kMtimeNow)) {
+    next.Touch(SetAttrField::kMtime);
+  }
+  if (!HasSetAttrField(fields, SetAttrField::kCtime)) {
+    next.Touch(SetAttrField::kCtime);
+  }
+  if (HasSetAttrField(fields, SetAttrField::kMode)) {
+    status = SyncPosixAccessAclForMode(&next, attr.mode);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  *out = std::move(next);
+  return utils::Status::OK();
+}
 
 CreateInheritance ResolveCreateInheritance(uint64_t caller_gid, const SwordFsAttr &parent, uint32_t child_mode) {
   CreateInheritance result{.gid = caller_gid, .mode = child_mode};

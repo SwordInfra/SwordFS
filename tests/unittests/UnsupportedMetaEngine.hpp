@@ -12,6 +12,34 @@ namespace swordfs::test {
 // A derived fixture overrides only the exact methods the component consumes.
 class UnsupportedMetaEngine : public metadata::IMetaEngine {
  public:
+  // This test-only adapter deliberately does not model FileMetadata. Tests
+  // needing typed attachment or EOF transactions must provide a real fixture.
+  utils::Status ReadFileChunkSnapshot(metadata::InodeID, metadata::ChunkIndex, metadata::FileChunkSnapshot *) override {
+    return Unsupported();
+  }
+  utils::Status ReadFileMappingSnapshot(metadata::InodeID, metadata::FileMappingSnapshot *) override {
+    return Unsupported();
+  }
+  utils::Status ProbeAttachment(metadata::InodeID, metadata::ChunkIndex, std::optional<metadata::ChunkID> *) override {
+    return Unsupported();
+  }
+  utils::Status AttachPrepared(metadata::InodeID, metadata::ChunkIndex, metadata::ChunkID, uint64_t,
+                               const metadata::FileSizePrecondition &) override {
+    return Unsupported();
+  }
+  utils::Status FinalizeAttachedWrite(metadata::InodeID, metadata::ChunkIndex, metadata::ChunkID, uint64_t,
+                                      const metadata::FileSizePrecondition &) override {
+    return Unsupported();
+  }
+  utils::Status CommitShrink(metadata::InodeID, const metadata::ChunkSizePlan &, const metadata::SwordFsAttr &,
+                             metadata::SetAttrField, metadata::ChunkSizeCommitResult *) override {
+    return Unsupported();
+  }
+  utils::Status CommitGrow(metadata::InodeID, const metadata::ChunkSizePlan &, const metadata::SwordFsAttr &,
+                           metadata::SetAttrField, metadata::ChunkSizeCommitResult *) override {
+    return Unsupported();
+  }
+
   utils::Status Initialize() override {
     return utils::Status::OK();
   }

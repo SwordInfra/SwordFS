@@ -28,6 +28,9 @@ class Chunk {
   virtual utils::Status Write(size_t offset, const folly::IOBuf &data) = 0;
   virtual utils::Status Flush() = 0;
   virtual void TruncateLocal(size_t size) = 0;
+  // Reconcile a successfully sanitized private boundary without discarding
+  // dirty writes. TruncateLocal additionally cuts the dirty buffer.
+  virtual void ClampPublishedPrefix(size_t visible_prefix) = 0;
   virtual bool HasPendingWrites() const = 0;
 
  protected:

@@ -226,7 +226,10 @@ utils::Status VfsImpl::SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, st
     }
     status = file_handle->SetAttr(metadata_attr, fields, out_attr ? &inode : nullptr);
   } else {
-    auto inode_handle = InodeHandleManager::Instance().Get(ino, false);
+    // Size mutations must pass through the mount-wide per-inode operation
+    // barrier even when no file descriptor is open. Reuse/create the shared
+    // handle so an Open racing this path cannot publish an old COW boundary.
+    auto inode_handle = InodeHandleManager::Instance().Get(ino, metadata::HasSetAttrField(fields, SetAttrField::kSize));
     if (inode_handle) {
       status = inode_handle->SetAttr(metadata_attr, fields, out_attr ? &inode : nullptr);
     } else {

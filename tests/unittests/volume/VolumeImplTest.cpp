@@ -5,16 +5,21 @@
 #include <unistd.h>
 
 #include <CLI/CLI.hpp>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "TestCOWChunkMetadata.hpp"
 #include "UnsupportedMetaEngine.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
+#include "chunk/cow/COWCleanup.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/redis/RedisTestUtils.hpp"
@@ -44,6 +49,10 @@ void ParseConfig(std::vector<std::string> args) {
 
 class NoopDataEngine final : public swordfs::storage::IDataEngine {
  public:
+  explicit NoopDataEngine(std::shared_ptr<std::atomic<int>> delete_count = nullptr)
+      : delete_count_(std::move(delete_count)) {
+  }
+
   Status Initialize() override {
     return Status::OK();
   }
@@ -54,8 +63,14 @@ class NoopDataEngine final : public swordfs::storage::IDataEngine {
     return Status::OK();
   }
   Status Delete(std::string_view) override {
+    if (delete_count_) {
+      delete_count_->fetch_add(1, std::memory_order_relaxed);
+    }
     return Status::OK();
   }
+
+ private:
+  std::shared_ptr<std::atomic<int>> delete_count_;
 };
 
 class InvalidChunkMetadataEngine final : public swordfs::test::UnsupportedMetaEngine {
@@ -121,6 +136,66 @@ class EncodedVolumeMetaEngine final : public swordfs::test::UnsupportedMetaEngin
 
  private:
   std::string encoded_;
+};
+
+struct DetachedCleanupObserver {
+  std::promise<void> acknowledged;
+  std::atomic<int> attachment_probes{0};
+};
+
+// Models only the metadata API involved in a durable, already-detached COW
+// cleanup. The production mount owns and runs the actual GC participant.
+class DetachedCleanupMetaEngine final : public swordfs::test::UnsupportedMetaEngine {
+ public:
+  DetachedCleanupMetaEngine(swordfs::metadata::PendingDelete candidate,
+                            std::shared_ptr<DetachedCleanupObserver> observer, bool still_attached = false)
+      : candidate_(std::move(candidate)), observer_(std::move(observer)), still_attached_(still_attached) {
+  }
+
+  Status LoadVolume(SwordFsVolume *out) override {
+    return swordfs::test::LoadConfiguredTestVolume(out);
+  }
+  Status OpenChunkMetadata(ChunkType type, swordfs::metadata::ChunkMetadataPtr *out) override {
+    if (type != ChunkType::kCow || out == nullptr) {
+      return Status::InvalidArgument("invalid cleanup mechanism request");
+    }
+    *out = std::make_shared<swordfs::test::TestCOWChunkMetadata>();
+    return Status::OK();
+  }
+  Status BindChunkMetadataBridge(swordfs::chunk::internal::ChunkMetadataBridge *) override {
+    return Status::OK();
+  }
+  Status VisitPendingDeletesBatch(size_t, const swordfs::metadata::PendingDeleteVisitorFn &visitor,
+                                  bool *has_more) override {
+    *has_more = false;
+    if (served_) {
+      return Status::OK();
+    }
+    served_ = true;
+    return visitor(candidate_);
+  }
+  Status VisitPendingReclaims(const swordfs::metadata::ReclaimVisitorFn &) override {
+    return Status::OK();
+  }
+  Status ProbeAttachment(swordfs::metadata::InodeID, swordfs::metadata::ChunkIndex,
+                         std::optional<swordfs::metadata::ChunkID> *attached) override {
+    observer_->attachment_probes.fetch_add(1, std::memory_order_relaxed);
+    if (still_attached_) {
+      *attached = swordfs::metadata::ChunkID(123);
+      return Status::OK();
+    }
+    return Status::NotFound("inode reclaimed before physical cleanup");
+  }
+  Status CompletePendingDelete(std::string_view) override {
+    observer_->acknowledged.set_value();
+    return Status::OK();
+  }
+
+ private:
+  swordfs::metadata::PendingDelete candidate_;
+  std::shared_ptr<DetachedCleanupObserver> observer_;
+  bool served_ = false;
+  bool still_attached_ = false;
 };
 
 }  // namespace
@@ -421,6 +496,62 @@ TEST_F(VolumeImplTest, MountRejectsCleanupMetadataClassMismatch) {
   const auto status = volume.LoadFrom(swordfs::test::MakeTestMountOptions(volume_name));
   EXPECT_EQ(status.ToErrno(), EINVAL);
   EXPECT_EQ(status.message(), "COW cleanup metadata type mismatch");
+}
+
+TEST_F(VolumeImplTest, RuntimeGcTreatsMissingInodeAsDetachedForTypedCleanup) {
+  swordfs::metadata::PendingDelete candidate;
+  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedDelete(
+                  105, {.index = 0, .chunk_id = swordfs::metadata::ChunkID(123)}, &candidate)
+                  .ok());
+  auto observer = std::make_shared<DetachedCleanupObserver>();
+  auto completed = observer->acknowledged.get_future();
+
+  SwordFsVolume config;
+  config.name = makeVolumeName("detached-cleanup");
+  config.storage = std::string(swordfs::test::kTestDataEngine);
+  config.bucket = "opaque://endpoint/bucket";
+  config.chunk_type = ChunkType::kCow;
+  config.chunk_size = 4096;
+  auto options =
+      PrepareInjectedMount(config, std::make_unique<DetachedCleanupMetaEngine>(std::move(candidate), observer));
+  swordfs::test::pending_data_engine = std::make_unique<NoopDataEngine>();
+
+  VolumeImpl volume;
+  ASSERT_TRUE(volume.LoadFrom(options).ok());
+  volume.StartRuntimeServices();
+  const auto result = completed.wait_for(std::chrono::seconds(5));
+  volume.StopRuntimeServices();
+  EXPECT_EQ(result, std::future_status::ready);
+  EXPECT_EQ(observer->attachment_probes.load(std::memory_order_relaxed), 1);
+}
+
+TEST_F(VolumeImplTest, RuntimeGcPreservesStillAttachedTypedChunk) {
+  swordfs::metadata::PendingDelete candidate;
+  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedDelete(
+                  105, {.index = 0, .chunk_id = swordfs::metadata::ChunkID(123)}, &candidate)
+                  .ok());
+  auto observer = std::make_shared<DetachedCleanupObserver>();
+  auto completed = observer->acknowledged.get_future();
+  auto delete_count = std::make_shared<std::atomic<int>>(0);
+
+  SwordFsVolume config;
+  config.name = makeVolumeName("attached-cleanup");
+  config.storage = std::string(swordfs::test::kTestDataEngine);
+  config.bucket = "opaque://endpoint/bucket";
+  config.chunk_type = ChunkType::kCow;
+  config.chunk_size = 4096;
+  auto options =
+      PrepareInjectedMount(config, std::make_unique<DetachedCleanupMetaEngine>(std::move(candidate), observer, true));
+  swordfs::test::pending_data_engine = std::make_unique<NoopDataEngine>(delete_count);
+
+  VolumeImpl volume;
+  ASSERT_TRUE(volume.LoadFrom(options).ok());
+  volume.StartRuntimeServices();
+  const auto result = completed.wait_for(std::chrono::seconds(5));
+  volume.StopRuntimeServices();
+  EXPECT_EQ(result, std::future_status::ready);
+  EXPECT_EQ(observer->attachment_probes.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(delete_count->load(std::memory_order_relaxed), 0);
 }
 
 TEST_F(VolumeImplTest, CreateFromNormalizesDataEngineIdentity) {
