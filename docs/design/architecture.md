@@ -65,7 +65,7 @@ The major responsibilities are:
 | --- | --- | --- |
 | FUSE hooks | Translate libfuse requests/replies and admit work into the fiber runtime | Filesystem state or persistence |
 | VFS/handle layer | POSIX-facing orchestration, open-handle lifetime, file/chunk runtime state | Durable namespace storage implementation |
-| Metadata engine | Authoritative inode, directory, chunk-descriptor, transaction, orphan/reclaim metadata | File object bytes |
+| Metadata engine | Authoritative inode, directory, typed chunk mapping, transaction, orphan/reclaim metadata | File object bytes |
 | Data engine | Put/Get/Delete immutable file objects | Namespace/link/inode semantics |
 | Orphan reclaimer | Apply the mount-local open-handle fence and hand durable orphan candidates to metadata preparation | Physical object deletion or mechanism-specific cleanup payloads |
 | Private chunk GC | Replay durable pending-delete/reclaim work, revalidate reachability, delete physical data, and acknowledge success | Namespace/open-handle policy |
@@ -73,8 +73,9 @@ The major responsibilities are:
 `VolumeImpl` is the mount composition root. It binds one mounted volume to one
 metadata engine and, when configured, one data engine. After loading the
 persisted `ChunkType`, it opens the chunk-type-selected typed `ChunkMetadata`
-capability, constructs the transitional legacy `ChunkMetadataBridge`, and then
-constructs the mount-owned `ChunkFactory` and private chunk-GC worker. VFS sees
+capability, binds the pure `ChunkCleanupWorkEncoder` for detached ChunkID
+maintenance, and then constructs the mount-owned `ChunkFactory` and private
+chunk-GC worker. VFS sees
 only the stable `ChunkFactory`/`Chunk` data-path facade and never receives the
 typed mechanism metadata capability or a chunk-type implementation object.
 Backends are selected by URL scheme through registries rather than hard-coded
@@ -318,23 +319,12 @@ Lifecycle/control operations such as engine construction, initialization, format
 
 ### 6.2 Core metadata model
 
-The main logical records are:
-
-- **`SwordFsInode`** — inode ID, POSIX-like attributes, parent inode, optional symlink target;
-- **directory entry** — name/type/inode mapping owned by a directory;
-- **`SwordFsChunk`** — the shared file-to-logical-chunk head, currently containing index, publication generation, and logical size; the logical start offset is derived from `index * chunk_size` rather than persisted;
-- **volume configuration** — storage/backend configuration and chunk size;
-- **orphan candidate** — inode whose last namespace link disappeared but which has not crossed the reclaim point of no return;
-- **`ReclaimWork`** — a frozen opaque chunk-type-private payload for an inode already removed from live metadata and awaiting/undergoing data deletion.
-
-Directory entries, inodes, and logical chunk heads are common to every chunk
-type. Chunk-internal fragment indexes belong to the selected chunk-type
-implementation, under its own metadata key space and encoding. Metadata does
-**not** store mutable object bytes. In the current `cow` implementation,
-the head's generation also identifies the immutable physical object revision.
-That second meaning is specific to the transitional COW common head;
-#312 removes it from the final mechanism-neutral `SwordFsChunk` contract after
-the mechanism-private authority cutover.
+The common logical records are `SwordFsInode`, directory entries, and the
+FileMetadata-owned mapping `ChunkIndex -> ChunkID`. `ChunkIndex` is a checked
+unsigned 64-bit logical coordinate; `ChunkID` is a monotonic volume-scoped
+identity that is never reused after detach. COW revision, valid-prefix size
+and immutable object identity belong only to the private typed ChunkMetadata
+domain. A missing mapping inside EOF represents a sparse hole.
 
 For relationships between these records, handles, and write buffers, see
 [Data structures and ownership](data-structures.md).
@@ -343,10 +333,12 @@ For relationships between these records, handles, and write buffers, see
 
 The Redis implementation owns durable FileMetadata state and makes composite
 namespace/chunk transitions visible atomically through its transaction layer.
-The currently transitional `ChunkMetadataBridge` still participates in the
-common-head publication path; typed `ChunkMetadata` remains its own semantic
-domain. The staged #317/#318/#319/#320 cutover removes remaining common-head
-authority without introducing a second metadata backend.
+`AttachPrepared`, `FinalizeAttachedWrite`, `CommitShrink` and `CommitGrow`
+atomically validate and mutate FileMetadata mappings and inode EOF. COW-private
+head CAS remains a separate domain and is never part of the same Redis
+transaction. The pure `ChunkCleanupWorkEncoder` only serializes detached
+ChunkID identities for safe maintenance; it does not consult or mutate private
+COW metadata.
 
 No pointers to mutable transaction-owned inode state escape as authoritative
 state; callers observe value snapshots and commit mutations transactionally.
@@ -537,96 +529,18 @@ a lookup-only miss returns `OK` with `nullptr`; and a create-on-miss returns an
 empty usable chunk. The factory is concrete and mount-owned so mechanism
 selection does not become another public polymorphic API.
 
-Metadata transactions use a transitional internal
-`chunk::internal::ChunkMetadataBridge`. It contains only the transaction-time
-callbacks needed by the current shared-head protocol: load, publish, truncate,
-reclaim preparation, and freezing durable cleanup work. It has no runtime
-chunk construction or physical-delete API and retains no
-`ChunkMetadataPtr`; `cow::COWChunkMetadataBridge` is a stateless
-legacy/common-authority adapter. `VolumeImpl` validates that the opened typed
-ChunkMetadata capability matches the persisted chunk type and owns that
-capability for the mount lifetime. `ChunkFactory` receives the capability
-explicitly, while the Redis backend retains only a non-owning bridge pointer. This bridge
-preserves the existing transaction ordering while later mechanism-specific
-metadata work moves behind typed ChunkMetadata implementations. #318 retires truncate
-callbacks, #319 retires cleanup/reclaim callbacks, #317 retires
-publication/load callbacks, and #320 removes the remaining bridge surface; new
-typed COW metadata must not be routed through this transitional adapter.
+Metadata transactions own only FileMetadata reachability: the inode EOF
+and typed `chunk_refs:<ino>` logical index to ChunkID map. The COW selected
+`ChunkMetadata` owns per-ChunkID `COWChunkHead{revision,size}` and private
+revision allocation. `VolumeImpl` opens this capability and passes it through
+`ChunkFactory`; a pure `ChunkCleanupWorkEncoder` serializes detached work
+without sharing mutable metadata or participating in Redis transactions.
 
-The final metadata architecture has two independent semantic/atomicity domains
-behind `IMetaEngine`: FileMetadata owns inode/namespace/EOF and the eventual
-`ChunkIndex -> ChunkID` reachability mapping, while the selected
-`ChunkMetadata` implementation owns mechanism state rooted at `ChunkID`.
-`ChunkID` is a strong volume-scoped identity that is stable for one attached
-chunk-state materialization and is never reused after detach. Its numeric value
-is exposed only as a stable representation for persistence, typed key
-construction, and diagnostics. For COW, `COWChunkMetadata` now owns the staged
-`ChunkID -> COWChunkHead{revision,size}` model and an independent monotonic
-`COWChunkRevision` allocator per ChunkID. Full-head CAS compares revision and
-size; a retained-boundary clamp keeps the same revision and reduces only size.
-ChunkMetadata allocation and typed mutation do not participate in
-`RedisMetaTxn`; Redis may share backend infrastructure without sharing
-a correctness transaction. The raw
-`IChunkIndexTxn` record operations that remain today are solely legacy
-`ChunkMetadataBridge` plumbing until the staged authority cutover removes
-them. The implemented COW path is represented by the typed
-`COWChunkMetadata` root; Redis provides the COW-specific backend
-implementation. Other chunk types remain unsupported until their own typed
-metadata roots exist rather than falling back to a generic backend capability.
-
-`ChunkFactory` narrows the mount-owned generic capability to
-`COWChunkMetadata` and passes that typed dependency into each `COWChunk`.
-During #316 the runtime retains the dependency but does not use it as live
-read/publication/truncate authority. Legacy `SwordFsChunk`, the common revision
-allocator, and `(InodeID, ChunkIndex, ChunkRevision)` object keys therefore
-remain the sole production path until #317; no shadow state or dual-write
-invariant is introduced.
-
-Each published chunk has a metadata descriptor:
-
-```text
-SwordFsChunk {
-    index
-    revision
-    size
-}
-```
-
-The logical chunk start is derived from `index * chunk_size`; duplicating it
-in persisted chunk metadata would create a second representation of the same
-fixed-layout identity. Offset-to-chunk mapping uses checked arithmetic: negative
-offsets are rejected before lookup/session creation, multiplication is bounded
-by the supported `off_t` maximum, and a non-empty write validates its entire
-range before mutating local state. Descriptor validation likewise accepts an
-extent ending exactly at `off_t` max and rejects an extent beyond it. During
-the staged #312 refactor, `revision` and `size`
-remain transitional common fields until COW publication, truncate,
-and cleanup consumers have moved to mechanism-private authoritative state.
-
-`revision` is currently a volume-wide monotonically allocated, non-zero
-publication generation for the shared head. Allocated generations may have
-gaps after failures, but one must not be reused while the volume's metadata
-remains authoritative. For the current `cow` implementation, that
-same value also identifies the immutable physical object revision. This
-mechanism-specific physical meaning is transitional and is not part of the
-target common `SwordFsChunk` contract under #312.
-
-For the current `cow` implementation using S3/object storage, the
-physical object key is:
-
-```text
-<inode>/<chunk-index>/<revision>
-```
-
-This gives each COW revision an immutable physical identity and
-allows metadata publication to change independently from an already-written
-object. `<chunk-index>` is the canonical unsigned decimal 64-bit logical index.
-Common descriptors and frozen cleanup/reclaim identities persist that index at
-64-bit width. No independent COW layout number is carried in the
-volume or cleanup wrappers; SwordFS beta metadata follows only the current
-layout, while generic codec schema/type framing remains responsible for record
-integrity. Future strategies may use a different physical layout under the
-same logical head.
+Immutable object keys are determined by `(ChunkID,COWChunkRevision)`, not by
+inode number or logical index. The generic metadata layer must not interpret
+private COW revisions or object-key encodings. Direct `SetAttr(kSize)` is
+rejected so `FileReadWriter` can coordinate EOF and retained-boundary COW
+sanitation under the inode operation lock.
 
 S3 requests that can block a foreground filesystem operation also require a
 finite terminal-completion policy owned by SwordFS. Transport low-speed
@@ -643,67 +557,32 @@ Within one inode, `FileReadWriter` uses a fiber read/write lock around file oper
 
 ## 9. Write and publication path
 
-For `cow`, the most important data-path invariant is:
+For COW, immutable object bytes are uploaded before publishing their private
+head. A dirty local buffer is never authoritative shared metadata.
 
-> **Object bytes are written before the metadata descriptor that makes those bytes authoritative.**
+### 9.1 First attachment
 
-### 9.1 Dirty chunk state
+The writer allocates a fresh ChunkID and its first private revision, uploads
+immutable bytes, then publishes the private COW head with compare-and-swap.
+`AttachPrepared(ino,index,id,end,expected)` atomically attaches the identity
+in FileMetadata only if EOF, boundary and existing mapping still match.
+Conflicting attachments are resolved from the latest authoritative state.
 
-When a chunk does not yet exist in metadata, the local `Chunk` starts in a writing state with a `WriteBuf`. It is **not** inserted into persistent/shared chunk metadata merely because bytes were written locally.
+### 9.2 Rewrite and flush
 
-This means unflushed data is local runtime state. A remote or restarted client cannot discover a partially written chunk through authoritative metadata.
+A rewrite keeps the same attached ChunkID, uploads a new per-ID revision, and
+CAS-publishes a new COW head. `FinalizeAttachedWrite` then checks the attached
+identity and the FileMetadata EOF/boundary precondition. New head revisions
+supersede old ones for **all** reads, with no snapshot semantics. After known
+success the old private revision is merely a best-effort cleanup candidate.
 
-### 9.2 Flush sequence
+### 9.3 Failure boundary
 
-For a new chunk or a rewritten chunk, flush follows this sequence:
-
-```mermaid
-sequenceDiagram
-    participant C as Chunk
-    participant M as Metadata Engine
-    participant D as Data Engine
-
-    C->>M: AllocateChunkRevision()
-    M-->>C: unique revision
-    C->>D: Put(ino/index/revision, bytes)
-    D-->>C: object durable/accepted
-    C->>M: CommitChunk(expected?, replacement)
-    M-->>C: authoritative descriptor published
-```
-
-`CommitChunk` provides compare-and-swap semantics:
-
-- first publication expects no existing descriptor;
-- rewrite publication carries the previously authoritative descriptor as `expected`;
-- replaying an already-published replacement is idempotent;
-- a conflicting publication is rejected rather than silently overwriting the winner;
-- after a **known** rewrite success, the superseded immutable revision is a
-  best-effort cleanup candidate;
-- after a **known** `AlreadyExists` / `NotFound`, the definitely losing
-  uploaded revision is a best-effort cleanup candidate;
-- cleanup registration failure may leak an obsolete object, but it does not
-  change the known publication result.
-
-The inode size side effect is reconciled as part of metadata publication and publication must not shrink inode size.
-
-### 9.3 Rewrite behavior
-
-The current object-storage path uses **whole-chunk copy-on-write** for overwrites of flushed chunks:
-
-1. read the currently published object into a fresh write buffer;
-2. apply the modification locally;
-3. allocate a new revision;
-4. upload a new full immutable object;
-5. CAS-publish the new descriptor;
-6. after a known successful publication, best-effort register the old
-   immutable revision in `pending_deletes`.
-
-The foreground rewrite path does not physically delete the previous object.
-The private chunk-GC worker discovers durable cleanup work at startup and on
-its periodic safety scan, rechecks reachability, and deletes physical data.
-Correctness does not depend on a VFS flush/truncate/setattr wakeup.
-
-There is currently no slice/extent overlay or compaction layer in the open-source data path. Random overwrites can therefore incur whole-chunk read/write amplification.
+The private COW head and FileMetadata are separate transactional domains.
+Object upload does not prove publication; CAS alone does not prove the entire
+write completed. On ambiguous Redis outcomes, reread authority before retry.
+A failed cleanup enqueue may leak storage, but cannot invalidate a known
+successful write. No common descriptor or dual-write path remains.
 
 ## 10. Read path
 
@@ -1088,7 +967,7 @@ Future changes should preserve or explicitly revise the following contracts:
 
 1. **Authoritative metadata operations are atomic.** Namespace observers must not see intermediate composite-operation state.
 2. **Runtime filesystem metadata operations execute in the fiber domain; blocking backend IO executes in POSIX worker threads.**
-3. **Unpublished chunk data is not authoritative shared metadata.** A chunk becomes authoritative only after object write + `CommitChunk` publication.
+3. **Unpublished chunk data is not authoritative shared metadata.** An object upload precedes COW head CAS and typed FileMetadata attachment/EOF publication.
 4. **Published object identities are immutable and revisioned.** Revisions are volume-scoped, non-zero, monotonic, and not reused.
 5. **Rewrite publication is conditional.** A stale writer must not overwrite a newer authoritative chunk descriptor.
 6. **Open-handle runtime state does not replace durable metadata.** Local fences protect transitions; they are not persistent lifecycle records.

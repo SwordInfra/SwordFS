@@ -102,7 +102,7 @@ class InvalidChunkMetadataEngine final : public swordfs::test::UnsupportedMetaEn
     return Status::OK();
   }
 
-  Status BindChunkMetadataBridge(swordfs::chunk::internal::ChunkMetadataBridge *) override {
+  Status BindChunkCleanupWorkEncoder(swordfs::chunk::internal::ChunkCleanupWorkEncoder *) override {
     return Status::OK();
   }
 
@@ -162,7 +162,7 @@ class DetachedCleanupMetaEngine final : public swordfs::test::UnsupportedMetaEng
     *out = std::make_shared<swordfs::test::TestCOWChunkMetadata>();
     return Status::OK();
   }
-  Status BindChunkMetadataBridge(swordfs::chunk::internal::ChunkMetadataBridge *) override {
+  Status BindChunkCleanupWorkEncoder(swordfs::chunk::internal::ChunkCleanupWorkEncoder *) override {
     return Status::OK();
   }
   Status VisitPendingDeletesBatch(size_t, const swordfs::metadata::PendingDeleteVisitorFn &visitor,

@@ -27,11 +27,9 @@ class RedisKey {
   std::string PosixLock(uint64_t inode_ino) const;
   std::string FlockLock(uint64_t inode_ino) const;
   std::string NextIno() const;
-  std::string NextChunkRevision() const;
   std::string NextChunkID() const;
   std::string Inode(uint64_t ino) const;
   std::string Directory(uint64_t parent_ino) const;
-  std::string Chunk(uint64_t ino) const;
   // #317 FileMetadata authority: index -> typed ChunkID, no COW state.
   std::string ChunkRefs(uint64_t ino) const;
   // Generic storage namespace for selected chunk type's private metadata.

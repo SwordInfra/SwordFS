@@ -64,7 +64,6 @@ using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsAttr;
-using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
@@ -982,13 +981,6 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   Status CompletePendingDelete(std::string_view) override {
     return Status::OK();
   }
-  Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
-    if (revision == nullptr) {
-      return Status::InvalidArgument("chunk revision output is null");
-    }
-    *revision = next_revision_++;
-    return Status::OK();
-  }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *iterator) override {
     if (call_status_.ok() && iterator != nullptr) {
       if (dir_iterator_ != nullptr) {
@@ -999,16 +991,6 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
       }
     }
     return call_status_;
-  }
-  Status CommitChunk(InodeID, const std::optional<swordfs::metadata::SwordFsChunk> &,
-                     const swordfs::metadata::SwordFsChunk &) override {
-    return Status::OK();
-  }
-  Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
-    return Status::NotFound("");
-  }
-  Status Truncate(InodeID, uint64_t) override {
-    return Status::OK();
   }
 
   void set_status(Status s) {
@@ -1188,7 +1170,6 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   int fail_dir_seek_call_ = 0;
   Status dir_seek_failure_{Status::OK()};
   Status dir_peek_status_{Status::OK()};
-  swordfs::metadata::ChunkRevision next_revision_ = 1;
   std::unordered_map<InodeID, SwordFsInode> inodes_;
   std::vector<swordfs::metadata::SwordFsEntry> dir_entries_{{".", DT_DIR, 1}};
   swordfs::metadata::DirIteratorPtr dir_iterator_;

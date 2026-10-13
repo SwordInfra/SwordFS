@@ -32,26 +32,21 @@ TEST(RedisMetaTxnTest, PrepareReclaimScansAuthoritativeChunksInsideTransaction) 
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk chunk{0, 1, 4096};
-  std::string chunk_data;
-  ASSERT_TRUE(chunk.SerializeTo(&chunk_data).ok());
-  redis.hset(key.Chunk(file.ino), "0", chunk_data);
+  redis.hset(key.ChunkRefs(file.ino), "0", "73");
 
   std::optional<ReclaimWork> work;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
     return txn.PrepareReclaim(file.ino, work);
   });
 
   ASSERT_TRUE(status.ok()) << status.message();
   ASSERT_TRUE(work.has_value());
-  std::vector<swordfs::chunk::cow::COWRef> refs;
-  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWReclaim(*work, 4096, &refs).ok());
-  ASSERT_EQ(refs.size(), 1U);
-  EXPECT_EQ(refs[0].descriptor, chunk);
-  EXPECT_EQ(refs[0].key, swordfs::chunk::cow::FormatCOWObjectKey(file.ino, chunk.index, chunk.revision));
+  ReclaimWork expected;
+  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedReclaim(file.ino, {{0, ChunkID(73)}}, &expected).ok());
+  EXPECT_EQ(work->payload, expected.payload);
   EXPECT_FALSE(redis.exists(key.Inode(file.ino)));
-  EXPECT_FALSE(redis.exists(key.Chunk(file.ino)));
+  EXPECT_FALSE(redis.exists(key.ChunkRefs(file.ino)));
   EXPECT_TRUE(redis.hexists(key.Reclaims(), std::to_string(file.ino)));
 }
 
@@ -78,7 +73,7 @@ TEST(RedisMetaTxnTest, LinkIgnoresUnrelatedFrozenWorkChanges) {
   int attempts = 0;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
     SwordFsInode parent;
     auto status = txn.LookupInode(kRootInodeId, &parent);
     if (!status.ok()) {
@@ -129,7 +124,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimIgnoresUnrelatedFrozenWorkChanges) {
   std::optional<ReclaimWork> work;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
     auto status = txn.PrepareReclaim(kIno, work);
     if (!status.ok()) {
       return status;
@@ -164,10 +159,7 @@ TEST(RedisMetaTxnTest, LinkCommitInvalidatesConcurrentReclaimSnapshot) {
   file_attr.nlink = 0;
   ASSERT_TRUE(SeedInode(redis, key, SwordFsInode(kIno, file_attr, kRootInodeId)).ok());
   redis.hset(key.Orphans(), std::to_string(kIno), "1");
-  const SwordFsChunk chunk{.index = 0, .revision = 1, .size = 64};
-  std::string encoded_chunk;
-  ASSERT_TRUE(chunk.SerializeTo(&encoded_chunk).ok());
-  redis.hset(key.Chunk(kIno), "0", encoded_chunk);
+  redis.hset(key.ChunkRefs(kIno), "0", "73");
 
   RedisMetaClient reclaim_store(config);
   RedisMetaClient link_store(config);
@@ -175,7 +167,7 @@ TEST(RedisMetaTxnTest, LinkCommitInvalidatesConcurrentReclaimSnapshot) {
   std::optional<ReclaimWork> work;
   const auto status = reclaim_store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
     auto status = txn.PrepareReclaim(kIno, work);
     if (!status.ok()) {
       return status;
@@ -185,7 +177,7 @@ TEST(RedisMetaTxnTest, LinkCommitInvalidatesConcurrentReclaimSnapshot) {
     }
 
     return link_store.Transact([&](RedisKvTxn &link_kv_txn) {
-      RedisMetaTxn link_txn(link_kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+      RedisMetaTxn link_txn(link_kv_txn, key, 4096, &COWEncoderForTest());
       SwordFsInode parent;
       auto status = link_txn.LookupInode(kRootInodeId, &parent);
       if (!status.ok()) {
@@ -208,7 +200,7 @@ TEST(RedisMetaTxnTest, LinkCommitInvalidatesConcurrentReclaimSnapshot) {
   EXPECT_FALSE(work.has_value());
   EXPECT_TRUE(redis.hexists(key.Directory(kRootInodeId), "revived"));
   EXPECT_TRUE(redis.exists(key.Inode(kIno)));
-  EXPECT_TRUE(redis.exists(key.Chunk(kIno)));
+  EXPECT_TRUE(redis.exists(key.ChunkRefs(kIno)));
   EXPECT_FALSE(redis.hexists(key.Reclaims(), std::to_string(kIno)));
 }
 
@@ -226,10 +218,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimFreshRetryUsesAbsentInodeRatherThanFrozenWo
   file_attr.nlink = 0;
   ASSERT_TRUE(SeedInode(control, key, SwordFsInode(kIno, file_attr, kRootInodeId)).ok());
   control.hset(key.Orphans(), std::to_string(kIno), "1");
-  const SwordFsChunk chunk{.index = 0, .revision = 7, .size = 128};
-  std::string encoded_chunk;
-  ASSERT_TRUE(chunk.SerializeTo(&encoded_chunk).ok());
-  control.hset(key.Chunk(kIno), "0", encoded_chunk);
+  control.hset(key.ChunkRefs(kIno), "0", "73");
 
   config.socket_timeout = std::chrono::milliseconds(50);
   config.retry_attempts = 3;
@@ -239,7 +228,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimFreshRetryUsesAbsentInodeRatherThanFrozenWo
   std::optional<ReclaimWork> first_work;
   const auto first_status = first_store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
     auto status = txn.PrepareReclaim(kIno, first_work);
     if (!status.ok()) {
       return status;
@@ -258,7 +247,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimFreshRetryUsesAbsentInodeRatherThanFrozenWo
   RedisMetaClient retry_store(retry_config);
   std::optional<ReclaimWork> replay;
   const auto retry_status = retry_store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
     return txn.PrepareReclaim(kIno, replay);
   });
 
@@ -272,12 +261,11 @@ TEST(RedisMetaTxnTest, PrepareReclaimFreshRetryUsesAbsentInodeRatherThanFrozenWo
   ASSERT_TRUE(persisted.has_value());
   ReclaimWork retained;
   ASSERT_TRUE(retained.ParseFrom(*persisted).ok());
-  std::vector<swordfs::chunk::cow::COWRef> refs;
-  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWReclaim(retained, 4096, &refs).ok());
-  ASSERT_EQ(refs.size(), 1U);
-  EXPECT_EQ(refs[0].descriptor, chunk);
+  ReclaimWork expected;
+  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedReclaim(kIno, {{0, ChunkID(73)}}, &expected).ok());
+  EXPECT_EQ(retained.payload, expected.payload);
   EXPECT_FALSE(control.exists(key.Inode(kIno)));
-  EXPECT_FALSE(control.exists(key.Chunk(kIno)));
+  EXPECT_FALSE(control.exists(key.ChunkRefs(kIno)));
   EXPECT_TRUE(control.hexists(key.Reclaims(), std::to_string(kIno)));
 }
 }  // namespace swordfs::metadata

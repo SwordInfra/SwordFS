@@ -18,10 +18,6 @@ namespace swordfs::chunk::cow {
 
 namespace {
 
-bool ValidHead(const metadata::SwordFsChunk &head, uint64_t chunk_size) {
-  return chunk_size == 0 ? head.revision != metadata::kInvalidChunkRevision : head.IsValidForChunkSize(chunk_size);
-}
-
 struct COWRevisionCleanup {
   metadata::ChunkID chunk_id;
   metadata::cow::COWChunkRevision revision;
@@ -144,102 +140,7 @@ utils::Status DecodeTypedReclaim(const metadata::ReclaimWork &work, std::vector<
   return utils::Status::OK();
 }
 
-utils::Status EncodeRefs(metadata::InodeID ino, const std::vector<COWRef> &refs, std::string *out) {
-  if (out == nullptr || ino == 0 || refs.size() > std::numeric_limits<uint32_t>::max()) {
-    return utils::Status::InvalidArgument("invalid COW cleanup references");
-  }
-  metadata::BufEncoder enc;
-  enc.Header(metadata::RecordType::kCowCleanup);
-  enc.U64(ino);
-  enc.U32(static_cast<uint32_t>(refs.size()));
-  for (const auto &ref : refs) {
-    if (ref.ino != ino || ref.key != FormatCOWObjectKey(ino, ref.descriptor.index, ref.descriptor.revision)) {
-      return utils::Status::InvalidArgument("COW cleanup reference identity mismatch");
-    }
-    enc.U64(ref.descriptor.index);
-    enc.U64(ref.descriptor.revision);
-    enc.U64(ref.descriptor.size);
-    enc.String(ref.key);
-  }
-  enc.Finish(out);
-  return utils::Status::OK();
-}
-
-utils::Status DecodeRefs(std::string_view payload, metadata::InodeID expected_ino, uint64_t chunk_size,
-                         std::vector<COWRef> *out) {
-  if (out == nullptr) {
-    return utils::Status::InvalidArgument("COW cleanup output is null");
-  }
-  metadata::BufDecoder dec(payload);
-  metadata::InodeID ino = 0;
-  uint32_t count = 0;
-  dec.Header(metadata::RecordType::kCowCleanup);
-  dec.U64(&ino);
-  dec.U32(&count);
-  if (!dec || ino == 0 || ino != expected_ino) {
-    return utils::Status::Malformed("COW cleanup inode mismatch");
-  }
-  std::vector<COWRef> refs;
-  for (uint32_t i = 0; i < count; ++i) {
-    COWRef ref;
-    ref.ino = ino;
-    dec.U64(&ref.descriptor.index);
-    dec.U64(&ref.descriptor.revision);
-    dec.U64(&ref.descriptor.size);
-    dec.String(&ref.key);
-    if (!dec || !ValidHead(ref.descriptor, chunk_size) ||
-        ref.key != FormatCOWObjectKey(ino, ref.descriptor.index, ref.descriptor.revision)) {
-      return utils::Status::Malformed("COW cleanup identity mismatch");
-    }
-    refs.push_back(std::move(ref));
-  }
-  if (!dec.Done()) {
-    return utils::Status::Malformed("COW cleanup has trailing data");
-  }
-  *out = std::move(refs);
-  return utils::Status::OK();
-}
-
 }  // namespace
-
-utils::Status FreezeCOWDelete(metadata::InodeID ino, const metadata::SwordFsChunk &chunk, uint64_t chunk_size,
-                              metadata::PendingDelete *out) {
-  if (out == nullptr || ino == 0 || !ValidHead(chunk, chunk_size)) {
-    return utils::Status::InvalidArgument("invalid COW pending delete");
-  }
-  const auto key = FormatCOWObjectKey(ino, chunk.index, chunk.revision);
-  metadata::PendingDelete work;
-  work.id = "cow:" + key;
-  auto status = EncodeRefs(ino, std::vector<COWRef>{{ino, chunk, key}}, &work.payload);
-  if (!status.ok()) {
-    return status;
-  }
-  *out = std::move(work);
-  return utils::Status::OK();
-}
-
-utils::Status FreezeCOWReclaim(metadata::InodeID ino, const std::vector<metadata::SwordFsChunk> &chunks,
-                               uint64_t chunk_size, metadata::ReclaimWork *out) {
-  if (out == nullptr || ino == 0) {
-    return utils::Status::InvalidArgument("invalid COW reclaim");
-  }
-  std::vector<COWRef> refs;
-  refs.reserve(chunks.size());
-  for (const auto &chunk : chunks) {
-    if (!ValidHead(chunk, chunk_size)) {
-      return utils::Status::InvalidArgument("invalid COW reclaim descriptor");
-    }
-    refs.push_back({ino, chunk, FormatCOWObjectKey(ino, chunk.index, chunk.revision)});
-  }
-  metadata::ReclaimWork work;
-  work.ino = ino;
-  auto status = EncodeRefs(ino, refs, &work.payload);
-  if (!status.ok()) {
-    return status;
-  }
-  *out = std::move(work);
-  return utils::Status::OK();
-}
 
 utils::Status FreezeCOWDetachedReclaim(metadata::InodeID ino, const std::vector<metadata::ChunkMapping> &mappings,
                                        metadata::ReclaimWork *out) {
@@ -300,46 +201,13 @@ utils::Status FreezeCOWRevisionDelete(metadata::ChunkID id, metadata::cow::COWCh
   return utils::Status::OK();
 }
 
-utils::Status DecodeCOWDelete(const metadata::PendingDelete &work, uint64_t chunk_size, COWRef *out) {
-  if (out == nullptr) {
-    return utils::Status::InvalidArgument("COW delete output is null");
-  }
-  std::vector<COWRef> refs;
-  // The inode is carried inside the private payload, not by the generic queue.
-  metadata::BufDecoder dec(work.payload);
-  metadata::InodeID ino = 0;
-  dec.Header(metadata::RecordType::kCowCleanup);
-  dec.U64(&ino);
-  if (!dec || ino == 0) {
-    return utils::Status::Malformed("invalid COW cleanup inode");
-  }
-  auto status = DecodeRefs(work.payload, ino, chunk_size, &refs);
-  if (!status.ok()) {
-    return status;
-  }
-  if (refs.size() != 1 || work.id != "cow:" + refs[0].key) {
-    return utils::Status::Malformed("COW pending delete id mismatch");
-  }
-  *out = std::move(refs[0]);
-  return utils::Status::OK();
-}
-
-utils::Status DecodeCOWReclaim(const metadata::ReclaimWork &work, uint64_t chunk_size, std::vector<COWRef> *out) {
-  return DecodeRefs(work.payload, work.ino, chunk_size, out);
-}
-
 namespace {
 
 class COWCleanupParticipant final : public internal::ChunkCleanupParticipant {
  public:
-  COWCleanupParticipant(uint64_t chunk_size, std::shared_ptr<metadata::cow::COWChunkMetadata> chunk_metadata,
-                        metadata::IMetaEngine *meta, storage::IDataEngine *data,
+  COWCleanupParticipant(std::shared_ptr<metadata::cow::COWChunkMetadata> chunk_metadata, storage::IDataEngine *data,
                         internal::ChunkReachabilityProbeFn reachability_probe)
-      : chunk_size_(chunk_size),
-        chunk_metadata_(std::move(chunk_metadata)),
-        meta_(meta),
-        data_(data),
-        reachability_probe_(std::move(reachability_probe)) {
+      : chunk_metadata_(std::move(chunk_metadata)), data_(data), reachability_probe_(std::move(reachability_probe)) {
   }
 
   utils::Status DeletePending(const metadata::PendingDelete &work, bool *completed) override {
@@ -354,33 +222,13 @@ class COWCleanupParticipant final : public internal::ChunkCleanupParticipant {
     if (!status.ok()) {
       return status;
     }
-    if (recognized) {
-      if (typed.kind == COWCleanupKind::kRevision) {
-        return DeleteTypedRevision(typed.revision, completed);
-      }
-      return DeleteDetachedChunk(typed.detached, completed);
+    if (!recognized) {
+      return utils::Status::Malformed("unsupported COW pending-delete payload");
     }
-
-    COWRef ref;
-    status = DecodeCOWDelete(work, chunk_size_, &ref);
-    if (!status.ok()) {
-      return status;
+    if (typed.kind == COWCleanupKind::kRevision) {
+      return DeleteTypedRevision(typed.revision, completed);
     }
-    metadata::SwordFsChunk current;
-    status = meta_->FindChunk(ref.ino, ref.descriptor.index, &current);
-    if (status.ok()) {
-      if (current.revision == ref.descriptor.revision) {
-        return utils::Status::OK();
-      }
-    } else if (!status.IsNotFound()) {
-      return status;
-    }
-    status = data_->Delete(ref.key);
-    if (!status.ok()) {
-      return status;
-    }
-    *completed = true;
-    return utils::Status::OK();
+    return DeleteDetachedChunk(typed.detached, completed);
   }
 
   utils::Status DeleteReclaim(const metadata::ReclaimWork &work, bool *completed) override {
@@ -395,40 +243,10 @@ class COWCleanupParticipant final : public internal::ChunkCleanupParticipant {
     if (!status.ok()) {
       return status;
     }
-    if (recognized) {
-      return DeleteDetachedReclaim(typed, completed);
+    if (!recognized) {
+      return utils::Status::Malformed("unsupported COW reclaim payload");
     }
-
-    std::vector<COWRef> refs;
-    status = DecodeCOWReclaim(work, chunk_size_, &refs);
-    if (!status.ok()) {
-      return status;
-    }
-
-    metadata::SwordFsInode inode;
-    status = meta_->GetInode(work.ino, &inode);
-    if (status.ok()) {
-      // A live inode proves that this maintenance record does not represent a
-      // completed logical reclaim. Drop it without touching physical data.
-      *completed = true;
-      return utils::Status::OK();
-    }
-    if (!status.IsNotFound()) {
-      return status;
-    }
-
-    size_t failed = 0;
-    for (const auto &ref : refs) {
-      status = data_->Delete(ref.key);
-      if (!status.ok()) {
-        ++failed;
-      }
-    }
-    if (failed != 0) {
-      return utils::Status::IOError("COW reclaim left " + std::to_string(failed) + " object(s) undeleted");
-    }
-    *completed = true;
-    return utils::Status::OK();
+    return DeleteDetachedReclaim(typed, completed);
   }
 
  private:
@@ -538,16 +356,14 @@ class COWCleanupParticipant final : public internal::ChunkCleanupParticipant {
   }
 
  private:
-  uint64_t chunk_size_;
   std::shared_ptr<metadata::cow::COWChunkMetadata> chunk_metadata_;
-  metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
   internal::ChunkReachabilityProbeFn reachability_probe_;
 };
 
 }  // namespace
 
-utils::Status CreateCOWCleanupParticipant(uint64_t chunk_size, metadata::ChunkMetadataPtr chunk_metadata,
+utils::Status CreateCOWCleanupParticipant(uint64_t /*chunk_size*/, metadata::ChunkMetadataPtr chunk_metadata,
                                           metadata::IMetaEngine *meta, storage::IDataEngine *data,
                                           internal::ChunkReachabilityProbeFn reachability_probe,
                                           std::unique_ptr<internal::ChunkCleanupParticipant> *out) {
@@ -561,8 +377,7 @@ utils::Status CreateCOWCleanupParticipant(uint64_t chunk_size, metadata::ChunkMe
       return utils::Status::InvalidArgument("COW cleanup metadata type mismatch");
     }
   }
-  *out = std::make_unique<COWCleanupParticipant>(chunk_size, std::move(cow_metadata), meta, data,
-                                                 std::move(reachability_probe));
+  *out = std::make_unique<COWCleanupParticipant>(std::move(cow_metadata), data, std::move(reachability_probe));
   return utils::Status::OK();
 }
 

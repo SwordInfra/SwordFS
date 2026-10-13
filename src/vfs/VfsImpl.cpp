@@ -232,6 +232,10 @@ utils::Status VfsImpl::SetAttr(fuse_ino_t ino, struct stat *attr, int to_set, st
     auto inode_handle = InodeHandleManager::Instance().Get(ino, metadata::HasSetAttrField(fields, SetAttrField::kSize));
     if (inode_handle) {
       status = inode_handle->SetAttr(metadata_attr, fields, out_attr ? &inode : nullptr);
+    } else if (metadata::HasSetAttrField(fields, SetAttrField::kSize)) {
+      // A size mutation without a shared inode handle cannot safely bypass
+      // the COW boundary/attachment coordination in FileReadWriter.
+      return Status::IOError("size mutation requires an inode operation handle");
     } else {
       status = VolumeImpl::Instance().meta_engine()->SetAttr(ino, metadata_attr, fields, out_attr ? &inode : nullptr);
     }
