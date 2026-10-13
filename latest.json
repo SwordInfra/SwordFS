@@ -10,8 +10,8 @@
     "libfuse": "fusermount3 version: 3.18.2",
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
-    "runner": "GitHub Actions (9 fstests shards)",
-    "swordfs_commit": "5c027ab9b95936202f260eb23f36609264756567"
+    "runner": "GitHub Actions (11 fstests shards)",
+    "swordfs_commit": "0f3326cde5ef5f22ae4ccfa672b751ad8f3d90b7"
   },
   "summary": {
     "blocking_count": 0,
