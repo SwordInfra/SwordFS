@@ -18,6 +18,7 @@ from typing import Iterable
 GAP_CATEGORIES = {
     "known_semantic_defect": "KNOWN_SEMANTIC_DEFECT",
     "known_unsupported": "KNOWN_UNSUPPORTED",
+    "kernel_local_only": "KERNEL_LOCAL_ONLY",
     "upstream_not_applicable": "UPSTREAM_NOT_APPLICABLE",
     "upstream_test_defect": "UPSTREAM_TEST_DEFECT",
     "environment": "ENVIRONMENT",
@@ -297,14 +298,17 @@ def load_gaps(path: pathlib.Path) -> dict[str, Gap]:
             if not reason:
                 raise BaselineError(f"{path}:{line_number}: reason is required")
 
-            if category in {"known_semantic_defect", "known_unsupported"}:
+            if category in {"known_semantic_defect", "known_unsupported", "kernel_local_only"}:
                 if not ISSUE_RE.fullmatch(issue):
                     raise BaselineError(f"{path}:{line_number}: {category} requires a #<issue> reference")
             else:
                 if issue not in {"", "-"}:
                     raise BaselineError(f"{path}:{line_number}: {category} must not use a semantic Issue")
 
-            if expected_result not in {"FAIL", "NOTRUN"}:
+            if category == "kernel_local_only":
+                if expected_result != "PASS" or expected_message not in {"", "-"} or expected_evidence not in {"", "-"}:
+                    raise BaselineError(f"{path}:{line_number}: kernel_local_only requires PASS and no FAIL evidence")
+            elif expected_result not in {"FAIL", "NOTRUN"}:
                 raise BaselineError(f"{path}:{line_number}: {category} must expect FAIL or NOTRUN")
 
             if expected_result == "NOTRUN" and not expected_message:
@@ -315,7 +319,10 @@ def load_gaps(path: pathlib.Path) -> dict[str, Gap]:
                 )
 
             referenced_evidence = evidence_path_from_message(test, expected_message)
-            if expected_result == "NOTRUN":
+            if expected_result == "PASS":
+                expected_message = "-"
+                expected_evidence = "-"
+            elif expected_result == "NOTRUN":
                 if expected_evidence not in {"", "-"}:
                     raise BaselineError(f"{path}:{line_number}: NOTRUN entries must not carry FAIL evidence")
                 expected_evidence = "-"
@@ -553,6 +560,10 @@ def classify(
         if raw.result == "PASS":
             if test in supported:
                 classification = "PASS"
+            elif gap is not None and gap.category == "kernel_local_only" and gap.expected_result == "PASS":
+                # A kernel-local result does not verify SwordFS's distributed
+                # lock authority; keep it outside the supported count.
+                classification = "KERNEL_LOCAL_ONLY"
             elif gap is not None:
                 classification = "XPASS"
             else:

@@ -28,9 +28,12 @@
 #include "cmd/Mount.hpp"
 #include "config/ConfigCenter.hpp"
 #include "config/Validator.hpp"
+#include "fuse/PosixRecordLocks.hpp"
 #include "fuse/Vfs.hpp"
+#include "metadata/redis/RedisLockAuthority.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/redis/RedisOwnerLease.hpp"
+#include "utils/BlockingExecutor.hpp"
 #include "utils/Fuse.hpp"
 #include "utils/Logging.hpp"
 #include "vfs/InodeHandle.hpp"
@@ -184,9 +187,10 @@ static FuseArgsGuard BuildFuseArgs(const std::vector<std::string> &extras) {
 
 // Mount the filesystem via libfuse low-level API. Blocks until unmounted.
 static int Mount(const std::string &mountpoint, const std::vector<std::string> &extras, int signal_fd,
-                 swordfs::metadata::RedisOwnerLease *lease) {
+                 swordfs::fuse::PosixRecordLocks *posix_locks) {
   FuseArgsGuard args(BuildFuseArgs(extras));
   ::swordfs::fuse::MountInitContext init_context(signal_fd);
+  init_context.posix_locks = posix_locks;
 
   FuseSessionGuard se(fuse_session_new(args.get(), &::swordfs::fuse::VfsHookFactory::get_ops(),
                                        sizeof(struct fuse_lowlevel_ops), &init_context));
@@ -207,13 +211,8 @@ static int Mount(const std::string &mountpoint, const std::vector<std::string> &
   fuse_loop_cfg_set_max_threads(loop_cfg, ConfigCenter::Instance().fuse_threads());
   int ret = fuse_session_loop_mt(se.get(), loop_cfg);
   fuse_loop_cfg_destroy(loop_cfg);
-  // Normal unmount is the lock authority's quiescence barrier. Revoke its
-  // exact generation while the FUSE session still exists, before teardown.
-  // A lease expiring on its own must NEVER terminate this FUSE loop.
-  if (lease != nullptr) {
-    // Revoke logs an unconfirmed DEL and falls back to the Redis TTL.
-    (void)lease->Revoke();
-  }
+  // The session guard destroys FUSE and drains all admitted fibers in the
+  // destroy hook before the caller revokes the generation and frees workers.
   return init_context.failed ? 1 : ret;
 }
 
@@ -258,6 +257,9 @@ int RunMount() {
   // POSIX/flock operations (#430). This lifecycle is independent of normal
   // metadata I/O: a failed lease registration must not unmount the volume.
   std::unique_ptr<swordfs::metadata::RedisOwnerLease> lease;
+  std::unique_ptr<swordfs::metadata::RedisLockAuthority> lock_authority;
+  std::unique_ptr<swordfs::utils::BlockingExecutor> lock_executor;
+  std::unique_ptr<swordfs::fuse::PosixRecordLocks> posix_locks;
   if (cfg.enable_lock_owner_lease()) {
     swordfs::metadata::RedisMetaConfig redis_config;
     status = swordfs::metadata::ParseRedisMetaUrl(cfg.meta_url(), &redis_config);
@@ -275,6 +277,9 @@ int RunMount() {
     status = lease->Register();
     if (status.ok()) {
       SWORDFS_LOG_INFO << "lock owner lease registered generation " << lease->generation();
+      lock_authority = std::make_unique<swordfs::metadata::RedisLockAuthority>(redis_config, cfg.volume(), *lease);
+      lock_executor = std::make_unique<swordfs::utils::BlockingExecutor>(2, "swordfs-lock");
+      posix_locks = std::make_unique<swordfs::fuse::PosixRecordLocks>(*lock_authority, *lock_executor);
     } else {
       // Fail only the advisory-lock service closed; ordinary FUSE remains
       // available. A failed generation cannot be reused within this mount.
@@ -293,7 +298,15 @@ int RunMount() {
   // than depending on callers to remember a mount option; SwordFS metadata
   // intentionally does not duplicate the kernel's credential engine.
   auto fuse_extras = detail::BuildFuseExtras(cfg.fuse_opts());
-  int ret = Mount(mountpoint, fuse_extras, signal_fd, lease.get());
+  int ret = Mount(mountpoint, fuse_extras, signal_fd, posix_locks.get());
+  // The FUSE destroy hook has drained its fiber work before Mount returns.
+  // Revoke the exact generation only after no lock worker can grant/reply.
+  if (lease != nullptr) {
+    (void)lease->Revoke();
+  }
+  posix_locks.reset();
+  lock_executor.reset();
+  lock_authority.reset();
   // The heartbeat and Redis client must not outlive the volume engines.
   lease.reset();
   if (ret != 0) {

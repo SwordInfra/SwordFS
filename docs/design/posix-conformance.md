@@ -119,6 +119,7 @@ design, implementation, test and review evidence. Use the repository's
 | #431 | Traditional POSIX `getlk`/`setlk` and any-close release | #428–#430 |
 | #432 | BSD `flock` and open-file-description last-close release | #428–#430 |
 | #433 | Interruptible waits, cancellation, cross-mount integration and activation | #431, #432 (and the shared prerequisites) |
+| #464 | OFD byte-range record-lock feasibility, owner lifetime and separate implementation | #428; independent of #431 development |
 
 The actual changes may be reviewed separately as each child reaches its own
 design-readiness checkpoint. The parent remains open until Redis integration, relevant fstests
@@ -127,6 +128,12 @@ Redis metadata session or a lock cleanup service. #430 owns actual lock
 records, atomic owner-validity checks and optional lazy reclamation. The
 #430-specific design review, candidate Redis schema and unresolved gates are
 tracked in [`430-redis-lock-authority.md`](430-redis-lock-authority.md).
+The traditional POSIX FUSE adapter, per-close FLUSH contract, blocking-worker
+boundary, GETLK diagnostics and missing-FLUSH limitation are reviewed in
+[`431-posix-record-lock-integration.md`](431-posix-record-lock-integration.md).
+OFD implementation is exclusively #464; its shared-transport implications
+are nevertheless a #433 feature-activation gate, not an implicit feature
+added to #431.
 No intermediate child permits enabling incomplete remote-lock support or
 claiming OFD/delegation compatibility. The known
 conversion/reply-delivery ambiguity is a mandatory #430 authority decision,

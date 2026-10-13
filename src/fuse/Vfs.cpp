@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "fuse/Limits.hpp"
+#include "fuse/PosixRecordLocks.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
@@ -203,6 +204,13 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   // answers writes from its own page cache, which masks daemon-side
   // semantics (e.g. rejecting writes to flushed chunks, open-unlink).
   fuse_unset_feature_flag(conn, FUSE_CAP_WRITEBACK_CACHE);
+
+  // #433 must first reconcile traditional close semantics and the untagged
+  // OFD transport (#464). Callbacks are implemented but not advertised here.
+  fuse_unset_feature_flag(conn, FUSE_CAP_POSIX_LOCKS);
+  if (init_context != nullptr) {
+    init_context->posix_locks_negotiated = false;
+  }
 
   // FUSE_CAP_SPLICE_READ is the libfuse request-ingestion path that delivers
   // pipe-backed data to write_buf(). SwordFS implements only .write, so keep
@@ -451,15 +459,29 @@ void VfsHookFactory::SwordFsWrite(fuse_req_t req, fuse_ino_t ino, const char *bu
 }
 
 void VfsHookFactory::SwordFsFlush(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
-  uint64_t fh = fi->fh;
-  RunFuseInFiber(req, [req, ino, fh] {
+  const uint64_t fh = fi->fh;
+  const uint64_t lock_owner = fi->lock_owner;
+  auto *context = static_cast<MountInitContext *>(fuse_req_userdata(req));
+  const bool release_posix = context != nullptr && context->posix_locks_negotiated;
+  auto *posix_locks = context != nullptr ? context->posix_locks : nullptr;
+  RunFuseInFiber(req, [req, ino, fh, lock_owner, release_posix, posix_locks] {
     SetRequestContext(req);
     auto status = VfsImpl::Flush(ino, fh);
-    if (!status.ok()) {
-      fuse_reply_err(req, status.ToErrno());
-      return;
+    int error = status.ToErrno();
+    if (release_posix) {
+      // Every delivered FLUSH independently releases the entire process
+      // Owner, including an invalid fh or a failed data flush. Never rely
+      // on client-side lock bookkeeping for this correctness requirement.
+      status = posix_locks != nullptr ? posix_locks->UnlockOwner(ino, lock_owner)
+                                      : utils::Status::Unavailable("remote POSIX lock authority is unavailable");
+      if (!status.ok()) {
+        SWORDFS_LOG_WARN << "POSIX unlock on FLUSH failed for ino=" << ino << ": " << status.message();
+        if (error == 0) {
+          error = status.ToErrno();
+        }
+      }
     }
-    fuse_reply_err(req, 0);
+    fuse_reply_err(req, error);
   });
 }
 
@@ -622,19 +644,62 @@ void VfsHookFactory::SwordFsCreate(fuse_req_t req, fuse_ino_t parent, const char
 }
 
 void VfsHookFactory::SwordFsGetlk(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi, struct flock *lock) {
-  (void)ino;
-  (void)fi;
-  (void)lock;
-  fuse_reply_err(req, ENOSYS);
+  auto *context = static_cast<MountInitContext *>(fuse_req_userdata(req));
+  if (context == nullptr || !context->posix_locks_negotiated) {
+    // Preserve the unadvertised-FUSE-lock baseline until #433 activates the
+    // remote service. EOPNOTSUPP makes fstests generic/131,478 XPASS without
+    // demonstrating authoritative cross-Mount locking.
+    fuse_reply_err(req, ENOSYS);
+    return;
+  }
+  auto *posix_locks = context->posix_locks;
+  const uint64_t owner = fi->lock_owner;
+  const struct flock request = *lock;
+  RunFuseInFiber(req, [req, ino, owner, request, posix_locks] {
+    SetRequestContext(req);
+    if (posix_locks == nullptr) {
+      fuse_reply_err(req, EIO);
+      return;
+    }
+    struct flock reply{};
+    auto status = posix_locks->Get(ino, owner, request, &reply);
+    if (!status.ok()) {
+      fuse_reply_err(req, status.ToErrno());
+      return;
+    }
+    // Reply delivery errors cannot justify rollback of authoritative state.
+    (void)fuse_reply_lock(req, &reply);
+  });
 }
 
 void VfsHookFactory::SwordFsSetlk(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi, struct flock *lock,
                                   int sleep) {
-  (void)ino;
-  (void)fi;
-  (void)lock;
-  (void)sleep;
-  fuse_reply_err(req, ENOSYS);
+  auto *context = static_cast<MountInitContext *>(fuse_req_userdata(req));
+  if (context == nullptr || !context->posix_locks_negotiated) {
+    fuse_reply_err(req, ENOSYS);
+    return;
+  }
+  if (sleep != 0) {
+    // Blocking semantics belong to #433; never make a locally successful
+    // lock claim through the implemented nonblocking Redis path.
+    fuse_reply_err(req, EOPNOTSUPP);
+    return;
+  }
+  auto *posix_locks = context->posix_locks;
+  const uint64_t owner = fi->lock_owner;
+  const struct flock request = *lock;
+  RunFuseInFiber(req, [req, ino, owner, request, posix_locks] {
+    SetRequestContext(req);
+    if (posix_locks == nullptr) {
+      fuse_reply_err(req, EIO);
+      return;
+    }
+    auto status = posix_locks->Set(ino, owner, request);
+    if (status.ok() && !posix_locks->CanGrant()) {
+      status = utils::Status::Unavailable("lock Owner Lease expired before SETLK reply");
+    }
+    fuse_reply_err(req, status.ToErrno());
+  });
 }
 
 void VfsHookFactory::SwordFsBmap(fuse_req_t req, fuse_ino_t ino, size_t blocksize, uint64_t idx) {
