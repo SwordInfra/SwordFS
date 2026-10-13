@@ -390,7 +390,7 @@ jobs:
           fail_ci_if_error: false
 
       - name: Enforce per-file patch coverage
-        if: matrix.build_type == 'Debug'
+        if: needs.change-scope.outputs.run_full_ci == 'true' && matrix.build_type == 'Debug'
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
