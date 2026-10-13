@@ -7,6 +7,168 @@
 > persistent repair coordinator is promised. Failed shrink sanitation must
 > preserve EOF and fail closed without exposing the old tail.
 
+## #320 design review — final common COW contract retirement
+
+This section is the implementation plan for #320 after #317 / PR #425
+became the sole production COW authority. It supersedes the *transitional*
+`SwordFsChunk`, `CommitChunk`, `ChunkView`, common revision, and legacy
+cleanup instructions elsewhere in this document. Implementation of #320 must
+also remove/rewrite those historical instructions, not leave conflicting
+production contracts next to this section. **No COW authority change or
+cross-domain consistency redesign belongs to #320.**
+
+### One surviving model and one size-mutation entry point
+
+```text
+FileMetadata / Redis transaction domain:
+  inode EOF, attrs, non-revivability
+  (InodeID, ChunkIndex) -> ChunkID
+
+COW ChunkMetadata / independent transaction domain:
+  ChunkID -> COWChunkHead {COWChunkRevision, size}
+  immutable object = (ChunkID, COWChunkRevision)
+
+Optional maintenance:
+  opaque PendingDelete / ReclaimWork
+  + mechanism-owned typed payload and reachability-checked consumer
+```
+
+Keep `ChunkID`, `ChunkMapping`, `FileChunkSnapshot`, `FileMappingSnapshot`,
+`FileSizePrecondition`, `ChunkSizePlan`, `CommitShrink`, `CommitGrow`,
+`AttachPrepared`, `FinalizeAttachedWrite`, `ProbeAttachment`, the selected
+`ChunkMetadata` capability, and typed COW head/revision/allocator. Maintain
+the existing FileMetadata WATCH/EXEC and separate COW-head CAS boundaries.
+Do not introduce a replacement generic descriptor or a second representation
+of `ChunkIndex -> ChunkID`.
+
+**Size routing is an explicit safety contract.** The VFS must continue to
+route size-bearing `SetAttr` and truncate through `FileReadWriter`, which
+coordinates typed `CommitShrink` / `CommitGrow`, cached sessions, and retained
+COW boundary sanitation. The old metadata-only `IMetaEngine::Truncate` and
+`RedisMetaTxn::TruncateChunks` cannot remain as alternative size engines.
+Ordinary metadata-only `SetAttr` must reject `kSize` requests (including
+combined attributes) or be made inaccessible to those callers; it cannot
+silently update inode EOF and leave typed attachments/private heads stale.
+Non-size inode attribute mutation remains available via `SetAttr`.
+Tests that used `meta->Truncate`/`meta->SetAttr(size)` only to synthesize
+old descriptors must switch to the typed size contract or exercise VFS.
+
+### Delete entire legacy authority and persistence paths
+
+Delete `SwordFsChunk`, common `ChunkRevision`/`kInvalidChunkRevision`,
+`ChunkPublishIntent`, `ChunkView`, `ChunkIndexChange`, common
+`AllocateChunkRevision`, `CommitChunk`, `FindChunk`, `LoadChunkView`,
+`IChunkIndexReader`, and `IChunkIndexTxn`, including their Redis transaction,
+operations, and backend implementations and test-only overrides. Remove the
+legacy Redis `Chunk(ino)` descriptor hash, `NextChunkRevision` allocator,
+`RedisMetaTxn::{LookupChunk,ScanChunks,SetChunk,DeleteChunks,TruncateChunks}`
+and transitional raw `PrivateHash`/`Read`/`Scan`/`Put`/`Erase` transaction
+operations. Also retire `RedisKey::PrivateChunkIndex` and the transaction's
+`ChunkType` member if, as now, they exist only for that raw legacy surface.
+The typed `ChunkRefs(ino)` map, `NextChunkID`, and COW-private
+per-ChunkID revision keys **must not** be removed. Update the volume-format
+initialization keys/count together with removal of `next_chunk_revision`.
+
+Drop the legacy `RecordType::kChunk` and `RecordType::kCowCleanup` encoder/
+decoder paths and the corresponding COW `COWRef`, `FreezeCOWDelete`,
+`FreezeCOWReclaim`, `DecodeCOWDelete`, `DecodeCOWReclaim`, and stale common
+descriptor reachability checks. Keep `RecordType::kCowTypedCleanup`,
+`FreezeCOWRevisionDelete`, `FreezeCOWDetachedDelete`,
+`FreezeCOWDetachedReclaim`, and typed cleanup consumer validation; their
+names/payloads refer to actual `(ChunkID, revision)` or detached ID identity.
+Unknown or malformed maintenance payloads must report a diagnostic error,
+not grant permission to delete an object or silently bypass reachability.
+Beta layout compatibility and migration are out of scope.
+
+### Replace, do not accidentally delete, the two typed work encoders
+
+The existing `ChunkMetadataBridge` is **not entirely dead**: `CommitShrink`
+uses `FreezeDetachedDelete`, while `PrepareReclaim` uses
+`FreezeDetachedReclaim`. These methods encode an *opaque mechanism-owned
+maintenance candidate* from already known FileMetadata mappings; they are
+pure serialization and must not read or mutate the COW private metadata
+domain inside a FileMetadata Redis transaction.
+
+Replace the old large callback bridge and its raw-index transaction surface
+with one narrowly scoped, mount-owned mechanism-specific **cleanup-work
+encoder** (illustrative name: `ChunkCleanupWorkEncoder`). It exposes only:
+
+```text
+EncodeDetachedDelete(InodeID, ChunkMapping) -> PendingDelete
+EncodeDetachedReclaim(InodeID, vector<ChunkMapping>) -> ReclaimWork
+```
+
+The FileMetadata backend treats the encoded payload as opaque and may enqueue
+it best effort; the `ChunkGcWorker` and selected mechanism's
+`ChunkCleanupParticipant` remain the *only* destructive cleanup policy.
+The selected encoder is stateless/pure, composed once per volume, and bound
+for the volume lifetime. An equivalent existing typed mechanism hook is
+acceptable **only if** it avoids new common/private transaction coupling
+and does not retain the legacy bridge API under a new name. Do not store
+`COWChunkRevision`, object keys, or private Slice extents in FileMetadata.
+
+### Reclaim/truncate failure and GC ordering that must survive
+
+1. **Reclaim:** `PrepareReclaim` scans/WATCHes the **typed** `ChunkRefs` map
+   even when it is empty. An empty attachment set is a valid empty/hole file,
+   **not** a signal to scan the old `Chunk(ino)` hash or decode its heads.
+   Establish inode non-revivability, detach `ChunkRefs`, and only then perform
+   optional maintenance. Lost `ReclaimWork` may leak objects. Do not delete
+   a still-reachable object merely because a queue item exists.
+2. **Shrink:** FileMetadata publishes EOF + whole-ID detaches with its
+   existing Redis ordering/revalidation; optional typed maintenance records
+   may be queued in that transaction. The mechanism clamps only the retained
+   attached boundary afterward. Preserve #317's recognized partial-EXEC
+   fail-closed behavior for the live file session; removal of the old bridge
+   must not relax it.
+3. **Grow:** sanitize a retained old-EOF boundary before FileMetadata
+   publishes a larger EOF. A detached ChunkID never reattaches and no old
+   object tail reappears after shrink-then-grow.
+4. **GC:** a typed revision candidate is live if the currently published
+   COW head references its `COWChunkRevision` (independent of head `size`).
+   A detached-ID candidate first verifies the FileMetadata mapping no longer
+   reaches that ID; a reclaim candidate checks inode reachability and all
+   detached IDs before destructive work. Keep the bounded clean-read
+   race-vs-GC handling and fail-closed storage-error propagation.
+5. **Errors:** preserve the final #317 classification: bounded WATCH/pre-EXEC
+   retry, read-only proof for truly unknown EXEC, and diagnostic/fail-closed
+   behavior for known per-command EXEC errors. #320 adds no compensation or
+   durable coordinator for this temporary COW implementation.
+
+### Implementation order and verification contract
+
+Implement as one coherent cleanup task, with reviewable internal stages:
+
+1. Introduce/test the tiny detached-work encoder and switch all typed
+   reclaim/shrink consumers to it, without changing cleanup reachability.
+2. Remove the common descriptor transaction methods, raw index interfaces,
+   legacy Redis hash/allocator and metadata-only size bypasses; simplify
+   `VolumeImpl` composition and backend bindings to the narrow encoder.
+3. Remove legacy COW cleanup codec/branch and old descriptor-shaped tests;
+   **port** currently useful file/size/reclaim/GC failure semantics to typed
+   FileMetadata + COW private head, rather than deleting coverage merely
+   because a helper invoked `CommitChunk`.
+4. Rewrite the authoritative sections of this document plus
+   `docs/design/redis-metadata-schema.md`, `docs/design/architecture.md`,
+   `docs/design/data-structures.md`, and `docs/design/posix-authorization.md`
+   to remove old `CommitChunk`, common revision, Memory backend, and legacy
+   schema claims. Remove obsolete source comments and fixtures, too.
+
+Required evidence: no runtime/reference-code occurrences of the legacy
+symbols or old Redis keys, and no old authority claims in final design docs;
+Redis service-backed initial attach/rewrite, boundary shrink/grow,
+reclaim/GC, partial EXEC and clean-read race coverage; full E2E,
+pjdfstest/fstests, Debug/Release and per-changed-production-file Codecov
+patch coverage **above 90%**. Direct metadata-only `SetAttr(kSize)` must not
+be able to mutate EOF without the typed size/boundary protocol. Review the
+line-change distribution by feature versus tests before merging.
+
+This stage is Redis-only after #443 removed the Memory backend. It is a
+**refactor**, so do not manufacture artificial RED/GREEN evidence; preserve
+or improve the existing semantic test matrix while deleting stale tests.
+Only after this audit may #312/#394 be closed and #270 begin its Slice-index
+implementation, separately gated on Slice concurrent-mutation design #424.
+
 ## Volume-fixed chunk type
 
 The formatted volume records one stable `ChunkType` enum value.
