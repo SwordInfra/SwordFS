@@ -38,6 +38,7 @@ struct Interval {
   uint64_t start;
   uint64_t end;  // UINT64_MAX is the infinity sentinel.
   Type type;
+  int32_t pid = 0;
 };
 
 struct Holder {
@@ -77,7 +78,10 @@ utils::Status ValidateRange(const Range &range, Interval *result) {
   if (range.type != Type::kRead && range.type != Type::kWrite && range.type != Type::kUnlock) {
     return utils::Status::InvalidArgument("unknown POSIX lock type");
   }
-  *result = {range.start, range.length == 0 ? UINT64_MAX : range.start + range.length, range.type};
+  if (range.pid < 0) {
+    return utils::Status::InvalidArgument("negative POSIX holder PID");
+  }
+  *result = {range.start, range.length == 0 ? UINT64_MAX : range.start + range.length, range.type, range.pid};
   if (result->start == result->end) {
     return utils::Status::InvalidArgument("POSIX lock interval is empty");
   }
@@ -102,7 +106,7 @@ utils::Status Decode(std::string_view data, bool flock, Holder *holder) {
     }
     return utils::Status::OK();
   }
-  if (!data.starts_with("P1|")) {
+  if (!data.starts_with("P2|")) {
     return utils::Status::Malformed("invalid POSIX lock record version");
   }
   data.remove_prefix(3);
@@ -112,19 +116,22 @@ utils::Status Decode(std::string_view data, bool flock, Holder *holder) {
   while (!data.empty()) {
     const auto [entry, rest] = SplitOnce(data, '|');
     const auto [kind, tail] = SplitOnce(entry, ',');
-    const auto [start, end] = SplitOnce(tail, ',');
+    const auto [start, remaining] = SplitOnce(tail, ',');
+    const auto [end, pid] = SplitOnce(remaining, ',');
     uint64_t first = 0;
     uint64_t last = 0;
-    if ((kind != "R" && kind != "W") || tail.find(',') == std::string_view::npos || !ParseNumber(start, &first) ||
-        !ParseNumber(end, &last) || first >= last) {
+    uint64_t holder_pid = 0;
+    if ((kind != "R" && kind != "W") || remaining.find(',') == std::string_view::npos || !ParseNumber(start, &first) ||
+        !ParseNumber(end, &last) || !ParseNumber(pid, &holder_pid) || holder_pid > INT32_MAX || first >= last) {
       return utils::Status::Malformed("malformed POSIX range");
     }
     if (!holder->ranges.empty() && (holder->ranges.back().end > first ||
                                     (holder->ranges.back().end == first &&
-                                     holder->ranges.back().type == (kind == "R" ? Type::kRead : Type::kWrite)))) {
+                                     holder->ranges.back().type == (kind == "R" ? Type::kRead : Type::kWrite) &&
+                                     holder->ranges.back().pid == static_cast<int32_t>(holder_pid)))) {
       return utils::Status::Malformed("POSIX range set is not canonical");
     }
-    holder->ranges.push_back({first, last, kind == "R" ? Type::kRead : Type::kWrite});
+    holder->ranges.push_back({first, last, kind == "R" ? Type::kRead : Type::kWrite, static_cast<int32_t>(holder_pid)});
     if (holder->ranges.size() > kMaxIntervals) {
       return utils::Status::Malformed("POSIX range count exceeds maximum");
     }
@@ -137,9 +144,9 @@ utils::Status Decode(std::string_view data, bool flock, Holder *holder) {
 }
 
 std::string Encode(const std::vector<Interval> &ranges) {
-  std::string result = "P1";
+  std::string result = "P2";
   for (const auto &range : ranges) {
-    result += folly::sformat("|{},{},{}", range.type == Type::kRead ? 'R' : 'W', range.start, range.end);
+    result += folly::sformat("|{},{},{},{}", range.type == Type::kRead ? 'R' : 'W', range.start, range.end, range.pid);
   }
   return result;
 }
@@ -155,10 +162,10 @@ utils::Status UpdateRanges(std::vector<Interval> *ranges, const Interval &reques
       continue;
     }
     if (part.start < request.start) {
-      next.push_back({part.start, request.start, part.type});
+      next.push_back({part.start, request.start, part.type, part.pid});
     }
     if (request.end < part.end) {
-      next.push_back({request.end, part.end, part.type});
+      next.push_back({request.end, part.end, part.type, part.pid});
     }
   }
   if (request.type != Type::kUnlock) {
@@ -167,7 +174,8 @@ utils::Status UpdateRanges(std::vector<Interval> *ranges, const Interval &reques
   std::sort(next.begin(), next.end(), [](const Interval &a, const Interval &b) { return a.start < b.start; });
   ranges->clear();
   for (const auto &part : next) {
-    if (!ranges->empty() && ranges->back().end == part.start && ranges->back().type == part.type) {
+    if (!ranges->empty() && ranges->back().end == part.start && ranges->back().type == part.type &&
+        ranges->back().pid == part.pid) {
       ranges->back().end = part.end;
     } else {
       ranges->push_back(part);
@@ -273,6 +281,10 @@ utils::Status SetState(RedisKvTxn &txn, std::string_view hash, std::string_view 
 RedisLockAuthority::RedisLockAuthority(const RedisMetaConfig &config, std::string_view volume_name,
                                        RedisOwnerLease &owner_lease)
     : client_(config), key_(config.db, volume_name), owner_lease_(owner_lease) {
+}
+
+bool RedisLockAuthority::CanGrant() const {
+  return owner_lease_.CanGrant(owner_lease_.generation());
 }
 
 utils::ThreadMutex &RedisLockAuthority::OwnerMutex(uint64_t inode_ino, uint64_t kernel_owner, bool flock) {
@@ -449,7 +461,7 @@ utils::Status RedisLockAuthority::GetPosix(uint64_t inode_ino, uint64_t kernel_o
       for (const auto &other : holder.ranges) {
         if (Overlaps(interval, other) && (request.type == PosixType::kWrite || other.type == PosixType::kWrite)) {
           result = PosixConflict{other.start, other.end == UINT64_MAX ? 0 : other.end - other.start,
-                                 holder.kernel_owner, other.type};
+                                 holder.kernel_owner, other.type, other.pid};
           return utils::Status::OK();
         }
       }

@@ -1,21 +1,26 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
+#include <fcntl.h>
 #include <gtest/gtest.h>
 
 #include <cerrno>
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "FiberTest.hpp"
+#include "fuse/PosixRecordLocks.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisLockAuthority.hpp"
 #include "metadata/redis/RedisLockFaultProxy.hpp"
 #include "metadata/redis/RedisMetaTestSupport.hpp"
 #include "metadata/redis/RedisOwnerLease.hpp"
+#include "utils/BlockingExecutor.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -112,6 +117,158 @@ TEST_F(RedisLockAuthorityTest, GetlkReportsLiveConflictsAndIgnoresSelfAndExpired
   EXPECT_FALSE(first_->SetPosix(23, 100, {100, 1, PosixType::kWrite}).ok());
 }
 
+TEST_F(RedisLockAuthorityTest, GetlkPreservesHolderPidAcrossMountsAndSameOwnerSplits) {
+  // PID must describe the conflicting lock segment, not the opaque FUSE owner.
+  ASSERT_TRUE(first_->SetPosix(231, 0xabcdef, {10, 90, PosixType::kWrite, 1234}).ok());
+  ASSERT_TRUE(first_->SetPosix(231, 0xabcdef, {40, 20, PosixType::kRead, 5678}).ok());
+
+  std::optional<RedisLockAuthority::PosixConflict> conflict;
+  ASSERT_TRUE(second_->GetPosix(231, 0xabcdef, {15, 1, PosixType::kRead}, &conflict).ok());
+  ASSERT_TRUE(conflict.has_value());
+  EXPECT_EQ(conflict->pid, 1234);
+  EXPECT_EQ(conflict->start, 10U);
+  EXPECT_EQ(conflict->length, 30U);
+
+  ASSERT_TRUE(second_->GetPosix(231, 999, {45, 1, PosixType::kWrite}, &conflict).ok());
+  ASSERT_TRUE(conflict.has_value());
+  EXPECT_EQ(conflict->pid, 5678);
+  EXPECT_EQ(conflict->type, PosixType::kRead);
+  EXPECT_EQ(conflict->start, 40U);
+  EXPECT_EQ(conflict->length, 20U);
+
+  ASSERT_TRUE(first_->GetPosix(231, 0xabcdef, {15, 1, PosixType::kWrite}, &conflict).ok());
+  EXPECT_FALSE(conflict.has_value());
+}
+
+TEST_F(RedisLockAuthorityTest, AdjacentSameModeRangesWithDistinctPidsPreserveTheirHolders) {
+  // Adjacent ranges may merge only when both mode and diagnostic PID agree.
+  ASSERT_TRUE(first_->SetPosix(234, 100, {0, 40, PosixType::kWrite, 1234}).ok());
+  ASSERT_TRUE(first_->SetPosix(234, 100, {40, 60, PosixType::kWrite, 5678}).ok());
+
+  std::optional<RedisLockAuthority::PosixConflict> conflict;
+  ASSERT_TRUE(second_->GetPosix(234, 200, {10, 1, PosixType::kWrite}, &conflict).ok());
+  ASSERT_TRUE(conflict.has_value());
+  EXPECT_EQ(conflict->pid, 1234);
+  EXPECT_EQ(conflict->length, 40U);
+  ASSERT_TRUE(second_->GetPosix(234, 200, {50, 1, PosixType::kWrite}, &conflict).ok());
+  ASSERT_TRUE(conflict.has_value());
+  EXPECT_EQ(conflict->pid, 5678);
+  EXPECT_EQ(conflict->start, 40U);
+  EXPECT_EQ(conflict->length, 60U);
+
+  // A later partial unlock must retain both original PIDs on the fragments.
+  ASSERT_TRUE(first_->SetPosix(234, 100, {20, 60, PosixType::kUnlock}).ok());
+  ASSERT_TRUE(second_->GetPosix(234, 200, {10, 1, PosixType::kWrite}, &conflict).ok());
+  ASSERT_TRUE(conflict.has_value());
+  EXPECT_EQ(conflict->pid, 1234);
+  EXPECT_EQ(conflict->length, 20U);
+  ASSERT_TRUE(second_->GetPosix(234, 200, {90, 1, PosixType::kWrite}, &conflict).ok());
+  ASSERT_TRUE(conflict.has_value());
+  EXPECT_EQ(conflict->pid, 5678);
+  EXPECT_EQ(conflict->start, 80U);
+}
+
+TEST_F(RedisLockAuthorityTest, MalformedStoredPosixPidFailsClosed) {
+  const redis::RedisKey key(config_.db, volume_);
+  sw::redis::Redis redis(ConnectionOptions(config_));
+  const auto hash = key.PosixLock(235);
+  const auto owner = std::to_string(first_lease_->generation()) + ":100";
+  std::optional<RedisLockAuthority::PosixConflict> conflict;
+  for (const char *value : {"P1|W,0,100", "P2|W,0,100", "P2|W,0,100,2147483648", "P2|W,0,100,-1",
+                            "P2|W,0,100,1234|W,100,200,1234", "P2|W,100,100,1"}) {
+    SCOPED_TRACE(value);
+    redis.hset(hash, owner, value);
+    EXPECT_FALSE(second_->GetPosix(235, 200, {0, 200, PosixType::kWrite}, &conflict).ok());
+    EXPECT_FALSE(second_->SetPosix(235, 200, {0, 200, PosixType::kWrite}).ok());
+  }
+  redis.del(hash);
+  EXPECT_TRUE(second_->SetPosix(235, 200, {0, 200, PosixType::kWrite}).ok());
+}
+
+TEST_F(RedisLockAuthorityTest, FiberAdapterValidatesAndRepliesWithRemoteConflicts) {
+  utils::BlockingExecutor executor(2, "lock-adapter-test");
+  fuse::PosixRecordLocks first(*first_, executor);
+  fuse::PosixRecordLocks second(*second_, executor);
+
+  struct flock request{};
+  request.l_type = F_WRLCK;
+  request.l_whence = SEEK_SET;
+  request.l_start = 10;
+  request.l_len = 20;
+  request.l_pid = 4321;
+  test::RunInTestFiber([&] {
+    ASSERT_TRUE(first.Set(230, 150, request).ok());
+    struct flock result{};
+    ASSERT_TRUE(second.Get(230, 150, request, &result).ok());
+    EXPECT_EQ(result.l_type, F_WRLCK);
+    EXPECT_EQ(result.l_start, 10);
+    EXPECT_EQ(result.l_len, 20);
+    EXPECT_EQ(result.l_whence, SEEK_SET);
+    EXPECT_EQ(result.l_pid, 4321);
+    EXPECT_TRUE(first.CanGrant());
+
+    ASSERT_TRUE(first.Get(230, 150, request, &result).ok());
+    EXPECT_EQ(result.l_type, F_UNLCK);
+    request.l_type = F_RDLCK;
+    EXPECT_EQ(second.Set(230, 200, request).ToErrno(), EAGAIN);
+
+    request.l_start = 30;
+    ASSERT_TRUE(second.Set(230, 200, request).ok());
+    ASSERT_TRUE(second.Get(230, 200, request, &result).ok());
+    EXPECT_EQ(result.l_type, F_UNLCK);
+
+    request.l_whence = SEEK_CUR;
+    EXPECT_EQ(second.Set(230, 200, request).ToErrno(), EINVAL);
+    request.l_whence = SEEK_SET;
+    request.l_start = -1;
+    EXPECT_EQ(second.Set(230, 200, request).ToErrno(), EINVAL);
+    request.l_start = 1;
+    request.l_len = -1;
+    EXPECT_EQ(second.Set(230, 200, request).ToErrno(), EINVAL);
+    request.l_start = std::numeric_limits<off_t>::max();
+    request.l_len = 2;
+    EXPECT_EQ(second.Set(230, 200, request).ToErrno(), EINVAL);
+    request.l_start = 0;
+    request.l_len = 0;
+    request.l_type = F_UNLCK;
+    EXPECT_EQ(second.Get(230, 200, request, &result).ToErrno(), EINVAL);
+    request.l_type = 99;
+    EXPECT_EQ(second.Set(230, 200, request).ToErrno(), EINVAL);
+    request.l_type = F_RDLCK;
+    EXPECT_EQ(second.Get(230, 200, request, nullptr).ToErrno(), EINVAL);
+  });
+}
+
+TEST_F(RedisLockAuthorityTest, FiberAdapterFullOwnerCloseReleasesAllRangesAndChecksLease) {
+  utils::BlockingExecutor executor(2, "lock-close-test");
+  fuse::PosixRecordLocks first(*first_, executor);
+  fuse::PosixRecordLocks second(*second_, executor);
+  struct flock request{};
+  request.l_type = F_WRLCK;
+  request.l_whence = SEEK_SET;
+  request.l_len = 10;
+  request.l_pid = 500;
+  test::RunInTestFiber([&] {
+    ASSERT_TRUE(first.Set(232, 123, request).ok());
+    request.l_start = 20;
+    ASSERT_TRUE(first.Set(232, 123, request).ok());
+    request.l_start = 0;
+    request.l_len = 0;
+    EXPECT_EQ(second.Set(232, 456, request).ToErrno(), EAGAIN);
+    ASSERT_TRUE(first.UnlockOwner(232, 123).ok());
+    EXPECT_TRUE(second.Set(232, 456, request).ok());
+    EXPECT_TRUE(first.UnlockOwner(232, 123).ok());  // Mandatory safe no-op close.
+  });
+
+  ASSERT_TRUE(first_lease_->Revoke().ok());
+  test::RunInTestFiber([&] {
+    EXPECT_FALSE(first.CanGrant());
+    EXPECT_EQ(first.UnlockOwner(232, 123).ToErrno(), EIO);
+    struct flock result{};
+    EXPECT_EQ(first.Get(232, 123, request, &result).ToErrno(), EIO);
+  });
+}
+
 TEST_F(RedisLockAuthorityTest, FlockSharedExclusiveAndReleaseAcrossMounts) {
   ASSERT_TRUE(first_->SetFlock(24, 101, FlockType::kShared).ok());
   EXPECT_TRUE(second_->SetFlock(24, 202, FlockType::kShared).ok());
@@ -158,7 +315,7 @@ TEST_F(RedisLockAuthorityTest, NoOpUnlockInvalidatesAnOlderDelayedGrant) {
         guarded.watch(hash);
         EXPECT_EQ(guarded.hlen(hash), 0);
       }
-      delayed.hset(hash, field, flock ? "F1|X" : "P1|W,0,100");
+      delayed.hset(hash, field, flock ? "F1|X" : "P2|W,0,100,0");
 
       if (flock) {
         ASSERT_TRUE(first_->SetFlock(ino, 101, FlockType::kUnlock).ok());
@@ -194,6 +351,7 @@ TEST_F(RedisLockAuthorityTest, NormalReleaseDoesNotKeepHashOrTombstoneForUsedIno
 
 TEST_F(RedisLockAuthorityTest, InvalidRangesCannotProduceAChange) {
   EXPECT_EQ(first_->SetPosix(28, 101, {UINT64_MAX, 2, PosixType::kWrite}).ToErrno(), EINVAL);
+  EXPECT_EQ(first_->SetPosix(28, 101, {0, 1, PosixType::kWrite, -1}).ToErrno(), EINVAL);
   EXPECT_EQ(first_->SetPosix(28, 101, {0, 0, PosixType::kUnlock}).ToErrno(), 0);
 }
 
@@ -205,7 +363,7 @@ TEST_F(RedisLockAuthorityTest, ExpiredGenerationsDoNotBlockGrantsAndCanBeCleaned
   // Expired owner records are deliberately left by the O(1)-key Revoke.
   ASSERT_TRUE(first_lease_->Revoke().ok());
   for (uint64_t i = 0; i < 1124; ++i) {
-    redis.hset(hash, std::to_string(stale_generation) + ":" + std::to_string(i), "P1|W,0,100");
+    redis.hset(hash, std::to_string(stale_generation) + ":" + std::to_string(i), "P2|W,0,100,0");
   }
   EXPECT_EQ(second_->SetPosix(30, 5000, {0, 100, PosixType::kWrite}).ToErrno(), ENOLCK);
   EXPECT_LT(redis.hlen(hash), 1124);
@@ -226,7 +384,7 @@ TEST_F(RedisLockAuthorityTest, MixedLiveFirstScanPageStillReclaimsLaterStaleOwne
   // on Redis' first HSCAN page live. This reproduces a stable live-only first
   // page with expired owners beyond the page, independent of Hash ordering.
   for (uint64_t i = 0; i < 1152; ++i) {
-    redis.hset(hash, std::to_string(800000 + i) + ":1", "P1|R,0,100");
+    redis.hset(hash, std::to_string(800000 + i) + ":1", "P2|R,0,100,0");
   }
   std::vector<std::pair<std::string, std::string>> first_page;
   const auto next = redis.hscan(hash, 0, 128, std::back_inserter(first_page));
@@ -270,7 +428,7 @@ TEST_F(RedisLockAuthorityTest, MalformedOrUnexpectedHashValuesFailClosed) {
   redis.hset(hash, std::to_string(first_lease_->generation()) + ":99", "invalid POSIX record");
   EXPECT_FALSE(first_->SetPosix(31, 1, {0, 0, PosixType::kRead}).ok());
   redis.del(hash);
-  redis.hset(hash, "!malformed-owner", "P1|W,0,100");
+  redis.hset(hash, "!malformed-owner", "P2|W,0,100,0");
   EXPECT_FALSE(first_->GetPosix(31, 1, {0, 100, PosixType::kWrite}, nullptr).ok());
   std::optional<RedisLockAuthority::PosixConflict> conflict;
   EXPECT_FALSE(first_->GetPosix(31, 1, {0, 100, PosixType::kWrite}, &conflict).ok());
@@ -296,7 +454,7 @@ TEST_F(RedisLockAuthorityTest, DistinctGenerationLeasesAreValidatedAsOneWatchedB
     const auto lease_key = key.OwnerLease(generation);
     ASSERT_EQ(redis.command<std::string>("SET", lease_key, "active", "PX", 600000), "OK");
     synthetic_leases.push_back(lease_key);
-    redis.hset(hash, std::to_string(generation) + ":1", "P1|R,0,100");
+    redis.hset(hash, std::to_string(generation) + ":1", "P2|R,0,100,0");
   }
   EXPECT_TRUE(first_->SetPosix(33, 99, {0, 100, PosixType::kRead}).ok());
   EXPECT_EQ(first_->SetPosix(33, 99, {0, 100, PosixType::kWrite}).ToErrno(), EAGAIN);
@@ -310,7 +468,7 @@ TEST_F(RedisLockAuthorityTest, PersistedLeaseWithoutTtlIsNeverAssumedExpired) {
   const redis::RedisKey key(config_.db, volume_);
   sw::redis::Redis redis(ConnectionOptions(config_));
   redis.set(key.OwnerLease(500000), "corrupted perpetual lease");
-  redis.hset(key.PosixLock(34), "500000:1", "P1|W,0,100");
+  redis.hset(key.PosixLock(34), "500000:1", "P2|W,0,100,0");
   EXPECT_FALSE(first_->SetPosix(34, 99, {0, 100, PosixType::kRead}).ok());
   EXPECT_EQ(redis.hlen(key.PosixLock(34)), 1);
 }
@@ -329,7 +487,7 @@ TEST_F(RedisLockAuthorityTest, HolderLimitRejectsNewGrantsBeforeCrossingCap) {
     const auto hash = flock ? key.FlockLock(ino) : key.PosixLock(ino);
     for (uint64_t owner = 0; owner < 1024; ++owner) {
       redis.hset(hash, std::to_string(synthetic_generation) + ":" + std::to_string(owner),
-                 flock ? "F1|S" : "P1|R,0,100");
+                 flock ? "F1|S" : "P2|R,0,100,0");
     }
     ASSERT_EQ(redis.hlen(hash), 1024);
     const auto attempt = flock ? first_->SetFlock(ino, 5000, FlockType::kShared)
@@ -362,7 +520,7 @@ TEST_F(RedisLockAuthorityTest, LostExecReplyReplaysTheSamePosixIntentSafely) {
       ASSERT_TRUE(authority.SetPosix(inode, 600, {0, 100, PosixType::kWrite}).ok());
       const auto hash = key.PosixLock(inode);
       EXPECT_EQ(redis.hlen(hash), 1);
-      EXPECT_EQ(redis.hget(hash, std::to_string(first_lease_->generation()) + ":600").value_or(""), "P1|W,0,100");
+      EXPECT_EQ(redis.hget(hash, std::to_string(first_lease_->generation()) + ":600").value_or(""), "P2|W,0,100,0");
     }
     EXPECT_EQ(proxy.intercepted_execs(), 1);
   }
