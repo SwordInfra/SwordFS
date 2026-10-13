@@ -39,6 +39,10 @@ BLOCKING = {
 ISSUE_RE = re.compile(r"^#[1-9][0-9]*$")
 TEST_RE = re.compile(r"^[a-z0-9_-]+/[0-9]+$")
 WORK_DIR_RE = re.compile(r"/tmp/swordfs-fstests[.-][^/\s)]+")
+# CI builds the pinned upstream tools once at this fixed path so their ELF
+# RPATH survives cross-runner distribution. Its location is harness noise,
+# just like the previous per-shard WORK_DIR/xfstests location.
+SHARED_TOOLS_ROOT = "/opt/swordfs-fstests-tools/"
 RESULT_DIR_RE = re.compile(r"/(?:[^/\s)]+/)*build/fstests-conformance/raw/results")
 EVIDENCE_REF_RE = re.compile(
     r"<FSTESTS_RESULT_DIR>/(?P<path>[a-z0-9_-]+/[0-9]+\.(?:out\.bad|mountfail))"
@@ -131,6 +135,7 @@ def normalize_message(value: str | None) -> str:
     # because the random mktemp suffix changed. Canonicalize exactly the
     # harness-owned root while preserving the meaningful relative path/reason.
     normalized = WORK_DIR_RE.sub("<FSTESTS_WORK_DIR>", normalized)
+    normalized = normalized.replace(SHARED_TOOLS_ROOT, "<FSTESTS_WORK_DIR>/")
     # Upstream XUnit FAIL messages include the absolute path of the .out.bad
     # or .mountfail artifact. The testcase-specific suffix is useful evidence,
     # but the GitHub workspace prefix is runner noise.
@@ -196,6 +201,7 @@ def normalize_failure_evidence(value: str, path: str) -> str:
     """Canonicalize only proven fstests harness noise in detailed FAIL evidence."""
     normalized = value.replace("\r\n", "\n").replace("\r", "\n")
     normalized = WORK_DIR_RE.sub("<FSTESTS_WORK_DIR>", normalized)
+    normalized = normalized.replace(SHARED_TOOLS_ROOT, "<FSTESTS_WORK_DIR>/")
     normalized = RESULT_DIR_RE.sub("<FSTESTS_RESULT_DIR>", normalized)
 
     lines: list[str] = []

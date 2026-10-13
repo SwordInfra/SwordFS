@@ -20,6 +20,30 @@ SPEC.loader.exec_module(CLASSIFY)
 
 
 class FstestsFailureEvidenceTest(unittest.TestCase):
+    def test_shared_upstream_tool_root_normalizes_to_original_harness_evidence(self) -> None:
+        # Reusing the exact pinned tools must not require changing the known
+        # semantic baseline: only the upstream executable's location moved.
+        old = (
+            "QA output created by 184\n"
+            "/tmp/swordfs-fstests-ABCDEF/xfstests/tests/generic/184: line 21: "
+            "/tmp/swordfs-fstests-ABCDEF/test/null: Permission denied\n"
+        )
+        new = (
+            "QA output created by 184\n"
+            "/opt/swordfs-fstests-tools/xfstests/tests/generic/184: line 21: "
+            "/tmp/swordfs-fstests-GHIJKL/test/null: Permission denied\n"
+        )
+        self.assertEqual(
+            CLASSIFY.normalize_failure_evidence(old, "generic/184.out.bad"),
+            CLASSIFY.normalize_failure_evidence(new, "generic/184.out.bad"),
+        )
+        self.assertEqual(
+            CLASSIFY.normalize_message(
+                "/opt/swordfs-fstests-tools/xfstests/src/file_attr not built"
+            ),
+            "<FSTESTS_WORK_DIR>/xfstests/src/file_attr not built",
+        )
+
     def test_out_bad_normalization_removes_run_paths_and_absolute_stat_times(self) -> None:
         first = """QA output created by 120
   File: \"/tmp/swordfs-fstests-AAAAAA/scratch/testfile\"

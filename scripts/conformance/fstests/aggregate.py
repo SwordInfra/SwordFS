@@ -76,6 +76,13 @@ def _copy_test_evidence(source: pathlib.Path, destination: pathlib.Path, errors:
             relative = source_file.relative_to(source)
             target = destination / relative
             if target.exists():
+                # Upstream creates this empty per-invocation sentinel when its
+                # dmesg probe finds nothing. Multiple shards may independently
+                # produce it; it is not per-test result evidence.
+                if (relative.as_posix() == "generic/check_dmesg"
+                        and source_file.stat().st_size == 0
+                        and target.stat().st_size == 0):
+                    continue
                 errors.append(f"duplicate testcase evidence path across shards: {relative}")
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)

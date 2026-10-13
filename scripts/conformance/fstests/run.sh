@@ -342,9 +342,11 @@ WORK_DIR="$(mktemp -d /tmp/swordfs-fstests-XXXXXX)"
 # able to traverse the harness parent directory before they can reach the FUSE
 # TEST/SCRATCH mounts. Keep write ownership with root while allowing traversal.
 chmod 0755 "${WORK_DIR}"
-FSTESTS_DIR="${WORK_DIR}/xfstests"
-LIBURING_DIR="${WORK_DIR}/liburing"
-LIBURING_PREFIX="${WORK_DIR}/liburing-install"
+# The harness still gets a fresh per-shard mount/process workspace. Only the
+# read-mostly upstream executable toolchain can be installed once per CI run.
+FSTESTS_TOOL_ROOT="${FSTESTS_TOOL_ROOT:-${WORK_DIR}/fstests-tools}"
+FSTESTS_DIR="${FSTESTS_TOOL_ROOT}/xfstests"
+LIBURING_PREFIX="${FSTESTS_TOOL_ROOT}/liburing-install"
 TEST_DIR="${WORK_DIR}/test"
 SCRATCH_MNT="${WORK_DIR}/scratch"
 SELECT_RESULTS="${RAW_DIR}/selection-verification"
@@ -429,76 +431,30 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "=== Fetching liburing ${LIBURING_COMMIT} ==="
-git init -q "${LIBURING_DIR}"
-git -C "${LIBURING_DIR}" remote add origin "${LIBURING_REPOSITORY}"
-git -C "${LIBURING_DIR}" fetch -q --depth 1 origin "${LIBURING_COMMIT}"
-git -C "${LIBURING_DIR}" checkout -q --detach FETCH_HEAD
-ACTUAL_LIBURING_COMMIT="$(git -C "${LIBURING_DIR}" rev-parse HEAD)"
-if [[ "${ACTUAL_LIBURING_COMMIT}" != "${LIBURING_COMMIT}" ]]; then
-  echo "ERROR: fetched liburing ${ACTUAL_LIBURING_COMMIT}, expected ${LIBURING_COMMIT}" >&2
+if [[ -n "${FSTESTS_PREBUILT_TOOLS:-}" ]]; then
+  echo "=== Using verified shared fstests/liburing toolchain ==="
+  if [[ "${FSTESTS_TOOL_ROOT}" != /opt/swordfs-fstests-tools ]]; then
+    echo "ERROR: unexpected shared fstests toolchain prefix: ${FSTESTS_TOOL_ROOT}" >&2
+    exit 2
+  fi
+else
+  # Local harnesses still build their own pinned tools inside this isolated
+  # WORK_DIR; no shared state and no compatibility or fallback in CI.
+  bash "${SCRIPT_DIR}/build-tools.sh" "${FSTESTS_TOOL_ROOT}" "${OUTPUT_DIR}"
+fi
+if [[ ! -x "${FSTESTS_DIR}/check" || ! -d "${LIBURING_PREFIX}/lib" ||
+      ! -s "${FSTESTS_TOOL_ROOT}/fstests-local-patches.diff" ]]; then
+  echo "ERROR: required pinned fstests toolchain contents are missing" >&2
   exit 2
 fi
-
-# Build liburing against the runner's actual UAPI headers. Ubuntu's hosted
-# runner package can ship a generated compat.h that expects a kernel header
-# absent from the image, while installing matching kernel headers mutates the
-# host package graph. A pinned source build preserves io_uring test coverage
-# without making the conformance environment depend on that packaging mismatch.
-echo "=== Building pinned liburing ==="
-(
-  cd "${LIBURING_DIR}"
-  ./configure --prefix="${LIBURING_PREFIX}"
-  jobs="$(nproc)"
-  jobs=$((jobs / 2))
-  ((jobs > 0)) || jobs=1
-  make -j"${jobs}"
-  make install
-) >"${OUTPUT_DIR}/liburing-build.log" 2>&1
+cp "${FSTESTS_TOOL_ROOT}/fstests-local-patches.diff" "${OUTPUT_DIR}/fstests-local-patches.diff"
+# The upstream vfstest helper may execute with setuid; use a fixed RPATH to
+# keep liburing available even when glibc ignores LD_LIBRARY_PATH.
 export PKG_CONFIG_PATH="${LIBURING_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
 export CPPFLAGS="-I${LIBURING_PREFIX}/include${CPPFLAGS:+ ${CPPFLAGS}}"
-# generic/633 copies vfstest into the tested filesystem and executes that
-# copy with setuid/setgid bits. glibc secure-execution mode ignores
-# LD_LIBRARY_PATH for such binaries, so make the pinned liburing location an
-# explicit loader search path in the helper itself as well as a link path.
 export LDFLAGS="-L${LIBURING_PREFIX}/lib -Wl,-rpath,${LIBURING_PREFIX}/lib${LDFLAGS:+ ${LDFLAGS}}"
 export LIBRARY_PATH="${LIBURING_PREFIX}/lib${LIBRARY_PATH:+:${LIBRARY_PATH}}"
 export LD_LIBRARY_PATH="${LIBURING_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-
-echo "=== Fetching fstests ${FSTESTS_COMMIT} ==="
-git init -q "${FSTESTS_DIR}"
-git -C "${FSTESTS_DIR}" remote add origin "${FSTESTS_REPOSITORY}"
-git -C "${FSTESTS_DIR}" fetch -q --depth 1 origin "${FSTESTS_COMMIT}"
-git -C "${FSTESTS_DIR}" checkout -q --detach FETCH_HEAD
-ACTUAL_FSTESTS_COMMIT="$(git -C "${FSTESTS_DIR}" rev-parse HEAD)"
-if [[ "${ACTUAL_FSTESTS_COMMIT}" != "${FSTESTS_COMMIT}" ]]; then
-  echo "ERROR: fetched fstests ${ACTUAL_FSTESTS_COMMIT}, expected ${FSTESTS_COMMIT}" >&2
-  exit 2
-fi
-
-# generic/615 stops its sentinel-controlled background stat loop by removing
-# the sentinel and immediately killing the loop shell. On FUSE the shell is
-# commonly inside `blocks=$(stat ...)` at that instant, so killing the shell
-# closes the command-substitution pipe while coreutils stat is writing and
-# deterministically contaminates the testcase output with a Broken pipe
-# diagnostic. Let the existing sentinel terminate the loop naturally instead;
-# the buffered/direct-I/O workload and zero-block assertion remain unchanged.
-echo "=== Applying fstests CI reliability patch ${FSTESTS_PATCH_RELATIVE} ==="
-git -C "${FSTESTS_DIR}" apply --check "${FSTESTS_PATCH}"
-git -C "${FSTESTS_DIR}" apply "${FSTESTS_PATCH}"
-git -C "${FSTESTS_DIR}" diff --check
-git -C "${FSTESTS_DIR}" diff -- tests/generic/615 >"${OUTPUT_DIR}/fstests-local-patches.diff"
-
-echo "=== Building fstests ==="
-(
-  cd "${FSTESTS_DIR}"
-  make configure
-  ./configure
-  jobs="$(nproc)"
-  jobs=$((jobs / 2))
-  ((jobs > 0)) || jobs=1
-  make -j"${jobs}"
-) >"${OUTPUT_DIR}/fstests-build.log" 2>&1
 
 echo "=== Ensuring fstests users and groups ==="
 getent group fsgqa >/dev/null 2>&1 || groupadd fsgqa
