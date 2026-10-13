@@ -11,13 +11,14 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (11 fstests shards)",
-    "swordfs_commit": "0f3326cde5ef5f22ae4ccfa672b751ad8f3d90b7"
+    "swordfs_commit": "8d3f92e22d59e1c56bef3b46875c720f2615fb93"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "ENVIRONMENT": 8,
-      "KNOWN_UNSUPPORTED": 90,
+      "KERNEL_LOCAL_ONLY": 2,
+      "KNOWN_UNSUPPORTED": 88,
       "PASS": 144,
       "UPSTREAM_NOT_APPLICABLE": 402,
       "UPSTREAM_TEST_DEFECT": 1
@@ -30,9 +31,9 @@
     "known_gap_count": 501,
     "overall_support_percent": 22.33,
     "raw_results": {
-      "FAIL": 19,
+      "FAIL": 17,
       "NOTRUN": 482,
-      "PASS": 144
+      "PASS": 146
     },
     "selected_count": 645,
     "supported_count": 144,
@@ -849,11 +850,11 @@
       "test": "generic/130"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/131.out.bad)",
-      "reason": "SwordFS POSIX lock hooks return ENOSYS; tracked by #255.",
-      "result": "FAIL",
+      "classification": "KERNEL_LOCAL_ONLY",
+      "issue": "#433",
+      "message": "",
+      "reason": "Kernel-local POSIX locks pass without FUSE_CAP_POSIX_LOCKS; this does not verify distributed cross-Mount authority; remote activation remains #433.",
+      "result": "PASS",
       "test": "generic/131"
     },
     {
@@ -3009,11 +3010,11 @@
       "test": "generic/477"
     },
     {
-      "classification": "KNOWN_UNSUPPORTED",
-      "issue": "#255",
-      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/478.out.bad)",
-      "reason": "SwordFS POSIX/OFD setlk/getlk FUSE hooks return ENOSYS; tracked by #255.",
-      "result": "FAIL",
+      "classification": "KERNEL_LOCAL_ONLY",
+      "issue": "#433",
+      "message": "",
+      "reason": "Kernel-local POSIX/OFD interactions pass without FUSE_CAP_POSIX_LOCKS; cross-Mount remote locks and OFD transport remain unverified under #433/#464.",
+      "result": "PASS",
       "test": "generic/478"
     },
     {
