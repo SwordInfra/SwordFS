@@ -9,10 +9,8 @@ namespace swordfs::metadata {
 
 using InodeID = uint64_t;
 using ChunkIndex = uint64_t;
-using ChunkRevision = uint64_t;
 
 constexpr InodeID kRootInodeId = 1;
-constexpr ChunkRevision kInvalidChunkRevision = 0;
 inline constexpr uint64_t kMaxXAttrNameLength = 255;
 inline constexpr uint64_t kMaxXAttrValueSize = 64 * 1024;
 inline constexpr uint64_t kMaxXAttrListSize = 64 * 1024;

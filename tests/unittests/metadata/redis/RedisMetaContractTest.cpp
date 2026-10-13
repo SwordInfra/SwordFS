@@ -80,10 +80,6 @@ FIBER_TEST_F(RedisMetaImplTest, ContractMalformedAclFailsWithoutMutation) {
   swordfs::test::meta_contract::AclRejectsMalformedLinuxEncoding(static_cast<IMetaEngine &>(*impl_));
 }
 
-FIBER_TEST_F(RedisMetaImplTest, ContractChunkPublicationHonorsOffTMaximum) {
-  swordfs::test::meta_contract::ChunkPublicationValidatesMaximumFileExtent(static_cast<IMetaEngine &>(*impl_));
-}
-
 FIBER_TEST_F(RedisMetaImplTest, ContractReadlinkAndReclaimValidateMissingState) {
   swordfs::test::meta_contract::ReadlinkAndReclaimValidateMissingState(static_cast<IMetaEngine &>(*impl_));
 }
@@ -215,21 +211,22 @@ FIBER_TEST_F(RedisMetaImplTest, ConcurrentCrossEngineRenameOfSameSourceHasOneWin
   swordfs::test::RunInTestThreadFromFiber([&] { peer.reset(); });
 }
 
-FIBER_TEST_F(RedisMetaImplTest, ReclaimUsesLatestPublishedRevisionAfterRewrite) {
+FIBER_TEST_F(RedisMetaImplTest, ReclaimFreezesAttachedChunkIDIndependentOfPrivateRevision) {
   SwordFsInode file;
-  ASSERT_TRUE(impl_->Create(kRootInodeId, "latest-head", 0644, &file).ok());
-  const swordfs::metadata::SwordFsChunk original{.index = 0, .revision = 1, .size = 64};
-  const swordfs::metadata::SwordFsChunk replacement{.index = 0, .revision = 2, .size = 128};
-  ASSERT_TRUE(impl_->CommitChunk(file.ino, std::nullopt, original).ok());
-  ASSERT_TRUE(impl_->CommitChunk(file.ino, original, replacement).ok());
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "latest-head").ok());
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "typed-reclaim", 0644, &file).ok());
+  const swordfs::metadata::ChunkID id(73);
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, id, 64, {.eof = 0}).ok());
+  swordfs::metadata::FileChunkSnapshot before;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 0, &before).ok());
+  ASSERT_EQ(before.chunk_id, std::optional{id});
+
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "typed-reclaim").ok());
   ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
-  auto work = PendingReclaim(file.ino);
+  const auto work = PendingReclaim(file.ino);
   ASSERT_TRUE(work.has_value());
-  std::vector<swordfs::chunk::cow::COWRef> refs;
-  ASSERT_TRUE(swordfs::chunk::cow::DecodeCOWReclaim(*work, swordfs::test::redis_meta::kTestChunkSize, &refs).ok());
-  ASSERT_EQ(refs.size(), 1U);
-  EXPECT_EQ(refs[0].descriptor, replacement);
+  swordfs::metadata::ReclaimWork expected;
+  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedReclaim(file.ino, {{0, id}}, &expected).ok());
+  EXPECT_EQ(work->payload, expected.payload);
   ASSERT_TRUE(impl_->CompleteReclaim(file.ino).ok());
 }
 

@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include "chunk/internal/ChunkMetadataBridge.hpp"
+#include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/redis/RedisBackendContext.hpp"
@@ -76,12 +76,12 @@ utils::Status RedisMetaOps::OpenChunkMetadata(ChunkType chunk_type, ChunkMetadat
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaOps::BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) {
+utils::Status RedisMetaOps::BindChunkCleanupWorkEncoder(chunk::internal::ChunkCleanupWorkEncoder *encoder) {
   utils::ExpectInThreadDomain();
-  if (bridge == nullptr) {
-    return utils::Status::InvalidArgument("chunk metadata bridge is null");
+  if (encoder == nullptr) {
+    return utils::Status::InvalidArgument("cleanup work encoder is null");
   }
-  chunk_metadata_bridge_ = bridge;
+  cleanup_work_encoder_ = encoder;
   return utils::Status::OK();
 }
 
@@ -117,11 +117,10 @@ utils::Status RedisMetaOps::FormatVolume(const SwordFsVolume &config) {
       // its history in the same atomic commit as the volume identity. Keep
       // all initialization keys together so every SET has the same error
       // handling and none can be omitted from the atomic format transaction.
-      const std::array<std::pair<std::string, std::string>, 6> initial_keys{{
+      const std::array<std::pair<std::string, std::string>, 5> initial_keys{{
           {key_.Format(), config.SerializeTo()},
           {key_.Inode(kRootInodeId), root_value},
           {key_.NextIno(), std::to_string(kRootInodeId)},
-          {key_.NextChunkRevision(), "0"},
           {key_.InodeCount(), "1"},
           {key_.OwnerGeneration(), "0"},
       }};
@@ -252,15 +251,13 @@ utils::Status RedisMetaOps::LookupEntry(InodeID parent_ino, std::string_view nam
 utils::Status RedisMetaOps::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out) {
   utils::ExpectInFiberDomain();
   SwordFsInode result;
-  std::vector<PendingDelete> detached_chunks;
-  auto status = TransactFromFiber([&](RedisMetaTxn &txn) {
-    return txn.SetAttr(ino, requested, fields, out != nullptr ? &result : nullptr, &detached_chunks);
-  });
+  if (HasSetAttrField(fields, SetAttrField::kSize)) {
+    return utils::Status::InvalidArgument("size changes require FileReadWriter");
+  }
+  auto status = TransactFromFiber(
+      [&](RedisMetaTxn &txn) { return txn.SetAttr(ino, requested, fields, out != nullptr ? &result : nullptr); });
   if (status.ok() && out != nullptr) {
     *out = result;
-  }
-  if (status.ok()) {
-    RegisterPendingDeletesBestEffort(ino, detached_chunks, "setattr shrink");
   }
   return status;
 }
@@ -304,16 +301,6 @@ utils::Status RedisMetaOps::ListXAttrs(InodeID ino, std::vector<std::string> *na
 utils::Status RedisMetaOps::RemoveXAttr(InodeID ino, std::string_view name) {
   utils::ExpectInFiberDomain();
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.RemoveXAttr(ino, name); });
-}
-
-utils::Status RedisMetaOps::Truncate(InodeID ino, uint64_t size) {
-  utils::ExpectInFiberDomain();
-  std::vector<PendingDelete> detached_chunks;
-  auto status = TransactFromFiber([&](RedisMetaTxn &txn) { return txn.Truncate(ino, size, &detached_chunks); });
-  if (status.ok()) {
-    RegisterPendingDeletesBestEffort(ino, detached_chunks, "truncate");
-  }
-  return status;
 }
 
 utils::Status RedisMetaOps::TouchInode(InodeID ino, SetAttrField fields) {
@@ -489,92 +476,6 @@ utils::Status RedisMetaOps::CompletePendingDelete(std::string_view object_key) {
   return TransactFromFiber([&](RedisMetaTxn &txn) { return txn.CompletePendingDelete(object_key); });
 }
 
-utils::Status RedisMetaOps::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
-                                        const SwordFsChunk &replacement, const ChunkPublishIntent &intent) {
-  utils::ExpectInFiberDomain();
-  // Validate before opening the publication transaction. RedisMetaTxn repeats
-  // these checks at the transaction boundary as defense in depth.
-  if (!replacement.IsValidForChunkSize(chunk_size_)) {
-    return utils::Status::InvalidArgument("replacement chunk descriptor is invalid");
-  }
-  if (expected.has_value() && !expected->IsValidForChunkSize(chunk_size_)) {
-    return utils::Status::InvalidArgument("expected chunk descriptor is invalid");
-  }
-  if (expected.has_value() && replacement.revision <= expected->revision) {
-    return utils::Status::InvalidArgument("replacement revision must increase");
-  }
-  if (expected.has_value() && expected->index != replacement.index) {
-    return utils::Status::InvalidArgument("replacement must preserve chunk index");
-  }
-
-  utils::Status publication_result;
-  std::optional<PendingDelete> cleanup_candidate;
-  auto status = TransactFromFiber([&](RedisMetaTxn &txn) {
-    return txn.CommitChunk(ino, expected, replacement, publication_result, cleanup_candidate, intent);
-  });
-  if (!status.ok()) {
-    // A participant rejection is a known non-publication: its queued writes
-    // were discarded. An EXEC error leaves publication_result OK because the
-    // outcome can be partial or ambiguous and must not trigger deletion.
-    if (!publication_result.ok() && cleanup_candidate.has_value()) {
-      RegisterPendingDeletesBestEffort(ino, std::vector<PendingDelete>{*cleanup_candidate},
-                                       "rejected chunk publication");
-    }
-    return status;
-  }
-  if (cleanup_candidate.has_value()) {
-    RegisterPendingDeletesBestEffort(ino, std::vector<PendingDelete>{*cleanup_candidate}, "chunk publication");
-  }
-  return publication_result;
-}
-
-utils::Status RedisMetaOps::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
-  utils::ExpectInFiberDomain();
-  if (chunk == nullptr) {
-    return utils::Status::InvalidArgument("chunk output is null");
-  }
-
-  std::string value;
-  auto status = backend_->executor().RunFromFiber(
-      [&] { return backend_->client().HGet(key_.Chunk(ino), std::to_string(idx), &value); });
-  if (!status.ok()) {
-    return status;
-  }
-  status = chunk->ParseFrom(value);
-  if (!status.ok()) {
-    return status;
-  }
-  if (chunk->index != idx || !chunk->IsValidForChunkSize(chunk_size_)) {
-    return utils::Status::Malformed("persisted chunk descriptor does not match its canonical identity");
-  }
-  return utils::Status::OK();
-}
-
-utils::Status RedisMetaOps::LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out) {
-  utils::ExpectInFiberDomain();
-  if (out == nullptr) {
-    return utils::Status::InvalidArgument("chunk view output is null");
-  }
-
-  ChunkView view;
-  utils::Status read_result;
-  // Even a semantic read error must reach the read-only EXEC, so WATCH can
-  // reject a view assembled while its public or private hash changed.
-  auto status = TransactFromFiber([&](RedisMetaTxn &txn) {
-    view = {};
-    read_result = txn.LoadChunkView(ino, idx, &view);
-    return utils::Status::OK();
-  });
-  if (!status.ok()) {
-    return status;
-  }
-  if (!read_result.ok()) {
-    return read_result;
-  }
-  *out = std::move(view);
-  return utils::Status::OK();
-}
-
 utils::Status RedisMetaOps::ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out) {
   utils::ExpectInFiberDomain();
   if (out == nullptr) {
@@ -678,19 +579,6 @@ utils::Status RedisMetaOps::CommitGrow(InodeID ino, const ChunkSizePlan &plan, c
   return status;
 }
 
-void RedisMetaOps::RegisterPendingDeletesBestEffort(InodeID ino, const std::vector<PendingDelete> &work,
-                                                    std::string_view reason) {
-  utils::ExpectInFiberDomain();
-  if (work.empty()) {
-    return;
-  }
-  auto status = TransactFromFiber([&](RedisMetaTxn &txn) { return txn.RegisterPendingDeletes(work); });
-  if (!status.ok()) {
-    SWORDFS_LOG_WARN << "Best-effort pending-delete registration failed after " << reason << ": ino=" << ino
-                     << " items=" << work.size() << " — " << status.message();
-  }
-}
-
 utils::Status RedisMetaOps::CollectPendingReclaims(std::vector<ReclaimWork> &out) {
   utils::ExpectInFiberDomain();
   out.clear();
@@ -750,21 +638,12 @@ utils::Status RedisMetaOps::AllocateInode(InodeID *ino) {
   return backend_->executor().RunFromFiber([&] { return backend_->client().Incr(key_.NextIno(), ino); });
 }
 
-utils::Status RedisMetaOps::AllocateChunkRevision(ChunkRevision *revision) {
-  utils::ExpectInFiberDomain();
-  if (revision == nullptr) {
-    return utils::Status::InvalidArgument("chunk revision output is null");
-  }
-  return backend_->executor().RunFromFiber([&] { return backend_->client().Incr(key_.NextChunkRevision(), revision); });
-}
-
 utils::Status RedisMetaOps::TransactFromFiber(const std::function<utils::Status(RedisMetaTxn &)> &callback) {
   utils::ExpectInFiberDomain();
   return backend_->executor().RunFromFiber([&] {
     return backend_->client().Transact([&](RedisKvTxn &kv_txn) {
       utils::ExpectInThreadDomain();
-      const auto chunk_type = chunk_metadata_ != nullptr ? chunk_metadata_->Type() : ChunkType::kCow;
-      RedisMetaTxn txn(kv_txn, key_, chunk_size_, chunk_type, chunk_metadata_bridge_);
+      RedisMetaTxn txn(kv_txn, key_, chunk_size_, cleanup_work_encoder_);
       return callback(txn);
     });
   });

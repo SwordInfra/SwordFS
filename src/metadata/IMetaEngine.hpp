@@ -16,7 +16,6 @@
 
 #include "metadata/ChunkMetadata.hpp"
 #include "metadata/ChunkSizePlan.hpp"
-#include "metadata/IChunkIndexTxn.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
 #include "metadata/types/Entry.hpp"
@@ -30,7 +29,7 @@ using Status = swordfs::utils::Status;
 using SwordFsContext = swordfs::utils::SwordFsContext;
 
 namespace swordfs::chunk::internal {
-class ChunkMetadataBridge;
+class ChunkCleanupWorkEncoder;
 }
 
 namespace swordfs::metadata {
@@ -117,10 +116,9 @@ class IMetaEngine {
     return Status::NotSupported("metadata backend does not support chunk metadata");
   }
 
-  /// Transitional #384 bridge used only by legacy common-authority chunk
-  /// transactions. VFS/runtime callers never observe this callback surface.
-  virtual Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *) {
-    return Status::NotSupported("metadata backend does not support the chunk metadata bridge");
+  /// Bind the selected mechanism's pure detached-work encoder for maintenance.
+  virtual Status BindChunkCleanupWorkEncoder(chunk::internal::ChunkCleanupWorkEncoder *) {
+    return Status::NotSupported("metadata backend does not support cleanup work encoding");
   }
 
   /// Initialize a metadata backend connection and validate backend-specific
@@ -281,68 +279,9 @@ class IMetaEngine {
   /// Idempotent: a missing key is not an error.
   virtual Status CompletePendingDelete(std::string_view key) = 0;
 
-  /// Allocate a globally unique, monotonically increasing chunk revision.
-  /// Revisions are volume-scoped persistent identities: a backend must never
-  /// return zero or reuse an allocated revision while metadata for that volume
-  /// remains authoritative. Allocated-but-unpublished revisions may be skipped
-  /// after failures.
-  virtual Status AllocateChunkRevision(ChunkRevision *revision) = 0;
-
   /// Open a directory and create its per-open iterator. Implementations may
   /// share backend directory-entry prefetch/cache state between iterators.
   virtual Status OpenDir(InodeID ino, DirIteratorPtr *iterator) = 0;
-
-  // ────────────────────────────────────────────────────────────────
-  // Chunk metadata
-  // ────────────────────────────────────────────────────────────────
-
-  /// Atomically publish |replacement| as the authoritative descriptor.
-  ///
-  /// When |expected| is empty, the chunk must not already exist (first
-  /// publication). When |expected| is present, the current descriptor must
-  /// match it (rewrite CAS). Replaying an already-published |replacement| is
-  /// idempotent and must also reconcile inode side effects after an ambiguous
-  /// or partially applied backend transaction. A rewrite replacement revision
-  /// must be strictly greater than the expected revision. Publication must
-  /// never shrink inode size. A conflicting descriptor returns AlreadyExists;
-  /// a rewrite whose expected descriptor disappeared returns NotFound.
-  ///
-  /// Cleanup completeness is deliberately outside the publication contract.
-  /// Backends should best-effort register an obsolete |expected| revision, or
-  /// a definitely rejected uploaded |replacement|, for background cleanup.
-  /// Failure to register cleanup may leak an object but must not invalidate an
-  /// otherwise known publication result. Conversely, an ambiguous backend
-  /// error does not prove publication failed; callers must retain the uploaded
-  /// candidate and reconcile authoritative metadata before treating it as
-  /// obsolete.
-  virtual Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
-                             const SwordFsChunk &replacement) = 0;
-
-  /// Publish a chunk-type-owned intent with the public head in one metadata
-  /// transaction. Legacy engines may only accept an empty intent.
-  virtual Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
-                             const ChunkPublishIntent &intent) {
-    if (!intent.payload.empty()) {
-      return Status::NotSupported("metadata backend does not support chunk publication intent");
-    }
-    return CommitChunk(ino, expected, replacement);
-  }
-
-  /// Read the public head and the selected chunk type's private representation
-  /// from one validated metadata snapshot. NotFound means no public head.
-  virtual Status LoadChunkView(InodeID, ChunkIndex, ChunkView *) {
-    return Status::NotSupported("metadata backend does not support chunk index snapshots");
-  }
-
-  /// Find the chunk at |idx|.  Returns OK and fills |*chunk| if a
-  /// matching chunk is registered for the given inode.
-  virtual Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) = 0;
-
-  /// Truncate |ino| to |size| bytes. Updates the inode size and drops chunk
-  /// metadata beyond the new size. Backends should best-effort register the
-  /// detached immutable objects for background cleanup; registration failure
-  /// may leak garbage but does not invalidate a known-success truncate.
-  virtual Status Truncate(InodeID ino, uint64_t size) = 0;
 };
 
 }  // namespace swordfs::metadata

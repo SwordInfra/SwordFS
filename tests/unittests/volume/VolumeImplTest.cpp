@@ -79,6 +79,7 @@ class InvalidChunkMetadataEngine final : public swordfs::test::UnsupportedMetaEn
     kNullCapability,
     kMismatchedChunkType,
     kCowTypeButWrongClass,
+    kCleanupBindingRejected,
   };
 
   explicit InvalidChunkMetadataEngine(Result result) : result_(result) {
@@ -102,8 +103,11 @@ class InvalidChunkMetadataEngine final : public swordfs::test::UnsupportedMetaEn
     return Status::OK();
   }
 
-  Status BindChunkMetadataBridge(swordfs::chunk::internal::ChunkMetadataBridge *) override {
-    return Status::OK();
+  Status BindChunkCleanupWorkEncoder(swordfs::chunk::internal::ChunkCleanupWorkEncoder *encoder) override {
+    if (result_ == Result::kCleanupBindingRejected) {
+      return Status::IOError("cleanup encoder binding rejected");
+    }
+    return encoder != nullptr ? Status::OK() : Status::InvalidArgument("missing cleanup encoder");
   }
 
  private:
@@ -162,7 +166,7 @@ class DetachedCleanupMetaEngine final : public swordfs::test::UnsupportedMetaEng
     *out = std::make_shared<swordfs::test::TestCOWChunkMetadata>();
     return Status::OK();
   }
-  Status BindChunkMetadataBridge(swordfs::chunk::internal::ChunkMetadataBridge *) override {
+  Status BindChunkCleanupWorkEncoder(swordfs::chunk::internal::ChunkCleanupWorkEncoder *) override {
     return Status::OK();
   }
   Status VisitPendingDeletesBatch(size_t, const swordfs::metadata::PendingDeleteVisitorFn &visitor,
@@ -477,6 +481,24 @@ TEST_F(VolumeImplTest, MountRejectsInvalidChunkMetadataCapability) {
     EXPECT_EQ(status.ToErrno(), EINVAL);
     EXPECT_EQ(status.message(), "chunk metadata type mismatch");
   }
+}
+
+TEST_F(VolumeImplTest, MountRejectsCleanupEncoderBindingFailure) {
+  swordfs::test::RegisterTestVolumeEngines();
+  const auto volume_name = makeVolumeName("encoder-binding-failure");
+  swordfs::test::pending_volume = SwordFsVolume{
+      .name = volume_name,
+      .chunk_type = ChunkType::kCow,
+  };
+  swordfs::test::pending_meta_engine =
+      std::make_unique<InvalidChunkMetadataEngine>(InvalidChunkMetadataEngine::Result::kCleanupBindingRejected);
+  swordfs::test::pending_data_engine.reset();
+
+  VolumeImpl volume;
+  const auto status = volume.LoadFrom(swordfs::test::MakeTestMountOptions(volume_name));
+  EXPECT_EQ(status.ToErrno(), EIO);
+  EXPECT_EQ(status.message(), "cleanup encoder binding rejected");
+  EXPECT_EQ(volume.chunk_factory(), nullptr);
 }
 
 TEST_F(VolumeImplTest, MountRejectsCleanupMetadataClassMismatch) {

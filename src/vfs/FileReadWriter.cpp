@@ -617,9 +617,17 @@ utils::Status FileReadWriter::CommitSizeChangeLocked(const metadata::SwordFsAttr
     return status;
   }
   if (requested.size == before.inode.attr.size) {
-    // Size is unchanged. This is an ordinary attribute update, not a COW
-    // boundary transition, and it still needs the requested ctime/flags.
-    status = meta_->SetAttr(ino_, requested, fields, out);
+    // A truncate to the persisted EOF can still discard unflushed live data.
+    // It is a content mutation and must update mtime, even though there is no
+    // typed FileMetadata boundary transition to commit. Preserve an explicit
+    // mtime request if the caller supplied one.
+    auto metadata_fields = static_cast<metadata::SetAttrField>(static_cast<uint32_t>(fields) &
+                                                               ~static_cast<uint32_t>(metadata::SetAttrField::kSize));
+    if (!metadata::HasSetAttrField(fields, metadata::SetAttrField::kMtime) &&
+        !metadata::HasSetAttrField(fields, metadata::SetAttrField::kMtimeNow)) {
+      metadata_fields = metadata_fields | metadata::SetAttrField::kMtimeNow;
+    }
+    status = meta_->SetAttr(ino_, requested, metadata_fields, out);
     if (!status.ok()) {
       return status;
     }

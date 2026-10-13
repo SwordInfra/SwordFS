@@ -344,31 +344,6 @@ inline void AclRejectsMalformedLinuxEncoding(metadata::IMetaEngine &meta) {
   EXPECT_EQ(observed_acl, published_acl);
 }
 
-inline void ChunkPublicationValidatesMaximumFileExtent(metadata::IMetaEngine &meta) {
-  using namespace metadata;
-  constexpr uint64_t kChunkSize = 4096;
-  constexpr ChunkIndex kLastIndex = kMaxSupportedFileSize / kChunkSize;
-  constexpr uint64_t kLastBytes = kMaxSupportedFileSize - kLastIndex * kChunkSize;
-
-  SwordFsInode exact_file;
-  ASSERT_TRUE(meta.Create(kRootInodeId, "contract-exact-off-max", 0644, &exact_file).ok());
-  const SwordFsChunk exact{.index = kLastIndex, .revision = 1, .size = kLastBytes};
-  ASSERT_TRUE(meta.CommitChunk(exact_file.ino, std::nullopt, exact).ok());
-  SwordFsInode published;
-  ASSERT_TRUE(meta.GetInode(exact_file.ino, &published).ok());
-  EXPECT_EQ(published.attr.size, kMaxSupportedFileSize);
-
-  SwordFsInode beyond_file;
-  ASSERT_TRUE(meta.Create(kRootInodeId, "contract-beyond-off-max", 0644, &beyond_file).ok());
-  const SwordFsChunk beyond{.index = kLastIndex, .revision = 2, .size = kLastBytes + 1};
-  EXPECT_EQ(meta.CommitChunk(beyond_file.ino, std::nullopt, beyond).ToErrno(), EINVAL);
-  const SwordFsChunk overflowing{.index = std::numeric_limits<ChunkIndex>::max(), .revision = 3, .size = 1};
-  EXPECT_EQ(meta.CommitChunk(beyond_file.ino, std::nullopt, overflowing).ToErrno(), EINVAL);
-  SwordFsChunk unpublished;
-  EXPECT_TRUE(meta.FindChunk(beyond_file.ino, kLastIndex, &unpublished).IsNotFound());
-  ASSERT_TRUE(meta.Truncate(beyond_file.ino, 0).ok());
-}
-
 inline void ReadlinkAndReclaimValidateMissingState(metadata::IMetaEngine &meta) {
   using namespace metadata;
   SwordFsInode link;

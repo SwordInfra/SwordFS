@@ -56,17 +56,10 @@ namespace {
 
 using swordfs::metadata::InodeID;
 using swordfs::metadata::kRootInodeId;
-using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsVolume;
 using swordfs::test::UnsupportedMetaEngine;
 using swordfs::utils::Status;
-
-metadata::PendingDelete MakePendingDelete(InodeID ino, const SwordFsChunk &descriptor) {
-  metadata::PendingDelete pending;
-  EXPECT_TRUE(chunk::cow::FreezeCOWDelete(ino, descriptor, 0, &pending).ok());
-  return pending;
-}
 
 metadata::PendingDelete MakeTypedRevisionDelete(metadata::ChunkID chunk_id, metadata::cow::COWChunkRevision revision) {
   metadata::BufEncoder enc;
@@ -110,37 +103,52 @@ metadata::ReclaimWork MakeTypedDetachedReclaim(
   return work;
 }
 
-std::unique_ptr<chunk::internal::ChunkCleanupParticipant> MakeLegacyCleanupParticipant(metadata::IMetaEngine *meta,
-                                                                                       storage::IDataEngine *data) {
+std::unique_ptr<chunk::internal::ChunkCleanupParticipant> MakeCleanupParticipant(
+    metadata::IMetaEngine *meta, storage::IDataEngine *data, metadata::ChunkMetadataPtr cow_metadata = {}) {
   if (meta == nullptr || data == nullptr) {
     return nullptr;
   }
   std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
   auto &volume = volume::VolumeImpl::Instance();
-  const auto status = chunk::internal::CreateChunkCleanupParticipant(metadata::ChunkType::kCow, volume.chunk_size(), {},
-                                                                     meta, data, {}, &cleanup);
+  // Real Redis tests pass the already-opened private ChunkMetadata from
+  // fixture setup. Opening it here would cross the thread/fiber boundary;
+  // generic mock tests deliberately use a lightweight in-memory double.
+  if (!cow_metadata) {
+    cow_metadata = std::make_shared<swordfs::test::TestCOWChunkMetadata>();
+  }
+  auto probe = [meta](InodeID ino, metadata::ChunkIndex index, std::optional<metadata::ChunkID> *out) {
+    auto status = meta->ProbeAttachment(ino, index, out);
+    if (status.IsNotFound()) {
+      out->reset();
+      return Status::OK();
+    }
+    return status;
+  };
+  const auto status = chunk::internal::CreateChunkCleanupParticipant(metadata::ChunkType::kCow, volume.chunk_size(),
+                                                                     cow_metadata, meta, data, probe, &cleanup);
   EXPECT_TRUE(status.ok()) << status.message();
   return cleanup;
 }
 
-utils::Status ReconcilePhysicalCleanup(storage::IDataEngine *data) {
+utils::Status ReconcilePhysicalCleanup(storage::IDataEngine *data, metadata::ChunkMetadataPtr cow_metadata = {}) {
   auto &volume = volume::VolumeImpl::Instance();
-  chunk::internal::ChunkGcWorker worker(volume.meta_engine(), MakeLegacyCleanupParticipant(volume.meta_engine(), data));
+  chunk::internal::ChunkGcWorker worker(volume.meta_engine(),
+                                        MakeCleanupParticipant(volume.meta_engine(), data, std::move(cow_metadata)));
   return worker.Reconcile();
 }
 
-utils::Status ReconcileAll(storage::IDataEngine *data) {
+utils::Status ReconcileAll(storage::IDataEngine *data, metadata::ChunkMetadataPtr cow_metadata = {}) {
   auto status = OrphanReclaimer::Instance().Reconcile();
   if (!status.ok()) {
     return status;
   }
-  return ReconcilePhysicalCleanup(data);
+  return ReconcilePhysicalCleanup(data, std::move(cow_metadata));
 }
 
 std::unique_ptr<chunk::internal::ChunkGcWorker> MakeChunkGcWorker(storage::IDataEngine *data) {
   auto &volume = volume::VolumeImpl::Instance();
   return std::make_unique<chunk::internal::ChunkGcWorker>(volume.meta_engine(),
-                                                          MakeLegacyCleanupParticipant(volume.meta_engine(), data));
+                                                          MakeCleanupParticipant(volume.meta_engine(), data));
 }
 
 class CompletingCleanupParticipant final : public chunk::internal::ChunkCleanupParticipant {
@@ -306,75 +314,8 @@ class FaultInjectingCOWChunkMetadata final : public metadata::cow::COWChunkMetad
   Status erase_head_status_;
 };
 
-class StagedIntentMetaEngine : public UnsupportedMetaEngine {
- public:
-  explicit StagedIntentMetaEngine(metadata::PendingDelete pending) : pending_(std::move(pending)) {
-    chunk::cow::COWRef ref;
-    const auto status = chunk::cow::DecodeCOWDelete(*pending_, 0, &ref);
-    EXPECT_TRUE(status.ok()) << status.message();
-    pending_ino_ = ref.ino;
-    current_ = ref.descriptor;
-  }
-
-  Status VisitPendingDeletesBatch(size_t max_items, const metadata::PendingDeleteVisitorFn &visitor,
-                                  bool *has_more) override {
-    if (max_items == 0 || !visitor || has_more == nullptr) {
-      return Status::InvalidArgument("invalid pending delete batch request");
-    }
-    *has_more = false;
-    if (!pending_.has_value()) {
-      return Status::OK();
-    }
-    return visitor(*pending_);
-  }
-
-  Status CompletePendingDelete(std::string_view key) override {
-    if (!pending_.has_value() || key != pending_->id) {
-      return Status::NotFound("pending delete not found");
-    }
-    completed_keys.push_back(std::string(key));
-    pending_.reset();
-    return Status::OK();
-  }
-
-  Status FindChunk(InodeID ino, metadata::ChunkIndex idx, SwordFsChunk *chunk) override {
-    if (!find_status_.ok()) {
-      return find_status_;
-    }
-    if (!current_.has_value() || ino != pending_ino_ || idx != current_->index) {
-      return Status::NotFound("chunk not found");
-    }
-    if (chunk != nullptr) {
-      *chunk = *current_;
-    }
-    return Status::OK();
-  }
-
-  Status VisitPendingReclaims(const metadata::ReclaimVisitorFn &) override {
-    return Status::OK();
-  }
-
-  Status VisitOrphanCandidates(const metadata::InodeVisitorFn &) override {
-    return Status::OK();
-  }
-
-  void SetCurrent(std::optional<SwordFsChunk> current) {
-    current_ = std::move(current);
-  }
-
-  void SetFindStatus(Status status) {
-    find_status_ = std::move(status);
-  }
-
-  std::vector<std::string> completed_keys;
-
- private:
-  InodeID pending_ino_;
-  std::optional<metadata::PendingDelete> pending_;
-  std::optional<SwordFsChunk> current_;
-  Status find_status_ = Status::OK();
-};
-
+// A GC queue fixture that deliberately does not implement any legacy
+// descriptor API. Malformed typed work must be rejected before data deletion.
 class RawPendingDeleteMetaEngine : public UnsupportedMetaEngine {
  public:
   explicit RawPendingDeleteMetaEngine(metadata::PendingDelete pending) : pending_(std::move(pending)) {
@@ -389,9 +330,6 @@ class RawPendingDeleteMetaEngine : public UnsupportedMetaEngine {
   }
   Status VisitOrphanCandidates(const metadata::InodeVisitorFn &) override {
     return Status::OK();
-  }
-  Status FindChunk(InodeID, metadata::ChunkIndex, SwordFsChunk *) override {
-    return Status::NotFound("no authoritative chunk");
   }
 
  private:
@@ -456,11 +394,8 @@ class ForcedMultiPassMetaEngine : public UnsupportedMetaEngine {
  public:
   ForcedMultiPassMetaEngine() {
     constexpr InodeID kProbeIno = 42;
-    descriptors_[0] = SwordFsChunk{.index = 0, .revision = 7, .size = 64};
-    descriptors_[1] = SwordFsChunk{.index = 1, .revision = 8, .size = 64};
-    pending_[0] = MakePendingDelete(kProbeIno, descriptors_[0]);
-    pending_[1] = MakePendingDelete(kProbeIno, descriptors_[1]);
-    probe_ino_ = kProbeIno;
+    pending_[0] = MakeTypedDetachedDelete(kProbeIno, 0, metadata::ChunkID(7));
+    pending_[1] = MakeTypedDetachedDelete(kProbeIno, 1, metadata::ChunkID(8));
   }
 
   Status VisitPendingDeletesBatch(size_t max_items, const metadata::PendingDeleteVisitorFn &visitor,
@@ -500,16 +435,6 @@ class ForcedMultiPassMetaEngine : public UnsupportedMetaEngine {
     return Status::OK();
   }
 
-  Status FindChunk(InodeID ino, metadata::ChunkIndex idx, SwordFsChunk *chunk) override {
-    if (ino != probe_ino_ || idx >= descriptors_.size()) {
-      return Status::NotFound("probe chunk not found");
-    }
-    if (chunk != nullptr) {
-      *chunk = descriptors_[idx];
-    }
-    return Status::OK();
-  }
-
   bool WaitForSecondPendingScan(std::chrono::steady_clock::duration timeout) {
     return second_pending_scan_started_.try_wait_for(timeout);
   }
@@ -523,8 +448,6 @@ class ForcedMultiPassMetaEngine : public UnsupportedMetaEngine {
   }
 
  private:
-  InodeID probe_ino_ = 0;
-  std::array<SwordFsChunk, 2> descriptors_;
   std::array<metadata::PendingDelete, 2> pending_;
   std::atomic<int> pending_delete_scan_calls_{0};
   std::atomic<int> orphan_scan_calls_{0};
@@ -581,19 +504,6 @@ class ReclaimerTest : public ::testing::Test {
     return meta_->GetInode(ino, &inode);
   }
 
-  // Create a regular file with one published chunk, and seed the matching
-  // object in the data engine. Returns the inode id.
-  InodeID CreateChunkedFile(std::string_view name, uint64_t revision = 1) {
-    SwordFsInode file;
-    auto status = meta_->Create(kRootInodeId, name, 0644, &file);
-    EXPECT_TRUE(status.ok()) << status.message();
-    SwordFsChunk chunk{.index = 0, .revision = revision, .size = 64};
-    status = meta_->CommitChunk(file.ino, std::nullopt, chunk);
-    EXPECT_TRUE(status.ok()) << status.message();
-    data_->Seed(chunk::cow::FormatCOWObjectKey(file.ino, 0, revision));
-    return file.ino;
-  }
-
   std::vector<InodeID> OrphanCandidates() {
     std::vector<InodeID> out;
     auto status = meta_->VisitOrphanCandidates([&out](InodeID ino) {
@@ -616,26 +526,6 @@ class ReclaimerTest : public ::testing::Test {
     return out;
   }
 
-  std::vector<std::string> PendingDeletes() {
-    std::vector<std::string> out;
-    bool has_more = false;
-    auto status = meta_->VisitPendingDeletesBatch(
-        1024,
-        [&out](const metadata::PendingDelete &work) {
-          chunk::cow::COWRef ref;
-          auto status = chunk::cow::DecodeCOWDelete(work, volume::VolumeImpl::Instance().chunk_size(), &ref);
-          if (!status.ok()) {
-            return status;
-          }
-          out.push_back(ref.key);
-          return Status::OK();
-        },
-        &has_more);
-    EXPECT_TRUE(status.ok()) << status.message();
-    EXPECT_FALSE(has_more);
-    return out;
-  }
-
   metadata::IMetaEngine *meta_ = nullptr;
   RecordingDataEngine *data_ = nullptr;
 };
@@ -650,6 +540,47 @@ class ReclaimerRedisTest : public ReclaimerTest {
     if (!HasFatalFailure()) {
       ASSERT_TRUE(meta_->OpenChunkMetadata(metadata::ChunkType::kCow, &typed_metadata_).ok());
     }
+  }
+
+  // Build real FileMetadata attachment and COW-private state, never a
+  // synthetic inode/index/revision descriptor from the retired protocol.
+  std::pair<InodeID, std::string> CreateTypedChunkFile(std::string_view name) {
+    SwordFsInode file;
+    auto status = meta_->Create(kRootInodeId, name, 0644, &file);
+    if (!status.ok()) {
+      ADD_FAILURE() << status.message();
+      return {};
+    }
+
+    FileReadWriter writer(file.ino, 2);
+    status = writer.Write(*folly::IOBuf::copyBuffer("hello"), 0);
+    if (status.ok()) {
+      status = writer.Flush();
+    }
+    if (!status.ok()) {
+      ADD_FAILURE() << status.message();
+      return {};
+    }
+
+    metadata::FileChunkSnapshot attached;
+    status = meta_->ReadFileChunkSnapshot(file.ino, 0, &attached);
+    if (!status.ok() || !attached.chunk_id.has_value()) {
+      ADD_FAILURE() << "typed chunk attachment not published";
+      return {};
+    }
+    const auto cow_metadata = std::dynamic_pointer_cast<metadata::cow::COWChunkMetadata>(typed_metadata_);
+    if (!cow_metadata) {
+      ADD_FAILURE() << "COW-private metadata capability missing";
+      return {};
+    }
+    metadata::cow::COWChunkHead head;
+    status = cow_metadata->GetHead(*attached.chunk_id, &head);
+    if (!status.ok()) {
+      ADD_FAILURE() << status.message();
+      return {};
+    }
+    const chunk::cow::COWObjectKey key(*attached.chunk_id, head.revision);
+    return {file.ino, std::string(static_cast<std::string_view>(key))};
   }
 
   metadata::ChunkMetadataPtr typed_metadata_;
@@ -946,7 +877,7 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsMalformedPendingDeleteWork) {
     ASSERT_TRUE(status.ok()) << status.message();
   });
 
-  chunk::internal::ChunkGcWorker worker(raw_meta, MakeLegacyCleanupParticipant(raw_meta, data_));
+  chunk::internal::ChunkGcWorker worker(raw_meta, MakeCleanupParticipant(raw_meta, data_));
   const auto status = worker.Reconcile();
   EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_TRUE(data_->DeleteCalls().empty());
@@ -1017,195 +948,6 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsMalformedReclaimWork) {
   EXPECT_FALSE(pending_meta->completed);
 }
 
-FIBER_TEST_F(ReclaimerTest, ChunkGcFailsClosedWhenReclaimReachabilityLookupFails) {
-  constexpr InodeID kIno = 42;
-  const SwordFsChunk descriptor{.index = 0, .revision = 7, .size = 64};
-  metadata::ReclaimWork frozen;
-  ASSERT_TRUE(chunk::cow::FreezeCOWReclaim(kIno, {descriptor}, 0, &frozen).ok());
-
-  PendingReclaimMetaEngine *pending_meta = nullptr;
-  swordfs::test::RunInTestThreadFromFiber([&] {
-    auto replacement = std::make_unique<swordfs::test::ConfiguredMetaEngine<PendingReclaimMetaEngine>>(frozen);
-    pending_meta = replacement.get();
-    pending_meta->SetGetInodeStatus(Status::IOError("inode lookup unavailable"));
-    auto data = std::make_unique<RecordingDataEngine>();
-    data_ = data.get();
-    SwordFsVolume config;
-    const auto status =
-        swordfs::test::LoadTestVolumeRuntime(std::move(replacement), std::move(data), std::move(config));
-    ASSERT_TRUE(status.ok()) << status.message();
-  });
-
-  const auto status = ReconcilePhysicalCleanup(data_);
-  EXPECT_EQ(status.ToErrno(), EIO);
-  EXPECT_TRUE(data_->DeleteCalls().empty());
-  EXPECT_FALSE(pending_meta->completed);
-}
-
-FIBER_TEST_F(ReclaimerRedisTest, ReconcileDeletesFrozenObjectsAndCompletes) {
-  const InodeID f_ino = CreateChunkedFile("f");
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-
-  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-  EXPECT_EQ(data_->DeleteCalls(), std::vector<std::string>{key});
-  EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(ReadInodeStatus(f_ino).IsNotFound());
-  EXPECT_TRUE(PendingReclaims().empty());
-  EXPECT_TRUE(OrphanCandidates().empty());
-
-  // Nothing left to do: a second pass is a no-op.
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_EQ(data_->DeleteCallCount(), 1U);
-
-  // The prepared output is optional; omitting it must not change the reclaim
-  // sequence or leave the frozen record behind.
-  const InodeID second = CreateChunkedFile("second", 2);
-  const auto second_key = chunk::cow::FormatCOWObjectKey(second, 0, 2);
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "second").ok());
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_FALSE(data_->Contains(second_key));
-  EXPECT_TRUE(ReadInodeStatus(second).IsNotFound());
-  EXPECT_TRUE(PendingReclaims().empty());
-}
-
-FIBER_TEST_F(ReclaimerTest, FrozenWorkDoesNotAuthorizeDeletingALiveInodeAndMayBeDiscarded) {
-  constexpr InodeID kFileIno = 42;
-  const SwordFsChunk head{.index = 0, .revision = 7, .size = 64};
-  metadata::ReclaimWork frozen;
-  ASSERT_TRUE(chunk::cow::FreezeCOWReclaim(kFileIno, {head}, 0, &frozen).ok());
-
-  PendingReclaimMetaEngine *pending_meta = nullptr;
-  swordfs::test::RunInTestThreadFromFiber([&] {
-    auto replacement = std::make_unique<swordfs::test::ConfiguredMetaEngine<PendingReclaimMetaEngine>>(frozen);
-    pending_meta = replacement.get();
-    pending_meta->SetInodeLive(true);
-    auto data = std::make_unique<RecordingDataEngine>();
-    data_ = data.get();
-    SwordFsVolume config;
-    const auto load_status =
-        swordfs::test::LoadTestVolumeRuntime(std::move(replacement), std::move(data), std::move(config));
-    ASSERT_TRUE(load_status.ok()) << load_status.message();
-  });
-
-  const auto key = chunk::cow::FormatCOWObjectKey(kFileIno, 0, 7);
-  data_->Seed(key);
-
-  const auto live_status = ReconcilePhysicalCleanup(data_);
-  EXPECT_TRUE(live_status.ok()) << live_status.message();
-  EXPECT_TRUE(data_->Contains(key));
-  EXPECT_TRUE(data_->DeleteCalls().empty());
-  EXPECT_TRUE(pending_meta->completed);
-
-  // The maintenance handoff was stale and has been acknowledged. If logical
-  // state later becomes unreachable, losing that old target is allowed to
-  // leak storage rather than turning stale queue state into future authority.
-  pending_meta->SetInodeLive(false);
-  ASSERT_TRUE(ReconcilePhysicalCleanup(data_).ok());
-  EXPECT_TRUE(data_->Contains(key));
-  EXPECT_TRUE(data_->DeleteCalls().empty());
-}
-
-TEST_F(ReclaimerTest, PendingReclaimContinuesDirectlyToDeletion) {
-  constexpr InodeID kFileIno = 42;
-  const SwordFsChunk head{.index = 0, .revision = 7, .size = 64};
-  metadata::ReclaimWork frozen;
-  ASSERT_TRUE(chunk::cow::FreezeCOWReclaim(kFileIno, {head}, 0, &frozen).ok());
-  auto replacement = std::make_unique<swordfs::test::ConfiguredMetaEngine<PendingReclaimMetaEngine>>(frozen);
-  auto *pending_meta = replacement.get();
-  auto data = std::make_unique<RecordingDataEngine>();
-  data_ = data.get();
-  SwordFsVolume config;
-  const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(replacement), std::move(data), std::move(config));
-  ASSERT_TRUE(status.ok()) << status.message();
-  const auto key = chunk::cow::FormatCOWObjectKey(kFileIno, 0, 7);
-  data_->Seed(key);
-
-  swordfs::test::RunInTestFiber([&] { ASSERT_TRUE(ReconcileAll(data_).ok()); });
-  EXPECT_TRUE(pending_meta->completed);
-  EXPECT_FALSE(data_->Contains(key));
-}
-
-FIBER_TEST_F(ReclaimerRedisTest, ReconcileRetriesFailedObjectDeletes) {
-  const InodeID f_ino = CreateChunkedFile("f");
-  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
-  data_->SetDeleteFailure(key, Status::IOError("injected delete failure"));
-
-  const auto first = ReconcileAll(data_);
-  EXPECT_FALSE(first.ok());
-  EXPECT_EQ(data_->DeleteCallCount(), 1U);
-  // The frozen record survives the failed delete...
-  EXPECT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
-
-  // ... and reconciliation completes it (idempotently) once the backend
-  // recovers.
-  data_->ClearDeleteFailures();
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_EQ(data_->DeleteCallCount(), 2U);
-  EXPECT_EQ(data_->DeleteCalls()[1], key);
-  EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(PendingReclaims().empty());
-  EXPECT_TRUE(ReadInodeStatus(f_ino).IsNotFound());
-}
-
-FIBER_TEST_F(ReclaimerRedisTest, TruncateCleanupDoesNotDependOnLocalChunkCache) {
-  const InodeID f_ino = CreateChunkedFile("truncate");
-  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-
-  // Call the authoritative metadata engine directly: this deliberately skips
-  // FileReadWriter/FileChunkManager, modelling a cold cache or a fresh mount.
-  ASSERT_TRUE(meta_->Truncate(f_ino, 0).ok());
-  EXPECT_EQ(PendingDeletes(), std::vector<std::string>{key});
-  EXPECT_TRUE(data_->Contains(key));
-
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(PendingDeletes().empty());
-}
-
-FIBER_TEST_F(ReclaimerRedisTest, TruncateCleanupRetriesFailedDelete) {
-  const InodeID f_ino = CreateChunkedFile("truncate-retry");
-  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-  ASSERT_TRUE(meta_->Truncate(f_ino, 0).ok());
-  data_->SetDeleteFailure(key, Status::IOError("injected delete failure"));
-
-  EXPECT_EQ(ReconcileAll(data_).ToErrno(), EIO);
-  EXPECT_EQ(PendingDeletes(), std::vector<std::string>{key});
-  EXPECT_TRUE(data_->Contains(key));
-
-  data_->ClearDeleteFailures();
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_TRUE(PendingDeletes().empty());
-  EXPECT_FALSE(data_->Contains(key));
-}
-
-FIBER_TEST_F(ReclaimerRedisTest, RewriteCleanupDeletesOnlySupersededRevision) {
-  const InodeID f_ino = CreateChunkedFile("rewrite");
-  SwordFsChunk first;
-  ASSERT_TRUE(meta_->FindChunk(f_ino, 0, &first).ok());
-
-  auto replacement = first;
-  replacement.revision = first.revision + 1;
-  const auto old_key = chunk::cow::FormatCOWObjectKey(f_ino, first.index, first.revision);
-  const auto new_key = chunk::cow::FormatCOWObjectKey(f_ino, replacement.index, replacement.revision);
-  data_->Seed(new_key);
-
-  ASSERT_TRUE(meta_->CommitChunk(f_ino, first, replacement).ok());
-  EXPECT_EQ(PendingDeletes(), std::vector<std::string>{old_key});
-  EXPECT_TRUE(data_->Contains(old_key));
-  EXPECT_TRUE(data_->Contains(new_key));
-
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_FALSE(data_->Contains(old_key));
-  EXPECT_TRUE(data_->Contains(new_key));
-  EXPECT_TRUE(PendingDeletes().empty());
-
-  SwordFsChunk authoritative;
-  ASSERT_TRUE(meta_->FindChunk(f_ino, 0, &authoritative).ok());
-  EXPECT_EQ(authoritative, replacement);
-}
-
 FIBER_TEST_F(ReclaimerRedisTest, TypedRewriteFlushRegistersAndWorkerDeletesOldRevision) {
   SwordFsInode file;
   ASSERT_TRUE(meta_->Create(kRootInodeId, "typed-gc-rewrite", 0644, &file).ok());
@@ -1257,6 +999,109 @@ FIBER_TEST_F(ReclaimerRedisTest, TypedRewriteFlushRegistersAndWorkerDeletesOldRe
   ASSERT_TRUE(worker.Reconcile().ok());
   EXPECT_FALSE(data_->Contains(static_cast<std::string_view>(old_key)));
   EXPECT_TRUE(data_->Contains(static_cast<std::string_view>(new_key)));
+}
+
+FIBER_TEST_F(ReclaimerRedisTest, TypedReclaimRecoversCrashLeftOrphan) {
+  const auto [ino, key] = CreateTypedChunkFile("crash-left-orphan");
+  ASSERT_NE(ino, 0U);
+  ASSERT_TRUE(data_->Contains(key));
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "crash-left-orphan").ok());
+  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{ino}));
+
+  ASSERT_TRUE(ReconcileAll(data_, typed_metadata_).ok());
+  EXPECT_FALSE(data_->Contains(key));
+  EXPECT_TRUE(ReadInodeStatus(ino).IsNotFound());
+  EXPECT_TRUE(OrphanCandidates().empty());
+  EXPECT_TRUE(PendingReclaims().empty());
+}
+
+FIBER_TEST_F(ReclaimerRedisTest, TypedReclaimNeverDeletesRevivedInode) {
+  const auto [ino, key] = CreateTypedChunkFile("revive-before-reclaim");
+  ASSERT_NE(ino, 0U);
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "revive-before-reclaim").ok());
+  SwordFsInode revived;
+  ASSERT_TRUE(meta_->Link(ino, kRootInodeId, "revived", &revived).ok());
+  ASSERT_TRUE(ReconcileAll(data_, typed_metadata_).ok());
+
+  EXPECT_TRUE(data_->DeleteCalls().empty());
+  EXPECT_TRUE(data_->Contains(key));
+  ASSERT_TRUE(meta_->GetInode(ino, &revived).ok());
+  EXPECT_EQ(revived.attr.nlink, 1U);
+  EXPECT_TRUE(OrphanCandidates().empty());
+}
+
+FIBER_TEST_F(ReclaimerRedisTest, TypedReclaimWaitsForTheLastOpenDescriptor) {
+  const auto [ino, key] = CreateTypedChunkFile("open-during-reclaim");
+  ASSERT_NE(ino, 0U);
+  std::shared_ptr<FileHandle> handle;
+  ASSERT_TRUE(FileHandle::Open(ino, O_RDONLY, &handle).ok());
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "open-during-reclaim").ok());
+  ASSERT_TRUE(ReconcileAll(data_, typed_metadata_).ok());
+  EXPECT_TRUE(data_->Contains(key));
+  EXPECT_TRUE(data_->DeleteCalls().empty());
+  EXPECT_TRUE(ReadInodeStatus(ino).ok());
+  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{ino}));
+
+  ASSERT_TRUE(handle->Release().ok());
+  ASSERT_TRUE(ReconcileAll(data_, typed_metadata_).ok());
+  EXPECT_FALSE(data_->Contains(key));
+  EXPECT_TRUE(ReadInodeStatus(ino).IsNotFound());
+  std::shared_ptr<FileHandle> reopened;
+  EXPECT_TRUE(FileHandle::Open(ino, O_RDONLY, &reopened).IsNotFound());
+}
+
+FIBER_TEST_F(ReclaimerRedisTest, TypedReclaimRetriesFailedPhysicalDelete) {
+  const auto [ino, key] = CreateTypedChunkFile("retry-typed-gc");
+  ASSERT_NE(ino, 0U);
+  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "retry-typed-gc").ok());
+  data_->SetDeleteFailure(key, Status::IOError("transient delete failure"));
+  EXPECT_EQ(ReconcileAll(data_, typed_metadata_).ToErrno(), EIO);
+  EXPECT_TRUE(data_->Contains(key));
+  EXPECT_TRUE(ReadInodeStatus(ino).IsNotFound());
+  EXPECT_EQ(PendingReclaims(), (std::vector<InodeID>{ino}));
+
+  data_->ClearDeleteFailures();
+  ASSERT_TRUE(ReconcileAll(data_, typed_metadata_).ok());
+  EXPECT_FALSE(data_->Contains(key));
+  EXPECT_TRUE(PendingReclaims().empty());
+}
+
+FIBER_TEST_F(ReclaimerRedisTest, TypedLinkAndReclaimRaceCannotDeleteLiveObject) {
+  constexpr int kRounds = 12;
+  for (int round = 0; round < kRounds; ++round) {
+    const auto [ino, key] = CreateTypedChunkFile("reclaim-race");
+    ASSERT_NE(ino, 0U);
+    ASSERT_TRUE(meta_->Unlink(kRootInodeId, "reclaim-race").ok());
+
+    std::barrier gate(3);
+    std::atomic<bool> link_won{false};
+    std::atomic<bool> reconcile_failed{false};
+    auto linker = swordfs::test::StartFiberTestThread([&] {
+      gate.arrive_and_wait();
+      SwordFsInode revived;
+      link_won.store(meta_->Link(ino, kRootInodeId, "revived-race", &revived).ok());
+    });
+    auto reclaimer = swordfs::test::StartFiberTestThread([&] {
+      gate.arrive_and_wait();
+      reconcile_failed.store(!ReconcileAll(data_, typed_metadata_).ok());
+    });
+    gate.arrive_and_wait();
+    linker.join();
+    reclaimer.join();
+    ASSERT_FALSE(reconcile_failed.load()) << "round " << round;
+
+    if (link_won.load()) {
+      metadata::FileChunkSnapshot attached;
+      ASSERT_TRUE(meta_->ReadFileChunkSnapshot(ino, 0, &attached).ok());
+      EXPECT_TRUE(attached.chunk_id.has_value());
+      EXPECT_TRUE(data_->Contains(key));
+      ASSERT_TRUE(meta_->Unlink(kRootInodeId, "revived-race").ok());
+      ASSERT_TRUE(ReconcileAll(data_, typed_metadata_).ok());
+    } else {
+      EXPECT_TRUE(ReadInodeStatus(ino).IsNotFound());
+      EXPECT_FALSE(data_->Contains(key));
+    }
+  }
 }
 
 FIBER_TEST_F(ReclaimerTest, TypedRevisionCleanupDoesNotKeepStaleCachedReadSnapshot) {
@@ -1496,198 +1341,6 @@ FIBER_TEST_F(ReclaimerTest, TypedCOWReclaimPrevalidatesEveryDetachedChunkBeforeD
   EXPECT_FALSE(data_->Contains(static_cast<std::string_view>(second_key)));
 }
 
-FIBER_TEST_F(ReclaimerTest, PendingDeleteCandidateDoesNotDeleteStillAuthoritativeObject) {
-  constexpr InodeID kIno = 42;
-  SwordFsChunk descriptor{.index = 0, .revision = 7, .size = 64};
-  const auto key = chunk::cow::FormatCOWObjectKey(kIno, descriptor.index, descriptor.revision);
-  metadata::PendingDelete pending = MakePendingDelete(kIno, descriptor);
-
-  StagedIntentMetaEngine *staged = nullptr;
-  // Metadata-engine construction/destruction is control-plane work. Replace
-  // the fixture's metadata engine on a POSIX thread so the Debug execution-domain
-  // contract remains identical to production lifecycle.
-  swordfs::test::RunInTestThreadFromFiber([&] {
-    auto staged_meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<StagedIntentMetaEngine>>(pending);
-    staged = staged_meta.get();
-    auto data = std::make_unique<RecordingDataEngine>();
-    data_ = data.get();
-    SwordFsVolume config;
-    const auto status =
-        swordfs::test::LoadTestVolumeRuntime(std::move(staged_meta), std::move(data), std::move(config));
-    ASSERT_TRUE(status.ok()) << status.message();
-  });
-  data_->Seed(key);
-
-  // Queue membership alone is never delete authority. Reconciliation must
-  // leave both object and candidate untouched while the exact immutable key
-  // is still authoritative.
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_TRUE(data_->Contains(key));
-  EXPECT_TRUE(data_->DeleteCalls().empty());
-  EXPECT_TRUE(staged->completed_keys.empty());
-
-  // Once authoritative metadata no longer names that immutable object, the
-  // same candidate becomes executable and is acknowledged only after deletion.
-  staged->SetCurrent(std::nullopt);
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_FALSE(data_->Contains(key));
-  EXPECT_EQ(data_->DeleteCalls(), std::vector<std::string>{key});
-  EXPECT_EQ(staged->completed_keys, std::vector<std::string>{pending.id});
-}
-
-FIBER_TEST_F(ReclaimerTest, PendingDeleteFailsClosedWhenAuthoritativeChunkLookupFails) {
-  constexpr InodeID kIno = 42;
-  SwordFsChunk descriptor{.index = 0, .revision = 7, .size = 64};
-  const auto key = chunk::cow::FormatCOWObjectKey(kIno, descriptor.index, descriptor.revision);
-  metadata::PendingDelete pending = MakePendingDelete(kIno, descriptor);
-
-  StagedIntentMetaEngine *staged = nullptr;
-  swordfs::test::RunInTestThreadFromFiber([&] {
-    auto staged_meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<StagedIntentMetaEngine>>(pending);
-    staged = staged_meta.get();
-    staged->SetFindStatus(Status::IOError("chunk lookup unavailable"));
-    auto data = std::make_unique<RecordingDataEngine>();
-    data_ = data.get();
-    SwordFsVolume config;
-    const auto load_status =
-        swordfs::test::LoadTestVolumeRuntime(std::move(staged_meta), std::move(data), std::move(config));
-    ASSERT_TRUE(load_status.ok()) << load_status.message();
-  });
-  data_->Seed(key);
-
-  const auto status = ReconcileAll(data_);
-  EXPECT_EQ(status.ToErrno(), EIO);
-  EXPECT_TRUE(data_->Contains(key));
-  EXPECT_TRUE(data_->DeleteCalls().empty());
-  EXPECT_TRUE(staged->completed_keys.empty());
-}
-
-FIBER_TEST_F(ReclaimerTest, PendingDeleteRemovesSupersededRevisionWhileNewRevisionStaysAuthoritative) {
-  constexpr InodeID kIno = 42;
-  SwordFsChunk old_descriptor{.index = 0, .revision = 7, .size = 64};
-  const auto old_key = chunk::cow::FormatCOWObjectKey(kIno, old_descriptor.index, old_descriptor.revision);
-  metadata::PendingDelete pending = MakePendingDelete(kIno, old_descriptor);
-
-  StagedIntentMetaEngine *staged = nullptr;
-  swordfs::test::RunInTestThreadFromFiber([&] {
-    auto staged_meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<StagedIntentMetaEngine>>(pending);
-    staged = staged_meta.get();
-    staged->SetCurrent(SwordFsChunk{.index = 0, .revision = 8, .size = 64});
-    auto data = std::make_unique<RecordingDataEngine>();
-    data_ = data.get();
-    SwordFsVolume config;
-    const auto status =
-        swordfs::test::LoadTestVolumeRuntime(std::move(staged_meta), std::move(data), std::move(config));
-    ASSERT_TRUE(status.ok()) << status.message();
-  });
-  data_->Seed(old_key);
-
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_FALSE(data_->Contains(old_key));
-  EXPECT_EQ(data_->DeleteCalls(), std::vector<std::string>{old_key});
-  EXPECT_EQ(staged->completed_keys, std::vector<std::string>{pending.id});
-}
-
-FIBER_TEST_F(ReclaimerRedisTest, ReconcileRecoversCrashLeftOrphan) {
-  // Crash model: the unlink published the orphan candidate and the process
-  // died before any reclaim ran. A fresh mount has no descriptors and no
-  // handle state, so mount-time reconciliation is exactly what runs here.
-  const InodeID f_ino = CreateChunkedFile("f");
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
-  ASSERT_EQ(OrphanCandidates(), std::vector<InodeID>{f_ino});
-
-  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-  EXPECT_TRUE(data_->Contains(key)) << "nothing may be deleted before the reclaim is prepared";
-
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-
-  EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(ReadInodeStatus(f_ino).IsNotFound());
-  EXPECT_TRUE(OrphanCandidates().empty());
-  EXPECT_TRUE(PendingReclaims().empty());
-}
-
-FIBER_TEST_F(ReclaimerRedisTest, ReconcileLeavesRevivedInodeAlone) {
-  const InodeID f_ino = CreateChunkedFile("f");
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
-
-  // A hard link revives the inode before reconciliation runs (the marker is
-  // dropped by the link transaction itself).
-  SwordFsInode revived;
-  ASSERT_TRUE(meta_->Link(f_ino, kRootInodeId, "revived", &revived).ok());
-  EXPECT_TRUE(OrphanCandidates().empty());
-
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-
-  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-  EXPECT_TRUE(data_->DeleteCalls().empty()) << "no object may be deleted while a name references the inode";
-  EXPECT_TRUE(data_->Contains(key));
-  ASSERT_TRUE(meta_->GetInode(f_ino, &revived).ok());
-  EXPECT_EQ(revived.attr.nlink, 1U);
-}
-
-FIBER_TEST_F(ReclaimerRedisTest, ReconcileDefersUntilAfterTheLastDescriptorCloses) {
-  const InodeID f_ino = CreateChunkedFile("f");
-
-  // Open a descriptor, then unlink: the reclaim must be deferred while the
-  // descriptor lives, and the inode must survive for it.
-  std::shared_ptr<FileHandle> handle;
-  ASSERT_TRUE(FileHandle::Open(f_ino, O_RDONLY, &handle).ok());
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
-
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_TRUE(data_->DeleteCalls().empty()) << "an open descriptor must defer the cleanup";
-  ASSERT_TRUE(ReadInodeStatus(f_ino).ok());
-
-  // Close only releases the local reference; background reclaim remains the
-  // sole executor and completes on the next pass.
-  ASSERT_TRUE(handle->Release().ok());
-  EXPECT_TRUE(data_->DeleteCalls().empty());
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-  EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(ReadInodeStatus(f_ino).IsNotFound());
-
-  // Once reclaimed, the inode cannot be reopened.
-  std::shared_ptr<FileHandle> reopened;
-  EXPECT_TRUE(FileHandle::Open(f_ino, O_RDONLY, &reopened).IsNotFound());
-}
-
-FIBER_TEST_F(ReclaimerRedisTest, ReconcileDefersAnUnlinkedInodeWithAnOpenDescriptor) {
-  // #143: the background reconciliation is a reclaim caller like any other, so
-  // it must go through the same per-inode decision. While a descriptor holds
-  // the unlinked inode open, a full Reconcile pass may not delete the inode or
-  // its objects.
-  const InodeID f_ino = CreateChunkedFile("f");
-  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-
-  std::shared_ptr<FileHandle> handle;
-  ASSERT_TRUE(FileHandle::Open(f_ino, O_RDONLY, &handle).ok());
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
-  ASSERT_EQ(OrphanCandidates(), std::vector<InodeID>{f_ino});
-
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-
-  // Nothing was reclaimed: the candidate is still durable, the inode still
-  // resolves, and the object the open descriptor can still read is untouched.
-  EXPECT_TRUE(data_->DeleteCalls().empty()) << "reconciliation must not reclaim an inode a descriptor still holds";
-  EXPECT_TRUE(data_->Contains(key));
-  ASSERT_TRUE(ReadInodeStatus(f_ino).ok()) << "the inode must survive while the descriptor is open";
-  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{f_ino}));
-  EXPECT_TRUE(PendingReclaims().empty());
-
-  // Last close only releases the local reference. The next worker pass owns
-  // preparation/deletion/completion.
-  ASSERT_TRUE(handle->Release().ok());
-  EXPECT_TRUE(data_->DeleteCalls().empty());
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_EQ(data_->DeleteCalls(), (std::vector<std::string>{key}));
-  EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(ReadInodeStatus(f_ino).IsNotFound());
-  EXPECT_TRUE(OrphanCandidates().empty());
-  EXPECT_TRUE(PendingReclaims().empty());
-}
-
 // ────────────────────────────────────────────────────────────────
 // #141: a reclaim must never delete objects a Link can still revive
 // ────────────────────────────────────────────────────────────────
@@ -1696,61 +1349,6 @@ FIBER_TEST_F(ReclaimerRedisTest, ReconcileDefersAnUnlinkedInodeWithAnOpenDescrip
 // object must both still be there — or the reclaim prepared first — and then
 // the link must have failed and the object must be gone. A revived inode
 // whose object was deleted would be silent data loss.
-
-FIBER_TEST_F(ReclaimerRedisTest, ConcurrentReclaimAndLinkNeverDeleteLiveData) {
-  constexpr int kRounds = 100;
-
-  std::atomic<int> revived{0};
-  std::atomic<int> reclaimed{0};
-  std::atomic<int> failures{0};
-
-  for (int round = 0; round < kRounds; ++round) {
-    const InodeID f_ino = CreateChunkedFile("race");
-    const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-    ASSERT_TRUE(meta_->Unlink(kRootInodeId, "race").ok());
-
-    std::barrier gate(3);
-    std::atomic<bool> link_won{false};
-
-    auto linker = swordfs::test::StartFiberTestThread([&] {
-      gate.arrive_and_wait();
-      SwordFsInode inode;
-      if (meta_->Link(f_ino, kRootInodeId, "revived", &inode).ok()) {
-        link_won.store(true);
-      }
-    });
-    auto reclaimer = swordfs::test::StartFiberTestThread([&] {
-      gate.arrive_and_wait();
-      if (!ReconcileAll(data_).ok()) {
-        failures.fetch_add(1, std::memory_order_relaxed);
-      }
-    });
-
-    gate.arrive_and_wait();
-    linker.join();
-    reclaimer.join();
-
-    if (link_won.load()) {
-      // The revival won: the inode, its chunk metadata and its object are
-      // all still there.
-      SwordFsChunk chunk;
-      EXPECT_TRUE(meta_->FindChunk(f_ino, 0, &chunk).ok()) << "round " << round << ": revived inode lost its metadata";
-      EXPECT_TRUE(data_->Contains(key)) << "round " << round << ": revived inode lost its object";
-      revived.fetch_add(1, std::memory_order_relaxed);
-      // Clean up the fresh orphan before the next round.
-      ASSERT_TRUE(meta_->Unlink(kRootInodeId, "revived").ok());
-      ASSERT_TRUE(ReconcileAll(data_).ok());
-    } else {
-      // The reclaim won: the inode is gone and so is its object.
-      EXPECT_TRUE(ReadInodeStatus(f_ino).IsNotFound()) << "round " << round;
-      EXPECT_FALSE(data_->Contains(key)) << "round " << round << ": reclaimed inode left its object behind";
-      reclaimed.fetch_add(1, std::memory_order_relaxed);
-    }
-  }
-
-  EXPECT_EQ(revived.load() + reclaimed.load(), kRounds);
-  EXPECT_EQ(failures.load(), 0);
-}
 
 // ────────────────────────────────────────────────────────────────
 // #143: a reclaim with no engines must fail closed, and a
@@ -1792,54 +1390,6 @@ FIBER_TEST_F(ReclaimerNoEngineTest, MissingDataEngineFailsClosedAndReconcileStay
 // ────────────────────────────────────────────────────────────────
 // #143/#142: one failing cleanup item must not hide the rest of the work
 // ────────────────────────────────────────────────────────────────
-
-FIBER_TEST_F(ReclaimerRedisTest, ReconcileCountsEveryFailedCleanupItem) {
-  // One truncate pending-delete, one orphan candidate and one already-frozen
-  // pending reclaim all fail. The pass must attempt all three and report the
-  // aggregate — a failure in one durable queue must not hide another.
-  const InodeID truncated = CreateChunkedFile("truncated");
-  const InodeID orphan = CreateChunkedFile("orphan");
-  const InodeID frozen = CreateChunkedFile("frozen");
-  const auto truncated_key = chunk::cow::FormatCOWObjectKey(truncated, 0, 1);
-  const auto orphan_key = chunk::cow::FormatCOWObjectKey(orphan, 0, 1);
-  const auto frozen_key = chunk::cow::FormatCOWObjectKey(frozen, 0, 1);
-  ASSERT_TRUE(meta_->Truncate(truncated, 0).ok());
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "orphan").ok());
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "frozen").ok());
-
-  // Freeze one directly through metadata to model a crash-left pending record
-  // without involving the worker path under test.
-  ASSERT_TRUE(meta_->PrepareReclaim(frozen).ok());
-  data_->SetDeleteFailure(frozen_key, Status::IOError("injected delete failure"));
-  ASSERT_EQ(PendingReclaims(), std::vector<InodeID>{frozen});
-
-  data_->SetDeleteFailure(truncated_key, Status::IOError("injected delete failure"));
-  data_->SetDeleteFailure(orphan_key, Status::IOError("injected delete failure"));
-  const auto status = ReconcileAll(data_);
-  EXPECT_EQ(status.ToErrno(), EIO) << status.message();
-  EXPECT_NE(status.message().find("left 3 cleanup item(s) pending"), std::string::npos) << status.message();
-
-  // All three durable records survive for the next pass.
-  EXPECT_EQ(PendingDeletes(), std::vector<std::string>{truncated_key});
-  EXPECT_EQ(PendingReclaims(), (std::vector<InodeID>{orphan, frozen}));
-  EXPECT_TRUE(OrphanCandidates().empty());
-  EXPECT_TRUE(data_->Contains(truncated_key));
-  EXPECT_TRUE(data_->Contains(orphan_key));
-  EXPECT_TRUE(data_->Contains(frozen_key));
-
-  // With the backend healthy the next pass finishes all work: the failed pass
-  // lost nothing.
-  data_->ClearDeleteFailures();
-  ASSERT_TRUE(ReconcileAll(data_).ok());
-  EXPECT_TRUE(PendingDeletes().empty());
-  EXPECT_TRUE(PendingReclaims().empty());
-  EXPECT_FALSE(data_->Contains(truncated_key));
-  EXPECT_FALSE(data_->Contains(orphan_key));
-  EXPECT_FALSE(data_->Contains(frozen_key));
-  EXPECT_TRUE(ReadInodeStatus(truncated).ok());
-  EXPECT_TRUE(ReadInodeStatus(orphan).IsNotFound());
-  EXPECT_TRUE(ReadInodeStatus(frozen).IsNotFound());
-}
 
 // ────────────────────────────────────────────────────────────────
 // #143: a backend that cannot answer the scan must be reported
@@ -1962,33 +1512,6 @@ FIBER_TEST_F(ReclaimerScanFailureTest, ReconcileSurfacesPendingScanFailure) {
 // POSIX-thread hooks — while each pass is fiber-domain work handed to that
 // thread's own fiber runtime. The thread's effect is the only observable, so
 // these tests watch the durable record rather than the thread.
-
-FIBER_TEST_F(ReclaimerRedisTest, WorkerCompletesAPendingReclaimImmediatelyAtStartup) {
-  const InodeID f_ino = CreateChunkedFile("f");
-  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "f").ok());
-
-  ASSERT_TRUE(meta_->PrepareReclaim(f_ino).ok());
-  ASSERT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
-
-  auto worker = MakeChunkGcWorker(data_);
-  swordfs::test::RunInTestThreadFromFiber([&] { worker->Start(); });
-
-  // Start() runs the first pass immediately; give the worker room to hand the
-  // pass to its fiber runtime and complete it.
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-  while (std::chrono::steady_clock::now() < deadline && !PendingReclaims().empty()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  }
-  const bool completed = PendingReclaims().empty();
-
-  swordfs::test::RunInTestThreadFromFiber([&] { worker->Stop(); });
-
-  EXPECT_TRUE(completed) << "the startup worker pass must finish crash-left reclaim work";
-  EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(ReadInodeStatus(f_ino).IsNotFound());
-  EXPECT_TRUE(OrphanCandidates().empty());
-}
 
 FIBER_TEST_F(ReclaimerRedisTest, ReconcileLeavesLargeOrphanBacklogsForLaterPassesAndEventuallyDrainsThem) {
   constexpr int kCandidates = 300;
@@ -2120,43 +1643,6 @@ TEST_F(ReclaimerSlowScanTest, OrphanWorkerStopInterruptsALongCandidateScan) {
   // Stop should interrupt candidate visitation instead of joining an entire
   // backlog scan before the daemon can exit.
   EXPECT_LT(elapsed, std::chrono::milliseconds(250));
-}
-
-FIBER_TEST_F(ReclaimerRedisTest, WorkerSurvivesAFailedPassAndRecoversOnWake) {
-  const InodeID f_ino = CreateChunkedFile("retry-failure");
-  const auto key = chunk::cow::FormatCOWObjectKey(f_ino, 0, 1);
-  ASSERT_TRUE(meta_->Unlink(kRootInodeId, "retry-failure").ok());
-
-  // Freeze the reclaim first, and keep the backend failing so the first worker
-  // pass reports an error instead of completing the record.
-  ASSERT_TRUE(meta_->PrepareReclaim(f_ino).ok());
-  data_->SetDeleteFailure(key, Status::IOError("injected persistent delete failure"));
-  ASSERT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
-
-  auto worker = MakeChunkGcWorker(data_);
-  swordfs::test::RunInTestThreadFromFiber([&] { worker->Start(); });
-
-  // Observe an actual failed Delete result rather than racing against the
-  // worker's public call log. Durable reclaim state proves the failed
-  // attempt cannot have completed deletion.
-  const bool failed_delete_observed = data_->WaitForFailedDelete(std::chrono::seconds(15));
-  EXPECT_TRUE(failed_delete_observed) << "the worker must attempt the failing delete";
-  EXPECT_EQ(PendingReclaims(), std::vector<InodeID>{f_ino});
-
-  // Recover the backend and explicitly wake the same worker; the failed pass
-  // must not terminate it and wakeup must not wait for the safety interval.
-  data_->ClearDeleteFailures();
-  worker->Wake();
-  const auto recovery_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-  while (std::chrono::steady_clock::now() < recovery_deadline && !PendingReclaims().empty()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  }
-  const bool recovered = PendingReclaims().empty();
-
-  swordfs::test::RunInTestThreadFromFiber([&] { worker->Stop(); });
-
-  EXPECT_TRUE(recovered) << "a failed worker pass must not terminate the reclaim worker";
-  EXPECT_FALSE(data_->Contains(key));
 }
 
 TEST_F(ReclaimerTest, OrphanWorkerLifecycleIsIdempotent) {

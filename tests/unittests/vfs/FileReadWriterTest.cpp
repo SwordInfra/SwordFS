@@ -47,7 +47,6 @@ using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsAttr;
-using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
@@ -530,12 +529,15 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
   Status SetAttr(InodeID ino, const SwordFsAttr &attr, SetAttrField fields, SwordFsInode *out) override {
+    last_set_attr_fields = fields;
+    if (reject_legacy_size_setattr && HasSetAttrField(fields, SetAttrField::kSize)) {
+      return Status::InvalidArgument("direct metadata size setattr is forbidden");
+    }
     if (!set_attr_status.ok() && !set_attr_commit_on_error) {
       return set_attr_status;
     }
     if (HasSetAttrField(fields, SetAttrField::kSize)) {
       file_size_ = static_cast<off_t>(attr.size);
-      TruncateChunks(ino, attr.size);
     }
     if (out) {
       *out = {};
@@ -618,26 +620,7 @@ class MockMetaEngine : public IMetaEngine {
     pending_deletes_.erase(std::string(key));
     return Status::OK();
   }
-  Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
-    ++allocate_chunk_revision_calls;
-    if (!allocate_chunk_revision_status.ok()) {
-      return allocate_chunk_revision_status;
-    }
-    if (revision == nullptr) {
-      return Status::InvalidArgument("chunk revision output is null");
-    }
-    *revision = next_revision_++;
-    return Status::OK();
-  }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
-    return Status::OK();
-  }
-
-  Status SeedChunkForTest(InodeID ino, const SwordFsChunk &chunk) {
-    chunks_[ino][chunk.index] = chunk;
-    if (chunk.revision >= next_revision_) {
-      next_revision_ = chunk.revision + 1;
-    }
     return Status::OK();
   }
 
@@ -671,141 +654,8 @@ class MockMetaEngine : public IMetaEngine {
     return Status::OK();
   }
 
-  void SetNextFindChunkResult(const SwordFsChunk &chunk) {
-    next_find_chunk_result_ = chunk;
-    next_find_chunk_status_.reset();
-    if (chunk.revision >= next_revision_) {
-      next_revision_ = chunk.revision + 1;
-    }
-  }
-
-  void SetNextFindChunkStatus(Status status) {
-    next_find_chunk_status_ = std::move(status);
-    next_find_chunk_result_.reset();
-  }
-
-  void EraseChunkForTest(InodeID ino, ChunkIndex index) {
-    auto ino_it = chunks_.find(ino);
-    if (ino_it == chunks_.end()) {
-      return;
-    }
-    ino_it->second.erase(index);
-    if (ino_it->second.empty()) {
-      chunks_.erase(ino_it);
-    }
-  }
-
   void DetachTypedChunkForTest(InodeID ino, ChunkIndex index) {
     typed_chunks_[ino].erase(index);
-  }
-
-  Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
-                     const SwordFsChunk &replacement) override {
-    if (commit_started_ != nullptr) {
-      auto *started = commit_started_;
-      auto *release = commit_release_;
-      commit_started_ = nullptr;
-      commit_release_ = nullptr;
-      started->post();
-      release->wait();
-    }
-    if (expected.has_value() && replacement.revision <= expected->revision) {
-      return Status::InvalidArgument("replacement revision must increase");
-    }
-    if (!expected.has_value()) {
-      if (!publish_chunk_status.ok() && !publish_chunk_commit_on_error) {
-        if (publish_chunk_status.ToErrno() == EEXIST || publish_chunk_status.IsNotFound()) {
-          QueuePendingDelete(ino, replacement);
-        }
-        return publish_chunk_status;
-      }
-
-      auto &chunk_map = chunks_[ino];
-      auto it = chunk_map.find(replacement.index);
-      if (it != chunk_map.end()) {
-        if (!(it->second == replacement)) {
-          QueuePendingDelete(ino, replacement);
-          return Status::AlreadyExists("conflicting chunk");
-        }
-      } else {
-        chunk_map.emplace(replacement.index, replacement);
-      }
-      file_size_ = std::max(
-          file_size_, static_cast<off_t>(static_cast<uint64_t>(replacement.index) * kTestChunkSize + replacement.size));
-      return publish_chunk_status;
-    }
-
-    ++replace_chunk_calls;
-    if (!replace_chunk_status.ok() && !replace_chunk_commit_on_error && !replace_chunk_descriptor_only_on_error) {
-      if (replace_chunk_status.ToErrno() == EEXIST || replace_chunk_status.IsNotFound()) {
-        QueuePendingDelete(ino, replacement);
-      }
-      return replace_chunk_status;
-    }
-    auto &chunk_map = chunks_[ino];
-    auto it = chunk_map.find(expected->index);
-    if (it == chunk_map.end()) {
-      QueuePendingDelete(ino, replacement);
-      return Status::NotFound("chunk not found");
-    }
-    if (it->second == replacement) {
-      QueuePendingDelete(ino, *expected);
-      file_size_ = std::max(
-          file_size_, static_cast<off_t>(static_cast<uint64_t>(replacement.index) * kTestChunkSize + replacement.size));
-      return replace_chunk_status;
-    }
-    if (!(it->second == *expected)) {
-      QueuePendingDelete(ino, replacement);
-      return Status::AlreadyExists("chunk changed before replacement");
-    }
-    QueuePendingDelete(ino, *expected);
-    it->second = replacement;
-    if (!replace_chunk_descriptor_only_on_error) {
-      file_size_ = std::max(
-          file_size_, static_cast<off_t>(static_cast<uint64_t>(replacement.index) * kTestChunkSize + replacement.size));
-    }
-    return replace_chunk_status;
-  }
-
-  Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override {
-    ++find_chunk_calls;
-    if (next_find_chunk_status_.has_value()) {
-      auto status = std::move(*next_find_chunk_status_);
-      next_find_chunk_status_.reset();
-      return status;
-    }
-    if (next_find_chunk_result_.has_value()) {
-      if (chunk) {
-        *chunk = *next_find_chunk_result_;
-      }
-      next_find_chunk_result_.reset();
-      return Status::OK();
-    }
-    if (!find_chunk_status.ok() && (!find_chunk_error_idx.has_value() || *find_chunk_error_idx == idx)) {
-      return find_chunk_status;
-    }
-    auto it = chunks_.find(ino);
-    if (it == chunks_.end()) {
-      return Status::NotFound("");
-    }
-    auto cit = it->second.find(idx);
-    if (cit == it->second.end()) {
-      return Status::NotFound("");
-    }
-    if (chunk) {
-      *chunk = cit->second;
-    }
-    return Status::OK();
-  }
-
-  Status Truncate(InodeID ino, uint64_t size) override {
-    ++truncate_calls;
-    if (!truncate_status_.ok() && !truncate_commit_on_error) {
-      return truncate_status_;
-    }
-    TruncateChunks(ino, size);
-    file_size_ = static_cast<off_t>(size);
-    return truncate_status_;
   }
 
   void set_file_size(off_t size) {
@@ -841,22 +691,6 @@ class MockMetaEngine : public IMetaEngine {
     get_inode_release_ = release;
   }
 
-  std::vector<std::string> PendingDeleteKeys() const {
-    std::vector<std::string> out;
-    out.reserve(pending_deletes_.size());
-    for (const auto &[id, pending] : pending_deletes_) {
-      (void)id;
-      swordfs::chunk::cow::COWRef ref;
-      auto status = swordfs::chunk::cow::DecodeCOWDelete(pending, 0, &ref);
-      EXPECT_TRUE(status.ok()) << status.message();
-      if (status.ok()) {
-        out.push_back(ref.key);
-      }
-    }
-    std::sort(out.begin(), out.end());
-    return out;
-  }
-
   int truncate_calls = 0;
   int find_chunk_calls = 0;
   int replace_chunk_calls = 0;
@@ -877,6 +711,8 @@ class MockMetaEngine : public IMetaEngine {
   bool replace_chunk_descriptor_only_on_error = false;
   swordfs::metadata::InodeFlag test_inode_flags = swordfs::metadata::InodeFlag::kNone;
   Status set_attr_status = Status::OK();
+  bool reject_legacy_size_setattr = false;
+  SetAttrField last_set_attr_fields = static_cast<SetAttrField>(0);
   bool set_attr_commit_on_error = false;
   bool truncate_commit_on_error = false;
   bool fail_snapshot_after_commit = false;
@@ -886,36 +722,6 @@ class MockMetaEngine : public IMetaEngine {
   std::optional<ChunkIndex> find_chunk_error_idx;
 
  private:
-  void QueuePendingDelete(InodeID ino, const SwordFsChunk &chunk) {
-    swordfs::metadata::PendingDelete work;
-    auto status = swordfs::chunk::cow::FreezeCOWDelete(ino, chunk, 0, &work);
-    EXPECT_TRUE(status.ok()) << status.message();
-    if (status.ok()) {
-      pending_deletes_.insert_or_assign(work.id, std::move(work));
-    }
-  }
-
-  void TruncateChunks(InodeID ino, uint64_t size) {
-    auto ino_it = chunks_.find(ino);
-    if (ino_it == chunks_.end()) {
-      return;
-    }
-    for (auto it = ino_it->second.begin(); it != ino_it->second.end();) {
-      auto &chunk = it->second;
-      const uint64_t start_offset = static_cast<uint64_t>(chunk.index) * kTestChunkSize;
-      if (start_offset >= size) {
-        QueuePendingDelete(ino, chunk);
-        it = ino_it->second.erase(it);
-        continue;
-      }
-      const uint64_t max_size = size - start_offset;
-      if (chunk.size > max_size) {
-        chunk.size = max_size;
-      }
-      ++it;
-    }
-  }
-
  private:
   off_t file_size_ = 0;
   std::unordered_map<InodeID, std::map<ChunkIndex, swordfs::metadata::ChunkID>> typed_chunks_;
@@ -923,11 +729,7 @@ class MockMetaEngine : public IMetaEngine {
   std::optional<uint64_t> reported_file_size_;
   Status truncate_status_ = Status::OK();
   bool fail_next_mapping_snapshot_ = false;
-  swordfs::metadata::ChunkRevision next_revision_ = 1;
-  std::unordered_map<InodeID, std::unordered_map<ChunkIndex, SwordFsChunk>> chunks_;
   std::unordered_map<std::string, swordfs::metadata::PendingDelete> pending_deletes_;
-  std::optional<SwordFsChunk> next_find_chunk_result_;
-  std::optional<Status> next_find_chunk_status_;
   folly::fibers::Baton *get_inode_started_{nullptr};
   folly::fibers::Baton *get_inode_release_{nullptr};
   folly::fibers::Baton *commit_started_{nullptr};
@@ -1356,17 +1158,9 @@ TEST_F(FileReadWriterTest, PersistedChunkReadErrorRollsBackPartialOutput) {
 
 TEST_F(FileReadWriterTest, PersistedChunkZeroLengthReadIsNoOp) {
   RunInTestFiber([&] {
-    SwordFsChunk published{};
-    published.index = 0;
-    published.revision = 19;
-    published.size = 64;
-    ASSERT_TRUE(mock_meta_->SeedChunkForTest(kIno, published).ok());
-
     swordfs::chunk::cow::COWChunk chunk(
         kIno, 0, kTestChunkSize, cow_metadata_, mock_meta_, mock_data_, swordfs::metadata::ChunkID(71),
-        swordfs::metadata::cow::COWChunkHead{.revision = swordfs::metadata::cow::COWChunkRevision(published.revision),
-                                             .size = published.size},
-        published.size);
+        swordfs::metadata::cow::COWChunkHead{.revision = swordfs::metadata::cow::COWChunkRevision(19), .size = 64}, 64);
 
     auto out = folly::IOBuf::copyBuffer("keep");
     ASSERT_TRUE(chunk.Read(16, 0, out.get()).ok());
@@ -3250,6 +3044,55 @@ TEST_F(FileReadWriterTest, UnchangedTypedSizeStillPropagatesAttributeMutationErr
     requested.size = 64;
     EXPECT_EQ(rw.SetAttr(requested, SetAttrField::kSize, nullptr).ToErrno(), EIO);
     EXPECT_EQ(mock_meta_->file_size(), 64);
+  });
+}
+
+TEST_F(FileReadWriterTest, UnchangedTruncateNeverCallsLegacySizeSetAttr) {
+  RunInTestFiber([&] {
+    auto rw = Make(0);
+    mock_meta_->reject_legacy_size_setattr = true;
+    ASSERT_TRUE(rw.Truncate(0).ok());
+    EXPECT_EQ(mock_meta_->file_size(), 0);
+    EXPECT_EQ(mock_meta_->truncate_calls, 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, UnflushedWriteTruncatedToPersistedEofStillUpdatesMtime) {
+  RunInTestFiber([&] {
+    auto rw = Make(0);
+    mock_meta_->reject_legacy_size_setattr = true;
+    ASSERT_TRUE(rw.Write(Buf("unflushed"), 0).ok());
+    ASSERT_TRUE(rw.Truncate(0).ok());
+    EXPECT_FALSE(HasSetAttrField(mock_meta_->last_set_attr_fields, SetAttrField::kSize));
+    EXPECT_TRUE(HasSetAttrField(mock_meta_->last_set_attr_fields, SetAttrField::kMtimeNow));
+    EXPECT_EQ(mock_meta_->file_size(), 0);
+  });
+}
+
+TEST_F(FileReadWriterTest, UnchangedTypedSizeRespectsExplicitMtime) {
+  RunInTestFiber([&] {
+    auto rw = Make(0);
+    mock_meta_->reject_legacy_size_setattr = true;
+    SwordFsAttr attr;
+    attr.size = 0;
+    attr.mtime = 123;
+    ASSERT_TRUE(rw.SetAttr(attr, SetAttrField::kSize | SetAttrField::kMtime, nullptr).ok());
+    EXPECT_TRUE(HasSetAttrField(mock_meta_->last_set_attr_fields, SetAttrField::kMtime));
+    EXPECT_FALSE(HasSetAttrField(mock_meta_->last_set_attr_fields, SetAttrField::kMtimeNow));
+    EXPECT_FALSE(HasSetAttrField(mock_meta_->last_set_attr_fields, SetAttrField::kSize));
+  });
+}
+
+TEST_F(FileReadWriterTest, UnchangedTypedSizePreservesExplicitMtimeNow) {
+  RunInTestFiber([&] {
+    auto rw = Make(0);
+    mock_meta_->reject_legacy_size_setattr = true;
+    SwordFsAttr attr;
+    attr.size = 0;
+    ASSERT_TRUE(rw.SetAttr(attr, SetAttrField::kSize | SetAttrField::kMtimeNow, nullptr).ok());
+    EXPECT_TRUE(HasSetAttrField(mock_meta_->last_set_attr_fields, SetAttrField::kMtimeNow));
+    EXPECT_FALSE(HasSetAttrField(mock_meta_->last_set_attr_fields, SetAttrField::kMtime));
+    EXPECT_FALSE(HasSetAttrField(mock_meta_->last_set_attr_fields, SetAttrField::kSize));
   });
 }
 

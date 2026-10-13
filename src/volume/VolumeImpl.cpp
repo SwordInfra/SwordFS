@@ -10,8 +10,8 @@
 
 #include "chunk/ChunkFactory.hpp"
 #include "chunk/internal/ChunkCleanupParticipant.hpp"
+#include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
 #include "chunk/internal/ChunkGcWorker.hpp"
-#include "chunk/internal/ChunkMetadataBridge.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
@@ -69,30 +69,28 @@ VolumeImpl &VolumeImpl::Instance() {
 
 Status VolumeImpl::ComposeChunkMetadata() {
   chunk_metadata_.reset();
-  chunk_metadata_bridge_.reset();
+  cleanup_work_encoder_.reset();
   auto status = meta_engine_->OpenChunkMetadata(config_.chunk_type, &chunk_metadata_);
   if (!status.ok()) {
     return status;
   }
-  // Mount composition owns typed metadata identity/lifetime. Keep the legacy
-  // transaction bridge stateless and outside the independent ChunkMetadata
-  // domain.
+  // FileMetadata only receives pure detached-work serialization. The COW
+  // metadata authority remains independent and is not accessed by the encoder.
   if (chunk_metadata_ == nullptr || chunk_metadata_->Type() != config_.chunk_type) {
     return Status::InvalidArgument("chunk metadata type mismatch");
   }
-  status = chunk::internal::CreateChunkMetadataBridge(config_.chunk_type, &chunk_metadata_bridge_);
+  status = chunk::internal::CreateChunkCleanupWorkEncoder(config_.chunk_type, &cleanup_work_encoder_);
   if (!status.ok()) {
     return status;
   }
-  return meta_engine_->BindChunkMetadataBridge(chunk_metadata_bridge_.get());
+  return meta_engine_->BindChunkCleanupWorkEncoder(cleanup_work_encoder_.get());
 }
 
 Status VolumeImpl::ComposeChunkRuntime() {
   chunk_factory_.reset();
   chunk_gc_worker_.reset();
-  if (meta_engine_ == nullptr || chunk_metadata_ == nullptr || chunk_metadata_bridge_ == nullptr) {
-    return Status::Internal("chunk runtime requires composed metadata capabilities");
-  }
+  // LoadFrom reaches runtime composition only after ComposeChunkMetadata
+  // succeeds; incomplete capabilities cannot reach this point.
   chunk_factory_ = std::make_unique<chunk::ChunkFactory>(config_.chunk_type, chunk_metadata_, meta_engine_.get(),
                                                          data_engine_.get(), config_.chunk_size);
   if (data_engine_ != nullptr) {
@@ -238,7 +236,7 @@ void VolumeImpl::Shutdown() {
   chunk_gc_worker_.reset();
   data_engine_.reset();
   meta_engine_.reset();
-  chunk_metadata_bridge_.reset();
+  cleanup_work_encoder_.reset();
   chunk_metadata_.reset();
 }
 

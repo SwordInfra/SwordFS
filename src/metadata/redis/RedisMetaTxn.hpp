@@ -11,7 +11,6 @@
 #include <vector>
 
 #include "metadata/ChunkSizePlan.hpp"
-#include "metadata/IChunkIndexTxn.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/types/Chunk.hpp"
 #include "metadata/types/Common.hpp"
@@ -21,7 +20,7 @@
 #include "utils/Status.hpp"
 
 namespace swordfs::chunk::internal {
-class ChunkMetadataBridge;
+class ChunkCleanupWorkEncoder;
 }
 
 namespace swordfs::metadata {
@@ -37,10 +36,10 @@ struct ChunkSizeCommitResult;
 // low-level Redis metadata primitives remain private. RedisMetaImpl owns POSIX
 // policy; transaction-scoped reads stay here when their WATCH snapshot is part
 // of the mutation's correctness contract.
-class RedisMetaTxn : public IChunkIndexTxn {
+class RedisMetaTxn {
  public:
-  RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size, ChunkType chunk_type,
-               const chunk::internal::ChunkMetadataBridge *bridge);
+  RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size,
+               const chunk::internal::ChunkCleanupWorkEncoder *encoder);
 
   // ────────────────────────────────────────────────────────────────
   // Reads
@@ -52,12 +51,10 @@ class RedisMetaTxn : public IChunkIndexTxn {
   // ────────────────────────────────────────────────────────────────
   // Inode operations
   // ────────────────────────────────────────────────────────────────
-  utils::Status SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out = nullptr,
-                        std::vector<PendingDelete> *detached_chunks = nullptr);
+  utils::Status SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out = nullptr);
   utils::Status SetInodeFlags(InodeID ino, InodeFlag inode_flags, SwordFsInode *out = nullptr);
   utils::Status SetXAttr(InodeID ino, std::string_view name, std::string_view value, XAttrSetMode mode);
   utils::Status RemoveXAttr(InodeID ino, std::string_view name);
-  utils::Status Truncate(InodeID ino, uint64_t size, std::vector<PendingDelete> *detached_chunks = nullptr);
   utils::Status TouchInode(InodeID ino, SetAttrField fields);
 
   // ────────────────────────────────────────────────────────────────
@@ -80,13 +77,6 @@ class RedisMetaTxn : public IChunkIndexTxn {
   // Drop one immutable object from the truncate cleanup queue after physical
   // deletion. Missing entries are already complete.
   utils::Status CompletePendingDelete(std::string_view object_key);
-
-  // Transitional raw operations used only by ChunkMetadataBridge. Final typed
-  // ChunkMetadata is an independent domain and never binds to this transaction.
-  utils::Status Read(std::string_view hash, std::string_view field, std::string *value) override;
-  utils::Status Scan(std::string_view hash, std::vector<std::pair<std::string, std::string>> *values) override;
-  utils::Status Put(std::string_view hash, std::string_view field, std::string_view value) override;
-  utils::Status Erase(std::string_view hash, std::string_view field) override;
 
   // Register immutable object identities as best-effort background cleanup
   // candidates. Queue membership is never delete authority: private chunk GC must
@@ -118,10 +108,6 @@ class RedisMetaTxn : public IChunkIndexTxn {
   // ────────────────────────────────────────────────────────────────
   // Chunk operations
   // ────────────────────────────────────────────────────────────────
-  utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
-                            utils::Status &publication_result, std::optional<PendingDelete> &cleanup_candidate,
-                            const ChunkPublishIntent &intent = {});
-  utils::Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out);
   utils::Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out);
   utils::Status ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out);
   utils::Status ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out);
@@ -141,28 +127,20 @@ class RedisMetaTxn : public IChunkIndexTxn {
   utils::Status DeleteInode(InodeID ino);
   utils::Status AdjustNlink(SwordFsInode *inode, int delta, uint64_t *nlink = nullptr);
   utils::Status LinkEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &child, SwordFsInode *parent);
-  utils::Status SetChunk(InodeID ino, const SwordFsChunk &chunk);
-  utils::Status TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size,
-                               std::vector<PendingDelete> *detached_chunks);
-  utils::Status DeleteChunks(InodeID ino);
   utils::Status IsDescendantOf(InodeID ancestor_ino, InodeID child_ino, bool *result);
   utils::Status DetachEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &target,
                             SwordFsInode *parent);
   utils::Status ReplaceEntry(InodeID parent_ino, std::string_view name, const SwordFsInode &child,
                              SwordFsInode *parent);
   utils::Status AdjustInodeCount(int64_t delta);
-  utils::Status LookupChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
   utils::Status LookupAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out);
-  utils::Status ScanChunks(InodeID ino, std::vector<std::pair<std::string, SwordFsChunk>> &chunks);
   utils::Status QueuePendingDelete(const PendingDelete &work);
-  std::string PrivateHash(std::string_view hash) const;
 
  private:
   RedisKvTxn &txn_;
   const redis::RedisKey &key_;
   uint64_t chunk_size_;
-  const chunk::internal::ChunkMetadataBridge *chunk_metadata_bridge_;
-  ChunkType chunk_type_;
+  const chunk::internal::ChunkCleanupWorkEncoder *cleanup_work_encoder_;
 };
 
 }  // namespace swordfs::metadata

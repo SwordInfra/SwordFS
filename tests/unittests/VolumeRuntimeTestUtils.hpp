@@ -112,8 +112,8 @@ class ConfiguredMetaEngine final : public Base {
     return utils::Status::OK();
   }
 
-  utils::Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) override {
-    auto status = Base::BindChunkMetadataBridge(bridge);
+  utils::Status BindChunkCleanupWorkEncoder(chunk::internal::ChunkCleanupWorkEncoder *bridge) override {
+    auto status = Base::BindChunkCleanupWorkEncoder(bridge);
     return status.ToErrno() == ENOSYS ? utils::Status::OK() : status;
   }
 };

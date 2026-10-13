@@ -178,7 +178,7 @@ path:
   expressed through kernel SETATTR/MODE handling rather than hidden inside
   OPEN;
 - treat metadata `Truncate()` as size/chunk mutation only;
-- treat WRITE and `CommitChunk()` as data/publication operations only, never as
+- treat WRITE and typed chunk attachment/head publication as data operations only, never as
   delayed privilege-decision boundaries.
 
 The kernel's explicit MODE adjustment in the legacy path remains authoritative

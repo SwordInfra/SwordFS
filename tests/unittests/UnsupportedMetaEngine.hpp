@@ -134,20 +134,7 @@ class UnsupportedMetaEngine : public metadata::IMetaEngine {
   utils::Status CompletePendingDelete(std::string_view) override {
     return Unsupported();
   }
-  utils::Status AllocateChunkRevision(metadata::ChunkRevision *) override {
-    return Unsupported();
-  }
   utils::Status OpenDir(metadata::InodeID, metadata::DirIteratorPtr *) override {
-    return Unsupported();
-  }
-  utils::Status CommitChunk(metadata::InodeID, const std::optional<metadata::SwordFsChunk> &,
-                            const metadata::SwordFsChunk &) override {
-    return Unsupported();
-  }
-  utils::Status FindChunk(metadata::InodeID, metadata::ChunkIndex, metadata::SwordFsChunk *) override {
-    return Unsupported();
-  }
-  utils::Status Truncate(metadata::InodeID, uint64_t) override {
     return Unsupported();
   }
 

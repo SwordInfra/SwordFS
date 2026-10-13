@@ -71,9 +71,9 @@ Status RedisMetaImpl::OpenChunkMetadata(ChunkType chunk_type, ChunkMetadataPtr *
   return ops_.OpenChunkMetadata(chunk_type, out);
 }
 
-Status RedisMetaImpl::BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) {
+Status RedisMetaImpl::BindChunkCleanupWorkEncoder(chunk::internal::ChunkCleanupWorkEncoder *encoder) {
   utils::ExpectInThreadDomain();
-  return ops_.BindChunkMetadataBridge(bridge);
+  return ops_.BindChunkCleanupWorkEncoder(encoder);
 }
 
 utils::Status RedisMetaImpl::Initialize() {
@@ -567,21 +567,6 @@ Status RedisMetaImpl::CompletePendingDelete(std::string_view key) {
   return ops_.CompletePendingDelete(key);
 }
 
-Status RedisMetaImpl::AllocateChunkRevision(ChunkRevision *revision) {
-  return ops_.AllocateChunkRevision(revision);
-}
-
-Status RedisMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
-                                  const SwordFsChunk &replacement) {
-  return CommitChunk(ino, expected, replacement, {});
-}
-
-Status RedisMetaImpl::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
-                                  const SwordFsChunk &replacement, const ChunkPublishIntent &intent) {
-  utils::ExpectInFiberDomain();
-  return ops_.CommitChunk(ino, expected, replacement, intent);
-}
-
 Status RedisMetaImpl::ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out) {
   utils::ExpectInFiberDomain();
   return ops_.ReadFileChunkSnapshot(ino, index, out);
@@ -619,21 +604,6 @@ Status RedisMetaImpl::CommitGrow(InodeID ino, const ChunkSizePlan &plan, const S
                                  SetAttrField fields, ChunkSizeCommitResult *out) {
   utils::ExpectInFiberDomain();
   return ops_.CommitGrow(ino, plan, requested, fields, out);
-}
-
-Status RedisMetaImpl::FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
-  utils::ExpectInFiberDomain();
-  return ops_.FindChunk(ino, idx, chunk);
-}
-
-Status RedisMetaImpl::LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out) {
-  utils::ExpectInFiberDomain();
-  return ops_.LoadChunkView(ino, idx, out);
-}
-
-Status RedisMetaImpl::Truncate(InodeID ino, uint64_t size) {
-  utils::ExpectInFiberDomain();
-  return ops_.Truncate(ino, size);
 }
 
 }  // namespace swordfs::metadata

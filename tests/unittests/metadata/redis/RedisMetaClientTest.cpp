@@ -911,7 +911,6 @@ TEST(RedisMetaClientTest, StandaloneReadOnlyConnectionFailuresReturnUnavailable)
 
   std::string value;
   EXPECT_TRUE(client.Get("unreachable", &value).IsUnavailable());
-  EXPECT_TRUE(client.HGet("unreachable", "field", &value).IsUnavailable());
 
   std::vector<std::optional<std::string>> values;
   EXPECT_TRUE(client.MGet({"unreachable"}, &values).IsUnavailable());

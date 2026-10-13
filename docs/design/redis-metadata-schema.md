@@ -1,523 +1,147 @@
-# Redis metadata: storage and transactions
+# Redis FileMetadata schema and transaction semantics
 
-This document describes how Redis represents the [logical data model](data-structures.md)
-and implements metadata consistency. Start with the [architecture](architecture.md)
-for filesystem workflows and the [thread model](thread-model.md) for execution domains.
+This is the current SwordFS beta schema after the typed ChunkID authority
+cutover and removal of the common COW descriptor path. It does not promise
+compatibility with records from pre-cutover beta versions.
 
-## Storage layout
+## Keys and authorities
 
-All keys use the volume hash tag `{db:volume}`. Keeping related keys in one
-Redis Cluster slot is a layout constraint for multi-key transactions; it does
-not by itself establish support for every Cluster deployment configuration.
+Every key is prefixed with the Redis Cluster hash tag `{db:volume}`. Multi-key
+FileMetadata operations stay in one transaction slot; the current single-slot
+layout is not horizontal volume sharding.
 
-| Key suffix | Redis type | Stored state |
+| Suffix | Type | Authority |
 | --- | --- | --- |
-| `format` | String | Serialized volume configuration |
-| `next_ino` | Integer string | Inode allocator |
-| `next_chunk_revision` | Integer string | Volume-wide logical publication-generation allocator |
-| `next_chunk_id` | Integer string | Volume-scoped monotonic `ChunkID` allocator |
-| `inode_count` | Integer string | Advisory legacy inode metric; never an authoritative filesystem invariant |
-| `inode:<ino>` | String | Canonical serialized `SwordFsInode`, including ordered raw xattrs and POSIX ACL xattr bytes |
-| `dir:<parent_ino>` | Hash | Name → child type and inode ID |
-| `chunk:<ino>` | Hash | Canonical decimal 64-bit chunk index → shared published logical `SwordFsChunk` head |
-| `private_chunk_index:<mechanism-key>:<hash>` | Hash | Transitional legacy bridge fields; logical chunk-index fields use canonical decimal 64-bit indexes and field layout belongs only to that mechanism |
-| `private_chunk_index:1:head:<chunk-id>` | String | Staged typed COW `COWChunkHead{revision,size}` for one ChunkID |
-| `private_chunk_index:1:revision:<chunk-id>` | Integer string | Per-ChunkID monotonic COW revision allocator |
-| `orphans` | Hash | Inode ID → orphan marker |
-| `reclaims` | Hash | Inode ID → serialized frozen opaque `ReclaimWork` |
-| `pending_deletes` | Hash | Opaque mechanism-defined queue ID → serialized frozen opaque `PendingDelete` |
+| `format` | String | Serialized volume configuration with fixed chunk type and chunk size |
+| `next_ino` | Integer string | Monotonic inode allocator |
+| `next_chunk_id` | Integer string | Monotonic nonzero volume-scoped `ChunkID` allocator |
+| `inode_count` | Integer string | Advisory capacity metric; never an authoritative live-inode count |
+| `inode:<ino>` | String | `SwordFsInode` (EOF, attributes, namespace links and xattrs) |
+| `dir:<parent>` | Hash | Name to serialized child inode/type mapping |
+| `chunk_refs:<ino>` | Hash | Canonical decimal 64-bit `ChunkIndex` field to decimal nonzero `ChunkID` value |
+| `private_chunk_index:1:head:<chunk-id>` | String | COW-private serialized `COWChunkHead{revision,size}` |
+| `private_chunk_index:1:revision:<chunk-id>` | Integer string | COW-private per-ChunkID revision allocator |
+| `orphans` | Hash | Unlinked inode ID to orphan candidate marker |
+| `reclaims` | Hash | Inode ID to opaque `ReclaimWork` envelope |
+| `pending_deletes` | Hash | Opaque candidate ID to `PendingDelete` envelope |
 
-### Why these structures
+The `private_chunk_index:<mechanism-key>:<hash>` key constructor remains in
+`RedisKey` because typed COW uses it for the two private per-ChunkID records.
+There are no legacy descriptor fields or transaction-time raw Hash APIs exposed
+to the common metadata engine. Only `cow` is selectable; other persisted
+mechanism values are unsupported rather than silently coerced to COW.
 
-A directory Hash supports name lookup and incremental enumeration. Its values
-contain enough information to enumerate names and types without fetching every
-child inode. Full attributes remain canonical in the inode record. A missing
-directory Hash represents an empty directory when its directory inode exists.
+A missing `dir:<ino>` Hash represents an empty directory if its inode exists.
+`chunk_refs:<ino>` may be absent for an empty or all-hole regular file. A
+mapping field and value must decode canonically and fit the supported 64-bit
+index and nonzero ChunkID ranges. Corruption fails closed; do not reinterpret
+invalid values as holes.
 
-A chunk Hash represents one authoritative logical head per index. It contains
-neither mutable write buffers nor uploading records. During the staged #312
-cutover, the legacy metadata bridge may still read or change private-index
-fields in the same WATCH/EXEC transaction as the logical head and inode. That
-raw private index is transitional common-authority plumbing, not the target
-typed ChunkMetadata API. Final mechanism-owned state is rooted at `ChunkID`
-and uses its own consistency domain. #316 stages typed COW head and per-ChunkID
-revision state under separate private keys, but those records are not a shadow
-copy of the live common descriptor and are not yet production authority. For
-the currently selectable `cow` data path, the legacy common head generation is
-still also the immutable object revision and the production physical key still
-derives from inode, index, and revision until #317.
+## Allocators and COW keys
 
-`ChunkIndex` is a 64-bit unsigned logical coordinate. Redis Hash field names
-that identify a logical chunk use `std::to_string(index)`, i.e. the canonical
-unsigned decimal representation with no parallel truncated numeric identity.
-The serialized `SwordFsChunk` value stores the index as U64. The selectable
-`cow` cleanup/reclaim payloads also encode descriptor indexes as
-U64. SwordFS is still beta and does not preserve historical COW layout
-numbers or dual-decode older beta records.
+`next_chunk_id` uses an atomic validated Redis increment. It never reuses an
+identity after detach, even on allocator gaps or ambiguous acknowledgement.
+The counter is initialized lazily on first allocation and accepts only
+`1..INT64_MAX`. Redis returns a command error for negative, malformed or
+overflowed persisted values.
 
-Private-index Redis keys do not embed the human-readable mechanism name.
-`RedisKey::PrivateChunkIndex()` derives `<mechanism-key>` from the persisted
-`ChunkType` through `ChunkTypeKey()`; in the
-current beta layout the stable enum values are encoded as decimal strings
-(`1` = `cow`, `2` = `chunk_slice`, `3` = `redis_cache`). The trailing
-`<hash>` and its fields remain legacy bridge schema. The Redis COW adapter also
-uses the same mechanism-private namespace internally for per-ChunkID head and
-revision string keys; callers consume typed ChunkMetadata interfaces and never
-construct Redis keys or encoded values directly.
+Each COW ChunkID has its own validated revision counter and typed head.
+Revision 1 for one ChunkID is unrelated to revision 1 for another. The
+immutable object key is derived from `(ChunkID,COWChunkRevision)`; inode and
+logical offset are not part of its identity. The COW-private head uses
+compare-and-swap of both revision and size. Redis may be the backing service
+for both domains, but COW head CAS is not one `RedisMetaTxn` with inode EOF.
 
-`next_chunk_id` is mechanism-neutral and volume-scoped. The Redis
-ChunkMetadata adapter uses one atomic Lua command that rejects a negative
-persisted counter before mutation and otherwise executes Redis `INCR`.
-Malformed values and signed-64-bit overflow are Redis command errors and
-likewise leave the counter unchanged. SwordFS accepts successful ChunkID values
-only in `1..INT64_MAX`. The counter is created
-lazily by the first allocation rather than by the FileMetadata format
-transaction. A lost acknowledgement
-after the script may have executed is `OutcomeUnknown`; a later allocation
-obtains a fresh value and never reconstructs or reuses the lost identity. The
-legacy `next_chunk_revision` allocator remains separate while the current COW
-writer still depends on it.
-
-Each COW ChunkID also owns a separate revision counter key. Allocation uses the
-same validated non-negative Redis increment semantics as ChunkID allocation,
-but its sequence is local to that ChunkID: different ChunkIDs may both allocate
-revision 1. An ambiguous increment is never reconstructed or reused; retrying
-allocates a later revision and leaves a legal gap. Immutable target object
-identity is `(ChunkID, COWChunkRevision)`, while the legacy volume-wide
-`next_chunk_revision` remains production authority until #317.
-
-Frozen reclaim and pending-delete records carry opaque payloads.
-The common queue validates its envelope and Hash field identity; only the
-selected chunk-type implementation's chunk-GC logic interprets physical references and checks reachability
-before deletion. Truncate and rewrite publication use `pending_deletes` as
-best-effort maintenance state after a known metadata outcome. Queue
-membership is not delete authority.
-
-There is no inode-to-parents reverse index. Hard links use forward directory
-mappings and the inode link count. The current data path rewrites whole chunks.
-`chunk_slice` and `redis_cache` remain unselectable until their runtime
-`Chunk` implementations and private indexes are implemented; their different
-index layouts remain isolated behind the same volume-fixed mechanism framework.
-
-Allocators use atomic `INCR` independently of the subsequent namespace or
-publication transaction. Gaps after failure are harmless. Revision reuse is
-not: metadata recovery must preserve allocator state consistently with
-published descriptors. Volume object namespaces must also remain isolated.
-
-### Persistent-backend test isolation
-
-Redis-backed unit tests must not assume that the test Redis instance was
-flushed between process invocations. Every test namespace therefore includes
-both a process-run identity and an in-process sequence so stale keys from a
-previous run cannot collide with a later run, while concurrently executing
-test processes also remain isolated.
-
-## Transaction mechanism
-
-The implementation separates policy in `RedisMetaImpl`, operation
-orchestration in `RedisMetaOps`, filesystem record changes in `RedisMetaTxn`,
-and Redis transaction mechanics in `RedisKvTxn` / `RedisMetaClient`.
-
-Runtime calls offload blocking Redis work to the backend executor. Within
-that worker, a mutation reads and watches its inputs, validates filesystem
-conditions, queues writes, then attempts `EXEC`.
-
-```mermaid
-stateDiagram-v2
-    [*] --> ReadAndWatch
-    ReadAndWatch --> Rejected: validation fails
-    ReadAndWatch --> QueueWrites: preconditions hold
-    QueueWrites --> Exec
-    Exec --> Committed: replies confirm success
-    Exec --> Retry: WATCH conflict
-    ReadAndWatch --> Retry: retryable transport/protocol failure
-    QueueWrites --> Retry: retryable transport/protocol failure before EXEC
-    Retry --> ReadAndWatch: backoff; attempts remain
-    Retry --> Unavailable: retry budget exhausted
-    Exec --> Uncertain: no reliable terminal EXEC result
-    Exec --> Uncertain: command error; commit may be partial
-    Committed --> [*]
-    Rejected --> [*]
-    Unavailable --> [*]
-    Uncertain --> [*]
-```
-
-Reads through `RedisKvTxn` watch the key before reading by default. Hash
-fields therefore share key-level conflict granularity: unrelated names in one
-directory or indexes in one chunk Hash can still cause retries. A narrow
-unwatched Hash read is reserved for validation whose correctness is serialized
-by another watched key. Reclaim uses this for its per-inode `reclaims` field:
-the inode key remains the namespace/reclaim serialization point, while an
-unrelated inode's reclaim field must not force a retry. All reads must precede
-the first queued write; the wrapper rejects reads after writes.
-
-Typed `ChunkMetadata` is an independent semantic and atomicity domain. Its
-mechanism-specific APIs are keyed by `ChunkID`; they do not expose
-`RedisKvTxn`, Redis keys, fields, or encoded values to callers, and they must
-not be bound into `RedisMetaTxn` or committed through the FileMetadata
-`WATCH`/`MULTI`/`EXEC` lifecycle. A Redis ChunkMetadata implementation may
-reuse `RedisBackendContext`, executors, pools, and the same physical Redis
-deployment, but it owns its own commands and any mechanism-local transaction.
-Cross-domain correctness is therefore expressed by the higher-level
-publication/reclaim protocol and its ordering/reconciliation rules, not by a
-shared Redis transaction.
-
-`IChunkIndexTxn` currently remains only as a transitional raw string adapter
-for the legacy `ChunkMetadataBridge` while `SwordFsChunk` remains production
-authority. Those bridge reads/writes still execute inside the existing
-FileMetadata transaction because they are part of the old common-head
-protocol; this is not a typed ChunkMetadata transaction seam and no new typed
-mechanism state may use it. #318/#319/#317 retire the bridge callbacks as their
-authorities move, and #320 removes the remaining raw bridge surface. #316 and
-#270 place mechanism-owned typed metadata behind the independent ChunkMetadata
-boundary instead of extending `IChunkIndexTxn`. The #316 COW adapter uses its
-own per-ChunkID keys and `RedisMetaClient::Transact` for full-head CAS/erase;
-it never receives a `RedisMetaTxn` or FileMetadata transaction handle.
-
-`RedisKvTxn` borrows its transaction connection from the shared redis++ pool
-with `transaction(false, false)`. The `Redis` view returned by
-`Transaction::redis()` is kept only for the callback's WATCH/read phase, where
-it must share the transaction connection. Before normal terminal `EXEC`,
-read-only completion, or `DISCARD`, SwordFS releases that view so redis++ can
-return the healthy connection to the pool during its terminal reset. Keeping
-the shared view alive through terminal handling prevents the pool return and
-causes redis++ destruction cleanup to invalidate an otherwise healthy
-connection, turning successful metadata transactions into reconnect churn.
-
-`RedisMetaClient::Transact` bounds retries and uses randomized exponential
-backoff. It is the only automatic retry owner for Redis metadata
-transactions. It reruns the callback after WATCH conflicts or transport and
-protocol failures that are known to have occurred before `EXEC`. The callback
-must reconstruct its decisions from newly read state, without performing
-external object-store side effects. A valid Redis command-error reply is a
-known failure, not a transport retry signal. Exhausting the safe retry budget
-returns `Unavailable`.
-
-The default budget is **eight attempts** (with randomized exponential backoff,
-20ms base and a 1s per-attempt cap). The previous three-attempt default could
-return `Unavailable` while two independent Redis metadata engines created
-distinct entries in the same directory: both writes legitimately contend on
-the watched parent inode even though their names differ. The larger, still
-bounded budget lets normal short-lived WATCH conflicts converge without adding
-outer retries in VFS or in the test harness. Explicit URL `retry_attempts`
-overrides remain authoritative, including small budgets needed by
-retry-exhaustion tests. This does not change pre/post-EXEC ambiguity rules.
-
-Failure classification follows the protocol boundary where outcome certainty
-is lost rather than the redis++ exception class. With the pinned redis++
-implementation, queued transaction commands run under `MULTI` and only take
-effect when `EXEC` executes. A connection, timeout, or protocol failure during
-WATCH/read/queue processing is therefore safe to retry: any queued mutation
-has not executed. In contrast, `Transaction::exec()` encapsulates sending
-`EXEC` and receiving/parsing its reply. Once that call begins, a returned
-`TimeoutError`, `ClosedError`, `IoError`, `ProtoError`, or other redis++ error
-cannot prove that Redis did not execute the transaction. Except for an
-explicit WATCH abort, every such terminal failure is `OutcomeUnknown` and is
-never automatically replayed.
-
-An error in one EXEC command is also `OutcomeUnknown`: Redis does not roll
-back commands in the same EXEC that already succeeded. The wrapper validates
-every queued reply and reports a possibly partial commit. The filesystem
-atomicity contract therefore depends on valid record types and successful
-transaction commands, not on a general rollback facility.
-
-Read-only operations have no remote mutation whose durable outcome can become
-ambiguous. Standalone `PING`, `GET`, `MGET`, `HGET`, and `HSCAN`, as well as
-read-only transaction completion, map transport/protocol/backend-availability
-failures to `Unavailable`; logical results such as `NotFound` and valid Redis
-error replies remain distinct known outcomes. They never return
-`OutcomeUnknown` merely because the reply was lost.
-
-The allocator counters (`next_ino` and `next_chunk_revision`) are different:
-their standalone `INCR` is itself a mutation. A valid Redis reply provides a
-known result (including a valid command-error reply), but once `INCR` may have
-been sent, losing or being unable to parse its acknowledgement is
-`OutcomeUnknown`. Allocator gaps are allowed, so reconciliation never guesses
-or reuses the lost value; the caller allocates a fresh identity on a later
-operation instead of blindly replaying the ambiguous command.
-
-All blocking Redis waits are finite. The metadata URL/runtime configuration
-supplies positive `connect_timeout`, `socket_timeout`, and connection-pool
-`wait_timeout` values, plus a positive transaction retry-attempt limit and a
-bounded backoff. `RedisMetaClient` validates direct programmatic
-configuration as well as URL-parsed configuration so a zero pool wait cannot
-silently restore redis++'s wait-forever behavior. Retry backoff configuration
-may exceed the runtime's 1s per-attempt cap; the exponential backoff calculation
-saturates at that cap before multiplication can overflow. Every foreground,
-initialization, directory-iteration, reclaim, and shutdown Redis operation
-uses this same client/pool policy; there is no bypass client in the metadata
-backend.
-
-SwordFS treats an acknowledged Redis transaction as the metadata-service
-completion boundary. It does not issue an additional Redis disk or replica
-barrier after `EXEC`. Deployments that require power-loss durability must
-configure Redis persistence, replication/HA, and no-eviction policy so the
-authoritative records and allocators meet that requirement. The client cannot
-strengthen a weaker backend durability policy after the fact.
-
-Ordinary metadata reads do not become WATCH transactions merely to update
-atime. `Open` and `OpenDir` consult the process-global `MountRuntimeBehavior`
-singleton. When it enables implicit access-time updates they perform the
-existing separate best-effort atime mutation; failure of that mutation does not
-invalidate the successful access. With `noatime`, those implicit mutations are
-skipped entirely. Redis never parses raw FUSE mount options, and explicit
-`SetAttr` atime/atime-now mutations remain unaffected by the implicit-access
-policy.
-
-## Atomic mutation boundaries
-
-The useful unit of explanation is the set of records that must change
-together, rather than one subsection for every API.
-
-| Mutation | Records changed together | Invariant |
-| --- | --- | --- |
-| Namespace creation | Child inode, parent name mapping, parent attributes, inode count | No visible name without its newly created inode |
-| Hard-link addition | Name mapping, inode link count, parent attributes, orphan cleanup when applicable | A revived inode cannot remain eligible for reclaim preparation |
-| Namespace removal or replacement | Directory mappings, affected inode/link counts and parent attributes, orphan marker when last link disappears | Cleanup work is recorded with the namespace change |
-| Chunk publication | Expected logical head validation, mechanism-private index update, replacement head, inode size | Only the CAS winner becomes authoritative; cleanup registration happens separately after a known outcome |
-| Size change | Inode size, pruned/clamped logical heads, mechanism-private index update | Metadata does not retain readable ranges beyond the new size; frozen opaque cleanup candidates are returned for later best-effort registration |
-| Reclaim preparation | Frozen chunk-type-private work, private index update, removal of orphan marker, live inode/chunk heads | Frozen deletion targets and live-state removal commit together without depending on advisory global accounting |
-| Reclaim completion | Pending reclaim record | Work disappears only after all frozen objects have been deleted |
-| Pending-delete completion | Pending-delete field | Work disappears only after the chunk-type implementation confirms frozen data is no longer live and deletion succeeds |
-
-Empty directory removal is an atomic namespace mutation. It watches directory
-contents to exclude concurrent child creation, adjusts parent link counts,
-and removes the empty directory's metadata directly; no object-data reclaim
-phase is needed.
-
-### Representative flow: rename with replacement
-
-Rename illustrates why watching only the source name is insufficient:
-
-1. Read source/destination parents and entries, then affected inodes. Ordinary
-   mode-bit DAC has already been handled by Linux VFS/FUSE; retain the
-   transaction-local sticky ownership safety check, then validate type
-   compatibility, rename flags, directory emptiness where required, and cycle
-   prevention.
-2. Plan source/destination mapping changes and inode/parent attribute changes
-   from that watched state. Moving a directory also changes parent relationships
-   and parent link counts.
-3. If replacing a regular file removes its last link, retain its inode and
-   publish an orphan marker in the same transaction. An empty directory victim
-   can instead be removed within the namespace transaction.
-4. Queue the complete write set and execute it atomically under normal valid
-   schema conditions. A WATCH conflict restarts from fresh reads.
-5. Return the metadata result. Foreground VFS wakes reclaim when needed;
-   object-store deletion is outside this transaction.
-
-No-replace and exchange change validation and the write set, while preserving
-the same atomic boundary. `RENAME_EXCHANGE` is a namespace-binding swap, not
-two overwrite renames: both names and both inodes survive, so exchange never
-creates an overwrite victim, orphan marker, or reclaim transition. The two
-operands may have different inode types. If both names already reference the
-same inode, exchange is a successful no-op and does not rewrite topology or
-timestamps.
-
-For exchange, every directory operand is cycle-checked independently against
-its destination parent. A cross-parent swap rewrites both inode `parent_ino`
-values; this is also the source of the synthetic `..` relationship for a
-directory. Parent directory link counts change only by the net number of
-directory children exchanged across that parent. If A moves from `old_parent`
-to `new_parent` and B moves in the opposite direction, the deltas are:
+## Transaction layers
 
 ```text
-old_parent: is_dir(B) - is_dir(A)
-new_parent: is_dir(A) - is_dir(B)
+RedisMetaImpl     IMetaEngine validation and POSIX policy
+    |
+RedisMetaOps      semantic operations and optimistic retry boundary
+    |
+RedisMetaTxn      FileMetadata inode, directory, EOF and chunk_refs semantics
+    |
+RedisKvTxn        WATCH -> MULTI -> EXEC
+    |
+RedisMetaClient   Redis client on BlockingExecutor POSIX threads
 ```
 
-Thus file↔file and dir↔dir exchanges have zero parent-link delta, while a
-cross-parent dir↔file exchange transfers one directory link from one parent to
-the other. Both directory mappings, both inode parent relationships and ctime,
-and both parent nlink/mtime/ctime updates are queued in the same Redis
-transaction. A WATCH conflict retries the whole decision from fresh state.
-Ordinary non-exchange rename keeps its directory/non-directory replacement
-compatibility checks. An ambiguous result is returned as an error rather than
-being treated as a definite rollback.
+Fiber callers suspend while Redis work executes in the POSIX-thread domain.
+`RedisMetaTxn` is per-attempt and does not expose raw `Get/Put/Scan/Erase`
+operations to chunk mechanisms; private COW metadata uses its independent
+`COWChunkMetadata` implementation.
 
-### Object cleanup registration and delete authority
+On Redis `EXEC` conflicts, the operation retries from a fresh transaction
+snapshot. A command error within EXEC may occur after prior commands already
+ran, so **the result is potentially partially applied**. A lost EXEC reply
+or network timeout may mean a committed mutation. The caller must reconcile
+by reading current FileMetadata, not reconstructing the outcome from local
+assumptions or a cleanup queue. New transactions must not replay stale
+`ChunkID` attachments, detached lists, or old EOF plans.
 
-Redis and the object store do not share a transaction. Last-link reclaim
-therefore separates the FileMetadata point of no return from optional cleanup
-handoff:
+## FileMetadata operations
 
-1. Read/WATCH the still-live inode and its authoritative chunk mapping state.
-   A linked inode is not reclaimable; its stale orphan marker and stale
-   `reclaims[ino]` maintenance entry can be removed in the same optimistic
-   transaction.
-2. For an unlinked inode, freeze chunk-type-private cleanup work in memory and
-   queue `DEL inode:<ino>` first. The inode key is the non-revivability fence
-   shared with `Link`.
-3. Queue `DEL chunk:<ino>` only after the inode deletion. Crossing this second
-   command is the logical point of no return: no live/revivable FileMetadata
-   path can reach the detached mappings.
-4. Queue orphan-marker removal and `HSET reclaims[ino]` afterwards as
-   maintenance. Failure or loss of these auxiliary commands may leak cleanup
-   work but cannot restore reachability.
+`ReadFileChunkSnapshot` loads one mapping with inode EOF and retained boundary
+snapshot. `ReadFileMappingSnapshot` scans the entire authoritative mapping for
+size planning and reclaim. `ProbeAttachment` gives GC an authoritative
+reachability answer. A missing mapping inside EOF is a sparse hole.
 
-`Link` does not read or WATCH the shared `reclaims` Hash. Link and reclaim
-already read/WATCH the same inode key. If Link commits first, its inode update
-invalidates reclaim's snapshot and reclaim retries against `nlink > 0`. If
-reclaim commits first, deleting the inode invalidates an in-flight Link and a
-retry observes the inode as absent. This keeps the race inode-local without a
-second fence or a shared-Hash serialization point.
+`AttachPrepared(ino,index,ChunkID,end,expected)` validates the attached ID,
+file type, current EOF, expected boundary and absent existing mapping under
+WATCH, then writes the selected ID and updates EOF as needed. It does not
+mint or read a COW revision. `FinalizeAttachedWrite` requires the same
+currently attached ID and valid EOF precondition before updating inode size
+and write timestamps. Stale attachments cause conflicts; idempotent retries
+first inspect the authoritative winner.
 
-`inode_count` is deliberately outside this protocol. Reclaim does not read,
-validate, WATCH, decrement, or repair it. The counter is advisory and cannot
-be part of the proof that an inode is safe to reclaim. This removes both the
-partial-`EXEC` ambiguity created by a failing counter command and the
-shared-key contention created by treating a global metric as authoritative.
+`CommitShrink` and `CommitGrow` validate a `ChunkSizePlan` against fresh EOF,
+boundary ID and full mapping. The transaction changes common EOF and
+`chunk_refs` together. COW retained-boundary sanitation is done in
+`FileReadWriter`/typed ChunkMetadata, **not** by the common metadata backend.
+`SetAttr(kSize)` is rejected at `RedisMetaOps` and `RedisMetaTxn` so direct
+callers cannot bypass COW coordination. Metadata-only mode, owner, time and
+xattr changes continue through the ordinary transactional setters.
 
-The critical `DEL` operations are deliberately type-insensitive. An auxiliary
-`HDEL`/`HSET` can still fail during `EXEC` (for example because external
-corruption changed a Hash key's Redis type), yielding `OutcomeUnknown` after
-the critical commands executed. `PrepareReclaim` reconciles such ambiguity
-from the inode key, not from cleanup records:
+## Reclaim and cleanup
 
-- inode absent: logical reclaim completed; lost cleanup work is an acceptable
-  storage leak;
-- inode present with `nlink > 0`: revival won; destructive cleanup stops;
-- inode present with `nlink == 0`: retry from a fresh WATCHed inode/mapping
-  snapshot.
+Unlink records an orphan candidate on last-link removal, but does not delete
+an inode while its local open descriptor fence remains. `PrepareReclaim`
+reads the current inode and, for a regular file, WATCHes its typed
+`chunk_refs` mapping. A linked/revived inode is not reclaimable.
 
-A surviving `chunk:<ino>` key under an absent inode is unreachable residue,
-not authoritative data. Likewise, `ReclaimWork` is maintenance only. Private
-chunk GC revalidates authoritative reachability before deleting data and may
-discard stale cleanup work that conflicts with a live inode. Completion removes
-retained maintenance after the selected mechanism reports it safe to
-acknowledge.
+For a last-link inode, the destructive transaction orders `DEL inode:<ino>`
+**before** `DEL chunk_refs:<ino>`; both commands are type-insensitive. It
+also removes orphan markers and may queue an opaque private `ReclaimWork`.
+The pure `ChunkCleanupWorkEncoder` freezes only the detached `ChunkID`
+identities. For a special inode or empty file, the payload is a valid empty
+private reclaim record. Deleting the inode is the non-revivability point of
+no return: Link and reclaim serialize on the same watched inode key.
 
-StatFs follows the same advisory-accounting rule. Redis reports a
-positive virtual inode capacity from its backend limits,
-with `files_free <= files`, rather than promising that `files` equals the
-current live inode population. Missing, stale, malformed, noncanonical, or
-wrong-typed `inode_count` state therefore cannot make StatFs fail.
+Because Redis EXEC can be partially applied, an auxiliary cleanup-registration
+error after the inode deletion may leave unreachable residue or lost work;
+that is a possible space leak, **not** permission to delete live data. An
+absent inode is already logically reclaimed. A surviving inode with `nlink >
+0` is live. For `nlink == 0`, retry from fresh watched mappings. `inode_count`
+is not part of this correctness proof.
 
-Rewrite/truncate cleanup intentionally uses a weaker contract. The
-authoritative metadata transaction does **not** depend on `pending_deletes`:
+`reclaims` and `pending_deletes` store opaque envelopes; their Hash field
+matches the serialized envelope ID. Mechanism-private typed COW payloads are
+decoded only by private GC. Queue membership is never delete authority:
+physical deletion requires a fresh mapping and/or COW head reachability
+check. A failed lookup, malformed work, or failed delete retains the item for
+retry and never guesses its object key.
 
-1. a truncate transaction scans the authoritative `chunk:<ino>` Hash, validates
-   canonical logical heads, applies removal or boundary clamp and inode-size
-   updates, coordinates mechanism-private metadata through the bridge, and returns frozen opaque
-   cleanup candidates for detached data;
-2. a rewrite publication transaction performs its CAS publication, private
-   index, and inode side effects and returns a frozen candidate when the
-   outcome is known: the old expected data after success/replay, or the
-   uploaded replacement after a definite logical rejection;
-3. after the authoritative transaction reports a **known** outcome,
-   `RedisMetaOps` attempts a separate transaction that writes
-   `pending_deletes[opaque_id] = PendingDelete{opaque_id, payload}`;
-4. cleanup-registration failure is logged and ignored by the logical operation.
-   It may leak an obsolete object, but it cannot invalidate a metadata mutation
-   whose result is already known.
+`StatFs` uses virtual capacity instead of treating a stale or corrupt
+`inode_count` as an authoritative link count. Namespace and inode attributes
+remain canonical even if that advisory metric is missing or malformed.
 
-An ambiguous/possibly partial authoritative transaction does not produce a
-cleanup decision merely because its API returned an error. Chunk publication
-retains the uploaded candidate and resolves current authoritative metadata on
-retry. Truncate may leave an unreachable object if a partial/ambiguous result
-detached metadata before cleanup registration; this is an accepted space leak,
-not permission to guess and delete data.
+## Persistence and testing
 
-A definitely rejected uploaded revision is terminal for the local writer even
-if best-effort registration fails. If registration did succeed, the background
-reclaimer may later delete that immutable key, so a later retry must allocate a
-fresh revision rather than reusing the rejected one.
+Metadata envelopes use the current format schema only. Beta development may
+replace incompatible layouts without a migration/dual-read decoder. Redis
+integration fixtures isolate test volumes under unique names and validate
+optimistic races, typed mapping scan corruption, ambiguous EXEC reconciliation,
+empty/sparse reclaim, and GC fail-closed behavior.
 
-Redis truncate scans only materialized fields in `chunk:<ino>` with HSCAN
-before queueing writes. It validates that each field matches the descriptor's
-index and canonical fixed-size chunk layout. A concurrent chunk-map mutation
-changes the watched Hash and forces the optimistic transaction to retry.
-
-The private chunk-GC worker scans `pending_deletes`. Common Redis metadata checks
-that the Hash field equals the frozen opaque ID, without decoding the private
-payload. The selected chunk-type implementation validates the payload and checks authoritative
-reachability. For `cow`, it verifies the frozen descriptor, canonical
-layout, and derived key against the current logical head. A still-live target
-is left untouched; otherwise chunk GC deletes it idempotently and removes the
-queue field only after success. Wrong record types,
-malformed private payloads, and physical-identity mismatches fail closed and
-remain queued.
-
-Reconciliation does not snapshot the complete Hash. Redis metadata keeps a
-process-local HSCAN cursor plus at most one decoded HSCAN response and exposes
-only a bounded number of pending-delete visitor callbacks per chunk-GC pass.
-If the response or cursor has more work, the worker finishes pending inode
-reclaims in that pass and then self-wakes for the next batch. This continuation
-also prevents a long-lived stale/live candidate from repeatedly occupying the
-front of every scan.
-
-Redis `COUNT` is only a scan hint, not a strict result-size bound. The hard
-SwordFS bound is therefore on visitor/object-delete work per reconciliation
-pass; transient metadata buffering is limited to one HSCAN response rather
-than the whole pending-delete Hash. The cursor/page buffer are not persisted:
-after restart HSCAN starts at zero and rediscovery is safe because the Hash is
-durable and cleanup operations are idempotent.
-
-As with Redis SCAN generally, records added while a cursor cycle is already in
-progress are not guaranteed to appear in that same cycle. The periodic
-chunk-GC safety scan is the correctness fallback; a missed concurrent addition
-is therefore picked up by a later scan even when no foreground VFS wake exists.
-This affects cleanup latency only: the durable Hash
-record, when registration succeeded, is never treated as completed merely
-because one cursor cycle ended.
-
-See the [reclaim state machine](architecture.md#141-reclaim-state-machine)
-and [chunk publication protocol](chunk-publication.md) for cross-engine
-ordering and failure windows.
-
-## Incremental enumeration
-
-`DirHandle` owns a backend-neutral iterator. Redis keeps its HSCAN cursor and
-prefetched entries private to that iterator. The FUSE offset is a logical
-position, not a Redis cursor.
-
-1. Sequential reads reuse iterator state.
-2. VFS peeks before encoding an entry into its byte-limited reply buffer and
-   advances only after the entry fits.
-3. A non-sequential seek can restart scanning from zero and skip to the
-   requested logical position. Seeking past the end returns an empty result.
-
-Enumeration is not a snapshot across concurrent mutations. The iterator
-retains shared ownership of backend context so its client/executor resources
-remain available for its lifetime.
-
-READDIRPLUS keeps this entry iterator unchanged and adds an explicit bounded
-attribute batch after enumeration. Up to 128 inode keys are read with one Redis
-`MGET`; results stay position-aligned with the requested inode IDs and a missing
-key represents an entry whose inode disappeared concurrently. Missing entries
-are skipped by VFS, while malformed inode values or Redis transport failures
-fail the request. A concurrently renamed entry whose inode remains live may be
-returned under the already-enumerated name; the scan is not a snapshot. Plain
-READDIR never issues this `MGET`.
-
-For inodes already tracked/open by the current mount, VFS acquires shared local
-inode-operation guards before the MGET and holds them through live-attribute
-composition. This is a local coherence fence only: it adds no Redis command and
-untracked directory entries acquire no per-inode VFS lock.
-
-All inode keys for one volume carry the same Redis hash tag, so the batch remains
-single-slot under the current schema. No Redis transaction or Lua script is
-needed: the contract requires correct inode/attribute binding for each returned
-entry, not a transaction-wide snapshot spanning HSCAN and the subsequent MGET.
-
-## Current boundaries
-
-- Redis durability and no-eviction configuration must protect authoritative
-  records and allocators together.
-- Local open-reference fences are not distributed leases between mounts.
-- Last-link reclaim requires durable pending work because the live inode is
-  removed at its point of no return. Rewrite/truncate object cleanup is
-  best-effort maintenance: failures may leave unreachable objects, while
-  chunk-type-owned authoritative reachability checks remain mandatory before
-  deletion.
-- `StatFs` exposes `inode_count` as its file count. Its block-capacity fields
-  are fixed values, not measurements of object-store capacity or usage.
-- Directory scan behavior under concurrent mutation does not provide snapshot
-  isolation or stable ordering.
-
-## Source entry points
-
-- Key layout: [`RedisKey.cpp`](../../src/metadata/redis/RedisKey.cpp).
-- Record mutations: [`RedisMetaTxn.cpp`](../../src/metadata/redis/RedisMetaTxn.cpp).
-- Retry policy: [`RedisMetaClient.cpp`](../../src/metadata/redis/RedisMetaClient.cpp).
-- WATCH/EXEC and error handling: [`RedisKvTxn.cpp`](../../src/metadata/redis/RedisKvTxn.cpp).
-- Enumeration: [`RedisDirIterator.cpp`](../../src/metadata/redis/RedisDirIterator.cpp).
+See [chunk publication](chunk-publication.md),
+[data structures](data-structures.md) and [architecture](architecture.md).

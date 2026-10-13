@@ -1,135 +1,86 @@
 # Data structures and ownership
 
-SwordFS separates authoritative metadata, immutable object bytes, and
-per-mount runtime state. Redis owns authoritative persisted metadata;
-per-mount runtime state remains local to the client.
+SwordFS separates **FileMetadata** (namespace and file reachability), private
+**ChunkMetadata** (the selected mechanism's data version) and per-mount runtime
+buffers. These are distinct authorities, not dual representations of one head.
 
-## Logical records
+## Authoritative records
 
 ```mermaid
 flowchart LR
-    D[Directory] -->|name maps to type and inode ID| I[SwordFsInode]
-    I -->|inode ID and chunk index| S[SwordFsChunk]
-    S -->|current cow: inode / index / revision| O[Immutable data object]
-    I -->|last link removed| A[Orphan candidate]
-    A -->|PrepareReclaim replaces live metadata| R[ReclaimWork]
-    R -->|frozen descriptors and object keys| O
+    D[Directory entry] --> I[SwordFsInode]
+    I --> M[ChunkIndex to ChunkID]
+    M --> C[COWChunkHead revision and size]
+    C --> O[Immutable ChunkID and revision object]
+    I --> A[Orphan candidate]
+    A --> R[ReclaimWork with detached ChunkIDs]
+    R -.-> G[Private GC with reachability checks]
+    G -.-> O
 ```
 
-| Structure | Essential content | Authority and lifetime |
-| --- | --- | --- |
-| `SwordFsVolume` | Volume identity, data-engine identity, bucket/location, region, chunk size | Defines how a mounted volume interprets its storage |
-| Directory entry | Name, child inode ID, child type | Namespace mapping; multiple entries may name one regular-file inode |
-| `SwordFsInode` | ID, attributes including size and `nlink`, parent ID, symlink target, ordered raw xattrs | Canonical inode attributes and raw xattrs; removing a name need not remove the inode |
-| `SwordFsChunk` | Index, revision, size; start offset is derived from `index * chunk_size` | Current shared publication head for one logical chunk; `revision`/`size` remain transitional under #312 |
-| `ChunkID` | Strong numeric volume-scoped identifier | Identifies one attached mechanism-owned chunk-state materialization; stable while attached and never reused after detach; numeric value is representation only |
-| `COWChunkRevision` | Strong COW-private per-ChunkID revision | Identifies one immutable COW object version inside a ChunkID; independently monotonic per ChunkID |
-| `COWChunkHead` | COW-private revision and valid-prefix size | Complete typed CAS identity for the staged `ChunkID -> COWChunkHead` model; not production authority until #317 |
-| Orphan candidate | Inode ID and cleanup marker | Last-link removal recorded while the live inode still exists |
-| `ReclaimWork` | Inode ID and opaque chunk-type-private payload | Replaces live inode/chunk metadata atomically at reclaim preparation |
-| `PendingDelete` | Opaque queue ID and chunk-type-private payload | Best-effort cleanup candidate whose physical identity is validated by the selected chunk-type implementation |
+| Structure | Content and owner |
+| --- | --- |
+| `SwordFsVolume` | Persisted volume configuration, selected mechanism, chunk size, data engine identity/location |
+| Directory entry | FileMetadata name, child inode ID and type; multiple entries may refer to one file inode |
+| `SwordFsInode` | FileMetadata inode attributes, EOF, link count, parent, symlink target and xattrs |
+| `ChunkIndex` | Unsigned 64-bit logical coordinate from checked file offset and fixed chunk size |
+| `ChunkMapping` | FileMetadata mapping from `ChunkIndex` to attached `ChunkID`; no common revision or size |
+| `ChunkID` | Volume-scoped monotonic nonzero identity; never reused when detached |
+| `COWChunkHead` | COW-private `{COWChunkRevision,size}` full-CAS value for one ChunkID |
+| `COWChunkRevision` | Per-ChunkID immutable COW generation, with independent allocator |
+| `ReclaimWork` | Optional opaque private cleanup handoff after FileMetadata removes an unlinked inode |
+| `PendingDelete` | Best-effort opaque candidate for detached ChunkID or superseded private revision |
 
-A directory entry does not duplicate full inode attributes. `parent_ino` is
-not a reverse index of every hard link: namespace lookup follows directory
-name mappings. `nlink` counts namespace links, separately from open references.
+A directory entry does not duplicate the inode attributes. Hard links share
+one inode and mapping. `nlink` is namespace authority independent of local
+open descriptor references. A missing mapping inside EOF is a hole and reads
+as zeroes. Both `ChunkIndex` and COW-private cleanup indices encode at full
+64-bit width. Persistent records use the current beta layout only.
 
-For chunk size `C`, file offset `x` maps to index `x / C` and offset `x % C`
-within the chunk. Descriptor size may be smaller than `C`. Missing descriptors
-and gaps after chunk data represent holes, filled with zeroes by the read path.
-
-The final #312 authority model separates three identities: `ChunkIndex` says
-where a logical chunk is in the file, `ChunkID` says which mechanism-owned
-chunk-state instance is attached there, and a mechanism-private revision (for
-COW) says which immutable object version backs that state. FileMetadata will
-eventually own only `ChunkIndex -> ChunkID`; selected ChunkMetadata owns the
-typed state behind ChunkID. #392 introduces the common ChunkID identity and
-independent ChunkMetadata domain while the current `SwordFsChunk` descriptor
-remains production authority until the later cutover. #316 adds the typed COW
-state behind that boundary: per-ChunkID `COWChunkRevision` allocation and
-`COWChunkHead{revision,size}` full-head CAS. The numeric ChunkID value is
-intentionally available for persistence/key encoding and diagnostics, but its
-number does not encode a revision, generation, or mechanism-specific layout.
-
-For the current `cow` mechanism, the object key is
-`<inode>/<chunk-index>/<revision>`. The common-head `revision` is therefore
-currently both a volume-wide monotonic publication/CAS generation and the
-immutable physical object revision; gaps are valid. That physical meaning is
-specific to the transitional COW model and is not part of #312's
-target mechanism-neutral common contract. Each volume needs an isolated
-bucket/prefix because the current derived object key does not include a volume
-name. #316 also defines the target typed COW object identity as
-`(ChunkID, COWChunkRevision)` and exposes object-key derivation from that pair;
-the production read/write path deliberately keeps using the legacy key until
-#317 switches authority coherently rather than dual-writing both identities.
-
-`SwordFsVolume` persists data-engine identity separately from the engine-specific
-bucket/location string. Format derives the identity from the current CLI input;
-mount uses the persisted identity to select the engine and then gives that
-engine its persisted location/configuration. The two fields are a persisted
-record invariant: both must be present for a configured data plane, or both
-absent when no data engine is configured; decoding rejects one-sided records.
-Persistent metadata records use schema version 1 and require an exact match as
-a current-format integrity rule. SwordFS is beta, so metadata layouts may
-change in place without introducing schema-version transitions or compatibility
-decoders for superseded development formats.
+For COW, each immutable object's name is `COWObjectKey(ChunkID,revision)`.
+Revisions are private to their ChunkID; the physical key never depends on the
+inode number or logical index. Redis uses typed `chunk_refs:<ino>` entries
+and separate COW-private head/revision keys. FileMetadata never persists
+buffer state, COW size or private revision.
 
 ## Runtime ownership
 
 ```mermaid
 flowchart TD
-    E[FUSE entry replies] -->|lookup refs| L[LocalInode per inode]
-    G[FORGET / FORGET_MULTI] -->|release refs| L
-    F[FileHandle per descriptor] -->|shared ownership| I[InodeHandle per inode]
-    M[InodeHandleManager] -.->|weak reference by inode ID| I
-    I --> R[FileReadWriter]
+    E[FUSE lookup] --> L[LocalInode]
+    F[FileHandle] --> I[InodeHandle per inode]
+    I --> R[FileReadWriter operation lock]
     R --> C[FileChunkManager]
-    C -->|index to shared Chunk| K[Chunk]
-    K --> W[WriteBuf while dirty or sealed]
-    K --> P[Published descriptor and pending revision]
-    D[DirHandle per open directory] --> T[Backend-neutral DirIterator]
+    C --> K[COWChunk per logical index]
+    K --> W[Dirty or published WriteBuf]
+    K --> H[COW-private current head]
+    M[InodeHandleManager] -.-> I
+    D[DirHandle] --> T[DirIterator]
 ```
 
-Handles for one inode share local dirty bytes through `FileReadWriter`. Weak
-registry references allow runtime state to disappear when no owner retains it.
-This graph is local to a mount; it provides neither distributed cache coherence
-nor a lease protecting another mount's descriptors.
+One inode's handles share local dirty buffers through `FileReadWriter`.
+Reads take the shared side of its fiber lock; write, flush and size mutation
+serialize against each other. An unflushed buffer is not persistent shared
+state. Weak runtime references can disappear after the final handle/lookup
+release; this is not a cross-mount lease or coherent metadata cache.
 
-The `LocalInode` registry is not a coherent metadata cache. Live inode
-operations continue to use authoritative metadata. When an authoritative
-`GetInode` returns `NotFound`, an already-retained local inode is lazily
-classified as `DETACHED` and exposes the cached attributes with `nlink == 0`.
-The copy disappears on the final `FORGET`.
-
-| Runtime state | Owner | Purpose |
-| --- | --- | --- |
-| FUSE lookup count, live/detached state, cached inode | `LocalInode` registry | Keep kernel-referenced inode identity/attributes alive independently of durable namespace lifetime |
-| Open/opening count and reclaim fence | `InodeHandle` | Exclude local reclaim preparation while a descriptor or open attempt is live |
-| Operation read/write lock | `FileReadWriter` | Concurrent reads; serialized writes, flushes, and size changes |
-| Dirty and flushed chunk map | `FileChunkManager` | Retain chunks by logical index |
-| State, buffer, published descriptor, pending revision | `Chunk` | Prepare a replacement while retaining the old CAS expectation |
-| Logical directory position and iterator | `DirHandle` | Continue enumeration without exposing backend cursors to FUSE |
-
-`Chunk` is mutable local state; `SwordFsChunk` describes published data. A
-rewrite may hold both an old descriptor and a new pending revision. Publication
-does not persist the local state enum or write buffer.
+`LocalInode` retains kernel-referenced cached identity until FORGET. A
+NotFound from authoritative metadata may transition that retained local inode
+to DETACHED (attributes show `nlink == 0`), without recreating durable data.
 
 ## Lifecycle boundaries
 
-1. Write changes local buffers. Restart loses unflushed bytes.
-2. Upload creates an immutable object that may remain unreachable until commit.
-3. `CommitChunk` publishes the descriptor and reconciles inode size atomically.
-4. Last-link removal retains the inode and adds an orphan marker atomically.
-5. After excluding local opens, `PrepareReclaim` freezes object identities into
-   `ReclaimWork` and removes live inode/chunk records in one metadata transaction.
-6. After all frozen objects are deleted, `CompleteReclaim` removes the pending
-   record. Failed deletion leaves work available for retry.
+1. Writes change a local buffer; restart loses unflushed contents.
+2. A flush uploads new immutable `(ChunkID,revision)` bytes and COW-private
+   head state, then atomically attaches/finalizes the logical ChunkID and EOF
+   with FileMetadata preconditions.
+3. Rewrites CAS the COW-private head; successful newer revisions supersede
+   earlier ones for all reads.
+4. Last-link removal registers an orphan without deleting a live inode while
+   an open descriptor can still need it.
+5. `PrepareReclaim` freezes detached ChunkIDs as optional maintenance work and
+   removes live inode/mapping authority under a Redis transaction.
+6. GC verifies latest FileMetadata and COW head reachability before physical
+   deletion. `CompleteReclaim` acknowledges only finished work.
 
-See the [publication state machine](chunk-publication.md) and
-[reclaim state machine](architecture.md#141-reclaim-state-machine).
-
-## Source entry points
-
-- Logical records: [`metadata/types`](../../src/metadata/types/).
-- Runtime ownership: [`InodeHandle.hpp`](../../src/vfs/InodeHandle.hpp) and
-  [`FileReadWriter.hpp`](../../src/vfs/FileReadWriter.hpp).
-- Publication state: [`Chunk.hpp`](../../src/chunk/Chunk.hpp).
+See [publication](chunk-publication.md) and the [Redis schema](redis-metadata-schema.md).

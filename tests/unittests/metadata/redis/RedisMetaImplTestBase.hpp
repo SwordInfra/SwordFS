@@ -19,7 +19,7 @@
 #include "FiberTest.hpp"
 #include "chunk/cow/COWCleanup.hpp"
 #include "chunk/cow/COWObjectKey.hpp"
-#include "chunk/internal/ChunkMetadataBridge.hpp"
+#include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
 #include "metadata/ChunkMetadata.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
@@ -41,7 +41,6 @@ using metadata::RedisMetaConfig;
 using metadata::RedisMetaImpl;
 using metadata::SetAttrField;
 using metadata::SwordFsAttr;
-using metadata::SwordFsChunk;
 using metadata::SwordFsEntry;
 using metadata::SwordFsInode;
 using metadata::SwordFsVolume;
@@ -50,20 +49,15 @@ using utils::SwordFsContext;
 
 inline constexpr uint64_t kTestChunkSize = 4096;
 
-inline metadata::PendingDelete MakePendingDelete(InodeID ino, metadata::ChunkIndex index,
-                                                 metadata::ChunkRevision revision) {
-  SwordFsChunk descriptor{.index = index, .revision = revision, .size = 64};
+inline metadata::PendingDelete MakePendingDelete(InodeID ino, metadata::ChunkIndex index, uint64_t revision) {
   metadata::PendingDelete pending;
-  const auto status = chunk::cow::FreezeCOWDelete(ino, descriptor, kTestChunkSize, &pending);
+  const auto status = chunk::cow::FreezeCOWDetachedDelete(ino, {index, metadata::ChunkID(revision)}, &pending);
   EXPECT_TRUE(status.ok()) << status.message();
   return pending;
 }
 
 inline std::string PendingDeleteObjectKey(const metadata::PendingDelete &pending) {
-  chunk::cow::COWRef ref;
-  const auto status = chunk::cow::DecodeCOWDelete(pending, kTestChunkSize, &ref);
-  EXPECT_TRUE(status.ok()) << status.message();
-  return status.ok() ? ref.key : std::string{};
+  return pending.id;
 }
 
 inline bool LoadConfig(RedisMetaConfig *config) {
@@ -94,9 +88,9 @@ class RedisMetaImplTest : public ::testing::Test {
     swordfs::metadata::ChunkMetadataPtr chunk_metadata;
     status = impl_->OpenChunkMetadata(swordfs::metadata::ChunkType::kCow, &chunk_metadata);
     ASSERT_TRUE(status.ok()) << status.message();
-    status = swordfs::chunk::internal::CreateChunkMetadataBridge(swordfs::metadata::ChunkType::kCow, &bridge_);
+    status = swordfs::chunk::internal::CreateChunkCleanupWorkEncoder(swordfs::metadata::ChunkType::kCow, &bridge_);
     ASSERT_TRUE(status.ok()) << status.message();
-    status = impl_->BindChunkMetadataBridge(bridge_.get());
+    status = impl_->BindChunkCleanupWorkEncoder(bridge_.get());
     ASSERT_TRUE(status.ok()) << status.message();
     folly::fibers::local<SwordFsContext>() = SwordFsContext{};
   }
@@ -165,7 +159,7 @@ class RedisMetaImplTest : public ::testing::Test {
     RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.hset(key.PendingDeletes(), pending.id, encoded); });
   }
 
-  std::unique_ptr<chunk::internal::ChunkMetadataBridge> bridge_;
+  std::unique_ptr<chunk::internal::ChunkCleanupWorkEncoder> bridge_;
   std::unique_ptr<RedisMetaImpl> impl_;
   RedisMetaConfig config_;
   std::string volume_name_;

@@ -47,7 +47,6 @@ using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsAttr;
-using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
@@ -409,27 +408,8 @@ class MockMetaEngine : public IMetaEngine {
   Status CompletePendingDelete(std::string_view) override {
     return Status::OK();
   }
-  Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
-    if (revision == nullptr) {
-      return Status::InvalidArgument("chunk revision output is null");
-    }
-    *revision = next_revision_++;
-    return Status::OK();
-  }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
     return Status::OK();
-  }
-  Status CommitChunk(InodeID, const std::optional<SwordFsChunk> &, const SwordFsChunk &) override {
-    ++commit_chunk_calls;
-    return Status::OK();
-  }
-  Status FindChunk(InodeID, ChunkIndex, SwordFsChunk *) override {
-    return Status::NotFound("no chunk");
-  }
-  Status Truncate(InodeID, uint64_t size) override {
-    ++truncate_calls;
-    last_truncate_size = size;
-    return truncate_status;
   }
 
   // Observable state / injectable statuses for tests.
@@ -450,7 +430,6 @@ class MockMetaEngine : public IMetaEngine {
   Status reclaim_status = Status::OK();
   Status prepare_reclaim_status = Status::OK();
   // Frozen descriptors the mock hands out from PrepareReclaim.
-  std::vector<swordfs::metadata::SwordFsChunk> reclaim_chunks;
 
   void BlockNextOpen(folly::fibers::Baton *entered, folly::fibers::Baton *release) {
     open_entered_ = entered;
@@ -463,7 +442,6 @@ class MockMetaEngine : public IMetaEngine {
   std::shared_ptr<swordfs::test::TestCOWChunkMetadata> cow_metadata_ =
       std::make_shared<swordfs::test::TestCOWChunkMetadata>();
   InodeID next_ino_ = 1000;
-  swordfs::metadata::ChunkRevision next_revision_ = 1;
   folly::fibers::Baton *open_entered_{nullptr};
   folly::fibers::Baton *open_release_{nullptr};
 };
@@ -1435,29 +1413,7 @@ class TrackingMetaEngine : public swordfs::metadata::IMetaEngine {
   Status CompletePendingDelete(std::string_view) override {
     return Status::OK();
   }
-  Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
-    if (revision == nullptr) {
-      return Status::InvalidArgument("chunk revision output is null");
-    }
-    *revision = next_revision_++;
-    return Status::OK();
-  }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
-    return Status::OK();
-  }
-  Status CommitChunk(InodeID, const std::optional<swordfs::metadata::SwordFsChunk> &,
-                     const swordfs::metadata::SwordFsChunk &) override {
-    return Status::OK();
-  }
-  Status FindChunk(InodeID, swordfs::metadata::ChunkIndex, swordfs::metadata::SwordFsChunk *) override {
-    return Status::NotFound("no chunk");
-  }
-  Status Truncate(InodeID ino, uint64_t size) override {
-    auto it = attrs.find(ino);
-    if (it == attrs.end()) {
-      return Status::NotFound("inode not found");
-    }
-    it->second.st_size = static_cast<off_t>(size);
     return Status::OK();
   }
 
@@ -1468,7 +1424,6 @@ class TrackingMetaEngine : public swordfs::metadata::IMetaEngine {
   Status prepare_reclaim_status = Status::OK();
   Status reclaim_status = Status::OK();
   Status open_status = Status::OK();
-  std::vector<swordfs::metadata::SwordFsChunk> chunks;
   std::unordered_map<InodeID, struct stat> attrs;
 
   void BlockNextOpen(folly::fibers::Baton *entered, folly::fibers::Baton *release) {
@@ -1480,7 +1435,6 @@ class TrackingMetaEngine : public swordfs::metadata::IMetaEngine {
   std::unordered_map<InodeID, std::map<ChunkIndex, metadata::ChunkID>> attachments_;
   std::shared_ptr<swordfs::test::TestCOWChunkMetadata> cow_metadata_ =
       std::make_shared<swordfs::test::TestCOWChunkMetadata>();
-  swordfs::metadata::ChunkRevision next_revision_ = 1;
   folly::fibers::Baton *open_entered_{nullptr};
   folly::fibers::Baton *open_release_{nullptr};
 };

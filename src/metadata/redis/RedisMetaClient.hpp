@@ -32,7 +32,6 @@ class RedisMetaClient {
   utils::Status Ping();
   utils::Status Get(std::string_view key, std::string *value);
   utils::Status MGet(const std::vector<std::string> &keys, std::vector<std::optional<std::string>> *values);
-  utils::Status HGet(std::string_view key, std::string_view field, std::string *value);
   utils::Status Incr(std::string_view key, uint64_t *value);
   // Atomically increment a missing/non-negative integer counter. Negative,
   // malformed, and overflowed state is a known failure and is not mutated.

@@ -7,16 +7,10 @@
 #include <string_view>
 
 #include "metadata/cow/COWChunkMetadata.hpp"
-#include "metadata/types/Common.hpp"
 
 namespace swordfs::chunk::cow {
 
-inline std::string FormatCOWObjectKey(metadata::InodeID ino, metadata::ChunkIndex index,
-                                      metadata::ChunkRevision revision) {
-  return std::to_string(ino) + "/" + std::to_string(index) + "/" + std::to_string(revision);
-}
-
-// Strong target object key for the #317 data-path cutover. FileMetadata
+// Immutable COW object identity. FileMetadata
 // coordinates deliberately do not participate in this COW-private identity.
 class COWObjectKey {
  public:

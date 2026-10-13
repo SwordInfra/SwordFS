@@ -49,23 +49,4 @@ utils::Status CalculateChunkPosition(off_t file_offset, uint64_t chunk_size, Chu
 utils::Status CalculateFileRangeEnd(off_t file_offset, uint64_t length, uint64_t *out);
 utils::Status CalculateChunkStartOffset(ChunkIndex index, uint64_t chunk_size, uint64_t *out);
 
-/// Common head for one logical chunk. In the current COW path,
-/// revision is both the publication/CAS generation and the immutable physical
-/// object revision. That mechanism-specific meaning is transitional under
-/// #312; it is not part of the target mechanism-neutral common contract.
-struct SwordFsChunk {
-  ChunkIndex index = 0;
-  ChunkRevision revision = kInvalidChunkRevision;
-  uint64_t size = 0;
-
-  bool operator==(const SwordFsChunk &) const = default;
-
-  /// Return whether this descriptor fits SwordFS's fixed-size logical chunk
-  /// layout for |chunk_size|. The file offset is derived from |index|.
-  bool IsValidForChunkSize(uint64_t chunk_size) const;
-
-  utils::Status SerializeTo(std::string *out) const;
-  utils::Status ParseFrom(std::string_view data);
-};
-
 }  // namespace swordfs::metadata

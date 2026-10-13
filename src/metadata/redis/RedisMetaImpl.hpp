@@ -30,7 +30,7 @@ class RedisMetaImpl : public IMetaEngine {
 
   utils::Status Initialize() override;
   Status OpenChunkMetadata(ChunkType chunk_type, ChunkMetadataPtr *out) override;
-  Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge) override;
+  Status BindChunkCleanupWorkEncoder(chunk::internal::ChunkCleanupWorkEncoder *encoder) override;
   utils::Status FormatVolume(const SwordFsVolume &config) override;
   utils::Status LoadVolume(SwordFsVolume *config) override;
   Limits GetLimits() const override;
@@ -63,14 +63,7 @@ class RedisMetaImpl : public IMetaEngine {
   Status VisitPendingDeletesBatch(size_t max_items, const PendingDeleteVisitorFn &visitor, bool *has_more) override;
   Status RegisterPendingDelete(const PendingDelete &work) override;
   Status CompletePendingDelete(std::string_view key) override;
-  Status AllocateChunkRevision(ChunkRevision *revision) override;
   Status OpenDir(InodeID ino, DirIteratorPtr *iterator) override;
-  Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
-                     const SwordFsChunk &replacement) override;
-  Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
-                     const ChunkPublishIntent &intent) override;
-  Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) override;
-  Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out) override;
   Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out) override;
   Status ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out) override;
   Status ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out) override;
@@ -82,7 +75,6 @@ class RedisMetaImpl : public IMetaEngine {
                       ChunkSizeCommitResult *out) override;
   Status CommitGrow(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
                     ChunkSizeCommitResult *out) override;
-  Status Truncate(InodeID ino, uint64_t size) override;
 
  private:
   Status CreateNode(InodeID parent_ino, std::string_view name, uint32_t mode, uint64_t rdev, SwordFsInode *out);
