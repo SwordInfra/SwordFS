@@ -3,10 +3,13 @@
 
 #include "utils/FiberRuntime.hpp"
 
+#include <folly/ExceptionString.h>
+#include <folly/ScopeGuard.h>
 #include <folly/io/async/EventBase.h>
 #include <glog/logging.h>
 
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -32,6 +35,28 @@ thread_local std::shared_ptr<FiberRuntime> t_runtime;
 
 FiberRuntime::FiberRuntime() : evb_(std::make_unique<folly::EventBase>()) {
   driver_thread_ = std::thread([this] { evb_->loopForever(); });
+}
+
+bool FiberRuntime::Post(folly::Function<void()> fn) {
+  if (!TryAdmit()) {
+    return false;
+  }
+  // Release admission if preparing the dispatch callback throws. The
+  // EventBase enqueue API itself is noexcept; failures within an enqueued
+  // notification must be contained on the driver thread instead.
+  auto rollback = folly::makeGuard([this] { CompleteTask(); });
+  evb_->runInEventBaseThread([this, fn = std::move(fn)]() mutable {
+    auto completion = folly::makeGuard([this] { CompleteTask(); });
+    try {
+      fn();
+    } catch (...) {
+      // Folly's EventBase requires callbacks not to throw. Keep the driver
+      // alive and let completion release this notification's admission.
+      LOG(ERROR) << "FiberRuntime::Post callback failed: " << folly::exceptionStr(std::current_exception());
+    }
+  });
+  rollback.dismiss();
+  return true;
 }
 
 bool FiberRuntime::TryAdmit() {

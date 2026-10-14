@@ -3,6 +3,7 @@
 
 // Unit tests for FiberRuntime lifecycle and admission.
 
+#include <folly/CancellationToken.h>
 #include <folly/fibers/Baton.h>
 #include <gtest/gtest.h>
 #include <unistd.h>
@@ -11,9 +12,11 @@
 #include <chrono>
 #include <cstdlib>
 #include <future>
+#include <stdexcept>
 #include <thread>
 
 #include "TestWatchdog.hpp"
+#include "utils/Context.hpp"
 #include "utils/FiberRuntime.hpp"
 
 using swordfs::utils::FiberRuntime;
@@ -34,6 +37,26 @@ bool WaitUntil(Predicate &&predicate) {
   return true;
 }
 
+// An install-time move failure exercises the exceptional handoff from the
+// accepted EventBase notification to the business fiber.  Throw only on the
+// driver to avoid an early failure while Submit packages the notification.
+struct ThrowOnDriverMove {
+  std::thread::id driver_thread;
+
+  explicit ThrowOnDriverMove(std::thread::id driver) : driver_thread(driver) {
+  }
+  ThrowOnDriverMove(const ThrowOnDriverMove &) = delete;
+  ThrowOnDriverMove(ThrowOnDriverMove &&other) : driver_thread(other.driver_thread) {
+    if (std::this_thread::get_id() == driver_thread) {
+      throw std::runtime_error("injected fiber installation failure");
+    }
+  }
+
+  void operator()() const {
+    ADD_FAILURE() << "task should not run after its capture fails to move";
+  }
+};
+
 }  // namespace
 
 TEST(FiberRuntimeTest, SubmittedTaskRunsInFiberDomain) {
@@ -45,6 +68,152 @@ TEST(FiberRuntimeTest, SubmittedTaskRunsInFiberDomain) {
   runtime.Shutdown();
 
   EXPECT_EQ(domain.load(std::memory_order_acquire), swordfs::utils::ExecutionDomain::kFiber);
+}
+
+TEST(FiberRuntimeTest, PostRunsOnDriverThreadWithoutCreatingBusinessFiber) {
+  FiberRuntime runtime;
+  std::atomic<swordfs::utils::ExecutionDomain> domain{swordfs::utils::ExecutionDomain::kFiber};
+  std::thread::id posting_thread = std::this_thread::get_id();
+  std::promise<std::thread::id> notified;
+  auto notified_future = notified.get_future();
+
+  ASSERT_TRUE(runtime.Post([&] {
+    domain.store(swordfs::utils::CurrentExecutionDomain(), std::memory_order_release);
+    notified.set_value(std::this_thread::get_id());
+  }));
+  ASSERT_EQ(notified_future.wait_for(kStateTransitionWatchdog), std::future_status::ready);
+  EXPECT_NE(notified_future.get(), posting_thread);
+  runtime.Shutdown();
+  EXPECT_EQ(domain.load(std::memory_order_acquire), swordfs::utils::ExecutionDomain::kThread);
+}
+
+TEST(FiberRuntimeTest, PostCanWakeAnAdmittedFiberAndIsDrainedAtShutdown) {
+  FiberRuntime runtime;
+  folly::fibers::Baton waiting;
+  folly::fibers::Baton finished;
+  std::atomic<bool> resumed{false};
+  ASSERT_TRUE(runtime.Submit([&] {
+    waiting.wait();
+    resumed.store(true, std::memory_order_release);
+    finished.post();
+  }));
+  ASSERT_TRUE(runtime.Post([&] { waiting.post(); }));
+  EXPECT_TRUE(swordfs::test::WaitForBaton(finished));
+  runtime.Shutdown();
+  EXPECT_TRUE(resumed.load(std::memory_order_acquire));
+  EXPECT_FALSE(runtime.Post([] {}));
+}
+
+TEST(FiberRuntimeTest, ThrowingPostNotificationDoesNotTerminateDriverOrLeakAdmission) {
+  // The test-first RED used EXPECT_EXIT to protect the test process from an
+  // uncaught EventBase callback. Run the final contract in-process so the
+  // exception boundary is also measured by normal coverage instrumentation.
+  FiberRuntime runtime;
+  std::promise<void> delivered;
+  auto delivery = delivered.get_future();
+  ASSERT_TRUE(runtime.Post([] { throw std::runtime_error("failed notification"); }));
+  ASSERT_TRUE(runtime.Post([&] { delivered.set_value(); }));
+  EXPECT_EQ(delivery.wait_for(kStateTransitionWatchdog), std::future_status::ready);
+  runtime.Shutdown();
+  EXPECT_FALSE(runtime.IsAccepting());
+}
+
+TEST(FiberRuntimeTest, SubmitAdmittedBeforeShutdownStillInstallsFiberAfterShutdownBegins) {
+  FiberRuntime runtime;
+  folly::fibers::Baton dispatch_started;
+  folly::fibers::Baton release_dispatch;
+  folly::fibers::Baton shutdown_done;
+  std::atomic<bool> task_completed{false};
+  std::atomic<int> rejected{0};
+
+  ASSERT_TRUE(runtime.Post([&] {
+    dispatch_started.post();
+    release_dispatch.wait();  // Hold the EventBase driver, not a business fiber.
+  }));
+  const bool started = swordfs::test::WaitForBaton(dispatch_started);
+  EXPECT_TRUE(started);
+  if (!started) {
+    release_dispatch.post();
+    runtime.Shutdown();
+    return;
+  }
+
+  ASSERT_TRUE(runtime.Submit([&] { task_completed.store(true, std::memory_order_release); },
+                             [&] { rejected.fetch_add(1, std::memory_order_relaxed); }));
+  std::thread shutdown([&] {
+    runtime.Shutdown();
+    shutdown_done.post();
+  });
+  EXPECT_TRUE(WaitUntil([&] { return !runtime.IsAccepting(); }));
+  EXPECT_FALSE(task_completed.load(std::memory_order_acquire));
+  release_dispatch.post();
+  swordfs::test::WaitForBatonOrAbort(shutdown_done, "queued Submit completion through shutdown");
+  shutdown.join();
+  EXPECT_TRUE(task_completed.load(std::memory_order_acquire));
+  EXPECT_EQ(rejected.load(std::memory_order_relaxed), 0);
+}
+
+TEST(FiberRuntimeTest, FiberInstallationFailureReleasesAdmissionAndRejectsExactlyOnce) {
+  FiberRuntime runtime;
+  std::promise<std::thread::id> driver_id_promise;
+  auto driver_id_future = driver_id_promise.get_future();
+  ASSERT_TRUE(runtime.Post([&] { driver_id_promise.set_value(std::this_thread::get_id()); }));
+  ASSERT_EQ(driver_id_future.wait_for(kStateTransitionWatchdog), std::future_status::ready);
+
+  std::atomic<int> rejected{0};
+  std::promise<void> rejection_done;
+  auto rejection_future = rejection_done.get_future();
+  ASSERT_TRUE(runtime.Submit(ThrowOnDriverMove{driver_id_future.get()}, [&] {
+    rejected.fetch_add(1, std::memory_order_relaxed);
+    rejection_done.set_value();
+  }));
+
+  EXPECT_EQ(rejection_future.wait_for(kStateTransitionWatchdog), std::future_status::ready);
+  // Shutdown would hang if the failed fiber installation leaked its admission.
+  runtime.Shutdown();
+  EXPECT_EQ(rejected.load(std::memory_order_relaxed), 1);
+}
+
+TEST(FiberRuntimeTest, CancellationCallbackDispatchesFiberWakeAcrossThreadBoundary) {
+  FiberRuntime runtime;
+  folly::CancellationSource source;
+  folly::fibers::Baton callback_registered;
+  folly::fibers::Baton wake;
+  folly::fibers::Baton completed;
+  std::atomic<bool> dispatched{false};
+  std::atomic<swordfs::utils::ExecutionDomain> resumed_domain{swordfs::utils::ExecutionDomain::kThread};
+  ASSERT_TRUE(runtime.Submit([&] {
+    folly::CancellationCallback callback(
+        source.getToken(), [&] { dispatched.store(runtime.Post([&] { wake.post(); }), std::memory_order_release); });
+    callback_registered.post();
+    wake.wait();
+    resumed_domain.store(swordfs::utils::CurrentExecutionDomain(), std::memory_order_release);
+    completed.post();
+  }));
+  const bool registered = swordfs::test::WaitForBaton(callback_registered);
+  EXPECT_TRUE(registered);
+  if (registered) {
+    source.requestCancellation();  // Non-fiber FUSE interrupt equivalent.
+  } else {
+    ASSERT_TRUE(runtime.Post([&] { wake.post(); }));
+  }
+  EXPECT_TRUE(swordfs::test::WaitForBaton(completed));
+  runtime.Shutdown();
+  if (registered) {
+    EXPECT_TRUE(dispatched.load(std::memory_order_acquire));
+  }
+  EXPECT_EQ(resumed_domain.load(std::memory_order_acquire), swordfs::utils::ExecutionDomain::kFiber);
+}
+
+TEST(FiberRuntimeTest, ContextCarriesOnlyCopiedCancellationToken) {
+  folly::CancellationSource source;
+  swordfs::utils::SwordFsContext request;
+  request.cancellation_token = source.getToken();
+  const auto copied = request;
+  EXPECT_FALSE(copied.cancellation_token.isCancellationRequested());
+  source.requestCancellation();
+  EXPECT_TRUE(request.cancellation_token.isCancellationRequested());
+  EXPECT_TRUE(copied.cancellation_token.isCancellationRequested());
 }
 
 TEST(FiberRuntimeTest, ShutdownDrainsAdmittedTasks) {
