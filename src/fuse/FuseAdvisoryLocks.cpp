@@ -1,7 +1,9 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
-#include "fuse/PosixRecordLocks.hpp"
+#include "fuse/FuseAdvisoryLocks.hpp"
+
+#include <sys/file.h>
 
 #include <limits>
 #include <optional>
@@ -10,8 +12,8 @@
 
 namespace swordfs::fuse {
 
-utils::Status PosixRecordLocks::ToRange(const struct flock &lock, bool allow_unlock,
-                                        metadata::ILockAuthority::PosixRange *range) {
+utils::Status FuseAdvisoryLocks::ToRange(const struct flock &lock, bool allow_unlock,
+                                         metadata::ILockAuthority::PosixRange *range) {
   if (lock.l_whence != SEEK_SET || lock.l_start < 0 || lock.l_len < 0 ||
       (lock.l_len != 0 && lock.l_start > std::numeric_limits<off_t>::max() - lock.l_len)) {
     return utils::Status::InvalidArgument("invalid normalized POSIX lock range");
@@ -37,7 +39,7 @@ utils::Status PosixRecordLocks::ToRange(const struct flock &lock, bool allow_unl
   return utils::Status::OK();
 }
 
-utils::Status PosixRecordLocks::Set(uint64_t inode_ino, uint64_t kernel_owner, const struct flock &lock) {
+utils::Status FuseAdvisoryLocks::SetPosix(uint64_t inode_ino, uint64_t kernel_owner, const struct flock &lock) {
   utils::ExpectInFiberDomain();
   metadata::ILockAuthority::PosixRange range{};
   auto status = ToRange(lock, true, &range);
@@ -48,8 +50,8 @@ utils::Status PosixRecordLocks::Set(uint64_t inode_ino, uint64_t kernel_owner, c
       [this, inode_ino, kernel_owner, range] { return authority_.SetPosix(inode_ino, kernel_owner, range); });
 }
 
-utils::Status PosixRecordLocks::Get(uint64_t inode_ino, uint64_t kernel_owner, const struct flock &lock,
-                                    struct flock *result) {
+utils::Status FuseAdvisoryLocks::GetPosix(uint64_t inode_ino, uint64_t kernel_owner, const struct flock &lock,
+                                          struct flock *result) {
   utils::ExpectInFiberDomain();
   if (result == nullptr) {
     return utils::Status::InvalidArgument("missing GETLK reply buffer");
@@ -84,15 +86,45 @@ utils::Status PosixRecordLocks::Get(uint64_t inode_ino, uint64_t kernel_owner, c
   return utils::Status::OK();
 }
 
-utils::Status PosixRecordLocks::UnlockOwner(uint64_t inode_ino, uint64_t kernel_owner) {
+utils::Status FuseAdvisoryLocks::UnlockPosixOwner(uint64_t inode_ino, uint64_t kernel_owner) {
   utils::ExpectInFiberDomain();
   return executor_.RunFromFiber([this, inode_ino, kernel_owner] {
     return authority_.SetPosix(inode_ino, kernel_owner, {0, 0, metadata::ILockAuthority::PosixType::kUnlock});
   });
 }
 
-bool PosixRecordLocks::CanGrant() const {
+bool FuseAdvisoryLocks::CanGrant() const {
   return authority_.CanGrant();
+}
+
+utils::Status FuseAdvisoryLocks::Flock(uint64_t inode_ino, uint64_t kernel_owner, int op) {
+  utils::ExpectInFiberDomain();
+  metadata::ILockAuthority::FlockType type;
+  switch (op & ~LOCK_NB) {
+    case LOCK_SH:
+      type = metadata::ILockAuthority::FlockType::kShared;
+      break;
+    case LOCK_EX:
+      type = metadata::ILockAuthority::FlockType::kExclusive;
+      break;
+    case LOCK_UN:
+      type = metadata::ILockAuthority::FlockType::kUnlock;
+      break;
+    default:
+      return utils::Status::InvalidArgument("invalid BSD flock operation");
+  }
+  if (type != metadata::ILockAuthority::FlockType::kUnlock && !(op & LOCK_NB)) {
+    return utils::Status::OperationNotSupported("blocking BSD flock belongs to #433");
+  }
+  return executor_.RunFromFiber(
+      [this, inode_ino, kernel_owner, type] { return authority_.SetFlock(inode_ino, kernel_owner, type); });
+}
+
+utils::Status FuseAdvisoryLocks::UnlockFlockOwner(uint64_t inode_ino, uint64_t kernel_owner) {
+  utils::ExpectInFiberDomain();
+  return executor_.RunFromFiber([this, inode_ino, kernel_owner] {
+    return authority_.SetFlock(inode_ino, kernel_owner, metadata::ILockAuthority::FlockType::kUnlock);
+  });
 }
 
 }  // namespace swordfs::fuse

@@ -17,7 +17,7 @@
 
 namespace swordfs::fuse {
 
-class PosixRecordLocks;
+class FuseAdvisoryLocks;
 
 /// Mount-lifecycle context passed to the low-level FUSE init callback.
 ///
@@ -33,8 +33,9 @@ struct MountInitContext {
   MountInitContext &operator=(const MountInitContext &) = delete;
 
   fuse_session *session = nullptr;
-  PosixRecordLocks *posix_locks = nullptr;  // Non-owning; outlives the FUSE session.
+  FuseAdvisoryLocks *advisory_locks = nullptr;  // Non-owning; outlives the FUSE session.
   bool posix_locks_negotiated = false;
+  bool flock_locks_negotiated = false;
   int readiness_fd = -1;
   bool failed = false;
 };

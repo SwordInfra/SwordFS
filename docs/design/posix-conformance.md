@@ -98,11 +98,13 @@ the handle and inode open reference are still relinquished.
 
 ## Distributed advisory locks (#379 — design contract)
 
-This section defines the proposed **first-stage** cross-mount locking contract.
-It is not a claim of implemented support: current `getlk`/`setlk` callbacks
-return `ENOSYS` and `flock` returns `NotSupported`. FUSE remote-lock feature
-flags must not be enabled before authority, lifecycle, and transport tests
-prove their semantics.
+This section defines the **first-stage** cross-mount locking contract.
+#429/#430 Redis lease and lock authority, #431's POSIX FUSE adapter, and
+#432's nonblocking BSD flock callback and final-RELEASE cleanup are implemented.
+Remote `FUSE_CAP_POSIX_LOCKS` and `FUSE_CAP_FLOCK_LOCKS` negotiation remains
+disabled: observed flock success (including fstests `generic/504`) is
+kernel-local, not evidence of Redis-backed cross-Mount locking. #433 owns
+blocking waits, transport validation and capability activation.
 
 ### Implementation decomposition and handoff
 
@@ -131,6 +133,8 @@ tracked in [`430-redis-lock-authority.md`](430-redis-lock-authority.md).
 The traditional POSIX FUSE adapter, per-close FLUSH contract, blocking-worker
 boundary, GETLK diagnostics and missing-FLUSH limitation are reviewed in
 [`431-posix-record-lock-integration.md`](431-posix-record-lock-integration.md).
+The BSD flock FUSE adapter, final-RELEASE cleanup, reuse and capability gates
+are reviewed in [`432-flock-fuse-integration.md`](432-flock-fuse-integration.md).
 OFD implementation is exclusively #464; its shared-transport implications
 are nevertheless a #433 feature-activation gate, not an implicit feature
 added to #431.

@@ -749,13 +749,6 @@ utils::Status VfsImpl::RetrieveReply(fuse_req_t /*req*/, void *cookie, fuse_ino_
   return Status::NotSupported("retrieve_reply");
 }
 
-utils::Status VfsImpl::FLock(fuse_ino_t ino, struct fuse_file_info *fi, int op) {
-  (void)ino;
-  (void)fi;
-  (void)op;
-  return Status::NotSupported("flock");
-}
-
 utils::Status VfsImpl::FAllocate(fuse_ino_t ino, int mode, off_t offset, off_t length, struct fuse_file_info *fi) {
   (void)ino;
   (void)mode;

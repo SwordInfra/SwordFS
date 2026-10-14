@@ -90,7 +90,10 @@ for xattrs, so the test should produce a fast, useful NOTRUN result.
 `generic/749` similarly probes `fallocate` before its mmap/SIGBUS body and
 SwordFS currently returns ENOSYS for fallocate. `generic/504` is also kept in
 the executed population so SwordFS' own flock behavior is observed instead of
-inheriting another FUSE implementation's `/proc/locks` conclusion.
+inheriting another FUSE implementation's `/proc/locks` conclusion. After
+#432, its PASS is classified `kernel_local_only` (#433), not supported:
+remote FUSE flock negotiation remains disabled, so the test does not
+exercise distributed Redis-backed flock authority.
 
 The peer check also exposed environment requirements that affect whether a
 result is trustworthy. Upstream's Ubuntu package list is useful input, but it
