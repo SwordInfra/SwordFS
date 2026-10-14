@@ -5,8 +5,8 @@
 //
 // Each test case:
 //   1. Creates a temp directory and unique S3 prefix
-//   2. Runs `swordfs format` via C++ API
-//   3. Runs `swordfs mount -f` as a subprocess
+//   2. Runs `swordfs format` as a subprocess
+//   3. Supervises `swordfs mount -f` as a direct child
 //   4. Waits for the FUSE mount to become ready
 //   5. Provides helper methods for POSIX filesystem operations
 //   6. On teardown: unmounts, kills the daemon, cleans up
@@ -131,7 +131,11 @@ class Fixture {
   bool IsMounted();
 
   /// Return true if the daemon process recorded during SetUp is gone.
-  bool IsDaemonGone() const;
+  bool IsDaemonGone();
+
+  const std::string &DiagnosticsDir() const {
+    return diagnostics_dir_;
+  }
 
   /// Return the absolute path for a relative path under the mountpoint.
   std::string MountPath(const std::string &relpath) const;
@@ -167,7 +171,8 @@ class Fixture {
   bool StopMount();
   bool CleanupRuntimeState();
   void CleanupWorkDir();
-  bool DaemonMissingBeforeTeardown() const;
+  bool DaemonMissingBeforeTeardown();
+  bool PollDaemonExit();
   void InitPaths();
   std::string FormatLogPath() const;
   std::string NextMountLogPath();
@@ -185,6 +190,8 @@ class Fixture {
   std::string base_bucket_url_;  // original URL (without test-name suffix)
   bool mounted_ = false;
   pid_t daemon_pid_ = 0;
+  bool daemon_reaped_ = false;
+  std::string daemon_stop_reason_ = "none";
   size_t mount_generation_ = 0;
 };
 
