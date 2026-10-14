@@ -23,7 +23,7 @@ namespace chunk {
 class ChunkFactory;
 namespace internal {
 class ChunkGcWorker;
-class ChunkMetadataBridge;
+class ChunkCleanupWorkEncoder;
 }  // namespace internal
 }  // namespace chunk
 
@@ -121,11 +121,11 @@ class VolumeImpl {
 
  private:
   swordfs::metadata::SwordFsVolume config_;
-  // Metadata backends retain a non-owning pointer to the bridge. Declare the
-  // ChunkMetadata capability and bridge before the engines so normal reverse member
-  // destruction also keeps the bridge alive through metadata-engine teardown.
+  // The metadata engine borrows the mount-owned cleanup encoder. Declare
+  // private ChunkMetadata and the encoder before the engine so both outlive
+  // the borrowing engine during reverse-order destruction.
   swordfs::metadata::ChunkMetadataPtr chunk_metadata_;
-  std::unique_ptr<swordfs::chunk::internal::ChunkMetadataBridge> chunk_metadata_bridge_;
+  std::unique_ptr<swordfs::chunk::internal::ChunkCleanupWorkEncoder> cleanup_work_encoder_;
   std::unique_ptr<swordfs::metadata::IMetaEngine> meta_engine_;
   std::unique_ptr<swordfs::storage::IDataEngine> data_engine_;
   // Runtime factory/GC borrow the engines and ChunkMetadata for the mounted

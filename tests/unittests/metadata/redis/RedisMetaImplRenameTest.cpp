@@ -26,7 +26,6 @@ using swordfs::test::redis_meta::RedisMetaImplTest;
 using swordfs::test::redis_meta::SetAttrField;
 using swordfs::test::redis_meta::Status;
 using swordfs::test::redis_meta::SwordFsAttr;
-using swordfs::test::redis_meta::SwordFsChunk;
 using swordfs::test::redis_meta::SwordFsEntry;
 using swordfs::test::redis_meta::SwordFsInode;
 using swordfs::test::redis_meta::SwordFsVolume;

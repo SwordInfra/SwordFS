@@ -43,7 +43,6 @@ using swordfs::metadata::Limits;
 using swordfs::metadata::RenameFlag;
 using swordfs::metadata::SetAttrField;
 using swordfs::metadata::SwordFsAttr;
-using swordfs::metadata::SwordFsChunk;
 using swordfs::metadata::SwordFsInode;
 using swordfs::metadata::SwordFsStatFs;
 using swordfs::metadata::SwordFsVolume;
@@ -74,18 +73,6 @@ class MissingMetaEngine : public IMetaEngine {
   }
   Limits GetLimits() const override {
     return {};
-  }
-  Status FindChunk(InodeID, ChunkIndex index, SwordFsChunk *out) override {
-    if (!find_chunk_status.ok()) {
-      return find_chunk_status;
-    }
-    if (published_.has_value() && published_->index == index) {
-      if (out != nullptr) {
-        *out = *published_;
-      }
-      return Status::OK();
-    }
-    return Status::NotFound("no chunk");
   }
   // Everything else is irrelevant for these tests.
   Status Lookup(InodeID, std::string_view, SwordFsInode *) override {
@@ -256,25 +243,9 @@ class MissingMetaEngine : public IMetaEngine {
   Status CompletePendingDelete(std::string_view) override {
     return Status::OK();
   }
-  Status AllocateChunkRevision(swordfs::metadata::ChunkRevision *revision) override {
-    if (revision == nullptr) {
-      return Status::InvalidArgument("chunk revision output is null");
-    }
-    *revision = next_revision_++;
-    return Status::OK();
-  }
   Status OpenDir(InodeID, swordfs::metadata::DirIteratorPtr *) override {
     return Status::OK();
   }
-  Status CommitChunk(InodeID, const std::optional<SwordFsChunk> &, const SwordFsChunk &replacement) override {
-    published_ = replacement;
-    return Status::OK();
-  }
-  Status Truncate(InodeID, uint64_t) override {
-    return Status::OK();
-  }
-
-  Status find_chunk_status = Status::OK();
 
  private:
   Status ValidateExpectedFileState(const swordfs::metadata::FileSizePrecondition &expected) const {
@@ -297,8 +268,6 @@ class MissingMetaEngine : public IMetaEngine {
     return Status::OK();
   }
 
-  swordfs::metadata::ChunkRevision next_revision_ = 1;
-  std::optional<SwordFsChunk> published_;
   uint64_t file_size_ = 0;
   std::map<ChunkIndex, swordfs::metadata::ChunkID> typed_mappings_;
 
@@ -452,40 +421,7 @@ class ChunkTest : public ::testing::Test {
   NullDataEngine *data_ = nullptr;
 };
 
-TEST(ChunkObjectKeyTest, IncludesInodeIndexAndRevision) {
-  EXPECT_EQ(swordfs::chunk::cow::FormatCOWObjectKey(/*ino=*/42, /*index=*/3, /*revision=*/7), "42/3/7");
-}
-
-TEST(SwordFsChunkDescriptorTest, ValidatesCanonicalFixedSizeIdentity) {
-  constexpr uint64_t kChunkSize = 64;
-  const SwordFsChunk valid{.index = 1, .revision = 1, .size = kChunkSize};
-  EXPECT_TRUE(valid.IsValidForChunkSize(kChunkSize));
-
-  auto invalid = valid;
-  EXPECT_FALSE(invalid.IsValidForChunkSize(0));
-
-  invalid = valid;
-  invalid.revision = swordfs::metadata::kInvalidChunkRevision;
-  EXPECT_FALSE(invalid.IsValidForChunkSize(kChunkSize));
-
-  invalid = valid;
-  invalid.size = kChunkSize + 1;
-  EXPECT_FALSE(invalid.IsValidForChunkSize(kChunkSize));
-
-  invalid = valid;
-  invalid.index = 2;
-  EXPECT_FALSE(invalid.IsValidForChunkSize(std::numeric_limits<uint64_t>::max()));
-
-  uint64_t start_offset = 0;
-  EXPECT_TRUE(swordfs::metadata::CalculateChunkStartOffset(1, kChunkSize, &start_offset).ok());
-  EXPECT_EQ(start_offset, kChunkSize);
-  EXPECT_FALSE(
-      swordfs::metadata::CalculateChunkStartOffset(2, std::numeric_limits<uint64_t>::max(), &start_offset).ok());
-  EXPECT_EQ(swordfs::metadata::CalculateChunkStartOffset(0, kChunkSize, nullptr).ToErrno(), EINVAL);
-  EXPECT_EQ(swordfs::metadata::CalculateChunkStartOffset(0, 0, &start_offset).ToErrno(), EINVAL);
-}
-
-TEST(SwordFsChunkDescriptorTest, ChunkIndexCoversSupportedOffTRangeAtMinimumChunkSize) {
+TEST(ChunkLayoutTest, ChunkIndexCoversSupportedOffTRangeAtMinimumChunkSize) {
   constexpr uint64_t kMinimumSupportedChunkSize = 4ULL * 1024;
   const uint64_t max_supported_index =
       static_cast<uint64_t>(std::numeric_limits<off_t>::max()) / kMinimumSupportedChunkSize;
@@ -493,7 +429,7 @@ TEST(SwordFsChunkDescriptorTest, ChunkIndexCoversSupportedOffTRangeAtMinimumChun
   EXPECT_GE(static_cast<uint64_t>(std::numeric_limits<ChunkIndex>::max()), max_supported_index);
 }
 
-TEST(SwordFsChunkDescriptorTest, MapsHighOffsetsWithoutNarrowingAndChecksFileRange) {
+TEST(ChunkLayoutTest, MapsHighOffsetsWithoutNarrowingAndChecksFileRange) {
   constexpr uint64_t kChunkSize = 64ULL * 1024 * 1024;
   constexpr off_t kGeneric525Offset = std::numeric_limits<off_t>::max() - 1;
 
@@ -523,19 +459,6 @@ TEST(SwordFsChunkDescriptorTest, MapsHighOffsetsWithoutNarrowingAndChecksFileRan
   ASSERT_TRUE(swordfs::metadata::CalculateFileRangeEnd(kGeneric525Offset, 1, &range_end).ok());
   EXPECT_EQ(range_end, swordfs::metadata::kMaxSupportedFileSize);
   EXPECT_EQ(swordfs::metadata::CalculateFileRangeEnd(kGeneric525Offset, 2, &range_end).ToErrno(), EINVAL);
-}
-
-TEST(SwordFsChunkDescriptorTest, ExtentEndingAtOffTMaxIsValidAndBeyondIsRejected) {
-  constexpr uint64_t kChunkSize = 4096;
-  constexpr ChunkIndex kLastIndex = swordfs::metadata::kMaxSupportedFileSize / kChunkSize;
-  constexpr uint64_t kLastStart = kLastIndex * kChunkSize;
-  constexpr uint64_t kExactSize = swordfs::metadata::kMaxSupportedFileSize - kLastStart;
-
-  const SwordFsChunk exact{.index = kLastIndex, .revision = 1, .size = kExactSize};
-  EXPECT_TRUE(exact.IsValidForChunkSize(kChunkSize));
-
-  const SwordFsChunk beyond{.index = kLastIndex, .revision = 1, .size = kExactSize + 1};
-  EXPECT_FALSE(beyond.IsValidForChunkSize(kChunkSize));
 }
 
 TEST_F(ChunkTest, FactoryOpenDistinguishesMissingExistingAndCreate) {
@@ -992,9 +915,6 @@ TEST_F(ChunkTest, FirstFlushPublishesTypedChunkIdAndPrivateHeadWithoutLegacyDesc
     EXPECT_EQ(
         data_->uploaded_keys[0],
         std::string(static_cast<std::string_view>(swordfs::chunk::cow::COWObjectKey(*file.chunk_id, head.revision))));
-    SwordFsChunk legacy;
-    EXPECT_TRUE(meta_->FindChunk(/*ino=*/42, /*index=*/0, &legacy).IsNotFound())
-        << "a completed flush must never publish two conflicting authorities";
   });
 }
 

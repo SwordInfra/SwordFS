@@ -18,10 +18,8 @@ enum class RecordType : uint32_t {
   kVolume = 1,
   kInode = 2,
   kEntry = 3,
-  kChunk = 4,
   kReclaim = 5,
   kPendingDelete = 6,
-  kCowCleanup = 7,
   kCowTypedCleanup = 8,
 };
 

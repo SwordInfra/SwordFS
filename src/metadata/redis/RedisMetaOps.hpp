@@ -13,7 +13,6 @@
 
 #include "metadata/ChunkMetadata.hpp"
 #include "metadata/ChunkSizePlan.hpp"
-#include "metadata/IChunkIndexTxn.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
 #include "metadata/types/Chunk.hpp"
@@ -26,7 +25,7 @@
 #include "utils/Synchronization.hpp"
 
 namespace swordfs::chunk::internal {
-class ChunkMetadataBridge;
+class ChunkCleanupWorkEncoder;
 }
 
 namespace swordfs::metadata {
@@ -58,7 +57,7 @@ class RedisMetaOps {
 
   utils::Status Initialize();
   utils::Status OpenChunkMetadata(ChunkType chunk_type, ChunkMetadataPtr *out);
-  utils::Status BindChunkMetadataBridge(chunk::internal::ChunkMetadataBridge *bridge);
+  utils::Status BindChunkCleanupWorkEncoder(chunk::internal::ChunkCleanupWorkEncoder *encoder);
   utils::Status FormatVolume(const SwordFsVolume &config);
   utils::Status LoadVolume(SwordFsVolume *config);
   utils::Status CreateDirIterator(InodeID ino, std::vector<SwordFsEntry> prefix_entries,
@@ -75,7 +74,6 @@ class RedisMetaOps {
   utils::Status GetXAttr(InodeID ino, std::string_view name, std::string *value);
   utils::Status ListXAttrs(InodeID ino, std::vector<std::string> *names);
   utils::Status RemoveXAttr(InodeID ino, std::string_view name);
-  utils::Status Truncate(InodeID ino, uint64_t size);
   utils::Status TouchInode(InodeID ino, SetAttrField fields);
   utils::Status PrepareReclaim(InodeID ino);
   utils::Status CompleteReclaim(InodeID ino);
@@ -86,10 +84,6 @@ class RedisMetaOps {
                                          bool *has_more);
   utils::Status RegisterPendingDelete(const PendingDelete &work);
   utils::Status CompletePendingDelete(std::string_view object_key);
-  utils::Status CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected, const SwordFsChunk &replacement,
-                            const ChunkPublishIntent &intent = {});
-  utils::Status FindChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk);
-  utils::Status LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out);
   utils::Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out);
   utils::Status ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out);
   utils::Status ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out);
@@ -102,7 +96,6 @@ class RedisMetaOps {
   utils::Status CommitGrow(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested, SetAttrField fields,
                            ChunkSizeCommitResult *out);
   utils::Status AllocateInode(InodeID *ino);
-  utils::Status AllocateChunkRevision(ChunkRevision *revision);
 
   // Run one optimistic metadata transaction when RedisMetaImpl must compose
   // multiple metadata primitives into one atomic POSIX operation. Standalone
@@ -115,11 +108,6 @@ class RedisMetaOps {
  private:
   utils::Status PrepareReclaimAttempt(InodeID ino);
 
-  // Register cleanup candidates after a metadata mutation has a known
-  // outcome. Failure is intentionally non-fatal: it may leak obsolete data,
-  // but it must not invalidate an otherwise successful metadata operation.
-  void RegisterPendingDeletesBestEffort(InodeID ino, const std::vector<PendingDelete> &work, std::string_view reason);
-
   // Snapshot the frozen pending-reclaim records, validating persisted state
   // before exposing it to the replay worker.
   utils::Status CollectPendingReclaims(std::vector<ReclaimWork> &out);
@@ -128,7 +116,7 @@ class RedisMetaOps {
 
  private:
   std::shared_ptr<RedisBackendContext> backend_;
-  const chunk::internal::ChunkMetadataBridge *chunk_metadata_bridge_ = nullptr;
+  const chunk::internal::ChunkCleanupWorkEncoder *cleanup_work_encoder_ = nullptr;
   ChunkMetadataPtr chunk_metadata_;
   redis::RedisKey key_;
   int reclaim_reconcile_attempts_ = 1;

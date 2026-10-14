@@ -14,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-#include "chunk/internal/ChunkMetadataBridge.hpp"
+#include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
 #include "metadata/ChunkSizePlan.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/InodePolicy.hpp"
@@ -40,56 +40,9 @@ utils::Status ParseAttachedChunkID(std::string_view encoded, ChunkID *out) {
 
 }  // namespace
 
-RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size, ChunkType chunk_type,
-                           const chunk::internal::ChunkMetadataBridge *bridge)
-    : txn_(txn), key_(key), chunk_size_(chunk_size), chunk_metadata_bridge_(bridge), chunk_type_(chunk_type) {
-}
-
-std::string RedisMetaTxn::PrivateHash(std::string_view hash) const {
-  return key_.PrivateChunkIndex(chunk_type_, hash);
-}
-
-utils::Status RedisMetaTxn::Read(std::string_view hash, std::string_view field, std::string *value) {
-  if (hash.empty() || value == nullptr) {
-    return utils::Status::InvalidArgument("private chunk index read requires hash and output");
-  }
-  return txn_.HGet(PrivateHash(hash), field, value);
-}
-
-utils::Status RedisMetaTxn::Scan(std::string_view hash, std::vector<std::pair<std::string, std::string>> *values) {
-  if (hash.empty() || values == nullptr) {
-    return utils::Status::InvalidArgument("private chunk index scan requires hash and output");
-  }
-  std::map<std::string, std::string> merged;
-  uint64_t cursor = 0;
-  do {
-    std::vector<std::pair<std::string, std::string>> page;
-    uint64_t next_cursor = 0;
-    auto status = txn_.HScan(PrivateHash(hash), cursor, 128, &page, &next_cursor);
-    if (!status.ok()) {
-      return status;
-    }
-    for (auto &entry : page) {
-      merged.insert_or_assign(std::move(entry.first), std::move(entry.second));
-    }
-    cursor = next_cursor;
-  } while (cursor != 0);
-  values->assign(merged.begin(), merged.end());
-  return utils::Status::OK();
-}
-
-utils::Status RedisMetaTxn::Put(std::string_view hash, std::string_view field, std::string_view value) {
-  if (hash.empty()) {
-    return utils::Status::InvalidArgument("private chunk index hash is empty");
-  }
-  return txn_.HSet(PrivateHash(hash), field, value);
-}
-
-utils::Status RedisMetaTxn::Erase(std::string_view hash, std::string_view field) {
-  if (hash.empty()) {
-    return utils::Status::InvalidArgument("private chunk index hash is empty");
-  }
-  return txn_.HDel(PrivateHash(hash), field);
+RedisMetaTxn::RedisMetaTxn(RedisKvTxn &txn, const redis::RedisKey &key, uint64_t chunk_size,
+                           const chunk::internal::ChunkCleanupWorkEncoder *encoder)
+    : txn_(txn), key_(key), chunk_size_(chunk_size), cleanup_work_encoder_(encoder) {
 }
 
 utils::Status RedisMetaTxn::LookupInode(InodeID ino, SwordFsInode *out) {
@@ -209,10 +162,10 @@ utils::Status RedisMetaTxn::AdjustNlink(SwordFsInode *inode, int delta, uint64_t
   return utils::Status::OK();
 }
 
-utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out,
-                                    std::vector<PendingDelete> *detached_chunks) {
-  if (detached_chunks != nullptr) {
-    detached_chunks->clear();
+utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out) {
+  // EOF mutations require typed boundary sanitation in FileReadWriter.
+  if (HasSetAttrField(fields, SetAttrField::kSize)) {
+    return utils::Status::InvalidArgument("size changes require FileReadWriter");
   }
   SwordFsInode inode;
   auto status = LookupInode(ino, &inode);
@@ -225,18 +178,6 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
   }
 
   SwordFsAttr attr = inode.attr;
-  const uint64_t old_size = attr.size;
-
-  if (HasSetAttrField(fields, SetAttrField::kSize)) {
-    // Redis MULTI/EXEC can partially apply a chunk descriptor update while
-    // leaving inode.size unchanged. Even a size-preserving setattr must
-    // reconcile chunk metadata so a later retry does not observe a descriptor
-    // beyond the requested EOF.
-    status = TruncateChunks(ino, old_size, requested.size, detached_chunks);
-    if (!status.ok()) {
-      return status;
-    }
-  }
   if (HasSetAttrField(fields, SetAttrField::kMode)) {
     attr.mode = (attr.mode & S_IFMT) | (requested.mode & 07777);
   }
@@ -245,14 +186,6 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
   }
   if (HasSetAttrField(fields, SetAttrField::kGid)) {
     attr.gid = requested.gid;
-  }
-  if (HasSetAttrField(fields, SetAttrField::kSize)) {
-    attr.size = requested.size;
-    if (!HasSetAttrField(fields, SetAttrField::kMtime) && !HasSetAttrField(fields, SetAttrField::kMtimeNow)) {
-      inode.attr = attr;
-      inode.Touch(SetAttrField::kMtime);
-      attr = inode.attr;
-    }
   }
   if (HasSetAttrField(fields, SetAttrField::kAtime)) {
     attr.atime = requested.atime;
@@ -359,31 +292,6 @@ utils::Status RedisMetaTxn::RemoveXAttr(InodeID ino, std::string_view name) {
   return SetInode(inode);
 }
 
-utils::Status RedisMetaTxn::Truncate(InodeID ino, uint64_t size, std::vector<PendingDelete> *detached_chunks) {
-  if (detached_chunks != nullptr) {
-    detached_chunks->clear();
-  }
-  SwordFsInode inode;
-  auto status = LookupInode(ino, &inode);
-  if (!status.ok()) {
-    return status;
-  }
-  status = CheckContentMetadataMutationPolicy(inode.attr, "truncate");
-  if (!status.ok()) {
-    return status;
-  }
-  status = TruncateChunks(ino, inode.attr.size, size, detached_chunks);
-  if (!status.ok()) {
-    return status;
-  }
-  if (inode.attr.size == size) {
-    return utils::Status::OK();
-  }
-  inode.attr.size = size;
-  inode.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
-  return SetInode(inode);
-}
-
 utils::Status RedisMetaTxn::TouchInode(InodeID ino, SetAttrField fields) {
   SwordFsInode inode;
   auto status = LookupInode(ino, &inode);
@@ -437,38 +345,15 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     }
   }
 
-  std::vector<SwordFsChunk> heads;
-  if (typed.mappings.empty()) {
-    std::vector<std::pair<std::string, SwordFsChunk>> scanned;
-    status = ScanChunks(ino, scanned);
-    if (!status.ok()) {
-      return status;
-    }
-    heads.reserve(scanned.size());
-    for (const auto &[field, descriptor] : scanned) {
-      (void)field;
-      heads.push_back(descriptor);
-    }
-    std::sort(heads.begin(), heads.end(),
-              [](const SwordFsChunk &a, const SwordFsChunk &b) { return a.index < b.index; });
-  }
-  if (chunk_metadata_bridge_ == nullptr) {
-    return utils::Status::Internal("chunk metadata bridge is not bound");
+  std::string serialized;
+  if (cleanup_work_encoder_ == nullptr) {
+    return utils::Status::Internal("cleanup work encoder is not bound");
   }
   ReclaimWork pending;
-  status = !typed.mappings.empty() ? chunk_metadata_bridge_->FreezeDetachedReclaim(ino, typed.mappings, &pending)
-                                   : chunk_metadata_bridge_->FreezeReclaim(*this, ino, heads, chunk_size_, &pending);
+  status = cleanup_work_encoder_->EncodeDetachedReclaim(ino, typed.mappings, &pending);
   if (!status.ok()) {
     return status;
   }
-  if (typed.mappings.empty()) {
-    status = chunk_metadata_bridge_->PrepareReclaim(*this, ino, heads);
-    if (!status.ok()) {
-      return status;
-    }
-  }
-
-  std::string serialized;
   status = pending.SerializeTo(&serialized);
   if (!status.ok()) {
     return status;
@@ -483,10 +368,6 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     return status;
   }
   status = txn_.Del(key_.ChunkRefs(ino));
-  if (!status.ok()) {
-    return status;
-  }
-  status = DeleteChunks(ino);
   if (!status.ok()) {
     return status;
   }
@@ -987,51 +868,6 @@ utils::Status RedisMetaTxn::AdjustInodeCount(int64_t delta) {
   return txn_.IncrBy(key_.InodeCount(), delta);
 }
 
-utils::Status RedisMetaTxn::LookupChunk(InodeID ino, ChunkIndex idx, SwordFsChunk *chunk) {
-  if (chunk == nullptr) {
-    return utils::Status::InvalidArgument("chunk output is null");
-  }
-
-  std::string value;
-  auto status = txn_.HGet(key_.Chunk(ino), std::to_string(idx), &value);
-  if (!status.ok()) {
-    return status;
-  }
-  return chunk->ParseFrom(value);
-}
-
-utils::Status RedisMetaTxn::ScanChunks(InodeID ino, std::vector<std::pair<std::string, SwordFsChunk>> &chunks) {
-  chunks.clear();
-
-  constexpr size_t kScanBatchSize = 128;
-  uint64_t cursor = 0;
-  do {
-    std::vector<std::pair<std::string, std::string>> values;
-    uint64_t next_cursor = 0;
-    auto status = txn_.HScan(key_.Chunk(ino), cursor, kScanBatchSize, &values, &next_cursor);
-    if (!status.ok()) {
-      return status;
-    }
-    for (auto &[field, value] : values) {
-      SwordFsChunk chunk;
-      status = chunk.ParseFrom(value);
-      if (!status.ok()) {
-        return status;
-      }
-      if (field != std::to_string(chunk.index)) {
-        return utils::Status::Malformed("persisted chunk descriptor does not match its canonical identity");
-      }
-      if (!chunk.IsValidForChunkSize(chunk_size_)) {
-        return utils::Status::Malformed("persisted chunk descriptor does not match its canonical identity");
-      }
-      chunks.emplace_back(std::move(field), chunk);
-    }
-    cursor = next_cursor;
-  } while (cursor != 0);
-
-  return utils::Status::OK();
-}
-
 utils::Status RedisMetaTxn::QueuePendingDelete(const PendingDelete &pending) {
   std::string encoded;
   auto status = pending.SerializeTo(&encoded);
@@ -1326,14 +1162,14 @@ utils::Status RedisMetaTxn::CommitSizeChange(InodeID ino, const ChunkSizePlan &p
   }
 
   if (!result.detached.empty()) {
-    if (chunk_metadata_bridge_ == nullptr) {
-      return utils::Status::Internal("chunk metadata bridge is not bound");
+    if (cleanup_work_encoder_ == nullptr) {
+      return utils::Status::Internal("cleanup work encoder is not bound");
     }
     // Enqueue immutable identities in the same watched Redis transaction as
     // detach/EOF. A partial EXEC remains safe: GC must recheck reachability.
     for (const auto &mapping : result.detached) {
       PendingDelete pending;
-      status = chunk_metadata_bridge_->FreezeDetachedDelete(ino, mapping, &pending);
+      status = cleanup_work_encoder_->EncodeDetachedDelete(ino, mapping, &pending);
       if (!status.ok()) {
         return status;
       }
@@ -1371,219 +1207,6 @@ utils::Status RedisMetaTxn::CommitSizeChange(InodeID ino, const ChunkSizePlan &p
     return status;
   }
   *out = std::move(result);
-  return utils::Status::OK();
-}
-
-utils::Status RedisMetaTxn::CommitChunk(InodeID ino, const std::optional<SwordFsChunk> &expected,
-                                        const SwordFsChunk &replacement, utils::Status &publication_result,
-                                        std::optional<PendingDelete> &cleanup_candidate,
-                                        const ChunkPublishIntent &intent) {
-  publication_result = utils::Status::OK();
-  cleanup_candidate.reset();
-
-  if (!replacement.IsValidForChunkSize(chunk_size_)) {
-    return utils::Status::InvalidArgument("replacement chunk descriptor is invalid");
-  }
-  if (expected.has_value() && !expected->IsValidForChunkSize(chunk_size_)) {
-    return utils::Status::InvalidArgument("expected chunk descriptor is invalid");
-  }
-  if (expected.has_value() && replacement.revision <= expected->revision) {
-    return utils::Status::InvalidArgument("replacement revision must increase");
-  }
-  if (expected.has_value() && expected->index != replacement.index) {
-    return utils::Status::InvalidArgument("replacement must preserve chunk index");
-  }
-  // IsValidForChunkSize() above already proves both multiplication and extent
-  // arithmetic are safe, so do not carry a second unreachable validation
-  // branch inside the transaction.
-  const uint64_t start_offset = static_cast<uint64_t>(replacement.index) * chunk_size_;
-  if (chunk_metadata_bridge_ == nullptr) {
-    return utils::Status::Internal("chunk metadata bridge is not bound");
-  }
-
-  auto reject_publication = [&](utils::Status rejection) -> utils::Status {
-    // A known logical rejection proves this uploaded replacement is not the
-    // authoritative descriptor. Cleanup registration happens after this
-    // transaction has a known outcome and is intentionally best effort.
-    PendingDelete pending;
-    auto status = chunk_metadata_bridge_->FreezeRejectedPublication(ino, replacement, intent, chunk_size_, &pending);
-    if (!status.ok()) {
-      return status;
-    }
-    cleanup_candidate = std::move(pending);
-    publication_result = std::move(rejection);
-    return utils::Status::OK();
-  };
-
-  SwordFsInode inode;
-  auto status = LookupInode(ino, &inode);
-  if (status.IsNotFound()) {
-    return reject_publication(status);
-  }
-  if (!status.ok()) {
-    return status;
-  }
-  if (!inode.IsRegular()) {
-    return utils::Status::InvalidArgument("not a regular file");
-  }
-
-  SwordFsChunk current;
-  status = LookupChunk(ino, replacement.index, &current);
-  bool replacement_already_published = false;
-  if (status.ok()) {
-    if (!current.IsValidForChunkSize(chunk_size_)) {
-      return utils::Status::Malformed("persisted chunk descriptor is invalid");
-    }
-    replacement_already_published = current == replacement;
-    const bool current_matches_expected = expected.has_value() && current == *expected;
-    if (!replacement_already_published && !current_matches_expected) {
-      return reject_publication(utils::Status::AlreadyExists("chunk changed before publication at index " +
-                                                             std::to_string(replacement.index)));
-    }
-    if (expected.has_value()) {
-      PendingDelete pending;
-      status = chunk_metadata_bridge_->FreezePendingDelete(*this, ino, *expected, chunk_size_, &pending);
-      if (!status.ok()) {
-        return status;
-      }
-      cleanup_candidate = std::move(pending);
-    }
-  } else if (status.IsNotFound()) {
-    if (expected.has_value()) {
-      return reject_publication(status);
-    }
-  } else {
-    return status;
-  }
-
-  status = chunk_metadata_bridge_->Publish(*this, ino, expected, replacement, intent);
-  if (!status.ok()) {
-    // Returning a non-OK callback status discards any private writes already
-    // queued by the participant. Keep the candidate cleanup for the caller's
-    // best-effort registration after that definite rejection.
-    PendingDelete pending;
-    auto cleanup_status =
-        chunk_metadata_bridge_->FreezeRejectedPublication(ino, replacement, intent, chunk_size_, &pending);
-    if (cleanup_status.ok()) {
-      cleanup_candidate = std::move(pending);
-      publication_result = status;
-    }
-    return status;
-  }
-
-  if (!replacement_already_published) {
-    status = SetChunk(ino, replacement);
-    if (!status.ok()) {
-      return status;
-    }
-  }
-
-  // Redis MULTI/EXEC does not roll back earlier commands when a later queued
-  // command fails at execution time. Re-applying the inode side effects when
-  // the replacement descriptor is already present lets a retry converge from
-  // a partial EXEC where SetChunk succeeded but SetInode did not.
-  const uint64_t chunk_end = start_offset + replacement.size;
-  if (chunk_end > inode.attr.size) {
-    inode.attr.size = chunk_end;
-  }
-  inode.Touch(SetAttrField::kMtime | SetAttrField::kCtime);
-  return SetInode(inode);
-}
-
-utils::Status RedisMetaTxn::LoadChunkView(InodeID ino, ChunkIndex idx, ChunkView *out) {
-  if (out == nullptr) {
-    return utils::Status::InvalidArgument("chunk view output is null");
-  }
-  ChunkView view;
-  auto status = LookupChunk(ino, idx, &view.head);
-  if (!status.ok()) {
-    return status;
-  }
-  if (view.head.index != idx || !view.head.IsValidForChunkSize(chunk_size_)) {
-    return utils::Status::Malformed("persisted chunk descriptor does not match its canonical identity");
-  }
-  if (chunk_metadata_bridge_ == nullptr) {
-    return utils::Status::Internal("chunk metadata bridge is not bound");
-  }
-  status = chunk_metadata_bridge_->LoadPublished(*this, ino, view.head, &view.private_snapshot);
-  if (!status.ok()) {
-    return status;
-  }
-  *out = std::move(view);
-  return utils::Status::OK();
-}
-
-utils::Status RedisMetaTxn::SetChunk(InodeID ino, const SwordFsChunk &chunk) {
-  std::string value;
-  auto status = chunk.SerializeTo(&value);
-  if (!status.ok()) {
-    return status;
-  }
-  return txn_.HSet(key_.Chunk(ino), std::to_string(chunk.index), value);
-}
-
-utils::Status RedisMetaTxn::DeleteChunks(InodeID ino) {
-  return txn_.Del(key_.Chunk(ino));
-}
-
-utils::Status RedisMetaTxn::TruncateChunks(InodeID ino, uint64_t old_size, uint64_t new_size,
-                                           std::vector<PendingDelete> *detached_chunks) {
-  if (new_size > old_size) {
-    return utils::Status::OK();
-  }
-  if (chunk_size_ == 0) {
-    return utils::Status::Internal("volume chunk size is not initialized");
-  }
-  ChunkSizeLayout layout;
-  auto status = PlanChunkSizeLayout(new_size, chunk_size_, &layout);
-  if (!status.ok()) {
-    return status;
-  }
-
-  // Drive truncate work from materialized metadata, never from logical file
-  // length. ScanChunks WATCHes the chunk hash before any write is queued; a
-  // concurrent chunk-map mutation therefore aborts EXEC and retries the whole
-  // operation.
-  std::vector<std::pair<std::string, SwordFsChunk>> chunks;
-  status = ScanChunks(ino, chunks);
-  if (!status.ok()) {
-    return status;
-  }
-
-  if (chunk_metadata_bridge_ == nullptr) {
-    return utils::Status::Internal("chunk metadata bridge is not bound");
-  }
-
-  std::vector<ChunkIndexChange> changes;
-  for (const auto &[field, head] : chunks) {
-    (void)field;
-    if (layout.ShouldDetach(head.index)) {
-      if (detached_chunks != nullptr) {
-        PendingDelete pending;
-        status = chunk_metadata_bridge_->FreezePendingDelete(*this, ino, head, chunk_size_, &pending);
-        if (!status.ok()) {
-          return status;
-        }
-        detached_chunks->push_back(std::move(pending));
-      }
-      changes.push_back({head, std::nullopt});
-    } else if (layout.boundary.has_value() && head.index == layout.boundary->index &&
-               head.size > layout.boundary->visible_prefix) {
-      auto clamped = head;
-      clamped.size = layout.boundary->visible_prefix;
-      changes.push_back({head, clamped});
-    }
-  }
-  for (const auto &change : changes) {
-    if (change.current.has_value()) {
-      status = SetChunk(ino, *change.current);
-    } else {
-      status = txn_.HDel(key_.Chunk(ino), std::to_string(change.previous.index));
-    }
-    if (!status.ok()) {
-      return status;
-    }
-  }
   return utils::Status::OK();
 }
 

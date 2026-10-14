@@ -16,7 +16,7 @@
 
 namespace swordfs::metadata {
 
-TEST(RedisMetaTxnTest, SetAttrShrinkWorksWithoutDetachedChunkOutput) {
+TEST(RedisMetaTxnTest, DirectSetAttrSizeCannotBypassTypedBoundary) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
@@ -31,26 +31,22 @@ TEST(RedisMetaTxnTest, SetAttrShrinkWorksWithoutDetachedChunkOutput) {
   SwordFsInode file(9, file_attr, kRootInodeId);
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
-  SwordFsChunk chunk{.index = 0, .revision = 1, .size = 4096};
-  std::string encoded;
-  ASSERT_TRUE(chunk.SerializeTo(&encoded).ok());
-  redis.hset(key.Chunk(file.ino), "0", encoded);
+  redis.hset(key.ChunkRefs(file.ino), "0", "17");
 
   SwordFsAttr requested = file.attr;
   requested.size = 0;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
     return txn.SetAttr(file.ino, requested, SetAttrField::kSize);
   });
-  ASSERT_TRUE(status.ok()) << status.message();
-  EXPECT_FALSE(redis.hexists(key.Chunk(file.ino), "0"));
-
+  EXPECT_EQ(status.ToErrno(), EINVAL);
+  EXPECT_EQ(redis.hget(key.ChunkRefs(file.ino), "0"), std::optional<std::string>{"17"});
   SwordFsInode stored;
   ASSERT_TRUE(stored.ParseFrom(redis.get(key.Inode(file.ino)).value_or("")).ok());
-  EXPECT_EQ(stored.attr.size, 0U);
+  EXPECT_EQ(stored.attr.size, 4096U);
 }
 
-TEST(RedisMetaTxnTest, SetAttrSizeAndOwnerChangesDoNotInventKillpriv) {
+TEST(RedisMetaTxnTest, SetAttrCombinedSizeAndOwnershipIsRejectedWithoutPartialMutation) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {
     GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
@@ -69,16 +65,16 @@ TEST(RedisMetaTxnTest, SetAttrSizeAndOwnerChangesDoNotInventKillpriv) {
   requested.gid = 200;
   requested.size = 1024;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
     return txn.SetAttr(file.ino, requested, SetAttrField::kUid | SetAttrField::kGid | SetAttrField::kSize);
   });
-  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(status.ToErrno(), EINVAL);
 
   SwordFsInode stored;
   ASSERT_TRUE(stored.ParseFrom(redis.get(key.Inode(file.ino)).value_or("")).ok());
-  EXPECT_EQ(stored.attr.uid, requested.uid);
-  EXPECT_EQ(stored.attr.gid, requested.gid);
-  EXPECT_EQ(stored.attr.size, requested.size);
+  EXPECT_EQ(stored.attr.uid, file.attr.uid);
+  EXPECT_EQ(stored.attr.gid, file.attr.gid);
+  EXPECT_EQ(stored.attr.size, file.attr.size);
   EXPECT_NE(stored.attr.mode & S_ISUID, 0u);
   EXPECT_NE(stored.attr.mode & S_ISGID, 0u);
 }
@@ -98,7 +94,7 @@ TEST(RedisMetaTxnTest, SetAttrExplicitKillprivUsesModeAwareSgidRule) {
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
 
   auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
     return txn.SetAttr(file.ino, file.attr, kKillSuidGidField);
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -112,7 +108,7 @@ TEST(RedisMetaTxnTest, SetAttrExplicitKillprivUsesModeAwareSgidRule) {
   file.attr.mode |= S_ISUID | S_ISGID | S_IXGRP;
   ASSERT_TRUE(SeedInode(redis, key, file).ok());
   status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
     return txn.SetAttr(file.ino, file.attr, kKillSuidGidField);
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -140,7 +136,7 @@ TEST(RedisMetaTxnTest, SetAttrCombinedModeOwnerAndKillprivUsesFinalRequestedMode
   requested.uid = 2000;
   requested.gid = 200;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
     return txn.SetAttr(file.ino, requested,
                        SetAttrField::kMode | SetAttrField::kUid | SetAttrField::kGid | kKillSuidGidField);
   });
@@ -172,7 +168,7 @@ TEST(RedisMetaTxnTest, SetAttrLegacyExplicitModeIsNotSecondGuessed) {
   SwordFsAttr requested = file.attr;
   requested.mode = S_IFREG | 0644 | S_ISGID;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
     return txn.SetAttr(file.ino, requested, SetAttrField::kMode);
   });
   ASSERT_TRUE(status.ok()) << status.message();
@@ -182,55 +178,4 @@ TEST(RedisMetaTxnTest, SetAttrLegacyExplicitModeIsNotSecondGuessed) {
   EXPECT_EQ(stored.attr.mode, static_cast<uint32_t>(requested.mode));
 }
 
-TEST(RedisMetaTxnTest, TruncateDoesNotInventKillpriv) {
-  RedisMetaConfig config;
-  if (!ParseTestConfig(&config)) {
-    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
-  }
-
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueRedisName("truncate-no-implicit-killpriv"));
-  sw::redis::Redis redis(ConnectionOptions(config));
-
-  SwordFsAttr file_attr(9, S_IFREG | 0644 | S_ISUID | S_ISGID);
-  file_attr.size = 4096;
-  SwordFsInode file(9, file_attr, kRootInodeId);
-  ASSERT_TRUE(SeedInode(redis, key, file).ok());
-
-  const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, ChunkType::kCow, &COWBridgeForTest());
-    return txn.Truncate(file.ino, 1024);
-  });
-  ASSERT_TRUE(status.ok()) << status.message();
-
-  SwordFsInode stored;
-  ASSERT_TRUE(stored.ParseFrom(redis.get(key.Inode(file.ino)).value_or("")).ok());
-  EXPECT_EQ(stored.attr.size, 1024U);
-  EXPECT_NE(stored.attr.mode & S_ISUID, 0u);
-  EXPECT_NE(stored.attr.mode & S_ISGID, 0u);
-}
-
-TEST(RedisMetaTxnTest, CommitChunkDoesNotInventKillpriv) {
-  RedisMetaConfig config;
-  if (!ParseTestConfig(&config)) {
-    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
-  }
-
-  RedisMetaClient store(config);
-  const redis::RedisKey key(config.db, UniqueRedisName("commit-no-implicit-killpriv"));
-  sw::redis::Redis redis(ConnectionOptions(config));
-
-  SwordFsAttr file_attr(9, S_IFREG | 0644 | S_ISUID | S_ISGID);
-  SwordFsInode file(9, file_attr, kRootInodeId);
-  ASSERT_TRUE(SeedInode(redis, key, file).ok());
-
-  const SwordFsChunk chunk{.index = 0, .revision = 1, .size = 64};
-  const auto status = CommitChunkTxn(store, key, 4096, file.ino, std::nullopt, chunk);
-  ASSERT_TRUE(status.ok()) << status.message();
-
-  SwordFsInode stored;
-  ASSERT_TRUE(stored.ParseFrom(redis.get(key.Inode(file.ino)).value_or("")).ok());
-  EXPECT_NE(stored.attr.mode & S_ISUID, 0u);
-  EXPECT_NE(stored.attr.mode & S_ISGID, 0u);
-}
 }  // namespace swordfs::metadata

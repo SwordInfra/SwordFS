@@ -35,10 +35,6 @@ std::string RedisKey::NextIno() const {
   return prefix_ + "next_ino";
 }
 
-std::string RedisKey::NextChunkRevision() const {
-  return prefix_ + "next_chunk_revision";
-}
-
 std::string RedisKey::NextChunkID() const {
   return prefix_ + "next_chunk_id";
 }
@@ -49,10 +45,6 @@ std::string RedisKey::Inode(uint64_t ino) const {
 
 std::string RedisKey::Directory(uint64_t parent_ino) const {
   return folly::sformat("{}dir:{}", prefix_, parent_ino);
-}
-
-std::string RedisKey::Chunk(uint64_t ino) const {
-  return folly::sformat("{}chunk:{}", prefix_, ino);
 }
 
 std::string RedisKey::ChunkRefs(uint64_t ino) const {

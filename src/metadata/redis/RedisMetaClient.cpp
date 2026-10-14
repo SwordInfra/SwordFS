@@ -146,21 +146,6 @@ utils::Status RedisMetaClient::MGet(const std::vector<std::string> &keys,
   });
 }
 
-utils::Status RedisMetaClient::HGet(std::string_view key, std::string_view field, std::string *value) {
-  utils::ExpectInThreadDomain();
-  if (value == nullptr) {
-    return utils::Status::InvalidArgument("Redis HGET output is null");
-  }
-  return RunReadOnlyCommand("HGET", [&] {
-    auto result = redis_->hget(std::string(key), std::string(field));
-    if (!result.has_value()) {
-      return utils::Status::NotFound("Redis hash field not found");
-    }
-    *value = std::move(*result);
-    return utils::Status::OK();
-  });
-}
-
 utils::Status RedisMetaClient::HScan(std::string_view key, uint64_t cursor, size_t count,
                                      std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor) {
   utils::ExpectInThreadDomain();

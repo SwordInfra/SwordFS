@@ -18,7 +18,7 @@
 
 #include "FiberTest.hpp"
 #include "chunk/cow/COWCleanup.hpp"
-#include "chunk/internal/ChunkMetadataBridge.hpp"
+#include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
@@ -101,132 +101,20 @@ inline utils::Status SeedEntry(sw::redis::Redis &redis, const redis::RedisKey &k
   return utils::Status::OK();
 }
 
-inline const chunk::internal::ChunkMetadataBridge &COWBridgeForTest();
-
-inline utils::Status CommitChunkTxn(RedisMetaClient &store, const redis::RedisKey &key, uint64_t chunk_size,
-                                    InodeID ino, const std::optional<SwordFsChunk> &expected,
-                                    const SwordFsChunk &replacement) {
-  utils::Status publication_result;
-  std::optional<PendingDelete> cleanup_candidate;
-  auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, chunk_size, ChunkType::kCow, &COWBridgeForTest());
-    return txn.CommitChunk(ino, expected, replacement, publication_result, cleanup_candidate);
-  });
-  if (!status.ok()) {
-    return status;
-  }
-  return publication_result;
-}
-
-class COWTestBridge final : public chunk::internal::ChunkMetadataBridge {
+class COWTestEncoder final : public chunk::internal::ChunkCleanupWorkEncoder {
  public:
-  utils::Status LoadPublished(IChunkIndexReader &, InodeID, const SwordFsChunk &,
-                              std::string *private_snapshot) const override {
-    if (private_snapshot == nullptr) {
-      return utils::Status::InvalidArgument("COW private snapshot output is null");
-    }
-    private_snapshot->clear();
-    return utils::Status::OK();
+  utils::Status EncodeDetachedDelete(InodeID ino, const ChunkMapping &mapping, PendingDelete *out) const override {
+    return chunk::cow::FreezeCOWDetachedDelete(ino, mapping, out);
   }
-
-  utils::Status Publish(IChunkIndexTxn &, InodeID, const std::optional<SwordFsChunk> &, const SwordFsChunk &,
-                        const ChunkPublishIntent &intent) const override {
-    if (!intent.payload.empty()) {
-      return utils::Status::InvalidArgument("COW publication intent must be empty");
-    }
-    return utils::Status::OK();
-  }
-
-  utils::Status PrepareReclaim(IChunkIndexTxn &, InodeID, const std::vector<SwordFsChunk> &) const override {
-    return utils::Status::OK();
-  }
-
-  utils::Status FreezePendingDelete(IChunkIndexTxn &, InodeID file_ino, const SwordFsChunk &head, uint64_t chunk_size,
-                                    PendingDelete *out) const override {
-    return chunk::cow::FreezeCOWDelete(file_ino, head, chunk_size, out);
-  }
-
-  utils::Status FreezeRejectedPublication(InodeID file_ino, const SwordFsChunk &replacement,
-                                          const ChunkPublishIntent &intent, uint64_t chunk_size,
-                                          PendingDelete *out) const override {
-    if (!intent.payload.empty()) {
-      return utils::Status::InvalidArgument("COW publication intent must be empty");
-    }
-    return chunk::cow::FreezeCOWDelete(file_ino, replacement, chunk_size, out);
-  }
-
-  utils::Status FreezeReclaim(IChunkIndexTxn &, InodeID file_ino, const std::vector<SwordFsChunk> &heads,
-                              uint64_t chunk_size, ReclaimWork *out) const override {
-    return chunk::cow::FreezeCOWReclaim(file_ino, heads, chunk_size, out);
-  }
-  utils::Status FreezeDetachedReclaim(InodeID file_ino, const std::vector<ChunkMapping> &mappings,
+  utils::Status EncodeDetachedReclaim(InodeID ino, const std::vector<ChunkMapping> &mappings,
                                       ReclaimWork *out) const override {
-    return chunk::cow::FreezeCOWDetachedReclaim(file_ino, mappings, out);
-  }
-  utils::Status FreezeDetachedDelete(InodeID file_ino, const ChunkMapping &mapping, PendingDelete *out) const override {
-    return chunk::cow::FreezeCOWDetachedDelete(file_ino, mapping, out);
+    return chunk::cow::FreezeCOWDetachedReclaim(ino, mappings, out);
   }
 };
 
-inline const chunk::internal::ChunkMetadataBridge &COWBridgeForTest() {
-  static const COWTestBridge bridge;
-  return bridge;
+inline const chunk::internal::ChunkCleanupWorkEncoder &COWEncoderForTest() {
+  static const COWTestEncoder encoder;
+  return encoder;
 }
-
-class RecordingRedisBridge final : public chunk::internal::ChunkMetadataBridge {
- public:
-  bool reject_publish = false;
-  bool reject_pending_delete = false;
-
-  ChunkType mechanism() const {
-    return ChunkType::kRedisCache;
-  }
-
-  utils::Status LoadPublished(IChunkIndexReader &reader, InodeID file_ino, const SwordFsChunk &head,
-                              std::string *private_snapshot) const override {
-    return reader.Read("fragments:" + std::to_string(file_ino), std::to_string(head.revision), private_snapshot);
-  }
-
-  utils::Status Publish(IChunkIndexTxn &txn, InodeID file_ino, const std::optional<SwordFsChunk> &,
-                        const SwordFsChunk &replacement, const ChunkPublishIntent &intent) const override {
-    // This test record is auxiliary; a real slice manifest needed for reads
-    // must be durable before the public head is queued in Redis EXEC.
-    const auto value = intent.payload.empty() ? "staged" : intent.payload;
-    auto status = txn.Put("fragments:" + std::to_string(file_ino), std::to_string(replacement.revision), value);
-    if (!status.ok()) {
-      return status;
-    }
-    return reject_publish ? utils::Status::IOError("reject private publication") : utils::Status::OK();
-  }
-
-  utils::Status PrepareReclaim(IChunkIndexTxn &, InodeID, const std::vector<SwordFsChunk> &) const override {
-    return utils::Status::OK();
-  }
-
-  utils::Status FreezePendingDelete(IChunkIndexTxn &, InodeID file_ino, const SwordFsChunk &head, uint64_t chunk_size,
-                                    PendingDelete *out) const override {
-    if (reject_pending_delete) {
-      return utils::Status::IOError("reject pending delete freeze");
-    }
-    return chunk::cow::FreezeCOWDelete(file_ino, head, chunk_size, out);
-  }
-
-  utils::Status FreezeRejectedPublication(InodeID file_ino, const SwordFsChunk &replacement, const ChunkPublishIntent &,
-                                          uint64_t chunk_size, PendingDelete *out) const override {
-    return chunk::cow::FreezeCOWDelete(file_ino, replacement, chunk_size, out);
-  }
-
-  utils::Status FreezeReclaim(IChunkIndexTxn &, InodeID file_ino, const std::vector<SwordFsChunk> &heads,
-                              uint64_t chunk_size, ReclaimWork *out) const override {
-    return chunk::cow::FreezeCOWReclaim(file_ino, heads, chunk_size, out);
-  }
-  utils::Status FreezeDetachedReclaim(InodeID file_ino, const std::vector<ChunkMapping> &mappings,
-                                      ReclaimWork *out) const override {
-    return chunk::cow::FreezeCOWDetachedReclaim(file_ino, mappings, out);
-  }
-  utils::Status FreezeDetachedDelete(InodeID file_ino, const ChunkMapping &mapping, PendingDelete *out) const override {
-    return chunk::cow::FreezeCOWDetachedDelete(file_ino, mapping, out);
-  }
-};
 
 }  // namespace swordfs::metadata
