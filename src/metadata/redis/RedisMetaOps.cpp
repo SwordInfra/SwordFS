@@ -85,6 +85,10 @@ utils::Status RedisMetaOps::BindChunkCleanupWorkEncoder(chunk::internal::ChunkCl
   return utils::Status::OK();
 }
 
+utils::BlockingExecutor &RedisMetaOps::SharedBlockingExecutor() const {
+  return backend_->executor();
+}
+
 utils::Status RedisMetaOps::Initialize() {
   utils::ExpectInThreadDomain();
   return backend_->executor().RunFromThread([this] { return backend_->client().Ping(); });

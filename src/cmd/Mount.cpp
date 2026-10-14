@@ -32,6 +32,7 @@
 #include "fuse/Vfs.hpp"
 #include "metadata/redis/RedisLockAuthority.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
+#include "metadata/redis/RedisMetaImpl.hpp"
 #include "metadata/redis/RedisOwnerLease.hpp"
 #include "utils/BlockingExecutor.hpp"
 #include "utils/Fuse.hpp"
@@ -213,6 +214,7 @@ static int Mount(const std::string &mountpoint, const std::vector<std::string> &
   fuse_loop_cfg_destroy(loop_cfg);
   // The session guard destroys FUSE and drains all admitted fibers in the
   // destroy hook before the caller revokes the generation and frees workers.
+  // Remote lock capabilities remain disabled until #473/#474.
   return init_context.failed ? 1 : ret;
 }
 
@@ -258,7 +260,6 @@ int RunMount() {
   // metadata I/O: a failed lease registration must not unmount the volume.
   std::unique_ptr<swordfs::metadata::RedisOwnerLease> lease;
   std::unique_ptr<swordfs::metadata::RedisLockAuthority> lock_authority;
-  std::unique_ptr<swordfs::utils::BlockingExecutor> lock_executor;
   std::unique_ptr<swordfs::fuse::FuseAdvisoryLocks> advisory_locks;
   if (cfg.enable_lock_owner_lease()) {
     swordfs::metadata::RedisMetaConfig redis_config;
@@ -278,8 +279,15 @@ int RunMount() {
     if (status.ok()) {
       SWORDFS_LOG_INFO << "lock owner lease registered generation " << lease->generation();
       lock_authority = std::make_unique<swordfs::metadata::RedisLockAuthority>(redis_config, cfg.volume(), *lease);
-      lock_executor = std::make_unique<swordfs::utils::BlockingExecutor>(2, "swordfs-lock");
-      advisory_locks = std::make_unique<swordfs::fuse::FuseAdvisoryLocks>(*lock_authority, *lock_executor);
+      // The metadata engine owns the Redis worker pool for the full Mount
+      // lifetime. There is no separate fixed-size lock worker pool.
+      // ParseRedisMetaUrl and VolumeImpl's scheme registry already establish
+      // that a successfully loaded redis:// engine is RedisMetaImpl.
+      // Avoid a redundant RTTI check and an untestable assertion branch.
+      auto &redis_meta =
+          static_cast<swordfs::metadata::RedisMetaImpl &>(*swordfs::volume::VolumeImpl::Instance().meta_engine());
+      advisory_locks =
+          std::make_unique<swordfs::fuse::FuseAdvisoryLocks>(*lock_authority, redis_meta.SharedBlockingExecutor());
     } else {
       // Fail only the advisory-lock service closed; ordinary FUSE remains
       // available. A failed generation cannot be reused within this mount.
@@ -305,7 +313,6 @@ int RunMount() {
     (void)lease->Revoke();
   }
   advisory_locks.reset();
-  lock_executor.reset();
   lock_authority.reset();
   // The heartbeat and Redis client must not outlive the volume engines.
   lease.reset();

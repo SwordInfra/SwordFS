@@ -481,6 +481,46 @@ utils::Status RedisLockAuthority::GetPosix(uint64_t inode_ino, uint64_t kernel_o
   return status;
 }
 
+utils::Status RedisLockAuthority::Inspect(uint64_t inode_ino, bool flock, std::vector<LockHolder> *out) {
+  utils::ExpectInThreadDomain();
+  if (out == nullptr) {
+    return utils::Status::InvalidArgument("missing lock inspection output");
+  }
+  const auto generation = owner_lease_.generation();
+  auto status = CheckLease(generation);
+  if (!status.ok()) {
+    return status;
+  }
+  const auto hash = flock ? key_.FlockLock(inode_ino) : key_.PosixLock(inode_ino);
+  std::vector<Holder> holders;
+  bool saw_stale = false;
+  // Unlike GETLK, this inspection must never do lazy stale-record cleanup.
+  status = client_.Transact([&](RedisKvTxn &txn) {
+    holders.clear();
+    return ReadHolders(txn, key_, hash, generation, flock, &holders, &saw_stale);
+  });
+  if (!status.ok()) {
+    return status;
+  }
+  status = CheckLease(generation);
+  if (!status.ok()) {
+    return status;
+  }
+  std::vector<LockHolder> snapshot;
+  snapshot.reserve(holders.size());
+  for (const auto &holder : holders) {
+    LockHolder item{holder.kernel_owner, holder.generation == generation, {}, holder.flock};
+    item.ranges.reserve(holder.ranges.size());
+    for (const auto &range : holder.ranges) {
+      item.ranges.push_back(
+          {range.start, range.end == UINT64_MAX ? 0 : range.end - range.start, range.type, range.pid});
+    }
+    snapshot.push_back(std::move(item));
+  }
+  *out = std::move(snapshot);
+  return utils::Status::OK();
+}
+
 utils::Status RedisLockAuthority::SetFlock(uint64_t inode_ino, uint64_t kernel_owner, FlockType type) {
   utils::ExpectInThreadDomain();
   if (type != FlockType::kShared && type != FlockType::kExclusive && type != FlockType::kUnlock) {
@@ -496,7 +536,9 @@ utils::Status RedisLockAuthority::SetFlock(uint64_t inode_ino, uint64_t kernel_o
       return status;
     }
     bool saw_stale = false;
+    bool released_on_conflict = false;
     status = client_.Transact([&](RedisKvTxn &txn) {
+      released_on_conflict = false;
       std::vector<Holder> holders;
       size_t stored_fields = 0;
       auto status = ReadHolders(txn, key_, hash, generation, true, &holders, &saw_stale, &stored_fields);
@@ -504,14 +546,26 @@ utils::Status RedisLockAuthority::SetFlock(uint64_t inode_ino, uint64_t kernel_o
         return status;
       }
       bool exists = false;
+      FlockType owned_type = FlockType::kUnlock;
+      bool conflict = false;
       for (const auto &holder : holders) {
         if (holder.generation == generation && holder.kernel_owner == kernel_owner) {
           exists = true;
+          owned_type = holder.flock;
           continue;
         }
         if (type != FlockType::kUnlock && (type == FlockType::kExclusive || holder.flock == FlockType::kExclusive)) {
-          return utils::Status::WouldBlock("conflicting BSD flock");
+          conflict = true;
         }
+      }
+      if (conflict) {
+        if (exists && owned_type != type) {
+          // Linux flock conversion is not atomic. Yield the old SH before
+          // waiting for EX, otherwise two SH upgraders deadlock forever.
+          released_on_conflict = true;
+          return SetState(txn, hash, field, "", true);
+        }
+        return utils::Status::WouldBlock("conflicting BSD flock");
       }
       if (!exists && type != FlockType::kUnlock && stored_fields >= kMaxHolders) {
         return utils::Status::NoLocks("inode flock holder limit reached");
@@ -523,7 +577,12 @@ utils::Status RedisLockAuthority::SetFlock(uint64_t inode_ino, uint64_t kernel_o
       if (saw_stale || status.ToErrno() == ENOLCK) {
         CleanupStale(hash);
       }
-      return status.ok() ? CheckLease(generation) : status;
+      if (!status.ok()) {
+        return status;
+      }
+      status = CheckLease(generation);
+      return status.ok() && released_on_conflict ? utils::Status::WouldBlock("flock conversion yielded old lock")
+                                                 : status;
     }
   }
   return utils::Status::IOError("flock outcome could not be confirmed after bounded retries");

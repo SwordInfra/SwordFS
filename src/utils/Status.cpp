@@ -38,6 +38,8 @@ int Status::ToErrno() const {
       return EAGAIN;
     case kNoLocks:
       return ENOLCK;
+    case kInterrupted:
+      return EINTR;
     case kNotEmpty:
       return ENOTEMPTY;
     case kNotPermitted:

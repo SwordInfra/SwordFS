@@ -29,6 +29,9 @@ class RedisMetaImpl : public IMetaEngine {
   RedisMetaImpl &operator=(const RedisMetaImpl &) = delete;
 
   utils::Status Initialize() override;
+  utils::BlockingExecutor &SharedBlockingExecutor() const {
+    return ops_.SharedBlockingExecutor();
+  }
   Status OpenChunkMetadata(ChunkType chunk_type, ChunkMetadataPtr *out) override;
   Status BindChunkCleanupWorkEncoder(chunk::internal::ChunkCleanupWorkEncoder *encoder) override;
   utils::Status FormatVolume(const SwordFsVolume &config) override;

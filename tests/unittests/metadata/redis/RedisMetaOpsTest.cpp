@@ -17,6 +17,16 @@
 
 namespace swordfs::metadata {
 
+// Advisory lock probes must run on the same Redis worker pool as metadata
+// operations; both callers are required to preserve the thread domain.
+TEST(RedisMetaOpsTest, SharedExecutorRunsMetadataSideWorkInThreadDomain) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  RedisMetaOps ops(config, UniqueRedisName("shared-executor"));
+  const auto domain = ops.SharedBlockingExecutor().RunFromThread([] { return utils::CurrentExecutionDomain(); });
+  EXPECT_EQ(domain, utils::ExecutionDomain::kThread);
+}
+
 TEST(RedisMetaOpsTest, BackendContextMayBeReleasedByFiberAfterThreadShutdown) {
   RedisMetaConfig config;
   config.host = "127.0.0.1";

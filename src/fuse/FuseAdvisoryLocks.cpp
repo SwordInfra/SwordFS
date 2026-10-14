@@ -5,10 +5,13 @@
 
 #include <sys/file.h>
 
+#include <cerrno>
 #include <limits>
+#include <memory>
 #include <optional>
 
 #include "utils/ExecutionDomain.hpp"
+#include "utils/FiberRuntime.hpp"
 
 namespace swordfs::fuse {
 
@@ -39,15 +42,79 @@ utils::Status FuseAdvisoryLocks::ToRange(const struct flock &lock, bool allow_un
   return utils::Status::OK();
 }
 
-utils::Status FuseAdvisoryLocks::SetPosix(uint64_t inode_ino, uint64_t kernel_owner, const struct flock &lock) {
+utils::Status FuseAdvisoryLocks::SetPosix(uint64_t inode_ino, uint64_t kernel_owner, const struct flock &lock,
+                                          bool blocking, const folly::CancellationToken &token) {
   utils::ExpectInFiberDomain();
   metadata::ILockAuthority::PosixRange range{};
   auto status = ToRange(lock, true, &range);
   if (!status.ok()) {
     return status;
   }
-  return executor_.RunFromFiber(
-      [this, inode_ino, kernel_owner, range] { return authority_.SetPosix(inode_ino, kernel_owner, range); });
+  while (true) {
+    if (blocking && token.isCancellationRequested()) {
+      return utils::Status::Interrupted("cancelled POSIX lock wait");
+    }
+    status = executor_.RunFromFiber(
+        [this, inode_ino, kernel_owner, range] { return authority_.SetPosix(inode_ino, kernel_owner, range); });
+    if (!blocking || range.type == metadata::ILockAuthority::PosixType::kUnlock || status.ToErrno() != EAGAIN) {
+      return status;
+    }
+    status =
+        WaitForAvailability(inode_ino, kernel_owner, false, range, metadata::ILockAuthority::FlockType::kUnlock, token);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+}
+
+utils::Status FuseAdvisoryLocks::WaitForAvailability(uint64_t inode_ino, uint64_t kernel_owner, bool flock,
+                                                     metadata::ILockAuthority::PosixRange range,
+                                                     metadata::ILockAuthority::FlockType flock_type,
+                                                     const folly::CancellationToken &token) {
+  auto waiter = std::make_shared<LockRetryScheduler::Waiter>();
+  waiter->inode_ino = inode_ino;
+  waiter->kernel_owner = kernel_owner;
+  waiter->flock = flock;
+  waiter->range = range;
+  waiter->flock_type = flock_type;
+  if (token.isCancellationRequested()) {
+    return utils::Status::Interrupted("cancelled lock wait");
+  }
+  auto status = scheduler_.RegisterWaiter(waiter);
+  if (!status.ok()) {
+    return status;
+  }
+  auto *runtime = utils::CurrentDriverFiberRuntime();
+  // The cancellation framework owns the request token; this callback only
+  // sends a thread-safe wake notification. The original Fiber unregisters
+  // its own waiter and decides the EINTR-vs-completed-grant outcome.
+  std::unique_ptr<folly::CancellationCallback> cancellation;
+  if (token.canBeCancelled()) {
+    cancellation = std::make_unique<folly::CancellationCallback>(token, [runtime, waiter] {
+      const auto wake = [waiter] {
+        if (!waiter->notified.exchange(true, std::memory_order_acq_rel)) {
+          waiter->baton.post();
+        }
+      };
+      if (runtime == nullptr || !runtime->Post(wake)) {
+        wake();
+      }
+    });
+  }
+  waiter->baton.wait();
+  scheduler_.RemoveWaiter(waiter);
+  cancellation.reset();
+  if (token.isCancellationRequested()) {
+    return utils::Status::Interrupted("cancelled lock wait");
+  }
+  const int error = waiter->probe_error.load(std::memory_order_acquire);
+  if (error == ENOLCK) {
+    return utils::Status::NoLocks("lock inspection exhausted its owner budget");
+  }
+  if (error != 0) {
+    return utils::Status::IOError("lock inspection failed before retry");
+  }
+  return utils::Status::OK();
 }
 
 utils::Status FuseAdvisoryLocks::GetPosix(uint64_t inode_ino, uint64_t kernel_owner, const struct flock &lock,
@@ -97,7 +164,8 @@ bool FuseAdvisoryLocks::CanGrant() const {
   return authority_.CanGrant();
 }
 
-utils::Status FuseAdvisoryLocks::Flock(uint64_t inode_ino, uint64_t kernel_owner, int op) {
+utils::Status FuseAdvisoryLocks::Flock(uint64_t inode_ino, uint64_t kernel_owner, int op,
+                                       const folly::CancellationToken &token) {
   utils::ExpectInFiberDomain();
   metadata::ILockAuthority::FlockType type;
   switch (op & ~LOCK_NB) {
@@ -113,11 +181,21 @@ utils::Status FuseAdvisoryLocks::Flock(uint64_t inode_ino, uint64_t kernel_owner
     default:
       return utils::Status::InvalidArgument("invalid BSD flock operation");
   }
-  if (type != metadata::ILockAuthority::FlockType::kUnlock && !(op & LOCK_NB)) {
-    return utils::Status::OperationNotSupported("blocking BSD flock belongs to #433");
+  const bool blocking = type != metadata::ILockAuthority::FlockType::kUnlock && !(op & LOCK_NB);
+  while (true) {
+    if (blocking && token.isCancellationRequested()) {
+      return utils::Status::Interrupted("cancelled flock wait");
+    }
+    auto status = executor_.RunFromFiber(
+        [this, inode_ino, kernel_owner, type] { return authority_.SetFlock(inode_ino, kernel_owner, type); });
+    if (!blocking || status.ToErrno() != EAGAIN) {
+      return status;
+    }
+    status = WaitForAvailability(inode_ino, kernel_owner, true, {}, type, token);
+    if (!status.ok()) {
+      return status;
+    }
   }
-  return executor_.RunFromFiber(
-      [this, inode_ino, kernel_owner, type] { return authority_.SetFlock(inode_ino, kernel_owner, type); });
 }
 
 utils::Status FuseAdvisoryLocks::UnlockFlockOwner(uint64_t inode_ino, uint64_t kernel_owner) {

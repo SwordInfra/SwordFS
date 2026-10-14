@@ -123,6 +123,14 @@ design, implementation, test and review evidence. Use the repository's
 | #433 | Interruptible waits, cancellation, cross-mount integration and activation | #431, #432 (and the shared prerequisites) |
 | #464 | OFD byte-range record-lock feasibility, owner lifetime and separate implementation | #428; independent of #431 development |
 
+The #433 integration work is decomposed into native sub-issues:
+**#471** common bounded Fiber wait/retry, **#472** FUSE interrupt handling,
+**#473** negotiated BSD flock/two-Mount conformance, and **#474** negotiated
+POSIX record-lock/two-Mount conformance **only after #464's OFD shared-
+transport safety gate**. #473 does not depend on implementing OFD record
+locks. The common wait implementation is reviewed in
+[`471-fiber-lock-wait.md`](471-fiber-lock-wait.md).
+
 The actual changes may be reviewed separately as each child reaches its own
 design-readiness checkpoint. The parent remains open until Redis integration, relevant fstests
 classification, post-merge main CI and review are reconciled. #429 establishes **owner lease validity**, not a general
@@ -376,10 +384,11 @@ atomic state visible at **FUSE lock callback admission** and again **before a
 successful lock-operation reply**. Post-terminal new lock requests fail with
 EIO, not falsely acknowledged. **A lease-loss event does not call
 `fuse_session_exit` or trigger unmount.** Ordinary FUSE requests and healthy
-metadata/data I/O continue. Only on an explicit user unmount do we stop new
-lock admissions, quiesce lock work, join the renewal worker, and attempt a
-single-attempt `DEL` of the exact owner lease key before ordinary
-`FuseSessionGuard`/Volume teardown. No enumerating per-inode lock records or
+metadata/data I/O continue. Only after a user-initiated unmount does the existing Mount teardown
+clean up the FUSE session and best-effort revoke the active Owner Lease
+(mark it terminal, stop renewal and attempt bounded DEL of the exact
+lease key). #471 does not add a broad direct-process-exit branch.
+No enumerating per-inode lock records or
 invented asynchronous cleanup guarantee; already executing application I/O
 cannot be retroactively fenced. The heartbeat must never call libfuse reply
 APIs or borrow a destroyed mount/session reference. Existing FUSE
@@ -556,14 +565,36 @@ defined above.
 
 ### Waiting, wakeup, cancellation and reply ownership
 
-Nonblocking operations perform one conditional grant. Blocking `F_SETLKW`
-and blocking `flock` use a bounded **wait/recheck loop**, not a long-lived
-Redis transaction or polling spin. A waiter observes a per-inode version,
-subscribes to a wakeup channel, then rechecks version/authority **after**
-subscription and before sleeping. Redis notifications only improve latency:
-missed notifications must recover through version comparison and a bounded
-recheck interval. Only a new atomic conflict check can grant the lock. Bound
-queued waiters, memory, and notification fanout; strict FIFO is not promised.
+**#471** implements a single logical **Mount-owned `LockRetryScheduler`**
+shared by traditional POSIX and BSD flock requests. A blocking request
+makes one immediate #430 nonblocking Redis try-lock; after a genuine
+`EAGAIN`, it registers with the Mount scheduler and suspends its Fiber on
+its own `utils::FiberBaton` (not a Redis worker). On each common Folly
+timer tick, a coordinator Fiber runs **read-only, grouped** lock-state
+probes for waiting `(inode, lock class)` groups using the **existing**
+BlockingExecutor and #430's authoritative Holder/Owner Lease validity
+rules. It compares exact requested ranges and SH/EX compatibility,
+then **notifies only** requests that *might* be grantable. Each awakened
+**original request Fiber** executes its own existing #430 atomic
+`SetPosix`/`SetFlock`: **the Scheduler never grants, reserves, converts,
+unlocks or otherwise changes a Redis lock**. If another Mount races and
+the original try-lock returns `EAGAIN`, the request simply re-registers.
+The read-only probe never promises a grant. Grouped reads and precise
+wakeups, rather than timer sharing alone, are what coalesce requests.
+No long-running WATCH transaction, busy polling, durable Redis waiter
+queue, custom timing wheel, Redis Pub/Sub, inode version/notification
+protocol or strict FIFO is required. A **minimal pure read-only group
+inspection** may be needed because `GetPosix` is a per-request lookup
+with lazy cleanup and `GetFlock` does not exist. It must reuse #430's
+validity semantics and must not alter existing grant APIs or storage.
+Redis pipelining of read-only group probes can be evaluated, but no
+batch-mutation/authorization protocol is needed. Multiple FUSE worker
+FiberRuntimes have distinct EventBases: cross-thread scheduling, Baton
+lifetime, cancellation
+and callbacks must be safe. Compatible shared readers and disjoint POSIX
+ranges must not be indefinitely starved by over-coarse inode batching.
+A blocking call may wait indefinitely under normal operation, but resource
+admission, retry rate and unmount response time must be bounded.
 
 The shared request-cancellation framework (#477) enables FUSE interrupt
 reception with `conn->no_interrupt = 0`, independent of lock activation.
@@ -574,36 +605,68 @@ The lock operation owns its cancellation callback and safely dispatches its
 waiter wakeup through `FiberRuntime::Post`. The request fiber coordinates
 exactly one reply and interrupt-handler removal:
 
-```
-NEW -> CHECKING -> WAITING --wake/recheck--> CHECKING
-         |           |
-         +-----------+--interrupt--> CANCELLING -> DONE_INTERRUPTED
-CHECKING --atomic grant--> GRANTED_PENDING_REPLY
-GRANTED_PENDING_REPLY --successfully delivered--> DONE_GRANTED
-GRANTED_PENDING_REPLY --cancel/failed delivery--> RESOLVE_UNDELIVERED
-RESOLVE_UNDELIVERED --safe compensation--> DONE_WITHOUT_NEW_GRANT
-```
+**Only user/operator action initiates umount.** Lock errors, long
+waits, Redis failures, lease expiry and cancellation may never trigger
+unmount. #471 retains the existing FuseSessionGuard / RunMount cleanup,
+including FiberRuntime shutdown and Owner Lease revoke; it introduces
+no broad _Exit(0) path. The FUSE remote-lock capabilities remain
+disabled. When #473/#474 enable kernel-visible blocking locks,
+revisit the user-initiated unmount lifecycle as needed rather than
+installing a broad exit or mass-cancellation mechanism prematurely.
 
-An interrupted waiter must not leave a **ghost lock**. If the backend grant
-committed but no success reply was delivered, compensate with the **exact
-operation/grant identity**, never by blindly removing all locks for that
-owner after a newer operation could have succeeded. Do not reply `EINTR`
-while still leaving an in-flight request eligible to acquire a lock.
-**A lock conversion complicates compensation**: undoing a newly acquired
-range can differ from restoring a prior same-owner range, and another owner
-may have acquired an intervening compatible lock. Conditional compensation
-must validate the owner revision and the whole affected conflict state; a
-reply failure cannot justify overwriting newer lock grants to restore the
-old shape. If a conversion cannot be safely reversed, the protocol needs an
-explicitly justified failure/owner-revocation policy before activation.
-The Redis commit and kernel reply are not one atomic transaction; an
-unqualified claim of perfect cancel-and-restore semantics would be false.
-Interrupted/cancelled, success-delivered, ambiguous reply-delivery, and
-compensation-error cases require explicit deterministic tests. A late
-interrupt after a successfully delivered reply cannot retroactively
-withdraw the successful grant. Deadlock detection/`EDEADLK` is **not**
-automatically provided by this wait loop; investigate pinned workloads
-before claiming Linux-equivalent cross-mount deadlock detection.
+**#477 already implements** FUSE interrupt-to-token forwarding, the
+`fuse_req_interrupt_func` registration/unregistration lifecycle and
+`FiberRuntime::Post()`. **#472** adds lock-specific EINTR/grant-vs-signal
+handling; #471 does not activate remote POSIX or BSD flock capabilities.
+The request-owning Fiber remains responsible for the lock reply; the #477
+reply adapter unregisters the FUSE interrupt callback. Cancellation **before
+submitting the next attempt** prevents that new grant attempt; an already-
+submitted attempt may still confirm a grant and win a concurrent signal
+as the tested Linux FUSE contract permits. No blanket rollback is
+valid when the original lock was converted or another owner has since
+acquired a compatible lock.
+
+The **#471/#472 cancellation seam** consumes the request-level
+`folly::CancellationToken` from `SwordFsContext`, with an operation-owned
+`folly::CancellationCallback` and exact `utils::FiberBaton` wakeup. The
+Scheduler itself has no cancellation state or `CancelWaiter()`. Race-safe
+registration
+and unregistration. A request cancelled before registering must not sleep;
+one cancelled during a Scheduler read-only probe must not be notified
+into a destroyed waiter or initiate another TryLock. A request cancelled
+after the probe's notification but **before its next try-lock is issued**
+must not submit the try-lock. By contrast, a signal arriving while the
+request's **already-submitted Redis mutation** is still executing cannot
+justify an immediate `EINTR`: only the request Fiber may reply, **after**
+the in-flight attempt result is known. A confirmed success may beat a
+late interrupt; `EAGAIN` or other ungranted outcome may terminate the
+cancelled request with `EINTR`. Neither the read-only Scheduler nor the
+interrupt callback replies, reserves a grant or modifies Redis locks.
+The cancellation token stays cancelled across retries; Folly Baton reset
+requires no concurrent poster. User-requested umount is separate from per-waiter cancellation;
+#471 preserves the existing Mount teardown path.
+
+Redis commit and FUSE reply are not a single atomic transaction. Keep #430's
+bounded same-intent retry followed by **error only** on unresolved outcome;
+do not invent an unconditional owner-revoke/forced-unmount/global reply
+permit/journal/conditional compensation framework to claim otherwise.
+**No advisory-lock failure can trigger FUSE umount or session exit**:
+Redis errors, exhausted ambiguous outcomes, expired Lock Owner Lease,
+`ENOLCK`, timeout of an individual Redis attempt and signal cancellation
+return errors for the affected lock operation, not Mount teardown. The
+Mount remains active with ordinary I/O independent of lock health.
+Mount teardown is independent from the individual lock-error path
+and is never initiated by a lock failure. While waiting, the *application syscall* remains blocked on the
+kernel FUSE reply, but the daemon's request Fiber sleeps on a
+`utils::FiberBaton` until the Mount scheduler selects it for a new Redis
+attempt based on a **read-only** availability probe or individual cancellation
+wakes it. Only that original Fiber then retries the existing atomic
+grant. No FUSE dispatcher or Redis worker is pinned for the wait.
+Distinguish normal interrupt semantics from this explicit failure-limit
+contract. Tests must cover early/during/late interrupt, reply ownership,
+failed reply and normal teardown; #473/#474 may activate only their own
+proven remote capabilities. A cross-Mount deadlock detector and strict
+lock-order fairness are not implicitly provided by retry loops.
 
 ### Design sign-off / test matrix
 
@@ -732,18 +795,16 @@ race. Revalidate on materially different target kernel/libfuse versions
 before claiming the same transport contract. The probe did **not** enable
 unsupported lock classes in SwordFS.
 
-For #429 the implemented Redis 7.x owner-lifecycle design uses validated
+The implemented #429 Redis owner-lifecycle design uses validated
 `WATCH`/`GET`/`MULTI`/`INCRBY`/`EXEC`, `SET NX PX`, `PEXPIRE XX`, and `DEL`,
 with default 60-second owner TTL, 10-second renew cadence, and 15-second
-conservative self-stop reserve. Native Redis and FUSE-lifecycle tests verify
-these owner operations; the separate #430 lock-grant protocol and its FUSE
-integration remain future work. For #430, prove `WATCH` expiry-at-`EXEC` plus full watched
-lease set under load, then finalize operation-ID retention, lazy-expired-lock
-filtering and bounded physical GC (or justify narrowly scoped Lua if native
-optimistic transactions fail their proof). Document the bounded
-waiter resource policy, **conversion
-compensation**, and exact failure responses before the implementation is
-deemed ready. Protect the following
+conservative self-stop reserve. #430 implements the independent Redis lock
+grant authority with bounded ambiguous-EXEC retry then error-only; #431/#432
+implement the nonblocking FUSE adapters. #471 must document and test bounded
+waiter resources, **standard flock conversion behavior**, voluntary-unmount
+termination and failure responses. Do not mandate a global reply-delivery
+or lock-conversion compensation protocol to promise atomicity that does not
+exist between Redis and the kernel. Protect the following
 with Redis tests and end-to-end / two-mount tests: lock range
 split/merge, read/read and read/write, owner upgrades, `GETLK` PID
 limitations, POSIX any-close, flock last-close, `LOCK_NB`, wait and wake,
