@@ -24,5 +24,8 @@ class E2EDiagnosticsTest : public ::testing::Test {
 // prevents the normal required E2E suite from becoming intentionally red.
 TEST_F(E2EDiagnosticsTest, DISABLED_PreservesDaemonGenerationsOnFailure) {
   ASSERT_TRUE(fixture_.Remount());
+  // Both clean unmount and intentional crash must leave a reaped-child
+  // record. CI inspects the reports after the controlled failure.
+  ASSERT_TRUE(fixture_.CrashAndRemount());
   ADD_FAILURE() << "controlled failure used to verify E2E diagnostic retention";
 }

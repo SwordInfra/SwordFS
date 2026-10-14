@@ -465,14 +465,24 @@ jobs:
           fi
 
           mapfile -t daemon_logs < <(find "${SWORDFS_E2E_DIAGNOSTICS_DIR}" -type f -name 'mount-*.log' -print | sort)
-          if [ "${#daemon_logs[@]}" -ne 2 ]; then
-            echo "ERROR: expected two daemon-generation logs after controlled failure; found ${#daemon_logs[@]}"
+          if [ "${#daemon_logs[@]}" -ne 3 ]; then
+            echo "ERROR: expected three daemon-generation logs after controlled failure; found ${#daemon_logs[@]}"
             find "${SWORDFS_E2E_DIAGNOSTICS_DIR}" -maxdepth 3 -type f -print || true
             exit 1
           fi
           for log in "${daemon_logs[@]}"; do
             test -s "${log}"
           done
+
+          diagnostics="${SWORDFS_E2E_DIAGNOSTICS_DIR}/E2EDiagnosticsTest_DISABLED_PreservesDaemonGenerationsOnFailure"
+          grep -qx 'kind=exit' "${diagnostics}/mount-1.exit"
+          grep -qx 'code=0' "${diagnostics}/mount-1.exit"
+          grep -qx 'requested_stop=clean_unmount' "${diagnostics}/mount-1.exit"
+          grep -qx 'kind=signal' "${diagnostics}/mount-2.exit"
+          grep -qx 'signal=9' "${diagnostics}/mount-2.exit"
+          grep -qx 'requested_stop=intentional_crash' "${diagnostics}/mount-2.exit"
+          grep -qx 'kind=exit' "${diagnostics}/mount-3.exit"
+          grep -qx 'code=0' "${diagnostics}/mount-3.exit"
 
           rm -rf "${SWORDFS_E2E_DIAGNOSTICS_DIR}"
           # The controlled failing case is diagnostics verification, not E2E
@@ -481,6 +491,25 @@ jobs:
 
       - name: Test (E2E)
         run: sg fuse -c "bash scripts/testing/run-e2e.sh --gtest_color=no"
+
+      - name: Capture E2E runner crash and OOM evidence
+        if: failure()
+        run: |
+          set +e
+          evidence="${SWORDFS_E2E_DIAGNOSTICS_DIR}/runner"
+          mkdir -p "${evidence}"
+          { date -u; uname -a; cat /proc/uptime; } > "${evidence}/environment.txt" 2>&1
+          sudo journalctl -k --no-pager -n 300 > "${evidence}/kernel.log" 2>&1 || \
+            sudo dmesg --time-format=iso | tail -n 300 > "${evidence}/kernel.log" 2>&1
+          if command -v coredumpctl >/dev/null 2>&1; then
+            coredumpctl --no-pager list > "${evidence}/coredumps.txt" 2>&1
+          fi
+          for file in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.events.local \
+                      /sys/fs/cgroup/memory.max /proc/pressure/memory; do
+            if [ -r "${file}" ]; then
+              { echo "=== ${file} ==="; cat "${file}"; } >> "${evidence}/memory.txt"
+            fi
+          done
 
       - name: Upload E2E failure diagnostics
         if: failure()

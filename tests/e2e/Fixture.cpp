@@ -9,6 +9,7 @@
 #include <folly/hash/Hash.h>
 #include <linux/magic.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -117,7 +118,9 @@ bool Fixture::Remount() {
     std::fprintf(stderr, "E2E: daemon disappeared before clean remount\n");
     return false;
   }
-  CleanupRuntimeState();
+  if (!CleanupRuntimeState()) {
+    return false;
+  }
   if (!IsDaemonGone()) {
     std::fprintf(stderr, "E2E: previous daemon did not exit before remount\n");
     if (daemon_pid_ > 0) {
@@ -138,14 +141,13 @@ bool Fixture::CrashAndRemount() {
     std::fprintf(stderr, "E2E: failed to kill daemon %d: %s\n", daemon_pid_, std::strerror(errno));
     return false;
   }
+  daemon_stop_reason_ = "intentional_crash";
 
-  constexpr int kMaxRetries = 40;
-  for (int i = 0; i < kMaxRetries; ++i) {
-    if (::kill(daemon_pid_, 0) != 0 && errno == ESRCH) {
-      CleanupRuntimeState();
-      return SetUp();
+  if (IsDaemonGone()) {
+    if (!CleanupRuntimeState()) {
+      return false;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    return SetUp();
   }
 
   std::fprintf(stderr, "E2E: killed daemon %d did not exit before crash remount\n", daemon_pid_);
@@ -197,25 +199,32 @@ bool Fixture::StartMount() {
 
   const std::string log_path = NextMountLogPath();
   std::ostringstream cmd;
-  cmd << FindSwordfsBin() << " --log-file " << log_path << " mount " << " --volume " << volume_name_ << " --meta "
-      << metadata_url << " --fuse-threads 2" << " --storage-thread-count 2" << " --pidfile " << work_dir_
-      << "/swordfs.pid" << " " << extra_mount_options_ << " " << mountpoint_ << " 2>&1";
+  cmd << "exec " << FindSwordfsBin() << " --log-file " << log_path << " mount -f --volume " << volume_name_
+      << " --meta " << metadata_url << " --fuse-threads 2 --storage-thread-count 2 " << extra_mount_options_ << " "
+      << mountpoint_;
+  const std::string command = cmd.str();
 
-  int ret = std::system(cmd.str().c_str());
-  if (ret != 0) {
-    std::fprintf(stderr, "E2E: mount failed (exit=%d): %s\n", WEXITSTATUS(ret), cmd.str().c_str());
+  // The shell's exec replaces it with the foreground SwordFS process, so
+  // waitpid below observes the actual FUSE daemon rather than an orphan PID.
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    std::fprintf(stderr, "E2E: fork mount failed: %s\n", std::strerror(errno));
     return false;
   }
-
-  // Read the daemon PID written by --pidfile.  We cannot use
-  // getpid() here because system() forks; the daemon runs as a
-  // descendant of that fork, not as the test process.
-  std::string pidfile = work_dir_ + "/swordfs.pid";
-  std::ifstream pfs(pidfile);
-  if (pfs) {
-    pfs >> daemon_pid_;
+  if (pid == 0) {
+    const int fd = ::open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0 || ::dup2(fd, STDOUT_FILENO) < 0 || ::dup2(fd, STDERR_FILENO) < 0) {
+      ::_exit(127);
+    }
+    if (fd > STDERR_FILENO) {
+      ::close(fd);
+    }
+    ::execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char *>(nullptr));
+    ::_exit(127);
   }
-
+  daemon_pid_ = pid;
+  daemon_reaped_ = false;
+  daemon_stop_reason_ = "none";
   return true;
 }
 
@@ -228,6 +237,10 @@ bool Fixture::WaitForMount() {
       mounted_ = true;
       return true;
     }
+    if (PollDaemonExit()) {
+      std::fprintf(stderr, "E2E: daemon exited before mount became ready; see %s\n", diagnostics_dir_.c_str());
+      return false;
+    }
     std::this_thread::sleep_for(std::chrono::microseconds(kDelayUs));
   }
 
@@ -236,35 +249,74 @@ bool Fixture::WaitForMount() {
 }
 
 bool Fixture::StopMount() {
-  if (!mounted_) {
-    return true;
-  }
-  std::string cmd = "fusermount3 -u " + mountpoint_;
-  if (std::system(cmd.c_str()) != 0) {
-    // Force-unmount as fallback.
-    cmd = "fusermount3 -uz " + mountpoint_;
-    if (std::system(cmd.c_str()) != 0) {
-      std::fprintf(stderr, "E2E: failed to unmount %s\n", mountpoint_.c_str());
-      return false;
+  bool unmounted = true;
+  if (mounted_) {
+    if (daemon_stop_reason_ == "none") {
+      daemon_stop_reason_ = "clean_unmount";
     }
+    std::string cmd = "fusermount3 -u " + mountpoint_;
+    if (std::system(cmd.c_str()) != 0) {
+      cmd = "fusermount3 -uz " + mountpoint_;
+      if (std::system(cmd.c_str()) != 0) {
+        std::fprintf(stderr, "E2E: failed to unmount %s\n", mountpoint_.c_str());
+        unmounted = false;
+      }
+    }
+    mounted_ = false;
   }
-  mounted_ = false;
   if (daemon_pid_ > 0 && !IsDaemonGone()) {
-    std::fprintf(stderr, "E2E: daemon %d did not exit after unmount\n", daemon_pid_);
+    std::fprintf(stderr, "E2E: daemon %d did not exit after unmount; terminating\n", daemon_pid_);
+    daemon_stop_reason_ = "forced_cleanup";
+    (void)::kill(daemon_pid_, SIGTERM);
+    if (!IsDaemonGone()) {
+      (void)::kill(daemon_pid_, SIGKILL);
+      (void)IsDaemonGone();
+    }
     return false;
   }
+  return unmounted;
+}
+
+bool Fixture::PollDaemonExit() {
+  if (daemon_reaped_) {
+    return true;
+  }
+  if (daemon_pid_ <= 0) {
+    return false;
+  }
+  int status = 0;
+  const pid_t result = ::waitpid(daemon_pid_, &status, WNOHANG);
+  if (result == 0 || (result < 0 && errno == EINTR)) {
+    return false;
+  }
+  if (result < 0) {
+    std::fprintf(stderr, "E2E: waitpid(%d) failed: %s\n", daemon_pid_, std::strerror(errno));
+    return false;
+  }
+  daemon_reaped_ = true;
+  std::ofstream report(diagnostics_dir_ + "/mount-" + std::to_string(mount_generation_) + ".exit");
+  report << "pid=" << daemon_pid_ << '\n';
+  report << "requested_stop=" << daemon_stop_reason_ << '\n';
+  if (WIFEXITED(status)) {
+    report << "kind=exit\ncode=" << WEXITSTATUS(status) << '\n';
+  } else if (WIFSIGNALED(status)) {
+    report << "kind=signal\nsignal=" << WTERMSIG(status) << '\n' << "core_dump=" << (WCOREDUMP(status) ? 1 : 0) << '\n';
+  } else {
+    report << "kind=other\nwait_status=" << status << '\n';
+  }
+  std::fprintf(stderr, "E2E: daemon pid=%d exited; see %s\n", daemon_pid_, diagnostics_dir_.c_str());
   return true;
 }
 
-bool Fixture::IsDaemonGone() const {
+bool Fixture::IsDaemonGone() {
   if (daemon_pid_ <= 0) {
     return false;
   }
   // fusermount3 -u returns before the daemon has fully exited;
   // Coverage-instrumented daemons may spend extra time flushing counters at exit;
-  // wait for the real process lifetime rather than assuming unmount completion implies exit.
-  for (int i = 0; i < 40; ++i) {
-    if (kill(daemon_pid_, 0) != 0 && errno == ESRCH) {
+  // waitpid reaps the child, and preserves its termination cause once.
+  for (int i = 0; i < 100; ++i) {
+    if (PollDaemonExit()) {
       return true;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -286,14 +338,14 @@ void Fixture::CleanupWorkDir() {
   std::system(cmd.c_str());
 }
 
-bool Fixture::DaemonMissingBeforeTeardown() const {
+bool Fixture::DaemonMissingBeforeTeardown() {
   if (!mounted_) {
     return false;
   }
   if (daemon_pid_ <= 0) {
     return true;
   }
-  return ::kill(daemon_pid_, 0) != 0 && errno == ESRCH;
+  return PollDaemonExit();
 }
 
 // ────────────────────────────────────────────────────────────────
