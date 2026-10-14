@@ -9,6 +9,7 @@
 #pragma once
 
 #define FUSE_USE_VERSION 312
+#include <folly/CancellationToken.h>
 #include <fuse_lowlevel.h>
 #include <sys/types.h>
 
@@ -29,6 +30,7 @@ struct SwordFsContext {
   gid_t gid = 0;
   pid_t pid = 0;
   mode_t umask = 0;
+  folly::CancellationToken cancellation_token;
 };
 
 }  // namespace swordfs::utils

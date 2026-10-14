@@ -7,6 +7,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <folly/CancellationToken.h>
 #include <folly/fibers/Baton.h>
 #include <folly/fibers/FiberManagerMap.h>
 #include <folly/io/IOBuf.h>
@@ -33,6 +34,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -83,6 +85,13 @@ struct FuseReplyCapture {
   void *user_data = nullptr;
   std::mutex mutex;
   std::condition_variable cv;
+  folly::fibers::Baton unregister_attempted;
+  fuse_interrupt_func_t interrupt_callback = nullptr;
+  void *interrupt_data = nullptr;
+  bool interrupted = false;
+  int interrupt_registrations = 0;
+  int interrupt_unregistrations = 0;
+  int attr_reply_calls = 0;
   bool replied = false;
   std::optional<int> error;
   std::optional<fuse_entry_param> entry;
@@ -111,6 +120,14 @@ struct FuseReplyCapture {
   bool Wait() {
     std::unique_lock lock(mutex);
     return cv.wait_for(lock, std::chrono::seconds(5), [&] { return replied; });
+  }
+
+  void Interrupt() {
+    std::lock_guard lock(mutex);
+    interrupted = true;
+    if (interrupt_callback != nullptr) {
+      interrupt_callback(reinterpret_cast<fuse_req_t>(this), interrupt_data);
+    }
   }
 };
 
@@ -166,6 +183,24 @@ extern "C" void *fuse_req_userdata(fuse_req_t req) {
   return CaptureFor(req)->user_data;
 }
 
+extern "C" void fuse_req_interrupt_func(fuse_req_t req, fuse_interrupt_func_t func, void *data) {
+  auto *capture = CaptureFor(req);
+  if (func == nullptr) {
+    capture->unregister_attempted.post();
+  }
+  std::lock_guard lock(capture->mutex);
+  capture->interrupt_callback = func;
+  capture->interrupt_data = data;
+  if (func == nullptr) {
+    ++capture->interrupt_unregistrations;
+  } else {
+    ++capture->interrupt_registrations;
+    if (capture->interrupted) {
+      func(req, data);
+    }
+  }
+}
+
 extern "C" int fuse_reply_lock(fuse_req_t req, const struct flock *lock) {
   auto *capture = CaptureFor(req);
   int reply_result = 0;
@@ -208,14 +243,17 @@ extern "C" int fuse_reply_entry(fuse_req_t req, const fuse_entry_param *entry) {
 
 extern "C" int fuse_reply_attr(fuse_req_t req, const struct stat *attr, double attr_timeout) {
   auto *capture = CaptureFor(req);
+  int reply_result = 0;
   {
     std::lock_guard lock(capture->mutex);
+    ++capture->attr_reply_calls;
     capture->attr = *attr;
     capture->attr_timeout = attr_timeout;
     capture->replied = true;
+    reply_result = capture->reply_result;
   }
   capture->cv.notify_one();
-  return 0;
+  return reply_result;
 }
 
 extern "C" int fuse_reply_statx(fuse_req_t req, int flags, struct statx *attr, double attr_timeout) {
@@ -771,6 +809,9 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   }
   Status GetInode(InodeID ino, SwordFsInode *out) override {
     ++get_inode_calls_;
+    if (on_get_inode_) {
+      on_get_inode_();
+    }
     if (out) {
       auto it = inodes_.find(ino);
       if (it != inodes_.end()) {
@@ -1147,6 +1188,10 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
     dir_seek_failure_ = std::move(status);
   }
 
+  void set_get_inode_callback(std::function<void()> callback) {
+    on_get_inode_ = std::move(callback);
+  }
+
   void set_dir_peek_status(Status status) {
     dir_peek_status_ = std::move(status);
   }
@@ -1185,6 +1230,7 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
   size_t create_status_index_ = 0;
   size_t unlink_status_index_ = 0;
   int get_inode_calls_ = 0;
+  std::function<void()> on_get_inode_;
   int get_inodes_calls_ = 0;
   size_t max_get_inodes_batch_size_ = 0;
   std::vector<InodeID> last_get_inodes_ids_;
@@ -1224,6 +1270,147 @@ class VfsImplIntegrationTest : public ::testing::Test {
 
 }  // namespace
 
+TEST_F(VfsImplIntegrationTest, PreexistingFuseInterruptReachesRequestContextAndUnregistersBeforeReply) {
+  FuseReplyCapture capture;
+  std::atomic<bool> inspected{false};
+  std::atomic<bool> cancelled{false};
+  mock_meta_->set_get_inode_callback([&] {
+    cancelled.store(folly::fibers::local<swordfs::utils::SwordFsContext>().cancellation_token.isCancellationRequested(),
+                    std::memory_order_release);
+    inspected.store(true, std::memory_order_release);
+  });
+
+  capture.Interrupt();
+  swordfs::fuse::VfsHookFactory::SwordFsGetattr(reinterpret_cast<fuse_req_t>(&capture), 1, nullptr);
+
+  ASSERT_TRUE(capture.Wait());
+  EXPECT_TRUE(inspected.load(std::memory_order_acquire));
+  EXPECT_TRUE(cancelled.load(std::memory_order_acquire));
+  EXPECT_EQ(capture.interrupt_registrations, 1);
+  EXPECT_EQ(capture.interrupt_unregistrations, 1);
+  EXPECT_EQ(capture.interrupt_callback, nullptr);
+}
+
+TEST_F(VfsImplIntegrationTest, ConcurrentFuseInterruptReachesInFlightRequestWithoutReplyingFromCallback) {
+  FuseReplyCapture capture;
+  folly::fibers::Baton entered;
+  folly::fibers::Baton release;
+  std::atomic<bool> cancelled{false};
+  mock_meta_->set_get_inode_callback([&] {
+    entered.post();
+    release.wait();
+    cancelled.store(folly::fibers::local<swordfs::utils::SwordFsContext>().cancellation_token.isCancellationRequested(),
+                    std::memory_order_release);
+  });
+  swordfs::fuse::VfsHookFactory::SwordFsGetattr(reinterpret_cast<fuse_req_t>(&capture), 1, nullptr);
+  const bool started = swordfs::test::WaitForBaton(entered);
+  EXPECT_TRUE(started);
+  if (started) {
+    capture.Interrupt();
+  }
+  release.post();
+
+  ASSERT_TRUE(capture.Wait());
+  EXPECT_TRUE(cancelled.load(std::memory_order_acquire));
+  EXPECT_EQ(capture.error_reply_calls, 0) << "interrupt callback must not reply or alter operation semantics";
+  EXPECT_EQ(capture.interrupt_registrations, 1);
+  EXPECT_EQ(capture.interrupt_unregistrations, 1);
+  EXPECT_EQ(capture.interrupt_callback, nullptr);
+}
+
+TEST_F(VfsImplIntegrationTest, InterruptDispatchBlocksUnregisterAndFailedReplyUntilCallbackCompletes) {
+  FuseReplyCapture capture;
+  capture.reply_result = -EIO;
+  folly::fibers::Baton operation_entered;
+  folly::fibers::Baton release_operation;
+  folly::fibers::Baton callback_entered;
+  folly::fibers::Baton release_callback;
+  std::unique_ptr<folly::CancellationCallback> operation_callback;
+  mock_meta_->set_get_inode_callback([&] {
+    operation_callback = std::make_unique<folly::CancellationCallback>(
+        folly::fibers::local<swordfs::utils::SwordFsContext>().cancellation_token, [&] {
+          callback_entered.post();
+          release_callback.wait();
+        });
+    operation_entered.post();
+    release_operation.wait();
+  });
+
+  swordfs::fuse::VfsHookFactory::SwordFsGetattr(reinterpret_cast<fuse_req_t>(&capture), 1, nullptr);
+  const bool started = swordfs::test::WaitForBaton(operation_entered);
+  EXPECT_TRUE(started);
+  if (!started) {
+    release_operation.post();
+    return;
+  }
+
+  std::thread interrupt([&] { capture.Interrupt(); });
+  // This is an actual Folly cancellation callback synchronously executing
+  // inside the libfuse interrupt callback, not a fake pre-dispatch gate.
+  const bool callback_running = swordfs::test::WaitForBaton(callback_entered);
+  EXPECT_TRUE(callback_running);
+  release_operation.post();
+  if (callback_running) {
+    EXPECT_TRUE(swordfs::test::WaitForBaton(capture.unregister_attempted));
+  }
+  release_callback.post();
+  interrupt.join();
+
+  ASSERT_TRUE(capture.Wait());
+  EXPECT_EQ(capture.attr_reply_calls, 1);
+  EXPECT_EQ(capture.error_reply_calls, 0);
+  EXPECT_EQ(capture.interrupt_registrations, 1);
+  EXPECT_EQ(capture.interrupt_unregistrations, 1);
+  EXPECT_EQ(capture.interrupt_callback, nullptr);
+  EXPECT_EQ(capture.reply_result, -EIO);
+}
+
+TEST_F(VfsImplIntegrationTest, RejectedRequestDetachesInterruptBeforeErrorReply) {
+  ASSERT_TRUE(swordfs::utils::InitFiberRuntime());
+  auto *runtime = swordfs::utils::ThisFiberRuntime();
+  ASSERT_NE(runtime, nullptr);
+  folly::fibers::Baton blocking_post_started;
+  folly::fibers::Baton release_post;
+  folly::fibers::Baton stopped;
+  ASSERT_TRUE(runtime->Post([&] {
+    blocking_post_started.post();
+    release_post.wait();
+  }));
+  const bool started = swordfs::test::WaitForBaton(blocking_post_started);
+  EXPECT_TRUE(started);
+  if (!started) {
+    release_post.post();
+    return;
+  }
+
+  std::thread shutdown([&] {
+    swordfs::utils::ShutdownFiberRuntime();
+    stopped.post();
+  });
+  const auto deadline = std::chrono::steady_clock::now() + swordfs::test::kAsyncCompletionWatchdog;
+  while (runtime->IsAccepting() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  const bool stopping = !runtime->IsAccepting();
+  EXPECT_TRUE(stopping);
+  FuseReplyCapture capture;
+  if (stopping) {
+    // Cancellation may precede admission failure. Even the immediately
+    // invoked interrupt must not reply or outlive the rejected request.
+    capture.Interrupt();
+    swordfs::fuse::VfsHookFactory::SwordFsGetattr(reinterpret_cast<fuse_req_t>(&capture), 1, nullptr);
+    EXPECT_TRUE(capture.Wait());
+    EXPECT_EQ(capture.error, EIO);
+    EXPECT_EQ(capture.error_reply_calls, 1);
+    EXPECT_EQ(capture.interrupt_registrations, 1);
+    EXPECT_EQ(capture.interrupt_unregistrations, 1);
+    EXPECT_EQ(capture.interrupt_callback, nullptr);
+  }
+  release_post.post();
+  swordfs::test::WaitForBatonOrAbort(stopped, "global runtime shutdown after rejected FUSE request");
+  shutdown.join();
+}
+
 TEST(FuseSetAttrFieldTest, KillSuidgidProtocolBitMapsToSemanticIntent) {
   const auto fields = swordfs::metadata::FromFuseSetAttrFields(FUSE_SET_ATTR_KILL_SUID);
 
@@ -1259,6 +1446,16 @@ TEST(VfsHookFactoryTest, InitDisablesUserspaceKillprivAndAtomicOTrunc) {
   EXPECT_EQ(conn.want & kUserspaceKillprivCaps, 0U);
   EXPECT_EQ(conn.want_ext & kUserspaceKillprivCaps, 0U);
 
+  swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
+  swordfs::volume::VolumeImpl::Initialize();
+}
+
+TEST(VfsHookFactoryTest, InitEnablesFuseInterruptTransportForRequestCancellation) {
+  swordfs::volume::VolumeImpl::Initialize();
+  struct fuse_conn_info conn{};
+  conn.no_interrupt = 1;
+  swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &conn);
+  EXPECT_EQ(conn.no_interrupt, 0);
   swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
   swordfs::volume::VolumeImpl::Initialize();
 }

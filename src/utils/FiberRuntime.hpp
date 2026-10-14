@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <folly/Function.h>
 #include <folly/fibers/FiberManagerMap.h>
 
 #include <atomic>
@@ -58,36 +59,46 @@ class FiberRuntime {
   template <typename Fn, typename RejectFn>
   bool Submit(Fn &&fn, RejectFn &&on_reject) {
     auto rejection = std::forward<RejectFn>(on_reject);
-    if (!TryAdmit()) {
-      rejection();
-      return false;
-    }
-
     try {
-      evb_->runInEventBaseThread([this, fn = std::forward<Fn>(fn), rejection]() mutable {
-        try {
-          auto &fm = folly::fibers::getFiberManagerT<SwordFsContext>(*evb_);
-          fm.addTask([this, fn = std::move(fn)]() mutable {
-            struct CompletionGuard {
-              FiberRuntime *runtime;
-              ~CompletionGuard() {
-                runtime->CompleteTask();
-              }
-            } guard{this};
-            fn();
-          });
-        } catch (...) {
-          CompleteTask();
-          rejection();
-        }
-      });
+      // Post owns the admission until this callback finishes. Transfer a
+      // second reference to the business fiber before releasing that Post;
+      // shutdown may already have begun, but admitted work must still run.
+      if (!Post([this, fn = std::forward<Fn>(fn), rejection]() mutable {
+            try {
+              // Take the transferred admission before any operation that may
+              // allocate or throw, including lazy FiberManager construction.
+              const uint64_t previous = task_state_.fetch_add(1, std::memory_order_acq_rel);
+              CHECK_LT(previous & kPendingMask, kPendingMask);
+              auto &fm = folly::fibers::getFiberManagerT<SwordFsContext>(*evb_);
+              fm.addTask([this, fn = std::move(fn)]() mutable {
+                struct CompletionGuard {
+                  FiberRuntime *runtime;
+                  ~CompletionGuard() {
+                    runtime->CompleteTask();
+                  }
+                } guard{this};
+                fn();
+              });
+            } catch (...) {
+              // An addTask failure must release the transferred reference.
+              CompleteTask();
+              rejection();
+            }
+          })) {
+        rejection();
+        return false;
+      }
     } catch (...) {
-      CompleteTask();
       rejection();
       return false;
     }
     return true;
   }
+
+  /// Dispatch a notification on the driver EventBase without creating a
+  /// business fiber. Admitted notifications participate in shutdown drain.
+  /// The callback runs on the driver thread, outside a fiber.
+  bool Post(folly::Function<void()> fn);
 
   /// Stop accepting tasks, drain all admitted fibers, and join the driver.
   /// Safe to call more than once.

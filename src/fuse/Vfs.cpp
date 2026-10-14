@@ -7,6 +7,7 @@
 #include "fuse/Vfs.hpp"
 
 #include <dirent.h>
+#include <folly/CancellationToken.h>
 #include <folly/ScopeGuard.h>
 #include <folly/logging/xlog.h>
 #include <sys/file.h>
@@ -16,8 +17,10 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdlib>
+#include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -47,6 +50,36 @@ MountInitContext::~MountInitContext() {
 
 namespace {
 
+// Centralize reply teardown at the boundary to libfuse: even a failed reply
+// consumes req. These file-local function objects deliberately shadow the
+// global C reply functions so every call in this translation unit detaches
+// its interrupt handler before the request can be destroyed. They introduce
+// no extra business state, allocations, or callback lifetime dependencies.
+template <auto LibfuseReply>
+struct RequestReply {
+  template <typename... Args>
+  decltype(auto) operator()(fuse_req_t req, Args &&...args) const {
+    fuse_req_interrupt_func(req, nullptr, nullptr);
+    return LibfuseReply(req, std::forward<Args>(args)...);
+  }
+};
+
+constexpr RequestReply<&::fuse_reply_attr> fuse_reply_attr{};
+constexpr RequestReply<&::fuse_reply_buf> fuse_reply_buf{};
+constexpr RequestReply<&::fuse_reply_create> fuse_reply_create{};
+constexpr RequestReply<&::fuse_reply_entry> fuse_reply_entry{};
+constexpr RequestReply<&::fuse_reply_err> fuse_reply_err{};
+constexpr RequestReply<&::fuse_reply_ioctl> fuse_reply_ioctl{};
+constexpr RequestReply<&::fuse_reply_ioctl_retry> fuse_reply_ioctl_retry{};
+constexpr RequestReply<&::fuse_reply_lock> fuse_reply_lock{};
+constexpr RequestReply<&::fuse_reply_none> fuse_reply_none{};
+constexpr RequestReply<&::fuse_reply_open> fuse_reply_open{};
+constexpr RequestReply<&::fuse_reply_readlink> fuse_reply_readlink{};
+constexpr RequestReply<&::fuse_reply_statfs> fuse_reply_statfs{};
+constexpr RequestReply<&::fuse_reply_statx> fuse_reply_statx{};
+constexpr RequestReply<&::fuse_reply_write> fuse_reply_write{};
+constexpr RequestReply<&::fuse_reply_xattr> fuse_reply_xattr{};
+
 void CompleteMountInit(MountInitContext *context, bool success) {
   if (context == nullptr) {
     return;
@@ -67,17 +100,48 @@ void CompleteMountInit(MountInitContext *context, bool success) {
   }
 }
 
+template <typename RejectFn>
+struct FuseRequestAdmission {
+  explicit FuseRequestAdmission(RejectFn reject_fn) : reject(std::move(reject_fn)) {
+  }
+
+  void Reject() {
+    // The runtime can reject either synchronously or on its driver thread.
+    // A failed admission setup must not race a second consuming FUSE reply.
+    if (!rejection_started.exchange(true, std::memory_order_acq_rel)) {
+      reject();
+    }
+  }
+
+  folly::CancellationSource source;
+  std::atomic<bool> rejection_started{false};
+  RejectFn reject;
+};
+
 template <typename Fn, typename RejectFn>
 void RunFuseInFiber(fuse_req_t req, Fn &&fn, RejectFn &&on_reject) {
-  ::swordfs::utils::RunInFiber(
-      [fn = std::forward<Fn>(fn)]() mutable {
-        ::swordfs::utils::ExpectInFiberDomain();
-        fn();
-      },
-      [on_reject = std::forward<RejectFn>(on_reject)]() mutable {
-        SWORDFS_LOG_ERROR << "Failed to admit FUSE request into the fiber runtime";
-        on_reject();
-      });
+  auto state = std::make_shared<FuseRequestAdmission<std::decay_t<RejectFn>>>(std::forward<RejectFn>(on_reject));
+  // libfuse invokes a newly registered callback synchronously if the request
+  // was already interrupted. Do not reply or interact with Fiber state here.
+  fuse_req_interrupt_func(
+      req, [](fuse_req_t, void *data) { static_cast<folly::CancellationSource *>(data)->requestCancellation(); },
+      &state->source);
+  try {
+    ::swordfs::utils::RunInFiber(
+        [state, fn = std::forward<Fn>(fn)]() mutable {
+          ::swordfs::utils::ExpectInFiberDomain();
+          folly::fibers::local<SwordFsContext>().cancellation_token = state->source.getToken();
+          fn();
+        },
+        [state] {
+          state->Reject();
+          SWORDFS_LOG_ERROR << "Failed to admit FUSE request into the fiber runtime";
+        });
+  } catch (...) {
+    // Keep source alive through the consuming reply: RequestReply first
+    // unregisters the libfuse callback, synchronizing with any interrupt.
+    state->Reject();
+  }
 }
 
 template <typename Fn>
@@ -153,7 +217,9 @@ std::string PackXAttrNames(const std::vector<std::string> &names) {
 
 void VfsHookFactory::SetRequestContext(fuse_req_t req) {
   auto &ctx = folly::fibers::local<SwordFsContext>();
+  auto token = std::move(ctx.cancellation_token);
   ctx = SwordFsContext{fuse_req_ctx(req)};
+  ctx.cancellation_token = std::move(token);
   if (!runtime::MountRuntimeBehavior::Instance().PosixAclEnabled()) {
     // Without DONT_MASK the kernel has already applied the caller umask.
     // Normalize it away so metadata create paths can apply ctx.umask exactly
@@ -170,7 +236,7 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   // Initialise per-thread fiber runtime.
   ::swordfs::utils::InitFiberRuntime();
   auto *init_context = static_cast<MountInitContext *>(userdata);
-  conn->no_interrupt = 1;
+  conn->no_interrupt = 0;
   conn->max_write = kMaxWriteSize;
   conn->max_readahead = kMaxReadAheadSize;
   conn->time_gran = kTimeGran;

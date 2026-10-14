@@ -565,12 +565,14 @@ missed notifications must recover through version comparison and a bounded
 recheck interval. Only a new atomic conflict check can grant the lock. Bound
 queued waiters, memory, and notification fanout; strict FIFO is not promised.
 
-Enable interrupt handling by changing `conn->no_interrupt = 1` when locking
-support is activated. `fuse_req_interrupt_func` registers without losing
-already-arrived interrupts. Its callback only updates thread-safe
-cancellation state and wakes the fiber-owned waiter; it must not acquire a
-fiber mutex or use request memory after unregister/destruction. The request
-fiber coordinates exactly one reply and interrupt-handler removal:
+The shared request-cancellation framework (#477) enables FUSE interrupt
+reception with `conn->no_interrupt = 0`, independent of lock activation.
+`fuse_req_interrupt_func` registers without losing already-arrived interrupts.
+Its callback only requests cancellation on the Folly source; it must not
+acquire a fiber mutex or use request memory after unregister/destruction.
+The lock operation owns its cancellation callback and safely dispatches its
+waiter wakeup through `FiberRuntime::Post`. The request fiber coordinates
+exactly one reply and interrupt-handler removal:
 
 ```
 NEW -> CHECKING -> WAITING --wake/recheck--> CHECKING
