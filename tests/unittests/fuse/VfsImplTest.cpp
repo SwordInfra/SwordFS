@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include <linux/fs.h>
 #include <linux/fuse.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <unistd.h>
@@ -44,7 +45,7 @@
 #include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkCleanupParticipant.hpp"
 #include "chunk/internal/ChunkGcWorker.hpp"
-#include "fuse/PosixRecordLocks.hpp"
+#include "fuse/FuseAdvisoryLocks.hpp"
 #include "fuse/Vfs.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/redis/RedisLockAuthority.hpp"
@@ -452,10 +453,6 @@ class IOBuf;
 
 TEST(VfsImplTest, Fsyncdir) {
   EXPECT_NOT_SUPPORTED(VfsImpl::FSyncDir(1, 0));
-}
-
-TEST(VfsImplTest, Flock) {
-  EXPECT_NOT_SUPPORTED(VfsImpl::FLock(1, nullptr, 0));
 }
 
 TEST(VfsImplTest, Fallocate) {
@@ -1345,6 +1342,33 @@ TEST(VfsHookFactoryTest, InitDisablesSpliceReadWithoutWriteBufCallback) {
 
   EXPECT_EQ(conn.want & FUSE_CAP_SPLICE_READ, 0U);
   EXPECT_EQ(conn.want_ext & FUSE_CAP_SPLICE_READ, 0U);
+
+  swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
+  swordfs::volume::VolumeImpl::Initialize();
+}
+
+TEST(VfsHookFactoryTest, InitDisablesRemoteAdvisoryLocksEvenWhenRequested) {
+  swordfs::volume::VolumeImpl::Initialize();
+
+  // libfuse can prepopulate these wants when callbacks are registered.
+  // Neither traditional POSIX locks nor BSD flock may be advertised until
+  // #433 validates their complete kernel-to-Redis behavior.
+  constexpr uint64_t kLockCaps = FUSE_CAP_POSIX_LOCKS | FUSE_CAP_FLOCK_LOCKS;
+  struct fuse_conn_info conn{};
+  conn.capable = static_cast<uint32_t>(kLockCaps);
+  conn.capable_ext = kLockCaps;
+  conn.want = static_cast<uint32_t>(kLockCaps);
+  conn.want_ext = kLockCaps;
+  swordfs::fuse::MountInitContext mount;
+  mount.posix_locks_negotiated = true;
+  mount.flock_locks_negotiated = true;
+  swordfs::fuse::VfsHookFactory::SwordFsInit(&mount, &conn);
+
+  EXPECT_FALSE(mount.failed);
+  EXPECT_EQ(conn.want & kLockCaps, 0U);
+  EXPECT_EQ(conn.want_ext & kLockCaps, 0U);
+  EXPECT_FALSE(mount.posix_locks_negotiated);
+  EXPECT_FALSE(mount.flock_locks_negotiated);
 
   swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
   swordfs::volume::VolumeImpl::Initialize();
@@ -2570,13 +2594,13 @@ TEST_F(VfsImplIntegrationTest, FusePosixLockCallbacksPreservePidAndFlushReleases
   swordfs::metadata::RedisLockAuthority first_authority(config, volume, first_lease);
   swordfs::metadata::RedisLockAuthority second_authority(config, volume, second_lease);
   swordfs::utils::BlockingExecutor executor(2, "fuse-posix-test");
-  swordfs::fuse::PosixRecordLocks first(first_authority, executor);
-  swordfs::fuse::PosixRecordLocks second(second_authority, executor);
+  swordfs::fuse::FuseAdvisoryLocks first(first_authority, executor);
+  swordfs::fuse::FuseAdvisoryLocks second(second_authority, executor);
   swordfs::fuse::MountInitContext first_mount;
-  first_mount.posix_locks = &first;
+  first_mount.advisory_locks = &first;
   first_mount.posix_locks_negotiated = true;  // Test the adapter, not production capability negotiation.
   swordfs::fuse::MountInitContext second_mount;
-  second_mount.posix_locks = &second;
+  second_mount.advisory_locks = &second;
   second_mount.posix_locks_negotiated = true;
 
   fuse_file_info fi{};
@@ -2749,6 +2773,208 @@ TEST_F(VfsImplIntegrationTest, FusePosixLockCallbacksPreservePidAndFlushReleases
   swordfs::fuse::VfsHookFactory::SwordFsRelease(reinterpret_cast<fuse_req_t>(&release), create.entry->ino, &valid_fh);
   ASSERT_TRUE(release.Wait());
   EXPECT_EQ(release.error.value_or(-1), 0);
+}
+
+TEST_F(VfsImplIntegrationTest, FuseFlockNonblockingAcrossGenerationsAndFinalRelease) {
+  swordfs::metadata::RedisMetaConfig config;
+  if (!swordfs::metadata::ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  const auto volume = swordfs::metadata::UniqueRedisName("fuse-flock");
+  const swordfs::metadata::redis::RedisKey key(config.db, volume);
+  sw::redis::Redis redis(swordfs::metadata::ConnectionOptions(config));
+  redis.set(key.OwnerGeneration(), "0");
+  swordfs::metadata::RedisOwnerLease first_lease(config, volume);
+  swordfs::metadata::RedisOwnerLease second_lease(config, volume);
+  ASSERT_TRUE(first_lease.Register().ok());
+  ASSERT_TRUE(second_lease.Register().ok());
+  swordfs::metadata::RedisLockAuthority first_authority(config, volume, first_lease);
+  swordfs::metadata::RedisLockAuthority second_authority(config, volume, second_lease);
+  swordfs::utils::BlockingExecutor executor(2, "fuse-flock-test");
+  swordfs::fuse::FuseAdvisoryLocks first(first_authority, executor);
+  swordfs::fuse::FuseAdvisoryLocks second(second_authority, executor);
+  swordfs::fuse::MountInitContext first_mount;
+  first_mount.advisory_locks = &first;
+  first_mount.flock_locks_negotiated = true;  // Exercise the adapter without enabling the actual FUSE capability.
+  swordfs::fuse::MountInitContext second_mount;
+  second_mount.advisory_locks = &second;
+  second_mount.flock_locks_negotiated = true;
+
+  constexpr fuse_ino_t kIno = 413;
+  fuse_file_info shared{};
+  shared.lock_owner = 0;  // Zero is a valid opaque kernel flock owner.
+  fuse_file_info independent{};
+  independent.lock_owner = 0;  // A second generation with the same numeric owner must still conflict.
+  fuse_file_info same_mount_other{};
+  same_mount_other.lock_owner = 19;
+
+  auto flock = [&](swordfs::fuse::MountInitContext &mount, fuse_file_info &fi, int op) {
+    FuseReplyCapture capture;
+    capture.user_data = &mount;
+    swordfs::fuse::VfsHookFactory::SwordFsFlock(reinterpret_cast<fuse_req_t>(&capture), kIno, &fi, op);
+    EXPECT_TRUE(capture.Wait());
+    EXPECT_EQ(capture.error_reply_calls, 1);
+    return capture.error.value_or(-1);
+  };
+
+  first_mount.flock_locks_negotiated = false;
+  EXPECT_EQ(flock(first_mount, shared, LOCK_EX | LOCK_NB), ENOSYS);
+  first_mount.flock_locks_negotiated = true;
+  EXPECT_EQ(flock(first_mount, shared, LOCK_SH | LOCK_NB), 0);
+  fuse_file_info inherited = shared;  // Same opaque owner across dup/fork, not a new flock owner.
+  EXPECT_EQ(flock(first_mount, inherited, LOCK_SH | LOCK_NB), 0);
+  EXPECT_EQ(flock(second_mount, independent, LOCK_SH | LOCK_NB), 0);
+  EXPECT_EQ(flock(second_mount, independent, LOCK_EX | LOCK_NB), EAGAIN);
+  EXPECT_EQ(flock(first_mount, shared, LOCK_EX | LOCK_NB), EAGAIN);
+  EXPECT_EQ(flock(first_mount, same_mount_other, LOCK_EX | LOCK_NB), EAGAIN);
+  EXPECT_EQ(flock(first_mount, shared, LOCK_UN), 0);
+  EXPECT_EQ(flock(first_mount, shared, LOCK_UN | LOCK_NB), 0);
+  EXPECT_EQ(flock(second_mount, independent, LOCK_EX | LOCK_NB), 0);
+  EXPECT_EQ(flock(second_mount, independent, LOCK_SH | LOCK_NB), 0);
+  EXPECT_EQ(flock(first_mount, shared, LOCK_SH | LOCK_NB), 0);
+  EXPECT_EQ(flock(second_mount, independent, LOCK_EX | LOCK_NB), EAGAIN);
+
+  // Neither malformed operations nor unsupported blocking requests may grant a lock.
+  for (int op : {0, LOCK_SH | LOCK_EX | LOCK_NB, LOCK_UN | LOCK_EX, LOCK_SH | LOCK_NB | 0x100}) {
+    EXPECT_EQ(flock(first_mount, shared, op), EINVAL);
+  }
+  EXPECT_EQ(flock(first_mount, shared, LOCK_EX), EOPNOTSUPP);
+  EXPECT_EQ(flock(first_mount, shared, LOCK_UN), 0);
+
+  // Leave only the first Mount holding SH. If FLUSH wrongly unlocks it,
+  // the otherwise independent second Mount would immediately acquire EX.
+  EXPECT_EQ(flock(second_mount, independent, LOCK_UN), 0);
+  EXPECT_EQ(flock(first_mount, shared, LOCK_SH | LOCK_NB), 0);
+  shared.fh = UINT64_MAX;
+  FuseReplyCapture flush;
+  flush.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsFlush(reinterpret_cast<fuse_req_t>(&flush), kIno, &shared);
+  ASSERT_TRUE(flush.Wait());
+  EXPECT_EQ(flush.error.value_or(-1), EINVAL);
+  EXPECT_EQ(flock(second_mount, independent, LOCK_EX | LOCK_NB), EAGAIN);
+
+  // Only final RELEASE may remove the first Mount's SH despite an invalid fh.
+  shared.flock_release = 1;
+  FuseReplyCapture release;
+  release.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsRelease(reinterpret_cast<fuse_req_t>(&release), kIno, &shared);
+  ASSERT_TRUE(release.Wait());
+  EXPECT_EQ(release.error.value_or(-1), EINVAL);
+  EXPECT_EQ(release.error_reply_calls, 1);
+  EXPECT_EQ(flock(second_mount, independent, LOCK_EX | LOCK_NB), 0);
+
+  // The second Mount's final RELEASE likewise drops its own EX grant.
+  independent.fh = UINT64_MAX;
+  independent.flock_release = 1;
+  FuseReplyCapture second_release;
+  second_release.user_data = &second_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsRelease(reinterpret_cast<fuse_req_t>(&second_release), kIno, &independent);
+  ASSERT_TRUE(second_release.Wait());
+  EXPECT_EQ(second_release.error.value_or(-1), EINVAL);
+  EXPECT_EQ(second_release.error_reply_calls, 1);
+  EXPECT_EQ(flock(first_mount, shared, LOCK_EX | LOCK_NB), 0);
+
+  // A failing remote unlock must not prevent local fh teardown.
+  fuse_file_info create_info{};
+  create_info.flags = O_RDWR;
+  FuseReplyCapture create;
+  swordfs::fuse::VfsHookFactory::SwordFsCreate(reinterpret_cast<fuse_req_t>(&create), 1, "flock-close-error", 0644,
+                                               &create_info);
+  ASSERT_TRUE(create.Wait());
+  ASSERT_TRUE(create.entry.has_value());
+  ASSERT_TRUE(create.fh.has_value());
+  fuse_file_info valid_fh{};
+  valid_fh.fh = *create.fh;
+  valid_fh.lock_owner = shared.lock_owner;
+  valid_fh.flock_release = 1;
+  FuseReplyCapture held;
+  held.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsFlock(reinterpret_cast<fuse_req_t>(&held), create.entry->ino, &valid_fh,
+                                              LOCK_EX | LOCK_NB);
+  ASSERT_TRUE(held.Wait());
+  ASSERT_EQ(held.error.value_or(-1), 0);
+
+  ASSERT_TRUE(first_lease.Revoke().ok());
+  FuseReplyCapture failed_remote_release;
+  failed_remote_release.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsRelease(reinterpret_cast<fuse_req_t>(&failed_remote_release), create.entry->ino,
+                                                &valid_fh);
+  ASSERT_TRUE(failed_remote_release.Wait());
+  EXPECT_EQ(failed_remote_release.error.value_or(-1), EIO);
+  FuseReplyCapture already_closed;
+  swordfs::fuse::VfsHookFactory::SwordFsRelease(reinterpret_cast<fuse_req_t>(&already_closed), create.entry->ino,
+                                                &valid_fh);
+  ASSERT_TRUE(already_closed.Wait());
+  EXPECT_EQ(already_closed.error.value_or(-1), EINVAL);
+  EXPECT_TRUE(
+      second_authority.SetFlock(create.entry->ino, 77, swordfs::metadata::ILockAuthority::FlockType::kExclusive).ok());
+  EXPECT_EQ(flock(first_mount, shared, LOCK_SH | LOCK_NB), EIO);
+  EXPECT_EQ(flock(first_mount, shared, LOCK_UN), EIO);
+  EXPECT_TRUE(second_lease.Revoke().ok());
+}
+
+TEST_F(VfsImplIntegrationTest, FuseFlockDisabledOrAbsentAdapterDoesNotGrant) {
+  swordfs::fuse::MountInitContext mount;
+  fuse_file_info fi{};
+  auto call = [&](int op) {
+    FuseReplyCapture capture;
+    capture.user_data = &mount;
+    swordfs::fuse::VfsHookFactory::SwordFsFlock(reinterpret_cast<fuse_req_t>(&capture), 1, &fi, op);
+    EXPECT_TRUE(capture.Wait());
+    return capture.error.value_or(-1);
+  };
+  EXPECT_EQ(call(LOCK_EX | LOCK_NB), ENOSYS);
+  mount.flock_locks_negotiated = true;
+  EXPECT_EQ(call(LOCK_EX | LOCK_NB), EIO);
+  fi.fh = UINT64_MAX;
+  fi.flock_release = 1;
+  FuseReplyCapture release;
+  release.user_data = &mount;
+  swordfs::fuse::VfsHookFactory::SwordFsRelease(reinterpret_cast<fuse_req_t>(&release), 1, &fi);
+  ASSERT_TRUE(release.Wait());
+  EXPECT_EQ(release.error.value_or(-1), EINVAL);  // Local error precedes unavailable remote unlock.
+}
+
+TEST_F(VfsImplIntegrationTest, FuseFlockRejectsGrantWhenOwnerLeaseExpiresBeforeReply) {
+  // Model the narrow boundary after an authoritative commit but before the
+  // FUSE reply: the completed mutation cannot authorize a stale owner.
+  class ExpiredAfterCommitAuthority final : public swordfs::metadata::ILockAuthority {
+   public:
+    swordfs::utils::Status SetPosix(uint64_t, uint64_t, PosixRange) override {
+      return swordfs::utils::Status::NotSupported("POSIX locks are not part of this scenario");
+    }
+    swordfs::utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return swordfs::utils::Status::NotSupported("POSIX locks are not part of this scenario");
+    }
+    swordfs::utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return swordfs::utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return false;
+    }
+  } authority;
+
+  swordfs::utils::BlockingExecutor executor(1, "fuse-flock-expiry-test");
+  swordfs::fuse::FuseAdvisoryLocks advisory_locks(authority, executor);
+  swordfs::fuse::MountInitContext mount;
+  mount.advisory_locks = &advisory_locks;
+  mount.flock_locks_negotiated = true;
+  fuse_file_info fi{};
+  fi.lock_owner = 42;
+
+  auto flock = [&](int op) {
+    FuseReplyCapture capture;
+    capture.user_data = &mount;
+    swordfs::fuse::VfsHookFactory::SwordFsFlock(reinterpret_cast<fuse_req_t>(&capture), 9, &fi, op);
+    EXPECT_TRUE(capture.Wait());
+    EXPECT_EQ(capture.error_reply_calls, 1);
+    return capture.error.value_or(-1);
+  };
+
+  EXPECT_EQ(flock(LOCK_EX | LOCK_NB), EIO);
+  EXPECT_EQ(flock(LOCK_SH | LOCK_NB), EIO);
+  // Unlock is still allowed to complete when new grants are forbidden.
+  EXPECT_EQ(flock(LOCK_UN), 0);
 }
 
 TEST_F(VfsImplIntegrationTest, IoctlControlSurfaceIsGatedAndUsesRestrictedBuffers) {

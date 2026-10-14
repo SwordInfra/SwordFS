@@ -21,7 +21,7 @@ SPEC.loader.exec_module(CLASSIFY)
 
 class FstestsFailureEvidenceTest(unittest.TestCase):
     def test_kernel_local_only_pass_does_not_promote_distributed_support(self) -> None:
-        for test in ("generic/131", "generic/478"):
+        for test in ("generic/131", "generic/478", "generic/504"):
             with self.subTest(test=test):
                 gap = CLASSIFY.Gap("kernel_local_only", "#433", "PASS", "-", "-", "Only local locks are verified")
                 for result, expected in (

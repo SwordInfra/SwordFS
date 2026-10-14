@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <folly/ScopeGuard.h>
 #include <folly/logging/xlog.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -20,8 +21,8 @@
 #include <utility>
 #include <vector>
 
+#include "fuse/FuseAdvisoryLocks.hpp"
 #include "fuse/Limits.hpp"
-#include "fuse/PosixRecordLocks.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
@@ -208,8 +209,12 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   // #433 must first reconcile traditional close semantics and the untagged
   // OFD transport (#464). Callbacks are implemented but not advertised here.
   fuse_unset_feature_flag(conn, FUSE_CAP_POSIX_LOCKS);
+  // libfuse may request FLOCK_LOCKS automatically when .flock is installed.
+  // #433 owns advertising remote BSD flock after blocking semantics are ready.
+  fuse_unset_feature_flag(conn, FUSE_CAP_FLOCK_LOCKS);
   if (init_context != nullptr) {
     init_context->posix_locks_negotiated = false;
+    init_context->flock_locks_negotiated = false;
   }
 
   // FUSE_CAP_SPLICE_READ is the libfuse request-ingestion path that delivers
@@ -463,8 +468,8 @@ void VfsHookFactory::SwordFsFlush(fuse_req_t req, fuse_ino_t ino, struct fuse_fi
   const uint64_t lock_owner = fi->lock_owner;
   auto *context = static_cast<MountInitContext *>(fuse_req_userdata(req));
   const bool release_posix = context != nullptr && context->posix_locks_negotiated;
-  auto *posix_locks = context != nullptr ? context->posix_locks : nullptr;
-  RunFuseInFiber(req, [req, ino, fh, lock_owner, release_posix, posix_locks] {
+  auto *advisory_locks = context != nullptr ? context->advisory_locks : nullptr;
+  RunFuseInFiber(req, [req, ino, fh, lock_owner, release_posix, advisory_locks] {
     SetRequestContext(req);
     auto status = VfsImpl::Flush(ino, fh);
     int error = status.ToErrno();
@@ -472,8 +477,8 @@ void VfsHookFactory::SwordFsFlush(fuse_req_t req, fuse_ino_t ino, struct fuse_fi
       // Every delivered FLUSH independently releases the entire process
       // Owner, including an invalid fh or a failed data flush. Never rely
       // on client-side lock bookkeeping for this correctness requirement.
-      status = posix_locks != nullptr ? posix_locks->UnlockOwner(ino, lock_owner)
-                                      : utils::Status::Unavailable("remote POSIX lock authority is unavailable");
+      status = advisory_locks != nullptr ? advisory_locks->UnlockPosixOwner(ino, lock_owner)
+                                         : utils::Status::Unavailable("remote POSIX lock authority is unavailable");
       if (!status.ok()) {
         SWORDFS_LOG_WARN << "POSIX unlock on FLUSH failed for ino=" << ino << ": " << status.message();
         if (error == 0) {
@@ -486,11 +491,32 @@ void VfsHookFactory::SwordFsFlush(fuse_req_t req, fuse_ino_t ino, struct fuse_fi
 }
 
 void VfsHookFactory::SwordFsRelease(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi) {
-  uint64_t fh = fi->fh;
-  RunFuseInFiber(req, [req, ino, fh] {
+  const uint64_t fh = fi->fh;
+  const uint64_t owner = fi->lock_owner;
+  const bool flock_release = fi->flock_release != 0;
+  auto *context = static_cast<MountInitContext *>(fuse_req_userdata(req));
+  const bool release_flock = context != nullptr && context->flock_locks_negotiated && flock_release;
+  auto *advisory_locks = context != nullptr ? context->advisory_locks : nullptr;
+  RunFuseInFiber(req, [req, ino, fh, owner, release_flock, advisory_locks] {
     SetRequestContext(req);
     auto status = VfsImpl::Release(ino, fh);
-    fuse_reply_err(req, status.ToErrno());
+    int error = status.ToErrno();
+    if (!status.ok()) {
+      SWORDFS_LOG_WARN << "local RELEASE failed for ino=" << ino << ": " << status.message();
+    }
+    if (release_flock) {
+      // A final RELEASE is independent of local fh validity/flush success.
+      // The kernel supplies the original flock owner even after dup/fork.
+      status = advisory_locks != nullptr ? advisory_locks->UnlockFlockOwner(ino, owner)
+                                         : utils::Status::Unavailable("remote flock authority is unavailable");
+      if (!status.ok()) {
+        SWORDFS_LOG_WARN << "flock unlock on RELEASE failed for ino=" << ino << ": " << status.message();
+        if (error == 0) {
+          error = status.ToErrno();
+        }
+      }
+    }
+    fuse_reply_err(req, error);
   });
 }
 
@@ -652,17 +678,17 @@ void VfsHookFactory::SwordFsGetlk(fuse_req_t req, fuse_ino_t ino, struct fuse_fi
     fuse_reply_err(req, ENOSYS);
     return;
   }
-  auto *posix_locks = context->posix_locks;
+  auto *advisory_locks = context->advisory_locks;
   const uint64_t owner = fi->lock_owner;
   const struct flock request = *lock;
-  RunFuseInFiber(req, [req, ino, owner, request, posix_locks] {
+  RunFuseInFiber(req, [req, ino, owner, request, advisory_locks] {
     SetRequestContext(req);
-    if (posix_locks == nullptr) {
+    if (advisory_locks == nullptr) {
       fuse_reply_err(req, EIO);
       return;
     }
     struct flock reply{};
-    auto status = posix_locks->Get(ino, owner, request, &reply);
+    auto status = advisory_locks->GetPosix(ino, owner, request, &reply);
     if (!status.ok()) {
       fuse_reply_err(req, status.ToErrno());
       return;
@@ -685,17 +711,17 @@ void VfsHookFactory::SwordFsSetlk(fuse_req_t req, fuse_ino_t ino, struct fuse_fi
     fuse_reply_err(req, EOPNOTSUPP);
     return;
   }
-  auto *posix_locks = context->posix_locks;
+  auto *advisory_locks = context->advisory_locks;
   const uint64_t owner = fi->lock_owner;
   const struct flock request = *lock;
-  RunFuseInFiber(req, [req, ino, owner, request, posix_locks] {
+  RunFuseInFiber(req, [req, ino, owner, request, advisory_locks] {
     SetRequestContext(req);
-    if (posix_locks == nullptr) {
+    if (advisory_locks == nullptr) {
       fuse_reply_err(req, EIO);
       return;
     }
-    auto status = posix_locks->Set(ino, owner, request);
-    if (status.ok() && !posix_locks->CanGrant()) {
+    auto status = advisory_locks->SetPosix(ino, owner, request);
+    if (status.ok() && !advisory_locks->CanGrant()) {
       status = utils::Status::Unavailable("lock Owner Lease expired before SETLK reply");
     }
     fuse_reply_err(req, status.ToErrno());
@@ -770,9 +796,23 @@ void VfsHookFactory::SwordFsForgetMulti(fuse_req_t req, size_t count, struct fus
 }
 
 void VfsHookFactory::SwordFsFlock(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi, int op) {
-  RunFuseInFiber(req, [req, ino, fi = *fi, op]() mutable {
+  auto *context = static_cast<MountInitContext *>(fuse_req_userdata(req));
+  if (context == nullptr || !context->flock_locks_negotiated) {
+    fuse_reply_err(req, ENOSYS);
+    return;
+  }
+  auto *advisory_locks = context->advisory_locks;
+  const uint64_t owner = fi->lock_owner;
+  RunFuseInFiber(req, [req, ino, owner, op, advisory_locks] {
     SetRequestContext(req);
-    auto status = VfsImpl::FLock(ino, &fi, op);
+    if (advisory_locks == nullptr) {
+      fuse_reply_err(req, EIO);
+      return;
+    }
+    auto status = advisory_locks->Flock(ino, owner, op);
+    if (status.ok() && (op & ~LOCK_NB) != LOCK_UN && !advisory_locks->CanGrant()) {
+      status = utils::Status::Unavailable("lock Owner Lease expired before flock reply");
+    }
     fuse_reply_err(req, status.ToErrno());
   });
 }

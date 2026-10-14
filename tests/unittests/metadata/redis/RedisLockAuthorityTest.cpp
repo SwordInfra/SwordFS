@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "FiberTest.hpp"
-#include "fuse/PosixRecordLocks.hpp"
+#include "fuse/FuseAdvisoryLocks.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisLockAuthority.hpp"
 #include "metadata/redis/RedisLockFaultProxy.hpp"
@@ -187,8 +187,8 @@ TEST_F(RedisLockAuthorityTest, MalformedStoredPosixPidFailsClosed) {
 
 TEST_F(RedisLockAuthorityTest, FiberAdapterValidatesAndRepliesWithRemoteConflicts) {
   utils::BlockingExecutor executor(2, "lock-adapter-test");
-  fuse::PosixRecordLocks first(*first_, executor);
-  fuse::PosixRecordLocks second(*second_, executor);
+  fuse::FuseAdvisoryLocks first(*first_, executor);
+  fuse::FuseAdvisoryLocks second(*second_, executor);
 
   struct flock request{};
   request.l_type = F_WRLCK;
@@ -197,9 +197,9 @@ TEST_F(RedisLockAuthorityTest, FiberAdapterValidatesAndRepliesWithRemoteConflict
   request.l_len = 20;
   request.l_pid = 4321;
   test::RunInTestFiber([&] {
-    ASSERT_TRUE(first.Set(230, 150, request).ok());
+    ASSERT_TRUE(first.SetPosix(230, 150, request).ok());
     struct flock result{};
-    ASSERT_TRUE(second.Get(230, 150, request, &result).ok());
+    ASSERT_TRUE(second.GetPosix(230, 150, request, &result).ok());
     EXPECT_EQ(result.l_type, F_WRLCK);
     EXPECT_EQ(result.l_start, 10);
     EXPECT_EQ(result.l_len, 20);
@@ -207,65 +207,65 @@ TEST_F(RedisLockAuthorityTest, FiberAdapterValidatesAndRepliesWithRemoteConflict
     EXPECT_EQ(result.l_pid, 4321);
     EXPECT_TRUE(first.CanGrant());
 
-    ASSERT_TRUE(first.Get(230, 150, request, &result).ok());
+    ASSERT_TRUE(first.GetPosix(230, 150, request, &result).ok());
     EXPECT_EQ(result.l_type, F_UNLCK);
     request.l_type = F_RDLCK;
-    EXPECT_EQ(second.Set(230, 200, request).ToErrno(), EAGAIN);
+    EXPECT_EQ(second.SetPosix(230, 200, request).ToErrno(), EAGAIN);
 
     request.l_start = 30;
-    ASSERT_TRUE(second.Set(230, 200, request).ok());
-    ASSERT_TRUE(second.Get(230, 200, request, &result).ok());
+    ASSERT_TRUE(second.SetPosix(230, 200, request).ok());
+    ASSERT_TRUE(second.GetPosix(230, 200, request, &result).ok());
     EXPECT_EQ(result.l_type, F_UNLCK);
 
     request.l_whence = SEEK_CUR;
-    EXPECT_EQ(second.Set(230, 200, request).ToErrno(), EINVAL);
+    EXPECT_EQ(second.SetPosix(230, 200, request).ToErrno(), EINVAL);
     request.l_whence = SEEK_SET;
     request.l_start = -1;
-    EXPECT_EQ(second.Set(230, 200, request).ToErrno(), EINVAL);
+    EXPECT_EQ(second.SetPosix(230, 200, request).ToErrno(), EINVAL);
     request.l_start = 1;
     request.l_len = -1;
-    EXPECT_EQ(second.Set(230, 200, request).ToErrno(), EINVAL);
+    EXPECT_EQ(second.SetPosix(230, 200, request).ToErrno(), EINVAL);
     request.l_start = std::numeric_limits<off_t>::max();
     request.l_len = 2;
-    EXPECT_EQ(second.Set(230, 200, request).ToErrno(), EINVAL);
+    EXPECT_EQ(second.SetPosix(230, 200, request).ToErrno(), EINVAL);
     request.l_start = 0;
     request.l_len = 0;
     request.l_type = F_UNLCK;
-    EXPECT_EQ(second.Get(230, 200, request, &result).ToErrno(), EINVAL);
+    EXPECT_EQ(second.GetPosix(230, 200, request, &result).ToErrno(), EINVAL);
     request.l_type = 99;
-    EXPECT_EQ(second.Set(230, 200, request).ToErrno(), EINVAL);
+    EXPECT_EQ(second.SetPosix(230, 200, request).ToErrno(), EINVAL);
     request.l_type = F_RDLCK;
-    EXPECT_EQ(second.Get(230, 200, request, nullptr).ToErrno(), EINVAL);
+    EXPECT_EQ(second.GetPosix(230, 200, request, nullptr).ToErrno(), EINVAL);
   });
 }
 
 TEST_F(RedisLockAuthorityTest, FiberAdapterFullOwnerCloseReleasesAllRangesAndChecksLease) {
   utils::BlockingExecutor executor(2, "lock-close-test");
-  fuse::PosixRecordLocks first(*first_, executor);
-  fuse::PosixRecordLocks second(*second_, executor);
+  fuse::FuseAdvisoryLocks first(*first_, executor);
+  fuse::FuseAdvisoryLocks second(*second_, executor);
   struct flock request{};
   request.l_type = F_WRLCK;
   request.l_whence = SEEK_SET;
   request.l_len = 10;
   request.l_pid = 500;
   test::RunInTestFiber([&] {
-    ASSERT_TRUE(first.Set(232, 123, request).ok());
+    ASSERT_TRUE(first.SetPosix(232, 123, request).ok());
     request.l_start = 20;
-    ASSERT_TRUE(first.Set(232, 123, request).ok());
+    ASSERT_TRUE(first.SetPosix(232, 123, request).ok());
     request.l_start = 0;
     request.l_len = 0;
-    EXPECT_EQ(second.Set(232, 456, request).ToErrno(), EAGAIN);
-    ASSERT_TRUE(first.UnlockOwner(232, 123).ok());
-    EXPECT_TRUE(second.Set(232, 456, request).ok());
-    EXPECT_TRUE(first.UnlockOwner(232, 123).ok());  // Mandatory safe no-op close.
+    EXPECT_EQ(second.SetPosix(232, 456, request).ToErrno(), EAGAIN);
+    ASSERT_TRUE(first.UnlockPosixOwner(232, 123).ok());
+    EXPECT_TRUE(second.SetPosix(232, 456, request).ok());
+    EXPECT_TRUE(first.UnlockPosixOwner(232, 123).ok());  // Mandatory safe no-op close.
   });
 
   ASSERT_TRUE(first_lease_->Revoke().ok());
   test::RunInTestFiber([&] {
     EXPECT_FALSE(first.CanGrant());
-    EXPECT_EQ(first.UnlockOwner(232, 123).ToErrno(), EIO);
+    EXPECT_EQ(first.UnlockPosixOwner(232, 123).ToErrno(), EIO);
     struct flock result{};
-    EXPECT_EQ(first.Get(232, 123, request, &result).ToErrno(), EIO);
+    EXPECT_EQ(first.GetPosix(232, 123, request, &result).ToErrno(), EIO);
   });
 }
 

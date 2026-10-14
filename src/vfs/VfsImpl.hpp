@@ -77,7 +77,6 @@ class VfsImpl {
                              const void *in_buf, size_t in_bufsz, size_t out_bufsz, IoCtlReply *reply);
   static utils::Status RetrieveReply(fuse_req_t req, void *cookie, fuse_ino_t ino, off_t offset,
                                      struct fuse_bufvec *bufv);
-  static utils::Status FLock(fuse_ino_t ino, struct fuse_file_info *fi, int op);
   static utils::Status FAllocate(fuse_ino_t ino, int mode, off_t offset, off_t length, struct fuse_file_info *fi);
   static utils::Status LSeek(fuse_ino_t ino, off_t off, int whence, struct fuse_file_info *fi);
   static utils::Status TmpFile(fuse_ino_t parent, mode_t mode, fuse_entry_param *entry, struct fuse_file_info *fi);
