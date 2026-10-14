@@ -365,7 +365,10 @@ class MockMetaEngine : public IMetaEngine {
       release->wait();
     }
     if (size != nullptr) {
-      *size = eof_[ino];
+      // Concurrent Open calls must not insert into the shared mock map.
+      // An inode without a recorded EOF has the same zero size as before.
+      const auto it = eof_.find(ino);
+      *size = it == eof_.end() ? 0 : it->second;
     }
     if (inode_flags != nullptr) {
       *inode_flags = inode_flags_snapshot;
