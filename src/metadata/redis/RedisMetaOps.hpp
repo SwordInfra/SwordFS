@@ -24,6 +24,10 @@
 #include "utils/Status.hpp"
 #include "utils/Synchronization.hpp"
 
+namespace swordfs::utils {
+class BlockingExecutor;
+}
+
 namespace swordfs::chunk::internal {
 class ChunkCleanupWorkEncoder;
 }
@@ -56,6 +60,7 @@ class RedisMetaOps {
   RedisMetaOps &operator=(RedisMetaOps &&) = delete;
 
   utils::Status Initialize();
+  utils::BlockingExecutor &SharedBlockingExecutor() const;
   utils::Status OpenChunkMetadata(ChunkType chunk_type, ChunkMetadataPtr *out);
   utils::Status BindChunkCleanupWorkEncoder(chunk::internal::ChunkCleanupWorkEncoder *encoder);
   utils::Status FormatVolume(const SwordFsVolume &config);

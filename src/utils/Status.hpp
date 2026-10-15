@@ -33,6 +33,7 @@ class Status {
     kOutcomeUnknown,         // internal ambiguous remote mutation outcome; maps to EIO
     kBusy,                   // EBUSY
     kWouldBlock,             // EAGAIN (nonblocking lock conflict)
+    kInterrupted,            // EINTR (cancelled blocking operation)
     kNoLocks,                // ENOLCK (bounded lock authority overflow)
     kNotPermitted,           // EPERM
     kPermission,             // EACCES
@@ -122,6 +123,9 @@ class Status {
   }
   static Status WouldBlock(std::string msg) {
     return Status(kWouldBlock, std::move(msg));
+  }
+  static Status Interrupted(std::string msg) {
+    return Status(kInterrupted, std::move(msg));
   }
   static Status NoLocks(std::string msg) {
     return Status(kNoLocks, std::move(msg));

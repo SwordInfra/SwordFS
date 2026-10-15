@@ -39,6 +39,14 @@ using swordfs::test::redis_meta::SwordFsInode;
 using swordfs::test::redis_meta::SwordFsVolume;
 namespace acl_test = swordfs::test::posix_acl;
 
+// The Mount lock adapter borrows the metadata engine's existing worker pool;
+// it must be usable from the same real Fiber path as metadata operations.
+FIBER_TEST_F(RedisMetaImplTest, AdvisoryLocksShareUsableMetadataExecutor) {
+  const auto domain =
+      impl_->SharedBlockingExecutor().RunFromFiber([] { return swordfs::utils::CurrentExecutionDomain(); });
+  EXPECT_EQ(domain, swordfs::utils::ExecutionDomain::kThread);
+}
+
 // Redis must publish the typed FileMetadata contract using its own
 // atomic inode + mapping transaction, independent of typed COW head CAS.
 FIBER_TEST_F(RedisMetaImplTest, PreparedChunkAttachmentIsAtomicAndCannotBeStolen) {

@@ -138,6 +138,9 @@ void ShutdownFiberRuntime();
 /// Returns the calling thread's FiberRuntime, or nullptr.
 FiberRuntime *ThisFiberRuntime();
 
+/// Return the already-running driver thread runtime while executing a request Fiber.
+FiberRuntime *CurrentDriverFiberRuntime();
+
 /// Asynchronously execute `fn` as a folly fiber.
 /// Each calling thread automatically gets its own FiberRuntime on first use.
 template <typename Fn>

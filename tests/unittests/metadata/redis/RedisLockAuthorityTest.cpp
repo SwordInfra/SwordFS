@@ -2,15 +2,24 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include <fcntl.h>
+#include <folly/CancellationToken.h>
+#include <folly/ScopeGuard.h>
 #include <gtest/gtest.h>
+#include <sys/file.h>
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <future>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "FiberTest.hpp"
@@ -21,6 +30,7 @@
 #include "metadata/redis/RedisMetaTestSupport.hpp"
 #include "metadata/redis/RedisOwnerLease.hpp"
 #include "utils/BlockingExecutor.hpp"
+#include "utils/FiberRuntime.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -66,6 +76,139 @@ using PosixType = RedisLockAuthority::PosixType;
 using PosixRange = RedisLockAuthority::PosixRange;
 using FlockType = RedisLockAuthority::FlockType;
 
+// The blocking flock path must not reject uncontended requests just because
+// they omit LOCK_NB. The first attempt still uses the existing Redis authority.
+FIBER_TEST_F(RedisLockAuthorityTest, BlockingFlockAcquiresWithoutContention) {
+  fuse::FuseAdvisoryLocks locks(*first_, swordfs::test::BlockingTestExecutor());
+  EXPECT_TRUE(locks.Flock(771, 100, LOCK_EX).ok());
+  EXPECT_TRUE(locks.Flock(771, 100, LOCK_UN).ok());
+}
+
+FIBER_TEST_F(RedisLockAuthorityTest, PreCancelledBlockingRequestsDoNotAcquireLocks) {
+  fuse::FuseAdvisoryLocks locks(*second_, swordfs::test::BlockingTestExecutor());
+  folly::CancellationSource source;
+  source.requestCancellation();
+  EXPECT_EQ(locks.Flock(778, 202, LOCK_EX, source.getToken()).ToErrno(), EINTR);
+  struct flock request{};
+  request.l_type = F_WRLCK;
+  request.l_whence = SEEK_SET;
+  request.l_start = 0;
+  request.l_len = 0;
+  EXPECT_EQ(locks.SetPosix(779, 202, request, true, source.getToken()).ToErrno(), EINTR);
+  // Redis mutation is thread-domain work even when the lock caller is a Fiber.
+  EXPECT_TRUE(swordfs::test::BlockingTestExecutor()
+                  .RunFromFiber([&] { return first_->SetFlock(778, 303, FlockType::kExclusive); })
+                  .ok());
+  EXPECT_TRUE(swordfs::test::BlockingTestExecutor()
+                  .RunFromFiber([&] { return first_->SetPosix(779, 303, {0, 0, PosixType::kWrite}); })
+                  .ok());
+}
+
+// A waiter must not be admitted unless the driver runtime can schedule
+// its read-only probe coordinator; failure leaves no phantom waiter behind.
+FIBER_TEST_F(RedisLockAuthorityTest, LockWaitAdmissionRequiresDriverRuntime) {
+  fuse::LockRetryScheduler scheduler(*second_, swordfs::test::BlockingTestExecutor());
+  auto waiter = std::make_shared<fuse::LockRetryScheduler::Waiter>();
+  waiter->inode_ino = 781;
+  waiter->kernel_owner = 202;
+  waiter->flock = true;
+  waiter->flock_type = FlockType::kExclusive;
+  EXPECT_EQ(scheduler.RegisterWaiter(waiter).ToErrno(), EIO);
+  EXPECT_EQ(scheduler.RegisterWaiter(waiter).ToErrno(), EIO);
+}
+
+// Opt-in-independent, bounded Redis-backed contention cost sample. The
+// baseline performs per-owner rejected TryLock calls; the grouped alternative
+// makes one validated read-only Inspect per hot inode/class group. This
+// measures real backend commands, rather than treating method-call counts as
+// redis traffic. It is diagnostic: host contention affects timing values.
+TEST_F(RedisLockAuthorityTest, GroupedReadOnlyProbesReduceRedisCommandCostUnderContention) {
+  constexpr uint64_t kInode = 789;
+  constexpr size_t kOwners = 16;
+  constexpr size_t kRounds = 24;
+  ASSERT_TRUE(first_->SetFlock(kInode, 101, FlockType::kExclusive).ok());
+  sw::redis::Redis metrics(ConnectionOptions(config_));
+  struct Sample {
+    uint64_t redis_commands;
+    double cpu_ms;
+    double p95_ms;
+    double p99_ms;
+  };
+  const auto measure = [&](bool grouped) {
+    const uint64_t before = RedisInfoCounter(metrics, "stats", "total_commands_processed");
+    const std::clock_t cpu_start = std::clock();
+    std::vector<double> samples;
+    samples.reserve(kRounds);
+    for (size_t round = 0; round < kRounds; ++round) {
+      const auto start = std::chrono::steady_clock::now();
+      if (grouped) {
+        std::vector<ILockAuthority::LockHolder> holders;
+        const auto status = second_->Inspect(kInode, true, &holders);
+        EXPECT_TRUE(status.ok()) << status.message();
+        EXPECT_EQ(holders.size(), 1U);
+      } else {
+        for (size_t owner = 0; owner < kOwners; ++owner) {
+          const auto status = second_->SetFlock(kInode, 200 + owner, FlockType::kExclusive);
+          EXPECT_EQ(status.ToErrno(), EAGAIN);
+        }
+      }
+      samples.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+    }
+    const double cpu_ms = static_cast<double>(std::clock() - cpu_start) * 1000 / CLOCKS_PER_SEC;
+    const uint64_t after = RedisInfoCounter(metrics, "stats", "total_commands_processed");
+    std::sort(samples.begin(), samples.end());
+    const auto percentile = [&](size_t pct) { return samples[(samples.size() * pct + 99) / 100 - 1]; };
+    return Sample{after - before, cpu_ms, percentile(95), percentile(99)};
+  };
+  const auto individual = measure(false);
+  const auto grouped = measure(true);
+  std::cout << "LOCK_CONTENTION_REDIS_COST mode=per_waiter owners=" << kOwners << " rounds=" << kRounds
+            << " redis_commands=" << individual.redis_commands << " cpu_ms=" << individual.cpu_ms
+            << " p95_round_ms=" << individual.p95_ms << " p99_round_ms=" << individual.p99_ms << '\n';
+  std::cout << "LOCK_CONTENTION_REDIS_COST mode=grouped owners=" << kOwners << " rounds=" << kRounds
+            << " redis_commands=" << grouped.redis_commands << " cpu_ms=" << grouped.cpu_ms
+            << " p95_round_ms=" << grouped.p95_ms << " p99_round_ms=" << grouped.p99_ms << '\n';
+  // Command efficiency is the functional cost property here; latency and CPU
+  // are reported without a CI threshold because runner noise is uncontrolled.
+  EXPECT_LT(grouped.redis_commands, individual.redis_commands);
+  EXPECT_TRUE(first_->SetFlock(kInode, 101, FlockType::kUnlock).ok());
+
+  // Distinct from the round-trip probe benchmark above: this samples actual
+  // blocked Fiber grant completion after the remote owner releases the lock.
+  // A fixed hold period is benchmark setup, NEVER evidence of waiter admission
+  // or correctness; the future's completion is the semantic success barrier.
+  utils::BlockingExecutor executor(1, "grant-latency-sample");
+  fuse::FuseAdvisoryLocks locks(*second_, executor);
+  utils::FiberRuntime runtime;
+  std::vector<double> grant_ms;
+  constexpr size_t kGrantSamples = 24;
+  grant_ms.reserve(kGrantSamples);
+  folly::CancellationSource cancellation;
+  auto cleanup = folly::makeGuard([&] {
+    cancellation.requestCancellation();
+    runtime.Shutdown();
+  });
+  for (size_t trial = 0; trial < kGrantSamples; ++trial) {
+    ASSERT_TRUE(first_->SetFlock(kInode + 1, 101, FlockType::kExclusive).ok());
+    std::promise<utils::Status> reply;
+    auto result = reply.get_future();
+    ASSERT_TRUE(runtime.Submit(
+        [&] { reply.set_value(locks.Flock(kInode + 1, 1000 + trial, LOCK_EX, cancellation.getToken())); }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(70));
+    const auto released_at = std::chrono::steady_clock::now();
+    ASSERT_TRUE(first_->SetFlock(kInode + 1, 101, FlockType::kUnlock).ok());
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(result.get().ok());
+    grant_ms.push_back(
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - released_at).count());
+    ASSERT_TRUE(second_->SetFlock(kInode + 1, 1000 + trial, FlockType::kUnlock).ok());
+  }
+  std::sort(grant_ms.begin(), grant_ms.end());
+  std::cout << "LOCK_CONTENTION_GRANT_LAG samples=" << kGrantSamples
+            << " p95_after_unlock_ms=" << grant_ms[(kGrantSamples * 95 + 99) / 100 - 1]
+            << " p99_after_unlock_ms=" << grant_ms[(kGrantSamples * 99 + 99) / 100 - 1] << '\n';
+}
+
 TEST_F(RedisLockAuthorityTest, ConflictingExclusiveAndCompatibleSharedGrantsAcrossMounts) {
   ASSERT_TRUE(first_->SetPosix(21, 100, {0, 0, PosixType::kRead}).ok());
   EXPECT_TRUE(second_->SetPosix(21, 200, {0, 0, PosixType::kRead}).ok());
@@ -74,6 +217,218 @@ TEST_F(RedisLockAuthorityTest, ConflictingExclusiveAndCompatibleSharedGrantsAcro
   EXPECT_TRUE(second_->SetPosix(21, 200, {0, 0, PosixType::kUnlock}).ok());
   EXPECT_TRUE(first_->SetPosix(21, 100, {0, 0, PosixType::kUnlock}).ok());
   EXPECT_TRUE(second_->SetPosix(21, 200, {0, 0, PosixType::kWrite}).ok());
+}
+
+// Linux flock conversion may relinquish SH before attempting EX. Retaining
+// the old SH on EAGAIN makes two independent upgraders deadlock indefinitely.
+TEST_F(RedisLockAuthorityTest, ConflictedSharedToExclusiveUpgradeReleasesOldSharedLock) {
+  ASSERT_TRUE(first_->SetFlock(772, 101, FlockType::kShared).ok());
+  ASSERT_TRUE(second_->SetFlock(772, 202, FlockType::kShared).ok());
+  EXPECT_EQ(first_->SetFlock(772, 101, FlockType::kExclusive).ToErrno(), EAGAIN);
+  EXPECT_TRUE(second_->SetFlock(772, 202, FlockType::kExclusive).ok());
+}
+
+TEST_F(RedisLockAuthorityTest, BlockingFlockWaitReleasesWorkerAndGrantsAfterUnlock) {
+  utils::BlockingExecutor executor(1, "blocking-flock-worker");
+  fuse::FuseAdvisoryLocks locks(*second_, executor);
+  ASSERT_TRUE(first_->SetFlock(773, 101, FlockType::kExclusive).ok());
+  utils::FiberRuntime runtime;
+  std::promise<utils::Status> reply;
+  auto future = reply.get_future();
+  ASSERT_TRUE(runtime.Submit([&] { reply.set_value(locks.Flock(773, 202, LOCK_EX)); }));
+  EXPECT_EQ(future.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  // This foreground unlock shares the *single* worker with the background
+  // probe. A waiting request must never occupy that worker indefinitely.
+  EXPECT_TRUE(executor.RunFromThread([&] { return first_->SetFlock(773, 101, FlockType::kUnlock); }).ok());
+  ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_TRUE(future.get().ok());
+  EXPECT_TRUE(second_->SetFlock(773, 202, FlockType::kUnlock).ok());
+  runtime.Shutdown();
+}
+
+TEST_F(RedisLockAuthorityTest, BlockingPosixWaitPreservesRangeAfterRemoteUnlock) {
+  utils::BlockingExecutor executor(1, "blocking-posix-worker");
+  fuse::FuseAdvisoryLocks locks(*second_, executor);
+  ASSERT_TRUE(first_->SetPosix(774, 101, {10, 30, PosixType::kWrite}).ok());
+  utils::FiberRuntime runtime;
+  std::promise<utils::Status> reply;
+  auto future = reply.get_future();
+  struct flock request{};
+  request.l_type = F_WRLCK;
+  request.l_whence = SEEK_SET;
+  request.l_start = 20;
+  request.l_len = 10;
+  request.l_pid = 42;
+  ASSERT_TRUE(runtime.Submit([&] { reply.set_value(locks.SetPosix(774, 202, request, true)); }));
+  EXPECT_EQ(future.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  EXPECT_TRUE(executor.RunFromThread([&] { return first_->SetPosix(774, 101, {10, 30, PosixType::kUnlock}); }).ok());
+  ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_TRUE(future.get().ok());
+  std::optional<RedisLockAuthority::PosixConflict> conflict;
+  ASSERT_TRUE(first_->GetPosix(774, 303, {20, 10, PosixType::kWrite}, &conflict).ok());
+  ASSERT_TRUE(conflict.has_value());
+  EXPECT_EQ(conflict->pid, 42);
+  EXPECT_EQ(conflict->start, 20U);
+  EXPECT_EQ(conflict->length, 10U);
+  runtime.Shutdown();
+}
+
+TEST_F(RedisLockAuthorityTest, CancelledBlockingFlockWaitNeverGrantsOrUnmounts) {
+  utils::BlockingExecutor executor(1, "blocking-flock-cancel");
+  fuse::FuseAdvisoryLocks locks(*second_, executor);
+  ASSERT_TRUE(first_->SetFlock(775, 101, FlockType::kExclusive).ok());
+  utils::FiberRuntime runtime;
+  folly::CancellationSource source;
+  std::promise<utils::Status> reply;
+  auto future = reply.get_future();
+  ASSERT_TRUE(runtime.Submit([&] { reply.set_value(locks.Flock(775, 202, LOCK_EX, source.getToken())); }));
+  EXPECT_EQ(future.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  source.requestCancellation();
+  ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_EQ(future.get().ToErrno(), EINTR);
+  ASSERT_TRUE(first_->SetFlock(775, 101, FlockType::kUnlock).ok());
+  EXPECT_TRUE(second_->SetFlock(775, 202, FlockType::kExclusive).ok());
+  runtime.Shutdown();
+}
+
+TEST_F(RedisLockAuthorityTest, CompatibleSharedWaitersAcrossMultipleEventBasesMakeProgress) {
+  utils::BlockingExecutor executor(1, "lock-shared-multi-eventbase");
+  fuse::FuseAdvisoryLocks locks(*second_, executor);
+  ASSERT_TRUE(first_->SetFlock(777, 101, FlockType::kExclusive).ok());
+  utils::FiberRuntime first_runtime;
+  utils::FiberRuntime second_runtime;
+  constexpr size_t kWaiterCount = 6;
+  std::array<std::promise<utils::Status>, kWaiterCount> replies;
+  std::array<std::future<utils::Status>, kWaiterCount> futures;
+  for (size_t i = 0; i < kWaiterCount; ++i) {
+    futures[i] = replies[i].get_future();
+    auto &runtime = i % 2 == 0 ? first_runtime : second_runtime;
+    ASSERT_TRUE(runtime.Submit([&, i] { replies[i].set_value(locks.Flock(777, 500 + i, LOCK_SH)); }));
+  }
+  for (auto &future : futures) {
+    EXPECT_EQ(future.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+  }
+  EXPECT_TRUE(first_->SetFlock(777, 101, FlockType::kUnlock).ok());
+  for (size_t i = 0; i < kWaiterCount; ++i) {
+    ASSERT_EQ(futures[i].wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(futures[i].get().ok());
+    EXPECT_TRUE(second_->SetFlock(777, 500 + i, FlockType::kUnlock).ok());
+  }
+  first_runtime.Shutdown();
+  second_runtime.Shutdown();
+}
+
+// A probe may nominate one conflicting exclusive candidate, but it cannot
+// grant both. The second requester must remain waiting until the first
+// committed owner explicitly unlocks its record range.
+TEST_F(RedisLockAuthorityTest, CompetingExclusivePosixWaitersRemainSerialized) {
+  utils::BlockingExecutor executor(1, "competing-posix-waiters");
+  fuse::FuseAdvisoryLocks locks(*second_, executor);
+  constexpr uint64_t kInode = 780;
+  ASSERT_TRUE(first_->SetPosix(kInode, 101, {0, 0, PosixType::kWrite}).ok());
+  utils::FiberRuntime first_runtime;
+  utils::FiberRuntime second_runtime;
+  folly::CancellationSource cancellation;
+  struct flock request{};
+  request.l_type = F_WRLCK;
+  request.l_whence = SEEK_SET;
+  request.l_start = 0;
+  request.l_len = 0;
+  std::promise<utils::Status> first_reply;
+  std::promise<utils::Status> second_reply;
+  auto first_result = first_reply.get_future();
+  auto second_result = second_reply.get_future();
+  auto stop_runtimes = folly::makeGuard([&] {
+    cancellation.requestCancellation();
+    first_runtime.Shutdown();
+    second_runtime.Shutdown();
+  });
+  ASSERT_TRUE(first_runtime.Submit(
+      [&] { first_reply.set_value(locks.SetPosix(kInode, 202, request, true, cancellation.getToken())); }));
+  ASSERT_TRUE(second_runtime.Submit(
+      [&] { second_reply.set_value(locks.SetPosix(kInode, 303, request, true, cancellation.getToken())); }));
+  EXPECT_EQ(first_result.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  EXPECT_EQ(second_result.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  ASSERT_TRUE(first_->SetPosix(kInode, 101, {0, 0, PosixType::kUnlock}).ok());
+  const bool first_won = first_result.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+  const bool second_won = second_result.wait_for(first_won ? std::chrono::milliseconds(100)
+                                                           : std::chrono::seconds(5)) == std::future_status::ready;
+  ASSERT_NE(first_won, second_won);
+  if (first_won) {
+    EXPECT_TRUE(first_result.get().ok());
+    EXPECT_EQ(second_result.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  } else {
+    EXPECT_TRUE(second_result.get().ok());
+    EXPECT_EQ(first_result.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  }
+  const uint64_t winner = first_won ? 202 : 303;
+  ASSERT_TRUE(second_->SetPosix(kInode, winner, {0, 0, PosixType::kUnlock}).ok());
+  auto &remaining = first_won ? second_result : first_result;
+  ASSERT_EQ(remaining.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_TRUE(remaining.get().ok());
+  ASSERT_TRUE(second_->SetPosix(kInode, first_won ? 303 : 202, {0, 0, PosixType::kUnlock}).ok());
+}
+
+// A revoked owner generation must never continue polling or grant a lock.
+// Its read-only probe fails closed and releases the suspended request.
+TEST_F(RedisLockAuthorityTest, BlockingWaitStopsWhenInspectCannotValidateLease) {
+  utils::BlockingExecutor executor(1, "lease-revoked-waiter");
+  fuse::FuseAdvisoryLocks locks(*second_, executor);
+  ASSERT_TRUE(first_->SetFlock(782, 101, FlockType::kExclusive).ok());
+  utils::FiberRuntime runtime;
+  folly::CancellationSource cancellation;
+  std::promise<utils::Status> reply;
+  auto result = reply.get_future();
+  auto stop_runtime = folly::makeGuard([&] {
+    cancellation.requestCancellation();
+    runtime.Shutdown();
+  });
+  ASSERT_TRUE(runtime.Submit([&] { reply.set_value(locks.Flock(782, 202, LOCK_EX, cancellation.getToken())); }));
+  EXPECT_EQ(result.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+  ASSERT_TRUE(second_lease_->Revoke().ok());
+  ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_EQ(result.get().ToErrno(), EIO);
+  EXPECT_TRUE(first_->SetFlock(782, 101, FlockType::kUnlock).ok());
+}
+
+TEST_F(RedisLockAuthorityTest, InspectRejectsMalformedStoredRangeWithoutGranting) {
+  const redis::RedisKey key(config_.db, volume_);
+  sw::redis::Redis redis(ConnectionOptions(config_));
+  const std::string hash = key.PosixLock(785);
+  const std::string owner = std::to_string(first_lease_->generation()) + ":101";
+  redis.hset(hash, owner, "P2|W,0,100,-1");
+  std::vector<ILockAuthority::LockHolder> snapshot;
+  const auto status = second_->Inspect(785, false, &snapshot);
+  EXPECT_FALSE(status.ok());
+  EXPECT_TRUE(snapshot.empty());
+  redis.del(hash);
+}
+
+TEST_F(RedisLockAuthorityTest, InspectRejectsMissingOutputWithoutReadingRedis) {
+  EXPECT_EQ(second_->Inspect(783, true, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(second_->Inspect(783, false, nullptr).ToErrno(), EINVAL);
+}
+
+TEST_F(RedisLockAuthorityTest, ReadOnlyInspectionDistinguishesSameOwnerAcrossGenerations) {
+  ASSERT_TRUE(first_->SetFlock(776, 202, FlockType::kShared).ok());
+  std::vector<ILockAuthority::LockHolder> holders;
+  ASSERT_TRUE(second_->Inspect(776, true, &holders).ok());
+  ASSERT_EQ(holders.size(), 1U);
+  EXPECT_EQ(holders.front().kernel_owner, 202U);
+  EXPECT_FALSE(holders.front().local_generation);
+  EXPECT_EQ(holders.front().flock, FlockType::kShared);
+  ASSERT_TRUE(first_->SetPosix(776, 202, {1, 5, PosixType::kWrite, 123}).ok());
+  ASSERT_TRUE(first_->Inspect(776, false, &holders).ok());
+  ASSERT_EQ(holders.size(), 1U);
+  EXPECT_TRUE(holders.front().local_generation);
+  ASSERT_EQ(holders.front().ranges.size(), 1U);
+  EXPECT_EQ(holders.front().ranges.front().start, 1U);
+  EXPECT_EQ(holders.front().ranges.front().length, 5U);
+  EXPECT_EQ(holders.front().ranges.front().pid, 123);
+  ASSERT_TRUE(first_lease_->Revoke().ok());
+  ASSERT_TRUE(second_->Inspect(776, true, &holders).ok());
+  EXPECT_TRUE(holders.empty());
+  EXPECT_EQ(first_->Inspect(776, false, &holders).ToErrno(), EIO);
 }
 
 TEST_F(RedisLockAuthorityTest, ConcurrentExclusiveCandidatesNeverBothSucceed) {

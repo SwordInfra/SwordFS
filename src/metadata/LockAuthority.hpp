@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 #include "utils/Status.hpp"
 
@@ -30,6 +31,18 @@ class ILockAuthority {
     int32_t pid = 0;
   };
   enum class FlockType { kShared, kExclusive, kUnlock };
+  // Validated, lease-filtered read-only state for grouped waiting probes.
+  // Local-generation identity is explicit: raw kernel owners can repeat on
+  // separate Mount generations.
+  // The type declaration has no executable behavior; gcov reports an
+  // implicit special member here despite tested snapshot construction/copy.
+  // Exclude only this declaration, not Inspect or any lock decision.
+  struct LockHolder {  // LCOV_EXCL_LINE
+    uint64_t kernel_owner;
+    bool local_generation;
+    std::vector<PosixRange> ranges;
+    FlockType flock = FlockType::kUnlock;
+  };
 
   virtual ~ILockAuthority() = default;
 
@@ -37,6 +50,12 @@ class ILockAuthority {
   virtual utils::Status GetPosix(uint64_t inode_ino, uint64_t kernel_owner, PosixRange request,
                                  std::optional<PosixConflict> *conflict) = 0;
   virtual utils::Status SetFlock(uint64_t inode_ino, uint64_t kernel_owner, FlockType type) = 0;
+  virtual utils::Status Inspect(uint64_t inode_ino, bool flock, std::vector<LockHolder> *holders) {
+    (void)inode_ino;
+    (void)flock;
+    (void)holders;
+    return utils::Status::OperationNotSupported("lock inspection unavailable");
+  }
 
   // Fiber-safe, nonblocking pre-reply gate. A successful Redis mutation is
   // not a grant if its mount generation became invalid before FUSE replied.

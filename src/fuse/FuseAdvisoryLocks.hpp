@@ -4,9 +4,11 @@
 #pragma once
 
 #include <fcntl.h>
+#include <folly/CancellationToken.h>
 
 #include <cstdint>
 
+#include "fuse/LockRetryScheduler.hpp"
 #include "metadata/LockAuthority.hpp"
 #include "utils/BlockingExecutor.hpp"
 #include "utils/Status.hpp"
@@ -19,13 +21,14 @@ namespace swordfs::fuse {
 class FuseAdvisoryLocks {
  public:
   FuseAdvisoryLocks(metadata::ILockAuthority &authority, utils::BlockingExecutor &executor)
-      : authority_(authority), executor_(executor) {
+      : authority_(authority), executor_(executor), scheduler_(authority, executor) {
   }
 
-  utils::Status SetPosix(uint64_t inode_ino, uint64_t kernel_owner, const struct flock &lock);
+  utils::Status SetPosix(uint64_t inode_ino, uint64_t kernel_owner, const struct flock &lock, bool blocking = false,
+                         const folly::CancellationToken &token = {});
   utils::Status GetPosix(uint64_t inode_ino, uint64_t kernel_owner, const struct flock &lock, struct flock *result);
   utils::Status UnlockPosixOwner(uint64_t inode_ino, uint64_t kernel_owner);
-  utils::Status Flock(uint64_t inode_ino, uint64_t kernel_owner, int op);
+  utils::Status Flock(uint64_t inode_ino, uint64_t kernel_owner, int op, const folly::CancellationToken &token = {});
   utils::Status UnlockFlockOwner(uint64_t inode_ino, uint64_t kernel_owner);
   bool CanGrant() const;
 
@@ -34,8 +37,15 @@ class FuseAdvisoryLocks {
                                metadata::ILockAuthority::PosixRange *range);
 
  private:
+  utils::Status WaitForAvailability(uint64_t inode_ino, uint64_t kernel_owner, bool flock,
+                                    metadata::ILockAuthority::PosixRange range,
+                                    metadata::ILockAuthority::FlockType flock_type,
+                                    const folly::CancellationToken &token);
+
+ private:
   metadata::ILockAuthority &authority_;
   utils::BlockingExecutor &executor_;
+  LockRetryScheduler scheduler_;
 };
 
 }  // namespace swordfs::fuse

@@ -32,9 +32,14 @@ RuntimeState g_state = RuntimeState::kStopped;
 }  // namespace
 
 thread_local std::shared_ptr<FiberRuntime> t_runtime;
+thread_local FiberRuntime *t_driver_runtime = nullptr;
 
 FiberRuntime::FiberRuntime() : evb_(std::make_unique<folly::EventBase>()) {
-  driver_thread_ = std::thread([this] { evb_->loopForever(); });
+  driver_thread_ = std::thread([this] {
+    t_driver_runtime = this;
+    evb_->loopForever();
+    t_driver_runtime = nullptr;
+  });
 }
 
 bool FiberRuntime::Post(folly::Function<void()> fn) {
@@ -211,6 +216,10 @@ void ShutdownFiberRuntime() {
   for (const auto &waiter : shutdown_waiters) {
     waiter->post();
   }
+}
+
+FiberRuntime *CurrentDriverFiberRuntime() {
+  return t_driver_runtime;
 }
 
 FiberRuntime *ThisFiberRuntime() {

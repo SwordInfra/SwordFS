@@ -771,22 +771,17 @@ void VfsHookFactory::SwordFsSetlk(fuse_req_t req, fuse_ino_t ino, struct fuse_fi
     fuse_reply_err(req, ENOSYS);
     return;
   }
-  if (sleep != 0) {
-    // Blocking semantics belong to #433; never make a locally successful
-    // lock claim through the implemented nonblocking Redis path.
-    fuse_reply_err(req, EOPNOTSUPP);
-    return;
-  }
   auto *advisory_locks = context->advisory_locks;
   const uint64_t owner = fi->lock_owner;
   const struct flock request = *lock;
-  RunFuseInFiber(req, [req, ino, owner, request, advisory_locks] {
+  RunFuseInFiber(req, [req, ino, owner, request, sleep, advisory_locks] {
     SetRequestContext(req);
     if (advisory_locks == nullptr) {
       fuse_reply_err(req, EIO);
       return;
     }
-    auto status = advisory_locks->SetPosix(ino, owner, request);
+    auto status = advisory_locks->SetPosix(ino, owner, request, sleep != 0,
+                                           folly::fibers::local<SwordFsContext>().cancellation_token);
     if (status.ok() && !advisory_locks->CanGrant()) {
       status = utils::Status::Unavailable("lock Owner Lease expired before SETLK reply");
     }
@@ -875,7 +870,7 @@ void VfsHookFactory::SwordFsFlock(fuse_req_t req, fuse_ino_t ino, struct fuse_fi
       fuse_reply_err(req, EIO);
       return;
     }
-    auto status = advisory_locks->Flock(ino, owner, op);
+    auto status = advisory_locks->Flock(ino, owner, op, folly::fibers::local<SwordFsContext>().cancellation_token);
     if (status.ok() && (op & ~LOCK_NB) != LOCK_UN && !advisory_locks->CanGrant()) {
       status = utils::Status::Unavailable("lock Owner Lease expired before flock reply");
     }

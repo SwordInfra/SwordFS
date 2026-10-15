@@ -2854,12 +2854,15 @@ TEST_F(VfsImplIntegrationTest, FusePosixLockCallbacksPreservePidAndFlushReleases
   EXPECT_EQ(*invalid_get.error, EINVAL);
   EXPECT_FALSE(invalid_get.lock_reply.has_value());
 
+  // Blocking mode still makes the first uncontended attempt immediately.
+  // The held inode is intentionally different: this checks hook dispatch,
+  // not the independently tested scheduler wakeup contract.
   FuseReplyCapture blocking;
   blocking.user_data = &second_mount;
-  swordfs::fuse::VfsHookFactory::SwordFsSetlk(reinterpret_cast<fuse_req_t>(&blocking), 123, &other_fi, &request, 1);
+  swordfs::fuse::VfsHookFactory::SwordFsSetlk(reinterpret_cast<fuse_req_t>(&blocking), 124, &other_fi, &request, 1);
   ASSERT_TRUE(blocking.Wait());
   ASSERT_TRUE(blocking.error.has_value());
-  EXPECT_EQ(*blocking.error, EOPNOTSUPP);
+  EXPECT_EQ(*blocking.error, 0);
 
   swordfs::fuse::MountInitContext no_authority;
   no_authority.posix_locks_negotiated = true;
@@ -3021,8 +3024,10 @@ TEST_F(VfsImplIntegrationTest, FuseFlockNonblockingAcrossGenerationsAndFinalRele
   fuse_file_info inherited = shared;  // Same opaque owner across dup/fork, not a new flock owner.
   EXPECT_EQ(flock(first_mount, inherited, LOCK_SH | LOCK_NB), 0);
   EXPECT_EQ(flock(second_mount, independent, LOCK_SH | LOCK_NB), 0);
+  // The failed SH->EX conversion yields the second Mount's SH lock,
+  // allowing the first Mount to upgrade as Linux flock does.
   EXPECT_EQ(flock(second_mount, independent, LOCK_EX | LOCK_NB), EAGAIN);
-  EXPECT_EQ(flock(first_mount, shared, LOCK_EX | LOCK_NB), EAGAIN);
+  EXPECT_EQ(flock(first_mount, shared, LOCK_EX | LOCK_NB), 0);
   EXPECT_EQ(flock(first_mount, same_mount_other, LOCK_EX | LOCK_NB), EAGAIN);
   EXPECT_EQ(flock(first_mount, shared, LOCK_UN), 0);
   EXPECT_EQ(flock(first_mount, shared, LOCK_UN | LOCK_NB), 0);
@@ -3035,7 +3040,7 @@ TEST_F(VfsImplIntegrationTest, FuseFlockNonblockingAcrossGenerationsAndFinalRele
   for (int op : {0, LOCK_SH | LOCK_EX | LOCK_NB, LOCK_UN | LOCK_EX, LOCK_SH | LOCK_NB | 0x100}) {
     EXPECT_EQ(flock(first_mount, shared, op), EINVAL);
   }
-  EXPECT_EQ(flock(first_mount, shared, LOCK_EX), EOPNOTSUPP);
+  EXPECT_EQ(flock(first_mount, shared, LOCK_SH), 0);
   EXPECT_EQ(flock(first_mount, shared, LOCK_UN), 0);
 
   // Leave only the first Mount holding SH. If FLUSH wrongly unlocks it,
@@ -3150,6 +3155,11 @@ TEST_F(VfsImplIntegrationTest, FuseFlockRejectsGrantWhenOwnerLeaseExpiresBeforeR
       return false;
     }
   } authority;
+
+  // Authorities that do not advertise read-only inspection fail closed,
+  // rather than waking a waiter without authoritative lock state.
+  std::vector<swordfs::metadata::ILockAuthority::LockHolder> holders;
+  EXPECT_EQ(authority.Inspect(9, true, &holders).ToErrno(), EOPNOTSUPP);
 
   swordfs::utils::BlockingExecutor executor(1, "fuse-flock-expiry-test");
   swordfs::fuse::FuseAdvisoryLocks advisory_locks(authority, executor);

@@ -30,6 +30,7 @@ class RedisLockAuthority final : public ILockAuthority {
                          std::optional<PosixConflict> *conflict) override;
   utils::Status SetFlock(uint64_t inode_ino, uint64_t kernel_owner, FlockType type) override;
   bool CanGrant() const override;
+  utils::Status Inspect(uint64_t inode_ino, bool flock, std::vector<LockHolder> *holders) override;
 
  private:
   utils::Status CheckLease(uint64_t generation) const;
