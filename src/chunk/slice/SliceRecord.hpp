@@ -12,8 +12,9 @@
 
 namespace swordfs::chunk::slice {
 
-// Identity of one immutable, contiguous S3 object. The zero identity is a
-// logical zero-cover, never an S3 object. Independent of ChunkID and COW.
+// Identity of one contiguous logical Slice, which may grow by appending before
+// it is frozen. The zero identity means a zero-cover, not a data object.
+// SliceID is independent of ChunkID and COW.
 class SliceID {
  public:
   constexpr SliceID() = default;
@@ -31,8 +32,9 @@ class SliceID {
 };
 
 // One entry in the ordered history belonging to a single logical ChunkID.
-// Later entries overlay earlier entries. The size of a Slice may exceed the
-// visible record length because off/len can reference a clipped subrange.
+// Later entries overlay earlier entries. size is the Slice's length at the
+// time of this record: multiple records with the same ID may have different
+// sizes as a Slice grows. off/len can reference a clipped subrange.
 struct SliceRecord {
   uint32_t pos = 0;
   SliceID id;

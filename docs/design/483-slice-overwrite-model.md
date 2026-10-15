@@ -6,11 +6,27 @@ the COW mechanism and its full-object head stay independent.
 
 ## V1 model (based on JuiceFS)
 
-An immutable object corresponds to a contiguous Slice (`SliceID`, nonzero).
-Each appended record has five logical fields `(pos, id, size, off, len)`:
-chunk-local position, object identity, full object byte size, offset within the
-object, and covered logical length. A clipped record retains its physical
-identity and increments `off`: clipping does not upload new objects.
+A contiguous **logical Slice** has a nonzero `SliceID` and may grow through
+sequential tail appends while it is still writable. Each history record has
+five fields `(pos, id, size, off, len)`: chunk-local position, Slice identity,
+the Slice length **at the time of the record**, offset within the Slice, and
+covered logical length. The same `SliceID` may therefore occur with different
+`size` values, which must not be rejected merely for being different. An
+unchanged Slice prefix retains its offsets and identity across append records;
+clipping a visible record also preserves these references.
+
+**Append eligibility:** an append extends the same Slice's contiguous logical
+range at its tail. Once a newer *different* Slice (or an explicit zero overlay)
+has overwritten any of its existing range, that Slice is frozen against
+further appends; later writes require a new Slice. A read-only range planner
+interprets already committed records, while the Slice Writer (#485) and the
+cross-mount authoritative publication check (#271/#424) must enforce this
+write-time rule, including races with other mounts.
+
+Logical Slice growth must not be mistaken for portable, in-place modification
+of an S3 object. The actual object upload/append representation and safe
+visibility to existing readers are design responsibilities of #485/#271;
+#483 defines neither an S3 append operation nor an object-key mutation policy.
 
 `SliceID == 0` is an explicit zero-cover record with `size == off == 0`.
 Uncovered ranges are implicitly zero. Apply records in **committed append
@@ -21,7 +37,7 @@ nonoverlapping, bounded object-reference or zero ranges; it is not persisted.
 Chunk-local fields are 32-bit while one chunk's configured size fits in a
 `uint32_t`; `SliceID` is a nonzero 64-bit number within the signed Redis
 counter range. Check `pos/len` and `off/len` by subtraction to avoid overflow.
-Reject zero-length records, malformed object references, noncanonical zeros,
+Reject zero-length records, malformed Slice references, noncanonical zeros,
 or ranges beyond the fixed-size chunk.
 
 ## Scope boundary

@@ -99,6 +99,32 @@ TEST(SliceRecordTest, AdjacentPhysicalSpansMergeOnlyWhenContiguous) {
               {{0, SliceID(10), 2, 8}, {8, SliceID(10), 12, 2}, {10, SliceID(11), 0, 2}, {12, SliceID(), 0, 4}});
 }
 
+TEST(SliceRecordTest, GrowingSliceMayAppearWithDifferentSizesInCommittedHistory) {
+  // One Slice may extend its existing contiguous prefix; the two records
+  // describe different points in its growth, not different data objects.
+  const Records records = {
+      {0, SliceID(7), 4, 0, 4},
+      {4, SliceID(7), 8, 4, 4},
+  };
+  ExpectSpans(Resolve(records, 16, 0, 12), {
+                                               {0, SliceID(7), 0, 8},
+                                               {8, SliceID(), 0, 4},
+                                           });
+
+  // Read planning must remain correct when a later Slice partially masks the
+  // grown Slice. Append/freeze decisions belong to the writer, not this API.
+  const Records overlaid = {
+      {0, SliceID(7), 4, 0, 4},
+      {4, SliceID(7), 8, 4, 4},
+      {2, SliceID(8), 2, 0, 2},
+  };
+  ExpectSpans(Resolve(overlaid, 16, 0, 8), {
+                                               {0, SliceID(7), 0, 2},
+                                               {2, SliceID(8), 0, 2},
+                                               {4, SliceID(7), 4, 4},
+                                           });
+}
+
 TEST(SliceRecordTest, IdenticalStartAndChunkBoundary) {
   Records records = {{0, SliceID(12), 64, 0, 64}, {0, SliceID(3), 4, 0, 4}, {60, SliceID(4), 4, 0, 4}};
   ExpectSpans(Resolve(records, 64, 0, 64), {{0, SliceID(3), 0, 4}, {4, SliceID(12), 4, 56}, {60, SliceID(4), 0, 4}});
