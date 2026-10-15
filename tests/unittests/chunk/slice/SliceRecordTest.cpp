@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <compare>
 #include <cstdint>
 #include <limits>
@@ -49,7 +50,7 @@ TEST(SliceRecordTest, DefaultRecordsAreNotValidCommittedData) {
   EXPECT_EQ(empty_span.len, 0);
 
   Spans out;
-  EXPECT_FALSE(ResolveRange(Records{uninitialized_record}, 64, 0, 1, &out).ok());
+  EXPECT_EQ(ResolveRange(Records{uninitialized_record}, 64, 0, 1, &out).ToErrno(), EIO);
   EXPECT_TRUE(out.empty());
 }
 
@@ -141,15 +142,15 @@ TEST(SliceRecordTest, RejectsMalformedAndOutOfRangeRecordsAtomically) {
   };
   for (const auto &records : invalid) {
     Spans out = {{1, SliceID(), 0, 3}};
-    EXPECT_FALSE(ResolveRange(records, 32, 0, 8, &out).ok());
+    EXPECT_EQ(ResolveRange(records, 32, 0, 8, &out).ToErrno(), EIO);
     ExpectSpans(out, {{1, SliceID(), 0, 3}});
   }
   const Records valid = {{0, SliceID(1), 32, 0, 32}};
   Spans out;
-  EXPECT_FALSE(ResolveRange(valid, 32, 33, 0, &out).ok());
-  EXPECT_FALSE(ResolveRange(valid, 32, 31, 2, &out).ok());
-  EXPECT_FALSE(ResolveRange(valid, 0, 0, 0, &out).ok());
-  EXPECT_FALSE(ResolveRange(valid, 32, 0, 1, nullptr).ok());
+  EXPECT_EQ(ResolveRange(valid, 32, 33, 0, &out).ToErrno(), EINVAL);
+  EXPECT_EQ(ResolveRange(valid, 32, 31, 2, &out).ToErrno(), EINVAL);
+  EXPECT_EQ(ResolveRange(valid, 0, 0, 0, &out).ToErrno(), EINVAL);
+  EXPECT_EQ(ResolveRange(valid, 32, 0, 1, nullptr).ToErrno(), EINVAL);
   EXPECT_TRUE(out.empty());
 }
 
@@ -161,9 +162,9 @@ TEST(SliceRecordTest, ValidatesAllHistoryIncludingOutsideRequestedRangeAndEmptyR
       {0, SliceID(2), 4, 0, 4},
   };
   Spans out = {{17, SliceID(), 0, 3}};
-  EXPECT_FALSE(ResolveRange(invalid_history, 64, 0, 4, &out).ok());
+  EXPECT_EQ(ResolveRange(invalid_history, 64, 0, 4, &out).ToErrno(), EIO);
   ExpectSpans(out, {{17, SliceID(), 0, 3}});
-  EXPECT_FALSE(ResolveRange(invalid_history, 64, 64, 0, &out).ok());
+  EXPECT_EQ(ResolveRange(invalid_history, 64, 64, 0, &out).ToErrno(), EIO);
   ExpectSpans(out, {{17, SliceID(), 0, 3}});
 
   const Records valid_history = {{0, SliceID(2), 4, 0, 4}};
