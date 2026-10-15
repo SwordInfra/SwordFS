@@ -9,7 +9,6 @@
 #include <utility>
 
 namespace swordfs::chunk::slice {
-namespace {
 
 utils::Status ValidateRecord(const SliceRecord &record, uint32_t chunk_size) {
   if (record.len == 0 || record.pos >= chunk_size || record.len > chunk_size - record.pos) {
@@ -27,6 +26,8 @@ utils::Status ValidateRecord(const SliceRecord &record, uint32_t chunk_size) {
   }
   return utils::Status::OK();
 }
+
+namespace {
 
 void AppendCoalesced(const ResolvedSlice &span, std::vector<ResolvedSlice> *out) {
   if (!out->empty()) {

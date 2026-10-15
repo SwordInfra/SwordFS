@@ -29,6 +29,7 @@ enum class RedisFaultScenario {
   kReadOnlyPreExecProtocolFailure,
   kReadOnlyReplyError,
   kIncrReplyError,
+  kEvalReplyError,
   kWriteExecReplyError,
   kWriteExecProtocolFailureApplied,
   kWriteExecDisconnectNotApplied,
@@ -514,6 +515,9 @@ class ScriptedRedisServer {
         break;
       case RedisFaultScenario::kIncrReplyError:
         ServeStandaloneReplyError("INCR");
+        break;
+      case RedisFaultScenario::kEvalReplyError:
+        ServeStandaloneReplyError("EVAL");
         break;
       case RedisFaultScenario::kWriteExecReplyError:
         ServeWriteExecReplyError();
