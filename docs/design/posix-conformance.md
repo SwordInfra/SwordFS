@@ -630,8 +630,8 @@ The **#471/#472 cancellation seam** consumes the request-level
 `folly::CancellationToken` from `SwordFsContext`, with an operation-owned
 `folly::CancellationCallback` and exact `utils::FiberBaton` wakeup. The
 Scheduler itself has no cancellation state or `CancelWaiter()`. Race-safe
-registration
-and unregistration. A request cancelled before registering must not sleep;
+registration and unregistration are owned by the request Fiber. A request
+cancelled before registering must not sleep;
 one cancelled during a Scheduler read-only probe must not be notified
 into a destroyed waiter or initiate another TryLock. A request cancelled
 after the probe's notification but **before its next try-lock is issued**
@@ -645,6 +645,20 @@ interrupt callback replies, reserves a grant or modifies Redis locks.
 The cancellation token stays cancelled across retries; Folly Baton reset
 requires no concurrent poster. User-requested umount is separate from per-waiter cancellation;
 #471 preserves the existing Mount teardown path.
+
+At the FUSE boundary, the already-interrupted registration callback may run
+inline before the request Fiber starts; it only signals the request's
+`CancellationSource`. Blocking POSIX `setlk(sleep=1)` and blocking BSD `flock`
+must return `EINTR` without starting a new mutating attempt in that case.
+After an attempt is submitted, its authoritative result determines whether
+a valid grant wins a late signal or an unsuccessful contention result becomes
+`EINTR`. During read-only inspection, cancellation can complete the request
+without waiting for the probe, and the probe must remain safe to finish after
+the waiter retires. Every path unregisters the interrupt handler before its
+single consuming FUSE reply, including when `fuse_reply_err` itself fails;
+the callback never replies. #472 validates these boundaries through the
+low-level FUSE hooks in `tests/unittests/fuse/VfsImplTest.cpp`, using a gated
+external lock authority without negotiating either remote-lock capability.
 
 Redis commit and FUSE reply are not a single atomic transaction. Keep #430's
 bounded same-intent retry followed by **error only** on unresolved outcome;
