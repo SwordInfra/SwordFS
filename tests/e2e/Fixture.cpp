@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <climits>
 #include <csignal>
@@ -103,6 +104,7 @@ bool Fixture::SetUp() {
 }
 
 void Fixture::TearDown() {
+  const bool peer_stopped = StopPeerMount();
   const bool daemon_missing = DaemonMissingBeforeTeardown();
   const bool mount_stopped = CleanupRuntimeState();
   if (daemon_missing) {
@@ -111,6 +113,114 @@ void Fixture::TearDown() {
   if (!mount_stopped) {
     ADD_FAILURE() << "SwordFS daemon/mount cleanup did not complete";
   }
+  if (!peer_stopped) {
+    ADD_FAILURE() << "SwordFS peer mount cleanup did not complete";
+  }
+}
+
+bool Fixture::StartPeerMount() {
+  if (!mounted_ || peer_pid_ > 0) {
+    return false;
+  }
+  peer_mountpoint_ = work_dir_ + "/mnt-peer";
+  peer_detached_ = false;
+  std::error_code ec;
+  std::filesystem::create_directories(peer_mountpoint_, ec);
+  if (ec) {
+    return false;
+  }
+
+  const char *metadata_url = std::getenv("SWORDFS_METADATA_URL");
+  if (metadata_url == nullptr || metadata_url[0] == '\0') {
+    return false;
+  }
+  const std::string log_path = diagnostics_dir_ + "/mount-peer.log";
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    return false;
+  }
+  if (pid == 0) {
+    const int fd = ::open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0 || ::dup2(fd, STDOUT_FILENO) < 0 || ::dup2(fd, STDERR_FILENO) < 0) {
+      ::_exit(127);
+    }
+    if (fd > STDERR_FILENO) {
+      ::close(fd);
+    }
+    const std::string binary = FindSwordfsBin();
+    ::execl(binary.c_str(), binary.c_str(), "--log-file", log_path.c_str(), "mount", "-f", "--volume",
+            volume_name_.c_str(), "--meta", metadata_url, "--fuse-threads", "2", "--storage-thread-count", "2",
+            peer_mountpoint_.c_str(), static_cast<char *>(nullptr));
+    ::_exit(127);
+  }
+  peer_pid_ = pid;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    struct statvfs stat{};
+    if (::statvfs(peer_mountpoint_.c_str(), &stat) == 0 && stat.f_type == FUSE_SUPER_MAGIC) {
+      return true;
+    }
+    int status = 0;
+    if (::waitpid(peer_pid_, &status, WNOHANG) == peer_pid_) {
+      peer_pid_ = 0;
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  (void)StopPeerMount();
+  return false;
+}
+
+bool Fixture::StopPeerMount() {
+  if (peer_pid_ == 0) {
+    return true;
+  }
+  bool unmounted = peer_detached_;
+  if (!peer_detached_) {
+    unmounted = std::system(("fusermount3 -u " + peer_mountpoint_).c_str()) == 0;
+  }
+  if (!unmounted) {
+    // A pending kernel flock syscall may hold a FUSE reference. Match the
+    // normal fixture's user-requested lazy-unmount fallback.
+    unmounted = std::system(("fusermount3 -uz " + peer_mountpoint_).c_str()) == 0;
+  }
+  bool exited = false;
+  bool clean_exit = false;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    int status = 0;
+    if (::waitpid(peer_pid_, &status, WNOHANG) == peer_pid_) {
+      exited = true;
+      // A user-requested lazy detach can end the libfuse session with
+      // -ECONNABORTED after the final file description closes. Only accept
+      // this expected disconnect for an explicitly detached peer; ordinary
+      // nonzero exits still indicate a failed cleanup.
+      clean_exit =
+          WIFEXITED(status) && (WEXITSTATUS(status) == 0 ||
+                                (peer_detached_ && WEXITSTATUS(status) == static_cast<unsigned char>(-ECONNABORTED)));
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  if (!exited) {
+    (void)::kill(peer_pid_, SIGKILL);
+    (void)::waitpid(peer_pid_, nullptr, 0);
+  }
+  peer_pid_ = 0;
+  peer_detached_ = false;
+  return unmounted && exited && clean_exit;
+}
+
+bool Fixture::DetachPeerMount() {
+  if (peer_pid_ <= 0 || peer_detached_) {
+    return false;
+  }
+  // Lazy detach removes the pathname, but the live kernel connection stays
+  // until every open description and outstanding syscall is released.
+  peer_detached_ = std::system(("fusermount3 -uz " + peer_mountpoint_).c_str()) == 0;
+  return peer_detached_;
+}
+
+std::string Fixture::PeerMountPath(const std::string &relpath) const {
+  return relpath.empty() ? peer_mountpoint_ : peer_mountpoint_ + "/" + relpath;
 }
 
 bool Fixture::Remount() {
