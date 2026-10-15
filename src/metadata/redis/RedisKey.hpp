@@ -28,6 +28,8 @@ class RedisKey {
   std::string FlockLock(uint64_t inode_ino) const;
   std::string NextIno() const;
   std::string NextChunkID() const;
+  // Dedicated volume-scoped identity stream; initialized once at format time.
+  std::string NextSliceID() const;
   std::string Inode(uint64_t ino) const;
   std::string Directory(uint64_t parent_ino) const;
   // #317 FileMetadata authority: index -> typed ChunkID, no COW state.
