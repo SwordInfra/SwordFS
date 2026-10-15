@@ -39,6 +39,10 @@ std::string RedisKey::NextChunkID() const {
   return prefix_ + "next_chunk_id";
 }
 
+std::string RedisKey::NextSliceID() const {
+  return prefix_ + "next_slice_id";
+}
+
 std::string RedisKey::Inode(uint64_t ino) const {
   return folly::sformat("{}inode:{}", prefix_, ino);
 }
