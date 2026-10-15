@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <folly/CancellationToken.h>
+#include <folly/ScopeGuard.h>
 #include <folly/fibers/Baton.h>
 #include <folly/fibers/FiberManagerMap.h>
 #include <folly/io/IOBuf.h>
@@ -1268,7 +1269,293 @@ class VfsImplIntegrationTest : public ::testing::Test {
   NoopDataEngine *data_engine_ = nullptr;
 };
 
+// Drive the actual low-level FUSE lock hooks with an external authority. The
+// barriers are on the blocking thread/Redis boundary, not on a mock FUSE reply
+// or a production-only test hook.
+class GatedFuseLockAuthority final : public swordfs::metadata::ILockAuthority {
+ public:
+  explicit GatedFuseLockAuthority(swordfs::utils::Status result, bool block_attempt = false, bool block_inspect = false)
+      : result_(std::move(result)), block_attempt_(block_attempt), block_inspect_(block_inspect) {
+  }
+
+  swordfs::utils::Status SetPosix(uint64_t, uint64_t, PosixRange) override {
+    return TryLock();
+  }
+
+  swordfs::utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+    return TryLock();
+  }
+
+  swordfs::utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+    return swordfs::utils::Status::OperationNotSupported("not used by blocking lock tests");
+  }
+
+  swordfs::utils::Status Inspect(uint64_t, bool, std::vector<LockHolder> *holders) override {
+    std::unique_lock lock(mutex_);
+    ++inspections_;
+    cv_.notify_all();
+    if (block_inspect_) {
+      cv_.wait(lock, [&] { return release_inspect_; });
+    }
+    // A remote exclusive owner still holds the lock; inspecting does not
+    // itself authorize another grant or mutate lock ownership.
+    if (available_on_inspect_) {
+      holders->clear();
+    } else {
+      *holders = {{999, false, {{0, 0, PosixType::kWrite}}, FlockType::kExclusive}};
+    }
+    lock.unlock();
+    if (on_inspect_result_) {
+      on_inspect_result_();
+    }
+    return swordfs::utils::Status::OK();
+  }
+
+  void OnAvailableInspect(std::function<void()> callback) {
+    available_on_inspect_ = true;
+    on_inspect_result_ = std::move(callback);
+  }
+
+  bool CanGrant() const override {
+    return true;
+  }
+
+  bool WaitForAttempts(int count) {
+    std::unique_lock lock(mutex_);
+    return cv_.wait_for(lock, std::chrono::seconds(5), [&] { return attempts_ >= count; });
+  }
+
+  bool WaitForInspections(int count) {
+    std::unique_lock lock(mutex_);
+    return cv_.wait_for(lock, std::chrono::seconds(5), [&] { return inspections_ >= count; });
+  }
+
+  int Attempts() {
+    std::lock_guard lock(mutex_);
+    return attempts_;
+  }
+
+  void Release() {
+    std::lock_guard lock(mutex_);
+    release_attempt_ = true;
+    release_inspect_ = true;
+    cv_.notify_all();
+  }
+
+ private:
+  swordfs::utils::Status TryLock() {
+    std::unique_lock lock(mutex_);
+    ++attempts_;
+    cv_.notify_all();
+    if (block_attempt_) {
+      cv_.wait(lock, [&] { return release_attempt_; });
+    }
+    return result_;
+  }
+
+  swordfs::utils::Status result_;
+  bool block_attempt_;
+  bool block_inspect_;
+  bool available_on_inspect_ = false;
+  std::function<void()> on_inspect_result_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  int attempts_ = 0;
+  int inspections_ = 0;
+  bool release_attempt_ = false;
+  bool release_inspect_ = false;
+};
+
+void SubmitBlockingFuseLock(FuseReplyCapture *capture, bool flock) {
+  fuse_file_info fi{};
+  fi.lock_owner = 123;
+  if (flock) {
+    swordfs::fuse::VfsHookFactory::SwordFsFlock(reinterpret_cast<fuse_req_t>(capture), 41, &fi, LOCK_EX);
+  } else {
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    swordfs::fuse::VfsHookFactory::SwordFsSetlk(reinterpret_cast<fuse_req_t>(capture), 41, &fi, &request, 1);
+  }
+}
+
 }  // namespace
+
+TEST_F(VfsImplIntegrationTest, BlockingFuseLockAlreadyInterruptedBeforeRegistrationNeverGrants) {
+  for (const bool flock : {false, true}) {
+    GatedFuseLockAuthority authority(swordfs::utils::Status::OK());
+    swordfs::utils::BlockingExecutor executor(2, "fuse-early-interrupt");
+    swordfs::fuse::FuseAdvisoryLocks locks(authority, executor);
+    swordfs::fuse::MountInitContext mount;
+    mount.advisory_locks = &locks;
+    mount.posix_locks_negotiated = true;
+    mount.flock_locks_negotiated = true;
+    FuseReplyCapture capture;
+    capture.user_data = &mount;
+    capture.reply_result = -EIO;  // A failed reply still consumes fuse_req_t.
+    capture.Interrupt();          // libfuse calls the registration callback inline.
+    SubmitBlockingFuseLock(&capture, flock);
+
+    ASSERT_TRUE(capture.Wait());
+    EXPECT_EQ(capture.error.value_or(-1), EINTR);
+    EXPECT_EQ(authority.Attempts(), 0);
+    EXPECT_EQ(capture.error_reply_calls, 1);
+    EXPECT_EQ(capture.interrupt_registrations, 1);
+    EXPECT_EQ(capture.interrupt_unregistrations, 1);
+    EXPECT_EQ(capture.interrupt_callback, nullptr);
+    swordfs::utils::ShutdownFiberRuntime();
+  }
+}
+
+TEST_F(VfsImplIntegrationTest, BlockingFuseLockInterruptedAfterAdmissionBeforeFirstAttemptNeverGrants) {
+  for (const bool flock : {false, true}) {
+    GatedFuseLockAuthority authority(swordfs::utils::Status::OK());
+    swordfs::utils::BlockingExecutor executor(2, "fuse-admitted-interrupt");
+    swordfs::fuse::FuseAdvisoryLocks locks(authority, executor);
+    swordfs::fuse::MountInitContext mount;
+    mount.advisory_locks = &locks;
+    mount.posix_locks_negotiated = true;
+    mount.flock_locks_negotiated = true;
+
+    ASSERT_TRUE(swordfs::utils::InitFiberRuntime());
+    auto *runtime = swordfs::utils::ThisFiberRuntime();
+    ASSERT_NE(runtime, nullptr);
+    folly::fibers::Baton driver_blocked;
+    folly::fibers::Baton release_driver;
+    auto unblock = folly::makeGuard([&] { release_driver.post(); });
+    ASSERT_TRUE(runtime->Post([&] {
+      driver_blocked.post();
+      release_driver.wait();
+    }));
+    ASSERT_TRUE(swordfs::test::WaitForBaton(driver_blocked));
+
+    FuseReplyCapture capture;
+    capture.user_data = &mount;
+    SubmitBlockingFuseLock(&capture, flock);  // Admitted but not executing on the driver.
+    EXPECT_EQ(capture.interrupt_registrations, 1);
+    capture.Interrupt();
+    EXPECT_EQ(capture.error_reply_calls, 0) << "interrupt callback cannot consume an admitted request";
+    EXPECT_EQ(authority.Attempts(), 0);
+    unblock.dismiss();
+    release_driver.post();
+
+    ASSERT_TRUE(capture.Wait());
+    EXPECT_EQ(capture.error.value_or(-1), EINTR);
+    EXPECT_EQ(authority.Attempts(), 0);
+    EXPECT_EQ(capture.error_reply_calls, 1);
+    EXPECT_EQ(capture.interrupt_unregistrations, 1);
+    EXPECT_EQ(capture.interrupt_callback, nullptr);
+    swordfs::utils::ShutdownFiberRuntime();
+  }
+}
+
+TEST_F(VfsImplIntegrationTest, BlockingFuseLockInterruptWaitsForAuthoritativeAttemptOutcome) {
+  for (const bool flock : {false, true}) {
+    for (const bool granted : {false, true}) {
+      GatedFuseLockAuthority authority(
+          granted ? swordfs::utils::Status::OK() : swordfs::utils::Status::WouldBlock("remote owner"),
+          /*block_attempt=*/true);
+      swordfs::utils::BlockingExecutor executor(2, "fuse-inflight-interrupt");
+      swordfs::fuse::FuseAdvisoryLocks locks(authority, executor);
+      swordfs::fuse::MountInitContext mount;
+      mount.advisory_locks = &locks;
+      mount.posix_locks_negotiated = true;
+      mount.flock_locks_negotiated = true;
+      FuseReplyCapture capture;
+      capture.user_data = &mount;
+      auto release = folly::makeGuard([&] { authority.Release(); });
+      SubmitBlockingFuseLock(&capture, flock);
+      const bool submitted = authority.WaitForAttempts(1);
+      EXPECT_TRUE(submitted);
+      if (submitted) {
+        capture.Interrupt();
+        capture.Interrupt();  // Both signals precede the consuming FUSE reply.
+        EXPECT_EQ(capture.error_reply_calls, 0) << "interrupt cannot reply before Redis result";
+      }
+      authority.Release();
+
+      ASSERT_TRUE(capture.Wait());
+      EXPECT_EQ(capture.error.value_or(-1), granted ? 0 : EINTR);
+      EXPECT_EQ(authority.Attempts(), 1) << "no grant attempt after cancelled EAGAIN";
+      EXPECT_EQ(capture.error_reply_calls, 1);
+      EXPECT_EQ(capture.interrupt_registrations, 1);
+      EXPECT_EQ(capture.interrupt_unregistrations, 1);
+      EXPECT_EQ(capture.interrupt_callback, nullptr);
+      swordfs::utils::ShutdownFiberRuntime();
+    }
+  }
+}
+
+TEST_F(VfsImplIntegrationTest, BlockingFuseLockInterruptWhileInspectionIsInFlightRetiresOnlyThatRequest) {
+  for (const bool flock : {false, true}) {
+    GatedFuseLockAuthority authority(swordfs::utils::Status::WouldBlock("remote owner"),
+                                     /*block_attempt=*/false, /*block_inspect=*/true);
+    swordfs::utils::BlockingExecutor executor(2, "fuse-inspect-interrupt");
+    swordfs::fuse::FuseAdvisoryLocks locks(authority, executor);
+    swordfs::fuse::MountInitContext mount;
+    mount.advisory_locks = &locks;
+    mount.posix_locks_negotiated = true;
+    mount.flock_locks_negotiated = true;
+    FuseReplyCapture capture;
+    capture.user_data = &mount;
+    // Make a stale waiter eligible for a new grant if the scheduler fails
+    // to retire it. A conflicting snapshot would hide that regression.
+    authority.OnAvailableInspect({});
+    auto release = folly::makeGuard([&] { authority.Release(); });
+    SubmitBlockingFuseLock(&capture, flock);
+    const bool probing = authority.WaitForInspections(1);
+    EXPECT_TRUE(probing);
+    if (probing) {
+      capture.Interrupt();
+    }
+    ASSERT_TRUE(capture.Wait());
+    EXPECT_EQ(capture.error.value_or(-1), EINTR);
+    EXPECT_EQ(capture.error_reply_calls, 1);
+    EXPECT_EQ(capture.interrupt_registrations, 1);
+    EXPECT_EQ(capture.interrupt_unregistrations, 1);
+    EXPECT_EQ(capture.interrupt_callback, nullptr);
+
+    // The blocked read-only probe can finish after the FUSE reply without
+    // reviving a retired waiter or issuing a second mutating TryLock.
+    authority.Release();
+    FuseReplyCapture ordinary_io;
+    swordfs::fuse::VfsHookFactory::SwordFsGetattr(reinterpret_cast<fuse_req_t>(&ordinary_io), 1, nullptr);
+    EXPECT_TRUE(ordinary_io.Wait()) << "other FUSE requests remain serviceable";
+    // Drain the coordinator before its authority and executor are destroyed.
+    swordfs::utils::ShutdownFiberRuntime();
+    EXPECT_EQ(authority.Attempts(), 1) << "a retired waiter must never grant after an available probe";
+    EXPECT_EQ(capture.error_reply_calls, 1);
+  }
+}
+
+TEST_F(VfsImplIntegrationTest, BlockingFuseLockAvailableInspectCannotRetryAfterInterrupt) {
+  for (const bool flock : {false, true}) {
+    GatedFuseLockAuthority authority(swordfs::utils::Status::WouldBlock("remote owner"));
+    swordfs::utils::BlockingExecutor executor(2, "fuse-inspect-available");
+    swordfs::fuse::FuseAdvisoryLocks locks(authority, executor);
+    swordfs::fuse::MountInitContext mount;
+    mount.advisory_locks = &locks;
+    mount.posix_locks_negotiated = true;
+    mount.flock_locks_negotiated = true;
+    FuseReplyCapture capture;
+    capture.user_data = &mount;
+    // Inspect has observed availability but has not yet delivered the
+    // notification to the original request Fiber. The competing signal must
+    // prevent another mutating attempt even if the scheduler also wakes it.
+    authority.OnAvailableInspect([&] { capture.Interrupt(); });
+    SubmitBlockingFuseLock(&capture, flock);
+
+    ASSERT_TRUE(capture.Wait());
+    EXPECT_EQ(capture.error.value_or(-1), EINTR);
+    // FUSE reply delivery does not drain the read-only scheduler. Verify
+    // terminal mutation and reply counts after all admitted fiber work exits.
+    swordfs::utils::ShutdownFiberRuntime();
+    EXPECT_EQ(authority.Attempts(), 1);
+    EXPECT_EQ(capture.error_reply_calls, 1);
+    EXPECT_EQ(capture.interrupt_unregistrations, 1);
+    EXPECT_EQ(capture.interrupt_callback, nullptr);
+  }
+}
 
 TEST_F(VfsImplIntegrationTest, PreexistingFuseInterruptReachesRequestContextAndUnregistersBeforeReply) {
   FuseReplyCapture capture;
