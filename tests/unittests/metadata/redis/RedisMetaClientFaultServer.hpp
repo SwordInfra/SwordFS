@@ -29,6 +29,11 @@ enum class RedisFaultScenario {
   kReadOnlyPreExecProtocolFailure,
   kReadOnlyReplyError,
   kIncrReplyError,
+  kSliceAppendReplyError,
+  kSliceAppendProtocolFailureApplied,
+  kSliceAppendDisconnectNotApplied,
+  kSliceCounterExecProtocolFailureApplied,
+  kSliceCounterExecDisconnectNotApplied,
   kWriteExecReplyError,
   kWriteExecProtocolFailureApplied,
   kWriteExecDisconnectNotApplied,
@@ -240,7 +245,7 @@ class ScriptedRedisServer {
       error_ = "failed to read RESP increment command";
       return false;
     }
-    if (command.empty() || (command.front() != "INCR" && command.front() != "EVAL")) {
+    if (command.empty() || (command.front() != "INCR" && command.front() != "EVAL" && command.front() != "RPUSHX")) {
       error_ = "expected Redis INCR or EVAL command";
       return false;
     }
@@ -470,6 +475,46 @@ class ScriptedRedisServer {
     }
   }
 
+  void ServeSliceCounterExec(bool apply, bool protocol_failure) {
+    const int client = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+    if (client < 0) {
+      error_ = "accept failed";
+      return;
+    }
+    connection_count_.fetch_add(1, std::memory_order_relaxed);
+    RespReader reader(client);
+    std::vector<std::string> command;
+    while (reader.ReadCommand(&command) && !command.empty()) {
+      if (command.front() == "WATCH" || command.front() == "MULTI") {
+        if (!Reply(client, "+OK\r\n")) {
+          break;
+        }
+      } else if (command.front() == "GET") {
+        if (!Reply(client, "$1\r\n0\r\n")) {
+          break;
+        }
+      } else if (command.front() == "SET") {
+        if (!Reply(client, "+QUEUED\r\n")) {
+          break;
+        }
+      } else if (command.front() == "EXEC") {
+        exec_received_.store(true, std::memory_order_relaxed);
+        mutation_applied_.store(apply, std::memory_order_relaxed);
+        if (protocol_failure) {
+          (void)Reply(client, "x\r\n");
+          ::close(client);
+        } else {
+          ResetAndClose(client);
+        }
+        return;
+      } else {
+        error_ = "unexpected SliceID allocation command " + command.front();
+        break;
+      }
+    }
+    ::close(client);
+  }
+
   void ServeIncrProtocolFailureAppliedThenFreshValue() {
     const int first_client = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
     if (first_client < 0) {
@@ -514,6 +559,21 @@ class ScriptedRedisServer {
         break;
       case RedisFaultScenario::kIncrReplyError:
         ServeStandaloneReplyError("INCR");
+        break;
+      case RedisFaultScenario::kSliceAppendReplyError:
+        ServeStandaloneReplyError("RPUSHX");
+        break;
+      case RedisFaultScenario::kSliceAppendProtocolFailureApplied:
+        ServeIncr(true, true);
+        break;
+      case RedisFaultScenario::kSliceAppendDisconnectNotApplied:
+        ServeIncr(false, false);
+        break;
+      case RedisFaultScenario::kSliceCounterExecProtocolFailureApplied:
+        ServeSliceCounterExec(true, true);
+        break;
+      case RedisFaultScenario::kSliceCounterExecDisconnectNotApplied:
+        ServeSliceCounterExec(false, false);
         break;
       case RedisFaultScenario::kWriteExecReplyError:
         ServeWriteExecReplyError();

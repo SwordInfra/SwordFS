@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -23,6 +24,7 @@
 #include "metadata/redis/RedisMetaClient.hpp"
 #include "metadata/redis/RedisMetaTxn.hpp"
 #include "metadata/redis/RedisReclaimCoordinator.hpp"
+#include "metadata/redis/RedisSliceChunkMetadata.hpp"
 #include "utils/BlockingExecutor.hpp"
 #include "utils/ExecutionDomain.hpp"
 #include "utils/Logging.hpp"
@@ -63,15 +65,25 @@ utils::Status RedisMetaOps::OpenChunkMetadata(ChunkType chunk_type, ChunkMetadat
   if (out == nullptr) {
     return utils::Status::InvalidArgument("chunk metadata output is null");
   }
-  if (chunk_type != ChunkType::kCow) {
+  if (chunk_type != ChunkType::kCow && chunk_type != ChunkType::kChunkSlice) {
     return utils::Status::NotSupported("chunk metadata type is not implemented: " +
                                        std::string(ChunkTypeName(chunk_type)));
   }
   if (chunk_metadata_ != nullptr) {
+    if (chunk_metadata_->Type() != chunk_type) {
+      return utils::Status::InvalidArgument("metadata mechanism does not match opened type");
+    }
     *out = chunk_metadata_;
     return utils::Status::OK();
   }
-  chunk_metadata_ = std::make_shared<RedisCOWChunkMetadata>(backend_, key_);
+  if (chunk_type == ChunkType::kChunkSlice) {
+    if (chunk_size_ == 0 || chunk_size_ > std::numeric_limits<uint32_t>::max()) {
+      return utils::Status::InvalidArgument("Slice ChunkSize exceeds supported 32-bit range");
+    }
+    chunk_metadata_ = std::make_shared<RedisSliceChunkMetadata>(backend_, key_, static_cast<uint32_t>(chunk_size_));
+  } else {
+    chunk_metadata_ = std::make_shared<RedisCOWChunkMetadata>(backend_, key_);
+  }
   *out = chunk_metadata_;
   return utils::Status::OK();
 }
@@ -121,12 +133,14 @@ utils::Status RedisMetaOps::FormatVolume(const SwordFsVolume &config) {
       // its history in the same atomic commit as the volume identity. Keep
       // all initialization keys together so every SET has the same error
       // handling and none can be omitted from the atomic format transaction.
-      const std::array<std::pair<std::string, std::string>, 5> initial_keys{{
+      const std::array<std::pair<std::string, std::string>, 7> initial_keys{{
           {key_.Format(), config.SerializeTo()},
           {key_.Inode(kRootInodeId), root_value},
           {key_.NextIno(), std::to_string(kRootInodeId)},
           {key_.InodeCount(), "1"},
           {key_.OwnerGeneration(), "0"},
+          {key_.NextChunkID(), "0"},
+          {key_.NextSliceID(), "0"},
       }};
       for (const auto &[key, value] : initial_keys) {
         auto queued = txn.Set(key, value);
