@@ -1,6 +1,7 @@
 // Copyright 2026 SwordFS Contributors.
 // Licensed under the Apache License, Version 2.0.
 
+#include <folly/ScopeGuard.h>
 #include <gtest/gtest.h>
 #include <sw/redis++/redis++.h>
 
@@ -37,6 +38,7 @@ TEST(RedisSliceChunkMetadataTest, SliceIdsHaveIndependentVolumeScopedMonotonicCo
   redis.set(key.NextSliceID(), "0");
   redis.set(other_key.NextSliceID(), "0");
   auto backend = std::make_shared<RedisBackendContext>(config, 2);
+  auto shutdown = folly::makeGuard([&] { backend->Shutdown(); });
   RedisSliceChunkMetadata first(backend, key, 64);
   RedisSliceChunkMetadata second(backend, key, 64);
   RedisSliceChunkMetadata other(backend, other_key, 64);
@@ -55,7 +57,6 @@ TEST(RedisSliceChunkMetadataTest, SliceIdsHaveIndependentVolumeScopedMonotonicCo
   });
   EXPECT_EQ(*redis.get(key.NextSliceID()), "2");
   EXPECT_EQ(*redis.get(key.NextChunkID()), "1");
-  backend->Shutdown();
 }
 
 TEST(RedisSliceChunkMetadataTest, MissingNegativeAndExhaustedAllocationStateCannotBeReset) {
@@ -66,6 +67,7 @@ TEST(RedisSliceChunkMetadataTest, MissingNegativeAndExhaustedAllocationStateCann
   const redis::RedisKey key(config.db, swordfs::test::UniqueRedisTestNamespace("slice-invalid-counter"));
   sw::redis::Redis redis(ConnectionOptions(config));
   auto backend = std::make_shared<RedisBackendContext>(config, 1);
+  auto shutdown = folly::makeGuard([&] { backend->Shutdown(); });
   RedisSliceChunkMetadata metadata(backend, key, 64);
   for (const auto &raw : {std::string(), std::string("-1"), std::string("invalid"),
                           std::to_string(std::numeric_limits<int64_t>::max())}) {
@@ -83,7 +85,6 @@ TEST(RedisSliceChunkMetadataTest, MissingNegativeAndExhaustedAllocationStateCann
       EXPECT_EQ(*redis.get(key.NextSliceID()), raw);
     }
   }
-  backend->Shutdown();
 }
 
 TEST(RedisSliceChunkMetadataTest, EmptyIndexAndOrderedRoundTripWithGrowingSlice) {
@@ -93,6 +94,7 @@ TEST(RedisSliceChunkMetadataTest, EmptyIndexAndOrderedRoundTripWithGrowingSlice)
   }
   const redis::RedisKey key(config.db, swordfs::test::UniqueRedisTestNamespace("slice-roundtrip"));
   auto backend = std::make_shared<RedisBackendContext>(config, 2);
+  auto shutdown = folly::makeGuard([&] { backend->Shutdown(); });
   RedisSliceChunkMetadata metadata(backend, key, 64);
   RedisSliceChunkMetadata remount(backend, key, 64);
   swordfs::test::RunInTestFiber([&] {
@@ -128,7 +130,6 @@ TEST(RedisSliceChunkMetadataTest, EmptyIndexAndOrderedRoundTripWithGrowingSlice)
     EXPECT_EQ(spans[3].id, SliceID());
     EXPECT_EQ(metadata.CreateIndex(first).ToErrno(), EEXIST);
   });
-  backend->Shutdown();
 }
 
 TEST(RedisSliceChunkMetadataTest, CorruptStoredRecordAndWrongHeaderFailClosed) {
@@ -141,6 +142,7 @@ TEST(RedisSliceChunkMetadataTest, CorruptStoredRecordAndWrongHeaderFailClosed) {
   const auto first_key = key.PrivateChunkIndex(ChunkType::kChunkSlice, "index:1");
   const auto second_key = key.PrivateChunkIndex(ChunkType::kChunkSlice, "index:2");
   auto backend = std::make_shared<RedisBackendContext>(config, 1);
+  auto shutdown = folly::makeGuard([&] { backend->Shutdown(); });
   RedisSliceChunkMetadata metadata(backend, key, 32);
   swordfs::test::RunInTestFiber([&] {
     ASSERT_TRUE(metadata.CreateIndex(ChunkID(1)).ok());
@@ -166,7 +168,6 @@ TEST(RedisSliceChunkMetadataTest, CorruptStoredRecordAndWrongHeaderFailClosed) {
     EXPECT_EQ(metadata.AppendRecord(ChunkID(2), {0, SliceID(3), 4, 0, 4}).ToErrno(), EIO);
     EXPECT_EQ(metadata.CreateIndex(ChunkID(2)).ToErrno(), EIO);
   });
-  backend->Shutdown();
 }
 
 }  // namespace

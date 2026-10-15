@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <iterator>
 #include <stdexcept>
 #include <thread>
 
@@ -24,6 +25,34 @@ if current and string.sub(current, 1, 1) == '-' then
   return redis.error_reply('ERR counter must be non-negative')
 end
 return redis.call('INCR', KEYS[1])
+)lua";
+
+constexpr std::string_view kIncrExistingScript = R"lua(
+local current = redis.call('GET', KEYS[1])
+if not current or not string.match(current, '^%d+$') then
+  return redis.error_reply('ERR existing non-negative counter required')
+end
+return redis.call('INCR', KEYS[1])
+)lua";
+
+constexpr std::string_view kCreateListScript = R"lua(
+local kind = redis.call('TYPE', KEYS[1]).ok
+if kind == 'none' then
+  redis.call('RPUSH', KEYS[1], ARGV[1])
+  return 1
+end
+if kind ~= 'list' then return -2 end
+if redis.call('LINDEX', KEYS[1], 0) ~= ARGV[1] then return -3 end
+if redis.call('LLEN', KEYS[1]) ~= 1 then return -4 end
+return 1
+)lua";
+
+constexpr std::string_view kAppendListScript = R"lua(
+local kind = redis.call('TYPE', KEYS[1]).ok
+if kind == 'none' then return -1 end
+if kind ~= 'list' then return -2 end
+if redis.call('LINDEX', KEYS[1], 0) ~= ARGV[1] then return -3 end
+return redis.call('RPUSH', KEYS[1], ARGV[2])
 )lua";
 
 sw::redis::ConnectionOptions MakeConnectionOptions(const RedisMetaConfig &config) {
@@ -193,6 +222,73 @@ utils::Status RedisMetaClient::IncrNonNegative(std::string_view key, uint64_t *v
     return RedisError("validated INCR", error);
   } catch (const sw::redis::Error &error) {
     return utils::Status::OutcomeUnknown("Redis validated INCR outcome is ambiguous: " + std::string(error.what()));
+  }
+}
+
+utils::Status RedisMetaClient::IncrExistingNonNegative(std::string_view key, uint64_t *value) {
+  utils::ExpectInThreadDomain();
+  if (value == nullptr) {
+    return utils::Status::InvalidArgument("Redis validated INCR output is null");
+  }
+  try {
+    const auto result = redis_->eval<long long>(kIncrExistingScript, {key}, {});
+    *value = static_cast<uint64_t>(result);
+    return utils::Status::OK();
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError("existing INCR", error);
+  } catch (const sw::redis::Error &error) {
+    return utils::Status::OutcomeUnknown("Redis existing INCR outcome is ambiguous: " + std::string(error.what()));
+  }
+}
+
+utils::Status RedisMetaClient::LRange(std::string_view key, std::vector<std::string> *values) {
+  utils::ExpectInThreadDomain();
+  if (values == nullptr) {
+    return utils::Status::InvalidArgument("Redis LRANGE output is null");
+  }
+  return RunReadOnlyCommand("LRANGE", [&] {
+    std::vector<std::string> loaded;
+    redis_->lrange(std::string(key), 0, -1, std::back_inserter(loaded));
+    *values = std::move(loaded);
+    return utils::Status::OK();
+  });
+}
+
+utils::Status RedisMetaClient::CreateListWithHeader(std::string_view key, std::string_view header) {
+  utils::ExpectInThreadDomain();
+  try {
+    const auto result = redis_->eval<long long>(kCreateListScript, {key}, {header});
+    if (result == -4) {
+      return utils::Status::AlreadyExists("Redis index already contains committed records");
+    }
+    if (result != 1) {
+      return utils::Status::Malformed("Redis index header or type mismatch");
+    }
+    return utils::Status::OK();
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError("LIST create", error);
+  } catch (const sw::redis::Error &error) {
+    return utils::Status::OutcomeUnknown("Redis LIST create outcome is ambiguous: " + std::string(error.what()));
+  }
+}
+
+utils::Status RedisMetaClient::AppendToListWithHeader(std::string_view key, std::string_view header,
+                                                      std::string_view value) {
+  utils::ExpectInThreadDomain();
+  try {
+    const auto result = redis_->eval<long long>(kAppendListScript, {key}, {header, value});
+    if (result == -1) {
+      return utils::Status::NotFound("Redis Slice index is missing");
+    }
+    if (result < 0) {
+      return utils::Status::Malformed("Redis index header or type mismatch");
+    }
+    return utils::Status::OK();
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError("LIST append", error);
+  } catch (const sw::redis::Error &error) {
+    // RPUSH is non-idempotent; a lost response must never cause blind replay.
+    return utils::Status::OutcomeUnknown("Redis LIST append outcome is ambiguous: " + std::string(error.what()));
   }
 }
 

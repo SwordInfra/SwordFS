@@ -38,6 +38,14 @@ class RedisMetaClient {
   // Transport/protocol loss after the script may have executed is
   // OutcomeUnknown, matching standalone INCR allocation semantics.
   utils::Status IncrNonNegative(std::string_view key, uint64_t *value);
+  // Like IncrNonNegative, but the authoritative counter must already exist.
+  // Missing/corrupt state must not restart a volume-scoped identity sequence.
+  utils::Status IncrExistingNonNegative(std::string_view key, uint64_t *value);
+  // Native LIST snapshot and header-checked atomic LIST mutations. The header
+  // check and RPUSH execute in one Redis Lua invocation, without a list-count CAS.
+  utils::Status LRange(std::string_view key, std::vector<std::string> *values);
+  utils::Status CreateListWithHeader(std::string_view key, std::string_view header);
+  utils::Status AppendToListWithHeader(std::string_view key, std::string_view header, std::string_view value);
   // Native Redis 7 owner-lease operations. No retry after an ambiguous
   // mutation: a lost SET/PEXPIRE/DEL reply is not a confirmed new lease.
   utils::Status CreateOwnerLease(std::string_view key, std::string_view nonce, std::chrono::milliseconds ttl);

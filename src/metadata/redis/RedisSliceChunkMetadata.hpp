@@ -5,6 +5,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <utility>
 
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/slice/SliceChunkMetadata.hpp"
@@ -24,6 +26,9 @@ class RedisSliceChunkMetadata final : public slice::SliceChunkMetadata {
   utils::Status CreateIndex(ChunkID chunk_id) override;
   utils::Status ReadRecords(ChunkID chunk_id, std::vector<chunk::slice::SliceRecord> *out) override;
   utils::Status AppendRecord(ChunkID chunk_id, const chunk::slice::SliceRecord &record) override;
+
+ private:
+  std::string IndexKey(ChunkID chunk_id) const;
 
  private:
   std::shared_ptr<RedisBackendContext> backend_;
