@@ -8,9 +8,12 @@ to disable traditional POSIX record locks altogether**: JuiceFS forwards
 them through the same Linux FUSE interface today. The supported-product
 contract and unsupported-OFD limitations must be assessed separately.
 
-**Scope:** enable *traditional* process-associated `F_GETLK`,
-`F_SETLK` and `F_SETLKW` through the existing SwordFS Redis lock
-authority once actual two-Mount tests and lifecycle gates are green.
+**Scope and current PR status:** #474's PR #494 activates *traditional*
+process-associated `F_GETLK`, `F_SETLK` and `F_SETLKW` through the existing
+SwordFS Redis lock authority. The real two-Mount tests and full CI are green
+at head `12813e1` ([run 38880840152](https://github.com/SwordInfra/SwordFS/actions/runs/38880840152));
+the PR is still Draft pending independent review and merge, so this does
+not describe the already-landed `main` capability.
 **OFD record locks are NOT SUPPORTED / NOT PLANNED** (#464 closed);
 no OFD functionality or separate OFD feature task is proposed.
 The existing shipped Redis-backed BSD `flock` remains unchanged.
@@ -94,16 +97,17 @@ supported-operation contracts before enabling remote POSIX in SwordFS:
 | R6 unsupported API boundary | OFD remains documented unsupported. Add a limited explicit **characterization** test with `F_OFD_*` to record existing kernel response, possible stale owners and effects on a supported POSIX caller; **do not** turn it into an OFD conformance gate or infer that it must be implemented |
 | R7 conformance | Promote `generic/131` only with real Redis-authoritative result; `generic/478` mixes unsupported OFD and remains outside supported classification |
 
-**Current code base:** `FuseAdvisoryLocks::SetPosix/GetPosix/
-UnlockPosixOwner` and `RedisLockAuthority` already exist; `Vfs.cpp`
-currently negotiates remote BSD flock and explicitly unsets
-`FUSE_CAP_POSIX_LOCKS`. `SwordFsFlush` already unlocks the kernel
-process owner (when POSIX negotiated) after local cleanup. Reuse these
-paths first rather than copying JuiceFS's extra handle bookkeeping
-preemptively. Revisit bounded fallback cleanup *only if* testing shows
-a present traditional-POSIX correctness or lost-FLUSH problem; do not
-introduce per-OFD state, owner classifier, Redis schema or another
-thread pool by default.
+**Implemented in PR #494:** `Vfs.cpp` negotiates **both**
+`FUSE_CAP_POSIX_LOCKS` and `FUSE_CAP_FLOCK_LOCKS`, rejecting unsupported
+remote capability rather than allowing a kernel-local fallback. It reuses
+`FuseAdvisoryLocks::SetPosix/GetPosix/UnlockPosixOwner` and
+`RedisLockAuthority`. The `SwordFsFlush` path attempts per-process Owner
+unlock on close, but a short Fiber-safe local `(inode, kernel_owner)`
+attempt hint skips Redis entirely for files/owners that never attempted a
+record-lock grant; a result-unknown attempt remains eligible for cleanup.
+Backend unlock failure does not turn a successful ordinary data FLUSH into
+an I/O error. No per-OFD state, owner classifier, Redis schema, fallback
+lock service or separate thread pool is introduced.
 
 **Risk boundary:** we can promise correct distributed behavior for
 **traditional POSIX callers** on supported normal paths once tested.
@@ -114,6 +118,30 @@ feature documentation, and any observed persistent contamination must be
 evaluated before activation rather than ignored as merely “unsupported”.
 
 ## 4. Workflow / decision
+
+### Verified activation and upstream conformance (PR #494)
+
+TDD RED on [run 38869059555](https://github.com/SwordInfra/SwordFS/actions/runs/38869059555)
+confirmed that two independent kernel Mounts without POSIX capability
+negotiation missed an overlapping remote lock. The subsequent GREEN
+implementation passed the real two-Mount conflict, shared/read compatibility,
+process any-close, blocking `F_SETLKW`, signal interruption and revoked-lease
+tests in [run 38880840152](https://github.com/SwordInfra/SwordFS/actions/runs/38880840152).
+
+The pinned fstests upstream `generic/131` invokes the POSIX advisory lock
+test (`_require_test_fcntl_advisory_locks` and `_run_locktest`). Its **raw
+result is PASS** on that run with `FUSE_CAP_POSIX_LOCKS` enabled. The old
+`KERNEL_LOCAL_ONLY` label was stale: `generic/131` itself exercises one
+Mount, but the separate two-Mount E2E verifies distributed Redis authority.
+The two pieces of evidence together justify moving **exactly**
+`generic/131` from `known-gaps.tsv` to `supported.txt` and subjecting it to
+the normal blocking supported-regression gate. This does not establish
+support for OFD or for other unreviewed fstests.
+
+`generic/478` exercises explicitly unsupported OFD lifetime semantics;
+it stays in `deferred-ci.tsv`, not `supported.txt`, and is never counted
+as a PASS. Capability activation and conformance promotion remain subject
+to #494's independent pre-merge review and post-merge main CI.
 
 ### CI regression correction for default-on remote POSIX (2026-10-16)
 
@@ -148,17 +176,15 @@ the required `conformance-deferred-change` approval label and the
 unsupported-OFD rationale. Do not report a PASS or treat this as supported
 conformance. No OFD implementation or classification heuristic is added.
 
-- **Design review reopened / ready for test-first verification**, not a
-  declaration that the remote feature already passes. The prior “protocol
-  BLOCKED, do not implement” conclusion is superseded.
-- Perform TDD with real two-Mount Linux FUSE tests: RED while POSIX
-  capability is disabled; GREEN by the smallest safe negotiation/cleanup
-  change using existing #431/#471/#472 facilities; no local compilation.
-- Investigate any **actual** unacceptable interference discovered by the
-  limited OFD characterization. If it cannot be bounded, document a
-  concrete blocker with a failing reproduction instead of repeating the
-  abstract assertion that “missing type tag => traditional POSIX disabled”.
-- If #474 is activated, rerun Debug/Release E2E, actual fstests generic/131,
-  conformance classification, per-modified-production-C++-file patch
-  coverage >90%, independent review, and main CI after merge.
+- The prior blanket “protocol BLOCKED, do not implement” conclusion is
+  superseded; supported traditional POSIX-only RED/GREEN is complete.
+- Real two-Mount FUSE RED and GREEN, Debug/Release E2E, upstream
+  `generic/131` PASS, and the full PR CI are verified. `generic/131` is
+  promoted to `supported.txt` with a blocking conformance regression gate.
+- The untagged OFD transport limitation remains real. If independent
+  review or bounded unsupported-OFD characterization identifies concrete
+  harmful interaction with supported POSIX operations, evaluate that
+  evidence without implementing OFD or asserting unsupported conformance.
+- Remaining lifecycle gates: independent review of #494, per-file C++
+  coverage confirmation, and main CI after merge.
 - No #464 reopening or OFD feature implementation. No forced FUSE umount.
