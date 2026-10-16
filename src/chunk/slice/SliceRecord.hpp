@@ -51,6 +51,10 @@ struct ResolvedSlice {
   uint32_t len = 0;
 };
 
+// Validate one authoritative committed record, independent of request bounds.
+// A malformed stored record is a data-integrity failure (EIO).
+utils::Status ValidateRecord(const SliceRecord &record, uint32_t chunk_size);
+
 // Materialize the visible spans for [pos, pos+len), including zero holes.
 // Validates the *entire* source history, even records outside the requested
 // range; invalid records return Malformed (EIO), while invalid caller inputs

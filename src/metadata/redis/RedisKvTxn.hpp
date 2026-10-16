@@ -29,6 +29,9 @@ class RedisKvTxn {
   };
 
   utils::Status Get(std::string_view key, std::string *value);
+  // Read the first LIST item while WATCHing the key. Used to create a
+  // Slice index exactly once with its first committed record.
+  utils::Status ListPrefix(std::string_view key, std::vector<std::string> *values);
   // Hash reads are watched by default. kUnwatched is for validation whose
   // serialization is provided by another watched key in the same operation.
   utils::Status HGet(std::string_view key, std::string_view field, std::string *value,
@@ -43,6 +46,7 @@ class RedisKvTxn {
   utils::Status HScan(std::string_view key, uint64_t cursor, size_t count,
                       std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor);
   utils::Status Set(std::string_view key, std::string_view value);
+  utils::Status RPush(std::string_view key, std::string_view value);
   utils::Status HSet(std::string_view key, std::string_view field, std::string_view value);
   utils::Status HDel(std::string_view key, std::string_view field);
   utils::Status IncrBy(std::string_view key, int64_t delta);

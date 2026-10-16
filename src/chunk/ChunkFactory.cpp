@@ -8,8 +8,10 @@
 
 #include "chunk/cow/COWChunk.hpp"
 #include "chunk/cow/COWChunkBoundary.hpp"
+#include "chunk/slice/SliceChunk.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/cow/COWChunkMetadata.hpp"
+#include "metadata/slice/SliceChunkMetadata.hpp"
 
 namespace swordfs::chunk {
 
@@ -18,6 +20,7 @@ ChunkFactory::ChunkFactory(metadata::ChunkType chunk_type, metadata::ChunkMetada
     : chunk_type_(chunk_type),
       chunk_metadata_(std::move(chunk_metadata)),
       cow_metadata_(std::dynamic_pointer_cast<metadata::cow::COWChunkMetadata>(chunk_metadata_)),
+      slice_metadata_(std::dynamic_pointer_cast<metadata::slice::SliceChunkMetadata>(chunk_metadata_)),
       meta_(meta),
       data_(data),
       chunk_size_(chunk_size) {
@@ -45,6 +48,21 @@ utils::Status ChunkFactory::Open(metadata::InodeID ino, metadata::ChunkIndex ind
   }
   if (chunk_metadata_->Type() != chunk_type_) {
     return utils::Status::Internal("ChunkFactory chunk metadata type mismatch");
+  }
+  if (chunk_type_ == metadata::ChunkType::kChunkSlice) {
+    if (slice_metadata_ == nullptr) {
+      return utils::Status::NotSupported("selected chunk type has no Slice metadata capability");
+    }
+    metadata::FileChunkSnapshot file;
+    auto status = meta_->ReadFileChunkSnapshot(ino, index, &file);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!file.chunk_id.has_value() && !create_if_missing) {
+      return utils::Status::OK();
+    }
+    *out = std::make_shared<slice::SliceChunk>(ino, index, chunk_size_, slice_metadata_, meta_, data_);
+    return utils::Status::OK();
   }
   if (chunk_type_ != metadata::ChunkType::kCow) {
     return utils::Status::NotSupported("selected chunk type has no runtime implementation");

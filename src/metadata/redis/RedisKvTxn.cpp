@@ -85,6 +85,22 @@ utils::Status RedisKvTxn::Get(std::string_view key, std::string *value) {
   });
 }
 
+utils::Status RedisKvTxn::ListPrefix(std::string_view key, std::vector<std::string> *values) {
+  if (values == nullptr) {
+    return utils::Status::InvalidArgument("Redis LIST prefix output is null");
+  }
+  if (has_writes_) {
+    return utils::Status::InvalidArgument("Redis transaction cannot read after a write");
+  }
+  return RunRedisCommand("LIST prefix", &retryable_pre_exec_failure_, [&] {
+    redis_->watch(key);
+    std::vector<std::string> loaded;
+    redis_->lrange(std::string(key), 0, 0, std::back_inserter(loaded));
+    *values = std::move(loaded);
+    return utils::Status::OK();
+  });
+}
+
 utils::Status RedisKvTxn::HGet(std::string_view key, std::string_view field, std::string *value, ReadMode mode) {
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis HGET output is null");
@@ -190,6 +206,14 @@ utils::Status RedisKvTxn::HScan(std::string_view key, uint64_t cursor, size_t co
 utils::Status RedisKvTxn::Set(std::string_view key, std::string_view value) {
   return RunRedisCommand("SET", &retryable_pre_exec_failure_, [&] {
     transaction_->set(std::string(key), std::string(value));
+    has_writes_ = true;
+    return utils::Status::OK();
+  });
+}
+
+utils::Status RedisKvTxn::RPush(std::string_view key, std::string_view value) {
+  return RunRedisCommand("RPUSH", &retryable_pre_exec_failure_, [&] {
+    transaction_->rpush(std::string(key), std::string(value));
     has_writes_ = true;
     return utils::Status::OK();
   });
