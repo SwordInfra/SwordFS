@@ -119,6 +119,43 @@ evaluated before activation rather than ignored as merely “unsupported”.
 
 ## 4. Workflow / decision
 
+### #494 strict-review remediation — bounded cleanup of the supported POSIX namespace
+
+The independent pre-merge review identified three **reproduced** regressions
+with RED evidence, not reasons to implement OFD semantics:
+
+- A supported POSIX record lock was stranded when an unsupported
+  `F_OFD_SETLK` reached the same FUSE callback and its final close did not
+  carry the corresponding opaque owner. The #428 wire contract still lacks
+  an OFD discriminator. **Defensive** cleanup now records a lock-attempt
+  Owner against the submitting *FUSE file handle* and on final `RELEASE`
+  unlocks that Owner only if the recorded attempt remains current. A normal
+  process-owner `FLUSH` still takes precedence, so the fallback does not
+  advertise any OFD ownership, unlock conversion or conformance contract.
+  Handles that never attempted a record lock cause **zero Redis calls**.
+- A failed final-close unlock while the Mount Owner Lease remained active
+  left a Redis grant without a future `FLUSH` to retry it. After a failed
+  owner cleanup the short Mount-local hint is marked pending; a single
+  existing FiberRuntime coordinator periodically retries pending owners
+  through the existing BlockingExecutor, without another `close()` or
+  dedicated thread pool. It stops upon confirmed cleanup, terminal lease,
+  or explicit FUSE destroy. The normal data `FLUSH` reply is unaffected.
+- A `FLUSH` could submit its full-range Redis unlock while an earlier
+  same-Owner grant was still in flight. The hint's revision did **not**
+  serialize those remote changes. A bounded set of existing `FiberMutex`
+  stripes now guards the **actual authority mutation** by `(inode, owner)`;
+  the stripe is released before any blocking `F_SETLKW` scheduler wait.
+  The revision is retained only to distinguish stale handle/cleanup
+  snapshots from newer grant attempts.
+
+These local hints are volatile, *not* authoritative lock metadata. A failed
+remote mutation may have committed and must not be mistaken for a no-op;
+terminal owner leases still rely on Redis lease expiry and lazy stale-owner
+cleanup. The defensive `RELEASE` path is solely to prevent unsupported
+requests from indefinitely contaminating **supported POSIX callers**; it is
+not OFD support. No automatic unmount, new persistent schema, global retry
+journal or unrelated I/O Redis work is introduced.
+
 ### Verified activation and upstream conformance (PR #494)
 
 TDD RED on [run 38869059555](https://github.com/SwordInfra/SwordFS/actions/runs/38869059555)

@@ -652,7 +652,10 @@ TEST(LockRetrySchedulerTest, FailedFinalCloseRetriesWithoutAnotherFlush) {
   utils::BlockingExecutor executor(2, "failed-last-close");
   FuseAdvisoryLocks locks(authority, executor);
   utils::FiberRuntime runtime;
-  auto cleanup = folly::makeGuard([&] { runtime.Shutdown(); });
+  auto cleanup = folly::makeGuard([&] {
+    locks.StopBackgroundCleanup();
+    runtime.Shutdown();
+  });
   std::promise<utils::Status> done;
   auto result = done.get_future();
   ASSERT_TRUE(runtime.Submit([&] {
@@ -752,6 +755,55 @@ TEST(LockRetrySchedulerTest, InFlightGrantAndCloseSerializeForTheSamePosixOwner)
   std::lock_guard lock(authority.mutex);
   EXPECT_TRUE(authority.unlock_entered);
   EXPECT_FALSE(authority.held) << "a late grant after FLUSH would strand a record lock";
+}
+
+TEST(LockRetrySchedulerTest, FinalReleaseCleansOnlyCurrentHandleOwnerAndSkipsNeverLockedHandles) {
+  class CountingAuthority final : public metadata::ILockAuthority {
+   public:
+    utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
+      if (range.type == PosixType::kUnlock) {
+        ++unlocks;
+      }
+      return utils::Status::OK();
+    }
+    utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return utils::Status::OK();
+    }
+    utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return true;
+    }
+    std::atomic<int> unlocks{0};
+  } authority;
+  utils::BlockingExecutor executor(2, "posix-final-release");
+  FuseAdvisoryLocks locks(authority, executor);
+  swordfs::test::RunInTestFiber([&] {
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    request.l_len = 10;
+    EXPECT_TRUE(locks.ReleasePosixHandle(801, 501).ok());
+    EXPECT_EQ(authority.unlocks.load(), 0);
+    EXPECT_TRUE(locks.SetPosix(801, 11, request, false, {}, 501).ok());
+    EXPECT_TRUE(locks.ReleasePosixHandle(801, 999).ok());
+    EXPECT_EQ(authority.unlocks.load(), 0);
+    // A newer operation by the same process invalidates an old handle's
+    // remembered attempt: releasing the old handle cannot erase that grant.
+    EXPECT_TRUE(locks.SetPosix(801, 11, request, false, {}, 502).ok());
+    EXPECT_TRUE(locks.ReleasePosixHandle(801, 501).ok());
+    EXPECT_EQ(authority.unlocks.load(), 0);
+    EXPECT_TRUE(locks.ReleasePosixHandle(801, 502).ok());
+    EXPECT_EQ(authority.unlocks.load(), 1);
+    EXPECT_TRUE(locks.ReleasePosixHandle(801, 502).ok());
+    EXPECT_EQ(authority.unlocks.load(), 1);
+    EXPECT_TRUE(locks.SetPosix(801, 12, request, false, {}, 503).ok());
+    EXPECT_TRUE(locks.UnlockPosixOwner(801, 12).ok());
+    EXPECT_EQ(authority.unlocks.load(), 2);
+    EXPECT_TRUE(locks.ReleasePosixHandle(801, 503).ok());
+    EXPECT_EQ(authority.unlocks.load(), 2) << "normal FLUSH cleanup must not double-unlock on RELEASE";
+  });
 }
 
 TEST(LockRetrySchedulerTest, SharedRequestsRemainCompatibleWithRemoteSharedFlock) {

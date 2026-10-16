@@ -341,7 +341,10 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
 }
 
 void VfsHookFactory::SwordFsDestroy(void *userdata) {
-  (void)userdata;
+  auto *context = static_cast<MountInitContext *>(userdata);
+  if (context != nullptr && context->advisory_locks != nullptr) {
+    context->advisory_locks->StopBackgroundCleanup();
+  }
   SWORDFS_LOG_INFO << "SwordFS filesystem unmounted";
   // Stop the reclaim worker before the fiber runtime it borrows is torn
   // down (and before the engines go away in VolumeImpl::Shutdown).
@@ -576,13 +579,24 @@ void VfsHookFactory::SwordFsRelease(fuse_req_t req, fuse_ino_t ino, struct fuse_
   const bool flock_release = fi->flock_release != 0;
   auto *context = static_cast<MountInitContext *>(fuse_req_userdata(req));
   const bool release_flock = context != nullptr && context->flock_locks_negotiated && flock_release;
+  const bool release_posix = context != nullptr && context->posix_locks_negotiated;
   auto *advisory_locks = context != nullptr ? context->advisory_locks : nullptr;
-  RunFuseInFiber(req, [req, ino, fh, owner, release_flock, advisory_locks] {
+  RunFuseInFiber(req, [req, ino, fh, owner, release_flock, release_posix, advisory_locks] {
     SetRequestContext(req);
     auto status = VfsImpl::Release(ino, fh);
     int error = status.ToErrno();
     if (!status.ok()) {
       SWORDFS_LOG_WARN << "local RELEASE failed for ino=" << ino << ": " << status.message();
+    }
+    if (release_posix && advisory_locks != nullptr) {
+      // Best-effort cleanup of owners whose requests lacked a matching
+      // process-owner FLUSH. This prevents unsupported OFD requests from
+      // indefinitely poisoning the *supported* POSIX lock namespace.
+      // A released/stale attempt cannot unlock a newer Owner grant.
+      status = advisory_locks->ReleasePosixHandle(ino, fh);
+      if (!status.ok()) {
+        SWORDFS_LOG_WARN << "POSIX fallback unlock on RELEASE failed for ino=" << ino << ": " << status.message();
+      }
     }
     if (release_flock) {
       // A final RELEASE is independent of local fh validity/flush success.
@@ -787,15 +801,16 @@ void VfsHookFactory::SwordFsSetlk(fuse_req_t req, fuse_ino_t ino, struct fuse_fi
   }
   auto *advisory_locks = context->advisory_locks;
   const uint64_t owner = fi->lock_owner;
+  const uint64_t fh = fi->fh;
   const struct flock request = *lock;
-  RunFuseInFiber(req, [req, ino, owner, request, sleep, advisory_locks] {
+  RunFuseInFiber(req, [req, ino, owner, fh, request, sleep, advisory_locks] {
     SetRequestContext(req);
     if (advisory_locks == nullptr) {
       fuse_reply_err(req, EIO);
       return;
     }
     auto status = advisory_locks->SetPosix(ino, owner, request, sleep != 0,
-                                           folly::fibers::local<SwordFsContext>().cancellation_token);
+                                           folly::fibers::local<SwordFsContext>().cancellation_token, fh);
     if (status.ok() && !advisory_locks->CanGrant()) {
       status = utils::Status::Unavailable("lock Owner Lease expired before SETLK reply");
     }
