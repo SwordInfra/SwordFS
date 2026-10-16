@@ -673,6 +673,87 @@ TEST(LockRetrySchedulerTest, FailedFinalCloseRetriesWithoutAnotherFlush) {
   EXPECT_GE(authority.unlocks, 2);
 }
 
+TEST(LockRetrySchedulerTest, InFlightGrantAndCloseSerializeForTheSamePosixOwner) {
+  class GatedMutationAuthority final : public metadata::ILockAuthority {
+   public:
+    utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
+      std::unique_lock lock(mutex);
+      if (range.type != PosixType::kUnlock) {
+        grant_entered = true;
+        cv.notify_all();
+        cv.wait(lock, [&] { return allow_grant; });
+        held = true;
+      } else {
+        unlock_entered = true;
+        held = false;
+        cv.notify_all();
+      }
+      return utils::Status::OK();
+    }
+    utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return utils::Status::OK();
+    }
+    utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return true;
+    }
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool grant_entered = false;
+    bool allow_grant = false;
+    bool unlock_entered = false;
+    bool held = false;
+  } authority;
+  utils::BlockingExecutor executor(2, "owner-serialization");
+  FuseAdvisoryLocks locks(authority, executor);
+  utils::FiberRuntime runtime;
+  auto cleanup = folly::makeGuard([&] {
+    {
+      std::lock_guard lock(authority.mutex);
+      authority.allow_grant = true;
+    }
+    authority.cv.notify_all();
+    runtime.Shutdown();
+  });
+  std::promise<utils::Status> grant;
+  std::promise<utils::Status> close;
+  auto grant_result = grant.get_future();
+  auto close_result = close.get_future();
+  ASSERT_TRUE(runtime.Submit([&] {
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    grant.set_value(locks.SetPosix(702, 92, request));
+  }));
+  {
+    std::unique_lock lock(authority.mutex);
+    ASSERT_TRUE(authority.cv.wait_for(lock, 5s, [&] { return authority.grant_entered; }));
+  }
+  std::promise<void> close_started;
+  auto started = close_started.get_future();
+  ASSERT_TRUE(runtime.Submit([&] {
+    close_started.set_value();
+    close.set_value(locks.UnlockPosixOwner(702, 92));
+  }));
+  ASSERT_EQ(started.wait_for(5s), std::future_status::ready);
+  {
+    std::unique_lock lock(authority.mutex);
+    EXPECT_FALSE(authority.cv.wait_for(lock, 200ms, [&] { return authority.unlock_entered; }))
+        << "FLUSH must not reach Redis before an in-flight same-owner grant completes";
+    authority.allow_grant = true;
+  }
+  authority.cv.notify_all();
+  ASSERT_EQ(grant_result.wait_for(5s), std::future_status::ready);
+  ASSERT_EQ(close_result.wait_for(5s), std::future_status::ready);
+  EXPECT_TRUE(grant_result.get().ok());
+  EXPECT_TRUE(close_result.get().ok());
+  std::lock_guard lock(authority.mutex);
+  EXPECT_TRUE(authority.unlock_entered);
+  EXPECT_FALSE(authority.held) << "a late grant after FLUSH would strand a record lock";
+}
+
 TEST(LockRetrySchedulerTest, SharedRequestsRemainCompatibleWithRemoteSharedFlock) {
   GatedProbeAuthority authority;
   utils::BlockingExecutor executor(1, "shared-holder-probe");
