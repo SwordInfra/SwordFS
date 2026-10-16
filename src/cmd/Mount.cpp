@@ -214,7 +214,6 @@ static int Mount(const std::string &mountpoint, const std::vector<std::string> &
   fuse_loop_cfg_destroy(loop_cfg);
   // The session guard destroys FUSE and drains all admitted fibers in the
   // destroy hook before the caller revokes the generation and frees workers.
-  // Remote lock capabilities remain disabled until #473/#474.
   return init_context.failed ? 1 : ret;
 }
 
@@ -255,44 +254,37 @@ int RunMount() {
     return 1;
   }
 
-  // Lock ownership is opt-in until the Redis lock authority has implemented
-  // POSIX/flock operations (#430). This lifecycle is independent of normal
-  // metadata I/O: a failed lease registration must not unmount the volume.
+  // Every Redis-backed mount registers an independent flock owner generation.
+  // Failed lease registration only disables remote advisory locks; ordinary
+  // file I/O remains available and the kernel must not fall back to local flock.
   std::unique_ptr<swordfs::metadata::RedisOwnerLease> lease;
   std::unique_ptr<swordfs::metadata::RedisLockAuthority> lock_authority;
   std::unique_ptr<swordfs::fuse::FuseAdvisoryLocks> advisory_locks;
-  if (cfg.enable_lock_owner_lease()) {
-    swordfs::metadata::RedisMetaConfig redis_config;
-    status = swordfs::metadata::ParseRedisMetaUrl(cfg.meta_url(), &redis_config);
-    // ConfigCenter's CLI validators reject malformed URLs and durations
-    // before RunMount is dispatched. Don't duplicate an unreachable mount
-    // failure/volume-shutdown branch for an already validated parse snapshot.
-    assert(status.ok());
-    const auto ttl = ParseLockLeaseDuration(cfg.lock_lease_ttl());
-    const auto renew = ParseLockLeaseDuration(cfg.lock_lease_renew_interval());
-    const auto margin = ParseLockLeaseDuration(cfg.lock_lease_safety_margin());
-    const auto timeout = ParseLockLeaseDuration(cfg.lock_lease_io_timeout());
-    assert(ttl && renew && margin && timeout);
-    swordfs::metadata::RedisOwnerLease::Timing timing{*ttl, *renew, *margin, *timeout};
-    lease = std::make_unique<swordfs::metadata::RedisOwnerLease>(redis_config, cfg.volume(), timing);
-    status = lease->Register();
-    if (status.ok()) {
-      SWORDFS_LOG_INFO << "lock owner lease registered generation " << lease->generation();
-      lock_authority = std::make_unique<swordfs::metadata::RedisLockAuthority>(redis_config, cfg.volume(), *lease);
-      // The metadata engine owns the Redis worker pool for the full Mount
-      // lifetime. There is no separate fixed-size lock worker pool.
-      // ParseRedisMetaUrl and VolumeImpl's scheme registry already establish
-      // that a successfully loaded redis:// engine is RedisMetaImpl.
-      // Avoid a redundant RTTI check and an untestable assertion branch.
-      auto &redis_meta =
-          static_cast<swordfs::metadata::RedisMetaImpl &>(*swordfs::volume::VolumeImpl::Instance().meta_engine());
-      advisory_locks =
-          std::make_unique<swordfs::fuse::FuseAdvisoryLocks>(*lock_authority, redis_meta.SharedBlockingExecutor());
-    } else {
-      // Fail only the advisory-lock service closed; ordinary FUSE remains
-      // available. A failed generation cannot be reused within this mount.
-      SWORDFS_LOG_WARN << "lock owner lease unavailable: " << status.message();
-    }
+  swordfs::metadata::RedisMetaConfig redis_config;
+  status = swordfs::metadata::ParseRedisMetaUrl(cfg.meta_url(), &redis_config);
+  // ConfigCenter's validators reject malformed URLs and durations before
+  // RunMount is dispatched, and the Redis engine is already loaded.
+  assert(status.ok());
+  const auto ttl = ParseLockLeaseDuration(cfg.lock_lease_ttl());
+  const auto renew = ParseLockLeaseDuration(cfg.lock_lease_renew_interval());
+  const auto margin = ParseLockLeaseDuration(cfg.lock_lease_safety_margin());
+  const auto timeout = ParseLockLeaseDuration(cfg.lock_lease_io_timeout());
+  assert(ttl && renew && margin && timeout);
+  swordfs::metadata::RedisOwnerLease::Timing timing{*ttl, *renew, *margin, *timeout};
+  lease = std::make_unique<swordfs::metadata::RedisOwnerLease>(redis_config, cfg.volume(), timing);
+  status = lease->Register();
+  if (status.ok()) {
+    SWORDFS_LOG_INFO << "lock owner lease registered generation " << lease->generation();
+    lock_authority = std::make_unique<swordfs::metadata::RedisLockAuthority>(redis_config, cfg.volume(), *lease);
+    // The metadata engine owns the Redis worker pool for the full Mount
+    // lifetime. No separate lock worker pool or ordinary I/O RTT is added.
+    auto &redis_meta =
+        static_cast<swordfs::metadata::RedisMetaImpl &>(*swordfs::volume::VolumeImpl::Instance().meta_engine());
+    advisory_locks =
+        std::make_unique<swordfs::fuse::FuseAdvisoryLocks>(*lock_authority, redis_meta.SharedBlockingExecutor());
+  } else {
+    // Never re-enable local-only flock on a still-mounted filesystem.
+    SWORDFS_LOG_WARN << "lock owner lease unavailable: " << status.message();
   }
 
   // Mount via libfuse low-level API

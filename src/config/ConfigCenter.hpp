@@ -110,9 +110,6 @@ class ConfigCenter {
   bool enable_ioctl() const {
     return enable_ioctl_;
   }
-  bool enable_lock_owner_lease() const {
-    return enable_lock_owner_lease_;
-  }
   const std::string &lock_lease_ttl() const {
     return lock_lease_ttl_;
   }
@@ -158,9 +155,6 @@ class ConfigCenter {
   std::string volume_;         // --volume (required for format)
   std::string fuse_opts_;      // -o FUSE mount options (e.g. allow_other,ro)
   bool enable_ioctl_ = false;  // --enable-ioctl
-  // Advisory-lock owner identity only; no kernel lock capability is enabled
-  // until the Redis lock authority (#430) is integrated.
-  bool enable_lock_owner_lease_ = false;
   std::string lock_lease_ttl_ = "60s";
   std::string lock_lease_renew_interval_ = "10s";
   std::string lock_lease_safety_margin_ = "15s";
