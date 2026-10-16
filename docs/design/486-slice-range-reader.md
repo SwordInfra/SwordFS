@@ -283,3 +283,24 @@ verify all changes and integrate #486 into #488's branch, then #488 into
 #487's branch, rerun #487's CI **on its updated HEAD**, and merge #487
 only when every gate passes. Continue Slice activation only under #275;
 #424/#271 govern safe authoritative publication and #485 the Writer.
+
+## Test fixture ownership (#496)
+
+Slice Reader tests live in `tests/unittests/chunk/slice/SliceChunkTest.cpp`,
+separate from COW tests in `tests/unittests/chunk/cow/COWChunkTest.cpp`.
+Both fixtures share the mechanism-neutral in-memory metadata/data test doubles
+and `ChunkRuntimeTest` base in `tests/unittests/chunk/ChunkTestSupport.hpp`.
+Slice tests own their file-metadata and object-engine doubles directly and
+construct a Slice `ChunkFactory` without initializing the `VolumeImpl`
+singleton. COW tests initialize the COW-configured `VolumeImpl` through
+`VolumeRuntimeTestUtils.hpp` in their own source file. Accordingly, neither
+the Slice fixture nor its shared support header initializes or depends on
+COW-specific test metadata. `TestCOWChunkMetadata` is used only by the COW
+runtime/fixture; `TestSliceChunkMetadata` is owned by the Slice fixture.
+All existing reader/dirty-overlay/truncate-provenance assertions are preserved.
+
+Both groups continue using the existing `swordfs_test` binary discovered by
+CMake's recursive unit-test sources and GoogleTest registration, and can be
+run independently with `SliceChunkTest.*` and `ChunkTest.*` GTest filters.
+This reorganizes test ownership only; production behavior and the separately
+tracked Slice Writer/activation/publication boundaries do not change.
