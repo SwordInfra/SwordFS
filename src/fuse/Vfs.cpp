@@ -241,12 +241,17 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   conn->max_readahead = kMaxReadAheadSize;
   conn->time_gran = kTimeGran;
 
-  // A local kernel flock table cannot provide cross-mount exclusion.
-  // A missing capability is a mount-init failure, never a silent fallback.
-  fuse_unset_feature_flag(conn, FUSE_CAP_POSIX_LOCKS);
+  // Neither kernel-local record locks nor kernel-local flock provides
+  // cross-mount exclusion. Require both remote transports instead of
+  // silently claiming success from a mount-local fallback.
   if (init_context != nullptr) {
     init_context->posix_locks_negotiated = false;
     init_context->flock_locks_negotiated = false;
+  }
+  if (!fuse_set_feature_flag(conn, FUSE_CAP_POSIX_LOCKS)) {
+    SWORDFS_LOG_ERROR << "Kernel does not support remote FUSE POSIX record locks";
+    CompleteMountInit(init_context, false);
+    return;
   }
   if (!fuse_set_feature_flag(conn, FUSE_CAP_FLOCK_LOCKS)) {
     SWORDFS_LOG_ERROR << "Kernel does not support remote FUSE BSD flock";
@@ -326,8 +331,9 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   fuse_unset_feature_flag(conn, FUSE_CAP_SPLICE_WRITE);
 
   if (init_context != nullptr) {
-    // FUSE forwards flock to Redis even when lease registration failed;
+    // Both lock classes reach Redis even when lease registration failed;
     // that situation returns EIO from the callback, never a local grant.
+    init_context->posix_locks_negotiated = true;
     init_context->flock_locks_negotiated = true;
   }
   CompleteMountInit(init_context, true);
@@ -335,7 +341,10 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
 }
 
 void VfsHookFactory::SwordFsDestroy(void *userdata) {
-  (void)userdata;
+  auto *context = static_cast<MountInitContext *>(userdata);
+  if (context != nullptr && context->advisory_locks != nullptr) {
+    context->advisory_locks->StopBackgroundCleanup();
+  }
   SWORDFS_LOG_INFO << "SwordFS filesystem unmounted";
   // Stop the reclaim worker before the fiber runtime it borrows is torn
   // down (and before the engines go away in VolumeImpl::Shutdown).
@@ -550,13 +559,14 @@ void VfsHookFactory::SwordFsFlush(fuse_req_t req, fuse_ino_t ino, struct fuse_fi
       // Every delivered FLUSH independently releases the entire process
       // Owner, including an invalid fh or a failed data flush. Never rely
       // on client-side lock bookkeeping for this correctness requirement.
+      // A revoked or unavailable lock lease must not poison the data FLUSH:
+      // expired owners are excluded by the Redis grant authority, while a
+      // failing best-effort unlock cannot be made durable by returning EIO
+      // from close(2). Linux may retain that error on later ordinary writes.
       status = advisory_locks != nullptr ? advisory_locks->UnlockPosixOwner(ino, lock_owner)
                                          : utils::Status::Unavailable("remote POSIX lock authority is unavailable");
       if (!status.ok()) {
         SWORDFS_LOG_WARN << "POSIX unlock on FLUSH failed for ino=" << ino << ": " << status.message();
-        if (error == 0) {
-          error = status.ToErrno();
-        }
       }
     }
     fuse_reply_err(req, error);
@@ -569,13 +579,24 @@ void VfsHookFactory::SwordFsRelease(fuse_req_t req, fuse_ino_t ino, struct fuse_
   const bool flock_release = fi->flock_release != 0;
   auto *context = static_cast<MountInitContext *>(fuse_req_userdata(req));
   const bool release_flock = context != nullptr && context->flock_locks_negotiated && flock_release;
+  const bool release_posix = context != nullptr && context->posix_locks_negotiated;
   auto *advisory_locks = context != nullptr ? context->advisory_locks : nullptr;
-  RunFuseInFiber(req, [req, ino, fh, owner, release_flock, advisory_locks] {
+  RunFuseInFiber(req, [req, ino, fh, owner, release_flock, release_posix, advisory_locks] {
     SetRequestContext(req);
     auto status = VfsImpl::Release(ino, fh);
     int error = status.ToErrno();
     if (!status.ok()) {
       SWORDFS_LOG_WARN << "local RELEASE failed for ino=" << ino << ": " << status.message();
+    }
+    if (release_posix && advisory_locks != nullptr) {
+      // Best-effort cleanup of owners whose requests lacked a matching
+      // process-owner FLUSH. This prevents unsupported OFD requests from
+      // indefinitely poisoning the *supported* POSIX lock namespace.
+      // A released/stale attempt cannot unlock a newer Owner grant.
+      status = advisory_locks->ReleasePosixHandle(ino, fh);
+      if (!status.ok()) {
+        SWORDFS_LOG_WARN << "POSIX fallback unlock on RELEASE failed for ino=" << ino << ": " << status.message();
+      }
     }
     if (release_flock) {
       // A final RELEASE is independent of local fh validity/flush success.
@@ -780,15 +801,16 @@ void VfsHookFactory::SwordFsSetlk(fuse_req_t req, fuse_ino_t ino, struct fuse_fi
   }
   auto *advisory_locks = context->advisory_locks;
   const uint64_t owner = fi->lock_owner;
+  const uint64_t fh = fi->fh;
   const struct flock request = *lock;
-  RunFuseInFiber(req, [req, ino, owner, request, sleep, advisory_locks] {
+  RunFuseInFiber(req, [req, ino, owner, fh, request, sleep, advisory_locks] {
     SetRequestContext(req);
     if (advisory_locks == nullptr) {
       fuse_reply_err(req, EIO);
       return;
     }
     auto status = advisory_locks->SetPosix(ino, owner, request, sleep != 0,
-                                           folly::fibers::local<SwordFsContext>().cancellation_token);
+                                           folly::fibers::local<SwordFsContext>().cancellation_token, fh);
     if (status.ok() && !advisory_locks->CanGrant()) {
       status = utils::Status::Unavailable("lock Owner Lease expired before SETLK reply");
     }

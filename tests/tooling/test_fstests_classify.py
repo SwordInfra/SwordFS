@@ -227,6 +227,16 @@ mount: semantic failure text
         expected_tests = {test for test, gap in gaps.items() if gap.expected_evidence != "-"}
         self.assertEqual(expected_tests, set(evidence))
 
+    def test_record_lock_baseline_promotes_only_traditional_posix(self) -> None:
+        supported = CLASSIFY.load_supported(ROOT / "conformance/fstests/supported.txt")
+        gaps = CLASSIFY.load_gaps(ROOT / "conformance/fstests/known-gaps.tsv")
+        deferred = CLASSIFY.load_deferred(ROOT / "conformance/fstests/deferred-ci.tsv")
+        self.assertIn("generic/131", supported)
+        self.assertNotIn("generic/131", gaps)
+        self.assertNotIn("generic/131", deferred)
+        self.assertIn("generic/478", deferred)
+        self.assertNotIn("generic/478", supported | gaps.keys())
+
     def test_fail_evidence_inventory_rejects_missing_and_orphan_files(self) -> None:
         gap = CLASSIFY.Gap(
             "known_unsupported",

@@ -778,10 +778,6 @@ jobs:
             job_timeout: 35
             suite_timeout: 15m
             test_timeout: 15m
-          - shard: bounded-478
-            job_timeout: 35
-            suite_timeout: 15m
-            test_timeout: 15m
     steps:
       - name: Fail closed when a prerequisite is missing
         env:

@@ -560,6 +560,321 @@ TEST(LockRetrySchedulerTest, FailedDriverAdmissionPropagatesWithoutLeavingAWaite
   EXPECT_EQ(authority.ProbeCount(), 0U);
 }
 
+// Every ordinary FUSE file close delivers FLUSH, even without a record lock.
+// No Redis unlock transaction may be issued for owners that have never made
+// a record-lock attempt; generic/531 stresses this path heavily.
+TEST(LockRetrySchedulerTest, UnlockedPosixOwnersDoNotIssueRedisFlushTransactions) {
+  class CountingAuthority final : public metadata::ILockAuthority {
+   public:
+    utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
+      if (range.type == PosixType::kUnlock) {
+        ++unlocks;
+      } else if (fail_grants) {
+        return utils::Status::IOError("unconfirmed grant outcome");
+      }
+      return utils::Status::OK();
+    }
+    utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return utils::Status::OK();
+    }
+    utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return true;
+    }
+    std::atomic<int> unlocks{0};
+    bool fail_grants = false;
+  } authority;
+  utils::BlockingExecutor executor(1, "posix-flush-filter");
+  FuseAdvisoryLocks locks(authority, executor);
+  swordfs::test::RunInTestFiber([&] {
+    for (uint64_t inode = 1; inode <= 100; ++inode) {
+      EXPECT_TRUE(locks.UnlockPosixOwner(inode, 7).ok());
+    }
+    EXPECT_EQ(authority.unlocks.load(), 0) << "ordinary closes must not cause Redis lock RTTs";
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    request.l_start = 0;
+    request.l_len = 10;
+    EXPECT_TRUE(locks.SetPosix(101, 7, request).ok());
+    EXPECT_TRUE(locks.UnlockPosixOwner(101, 8).ok());
+    EXPECT_EQ(authority.unlocks.load(), 0) << "a different process owner cannot trigger cleanup";
+    EXPECT_TRUE(locks.UnlockPosixOwner(101, 7).ok());
+    EXPECT_EQ(authority.unlocks.load(), 1);
+    EXPECT_TRUE(locks.UnlockPosixOwner(101, 7).ok());
+    EXPECT_EQ(authority.unlocks.load(), 1) << "last-close cleanup must not issue duplicate Redis work";
+
+    // A failed grant response may still represent an ambiguous backend
+    // commit. Its owner must remain eligible for full-range close cleanup.
+    authority.fail_grants = true;
+    EXPECT_EQ(locks.SetPosix(101, 9, request).ToErrno(), EIO);
+    EXPECT_TRUE(locks.UnlockPosixOwner(101, 9).ok());
+    EXPECT_EQ(authority.unlocks.load(), 2);
+  });
+}
+
+// A Redis unlock failure on the final close must be retried without waiting
+// for another FLUSH (there may never be one). The real authority's lease
+// remains healthy here, so TTL expiry cannot rescue an orphaned range.
+TEST(LockRetrySchedulerTest, FailedFinalCloseRetriesWithoutAnotherFlush) {
+  class FlakyAuthority final : public metadata::ILockAuthority {
+   public:
+    utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
+      std::lock_guard lock(mutex);
+      if (range.type == PosixType::kUnlock) {
+        ++unlocks;
+        if (unlocks == 1) {
+          return utils::Status::IOError("transient Redis failure");
+        }
+        held = false;
+        cv.notify_all();
+      } else {
+        held = true;
+      }
+      return utils::Status::OK();
+    }
+    utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return utils::Status::OK();
+    }
+    utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return true;
+    }
+    std::mutex mutex;
+    std::condition_variable cv;
+    int unlocks = 0;
+    bool held = false;
+  } authority;
+  utils::BlockingExecutor executor(2, "failed-last-close");
+  FuseAdvisoryLocks locks(authority, executor);
+  utils::FiberRuntime runtime;
+  auto cleanup = folly::makeGuard([&] {
+    locks.StopBackgroundCleanup();
+    runtime.Shutdown();
+  });
+  std::promise<utils::Status> done;
+  auto result = done.get_future();
+  ASSERT_TRUE(runtime.Submit([&] {
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    auto status = locks.SetPosix(701, 91, request);
+    if (status.ok()) {
+      status = locks.UnlockPosixOwner(701, 91);
+    }
+    done.set_value(status);
+  }));
+  ASSERT_EQ(result.wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(result.get().ToErrno(), EIO);
+  std::unique_lock lock(authority.mutex);
+  EXPECT_TRUE(authority.cv.wait_for(lock, 5s, [&] { return !authority.held; }))
+      << "the closed Owner must eventually release its Redis record lock";
+  EXPECT_GE(authority.unlocks, 2);
+}
+
+TEST(LockRetrySchedulerTest, InFlightGrantAndCloseSerializeForTheSamePosixOwner) {
+  class GatedMutationAuthority final : public metadata::ILockAuthority {
+   public:
+    utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
+      std::unique_lock lock(mutex);
+      if (range.type != PosixType::kUnlock) {
+        grant_entered = true;
+        cv.notify_all();
+        cv.wait(lock, [&] { return allow_grant; });
+        held = true;
+      } else {
+        unlock_entered = true;
+        held = false;
+        cv.notify_all();
+      }
+      return utils::Status::OK();
+    }
+    utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return utils::Status::OK();
+    }
+    utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return true;
+    }
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool grant_entered = false;
+    bool allow_grant = false;
+    bool unlock_entered = false;
+    bool held = false;
+  } authority;
+  utils::BlockingExecutor executor(2, "owner-serialization");
+  FuseAdvisoryLocks locks(authority, executor);
+  utils::FiberRuntime runtime;
+  auto cleanup = folly::makeGuard([&] {
+    {
+      std::lock_guard lock(authority.mutex);
+      authority.allow_grant = true;
+    }
+    authority.cv.notify_all();
+    runtime.Shutdown();
+  });
+  std::promise<utils::Status> grant;
+  std::promise<utils::Status> close;
+  auto grant_result = grant.get_future();
+  auto close_result = close.get_future();
+  ASSERT_TRUE(runtime.Submit([&] {
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    grant.set_value(locks.SetPosix(702, 92, request));
+  }));
+  {
+    std::unique_lock lock(authority.mutex);
+    ASSERT_TRUE(authority.cv.wait_for(lock, 5s, [&] { return authority.grant_entered; }));
+  }
+  std::promise<void> close_started;
+  auto started = close_started.get_future();
+  ASSERT_TRUE(runtime.Submit([&] {
+    close_started.set_value();
+    close.set_value(locks.UnlockPosixOwner(702, 92));
+  }));
+  ASSERT_EQ(started.wait_for(5s), std::future_status::ready);
+  {
+    std::unique_lock lock(authority.mutex);
+    EXPECT_FALSE(authority.cv.wait_for(lock, 200ms, [&] { return authority.unlock_entered; }))
+        << "FLUSH must not reach Redis before an in-flight same-owner grant completes";
+    authority.allow_grant = true;
+  }
+  authority.cv.notify_all();
+  ASSERT_EQ(grant_result.wait_for(5s), std::future_status::ready);
+  ASSERT_EQ(close_result.wait_for(5s), std::future_status::ready);
+  EXPECT_TRUE(grant_result.get().ok());
+  EXPECT_TRUE(close_result.get().ok());
+  std::lock_guard lock(authority.mutex);
+  EXPECT_TRUE(authority.unlock_entered);
+  EXPECT_FALSE(authority.held) << "a late grant after FLUSH would strand a record lock";
+}
+
+TEST(LockRetrySchedulerTest, FinalReleaseCleansOnlyCurrentHandleOwnerAndSkipsNeverLockedHandles) {
+  class CountingAuthority final : public metadata::ILockAuthority {
+   public:
+    utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
+      if (range.type == PosixType::kUnlock) {
+        ++unlocks;
+        if (fail_unlock) {
+          return utils::Status::IOError("unconfirmed final release");
+        }
+      }
+      return utils::Status::OK();
+    }
+    utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return utils::Status::OK();
+    }
+    utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return true;
+    }
+    std::atomic<int> unlocks{0};
+    bool fail_unlock = false;
+  } authority;
+  utils::BlockingExecutor executor(2, "posix-final-release");
+  FuseAdvisoryLocks locks(authority, executor);
+  swordfs::test::RunInTestFiber([&] {
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    request.l_len = 10;
+    EXPECT_TRUE(locks.ReleasePosixHandle(801, 501).ok());
+    EXPECT_EQ(authority.unlocks.load(), 0);
+    EXPECT_TRUE(locks.SetPosix(801, 11, request, false, {}, 501).ok());
+    EXPECT_TRUE(locks.ReleasePosixHandle(801, 999).ok());
+    EXPECT_EQ(authority.unlocks.load(), 0);
+    // A newer operation by the same process invalidates an old handle's
+    // remembered attempt: releasing the old handle cannot erase that grant.
+    EXPECT_TRUE(locks.SetPosix(801, 11, request, false, {}, 502).ok());
+    EXPECT_TRUE(locks.ReleasePosixHandle(801, 501).ok());
+    EXPECT_EQ(authority.unlocks.load(), 0);
+    EXPECT_TRUE(locks.ReleasePosixHandle(801, 502).ok());
+    EXPECT_EQ(authority.unlocks.load(), 1);
+    EXPECT_TRUE(locks.ReleasePosixHandle(801, 502).ok());
+    EXPECT_EQ(authority.unlocks.load(), 1);
+    EXPECT_TRUE(locks.SetPosix(801, 12, request, false, {}, 503).ok());
+    EXPECT_TRUE(locks.UnlockPosixOwner(801, 12).ok());
+    EXPECT_EQ(authority.unlocks.load(), 2);
+    EXPECT_TRUE(locks.ReleasePosixHandle(801, 503).ok());
+    EXPECT_EQ(authority.unlocks.load(), 2) << "normal FLUSH cleanup must not double-unlock on RELEASE";
+    authority.fail_unlock = true;
+    EXPECT_TRUE(locks.SetPosix(801, 13, request, false, {}, 504).ok());
+    EXPECT_EQ(locks.ReleasePosixHandle(801, 504).ToErrno(), EIO);
+    authority.fail_unlock = false;
+    EXPECT_TRUE(locks.UnlockPosixOwner(801, 13).ok());
+  });
+}
+
+TEST(LockRetrySchedulerTest, PersistentCleanupFailureStopsWithMountWithoutStallingDataClose) {
+  class FailingAuthority final : public metadata::ILockAuthority {
+   public:
+    utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
+      if (range.type == PosixType::kUnlock) {
+        ++unlocks;
+        return utils::Status::IOError("Redis unlock unavailable");
+      }
+      return utils::Status::OK();
+    }
+    utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return utils::Status::OK();
+    }
+    utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return true;
+    }
+    std::atomic<int> unlocks{0};
+  } authority;
+  utils::BlockingExecutor executor(2, "persistent-close-failure");
+  FuseAdvisoryLocks locks(authority, executor);
+  utils::FiberRuntime runtime;
+  auto cleanup = folly::makeGuard([&] {
+    locks.StopBackgroundCleanup();
+    runtime.Shutdown();
+  });
+  std::promise<utils::Status> first;
+  auto first_result = first.get_future();
+  ASSERT_TRUE(runtime.Submit([&] {
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    auto status = locks.SetPosix(802, 14, request);
+    if (status.ok()) {
+      status = locks.UnlockPosixOwner(802, 14);
+    }
+    first.set_value(status);
+  }));
+  ASSERT_EQ(first_result.wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(first_result.get().ToErrno(), EIO);
+
+  // A new task runs after the submitted cleanup coordinator has entered its
+  // bounded Fiber wait, so stopping below exercises the in-flight drain.
+  std::promise<void> coordinator_entered;
+  auto entered = coordinator_entered.get_future();
+  ASSERT_TRUE(runtime.Submit([&] { coordinator_entered.set_value(); }));
+  ASSERT_EQ(entered.wait_for(5s), std::future_status::ready);
+  std::promise<utils::Status> second;
+  auto second_result = second.get_future();
+  ASSERT_TRUE(runtime.Submit([&] { second.set_value(locks.UnlockPosixOwner(802, 14)); }));
+  ASSERT_EQ(second_result.wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(second_result.get().ToErrno(), EIO);
+  EXPECT_GE(authority.unlocks.load(), 2);
+
+  locks.StopBackgroundCleanup();
+  runtime.Shutdown();  // Must drain an active retry fiber without waiting for Redis recovery.
+}
+
 TEST(LockRetrySchedulerTest, SharedRequestsRemainCompatibleWithRemoteSharedFlock) {
   GatedProbeAuthority authority;
   utils::BlockingExecutor executor(1, "shared-holder-probe");

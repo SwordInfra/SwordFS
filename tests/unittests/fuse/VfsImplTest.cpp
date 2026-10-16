@@ -1715,14 +1715,16 @@ void LoadVfsHookVolume(bool enable_posix_acl) {
   ASSERT_TRUE(status.ok()) << status.message();
 }
 
+constexpr uint64_t kRequiredRemoteLockCaps = FUSE_CAP_POSIX_LOCKS | FUSE_CAP_FLOCK_LOCKS;
+
 }  // namespace
 
 TEST(VfsHookFactoryTest, InitDisablesUserspaceKillprivAndAtomicOTrunc) {
   swordfs::volume::VolumeImpl::Initialize();
 
   struct fuse_conn_info conn{};
-  conn.capable = FUSE_CAP_FLOCK_LOCKS;
-  conn.capable_ext = FUSE_CAP_FLOCK_LOCKS;
+  conn.capable = static_cast<uint32_t>(kRequiredRemoteLockCaps);
+  conn.capable_ext = kRequiredRemoteLockCaps;
   // libfuse may carry mount-option/default wants into init. SwordFS cannot
   // safely retain either capability while its public low-level callbacks do
   // not expose OPEN/WRITE KILL_SUIDGID protocol flags.
@@ -1742,8 +1744,8 @@ TEST(VfsHookFactoryTest, InitDisablesUserspaceKillprivAndAtomicOTrunc) {
 TEST(VfsHookFactoryTest, InitEnablesFuseInterruptTransportForRequestCancellation) {
   swordfs::volume::VolumeImpl::Initialize();
   struct fuse_conn_info conn{};
-  conn.capable = FUSE_CAP_FLOCK_LOCKS;
-  conn.capable_ext = FUSE_CAP_FLOCK_LOCKS;
+  conn.capable = static_cast<uint32_t>(kRequiredRemoteLockCaps);
+  conn.capable_ext = kRequiredRemoteLockCaps;
   conn.no_interrupt = 1;
   swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &conn);
   EXPECT_EQ(conn.no_interrupt, 0);
@@ -1756,8 +1758,8 @@ TEST(VfsHookFactoryTest, InitNegotiatesPosixAclAndDontMaskAsOneContract) {
 
   constexpr uint64_t kAclCaps = FUSE_CAP_POSIX_ACL | FUSE_CAP_DONT_MASK;
   struct fuse_conn_info conn{};
-  conn.capable = static_cast<uint32_t>(kAclCaps | FUSE_CAP_SETXATTR_EXT | FUSE_CAP_FLOCK_LOCKS);
-  conn.capable_ext = kAclCaps | FUSE_CAP_SETXATTR_EXT | FUSE_CAP_FLOCK_LOCKS;
+  conn.capable = static_cast<uint32_t>(kAclCaps | FUSE_CAP_SETXATTR_EXT | kRequiredRemoteLockCaps);
+  conn.capable_ext = kAclCaps | FUSE_CAP_SETXATTR_EXT | kRequiredRemoteLockCaps;
   int ready_pipe[2];
   ASSERT_EQ(::pipe(ready_pipe), 0);
   swordfs::fuse::MountInitContext ready_context(ready_pipe[1]);
@@ -1773,8 +1775,8 @@ TEST(VfsHookFactoryTest, InitNegotiatesPosixAclAndDontMaskAsOneContract) {
   swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
 
   struct fuse_conn_info incomplete{};
-  incomplete.capable = FUSE_CAP_POSIX_ACL | FUSE_CAP_FLOCK_LOCKS;
-  incomplete.capable_ext = FUSE_CAP_POSIX_ACL | FUSE_CAP_FLOCK_LOCKS;
+  incomplete.capable = FUSE_CAP_POSIX_ACL | kRequiredRemoteLockCaps;
+  incomplete.capable_ext = FUSE_CAP_POSIX_ACL | kRequiredRemoteLockCaps;
   int failed_pipe[2];
   ASSERT_EQ(::pipe(failed_pipe), 0);
   swordfs::fuse::MountInitContext init_context(failed_pipe[1]);
@@ -1805,8 +1807,8 @@ TEST(VfsHookFactoryTest, InitDoesNotNegotiatePosixAclWithoutVolumeOptIn) {
 
   constexpr uint64_t kAclCaps = FUSE_CAP_POSIX_ACL | FUSE_CAP_DONT_MASK;
   struct fuse_conn_info conn{};
-  conn.capable = static_cast<uint32_t>(kAclCaps | FUSE_CAP_FLOCK_LOCKS);
-  conn.capable_ext = kAclCaps | FUSE_CAP_FLOCK_LOCKS;
+  conn.capable = static_cast<uint32_t>(kAclCaps | kRequiredRemoteLockCaps);
+  conn.capable_ext = kAclCaps | kRequiredRemoteLockCaps;
   swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &conn);
 
   EXPECT_EQ(conn.want_ext & kAclCaps, 0U);
@@ -1822,8 +1824,8 @@ TEST(VfsHookFactoryTest, InitDisablesSpliceReadWithoutWriteBufCallback) {
   ASSERT_EQ(ops.write_buf, nullptr);
 
   struct fuse_conn_info conn{};
-  conn.capable = FUSE_CAP_SPLICE_READ | FUSE_CAP_FLOCK_LOCKS;
-  conn.capable_ext = FUSE_CAP_SPLICE_READ | FUSE_CAP_FLOCK_LOCKS;
+  conn.capable = FUSE_CAP_SPLICE_READ | kRequiredRemoteLockCaps;
+  conn.capable_ext = FUSE_CAP_SPLICE_READ | kRequiredRemoteLockCaps;
   conn.want = FUSE_CAP_SPLICE_READ;
   conn.want_ext = FUSE_CAP_SPLICE_READ;
   swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &conn);
@@ -1835,11 +1837,11 @@ TEST(VfsHookFactoryTest, InitDisablesSpliceReadWithoutWriteBufCallback) {
   swordfs::volume::VolumeImpl::Initialize();
 }
 
-TEST(VfsHookFactoryTest, InitNegotiatesRemoteFlockButNotPosixLocks) {
+TEST(VfsHookFactoryTest, InitNegotiatesRemotePosixAndFlockLocks) {
   swordfs::volume::VolumeImpl::Initialize();
 
   // libfuse can prepopulate these wants when callbacks are registered.
-  // POSIX record locks remain kernel-local while BSD flock must reach Redis.
+  // Both lock classes must reach Redis, even if libfuse prepopulates wants.
   constexpr uint64_t kLockCaps = FUSE_CAP_POSIX_LOCKS | FUSE_CAP_FLOCK_LOCKS;
   struct fuse_conn_info conn{};
   conn.capable = static_cast<uint32_t>(kLockCaps);
@@ -1853,8 +1855,8 @@ TEST(VfsHookFactoryTest, InitNegotiatesRemoteFlockButNotPosixLocks) {
 
   EXPECT_FALSE(mount.failed);
   EXPECT_EQ(conn.want_ext & FUSE_CAP_FLOCK_LOCKS, FUSE_CAP_FLOCK_LOCKS);
-  EXPECT_EQ(conn.want_ext & FUSE_CAP_POSIX_LOCKS, 0U);
-  EXPECT_FALSE(mount.posix_locks_negotiated);
+  EXPECT_EQ(conn.want_ext & FUSE_CAP_POSIX_LOCKS, FUSE_CAP_POSIX_LOCKS);
+  EXPECT_TRUE(mount.posix_locks_negotiated);
   EXPECT_TRUE(mount.flock_locks_negotiated);
 
   swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
@@ -1880,11 +1882,30 @@ TEST(VfsHookFactoryTest, InitRejectsKernelWithoutRemoteFlockCapability) {
   swordfs::volume::VolumeImpl::Initialize();
 }
 
+TEST(VfsHookFactoryTest, InitRejectsKernelWithoutRemotePosixCapability) {
+  swordfs::volume::VolumeImpl::Initialize();
+
+  struct fuse_conn_info conn{};
+  conn.capable = FUSE_CAP_FLOCK_LOCKS;
+  conn.capable_ext = FUSE_CAP_FLOCK_LOCKS;
+  conn.want_ext = FUSE_CAP_FLOCK_LOCKS;
+  swordfs::fuse::MountInitContext mount;
+  swordfs::fuse::VfsHookFactory::SwordFsInit(&mount, &conn);
+
+  EXPECT_TRUE(mount.failed);
+  EXPECT_EQ(conn.want_ext & FUSE_CAP_POSIX_LOCKS, 0U);
+  EXPECT_FALSE(mount.posix_locks_negotiated);
+  EXPECT_FALSE(mount.flock_locks_negotiated);
+
+  swordfs::fuse::VfsHookFactory::SwordFsDestroy(nullptr);
+  swordfs::volume::VolumeImpl::Initialize();
+}
+
 TEST(VfsHookFactoryTest, InitEnablesDirectoryIoctlOnlyForOptInMounts) {
   swordfs::volume::VolumeImpl::Initialize();
   struct fuse_conn_info conn{};
-  conn.capable = FUSE_CAP_IOCTL_DIR | FUSE_CAP_FLOCK_LOCKS;
-  conn.capable_ext = FUSE_CAP_IOCTL_DIR | FUSE_CAP_FLOCK_LOCKS;
+  conn.capable = FUSE_CAP_IOCTL_DIR | kRequiredRemoteLockCaps;
+  conn.capable_ext = FUSE_CAP_IOCTL_DIR | kRequiredRemoteLockCaps;
 
   swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
                                                                 /*ioctl_enabled=*/true);
@@ -1914,8 +1935,8 @@ TEST(VfsHookFactoryTest, InitResetsInodeHandleRegistryBeforeReturning) {
   });
 
   struct fuse_conn_info conn{};
-  conn.capable = FUSE_CAP_FLOCK_LOCKS;
-  conn.capable_ext = FUSE_CAP_FLOCK_LOCKS;
+  conn.capable = static_cast<uint32_t>(kRequiredRemoteLockCaps);
+  conn.capable_ext = kRequiredRemoteLockCaps;
   swordfs::fuse::VfsHookFactory::SwordFsInit(nullptr, &conn);
 
   // SwordFsInit must not return while the mount-reset task is still queued:
@@ -3254,8 +3275,8 @@ TEST_F(VfsImplIntegrationTest, FusePosixLockCallbacksPreservePidAndFlushReleases
   ASSERT_TRUE(forbidden_rollback.Wait());
   EXPECT_EQ(forbidden_rollback.error.value_or(-1), EAGAIN);
 
-  // With a valid fh, data FLUSH succeeds; remote unlock failure must still
-  // surface as EIO. A lease cannot be used for a new grant after revocation.
+  // A revoked lock Owner Lease forbids new grants, but a failed best-effort
+  // POSIX unlock must not poison a successful data FLUSH or later writes.
   fuse_file_info create_info{};
   create_info.flags = O_RDWR;
   FuseReplyCapture create;
@@ -3272,13 +3293,23 @@ TEST_F(VfsImplIntegrationTest, FusePosixLockCallbacksPreservePidAndFlushReleases
   ASSERT_TRUE(second_lease.Revoke().ok());
   ASSERT_TRUE(first_lease.Revoke().ok());
 
+  // The old lock request used an fh whose final RELEASE has no matching
+  // usable data handle. Even with an invalidated Owner Lease, the fallback
+  // must attempt the recorded Owner cleanup and report it only in logs;
+  // the separate data RELEASE reply retains its ordinary error semantics.
+  FuseReplyCapture orphan_release;
+  orphan_release.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsRelease(reinterpret_cast<fuse_req_t>(&orphan_release), 123, &fi);
+  ASSERT_TRUE(orphan_release.Wait());
+  EXPECT_TRUE(orphan_release.error.has_value());
+
   FuseReplyCapture revoked_flush;
   revoked_flush.user_data = &first_mount;
   swordfs::fuse::VfsHookFactory::SwordFsFlush(reinterpret_cast<fuse_req_t>(&revoked_flush), create.entry->ino,
                                               &valid_fh);
   ASSERT_TRUE(revoked_flush.Wait());
   ASSERT_TRUE(revoked_flush.error.has_value());
-  EXPECT_EQ(*revoked_flush.error, EIO);
+  EXPECT_EQ(*revoked_flush.error, 0);
 
   FuseReplyCapture release;
   swordfs::fuse::VfsHookFactory::SwordFsRelease(reinterpret_cast<fuse_req_t>(&release), create.entry->ino, &valid_fh);
