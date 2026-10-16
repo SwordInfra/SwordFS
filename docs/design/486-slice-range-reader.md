@@ -166,15 +166,16 @@ No new key is persisted in Redis: `SliceID` is volume-scoped and
 already recorded by #484. It must not collide with COW's
 `<ChunkID>/<revision>` namespace. Do not include the logical `pos`,
 `ChunkIndex`, historical `size` or mutable Flush generation in the object
-identity, since the *same* SliceID may grow after Flush. #485 must use the
-identical helper for initial `Put` and later `IDataEngine::Append`, and
-#273 for eventual reclamation. A zero SliceID is a zero cover and never a GET.
+identity. Under the revised #485 design, a Slice is frozen on file Flush;
+one immutable `Put` uses this key, and a later Write receives a **new**
+SliceID. #485 must use the identical helper for its frozen object `Put`,
+and #273 for eventual reclamation. A zero SliceID is a zero cover and never a GET.
 
 Current `IDataEngine::Get(key,offset,size,out)` is sufficient for bounded
 range fetches. #486 must not change the data engine to support new object
-operations; native `Append` is #485. Object-store backends that do not
-support native append still support reading already published objects, but
-Slice activation remains prohibited until writer capability is validated.
+operations; #485's initial implementation uses immutable `Put`, not native
+object Append. Slice activation remains gated on #271 authoritative
+publication and the other #275 prerequisites, not backend append support.
 
 ## Read algorithm and failures
 
@@ -199,14 +200,14 @@ Slice activation remains prohibited until writer capability is validated.
    cannot race buffer lifetime; never hold a global unrelated lock across
    arbitrary S3 operations. Finalize the target output only after success.
 
-### Read visibility versus physical append
+### Read visibility versus immutable Slice uploads
 
-SliceID is stable across eligible physical append; its older record's
-`size` is a historical upper bound for referenced offsets, not a request
-to hydrate all bytes or an instruction to consult current object length.
-Read exactly each *published* span. #485 must guarantee that append preserves
-all previously acknowledged prefix bytes. Do not assume an object is
-immutable simply because COW objects were immutable.
+Although the record codec permits historical length growth under a stable
+SliceID, the revised #485 writer publishes a **new immutable physical object
+per frozen Slice**. Its `size` field bounds valid object offsets; it is not
+a request to hydrate an entire Chunk or object. Read exactly each published
+span. Since only immutable objects are committed, later overlapping writes
+use new SliceIDs and LWW resolves visibility without modifying old bytes.
 
 FileMetadata snapshot and Slice-private LIST are deliberately separate
 authorities. #486 must not claim this is one atomic global snapshot or
