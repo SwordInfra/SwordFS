@@ -615,6 +615,64 @@ TEST(LockRetrySchedulerTest, UnlockedPosixOwnersDoNotIssueRedisFlushTransactions
   });
 }
 
+// A Redis unlock failure on the final close must be retried without waiting
+// for another FLUSH (there may never be one). The real authority's lease
+// remains healthy here, so TTL expiry cannot rescue an orphaned range.
+TEST(LockRetrySchedulerTest, FailedFinalCloseRetriesWithoutAnotherFlush) {
+  class FlakyAuthority final : public metadata::ILockAuthority {
+   public:
+    utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
+      std::lock_guard lock(mutex);
+      if (range.type == PosixType::kUnlock) {
+        ++unlocks;
+        if (unlocks == 1) {
+          return utils::Status::IOError("transient Redis failure");
+        }
+        held = false;
+        cv.notify_all();
+      } else {
+        held = true;
+      }
+      return utils::Status::OK();
+    }
+    utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return utils::Status::OK();
+    }
+    utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return true;
+    }
+    std::mutex mutex;
+    std::condition_variable cv;
+    int unlocks = 0;
+    bool held = false;
+  } authority;
+  utils::BlockingExecutor executor(2, "failed-last-close");
+  FuseAdvisoryLocks locks(authority, executor);
+  utils::FiberRuntime runtime;
+  auto cleanup = folly::makeGuard([&] { runtime.Shutdown(); });
+  std::promise<utils::Status> done;
+  auto result = done.get_future();
+  ASSERT_TRUE(runtime.Submit([&] {
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    auto status = locks.SetPosix(701, 91, request);
+    if (status.ok()) {
+      status = locks.UnlockPosixOwner(701, 91);
+    }
+    done.set_value(status);
+  }));
+  ASSERT_EQ(result.wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(result.get().ToErrno(), EIO);
+  std::unique_lock lock(authority.mutex);
+  EXPECT_TRUE(authority.cv.wait_for(lock, 5s, [&] { return !authority.held; }))
+      << "the closed Owner must eventually release its Redis record lock";
+  EXPECT_GE(authority.unlocks, 2);
+}
+
 TEST(LockRetrySchedulerTest, SharedRequestsRemainCompatibleWithRemoteSharedFlock) {
   GatedProbeAuthority authority;
   utils::BlockingExecutor executor(1, "shared-holder-probe");

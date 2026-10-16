@@ -361,6 +361,53 @@ TEST(OwnerLeaseE2ETest, IndependentKernelMountsEnforcePosixRecordLockConflicts) 
   EXPECT_TRUE(errno == EAGAIN || errno == EACCES) << "unexpected POSIX conflict errno: " << errno;
 }
 
+// Characterize the unsupported Linux OFD request's effect on the *supported*
+// traditional POSIX namespace. This is not OFD conformance: it only verifies
+// that closing an unsupported OFD user's final fd cannot indefinitely poison
+// a second Mount's ordinary F_SETLK while the first Mount's lease stays live.
+TEST(OwnerLeaseE2ETest, UnsupportedOfdLastCloseDoesNotOrphanSupportedPosixLock) {
+#ifdef F_OFD_SETLK
+  Fixture fixture;
+  ASSERT_TRUE(fixture.SetUp());
+  auto cleanup = folly::makeGuard([&] { fixture.TearDown(); });
+  ASSERT_EQ(fixture.CreateFile("ofd-boundary", 0644, O_CREAT | O_RDWR), 0);
+  ASSERT_TRUE(fixture.StartPeerMount());
+  const int owner_fd = fixture.OpenFile("ofd-boundary", O_RDWR);
+  ASSERT_GE(owner_fd, 0);
+  struct flock exclusive{};
+  exclusive.l_type = F_WRLCK;
+  exclusive.l_whence = SEEK_SET;
+  exclusive.l_start = 8;
+  exclusive.l_len = 16;
+  const int ofd_result = ::fcntl(owner_fd, F_OFD_SETLK, &exclusive);
+  const int ofd_errno = errno;
+  ASSERT_EQ(::close(owner_fd), 0);
+  if (ofd_result != 0) {
+    EXPECT_TRUE(ofd_errno == EINVAL || ofd_errno == ENOSYS || ofd_errno == EOPNOTSUPP);
+    return;  // An explicitly rejected unsupported request cannot leak a grant.
+  }
+  const int peer_fd = ::open(fixture.PeerMountPath("ofd-boundary").c_str(), O_RDWR);
+  ASSERT_GE(peer_fd, 0);
+  auto peer_cleanup = folly::makeGuard([&] { ::close(peer_fd); });
+  bool acquired = false;
+  for (int attempt = 0; attempt < 50; ++attempt) {
+    if (::fcntl(peer_fd, F_SETLK, &exclusive) == 0) {
+      acquired = true;
+      break;
+    }
+    ASSERT_TRUE(errno == EAGAIN || errno == EACCES);
+    std::this_thread::sleep_for(20ms);
+  }
+  EXPECT_TRUE(acquired) << "unsupported OFD last-close left a Redis lock blocking traditional POSIX";
+  if (acquired) {
+    exclusive.l_type = F_UNLCK;
+    EXPECT_EQ(::fcntl(peer_fd, F_SETLK, &exclusive), 0);
+  }
+#else
+  GTEST_SKIP() << "build target lacks F_OFD_SETLK";
+#endif
+}
+
 TEST(OwnerLeaseE2ETest, PosixReadLocksAndAnyCloseUnlockAcrossMounts) {
   Fixture fixture;
   ASSERT_TRUE(fixture.SetUp());
