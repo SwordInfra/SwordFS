@@ -96,6 +96,42 @@ FlockWaiter StartFlockWaiter(int holder_fd, int peer_fd) {
   return {pid, ready_pipe[0]};
 }
 
+// Like StartFlockWaiter, but the separate process issues a traditional
+// blocking byte-range lock against the independent peer mount.
+FlockWaiter StartPosixWaiter(int holder_fd, int peer_fd) {
+  int ready_pipe[2];
+  if (::pipe(ready_pipe) != 0) {
+    return {};
+  }
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    ::close(ready_pipe[0]);
+    ::close(ready_pipe[1]);
+    return {};
+  }
+  if (pid == 0) {
+    ::close(ready_pipe[0]);
+    ::close(holder_fd);
+    struct sigaction action{};
+    action.sa_handler = +[](int) {};
+    ::sigemptyset(&action.sa_mask);
+    ::sigaction(SIGUSR1, &action, nullptr);
+    struct flock lock{};
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    lock.l_start = 16;
+    lock.l_len = 24;
+    const char ready = 'R';
+    (void)::write(ready_pipe[1], &ready, 1);
+    const int result = ::fcntl(peer_fd, F_SETLKW, &lock);
+    const char outcome = result == 0 ? 'G' : (errno == EINTR ? 'I' : 'E');
+    (void)::write(ready_pipe[1], &outcome, 1);
+    ::_exit(0);
+  }
+  ::close(ready_pipe[1]);
+  return {pid, ready_pipe[0]};
+}
+
 char ReadWaiterEvent(int fd, int timeout_ms) {
   struct pollfd poll_fd{fd, POLLIN, 0};
   if (::poll(&poll_fd, 1, timeout_ms) != 1) {
@@ -108,12 +144,12 @@ char ReadWaiterEvent(int fd, int timeout_ms) {
 // The ready byte is sent before flock(2). Observe the child's actual Linux
 // syscall and sleeping state before sending a signal or detaching FUSE;
 // a pre-syscall signal would otherwise turn this into a timing-dependent test.
-bool WaitForBlockedFlock(pid_t pid) {
+bool WaitForBlockedLockSyscall(pid_t pid, long syscall_number) {
   const std::string process_dir = "/proc/" + std::to_string(pid) + "/";
   for (int attempt = 0; attempt < 500; ++attempt) {
     std::ifstream syscall_file(process_dir + "syscall");
-    long syscall_number = -1;
-    if (syscall_file >> syscall_number && syscall_number == SYS_flock) {
+    long observed_syscall = -1;
+    if (syscall_file >> observed_syscall && observed_syscall == syscall_number) {
       std::ifstream stat_file(process_dir + "stat");
       std::string process_stat;
       std::getline(stat_file, process_stat);
@@ -195,6 +231,13 @@ TEST(OwnerLeaseE2ETest, InvalidLeaseTimingsDoNotPreventOrdinaryMount) {
   // flock, rather than allowing the kernel to silently grant a local lock.
   EXPECT_EQ(::flock(fd, LOCK_EX | LOCK_NB), -1);
   EXPECT_EQ(errno, EIO);
+  struct flock record_lock{};
+  record_lock.l_type = F_WRLCK;
+  record_lock.l_whence = SEEK_SET;
+  record_lock.l_start = 0;
+  record_lock.l_len = 1;
+  EXPECT_EQ(::fcntl(fd, F_SETLK, &record_lock), -1);
+  EXPECT_EQ(errno, EIO) << "failed Redis registration must not fall back to a local POSIX lock";
   EXPECT_EQ(::close(fd), 0);
   EXPECT_EQ(fixture.WriteFile("lock-unavailable", "ordinary-data"), 0);
   std::string data;
@@ -272,6 +315,180 @@ TEST(OwnerLeaseE2ETest, IndependentKernelMountsEnforceRedisFlockConflictsAndLast
   EXPECT_EQ(authority.redis->hlen(authority.key.FlockLock(inode_stat.st_ino)), 1);
   EXPECT_EQ(::flock(peer_fd, LOCK_UN), 0);
   EXPECT_EQ(::close(peer_fd), 0);
+}
+
+// The same POSIX byte range must conflict across independent FUSE mount
+// sessions sharing one Redis volume. Before FUSE_CAP_POSIX_LOCKS is enabled,
+// each kernel grants the lock locally, so this test supplies a real RED proof
+// rather than accepting a passing local-kernel fcntl test as distributed.
+TEST(OwnerLeaseE2ETest, IndependentKernelMountsEnforcePosixRecordLockConflicts) {
+  Fixture fixture;
+  ASSERT_TRUE(fixture.SetUp());
+  auto cleanup = folly::makeGuard([&] { fixture.TearDown(); });
+  ASSERT_EQ(fixture.CreateFile("record-lock", 0644, O_CREAT | O_RDWR), 0);
+  ASSERT_TRUE(fixture.StartPeerMount());
+
+  const int first_fd = fixture.OpenFile("record-lock", O_RDWR);
+  ASSERT_GE(first_fd, 0);
+  const int second_fd = ::open(fixture.PeerMountPath("record-lock").c_str(), O_RDWR);
+  ASSERT_GE(second_fd, 0);
+  auto descriptors = folly::makeGuard([&] {
+    struct flock unlock{};
+    unlock.l_type = F_UNLCK;
+    unlock.l_whence = SEEK_SET;
+    unlock.l_start = 16;
+    unlock.l_len = 24;
+    (void)::fcntl(second_fd, F_SETLK, &unlock);
+    (void)::fcntl(first_fd, F_SETLK, &unlock);
+    (void)::close(second_fd);
+    (void)::close(first_fd);
+  });
+
+  struct flock exclusive{};
+  exclusive.l_type = F_WRLCK;
+  exclusive.l_whence = SEEK_SET;
+  exclusive.l_start = 16;
+  exclusive.l_len = 24;
+  ASSERT_EQ(::fcntl(first_fd, F_SETLK, &exclusive), 0);
+
+  struct flock conflict = exclusive;
+  ASSERT_EQ(::fcntl(second_fd, F_GETLK, &conflict), 0);
+  EXPECT_EQ(conflict.l_type, F_WRLCK) << "the peer must see the remote write lock";
+
+  errno = 0;
+  EXPECT_EQ(::fcntl(second_fd, F_SETLK, &exclusive), -1)
+      << "the independent peer must not receive a conflicting Redis record lock";
+  EXPECT_TRUE(errno == EAGAIN || errno == EACCES) << "unexpected POSIX conflict errno: " << errno;
+}
+
+TEST(OwnerLeaseE2ETest, PosixReadLocksAndAnyCloseUnlockAcrossMounts) {
+  Fixture fixture;
+  ASSERT_TRUE(fixture.SetUp());
+  auto cleanup = folly::makeGuard([&] { fixture.TearDown(); });
+  ASSERT_EQ(fixture.CreateFile("ranges", 0644, O_CREAT | O_RDWR), 0);
+  ASSERT_TRUE(fixture.StartPeerMount());
+
+  const int first_fd = fixture.OpenFile("ranges", O_RDWR);
+  ASSERT_GE(first_fd, 0);
+  int unrelated_fd = fixture.OpenFile("ranges", O_RDWR);
+  ASSERT_GE(unrelated_fd, 0);
+  const int peer_fd = ::open(fixture.PeerMountPath("ranges").c_str(), O_RDWR);
+  ASSERT_GE(peer_fd, 0);
+  auto descriptors = folly::makeGuard([&] {
+    ::close(peer_fd);
+    if (unrelated_fd >= 0) {
+      ::close(unrelated_fd);
+    }
+    ::close(first_fd);
+  });
+
+  struct flock shared{};
+  shared.l_type = F_RDLCK;
+  shared.l_whence = SEEK_SET;
+  shared.l_start = 16;
+  shared.l_len = 24;
+  ASSERT_EQ(::fcntl(first_fd, F_SETLK, &shared), 0);
+  ASSERT_EQ(::fcntl(peer_fd, F_SETLK, &shared), 0) << "shared/read ranges must coexist across mounts";
+
+  struct flock exclusive = shared;
+  exclusive.l_type = F_WRLCK;
+  errno = 0;
+  EXPECT_EQ(::fcntl(peer_fd, F_SETLK, &exclusive), -1);
+  EXPECT_TRUE(errno == EAGAIN || errno == EACCES);
+
+  // Closing any unrelated descriptor for the same inode in the original
+  // process must release all of that process's record locks. The same close
+  // must not release a different mount's owner.
+  ASSERT_EQ(::close(unrelated_fd), 0);
+  unrelated_fd = -1;
+  bool released = false;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    if (::fcntl(peer_fd, F_SETLK, &exclusive) == 0) {
+      released = true;
+      break;
+    }
+    if (errno != EAGAIN && errno != EACCES) {
+      break;
+    }
+    std::this_thread::sleep_for(20ms);
+  }
+  EXPECT_TRUE(released) << "any-close must release the original process owner, not the peer owner";
+  struct flock unlock = shared;
+  unlock.l_type = F_UNLCK;
+  EXPECT_EQ(::fcntl(peer_fd, F_SETLK, &unlock), 0);
+}
+
+TEST(OwnerLeaseE2ETest, BlockingPosixRecordLockWaitWakesOnPeerUnlock) {
+  Fixture fixture;
+  ASSERT_TRUE(fixture.SetUp());
+  auto cleanup = folly::makeGuard([&] { fixture.TearDown(); });
+  ASSERT_EQ(fixture.CreateFile("wait", 0644, O_CREAT | O_RDWR), 0);
+  ASSERT_TRUE(fixture.StartPeerMount());
+  const int holder_fd = fixture.OpenFile("wait", O_RDWR);
+  ASSERT_GE(holder_fd, 0);
+  const int peer_fd = ::open(fixture.PeerMountPath("wait").c_str(), O_RDWR);
+  ASSERT_GE(peer_fd, 0);
+  struct flock lock{};
+  lock.l_type = F_WRLCK;
+  lock.l_whence = SEEK_SET;
+  lock.l_start = 16;
+  lock.l_len = 24;
+  ASSERT_EQ(::fcntl(holder_fd, F_SETLK, &lock), 0);
+  const auto waiter = StartPosixWaiter(holder_fd, peer_fd);
+  ASSERT_GT(waiter.pid, 0);
+  auto waiter_cleanup = folly::makeGuard([&] {
+    (void)::kill(waiter.pid, SIGKILL);
+    (void)::waitpid(waiter.pid, nullptr, 0);
+    ::close(waiter.read_fd);
+    ::close(peer_fd);
+    ::close(holder_fd);
+  });
+  ASSERT_EQ(ReadWaiterEvent(waiter.read_fd, 2000), 'R');
+  ASSERT_TRUE(WaitForBlockedLockSyscall(waiter.pid, SYS_fcntl));
+  EXPECT_EQ(ReadWaiterEvent(waiter.read_fd, 250), '\0');
+  lock.l_type = F_UNLCK;
+  ASSERT_EQ(::fcntl(holder_fd, F_SETLK, &lock), 0);
+  EXPECT_EQ(ReadWaiterEvent(waiter.read_fd, 6000), 'G');
+}
+
+TEST(OwnerLeaseE2ETest, SignalInterruptCancelsBlockingPosixRecordLock) {
+  Fixture fixture;
+  ASSERT_TRUE(fixture.SetUp());
+  auto cleanup = folly::makeGuard([&] { fixture.TearDown(); });
+  ASSERT_EQ(fixture.CreateFile("interrupt", 0644, O_CREAT | O_RDWR), 0);
+  ASSERT_TRUE(fixture.StartPeerMount());
+  const int holder_fd = fixture.OpenFile("interrupt", O_RDWR);
+  ASSERT_GE(holder_fd, 0);
+  const int peer_fd = ::open(fixture.PeerMountPath("interrupt").c_str(), O_RDWR);
+  ASSERT_GE(peer_fd, 0);
+  struct flock lock{};
+  lock.l_type = F_WRLCK;
+  lock.l_whence = SEEK_SET;
+  lock.l_start = 16;
+  lock.l_len = 24;
+  ASSERT_EQ(::fcntl(holder_fd, F_SETLK, &lock), 0);
+  const auto waiter = StartPosixWaiter(holder_fd, peer_fd);
+  ASSERT_GT(waiter.pid, 0);
+  auto waiter_cleanup = folly::makeGuard([&] {
+    (void)::kill(waiter.pid, SIGKILL);
+    (void)::waitpid(waiter.pid, nullptr, 0);
+    ::close(waiter.read_fd);
+    ::close(peer_fd);
+    ::close(holder_fd);
+  });
+  ASSERT_EQ(ReadWaiterEvent(waiter.read_fd, 2000), 'R');
+  ASSERT_TRUE(WaitForBlockedLockSyscall(waiter.pid, SYS_fcntl));
+  ASSERT_EQ(::kill(waiter.pid, SIGUSR1), 0);
+  EXPECT_EQ(ReadWaiterEvent(waiter.read_fd, 6000), 'I');
+  lock.l_type = F_UNLCK;
+  ASSERT_EQ(::fcntl(holder_fd, F_SETLK, &lock), 0);
+  const int independent_fd = ::open(fixture.PeerMountPath("interrupt").c_str(), O_RDWR);
+  ASSERT_GE(independent_fd, 0);
+  lock.l_type = F_WRLCK;
+  EXPECT_EQ(::fcntl(independent_fd, F_SETLK, &lock), 0);
+  lock.l_type = F_UNLCK;
+  EXPECT_EQ(::fcntl(independent_fd, F_SETLK, &lock), 0);
+  EXPECT_EQ(::close(independent_fd), 0);
 }
 
 TEST(OwnerLeaseE2ETest, IndependentMountsShareSharedFlockAndConvertWithoutLocalFallback) {
@@ -406,7 +623,7 @@ TEST(OwnerLeaseE2ETest, BlockingFlockOnPeerMountWakesOnRemoteUnlock) {
     ::close(holder_fd);
   });
   ASSERT_EQ(ReadWaiterEvent(waiter.read_fd, 2000), 'R');
-  ASSERT_TRUE(WaitForBlockedFlock(waiter.pid));
+  ASSERT_TRUE(WaitForBlockedLockSyscall(waiter.pid, SYS_flock));
   EXPECT_EQ(ReadWaiterEvent(waiter.read_fd, 250), '\0') << "peer waiter must not bypass the remote EX owner";
   ASSERT_EQ(::flock(holder_fd, LOCK_UN), 0);
   EXPECT_EQ(ReadWaiterEvent(waiter.read_fd, 6000), 'G') << "blocked peer must wake after remote unlock";
@@ -434,7 +651,7 @@ TEST(OwnerLeaseE2ETest, SignalInterruptOnPeerMountDoesNotAcquireAfterCancellatio
     ::close(holder_fd);
   });
   ASSERT_EQ(ReadWaiterEvent(waiter.read_fd, 2000), 'R');
-  ASSERT_TRUE(WaitForBlockedFlock(waiter.pid));
+  ASSERT_TRUE(WaitForBlockedLockSyscall(waiter.pid, SYS_flock));
   ASSERT_EQ(ReadWaiterEvent(waiter.read_fd, 250), '\0');
   ASSERT_EQ(::kill(waiter.pid, SIGUSR1), 0);
   EXPECT_EQ(ReadWaiterEvent(waiter.read_fd, 6000), 'I') << "FUSE wait interruption must return EINTR";
@@ -480,7 +697,7 @@ TEST(OwnerLeaseE2ETest, LazyUnmountWithPendingPeerFlockExitsAfterDescriptionsClo
     ::close(holder_fd);
   });
   ASSERT_EQ(ReadWaiterEvent(waiter.read_fd, 2000), 'R');
-  ASSERT_TRUE(WaitForBlockedFlock(waiter.pid));
+  ASSERT_TRUE(WaitForBlockedLockSyscall(waiter.pid, SYS_flock));
   ASSERT_EQ(ReadWaiterEvent(waiter.read_fd, 250), '\0');
 
   // Ordinary unmount is EBUSY with open file descriptions. A user-requested

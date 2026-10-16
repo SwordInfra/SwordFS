@@ -241,12 +241,17 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   conn->max_readahead = kMaxReadAheadSize;
   conn->time_gran = kTimeGran;
 
-  // A local kernel flock table cannot provide cross-mount exclusion.
-  // A missing capability is a mount-init failure, never a silent fallback.
-  fuse_unset_feature_flag(conn, FUSE_CAP_POSIX_LOCKS);
+  // Neither kernel-local record locks nor kernel-local flock provides
+  // cross-mount exclusion. Require both remote transports instead of
+  // silently claiming success from a mount-local fallback.
   if (init_context != nullptr) {
     init_context->posix_locks_negotiated = false;
     init_context->flock_locks_negotiated = false;
+  }
+  if (!fuse_set_feature_flag(conn, FUSE_CAP_POSIX_LOCKS)) {
+    SWORDFS_LOG_ERROR << "Kernel does not support remote FUSE POSIX record locks";
+    CompleteMountInit(init_context, false);
+    return;
   }
   if (!fuse_set_feature_flag(conn, FUSE_CAP_FLOCK_LOCKS)) {
     SWORDFS_LOG_ERROR << "Kernel does not support remote FUSE BSD flock";
@@ -326,8 +331,9 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   fuse_unset_feature_flag(conn, FUSE_CAP_SPLICE_WRITE);
 
   if (init_context != nullptr) {
-    // FUSE forwards flock to Redis even when lease registration failed;
+    // Both lock classes reach Redis even when lease registration failed;
     // that situation returns EIO from the callback, never a local grant.
+    init_context->posix_locks_negotiated = true;
     init_context->flock_locks_negotiated = true;
   }
   CompleteMountInit(init_context, true);
@@ -550,13 +556,14 @@ void VfsHookFactory::SwordFsFlush(fuse_req_t req, fuse_ino_t ino, struct fuse_fi
       // Every delivered FLUSH independently releases the entire process
       // Owner, including an invalid fh or a failed data flush. Never rely
       // on client-side lock bookkeeping for this correctness requirement.
+      // A revoked or unavailable lock lease must not poison the data FLUSH:
+      // expired owners are excluded by the Redis grant authority, while a
+      // failing best-effort unlock cannot be made durable by returning EIO
+      // from close(2). Linux may retain that error on later ordinary writes.
       status = advisory_locks != nullptr ? advisory_locks->UnlockPosixOwner(ino, lock_owner)
                                          : utils::Status::Unavailable("remote POSIX lock authority is unavailable");
       if (!status.ok()) {
         SWORDFS_LOG_WARN << "POSIX unlock on FLUSH failed for ino=" << ino << ": " << status.message();
-        if (error == 0) {
-          error = status.ToErrno();
-        }
       }
     }
     fuse_reply_err(req, error);
