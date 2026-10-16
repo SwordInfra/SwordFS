@@ -11,16 +11,16 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (11 fstests shards)",
-    "swordfs_commit": "8974888b249295fae0ed1203795634f337070f7d"
+    "swordfs_commit": "20f25e1aa533395e5e1cf12a277eea703ac9dcd9"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
       "ENVIRONMENT": 8,
-      "KERNEL_LOCAL_ONLY": 3,
+      "KERNEL_LOCAL_ONLY": 2,
       "KNOWN_UNSUPPORTED": 87,
       "PASS": 144,
-      "UPSTREAM_NOT_APPLICABLE": 402,
+      "UPSTREAM_NOT_APPLICABLE": 403,
       "UPSTREAM_TEST_DEFECT": 1
     },
     "classified_count": 645,
@@ -31,9 +31,9 @@
     "known_gap_count": 501,
     "overall_support_percent": 22.33,
     "raw_results": {
-      "FAIL": 16,
+      "FAIL": 17,
       "NOTRUN": 482,
-      "PASS": 147
+      "PASS": 146
     },
     "selected_count": 645,
     "supported_count": 144,
@@ -3202,11 +3202,11 @@
       "test": "generic/503"
     },
     {
-      "classification": "KERNEL_LOCAL_ONLY",
-      "issue": "#433",
-      "message": "",
-      "reason": "Kernel-local BSD flock passes without FUSE_CAP_FLOCK_LOCKS; this does not verify Redis-backed cross-Mount ownership or last-close release; remote activation remains #433.",
-      "result": "PASS",
+      "classification": "UPSTREAM_NOT_APPLICABLE",
+      "issue": "-",
+      "message": "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/504.out.bad)",
+      "reason": "Upstream requires a Linux kernel-local FLOCK entry for the inode in /proc/locks. Negotiated FUSE_CAP_FLOCK_LOCKS delegates authority to Redis, which is not represented in the kernel-local /proc/locks list; real two-Mount Redis-backed E2E verifies exclusion and last-close independently under #473.",
+      "result": "FAIL",
       "test": "generic/504"
     },
     {

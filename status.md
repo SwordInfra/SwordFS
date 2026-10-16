@@ -21,8 +21,8 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 
 | Result | Count |
 | --- | ---: |
-| `PASS` | 147 |
-| `FAIL` | 16 |
+| `PASS` | 146 |
+| `FAIL` | 17 |
 | `NOTRUN` | 482 |
 
 ## Outcome counts
@@ -30,21 +30,21 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | Classification | Count |
 | --- | ---: |
 | `ENVIRONMENT` | 8 |
-| `KERNEL_LOCAL_ONLY` | 3 |
+| `KERNEL_LOCAL_ONLY` | 2 |
 | `KNOWN_UNSUPPORTED` | 87 |
 | `PASS` | 144 |
-| `UPSTREAM_NOT_APPLICABLE` | 402 |
+| `UPSTREAM_NOT_APPLICABLE` | 403 |
 | `UPSTREAM_TEST_DEFECT` | 1 |
 
 ## Known-gap Issues
 
 - [#255](https://github.com/SwordInfra/SwordFS/issues/255): 86 testcase(s), KNOWN_UNSUPPORTED
 - [#406](https://github.com/SwordInfra/SwordFS/issues/406): 1 testcase(s), KNOWN_UNSUPPORTED
-- [#433](https://github.com/SwordInfra/SwordFS/issues/433): 3 testcase(s), KERNEL_LOCAL_ONLY
+- [#433](https://github.com/SwordInfra/SwordFS/issues/433): 2 testcase(s), KERNEL_LOCAL_ONLY
 
 ## Execution metadata
 
-- SwordFS commit: `8974888b249295fae0ed1203795634f337070f7d`
+- SwordFS commit: `20f25e1aa533395e5e1cf12a277eea703ac9dcd9`
 - fstests commit: `a370dcbed43563f0462801e889e0eceb93c7cfad`
 - fstests patchset: `conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19`
 - fstests selector: `generic/quick`
@@ -52,8 +52,8 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 - libfuse: `fusermount3 version: 3.18.2`
 - Runner: `GitHub Actions (11 fstests shards)`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/38745334431
-Recorded at: 2026-10-15T14:00:14+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/38846922522
+Recorded at: 2026-10-16T04:01:30+00:00
 
 ## Historical main-branch progress
 
@@ -77,5 +77,6 @@ Recorded at: 2026-10-15T14:00:14+00:00
 | 2026-10-08T02:06:05+00:00 | `0ff0a31b5d43` | PASS | 22.33% | 144 | 144 | 19 | 482 | 0 | 501 |
 | 2026-10-13T13:00:13+00:00 | `8d3f92e22d59` | PASS | 22.33% | 144 | 146 | 17 | 482 | 0 | 501 |
 | 2026-10-14T02:03:45+00:00 | `fb0086a75d7d` | PASS | 22.33% | 144 | 147 | 16 | 482 | 0 | 501 |
+| 2026-10-16T04:01:30+00:00 | `20f25e1aa533` | PASS | 22.33% | 144 | 146 | 17 | 482 | 0 | 501 |
 
-Last fully healthy baseline: `8974888b249295fae0ed1203795634f337070f7d`
+Last fully healthy baseline: `20f25e1aa533395e5e1cf12a277eea703ac9dcd9`
