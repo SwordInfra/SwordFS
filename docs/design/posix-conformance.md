@@ -104,7 +104,11 @@ This section defines the **first-stage** cross-mount locking contract.
 Until #473, remote `FUSE_CAP_POSIX_LOCKS` and `FUSE_CAP_FLOCK_LOCKS` were
 both disabled: earlier observed flock success (including fstests
 `generic/504`) was kernel-local. #473 adds default-on negotiated BSD flock;
-POSIX record locks remain disabled pending #464/#474.
+POSIX record locks remain kernel-local until #474 completes real two-Mount
+traditional POSIX activation tests. The former blanket protocol blocker
+was withdrawn after source-level JuiceFS comparison: a missing OFD-class
+tag limits the unsupported OFD contract, but need not by itself block
+traditional POSIX support. OFD remains not planned (#464 closed).
 
 ### Implementation decomposition and handoff
 
@@ -121,14 +125,19 @@ design, implementation, test and review evidence. Use the repository's
 | #431 | Traditional POSIX `getlk`/`setlk` and any-close release | #428–#430 |
 | #432 | BSD `flock` and open-file-description last-close release | #428–#430 |
 | #433 | Interruptible waits, cancellation, cross-mount integration and activation | #431, #432 (and the shared prerequisites) |
-| #464 | OFD byte-range record-lock feasibility, owner lifetime and separate implementation | #428; independent of #431 development |
+| #464 | Closed / not planned: unsupported OFD record locks, no implementation | — |
 
 The #433 integration work is decomposed into native sub-issues:
 **#471** common bounded Fiber wait/retry, **#472** FUSE interrupt handling,
-**#473** negotiated BSD flock/two-Mount conformance, and **#474** negotiated
-POSIX record-lock/two-Mount conformance **only after #464's OFD shared-
-transport safety gate**. #473 does not depend on implementing OFD record
-locks. The common wait implementation is reviewed in
+**#473** negotiated BSD flock/two-Mount conformance, and **#474** the
+traditional POSIX-only remote activation and verification. The verified
+FUSE transport cannot distinguish unsupported OFD requests from traditional
+record locks. JuiceFS demonstrates that traditional POSIX support can still
+be shipped with a clear unsupported-OFD boundary; this requires focused
+real two-Mount RED/GREEN and risk-characterization tests in SwordFS.
+The updated decision is documented in
+[`474-traditional-posix-fuse-activation-gate.md`](474-traditional-posix-fuse-activation-gate.md).
+The common wait implementation is reviewed in
 [`471-fiber-lock-wait.md`](471-fiber-lock-wait.md).
 The reviewed activation contract and required real two-Mount proof for #473
 are maintained in [`473-distributed-flock-activation.md`](473-distributed-flock-activation.md).
@@ -157,9 +166,9 @@ boundary, GETLK diagnostics and missing-FLUSH limitation are reviewed in
 [`431-posix-record-lock-integration.md`](431-posix-record-lock-integration.md).
 The BSD flock FUSE adapter, final-RELEASE cleanup, reuse and capability gates
 are reviewed in [`432-flock-fuse-integration.md`](432-flock-fuse-integration.md).
-OFD implementation is exclusively #464; its shared-transport implications
-are nevertheless a #433 feature-activation gate, not an implicit feature
-added to #431.
+OFD implementation is **not planned** (#464 closed); its untagged shared
+transport is a POSIX-only activation constraint under #474, not a request
+to implement OFD or reopen #464.
 No intermediate child permits enabling incomplete remote-lock support or
 claiming OFD/delegation compatibility. The known
 conversion/reply-delivery ambiguity is a mandatory #430 authority decision,
@@ -202,11 +211,15 @@ use the proper Linux errno (`EAGAIN`/`EACCES` for record locks,
 the ownership key. Never fabricate a globally valid PID when a conflicting
 holder lives on another mount/PID namespace.
 
-**Explicitly excluded:** OFD record locks (`F_OFD_*`) and file
+**Explicitly excluded / not planned:** OFD record locks (`F_OFD_*`) and file
 leases/delegations (`F_SETLEASE`, `F_SETDELEG`). OFD is not BSD `flock`; the
 selected low-level FUSE `getlk`/`setlk` callback does not expose an explicit
 OFD-versus-process lock-kind argument. Do not claim OFD support until
-verified on the target kernel/libfuse. `generic/478` exercises mixed OFD
+verified on the target kernel/libfuse. #474 no longer demands a nonexistent
+OFD discriminator as a blanket prerequisite to the traditional POSIX feature;
+the capability remains disabled **until** traditional POSIX two-Mount
+behavior is actually proven in RED/GREEN CI.
+`generic/478` exercises mixed OFD
 and POSIX behavior and cannot be promoted solely because POSIX locking
 passes. `generic/786` and `generic/787` require separate delegation support.
 Advisory user locks are not #424's internal Slice write/truncate/grow fence.
@@ -621,10 +634,10 @@ exactly one reply and interrupt-handler removal:
 waits, Redis failures, lease expiry and cancellation may never trigger
 unmount. #471 retains the existing FuseSessionGuard / RunMount cleanup,
 including FiberRuntime shutdown and Owner Lease revoke; it introduces
-no broad _Exit(0) path. The FUSE remote-lock capabilities remain
-disabled. When #473/#474 enable kernel-visible blocking locks,
-revisit the user-initiated unmount lifecycle as needed rather than
-installing a broad exit or mass-cancellation mechanism prematurely.
+no broad _Exit(0) path. #473 has enabled negotiated remote BSD flock
+with explicit user-unmount lifecycle tests. #474 retains remote POSIX
+record locks disabled pending real two-Mount activation tests; neither
+lock path justifies mass cancellation or automatic unmount.
 
 **#477 already implements** FUSE interrupt-to-token forwarding, the
 `fuse_req_interrupt_func` registration/unregistration lifecycle and
@@ -690,8 +703,10 @@ wakes it. Only that original Fiber then retries the existing atomic
 grant. No FUSE dispatcher or Redis worker is pinned for the wait.
 Distinguish normal interrupt semantics from this explicit failure-limit
 contract. Tests must cover early/during/late interrupt, reply ownership,
-failed reply and normal teardown; #473/#474 may activate only their own
-proven remote capabilities. A cross-Mount deadlock detector and strict
+failed reply and normal teardown; only #473 has proven remote capability
+activation. #474 may activate only after tested traditional POSIX semantics and
+unsupported-OFD risk characterization.
+A cross-Mount deadlock detector and strict
 lock-order fairness are not implicitly provided by retry loops.
 
 ### Design sign-off / test matrix
@@ -729,10 +744,13 @@ arrive through ordinary low-level `getlk`/`setlk`, using the same opaque OFD
 owner for both operations. On its final close, `FLUSH` carried the traditional
 process lock owner instead; `RELEASE` carried `flock_release=0` and no OFD
 owner. Therefore treating an OFD `setlk` grant as a traditional POSIX grant
-would not remove it at the right time. #379/#431 must settle a safe strategy
-(including whether the first-stage POSIX-only target is possible with this
-transport) **before** enabling `FUSE_CAP_POSIX_LOCKS`. Merely declining to
-advertise OFD support cannot filter these requests.
+would not remove it at the right time. #474 confirms the missing
+POSIX-versus-OFD discriminator and OFD final-close owner, but a JuiceFS
+source comparison superseded the conclusion that traditional POSIX must
+remain disabled indefinitely. **Leave `FUSE_CAP_POSIX_LOCKS` disabled
+until actual two-Mount traditional POSIX tests validate activation**;
+explicitly characterize unsupported OFD interference rather than treating
+its behavior as supported or implementing OFD.
 
 **One-time investigation method, not a permanent CI gate:** a standalone
 low-level FUSE observer and Python driver exercised Linux/libfuse directly,
@@ -838,10 +856,12 @@ missed wakeup, cancel-before/after grant, ambiguous commit, stale owner
 cleanup, Redis outage/restart, and reply-delivery failure. Tests must await
 semantic completion, not use sleep as proof of correctness.
 
-Promote `generic/131` and `generic/504` only on authoritative CI evidence;
-evaluate `generic/478` separately as mixed POSIX/OFD coverage. Delegation
-cases remain unsupported. Do not enable `FUSE_CAP_POSIX_LOCKS` or
-`FUSE_CAP_FLOCK_LOCKS` merely because the corresponding callbacks exist.
+`generic/131` remains kernel-local-only, `generic/478` mixes unsupported
+OFD semantics, and `generic/504` is upstream-not-applicable to Redis
+flock due to `/proc/locks` introspection. The #473 two-Mount E2E proves
+remote BSD flock; do not promote POSIX or mixed OFD conformance based on
+local-kernel results. Do not enable `FUSE_CAP_POSIX_LOCKS` merely because
+the corresponding callbacks exist.
 
 References: Linux `fcntl_locking(2)` and `flock(2)` man pages; Linux
 `fs/fuse/file.c` for lock/flush/release; libfuse low-level lock callbacks and
