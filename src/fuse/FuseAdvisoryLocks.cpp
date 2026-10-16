@@ -54,6 +54,12 @@ utils::Status FuseAdvisoryLocks::SetPosix(uint64_t inode_ino, uint64_t kernel_ow
     if (blocking && token.isCancellationRequested()) {
       return utils::Status::Interrupted("cancelled POSIX lock wait");
     }
+    if (range.type != metadata::ILockAuthority::PosixType::kUnlock) {
+      // A Redis timeout is not proof that the attempt had no effect. Keep
+      // the process owner eligible for cleanup before submitting its grant.
+      std::lock_guard lock(posix_owner_mutex_);
+      ++posix_owner_attempts_[inode_ino][kernel_owner];
+    }
     status = executor_.RunFromFiber(
         [this, inode_ino, kernel_owner, range] { return authority_.SetPosix(inode_ino, kernel_owner, range); });
     if (!blocking || range.type == metadata::ILockAuthority::PosixType::kUnlock || status.ToErrno() != EAGAIN) {
@@ -155,9 +161,36 @@ utils::Status FuseAdvisoryLocks::GetPosix(uint64_t inode_ino, uint64_t kernel_ow
 
 utils::Status FuseAdvisoryLocks::UnlockPosixOwner(uint64_t inode_ino, uint64_t kernel_owner) {
   utils::ExpectInFiberDomain();
-  return executor_.RunFromFiber([this, inode_ino, kernel_owner] {
+  uint64_t attempt = 0;
+  {
+    std::lock_guard lock(posix_owner_mutex_);
+    const auto inode_it = posix_owner_attempts_.find(inode_ino);
+    if (inode_it == posix_owner_attempts_.end()) {
+      return utils::Status::OK();
+    }
+    const auto owner_it = inode_it->second.find(kernel_owner);
+    if (owner_it == inode_it->second.end()) {
+      return utils::Status::OK();
+    }
+    attempt = owner_it->second;
+  }
+  const auto status = executor_.RunFromFiber([this, inode_ino, kernel_owner] {
     return authority_.SetPosix(inode_ino, kernel_owner, {0, 0, metadata::ILockAuthority::PosixType::kUnlock});
   });
+  if (status.ok()) {
+    std::lock_guard lock(posix_owner_mutex_);
+    const auto inode_it = posix_owner_attempts_.find(inode_ino);
+    if (inode_it != posix_owner_attempts_.end()) {
+      const auto owner_it = inode_it->second.find(kernel_owner);
+      if (owner_it != inode_it->second.end() && owner_it->second == attempt) {
+        inode_it->second.erase(owner_it);
+        if (inode_it->second.empty()) {
+          posix_owner_attempts_.erase(inode_it);
+        }
+      }
+    }
+  }
+  return status;
 }
 
 bool FuseAdvisoryLocks::CanGrant() const {

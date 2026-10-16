@@ -115,6 +115,39 @@ evaluated before activation rather than ignored as merely “unsupported”.
 
 ## 4. Workflow / decision
 
+### CI regression correction for default-on remote POSIX (2026-10-16)
+
+The first full GREEN run exposed a critical fast-path problem: the low-level
+FUSE `FLUSH` callback occurs even when the file has never used record locks.
+Calling Redis `SetPosix(F_UNLCK)` on every ordinary close adds a backend RTT
+and contention to unrelated data operations. The pinned fstests
+`generic/531` stresses thousands of unlinked temporary file closes and
+timed out at 600 seconds after POSIX capability activation; the historical
+baseline was already long-running, so this is strong regression evidence,
+not proof of the sole cause.
+
+The `FuseAdvisoryLocks` adapter therefore tracks **only mount-local owners
+that have attempted a non-unlock POSIX request**, keyed by `(inode,
+kernel_lock_owner)`. This is an **optimization/conservative cleanup hint**,
+not the authoritative lock table. It is populated **before** dispatching
+the backend attempt because an uncertain reply is not proof of an absent
+Redis mutation. On `FLUSH`, owners absent from this hint need no Redis
+round trip. Tracked owners still receive a full-range Redis unlock; after
+a confirmed unlock the entry is removed only if no concurrent new lock
+attempt advanced its counter. On transient unlock failure the owner remains
+tracked for another delivered close. The adapter does not introduce
+per-inode I/O transactions, Redis schema changes, or persistent state.
+
+Separately, upstream `generic/478` **specifically tests OFD lock lifetime**
+using `clone/dup/close` and is explicitly outside the supported SwordFS
+feature set (#464 closed/not planned). With POSIX remote negotiation its
+previous *kernel-local-only* PASS is no longer a valid expectation; it
+stalled at the 900-second bounded-suite limit. Preserve the selected test
+and historical observation, but mark `generic/478` **DEFERRED_CI** with
+the required `conformance-deferred-change` approval label and the
+unsupported-OFD rationale. Do not report a PASS or treat this as supported
+conformance. No OFD implementation or classification heuristic is added.
+
 - **Design review reopened / ready for test-first verification**, not a
   declaration that the remote feature already passes. The prior “protocol
   BLOCKED, do not implement” conclusion is superseded.

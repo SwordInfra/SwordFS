@@ -569,6 +569,8 @@ TEST(LockRetrySchedulerTest, UnlockedPosixOwnersDoNotIssueRedisFlushTransactions
     utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
       if (range.type == PosixType::kUnlock) {
         ++unlocks;
+      } else if (fail_grants) {
+        return utils::Status::IOError("unconfirmed grant outcome");
       }
       return utils::Status::OK();
     }
@@ -582,6 +584,7 @@ TEST(LockRetrySchedulerTest, UnlockedPosixOwnersDoNotIssueRedisFlushTransactions
       return true;
     }
     std::atomic<int> unlocks{0};
+    bool fail_grants = false;
   } authority;
   utils::BlockingExecutor executor(1, "posix-flush-filter");
   FuseAdvisoryLocks locks(authority, executor);
@@ -602,6 +605,13 @@ TEST(LockRetrySchedulerTest, UnlockedPosixOwnersDoNotIssueRedisFlushTransactions
     EXPECT_EQ(authority.unlocks.load(), 1);
     EXPECT_TRUE(locks.UnlockPosixOwner(101, 7).ok());
     EXPECT_EQ(authority.unlocks.load(), 1) << "last-close cleanup must not issue duplicate Redis work";
+
+    // A failed grant response may still represent an ambiguous backend
+    // commit. Its owner must remain eligible for full-range close cleanup.
+    authority.fail_grants = true;
+    EXPECT_EQ(locks.SetPosix(101, 9, request).ToErrno(), EIO);
+    EXPECT_TRUE(locks.UnlockPosixOwner(101, 9).ok());
+    EXPECT_EQ(authority.unlocks.load(), 2);
   });
 }
 

@@ -7,6 +7,8 @@
 #include <folly/CancellationToken.h>
 
 #include <cstdint>
+#include <mutex>
+#include <unordered_map>
 
 #include "fuse/LockRetryScheduler.hpp"
 #include "metadata/LockAuthority.hpp"
@@ -46,6 +48,14 @@ class FuseAdvisoryLocks {
   metadata::ILockAuthority &authority_;
   utils::BlockingExecutor &executor_;
   LockRetryScheduler scheduler_;
+
+  // Only owners that attempted a POSIX grant may need an on-close remote
+  // cleanup. In particular, ordinary FLUSH must not make Redis requests.
+  // Record before the authority call: an unconfirmed mutation may have
+  // committed. The attempt counter prevents a concurrent new grant from
+  // being forgotten after an earlier FLUSH finishes its backend unlock.
+  std::mutex posix_owner_mutex_;
+  std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint64_t>> posix_owner_attempts_;
 };
 
 }  // namespace swordfs::fuse
