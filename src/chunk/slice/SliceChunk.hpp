@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -39,6 +40,10 @@ class SliceChunk final : public Chunk {
   bool HasPendingWrites() const override;
 
  private:
+  // An unpublished upload intent; keep its implementation private to the
+  // translation unit while the Chunk retains stable shared ownership.
+  struct FrozenSlice;
+
   // Each event affects only records already committed when it was captured.
   // Later records are constrained only by newer sanitation events.
   struct BoundaryClamp {
@@ -48,6 +53,7 @@ class SliceChunk final : public Chunk {
   };
 
   void CaptureBoundary(size_t visible_prefix);
+  void FreezeActiveLocked();
 
   metadata::InodeID ino_;
   size_t chunk_size_;
@@ -58,6 +64,14 @@ class SliceChunk final : public Chunk {
   // Non-overlapping sorted dirty intervals. Overwrites replace old portions;
   // segments outside the modified range preserve accepted local bytes.
   std::map<size_t, std::string> dirty_;
+  // Unfrozen written ranges are merged only when actually contiguous.
+  // dirty_ remains the sole Read-visible projection across all generations.
+  std::map<size_t, std::string> active_;
+  size_t active_bytes_ = 0;
+  // A new Write can auto-freeze while a prior Put is in flight; stable
+  // candidate ownership is independent of vector growth and retry timing.
+  std::vector<std::shared_ptr<FrozenSlice>> frozen_;
+  bool flushing_ = false;
   // Ordered by nondecreasing record_count for one attached ChunkID.
   // Same-history events coalesce; a new attachment resets old provenance.
   std::vector<BoundaryClamp> boundaries_;
