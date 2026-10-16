@@ -3293,6 +3293,16 @@ TEST_F(VfsImplIntegrationTest, FusePosixLockCallbacksPreservePidAndFlushReleases
   ASSERT_TRUE(second_lease.Revoke().ok());
   ASSERT_TRUE(first_lease.Revoke().ok());
 
+  // The old lock request used an fh whose final RELEASE has no matching
+  // usable data handle. Even with an invalidated Owner Lease, the fallback
+  // must attempt the recorded Owner cleanup and report it only in logs;
+  // the separate data RELEASE reply retains its ordinary error semantics.
+  FuseReplyCapture orphan_release;
+  orphan_release.user_data = &first_mount;
+  swordfs::fuse::VfsHookFactory::SwordFsRelease(reinterpret_cast<fuse_req_t>(&orphan_release), 123, &fi);
+  ASSERT_TRUE(orphan_release.Wait());
+  EXPECT_TRUE(orphan_release.error.has_value());
+
   FuseReplyCapture revoked_flush;
   revoked_flush.user_data = &first_mount;
   swordfs::fuse::VfsHookFactory::SwordFsFlush(reinterpret_cast<fuse_req_t>(&revoked_flush), create.entry->ino,

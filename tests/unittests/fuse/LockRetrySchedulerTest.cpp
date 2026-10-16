@@ -763,6 +763,9 @@ TEST(LockRetrySchedulerTest, FinalReleaseCleansOnlyCurrentHandleOwnerAndSkipsNev
     utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
       if (range.type == PosixType::kUnlock) {
         ++unlocks;
+        if (fail_unlock) {
+          return utils::Status::IOError("unconfirmed final release");
+        }
       }
       return utils::Status::OK();
     }
@@ -776,6 +779,7 @@ TEST(LockRetrySchedulerTest, FinalReleaseCleansOnlyCurrentHandleOwnerAndSkipsNev
       return true;
     }
     std::atomic<int> unlocks{0};
+    bool fail_unlock = false;
   } authority;
   utils::BlockingExecutor executor(2, "posix-final-release");
   FuseAdvisoryLocks locks(authority, executor);
@@ -803,7 +807,72 @@ TEST(LockRetrySchedulerTest, FinalReleaseCleansOnlyCurrentHandleOwnerAndSkipsNev
     EXPECT_EQ(authority.unlocks.load(), 2);
     EXPECT_TRUE(locks.ReleasePosixHandle(801, 503).ok());
     EXPECT_EQ(authority.unlocks.load(), 2) << "normal FLUSH cleanup must not double-unlock on RELEASE";
+    authority.fail_unlock = true;
+    EXPECT_TRUE(locks.SetPosix(801, 13, request, false, {}, 504).ok());
+    EXPECT_EQ(locks.ReleasePosixHandle(801, 504).ToErrno(), EIO);
+    authority.fail_unlock = false;
+    EXPECT_TRUE(locks.UnlockPosixOwner(801, 13).ok());
   });
+}
+
+TEST(LockRetrySchedulerTest, PersistentCleanupFailureStopsWithMountWithoutStallingDataClose) {
+  class FailingAuthority final : public metadata::ILockAuthority {
+   public:
+    utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
+      if (range.type == PosixType::kUnlock) {
+        ++unlocks;
+        return utils::Status::IOError("Redis unlock unavailable");
+      }
+      return utils::Status::OK();
+    }
+    utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return utils::Status::OK();
+    }
+    utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return true;
+    }
+    std::atomic<int> unlocks{0};
+  } authority;
+  utils::BlockingExecutor executor(2, "persistent-close-failure");
+  FuseAdvisoryLocks locks(authority, executor);
+  utils::FiberRuntime runtime;
+  auto cleanup = folly::makeGuard([&] {
+    locks.StopBackgroundCleanup();
+    runtime.Shutdown();
+  });
+  std::promise<utils::Status> first;
+  auto first_result = first.get_future();
+  ASSERT_TRUE(runtime.Submit([&] {
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    auto status = locks.SetPosix(802, 14, request);
+    if (status.ok()) {
+      status = locks.UnlockPosixOwner(802, 14);
+    }
+    first.set_value(status);
+  }));
+  ASSERT_EQ(first_result.wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(first_result.get().ToErrno(), EIO);
+
+  // A new task runs after the submitted cleanup coordinator has entered its
+  // bounded Fiber wait, so stopping below exercises the in-flight drain.
+  std::promise<void> coordinator_entered;
+  auto entered = coordinator_entered.get_future();
+  ASSERT_TRUE(runtime.Submit([&] { coordinator_entered.set_value(); }));
+  ASSERT_EQ(entered.wait_for(5s), std::future_status::ready);
+  std::promise<utils::Status> second;
+  auto second_result = second.get_future();
+  ASSERT_TRUE(runtime.Submit([&] { second.set_value(locks.UnlockPosixOwner(802, 14)); }));
+  ASSERT_EQ(second_result.wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(second_result.get().ToErrno(), EIO);
+  EXPECT_GE(authority.unlocks.load(), 2);
+
+  locks.StopBackgroundCleanup();
+  runtime.Shutdown();  // Must drain an active retry fiber without waiting for Redis recovery.
 }
 
 TEST(LockRetrySchedulerTest, SharedRequestsRemainCompatibleWithRemoteSharedFlock) {
