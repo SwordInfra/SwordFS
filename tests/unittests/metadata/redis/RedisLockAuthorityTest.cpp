@@ -613,12 +613,16 @@ TEST_F(RedisLockAuthorityTest, FiberAdapterFullOwnerCloseReleasesAllRangesAndChe
     ASSERT_TRUE(first.UnlockPosixOwner(232, 123).ok());
     EXPECT_TRUE(second.SetPosix(232, 456, request).ok());
     EXPECT_TRUE(first.UnlockPosixOwner(232, 123).ok());  // Mandatory safe no-op close.
+    // Preserve a separately tracked owner to verify lease failure remains
+    // visible when an actual remote cleanup is still required.
+    EXPECT_TRUE(first.SetPosix(233, 123, request).ok());
   });
 
   ASSERT_TRUE(first_lease_->Revoke().ok());
   test::RunInTestFiber([&] {
     EXPECT_FALSE(first.CanGrant());
-    EXPECT_EQ(first.UnlockPosixOwner(232, 123).ToErrno(), EIO);
+    EXPECT_TRUE(first.UnlockPosixOwner(232, 123).ok());          // Already released; no Redis operation.
+    EXPECT_EQ(first.UnlockPosixOwner(233, 123).ToErrno(), EIO);  // Still tracked; invalid lease fails.
     struct flock result{};
     EXPECT_EQ(first.GetPosix(232, 123, request, &result).ToErrno(), EIO);
   });

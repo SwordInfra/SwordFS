@@ -14,6 +14,7 @@
 #include "metadata/LockAuthority.hpp"
 #include "utils/BlockingExecutor.hpp"
 #include "utils/Status.hpp"
+#include "utils/Synchronization.hpp"
 
 namespace swordfs::fuse {
 
@@ -54,7 +55,7 @@ class FuseAdvisoryLocks {
   // Record before the authority call: an unconfirmed mutation may have
   // committed. The attempt counter prevents a concurrent new grant from
   // being forgotten after an earlier FLUSH finishes its backend unlock.
-  std::mutex posix_owner_mutex_;
+  utils::FiberMutex posix_owner_mutex_;
   std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint64_t>> posix_owner_attempts_;
 };
 
