@@ -3275,8 +3275,8 @@ TEST_F(VfsImplIntegrationTest, FusePosixLockCallbacksPreservePidAndFlushReleases
   ASSERT_TRUE(forbidden_rollback.Wait());
   EXPECT_EQ(forbidden_rollback.error.value_or(-1), EAGAIN);
 
-  // With a valid fh, data FLUSH succeeds; remote unlock failure must still
-  // surface as EIO. A lease cannot be used for a new grant after revocation.
+  // A revoked lock Owner Lease forbids new grants, but a failed best-effort
+  // POSIX unlock must not poison a successful data FLUSH or later writes.
   fuse_file_info create_info{};
   create_info.flags = O_RDWR;
   FuseReplyCapture create;
@@ -3299,7 +3299,7 @@ TEST_F(VfsImplIntegrationTest, FusePosixLockCallbacksPreservePidAndFlushReleases
                                               &valid_fh);
   ASSERT_TRUE(revoked_flush.Wait());
   ASSERT_TRUE(revoked_flush.error.has_value());
-  EXPECT_EQ(*revoked_flush.error, EIO);
+  EXPECT_EQ(*revoked_flush.error, 0);
 
   FuseReplyCapture release;
   swordfs::fuse::VfsHookFactory::SwordFsRelease(reinterpret_cast<fuse_req_t>(&release), create.entry->ino, &valid_fh);

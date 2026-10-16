@@ -560,6 +560,51 @@ TEST(LockRetrySchedulerTest, FailedDriverAdmissionPropagatesWithoutLeavingAWaite
   EXPECT_EQ(authority.ProbeCount(), 0U);
 }
 
+// Every ordinary FUSE file close delivers FLUSH, even without a record lock.
+// No Redis unlock transaction may be issued for owners that have never made
+// a record-lock attempt; generic/531 stresses this path heavily.
+TEST(LockRetrySchedulerTest, UnlockedPosixOwnersDoNotIssueRedisFlushTransactions) {
+  class CountingAuthority final : public metadata::ILockAuthority {
+   public:
+    utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
+      if (range.type == PosixType::kUnlock) {
+        ++unlocks;
+      }
+      return utils::Status::OK();
+    }
+    utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return utils::Status::OK();
+    }
+    utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return true;
+    }
+    std::atomic<int> unlocks{0};
+  } authority;
+  utils::BlockingExecutor executor(1, "posix-flush-filter");
+  FuseAdvisoryLocks locks(authority, executor);
+  swordfs::test::RunInTestFiber([&] {
+    for (uint64_t inode = 1; inode <= 100; ++inode) {
+      EXPECT_TRUE(locks.UnlockPosixOwner(inode, 7).ok());
+    }
+    EXPECT_EQ(authority.unlocks.load(), 0) << "ordinary closes must not cause Redis lock RTTs";
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    request.l_start = 0;
+    request.l_len = 10;
+    EXPECT_TRUE(locks.SetPosix(101, 7, request).ok());
+    EXPECT_TRUE(locks.UnlockPosixOwner(101, 8).ok());
+    EXPECT_EQ(authority.unlocks.load(), 0) << "a different process owner cannot trigger cleanup";
+    EXPECT_TRUE(locks.UnlockPosixOwner(101, 7).ok());
+    EXPECT_EQ(authority.unlocks.load(), 1);
+    EXPECT_TRUE(locks.UnlockPosixOwner(101, 7).ok());
+    EXPECT_EQ(authority.unlocks.load(), 1) << "last-close cleanup must not issue duplicate Redis work";
+  });
+}
+
 TEST(LockRetrySchedulerTest, SharedRequestsRemainCompatibleWithRemoteSharedFlock) {
   GatedProbeAuthority authority;
   utils::BlockingExecutor executor(1, "shared-holder-probe");
