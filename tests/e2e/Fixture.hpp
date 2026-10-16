@@ -55,6 +55,13 @@ class Fixture {
   /// mount, then start a fresh daemon against the same persistent backends.
   bool CrashAndRemount();
 
+  /// Start a second, independent foreground daemon on the same formatted
+  /// Redis volume. The peer is stopped before the primary mount on teardown.
+  bool StartPeerMount();
+  bool StopPeerMount();
+  bool DetachPeerMount();
+  std::string PeerMountPath(const std::string &relpath) const;
+
   // Opt-in mount options for lifecycle tests; ordinary E2E mounts are unchanged.
   void SetExtraMountOptions(std::string options) {
     extra_mount_options_ = std::move(options);
@@ -190,6 +197,9 @@ class Fixture {
   std::string base_bucket_url_;  // original URL (without test-name suffix)
   bool mounted_ = false;
   pid_t daemon_pid_ = 0;
+  pid_t peer_pid_ = 0;
+  bool peer_detached_ = false;
+  std::string peer_mountpoint_;
   bool daemon_reaped_ = false;
   std::string daemon_stop_reason_ = "none";
   size_t mount_generation_ = 0;

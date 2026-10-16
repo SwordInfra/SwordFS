@@ -241,6 +241,19 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   conn->max_readahead = kMaxReadAheadSize;
   conn->time_gran = kTimeGran;
 
+  // A local kernel flock table cannot provide cross-mount exclusion.
+  // A missing capability is a mount-init failure, never a silent fallback.
+  fuse_unset_feature_flag(conn, FUSE_CAP_POSIX_LOCKS);
+  if (init_context != nullptr) {
+    init_context->posix_locks_negotiated = false;
+    init_context->flock_locks_negotiated = false;
+  }
+  if (!fuse_set_feature_flag(conn, FUSE_CAP_FLOCK_LOCKS)) {
+    SWORDFS_LOG_ERROR << "Kernel does not support remote FUSE BSD flock";
+    CompleteMountInit(init_context, false);
+    return;
+  }
+
   constexpr uint64_t kPosixAclCaps = FUSE_CAP_POSIX_ACL | FUSE_CAP_DONT_MASK;
   const uint64_t capable = conn->capable_ext != 0 ? conn->capable_ext : conn->capable;
   const bool volume_posix_acl_enabled = ::swordfs::volume::VolumeImpl::Instance().config().enable_posix_acl;
@@ -271,17 +284,6 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   // answers writes from its own page cache, which masks daemon-side
   // semantics (e.g. rejecting writes to flushed chunks, open-unlink).
   fuse_unset_feature_flag(conn, FUSE_CAP_WRITEBACK_CACHE);
-
-  // #433 must first reconcile traditional close semantics and the untagged
-  // OFD transport (#464). Callbacks are implemented but not advertised here.
-  fuse_unset_feature_flag(conn, FUSE_CAP_POSIX_LOCKS);
-  // libfuse may request FLOCK_LOCKS automatically when .flock is installed.
-  // #433 owns advertising remote BSD flock after blocking semantics are ready.
-  fuse_unset_feature_flag(conn, FUSE_CAP_FLOCK_LOCKS);
-  if (init_context != nullptr) {
-    init_context->posix_locks_negotiated = false;
-    init_context->flock_locks_negotiated = false;
-  }
 
   // FUSE_CAP_SPLICE_READ is the libfuse request-ingestion path that delivers
   // pipe-backed data to write_buf(). SwordFS implements only .write, so keep
@@ -323,6 +325,11 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
 
   fuse_unset_feature_flag(conn, FUSE_CAP_SPLICE_WRITE);
 
+  if (init_context != nullptr) {
+    // FUSE forwards flock to Redis even when lease registration failed;
+    // that situation returns EIO from the callback, never a local grant.
+    init_context->flock_locks_negotiated = true;
+  }
   CompleteMountInit(init_context, true);
   SWORDFS_LOG_INFO << "SwordFS filesystem initialized (mount OK)";
 }

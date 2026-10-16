@@ -21,7 +21,7 @@ SPEC.loader.exec_module(CLASSIFY)
 
 class FstestsFailureEvidenceTest(unittest.TestCase):
     def test_kernel_local_only_pass_does_not_promote_distributed_support(self) -> None:
-        for test in ("generic/131", "generic/478", "generic/504"):
+        for test in ("generic/131", "generic/478"):
             with self.subTest(test=test):
                 gap = CLASSIFY.Gap("kernel_local_only", "#433", "PASS", "-", "-", "Only local locks are verified")
                 for result, expected in (
@@ -42,6 +42,29 @@ class FstestsFailureEvidenceTest(unittest.TestCase):
                         {test}, {test: CLASSIFY.RawResult(test, "PASS")}, set(), {test: gap}, **kwargs
                     )[0]
                     self.assertEqual(expected, obs.classification)
+
+    def test_remote_flock_504_proc_locks_assumption_is_not_distributed_conformance(self) -> None:
+        test = "generic/504"
+        gap = CLASSIFY.Gap(
+            "upstream_not_applicable",
+            "-",
+            "FAIL",
+            "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/504.out.bad)",
+            "generic/504.out.bad",
+            "FUSE remote flock is not recorded in /proc/locks",
+        )
+        evidence = "QA output created by 504\nlock info not found\nSilence is golden\n"
+        actual = {test: CLASSIFY.RawResult(test, "FAIL", gap.expected_message)}
+        result = CLASSIFY.classify(
+            {test}, actual, set(), {test: gap}, expected_evidence={test: evidence}, actual_evidence={test: evidence}
+        )[0]
+        self.assertEqual(result.classification, "UPSTREAM_NOT_APPLICABLE")
+        self.assertFalse(result.classification in CLASSIFY.BLOCKING)
+        # The baseline remains exact: an unexpected PASS or different failure
+        # must be investigated rather than accepted as the same observation.
+        for unexpected in ("PASS", "NOTRUN"):
+            result = CLASSIFY.classify({test}, {test: CLASSIFY.RawResult(test, unexpected)}, set(), {test: gap})[0]
+            self.assertIn(result.classification, CLASSIFY.BLOCKING)
 
     def test_kernel_local_only_manifest_validation_and_true_xpass(self) -> None:
         header = "test\tcategory\tissue\texpected_result\texpected_message\texpected_evidence\treason\n"

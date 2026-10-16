@@ -101,10 +101,10 @@ the handle and inode open reference are still relinquished.
 This section defines the **first-stage** cross-mount locking contract.
 #429/#430 Redis lease and lock authority, #431's POSIX FUSE adapter, and
 #432's nonblocking BSD flock callback and final-RELEASE cleanup are implemented.
-Remote `FUSE_CAP_POSIX_LOCKS` and `FUSE_CAP_FLOCK_LOCKS` negotiation remains
-disabled: observed flock success (including fstests `generic/504`) is
-kernel-local, not evidence of Redis-backed cross-Mount locking. #433 owns
-blocking waits, transport validation and capability activation.
+Until #473, remote `FUSE_CAP_POSIX_LOCKS` and `FUSE_CAP_FLOCK_LOCKS` were
+both disabled: earlier observed flock success (including fstests
+`generic/504`) was kernel-local. #473 adds default-on negotiated BSD flock;
+POSIX record locks remain disabled pending #464/#474.
 
 ### Implementation decomposition and handoff
 
@@ -130,6 +130,20 @@ POSIX record-lock/two-Mount conformance **only after #464's OFD shared-
 transport safety gate**. #473 does not depend on implementing OFD record
 locks. The common wait implementation is reviewed in
 [`471-fiber-lock-wait.md`](471-fiber-lock-wait.md).
+The reviewed activation contract and required real two-Mount proof for #473
+are maintained in [`473-distributed-flock-activation.md`](473-distributed-flock-activation.md).
+With #473's remote BSD flock activation, upstream `generic/504` no longer
+passes its **kernel-local** `/proc/locks` introspection check. Its exact
+`lock info not found` output is tracked as `upstream_not_applicable`, not as
+remote flock support: `FUSE_CAP_FLOCK_LOCKS` forwards ownership to Redis and
+does not create a local kernel flock table entry. The upstream test checks
+the latter explicitly. The real two-Mount kernel-to-Redis E2E matrix, not
+this upstream `/proc/locks` test, is the remote BSD flock acceptance gate.
+The #473 design removes the temporary `--enable-lock-owner-lease` staging
+switch: once activated, every Redis-backed Mount registers its Owner Lease
+and requests remote BSD flock by default, with no kernel-local fallback.
+An unavailable lock service fails lock requests without automatically
+unmounting the filesystem or affecting healthy ordinary I/O.
 
 The actual changes may be reviewed separately as each child reaches its own
 design-readiness checkpoint. The parent remains open until Redis integration, relevant fstests
@@ -395,8 +409,8 @@ APIs or borrow a destroyed mount/session reference. Existing FUSE
 `RunFuseInFiber` and mount INIT/destroy paths need integration tests before
 readiness is claimed.
 
-**Current Redis-only implementation staging (#429):** The `mount` command
-offers `--enable-lock-owner-lease` (off by default) and four independent
+**Lease configuration after #473:** The `mount` command registers an owner
+lease by default on every Redis-backed mount and offers four independent
 duration controls: `--lock-lease-ttl` (60s),
 `--lock-lease-renew-interval` (10s), `--lock-lease-safety-margin` (15s) and
 `--lock-lease-io-timeout` (5s). Positive integral `ms`, `s` and `m`
@@ -414,17 +428,16 @@ configured I/O budget. No hard wall-clock deadline or arbitrary kernel
 stall bound is promised. The local grant cutoff is independently checked
 and never extended by an unconfirmed or late Redis response.
 
-The opt-in path registers a Redis generation **after
+The default Mount path registers a Redis generation **after
 volume initialization and before FUSE mount**, with the owner heartbeat
 independent from ordinary I/O. A failed lease registration is terminal for
 that mount's *lock authority*, not its ordinary FUSE service. The normal
 FUSE loop exit joins the heartbeat and revokes only its own generation
 before session destruction; a Redis failure during this bounded cleanup
-falls back to expiry. Until #430 supplies server-authoritative grant checks,
-this opt-in option is for lifecycle verification only, and it does **not**
-enable POSIX or flock FUSE capabilities. The native Redis generation counter
-is required for lock use on beta volumes; no compatibility migration is
-attempted.
+falls back to expiry. #430 supplies server-authoritative BSD flock checks;
+#473 negotiates FUSE BSD flock by default and leaves POSIX record locks
+disabled. The native Redis generation counter is required for lock use on
+beta volumes; no compatibility migration is attempted.
 
 **Crash/partition/safety boundary:** if the process is paused indefinitely
 or the OS permits applications to modify other resources after their advisory
@@ -465,9 +478,9 @@ atomic lock authorization. Source contracts:
 and [expiry-versus-WATCH](https://redis.io/faq/doc/11ed4zroc6/can-a-key-expire-within-a-multi-exec-transaction).
 
 **Integration and replay details:** per-mount generation allocation and
-confirmed registration must be completed once for the owner-enabled FUSE
-mount startup path; while #429/#430/#431/#432/#433 are unfinished, keep
-`FUSE_CAP_POSIX_LOCKS` and `FUSE_CAP_FLOCK_LOCKS` disabled. The generation counter
+confirmed registration happen once on every default Redis-backed FUSE Mount.
+Only `FUSE_CAP_POSIX_LOCKS` remains disabled; the remote BSD flock capability
+is required. The generation counter
 is a durability-critical value, so `FLUSHDB`, failed restoration of that
 counter, or Redis failover to stale history invalidates the single-authority
 assumption. A routine reconnect to the *same trusted primary* may reissue
@@ -475,8 +488,7 @@ assumption. A routine reconnect to the *same trusted primary* may reissue
 rollback/primary change **must enter terminal state**; a last-minute
 `PEXPIRE` success alone does not prove the history lineage. No automatic
 multi-primary failover or Redis Cluster guarantee is advertised. Remote
-lock initialization must not add a heartbeat to mounts on which remote
-locking is intentionally disabled.
+lock initialization must not add heartbeat overhead to ordinary I/O requests.
 
 **#429 verification boundary:** Redis-backed tests exercise format-time
 counter initialization, strict counter rejection, non-reused generations,
