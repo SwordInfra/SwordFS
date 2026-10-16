@@ -17,6 +17,9 @@ class IMetaEngine;
 namespace cow {
 class COWChunkMetadata;
 }
+namespace slice {
+class SliceChunkMetadata;
+}
 }  // namespace swordfs::metadata
 
 namespace swordfs::storage {
@@ -46,6 +49,7 @@ class ChunkFactory {
   // plumbing.
   metadata::ChunkMetadataPtr chunk_metadata_;
   std::shared_ptr<metadata::cow::COWChunkMetadata> cow_metadata_;
+  std::shared_ptr<metadata::slice::SliceChunkMetadata> slice_metadata_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
   size_t chunk_size_;

@@ -6,8 +6,11 @@
 #include <folly/Random.h>
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <exception>
+#include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <thread>
 
@@ -193,6 +196,77 @@ utils::Status RedisMetaClient::IncrNonNegative(std::string_view key, uint64_t *v
     return RedisError("validated INCR", error);
   } catch (const sw::redis::Error &error) {
     return utils::Status::OutcomeUnknown("Redis validated INCR outcome is ambiguous: " + std::string(error.what()));
+  }
+}
+
+utils::Status RedisMetaClient::IncrExistingNonNegative(std::string_view key, uint64_t *value) {
+  utils::ExpectInThreadDomain();
+  if (value == nullptr) {
+    return utils::Status::InvalidArgument("Redis validated INCR output is null");
+  }
+  uint64_t allocated = 0;
+  auto status = Transact([&](RedisKvTxn &txn) {
+    std::string raw;
+    auto read = txn.Get(key, &raw);
+    if (!read.ok()) {
+      return read;
+    }
+    uint64_t current = 0;
+    const auto [end, error] = std::from_chars(raw.data(), raw.data() + raw.size(), current);
+    if (error != std::errc{} || end != raw.data() + raw.size() ||
+        current >= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      return utils::Status::Malformed("SliceID counter is invalid or exhausted");
+    }
+    allocated = current + 1;
+    return txn.Set(key, std::to_string(allocated));
+  });
+  if (status.ok()) {
+    *value = allocated;
+  }
+  return status;
+}
+
+utils::Status RedisMetaClient::LRange(std::string_view key, std::vector<std::string> *values) {
+  utils::ExpectInThreadDomain();
+  if (values == nullptr) {
+    return utils::Status::InvalidArgument("Redis LRANGE output is null");
+  }
+  return RunReadOnlyCommand("LRANGE", [&] {
+    std::vector<std::string> loaded;
+    redis_->lrange(std::string(key), 0, -1, std::back_inserter(loaded));
+    *values = std::move(loaded);
+    return utils::Status::OK();
+  });
+}
+
+utils::Status RedisMetaClient::CreateListWithFirstRecord(std::string_view key, std::string_view value) {
+  utils::ExpectInThreadDomain();
+  return Transact([&](RedisKvTxn &txn) {
+    std::vector<std::string> prefix;
+    auto status = txn.ListPrefix(key, &prefix);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!prefix.empty()) {
+      return utils::Status::AlreadyExists("Redis Slice index already exists");
+    }
+    return txn.RPush(key, value);
+  });
+}
+
+utils::Status RedisMetaClient::RPushExisting(std::string_view key, std::string_view value) {
+  utils::ExpectInThreadDomain();
+  try {
+    const auto count = redis_->command<long long>("RPUSHX", std::string(key), std::string(value));
+    if (count == 0) {
+      return utils::Status::NotFound("Redis Slice index is missing");
+    }
+    return utils::Status::OK();
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError("LIST append", error);
+  } catch (const sw::redis::Error &error) {
+    // RPUSH is non-idempotent; a lost response must never cause blind replay.
+    return utils::Status::OutcomeUnknown("Redis LIST append outcome is ambiguous: " + std::string(error.what()));
   }
 }
 
