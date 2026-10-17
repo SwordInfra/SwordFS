@@ -70,16 +70,15 @@ write-start time; disjoint record updates coexist. The same SliceID can appear
 in several records with growing historical `size` after valid tail appends.
 Uncommitted/preliminary bytes are not published as visible records.
 
-Follow JuiceFS's local Slice selection principle, with the agreed SwordFS
-exception that **Flush is not logical Slice freeze**. A same-SliceID append
-may continue after Flush if the Slice has not been frozen by a subsequent
-overlapping different Slice or zero-cover and the object store accepts the
-exact physical tail append (#485). Physical append eligibility and
-**authoritative multi-mount FileMetadata/EOF/zero-cover publication** remain
-#424/#271. LWW alone does not make a stale extension of an already covered
-Slice safe, nor does a single LIST append atomically update EOF in the
-separate FileMetadata domain. Do not introduce general WATCH/expected-history
-length CAS for every `AppendRecord`.
+The record model **permits** historical records sharing a SliceID with
+increasing `size`, but the revised #485 writer follows JuiceFS's **freeze on
+file Flush**: after a Slice is frozen, later writes use a *new* SliceID and
+immutable object. There is no `IDataEngine::Append` requirement. An active
+Slice may continue growing in local memory before freeze, but no metadata
+record is published for unfinished bytes. #424/#271 still own
+**authoritative multi-mount FileMetadata/EOF/zero-cover publication**;
+Redis list LWW does not alone prove global commit ordering. Do not introduce
+general WATCH/expected-history length CAS for every `AppendRecord`.
 
 An ambiguous response to native non-idempotent `RPUSHX`, or to `EXEC` for
 first-record creation or counter allocation, is `OutcomeUnknown`: the mutation
@@ -97,8 +96,9 @@ Lua to validate one. JuiceFS watches the inode to coordinate the inode
 update with RPUSH in one metadata transaction; SwordFS intentionally keeps
 its two metadata authorities separate. JuiceFS's local writer
 [`findWritableSlice`](https://github.com/juicedata/juicefs/blob/d4d6874ccc1c7d06b4a0bb32bf74a16f2a232cdb/pkg/vfs/writer.go#L164-L184)
-is the peer reference for Slice reuse, but SwordFS permits continued physical
-append after a successful Flush when still eligible.
+is the peer reference for **pre-freeze** Slice reuse. The file Flush freezes
+active Slices as JuiceFS does; pre-freeze completed Block uploads in JuiceFS
+do **not** mean its object storage supports in-place append.
 
 ## Verification and exclusions
 
