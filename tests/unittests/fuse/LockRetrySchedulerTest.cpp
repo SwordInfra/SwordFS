@@ -911,10 +911,16 @@ TEST(LockRetrySchedulerTest, PendingFailedCloseMustBeResolvedBeforeNewPosixGrant
     EXPECT_EQ(locks.UnlockPosixOwner(812, 72).ToErrno(), EIO);
     ASSERT_TRUE(authority.old_held);
 
-    // Restore the backend but do not provide a second FLUSH. The next
-    // same-owner grant must not acknowledge success on top of stale ranges.
-    authority.fail_unlock = false;
+    // While cleanup still fails, a disjoint grant must fail closed rather
+    // than acknowledging a new range on top of the stale one.
     request.l_start = 200;
+    EXPECT_EQ(locks.SetPosix(812, 72, request).ToErrno(), EIO);
+    EXPECT_FALSE(authority.new_held);
+    ASSERT_TRUE(authority.old_held);
+
+    // Restore the backend but do not provide a second FLUSH. The next
+    // same-owner grant must remove the old range before acknowledging.
+    authority.fail_unlock = false;
     ASSERT_TRUE(locks.SetPosix(812, 72, request).ok());
     EXPECT_FALSE(authority.old_held) << "closed ranges must not survive a new grant";
     EXPECT_TRUE(authority.new_held) << "pre-grant cleanup must not delete the new range";

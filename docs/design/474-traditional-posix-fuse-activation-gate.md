@@ -8,12 +8,13 @@ to disable traditional POSIX record locks altogether**: JuiceFS forwards
 them through the same Linux FUSE interface today. The supported-product
 contract and unsupported-OFD limitations must be assessed separately.
 
-**Scope and current PR status:** #474's PR #494 activates *traditional*
+**Scope and verification checkpoint (2026-10-19, before merge):** #474's PR #494 activates *traditional*
 process-associated `F_GETLK`, `F_SETLK` and `F_SETLKW` through the existing
-SwordFS Redis lock authority. The real two-Mount tests and full CI are green
-at head `12813e1` ([run 38880840152](https://github.com/SwordInfra/SwordFS/actions/runs/38880840152));
-the PR is still Draft pending independent review and merge, so this does
-not describe the already-landed `main` capability.
+SwordFS Redis lock authority. The real two-Mount tests and full CI passed
+at review head `df6fc74` ([run 39216797074](https://github.com/SwordInfra/SwordFS/actions/runs/39216797074):
+22 successful jobs); both changed production files exceeded 90% patch coverage.
+At this checkpoint, the PR was **Ready for Review** and had not yet merged.
+This dated record is verification history, not a live statement about `main`.
 **OFD record locks are NOT SUPPORTED / NOT PLANNED** (#464 closed);
 no OFD functionality or separate OFD feature task is proposed.
 The existing shipped Redis-backed BSD `flock` remains unchanged.
@@ -120,6 +121,38 @@ evaluated before activation rather than ignored as merely “unsupported”.
 ## 4. Workflow / decision
 
 ### #494 strict-review remediation — bounded cleanup of the supported POSIX namespace
+
+#### Owner lifetime correction after strict Review (2026-10-19)
+
+Two further lifecycle regressions were reproduced by the **test-first**
+[Debug run 39216197448](https://github.com/SwordInfra/SwordFS/actions/runs/39216197448):
+
+- **Stale handle ABA:** after a successful process-owner `FLUSH`, the local
+  Owner hint was erased but the final `RELEASE` for that handle could arrive
+  later. Creating another Owner hint previously restarted its `attempt`
+  counter at 1, so the old `RELEASE` could mistake a new same-Owner lock for
+  its own lock and send an incorrect Redis unlock. Attempt tokens are now
+  **monotonic across deletion and recreation for the full Mount lifetime**,
+  issued while holding the existing `posix_owner_mutex_`. Handle snapshots
+  are compared against this unique token before any remote unlock.
+- **Old failed-close cleanup hidden by a new grant:** after a full-owner
+  unlock failed, a successful non-overlapping `SETLK` previously cleared
+  `cleanup_pending`, even though Redis could still contain ranges belonging
+  to the closed FD. Under the existing per-Owner mutation stripe, a new
+  mutation must now **complete and confirm the pending full-owner cleanup
+  first**. On failure, leave the pending hint intact, schedule the existing
+  cleanup Fiber and fail the new request rather than publishing a grant on
+  top of stale ranges. On successful cleanup, remove the old hint, then
+  record the new unique attempt before issuing the new mutation. An
+  in-flight background retry uses the same stripe and checks the old token
+  before acting, so it cannot erase the new grant.
+
+These guards use the existing FiberMutex stripes, Redis authority and
+retry coordinator. They add **no Redis operation for a never-locked
+`FLUSH`**, no persistent state, no new thread pool, and no OFD feature.
+The two regressions are tested with a delayed final RELEASE across Owner
+recreation and a failed-close → failed fresh grant → successful cleanup →
+fresh disjoint grant sequence.
 
 The independent pre-merge review identified three **reproduced** regressions
 with RED evidence, not reasons to implement OFD semantics:

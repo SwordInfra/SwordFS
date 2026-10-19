@@ -77,6 +77,10 @@ class FuseAdvisoryLocks {
   // stripe while waiting on F_SETLKW's read-only retry scheduler.
   std::array<utils::FiberMutex, 64> posix_operation_mutexes_;
   utils::FiberMutex posix_owner_mutex_;
+  // Attempt identities must survive deletion/recreation of the owner hint:
+  // an old fh's delayed RELEASE must never match a newer grant (ABA).
+  // Access only while holding posix_owner_mutex_.
+  uint64_t next_posix_attempt_ = 0;
   std::unordered_map<uint64_t, std::unordered_map<uint64_t, PosixOwnerHint>> posix_owner_attempts_;
   // Only handles that attempted a record lock are tracked. On final RELEASE,
   // cleanup only if the Owner's attempt is still current (no new grant).

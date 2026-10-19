@@ -64,26 +64,62 @@ utils::Status FuseAdvisoryLocks::SetPosix(uint64_t inode_ino, uint64_t kernel_ow
     if (blocking && token.isCancellationRequested()) {
       return utils::Status::Interrupted("cancelled POSIX lock wait");
     }
+    bool pending_cleanup_failed = false;
     {
       // Serialize the *actual authority mutation* with FLUSH for this Owner.
       // Hint counters alone cannot protect a late grant from an earlier
       // full-range unlock. Release this stripe before blocking on a waiter.
       std::lock_guard operation_lock(PosixOperationMutex(inode_ino, kernel_owner));
-      if (range.type != metadata::ILockAuthority::PosixType::kUnlock) {
-        // Unknown backend replies may have committed, so mark before I/O.
+      bool pending_cleanup = false;
+      {
         std::lock_guard lock(posix_owner_mutex_);
-        auto &hint = posix_owner_attempts_[inode_ino][kernel_owner];
-        ++hint.attempt;
-        if (file_handle.has_value()) {
-          posix_handle_owners_[inode_ino][*file_handle][kernel_owner] = hint.attempt;
+        const auto inode_it = posix_owner_attempts_.find(inode_ino);
+        if (inode_it != posix_owner_attempts_.end()) {
+          const auto owner_it = inode_it->second.find(kernel_owner);
+          pending_cleanup = owner_it != inode_it->second.end() && owner_it->second.cleanup_pending;
         }
       }
-      status = executor_.RunFromFiber(
-          [this, inode_ino, kernel_owner, range] { return authority_.SetPosix(inode_ino, kernel_owner, range); });
-      if (status.ok() && range.type != metadata::ILockAuthority::PosixType::kUnlock) {
-        std::lock_guard lock(posix_owner_mutex_);
-        posix_owner_attempts_[inode_ino][kernel_owner].cleanup_pending = false;
+      if (pending_cleanup) {
+        // The last close may have failed before removing old Redis ranges.
+        // A disjoint new SETLK would otherwise preserve those stale ranges
+        // and cancel their retry. Finish the old full-owner unlock first;
+        // the operation stripe also excludes the background retry Fiber.
+        status = executor_.RunFromFiber([this, inode_ino, kernel_owner] {
+          return authority_.SetPosix(inode_ino, kernel_owner, {0, 0, metadata::ILockAuthority::PosixType::kUnlock});
+        });
+        if (status.ok()) {
+          std::lock_guard lock(posix_owner_mutex_);
+          const auto inode_it = posix_owner_attempts_.find(inode_ino);
+          if (inode_it != posix_owner_attempts_.end()) {
+            inode_it->second.erase(kernel_owner);
+            if (inode_it->second.empty()) {
+              posix_owner_attempts_.erase(inode_it);
+            }
+          }
+        } else {
+          pending_cleanup_failed = true;
+        }
       }
+      if (!pending_cleanup_failed) {
+        if (range.type != metadata::ILockAuthority::PosixType::kUnlock) {
+          // A timeout is not proof that the mutation did not commit. Mark
+          // before I/O and never reuse a token held by an older FUSE fh.
+          std::lock_guard lock(posix_owner_mutex_);
+          auto &hint = posix_owner_attempts_[inode_ino][kernel_owner];
+          hint.attempt = ++next_posix_attempt_;
+          if (file_handle.has_value()) {
+            posix_handle_owners_[inode_ino][*file_handle][kernel_owner] = hint.attempt;
+          }
+        }
+        status = executor_.RunFromFiber(
+            [this, inode_ino, kernel_owner, range] { return authority_.SetPosix(inode_ino, kernel_owner, range); });
+      }
+    }
+    if (pending_cleanup_failed) {
+      // Preserve the pending hint and its coordinator. A failed cleanup
+      // must never be turned into an acknowledged fresh lock grant.
+      SchedulePosixCleanup();
+      return status;
     }
     if (!blocking || range.type == metadata::ILockAuthority::PosixType::kUnlock || status.ToErrno() != EAGAIN) {
       return status;

@@ -108,9 +108,10 @@ negotiates `FUSE_CAP_POSIX_LOCKS` by default**, requiring kernel support for
 both remote lock capabilities rather than silently falling back to local
 locking. The real two-Mount `F_GETLK`/`F_SETLK`/`F_SETLKW`, any-close and
 EINTR tests, Debug/Release E2E, and upstream `generic/131` passed at PR
-head `12813e1` in CI [38880840152](https://github.com/SwordInfra/SwordFS/actions/runs/38880840152).
-This is **PR-verified, pending review and merge**, not a claim that #494 has
-already landed on `main`. The earlier blanket OFD transport blocker was
+review head `df6fc74` in CI [39216797074](https://github.com/SwordInfra/SwordFS/actions/runs/39216797074)
+(22 successful jobs, 2026-10-19). **At that pre-merge checkpoint**, #494 was
+Ready for Review; this records test evidence, not a live `main` deployment
+status. The earlier blanket OFD transport blocker was
 withdrawn after comparing JuiceFS; OFD remains unsupported and not planned
 (#464 closed), and this activation does not implement OFD semantics.
 
