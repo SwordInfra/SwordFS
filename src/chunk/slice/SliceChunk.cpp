@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -17,6 +18,90 @@
 #include "storage/IDataEngine.hpp"
 
 namespace swordfs::chunk::slice {
+
+// Candidate state is intentionally not exposed by the public Chunk header.
+// Put completion alone does not authorize retirement of any dirty bytes.
+struct SliceChunk::FrozenSlice {
+  size_t pos;
+  std::string payload;
+  size_t visible_len;
+  // Physical preparation only. #271 owns the typed SliceRecord consumer,
+  // atomic publication and the final ownership transition.
+  std::optional<SliceID> prepared_id;
+};
+
+namespace {
+
+using DirtyRanges = std::map<size_t, std::string>;
+constexpr size_t kMaxActiveSliceBytes = size_t{4} * 1024 * 1024;
+
+// Merge only touching written intervals; do not turn a sparse gap into a
+// zero-padded object that would hide already published bytes on commit.
+size_t AcceptWrite(DirtyRanges &ranges, size_t offset, std::string_view bytes) {
+  size_t start = offset;
+  size_t end = offset + bytes.size();
+  auto it = ranges.lower_bound(offset);
+  if (it == ranges.end() || it->first > end) {
+    if (it == ranges.begin() || std::prev(it)->first + std::prev(it)->second.size() < offset) {
+      ranges.emplace(offset, std::string(bytes));
+      return bytes.size();
+    }
+  }
+  if (it != ranges.begin()) {
+    auto previous = std::prev(it);
+    const size_t previous_end = previous->first + previous->second.size();
+    if (previous_end >= offset && (it == ranges.end() || it->first > std::max(end, previous_end))) {
+      // Overwrite and contiguous-tail extension avoid repeatedly copying the
+      // existing prefix for each small Write (quadratic sequential writes).
+      if (end <= previous_end) {
+        std::memcpy(previous->second.data() + offset - previous->first, bytes.data(), bytes.size());
+        return 0;
+      }
+      previous->second.resize(offset - previous->first);
+      previous->second.append(bytes);
+      return end - previous_end;
+    }
+    it = previous;
+  }
+  std::vector<std::pair<size_t, std::string>> previous;
+  size_t previous_bytes = 0;
+  while (it != ranges.end()) {
+    const size_t old_end = it->first + it->second.size();
+    if (old_end < start) {
+      ++it;
+      continue;
+    }
+    if (it->first > end) {
+      break;
+    }
+    start = std::min(start, it->first);
+    end = std::max(end, old_end);
+    previous_bytes += it->second.size();
+    previous.emplace_back(it->first, std::move(it->second));
+    it = ranges.erase(it);
+  }
+  std::string merged(end - start, '\0');
+  for (const auto &[old_start, old_bytes] : previous) {
+    std::memcpy(merged.data() + old_start - start, old_bytes.data(), old_bytes.size());
+  }
+  std::memcpy(merged.data() + offset - start, bytes.data(), bytes.size());
+  const size_t newly_covered = merged.size() - previous_bytes;
+  ranges.emplace(start, std::move(merged));
+  return newly_covered;
+}
+
+void ClipRanges(DirtyRanges &ranges, size_t size) {
+  auto it = ranges.lower_bound(size);
+  ranges.erase(it, ranges.end());
+  if (!ranges.empty()) {
+    it = std::prev(ranges.end());
+    if (it->first + it->second.size() > size) {
+      it->second.resize(size - it->first);
+    }
+  }
+}
+
+}  // namespace
 
 SliceChunk::SliceChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t chunk_size,
                        std::shared_ptr<metadata::slice::SliceChunkMetadata> slice_metadata, metadata::IMetaEngine *meta,
@@ -39,31 +124,40 @@ utils::Status SliceChunk::Write(size_t offset, const folly::IOBuf &data) {
   }
   auto flattened = data.cloneCoalesced();
   std::string bytes(reinterpret_cast<const char *>(flattened->data()), len);
-  const size_t end = offset + len;
   std::lock_guard<utils::FiberRWMutex> lock(mutex_);
-  auto it = dirty_.lower_bound(offset);
-  if (it != dirty_.begin()) {
-    --it;
-  }
-  std::vector<std::pair<size_t, std::string>> preserved;
-  while (it != dirty_.end() && it->first < end) {
-    const size_t start = it->first;
-    const size_t old_end = start + it->second.size();
-    if (old_end <= offset) {
-      ++it;
-      continue;
+  // This projection includes every unpublished frozen Slice plus every newer
+  // active Write. An older Put completion must never clear newer local bytes.
+  AcceptWrite(dirty_, offset, bytes);
+  // Keep the mutable working set bounded even for a single large Write.
+  // Frozen-but-unpublished bytes still count toward #202's future budget.
+  for (size_t cursor = 0; cursor < bytes.size();) {
+    const size_t part_size = std::min(kMaxActiveSliceBytes, bytes.size() - cursor);
+    const size_t part_start = offset + cursor;
+    const size_t part_end = part_start + part_size;
+    if (active_bytes_ + part_size > kMaxActiveSliceBytes) {
+      // Account actual new coverage. Repeated overwrites of already-buffered
+      // bytes should not force a new Slice merely because its range is large.
+      size_t covered = 0;
+      auto it = active_.upper_bound(part_start);
+      if (it != active_.begin()) {
+        --it;
+      }
+      for (; it != active_.end() && it->first < part_end; ++it) {
+        const size_t first = std::max(it->first, part_start);
+        const size_t last = std::min(it->first + it->second.size(), part_end);
+        if (first < last) {
+          covered += last - first;
+        }
+      }
+      if (active_bytes_ + part_size - covered > kMaxActiveSliceBytes) {
+        FreezeActiveLocked();
+      }
     }
-    if (start < offset) {
-      preserved.emplace_back(start, it->second.substr(0, offset - start));
+    active_bytes_ += AcceptWrite(active_, part_start, std::string_view(bytes).substr(cursor, part_size));
+    if (active_bytes_ >= kMaxActiveSliceBytes) {
+      FreezeActiveLocked();
     }
-    if (old_end > end) {
-      preserved.emplace_back(end, it->second.substr(end - start));
-    }
-    it = dirty_.erase(it);
-  }
-  dirty_.emplace(offset, std::move(bytes));
-  for (auto &part : preserved) {
-    dirty_.emplace(part.first, std::move(part.second));
+    cursor += part_size;
   }
   return utils::Status::OK();
 }
@@ -76,8 +170,9 @@ utils::Status SliceChunk::Read(size_t offset, size_t len, folly::IOBuf *out) con
     return utils::Status::OK();
   }
 
-  // Snapshot only the requested dirty bytes. Do not retain the fiber mutex
-  // across metadata or object-store I/O; a concurrent Write sees a later view.
+  // dirty_ is the merged Active + Frozen projection in acceptance order.
+  // Snapshot requested bytes before metadata/S3 I/O; neither freeze nor Put
+  // success makes pending dirty data temporarily disappear from this view.
   std::vector<std::pair<size_t, std::string>> overlays;
   std::vector<BoundaryClamp> boundaries;
   std::optional<utils::Status> boundary_error;
@@ -234,21 +329,94 @@ utils::Status SliceChunk::Read(size_t offset, size_t len, folly::IOBuf *out) con
   return utils::Status::OK();
 }
 
+void SliceChunk::FreezeActiveLocked() {
+  if (active_.empty()) {
+    return;
+  }
+  for (auto &[pos, bytes] : active_) {
+    const size_t len = bytes.size();
+    frozen_.push_back(std::make_shared<FrozenSlice>(
+        FrozenSlice{.pos = pos, .payload = std::move(bytes), .visible_len = len, .prepared_id = std::nullopt}));
+  }
+  active_.clear();
+  active_bytes_ = 0;
+}
+
 utils::Status SliceChunk::Flush() {
-  return utils::Status::NotSupported("Slice flush requires durable writer and publication (#485/#271)");
+  if (chunk_size_ > std::numeric_limits<uint32_t>::max()) {
+    return utils::Status::InvalidArgument("Slice flush exceeds 32-bit record range");
+  }
+  std::vector<std::shared_ptr<FrozenSlice>> candidates;
+  {
+    std::lock_guard<utils::FiberRWMutex> lock(mutex_);
+    if (flushing_) {
+      return utils::Status::Busy("Slice flush preparation already in flight");
+    }
+    flushing_ = true;
+    FreezeActiveLocked();
+    candidates = frozen_;
+  }
+
+  const auto finish = [&](utils::Status status) {
+    std::lock_guard<utils::FiberRWMutex> lock(mutex_);
+    flushing_ = false;
+    return status;
+  };
+
+  // One flight per Chunk retains local acceptance order independent of later
+  // writes. An uncertain Put is retried only with a fresh physical identity;
+  // already prepared objects are never overwritten or uploaded twice.
+  for (const auto &candidate : candidates) {
+    {
+      std::shared_lock<utils::FiberRWMutex> lock(mutex_);
+      if (candidate->visible_len == 0 || candidate->prepared_id.has_value()) {
+        continue;
+      }
+    }
+    SliceID id;
+    auto status = slice_metadata_->AllocateSliceID(&id);
+    if (!status.ok()) {
+      return finish(status);
+    }
+    if (id == SliceID() || id.Value() > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      return finish(utils::Status::Malformed("Slice allocator returned an invalid physical identity"));
+    }
+    // Frozen payload storage is never mutated or removed during in-flight
+    // preparation, even if a concurrent local truncate clips its visibility.
+    status = data_->Put(SliceObjectKey(id), folly::IOBuf::copyBuffer(candidate->payload));
+    if (!status.ok()) {
+      return finish(status);
+    }
+    std::lock_guard<utils::FiberRWMutex> lock(mutex_);
+    // TruncateLocal may have retired this candidate while Put was in flight.
+    // Its shared_ptr snapshot keeps the payload alive through Put, but a
+    // completely invisible object must never become eligible for publication.
+    if (candidate->visible_len != 0) {
+      candidate->prepared_id = id;
+    }
+  }
+  // Physical preparation alone is never a successful durable Flush. #271
+  // must publish the ordered candidates, FileMetadata and EOF atomically.
+  return finish(utils::Status::NotSupported("Slice records require authoritative publication (#271)"));
 }
 
 void SliceChunk::TruncateLocal(size_t size) {
   CaptureBoundary(size);
   std::lock_guard<utils::FiberRWMutex> lock(mutex_);
-  auto it = dirty_.lower_bound(size);
-  dirty_.erase(it, dirty_.end());
-  if (!dirty_.empty()) {
-    it = std::prev(dirty_.end());
-    if (it->first + it->second.size() > size) {
-      it->second.resize(size - it->first);
-    }
+  ClipRanges(dirty_, size);
+  ClipRanges(active_, size);
+  active_bytes_ = 0;
+  for (const auto &[pos, bytes] : active_) {
+    active_bytes_ += bytes.size();
   }
+  for (auto &candidate : frozen_) {
+    const size_t remaining = size > candidate->pos ? size - candidate->pos : 0;
+    candidate->visible_len = std::min(candidate->visible_len, remaining);
+  }
+  // Fully clipped generations have no publishable data. Release Chunk
+  // ownership immediately; any in-flight Put still owns its local snapshot.
+  // Do not delete a possibly completed but unreferenced immutable object.
+  std::erase_if(frozen_, [](const auto &candidate) { return candidate->visible_len == 0; });
 }
 
 void SliceChunk::ClampPublishedPrefix(size_t visible_prefix) {
