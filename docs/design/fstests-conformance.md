@@ -317,10 +317,13 @@ Issue. Known-gap categories are:
   behavior while the SwordFS distributed capability remains unadvertised. This
   category requires an Issue, an exact `PASS` expectation and no FAIL evidence;
   it does **not** increase `supported.txt` or the supported-pass count. The
-  specific upstream assertion must be inspected before admitting this category;
-  `generic/131` and `generic/478` currently exercise mount-local POSIX/OFD
-  locks even with `FUSE_CAP_POSIX_LOCKS` disabled, while remote cross-Mount
-  validation and activation remain #433/#464 work;
+  specific upstream assertion must be inspected before admitting this category.
+  **Historical note:** prior to #474, `generic/131` and `generic/478` passed
+  with kernel-local POSIX/OFD paths while `FUSE_CAP_POSIX_LOCKS` was disabled.
+  In #474 PR #494, upstream `generic/131` and separate Redis-authoritative
+  two-Mount E2E are green, so `generic/131` is now in `supported.txt`;
+  `generic/478` tests unsupported OFD lifetime and is explicitly
+  `DEFERRED_CI` without a supported-PASS claim;
 - `upstream_not_applicable` — the testcase fundamentally cannot apply to the
   SwordFS FUSE/distributed model for a concrete upstream capability reason;
 - `upstream_test_defect` — the tested semantic applies, but the pinned upstream

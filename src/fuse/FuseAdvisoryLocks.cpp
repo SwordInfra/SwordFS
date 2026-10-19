@@ -6,9 +6,13 @@
 #include <sys/file.h>
 
 #include <cerrno>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include "utils/ExecutionDomain.hpp"
 #include "utils/FiberRuntime.hpp"
@@ -42,8 +46,14 @@ utils::Status FuseAdvisoryLocks::ToRange(const struct flock &lock, bool allow_un
   return utils::Status::OK();
 }
 
+utils::FiberMutex &FuseAdvisoryLocks::PosixOperationMutex(uint64_t inode_ino, uint64_t kernel_owner) {
+  return posix_operation_mutexes_[(inode_ino ^ (kernel_owner * 0x9e3779b97f4a7c15ULL)) %
+                                  posix_operation_mutexes_.size()];
+}
+
 utils::Status FuseAdvisoryLocks::SetPosix(uint64_t inode_ino, uint64_t kernel_owner, const struct flock &lock,
-                                          bool blocking, const folly::CancellationToken &token) {
+                                          bool blocking, const folly::CancellationToken &token,
+                                          std::optional<uint64_t> file_handle) {
   utils::ExpectInFiberDomain();
   metadata::ILockAuthority::PosixRange range{};
   auto status = ToRange(lock, true, &range);
@@ -54,8 +64,63 @@ utils::Status FuseAdvisoryLocks::SetPosix(uint64_t inode_ino, uint64_t kernel_ow
     if (blocking && token.isCancellationRequested()) {
       return utils::Status::Interrupted("cancelled POSIX lock wait");
     }
-    status = executor_.RunFromFiber(
-        [this, inode_ino, kernel_owner, range] { return authority_.SetPosix(inode_ino, kernel_owner, range); });
+    bool pending_cleanup_failed = false;
+    {
+      // Serialize the *actual authority mutation* with FLUSH for this Owner.
+      // Hint counters alone cannot protect a late grant from an earlier
+      // full-range unlock. Release this stripe before blocking on a waiter.
+      std::lock_guard operation_lock(PosixOperationMutex(inode_ino, kernel_owner));
+      bool pending_cleanup = false;
+      {
+        std::lock_guard lock(posix_owner_mutex_);
+        const auto inode_it = posix_owner_attempts_.find(inode_ino);
+        if (inode_it != posix_owner_attempts_.end()) {
+          const auto owner_it = inode_it->second.find(kernel_owner);
+          pending_cleanup = owner_it != inode_it->second.end() && owner_it->second.cleanup_pending;
+        }
+      }
+      if (pending_cleanup) {
+        // The last close may have failed before removing old Redis ranges.
+        // A disjoint new SETLK would otherwise preserve those stale ranges
+        // and cancel their retry. Finish the old full-owner unlock first;
+        // the operation stripe also excludes the background retry Fiber.
+        status = executor_.RunFromFiber([this, inode_ino, kernel_owner] {
+          return authority_.SetPosix(inode_ino, kernel_owner, {0, 0, metadata::ILockAuthority::PosixType::kUnlock});
+        });
+        if (status.ok()) {
+          std::lock_guard lock(posix_owner_mutex_);
+          const auto inode_it = posix_owner_attempts_.find(inode_ino);
+          if (inode_it != posix_owner_attempts_.end()) {
+            inode_it->second.erase(kernel_owner);
+            if (inode_it->second.empty()) {
+              posix_owner_attempts_.erase(inode_it);
+            }
+          }
+        } else {
+          pending_cleanup_failed = true;
+        }
+      }
+      if (!pending_cleanup_failed) {
+        if (range.type != metadata::ILockAuthority::PosixType::kUnlock) {
+          // A timeout is not proof that the mutation did not commit. Mark
+          // before I/O and never reuse a token held by an older FUSE fh.
+          std::lock_guard lock(posix_owner_mutex_);
+          auto &hint = posix_owner_attempts_[inode_ino][kernel_owner];
+          hint.attempt = ++next_posix_attempt_;
+          if (file_handle.has_value()) {
+            posix_handle_owners_[inode_ino][*file_handle][kernel_owner] = hint.attempt;
+          }
+        }
+        status = executor_.RunFromFiber(
+            [this, inode_ino, kernel_owner, range] { return authority_.SetPosix(inode_ino, kernel_owner, range); });
+      }
+    }
+    if (pending_cleanup_failed) {
+      // Preserve the pending hint and its coordinator. A failed cleanup
+      // must never be turned into an acknowledged fresh lock grant.
+      SchedulePosixCleanup();
+      return status;
+    }
     if (!blocking || range.type == metadata::ILockAuthority::PosixType::kUnlock || status.ToErrno() != EAGAIN) {
       return status;
     }
@@ -154,10 +219,128 @@ utils::Status FuseAdvisoryLocks::GetPosix(uint64_t inode_ino, uint64_t kernel_ow
 }
 
 utils::Status FuseAdvisoryLocks::UnlockPosixOwner(uint64_t inode_ino, uint64_t kernel_owner) {
+  return UnlockPosixOwnerIfCurrent(inode_ino, kernel_owner);
+}
+
+utils::Status FuseAdvisoryLocks::UnlockPosixOwnerIfCurrent(uint64_t inode_ino, uint64_t kernel_owner,
+                                                           std::optional<uint64_t> expected_attempt,
+                                                           bool pending_only) {
   utils::ExpectInFiberDomain();
-  return executor_.RunFromFiber([this, inode_ino, kernel_owner] {
-    return authority_.SetPosix(inode_ino, kernel_owner, {0, 0, metadata::ILockAuthority::PosixType::kUnlock});
-  });
+  utils::Status status;
+  {
+    std::lock_guard operation_lock(PosixOperationMutex(inode_ino, kernel_owner));
+    {
+      std::lock_guard lock(posix_owner_mutex_);
+      const auto inode_it = posix_owner_attempts_.find(inode_ino);
+      if (inode_it == posix_owner_attempts_.end()) {
+        return utils::Status::OK();
+      }
+      const auto owner_it = inode_it->second.find(kernel_owner);
+      if (owner_it == inode_it->second.end() ||
+          (expected_attempt.has_value() && owner_it->second.attempt != *expected_attempt) ||
+          (pending_only && !owner_it->second.cleanup_pending)) {
+        return utils::Status::OK();
+      }
+      owner_it->second.cleanup_pending = true;
+    }
+    status = executor_.RunFromFiber([this, inode_ino, kernel_owner] {
+      return authority_.SetPosix(inode_ino, kernel_owner, {0, 0, metadata::ILockAuthority::PosixType::kUnlock});
+    });
+    if (status.ok()) {
+      std::lock_guard lock(posix_owner_mutex_);
+      const auto inode_it = posix_owner_attempts_.find(inode_ino);
+      if (inode_it != posix_owner_attempts_.end()) {
+        inode_it->second.erase(kernel_owner);
+        if (inode_it->second.empty()) {
+          posix_owner_attempts_.erase(inode_it);
+        }
+      }
+    }
+  }
+  if (!status.ok()) {
+    SchedulePosixCleanup();
+  }
+  return status;
+}
+
+utils::Status FuseAdvisoryLocks::ReleasePosixHandle(uint64_t inode_ino, uint64_t file_handle) {
+  utils::ExpectInFiberDomain();
+  std::unordered_map<uint64_t, uint64_t> owners;
+  {
+    std::lock_guard lock(posix_owner_mutex_);
+    const auto inode_it = posix_handle_owners_.find(inode_ino);
+    if (inode_it == posix_handle_owners_.end()) {
+      return utils::Status::OK();
+    }
+    const auto handle_it = inode_it->second.find(file_handle);
+    if (handle_it == inode_it->second.end()) {
+      return utils::Status::OK();
+    }
+    owners = std::move(handle_it->second);
+    inode_it->second.erase(handle_it);
+    if (inode_it->second.empty()) {
+      posix_handle_owners_.erase(inode_it);
+    }
+  }
+  utils::Status first_error = utils::Status::OK();
+  for (const auto &[owner, attempt] : owners) {
+    auto status = UnlockPosixOwnerIfCurrent(inode_ino, owner, attempt);
+    if (first_error.ok() && !status.ok()) {
+      first_error = status;
+    }
+  }
+  return first_error;
+}
+
+void FuseAdvisoryLocks::StopBackgroundCleanup() {
+  cleanup_stopping_.store(true, std::memory_order_release);
+}
+
+void FuseAdvisoryLocks::SchedulePosixCleanup() {
+  utils::ExpectInFiberDomain();
+  if (cleanup_stopping_.load(std::memory_order_acquire) || !authority_.CanGrant()) {
+    return;  // A terminal lease's TTL already bounds the stale record.
+  }
+  std::lock_guard lock(posix_owner_mutex_);
+  if (cleanup_running_) {
+    return;
+  }
+  auto *runtime = utils::CurrentDriverFiberRuntime();
+  if (runtime != nullptr && runtime->Submit([this] { RetryPendingPosixCleanup(); })) {
+    cleanup_running_ = true;
+  }
+}
+
+void FuseAdvisoryLocks::RetryPendingPosixCleanup() {
+  utils::ExpectInFiberDomain();
+  while (!cleanup_stopping_.load(std::memory_order_acquire) && authority_.CanGrant()) {
+    std::vector<std::tuple<uint64_t, uint64_t, uint64_t>> pending;
+    {
+      std::lock_guard lock(posix_owner_mutex_);
+      for (const auto &[inode_ino, owners] : posix_owner_attempts_) {
+        for (const auto &[owner, hint] : owners) {
+          if (hint.cleanup_pending) {
+            pending.emplace_back(inode_ino, owner, hint.attempt);
+          }
+        }
+      }
+      if (pending.empty()) {
+        cleanup_running_ = false;
+        return;
+      }
+    }
+    // One coordinator per Mount, not one Redis retry per closed file.
+    utils::FiberBaton timer;
+    timer.try_wait_for(std::chrono::milliseconds(250));
+    for (const auto &[inode_ino, owner, attempt] : pending) {
+      if (cleanup_stopping_.load(std::memory_order_acquire) || !authority_.CanGrant()) {
+        break;
+      }
+      (void)UnlockPosixOwnerIfCurrent(inode_ino, owner, attempt, true);
+    }
+  }
+  std::lock_guard lock(posix_owner_mutex_);
+  cleanup_running_ = false;
 }
 
 bool FuseAdvisoryLocks::CanGrant() const {

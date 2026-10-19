@@ -236,8 +236,12 @@ Actual two-Mount E2E tests establish distributed lock semantics independently
 of this incompatible upstream introspection requirement. No lease opt-in flag
 is passed to the mount fixture; remote flock is the default.
 
-Leave traditional POSIX `generic/131` and mixed OFD/POSIX
-`generic/478` as kernel-local-only, pending #464/#474.
+**Historical #473 boundary:** this PR left traditional POSIX `generic/131`
+and mixed OFD/POSIX `generic/478` as kernel-local-only. Subsequent #474
+(PR #494) has verified remote POSIX behavior on two real Mounts and
+promoted `generic/131` to `supported.txt`; the unsupported OFD lifecycle
+in `generic/478` is now explicitly deferred. #464 is closed/not planned,
+not a prerequisite to traditional POSIX lock support.
 
 ## 7. Peer-source comparison and explicit non-goals
 
