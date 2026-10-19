@@ -815,6 +815,114 @@ TEST(LockRetrySchedulerTest, FinalReleaseCleansOnlyCurrentHandleOwnerAndSkipsNev
   });
 }
 
+// The first handle's FLUSH may finish before its final RELEASE, while a
+// different open handle of the same process has already acquired a new lock.
+// Deleting and recreating the in-memory owner hint must not reuse an attempt
+// identity that allows the stale RELEASE to unlock the new grant.
+TEST(LockRetrySchedulerTest, StaleHandleReleaseCannotUnlockRecreatedPosixOwner) {
+  class CountingAuthority final : public metadata::ILockAuthority {
+   public:
+    utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
+      if (range.type == PosixType::kUnlock) {
+        ++unlocks;
+        held = false;
+      } else {
+        held = true;
+      }
+      return utils::Status::OK();
+    }
+    utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return utils::Status::OK();
+    }
+    utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return true;
+    }
+    int unlocks = 0;
+    bool held = false;
+  } authority;
+  utils::BlockingExecutor executor(2, "posix-aba");
+  FuseAdvisoryLocks locks(authority, executor);
+  swordfs::test::RunInTestFiber([&] {
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    request.l_len = 20;
+    ASSERT_TRUE(locks.SetPosix(811, 71, request, false, {}, 901).ok());
+    ASSERT_TRUE(locks.UnlockPosixOwner(811, 71).ok());  // FLUSH: erase first hint.
+    EXPECT_EQ(authority.unlocks, 1);
+    ASSERT_TRUE(locks.SetPosix(811, 71, request, false, {}, 902).ok());
+    ASSERT_TRUE(authority.held);
+    ASSERT_TRUE(locks.ReleasePosixHandle(811, 901).ok());  // Delayed old RELEASE.
+    EXPECT_TRUE(authority.held) << "an old fh must not erase a later process lock";
+    EXPECT_EQ(authority.unlocks, 1) << "stale RELEASE must not access Redis";
+    ASSERT_TRUE(locks.ReleasePosixHandle(811, 902).ok());
+    EXPECT_FALSE(authority.held);
+    EXPECT_EQ(authority.unlocks, 2);
+  });
+}
+
+// A successful new, disjoint range grant for the same owner cannot erase a
+// failed full-owner unlock's pending work. Old ranges stay in Redis unless
+// the old cleanup is positively completed before the new grant is admitted.
+TEST(LockRetrySchedulerTest, PendingFailedCloseMustBeResolvedBeforeNewPosixGrant) {
+  class RangeAuthority final : public metadata::ILockAuthority {
+   public:
+    utils::Status SetPosix(uint64_t, uint64_t, PosixRange range) override {
+      if (range.type == PosixType::kUnlock) {
+        ++unlock_attempts;
+        if (fail_unlock) {
+          return utils::Status::IOError("old full-owner unlock not applied");
+        }
+        old_held = false;
+        new_held = false;
+      } else if (range.start == 0) {
+        old_held = true;
+      } else if (range.start == 200) {
+        new_held = true;
+      }
+      return utils::Status::OK();
+    }
+    utils::Status GetPosix(uint64_t, uint64_t, PosixRange, std::optional<PosixConflict> *) override {
+      return utils::Status::OK();
+    }
+    utils::Status SetFlock(uint64_t, uint64_t, FlockType) override {
+      return utils::Status::OK();
+    }
+    bool CanGrant() const override {
+      return true;
+    }
+    bool fail_unlock = false;
+    bool old_held = false;
+    bool new_held = false;
+    int unlock_attempts = 0;
+  } authority;
+  utils::BlockingExecutor executor(2, "posix-pending-close");
+  FuseAdvisoryLocks locks(authority, executor);
+  swordfs::test::RunInTestFiber([&] {
+    struct flock request{};
+    request.l_type = F_WRLCK;
+    request.l_whence = SEEK_SET;
+    request.l_len = 100;
+    ASSERT_TRUE(locks.SetPosix(812, 72, request).ok());
+    authority.fail_unlock = true;
+    EXPECT_EQ(locks.UnlockPosixOwner(812, 72).ToErrno(), EIO);
+    ASSERT_TRUE(authority.old_held);
+
+    // Restore the backend but do not provide a second FLUSH. The next
+    // same-owner grant must not acknowledge success on top of stale ranges.
+    authority.fail_unlock = false;
+    request.l_start = 200;
+    ASSERT_TRUE(locks.SetPosix(812, 72, request).ok());
+    EXPECT_FALSE(authority.old_held) << "closed ranges must not survive a new grant";
+    EXPECT_TRUE(authority.new_held) << "pre-grant cleanup must not delete the new range";
+    EXPECT_GE(authority.unlock_attempts, 2);
+    ASSERT_TRUE(locks.UnlockPosixOwner(812, 72).ok());
+  });
+}
+
 TEST(LockRetrySchedulerTest, PersistentCleanupFailureStopsWithMountWithoutStallingDataClose) {
   class FailingAuthority final : public metadata::ILockAuthority {
    public:
