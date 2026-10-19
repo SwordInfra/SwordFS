@@ -10,37 +10,46 @@
     "libfuse": "fusermount3 version: 3.18.2",
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
-    "runner": "GitHub Actions (11 fstests shards)",
-    "swordfs_commit": "878cc434addbc16eb6609ad5e752e444711b8df7"
+    "runner": "GitHub Actions (10 fstests shards)",
+    "swordfs_commit": "b1426cb8647759c621f3f693ea1aff73b89d597e"
   },
   "summary": {
     "blocking_count": 0,
     "classifications": {
+      "DEFERRED_CI": 1,
       "ENVIRONMENT": 8,
-      "KERNEL_LOCAL_ONLY": 2,
       "KNOWN_UNSUPPORTED": 87,
-      "PASS": 144,
+      "PASS": 145,
       "UPSTREAM_NOT_APPLICABLE": 403,
       "UPSTREAM_TEST_DEFECT": 1
     },
-    "classified_count": 645,
-    "classified_percent": 100.0,
-    "deferred_count": 0,
+    "classified_count": 644,
+    "classified_percent": 99.84,
+    "deferred_count": 1,
     "executed_classified_percent": 100.0,
-    "executed_count": 645,
-    "known_gap_count": 501,
-    "overall_support_percent": 22.33,
+    "executed_count": 644,
+    "known_gap_count": 499,
+    "overall_support_percent": 22.48,
     "raw_results": {
+      "DEFERRED": 1,
       "FAIL": 17,
       "NOTRUN": 482,
-      "PASS": 146
+      "PASS": 145
     },
     "selected_count": 645,
-    "supported_count": 144,
+    "supported_count": 145,
     "supported_gate_percent": 100.0,
-    "supported_pass_count": 144
+    "supported_pass_count": 145
   },
   "tests": [
+    {
+      "classification": "DEFERRED_CI",
+      "issue": "",
+      "message": "",
+      "reason": "Explicitly unsupported OFD byte-range lock lifecycle test (#464 not planned): with FUSE remote POSIX enabled its mixed POSIX/OFD checks can hang on opaque OFD owner cleanup; no full OFD feature or conformance is claimed. Keep selected for provenance, defer costly unsupported execution from required PR-CI; never count as PASS.",
+      "result": "DEFERRED",
+      "test": "generic/478"
+    },
     {
       "classification": "PASS",
       "issue": "",
@@ -850,10 +859,10 @@
       "test": "generic/130"
     },
     {
-      "classification": "KERNEL_LOCAL_ONLY",
-      "issue": "#433",
+      "classification": "PASS",
+      "issue": "",
       "message": "",
-      "reason": "Kernel-local POSIX locks pass without FUSE_CAP_POSIX_LOCKS; this does not verify distributed cross-Mount authority; remote activation remains #433.",
+      "reason": "",
       "result": "PASS",
       "test": "generic/131"
     },
@@ -3008,14 +3017,6 @@
       "reason": "SwordFS does not enable FUSE export/open-by-handle support; tracked by #255.",
       "result": "FAIL",
       "test": "generic/477"
-    },
-    {
-      "classification": "KERNEL_LOCAL_ONLY",
-      "issue": "#433",
-      "message": "",
-      "reason": "Kernel-local POSIX/OFD interactions pass without FUSE_CAP_POSIX_LOCKS; cross-Mount remote locks and OFD transport remain unverified under #433/#464.",
-      "result": "PASS",
-      "test": "generic/478"
     },
     {
       "classification": "UPSTREAM_NOT_APPLICABLE",

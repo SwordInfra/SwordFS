@@ -7,53 +7,59 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | Metric | Value |
 | --- | ---: |
 | Selected upstream testcases | 645 |
-| Executed testcases | 645 |
-| Deferred from CI | 0 |
-| Explicitly supported | 144 |
-| Known gaps | 501 |
-| Overall support | 22.33% |
+| Executed testcases | 644 |
+| Deferred from CI | 1 |
+| Explicitly supported | 145 |
+| Known gaps | 499 |
+| Overall support | 22.48% |
 | Supported gate | 100.00% |
 | Executed population classified | 100.00% |
-| Full selected population classified | 100.00% |
+| Full selected population classified | 99.84% |
 | Blocking outcomes | 0 |
 
 ## Raw execution outcomes
 
 | Result | Count |
 | --- | ---: |
-| `PASS` | 146 |
+| `PASS` | 145 |
 | `FAIL` | 17 |
 | `NOTRUN` | 482 |
+| `DEFERRED` | 1 |
 
 ## Outcome counts
 
 | Classification | Count |
 | --- | ---: |
+| `DEFERRED_CI` | 1 |
 | `ENVIRONMENT` | 8 |
-| `KERNEL_LOCAL_ONLY` | 2 |
 | `KNOWN_UNSUPPORTED` | 87 |
-| `PASS` | 144 |
+| `PASS` | 145 |
 | `UPSTREAM_NOT_APPLICABLE` | 403 |
 | `UPSTREAM_TEST_DEFECT` | 1 |
+
+## Deferred from CI
+
+| Test | Reason |
+| --- | --- |
+| `generic/478` | Explicitly unsupported OFD byte-range lock lifecycle test (#464 not planned): with FUSE remote POSIX enabled its mixed POSIX/OFD checks can hang on opaque OFD owner cleanup; no full OFD feature or conformance is claimed. Keep selected for provenance, defer costly unsupported execution from required PR-CI; never count as PASS. |
 
 ## Known-gap Issues
 
 - [#255](https://github.com/SwordInfra/SwordFS/issues/255): 86 testcase(s), KNOWN_UNSUPPORTED
 - [#406](https://github.com/SwordInfra/SwordFS/issues/406): 1 testcase(s), KNOWN_UNSUPPORTED
-- [#433](https://github.com/SwordInfra/SwordFS/issues/433): 2 testcase(s), KERNEL_LOCAL_ONLY
 
 ## Execution metadata
 
-- SwordFS commit: `878cc434addbc16eb6609ad5e752e444711b8df7`
+- SwordFS commit: `b1426cb8647759c621f3f693ea1aff73b89d597e`
 - fstests commit: `a370dcbed43563f0462801e889e0eceb93c7cfad`
 - fstests patchset: `conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19`
 - fstests selector: `generic/quick`
 - Kernel: `6.17.0-1022-azure`
 - libfuse: `fusermount3 version: 3.18.2`
-- Runner: `GitHub Actions (11 fstests shards)`
+- Runner: `GitHub Actions (10 fstests shards)`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/39221586042
-Recorded at: 2026-10-19T08:28:19+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/39225184647
+Recorded at: 2026-10-19T09:01:17+00:00
 
 ## Historical main-branch progress
 
@@ -78,5 +84,6 @@ Recorded at: 2026-10-19T08:28:19+00:00
 | 2026-10-13T13:00:13+00:00 | `8d3f92e22d59` | PASS | 22.33% | 144 | 146 | 17 | 482 | 0 | 501 |
 | 2026-10-14T02:03:45+00:00 | `fb0086a75d7d` | PASS | 22.33% | 144 | 147 | 16 | 482 | 0 | 501 |
 | 2026-10-16T04:01:30+00:00 | `20f25e1aa533` | PASS | 22.33% | 144 | 146 | 17 | 482 | 0 | 501 |
+| 2026-10-19T09:01:17+00:00 | `b1426cb86477` | PASS | 22.48% | 145 | 145 | 17 | 482 | 1 | 499 |
 
-Last fully healthy baseline: `878cc434addbc16eb6609ad5e752e444711b8df7`
+Last fully healthy baseline: `b1426cb8647759c621f3f693ea1aff73b89d597e`
