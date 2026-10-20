@@ -20,6 +20,45 @@ SPEC.loader.exec_module(CLASSIFY)
 
 
 class FstestsFailureEvidenceTest(unittest.TestCase):
+    def test_scsi_debug_block_prerequisite_alternates_are_narrowly_scoped(self) -> None:
+        for test, alternate in (
+            ("generic/704", "require <FSTESTS_WORK_DIR>/test to be valid block disk"),
+            ("generic/767", "require <FSTESTS_WORK_DIR>/scratch to be valid block disk"),
+        ):
+            with self.subTest(test=test):
+                gap = CLASSIFY.Gap("environment", "-", "NOTRUN", "scsi_debug module not found", "-", "runner")
+                for reason in (gap.expected_message, alternate):
+                    observed = CLASSIFY.classify(
+                        {test}, {test: CLASSIFY.RawResult(test, "NOTRUN", reason)}, set(), {test: gap}
+                    )[0]
+                    self.assertEqual("ENVIRONMENT", observed.classification)
+                    self.assertFalse(observed.classification in CLASSIFY.BLOCKING)
+                    self.assertEqual("NOTRUN", observed.result)
+                for reason in (
+                    "another unrelated prerequisite",
+                    "require <FSTESTS_WORK_DIR>/other to be valid block disk",
+                    "require <FSTESTS_WORK_DIR>/scratch to be valid block disk"
+                    if test == "generic/704"
+                    else "require <FSTESTS_WORK_DIR>/test to be valid block disk",
+                ):
+                    observed = CLASSIFY.classify(
+                        {test}, {test: CLASSIFY.RawResult(test, "NOTRUN", reason)}, set(), {test: gap}
+                    )[0]
+                    self.assertEqual("BASELINE_REASON_MISMATCH", observed.classification)
+                    self.assertIn(observed.classification, CLASSIFY.BLOCKING)
+                for result in ("FAIL", "PASS"):
+                    observed = CLASSIFY.classify(
+                        {test}, {test: CLASSIFY.RawResult(test, result, alternate)}, set(), {test: gap}
+                    )[0]
+                    self.assertIn(observed.classification, CLASSIFY.BLOCKING)
+                unrelated = CLASSIFY.classify(
+                    {"generic/999"},
+                    {"generic/999": CLASSIFY.RawResult("generic/999", "NOTRUN", alternate)},
+                    set(),
+                    {"generic/999": gap},
+                )[0]
+                self.assertEqual("BASELINE_REASON_MISMATCH", unrelated.classification)
+
     def test_kernel_local_only_pass_does_not_promote_distributed_support(self) -> None:
         for test in ("generic/131", "generic/478"):
             with self.subTest(test=test):
