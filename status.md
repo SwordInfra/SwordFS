@@ -1,27 +1,27 @@
 # SwordFS fstests conformance
 
-Baseline gate: **PASS**
+Baseline gate: **BLOCKED**
 
 A passing baseline gate means the admitted supported/known-gap contract has no blocking regression; it does not mean every selected testcase passes.
 
 | Metric | Value |
 | --- | ---: |
 | Selected upstream testcases | 645 |
-| Executed testcases | 644 |
+| Executed testcases | 618 |
 | Deferred from CI | 1 |
 | Explicitly supported | 145 |
 | Known gaps | 499 |
-| Overall support | 22.48% |
-| Supported gate | 100.00% |
+| Overall support | 18.45% |
+| Supported gate | 82.07% |
 | Executed population classified | 100.00% |
 | Full selected population classified | 99.84% |
-| Blocking outcomes | 0 |
+| Blocking outcomes | 27 |
 
 ## Raw execution outcomes
 
 | Result | Count |
 | --- | ---: |
-| `PASS` | 145 |
+| `PASS` | 119 |
 | `FAIL` | 17 |
 | `NOTRUN` | 482 |
 | `DEFERRED` | 1 |
@@ -32,8 +32,9 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | --- | ---: |
 | `DEFERRED_CI` | 1 |
 | `ENVIRONMENT` | 8 |
+| `INFRASTRUCTURE` | 27 |
 | `KNOWN_UNSUPPORTED` | 87 |
-| `PASS` | 145 |
+| `PASS` | 119 |
 | `UPSTREAM_NOT_APPLICABLE` | 403 |
 | `UPSTREAM_TEST_DEFECT` | 1 |
 
@@ -43,6 +44,38 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | --- | --- |
 | `generic/478` | Explicitly unsupported OFD byte-range lock lifecycle test (#464 not planned): with FUSE remote POSIX enabled its mixed POSIX/OFD checks can hang on opaque OFD owner cleanup; no full OFD feature or conformance is claimed. Keep selected for provenance, defer costly unsupported execution from required PR-CI; never count as PASS. |
 
+## Blocking results
+
+| Test | Classification | Detail |
+| --- | --- | --- |
+| `infrastructure/1` | `INFRASTRUCTURE` | fstests harness exited with status 2 |
+| `generic/023` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/029` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/080` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/088` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/095` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/128` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/129` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/130` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/193` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/221` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/248` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/314` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/355` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/389` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/428` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/437` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/451` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/486` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/528` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/553` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/571` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/609` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/632` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/637` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/680` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+| `generic/729` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
+
 ## Known-gap Issues
 
 - [#255](https://github.com/SwordInfra/SwordFS/issues/255): 86 testcase(s), KNOWN_UNSUPPORTED
@@ -50,16 +83,16 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 
 ## Execution metadata
 
-- SwordFS commit: `b1426cb8647759c621f3f693ea1aff73b89d597e`
+- SwordFS commit: `092dc272d50d2824cc3180e368c88e9060dbc3c9`
 - fstests commit: `a370dcbed43563f0462801e889e0eceb93c7cfad`
 - fstests patchset: `conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19`
 - fstests selector: `generic/quick`
-- Kernel: `6.17.0-1022-azure`
+- Kernel: `multiple (see shard-environments.json)`
 - libfuse: `fusermount3 version: 3.18.2`
 - Runner: `GitHub Actions (10 fstests shards)`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/39225184647
-Recorded at: 2026-10-19T09:01:17+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/39401302917
+Recorded at: 2026-10-20T09:46:38+00:00
 
 ## Historical main-branch progress
 
@@ -85,5 +118,6 @@ Recorded at: 2026-10-19T09:01:17+00:00
 | 2026-10-14T02:03:45+00:00 | `fb0086a75d7d` | PASS | 22.33% | 144 | 147 | 16 | 482 | 0 | 501 |
 | 2026-10-16T04:01:30+00:00 | `20f25e1aa533` | PASS | 22.33% | 144 | 146 | 17 | 482 | 0 | 501 |
 | 2026-10-19T09:01:17+00:00 | `b1426cb86477` | PASS | 22.48% | 145 | 145 | 17 | 482 | 1 | 499 |
+| 2026-10-20T09:46:38+00:00 | `092dc272d50d` | BLOCKED | 18.45% | 145 | 119 | 17 | 482 | 1 | 499 |
 
 Last fully healthy baseline: `b1426cb8647759c621f3f693ea1aff73b89d597e`

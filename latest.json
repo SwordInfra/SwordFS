@@ -6,20 +6,21 @@
     "fstests_patchset": "conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19",
     "fstests_repository": "https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git",
     "fstests_selector": "generic/quick",
-    "kernel": "6.17.0-1022-azure",
+    "kernel": "multiple (see shard-environments.json)",
     "libfuse": "fusermount3 version: 3.18.2",
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
-    "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
+    "os": "multiple (see shard-environments.json)",
     "runner": "GitHub Actions (10 fstests shards)",
-    "swordfs_commit": "b1426cb8647759c621f3f693ea1aff73b89d597e"
+    "swordfs_commit": "092dc272d50d2824cc3180e368c88e9060dbc3c9"
   },
   "summary": {
-    "blocking_count": 0,
+    "blocking_count": 27,
     "classifications": {
       "DEFERRED_CI": 1,
       "ENVIRONMENT": 8,
+      "INFRASTRUCTURE": 27,
       "KNOWN_UNSUPPORTED": 87,
-      "PASS": 145,
+      "PASS": 119,
       "UPSTREAM_NOT_APPLICABLE": 403,
       "UPSTREAM_TEST_DEFECT": 1
     },
@@ -27,21 +28,165 @@
     "classified_percent": 99.84,
     "deferred_count": 1,
     "executed_classified_percent": 100.0,
-    "executed_count": 644,
+    "executed_count": 618,
     "known_gap_count": 499,
-    "overall_support_percent": 22.48,
+    "overall_support_percent": 18.45,
     "raw_results": {
       "DEFERRED": 1,
       "FAIL": 17,
       "NOTRUN": 482,
-      "PASS": 145
+      "PASS": 119
     },
     "selected_count": 645,
     "supported_count": 145,
-    "supported_gate_percent": 100.0,
-    "supported_pass_count": 145
+    "supported_gate_percent": 82.07,
+    "supported_pass_count": 119
   },
   "tests": [
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "fstests harness exited with status 2",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "infrastructure/1"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/023"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/029"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/080"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/088"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/095"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/128"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/129"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/130"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/193"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/221"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/248"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/314"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/355"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/389"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/428"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/437"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/451"
+    },
     {
       "classification": "DEFERRED_CI",
       "issue": "",
@@ -49,6 +194,78 @@
       "reason": "Explicitly unsupported OFD byte-range lock lifecycle test (#464 not planned): with FUSE remote POSIX enabled its mixed POSIX/OFD checks can hang on opaque OFD owner cleanup; no full OFD feature or conformance is claimed. Keep selected for provenance, defer costly unsupported execution from required PR-CI; never count as PASS.",
       "result": "DEFERRED",
       "test": "generic/478"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/486"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/528"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/553"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/571"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/609"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/632"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/637"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/680"
+    },
+    {
+      "classification": "INFRASTRUCTURE",
+      "issue": "",
+      "message": "selected testcase has no result; the fstests run is incomplete",
+      "reason": "",
+      "result": "INFRASTRUCTURE",
+      "test": "generic/729"
     },
     {
       "classification": "PASS",
@@ -208,14 +425,6 @@
       "message": "",
       "reason": "",
       "result": "PASS",
-      "test": "generic/023"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
       "test": "generic/024"
     },
     {
@@ -241,14 +450,6 @@
       "reason": "",
       "result": "PASS",
       "test": "generic/028"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/029"
     },
     {
       "classification": "PASS",
@@ -523,14 +724,6 @@
       "test": "generic/079"
     },
     {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/080"
-    },
-    {
       "classification": "UPSTREAM_NOT_APPLICABLE",
       "issue": "-",
       "message": "require <FSTESTS_WORK_DIR>/scratch to be valid block disk",
@@ -571,14 +764,6 @@
       "test": "generic/087"
     },
     {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/088"
-    },
-    {
       "classification": "UPSTREAM_NOT_APPLICABLE",
       "issue": "-",
       "message": "require <FSTESTS_WORK_DIR>/scratch to be valid block disk",
@@ -609,14 +794,6 @@
       "reason": "The testcase validates preallocation through FIEMAP physical extent mappings; SwordFS object-backed logical chunks do not expose a stable local physical extent map.",
       "result": "NOTRUN",
       "test": "generic/094"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/095"
     },
     {
       "classification": "KNOWN_UNSUPPORTED",
@@ -833,30 +1010,6 @@
       "reason": "",
       "result": "PASS",
       "test": "generic/126"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/128"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/129"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/130"
     },
     {
       "classification": "PASS",
@@ -1243,14 +1396,6 @@
       "test": "generic/191"
     },
     {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/193"
-    },
-    {
       "classification": "UPSTREAM_NOT_APPLICABLE",
       "issue": "-",
       "message": "Reflink not supported by scratch filesystem type: fuse",
@@ -1443,14 +1588,6 @@
       "test": "generic/220"
     },
     {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/221"
-    },
-    {
       "classification": "UPSTREAM_NOT_APPLICABLE",
       "issue": "-",
       "message": "Reflink not supported by scratch filesystem type: fuse",
@@ -1577,14 +1714,6 @@
       "reason": "",
       "result": "PASS",
       "test": "generic/247"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/248"
     },
     {
       "classification": "PASS",
@@ -1995,14 +2124,6 @@
       "test": "generic/313"
     },
     {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/314"
-    },
-    {
       "classification": "KNOWN_UNSUPPORTED",
       "issue": "#255",
       "message": "xfs_io falloc -k failed (old kernel/wrong fs?)",
@@ -2217,14 +2338,6 @@
       "reason": "Pinned fstests classifies reflink as unsupported for FUSE, so this testcase is not applicable to the current FUSE test model.",
       "result": "NOTRUN",
       "test": "generic/353"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/355"
     },
     {
       "classification": "UPSTREAM_NOT_APPLICABLE",
@@ -2457,14 +2570,6 @@
       "reason": "Pinned fstests classifies disk quota testing as unsupported for filesystem type fuse.",
       "result": "NOTRUN",
       "test": "generic/386"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/389"
     },
     {
       "classification": "KNOWN_UNSUPPORTED",
@@ -2728,14 +2833,6 @@
       "message": "",
       "reason": "",
       "result": "PASS",
-      "test": "generic/428"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
       "test": "generic/430"
     },
     {
@@ -2777,14 +2874,6 @@
       "reason": "SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.",
       "result": "NOTRUN",
       "test": "generic/436"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/437"
     },
     {
       "classification": "KNOWN_UNSUPPORTED",
@@ -2865,14 +2954,6 @@
       "reason": "The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.",
       "result": "NOTRUN",
       "test": "generic/450"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/451"
     },
     {
       "classification": "UPSTREAM_NOT_APPLICABLE",
@@ -3065,14 +3146,6 @@
       "reason": "SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.",
       "result": "NOTRUN",
       "test": "generic/485"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/486"
     },
     {
       "classification": "ENVIRONMENT",
@@ -3384,14 +3457,6 @@
       "message": "",
       "reason": "",
       "result": "PASS",
-      "test": "generic/528"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
       "test": "generic/529"
     },
     {
@@ -3571,14 +3636,6 @@
       "test": "generic/552"
     },
     {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/553"
-    },
-    {
       "classification": "UPSTREAM_NOT_APPLICABLE",
       "issue": "-",
       "message": "swapfiles are not supported",
@@ -3673,14 +3730,6 @@
       "reason": "The testcase requires local block-device geometry or a block device, which a SwordFS FUSE volume does not expose.",
       "result": "NOTRUN",
       "test": "generic/570"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/571"
     },
     {
       "classification": "UPSTREAM_NOT_APPLICABLE",
@@ -3947,14 +3996,6 @@
       "test": "generic/608"
     },
     {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/609"
-    },
-    {
       "classification": "KNOWN_UNSUPPORTED",
       "issue": "#255",
       "message": "xfs_io fzero failed (old kernel/wrong fs?)",
@@ -4088,14 +4129,6 @@
       "message": "",
       "reason": "",
       "result": "PASS",
-      "test": "generic/632"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
       "test": "generic/633"
     },
     {
@@ -4121,14 +4154,6 @@
       "reason": "Swapfile semantics are not applicable to the SwordFS FUSE/distributed storage model.",
       "result": "NOTRUN",
       "test": "generic/636"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/637"
     },
     {
       "classification": "PASS",
@@ -4393,14 +4418,6 @@
       "reason": "SwordFS VfsImpl::Fallocate returns NotSupported for this allocation mode; tracked by #255.",
       "result": "NOTRUN",
       "test": "generic/679"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/680"
     },
     {
       "classification": "UPSTREAM_NOT_APPLICABLE",
@@ -4745,14 +4762,6 @@
       "reason": "",
       "result": "PASS",
       "test": "generic/728"
-    },
-    {
-      "classification": "PASS",
-      "issue": "",
-      "message": "",
-      "reason": "",
-      "result": "PASS",
-      "test": "generic/729"
     },
     {
       "classification": "UPSTREAM_NOT_APPLICABLE",
