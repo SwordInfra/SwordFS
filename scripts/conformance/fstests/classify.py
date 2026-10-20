@@ -37,6 +37,24 @@ BLOCKING = {
     "INFRASTRUCTURE",
     "SWORD_FS_CRASH",
 }
+# The pinned generic/704 and generic/767 testcases require both a usable
+# physical block device and scsi_debug. On FUSE-hosted CI runners, fstests
+# may fail either prerequisite first; neither allows executing the test.
+# These are the ONLY accepted alternate NOTRUN reasons. Keep all other
+# baseline comparisons exact, and never treat FAIL or PASS as NOTRUN.
+SCSI_DEBUG_BLOCK_PREREQUISITE_ALTERNATIVES = {
+    "generic/704": "require <FSTESTS_WORK_DIR>/test to be valid block disk",
+    "generic/767": "require <FSTESTS_WORK_DIR>/scratch to be valid block disk",
+}
+
+
+def notrun_reason_matches(test: str, actual: str, expected: str) -> bool:
+    if actual == expected:
+        return True
+    return (
+        expected == "scsi_debug module not found"
+        and SCSI_DEBUG_BLOCK_PREREQUISITE_ALTERNATIVES.get(test) == actual
+    )
 ISSUE_RE = re.compile(r"^#[1-9][0-9]*$")
 TEST_RE = re.compile(r"^[a-z0-9_-]+/[0-9]+$")
 WORK_DIR_RE = re.compile(r"/tmp/swordfs-fstests[.-][^/\s)]+")
@@ -602,7 +620,7 @@ def classify(
             classification = "UNCLASSIFIED_NOTRUN"
         elif gap.expected_result != "NOTRUN":
             classification = "BASELINE_RESULT_MISMATCH"
-        elif normalize_message(raw.message) != gap.expected_message:
+        elif not notrun_reason_matches(test, normalize_message(raw.message), gap.expected_message):
             classification = "BASELINE_REASON_MISMATCH"
         else:
             classification = GAP_CATEGORIES[gap.category]
