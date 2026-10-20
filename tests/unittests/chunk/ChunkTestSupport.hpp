@@ -19,6 +19,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "metadata/IMetaEngine.hpp"
@@ -50,6 +51,10 @@ inline auto Buf(const std::string &value) {
 // Minimal FileMetadata test double shared by the COW and Slice chunk fixtures.
 class MissingMetaEngine : public IMetaEngine {
  public:
+  void ConfigureChunkSize(uint64_t chunk_size) {
+    chunk_size_ = chunk_size;
+  }
+
   Status Initialize() override {
     return Status::OK();
   }
@@ -83,7 +88,7 @@ class MissingMetaEngine : public IMetaEngine {
       snapshot.chunk_id = it->second;
     }
     swordfs::metadata::ChunkSizeLayout layout;
-    auto status = swordfs::metadata::PlanChunkSizeLayout(file_size_, kChunkTestSize, &layout);
+    auto status = swordfs::metadata::PlanChunkSizeLayout(file_size_, chunk_size_, &layout);
     if (!status.ok()) {
       return status;
     }
@@ -121,7 +126,7 @@ class MissingMetaEngine : public IMetaEngine {
   }
   Status AttachPrepared(InodeID, ChunkIndex index, swordfs::metadata::ChunkID id, uint64_t end,
                         const swordfs::metadata::FileSizePrecondition &expected) override {
-    auto status = swordfs::metadata::ValidateFileChunkWrite(index, id, end, kChunkTestSize);
+    auto status = swordfs::metadata::ValidateFileChunkWrite(index, id, end, chunk_size_);
     if (!status.ok()) {
       return status;
     }
@@ -129,11 +134,35 @@ class MissingMetaEngine : public IMetaEngine {
     if (!status.ok()) {
       return status;
     }
+    if (!next_attach_status.ok()) {
+      auto status = next_attach_status;
+      next_attach_status = Status::OK();
+      return status;
+    }
+    if (attach_mapping_without_eof_then_unknown) {
+      attach_mapping_without_eof_then_unknown = false;
+      typed_mappings_.emplace(index, id);
+      return Status::OutcomeUnknown("mapping committed without the inode EOF update");
+    }
+    if (competing_attachment_.has_value()) {
+      typed_mappings_[index] = competing_attachment_->first;
+      file_size_ = std::max(file_size_, competing_attachment_->second);
+      competing_attachment_.reset();
+      if (competing_attach_then_outcome_unknown) {
+        competing_attach_then_outcome_unknown = false;
+        return Status::OutcomeUnknown("first attachment lost the race and Redis reply was lost");
+      }
+      return Status::AlreadyExists("another mount attached first");
+    }
     if (typed_mappings_.contains(index)) {
       return Status::AlreadyExists("attachment already won");
     }
     typed_mappings_.emplace(index, id);
     file_size_ = std::max(file_size_, end);
+    if (attach_then_outcome_unknown) {
+      attach_then_outcome_unknown = false;
+      return Status::OutcomeUnknown("first attachment committed but Redis response was lost");
+    }
     return Status::OK();
   }
   // Simulate an independently committed FileMetadata replacement in tests.
@@ -141,9 +170,20 @@ class MissingMetaEngine : public IMetaEngine {
     typed_mappings_[index] = id;
     file_size_ = eof;
   }
+  void CompeteWithNextAttach(swordfs::metadata::ChunkID id, uint64_t eof) {
+    competing_attachment_ = std::pair{id, eof};
+  }
   Status FinalizeAttachedWrite(InodeID, ChunkIndex index, swordfs::metadata::ChunkID id, uint64_t end,
                                const swordfs::metadata::FileSizePrecondition &expected) override {
-    auto status = swordfs::metadata::ValidateFileChunkWrite(index, id, end, kChunkTestSize);
+    if (always_finalize_conflict) {
+      return Status::AlreadyExists("another mount keeps winning FileMetadata conflict");
+    }
+    if (!next_finalize_status.ok()) {
+      auto status = next_finalize_status;
+      next_finalize_status = Status::OK();
+      return status;
+    }
+    auto status = swordfs::metadata::ValidateFileChunkWrite(index, id, end, chunk_size_);
     if (!status.ok()) {
       return status;
     }
@@ -242,7 +282,7 @@ class MissingMetaEngine : public IMetaEngine {
 
  private:
   Status ValidateExpectedFileState(const swordfs::metadata::FileSizePrecondition &expected) const {
-    auto status = swordfs::metadata::ValidateFileSizePrecondition(expected, kChunkTestSize);
+    auto status = swordfs::metadata::ValidateFileSizePrecondition(expected, chunk_size_);
     if (!status.ok()) {
       return status;
     }
@@ -261,11 +301,19 @@ class MissingMetaEngine : public IMetaEngine {
     return Status::OK();
   }
 
+  uint64_t chunk_size_ = kChunkTestSize;
   uint64_t file_size_ = 0;
   std::map<ChunkIndex, swordfs::metadata::ChunkID> typed_mappings_;
+  std::optional<std::pair<swordfs::metadata::ChunkID, uint64_t>> competing_attachment_;
 
  public:
   Status file_snapshot_status = Status::OK();
+  Status next_attach_status = Status::OK();
+  bool attach_mapping_without_eof_then_unknown = false;
+  bool always_finalize_conflict = false;
+  Status next_finalize_status = Status::OK();
+  bool attach_then_outcome_unknown = false;
+  bool competing_attach_then_outcome_unknown = false;
 };
 
 // In-memory object engine for bounded reads, write publication and fault injection.

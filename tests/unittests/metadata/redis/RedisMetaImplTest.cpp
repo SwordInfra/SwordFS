@@ -197,8 +197,8 @@ FIBER_TEST_F(RedisMetaImplTest, TypedPublicationAndSizeCommitRespectImmutablePol
       .eof = 8,
       .boundary = swordfs::metadata::ChunkBoundarySnapshot{.index = 0, .chunk_id = id, .visible_prefix = 8},
   };
-  EXPECT_TRUE(impl_->FinalizeAttachedWrite(published.ino, 0, id, 8, {.eof = 0}).ok())
-      << "the original EOF-growth request can be replayed after policy changes";
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(published.ino, 0, id, 8, {.eof = 0}).ToErrno(), EEXIST)
+      << "EOF alone cannot prove this is the original request; stale replay must conflict";
   EXPECT_EQ(impl_->FinalizeAttachedWrite(published.ino, 0, id, 8, expected).ToErrno(), EPERM)
       << "a new same-EOF overwrite remains a content mutation";
   EXPECT_EQ(impl_->FinalizeAttachedWrite(published.ino, 0, id, 12, expected).ToErrno(), EPERM);
@@ -211,6 +211,64 @@ FIBER_TEST_F(RedisMetaImplTest, TypedPublicationAndSizeCommitRespectImmutablePol
   requested.size = 0;
   swordfs::metadata::ChunkSizeCommitResult result;
   EXPECT_EQ(impl_->CommitShrink(published.ino, shrink, requested, SetAttrField::kSize, &result).ToErrno(), EPERM);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, AttachedPublisherRejectsStaleEofRatherThanClaimNewWriteSucceeded) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "typed-stale-eof-publisher", 0644, &file).ok());
+  const swordfs::metadata::ChunkID chunk_id(70);
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, chunk_id, 8, {.eof = 0}).ok());
+
+  // Simulate two publishers observing the same EOF=8. B commits an EOF
+  // extension, while A has already appended a distinct SliceRecord and is
+  // about to finalize it. A's record is NOT a replay of B's write.
+  swordfs::metadata::FileChunkSnapshot initial;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 0, &initial).ok());
+  const swordfs::metadata::FileSizePrecondition before{.eof = initial.inode.attr.size,
+                                                       .boundary = initial.eof_boundary};
+  ASSERT_TRUE(impl_->FinalizeAttachedWrite(file.ino, 0, chunk_id, 12, before).ok());
+
+  SwordFsAttr original;
+  original.mtime = 1;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, original, SetAttrField::kMtime, nullptr).ok());
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(file.ino, 0, chunk_id, 10, before).ToErrno(), EEXIST)
+      << "a stale EOF must not acknowledge A's new Slice or silently skip mtime";
+  ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
+  EXPECT_EQ(file.attr.mtime, 1);
+
+  // A refreshes FileMetadata and finalizes its already appended Slice
+  // against the current EOF. This is a real content write and must touch
+  // timestamps even though no additional EOF growth is needed.
+  swordfs::metadata::FileChunkSnapshot refreshed;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 0, &refreshed).ok());
+  const swordfs::metadata::FileSizePrecondition current{.eof = refreshed.inode.attr.size,
+                                                        .boundary = refreshed.eof_boundary};
+  ASSERT_TRUE(impl_->FinalizeAttachedWrite(file.ino, 0, chunk_id, 10, current).ok());
+  ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
+  EXPECT_EQ(file.attr.size, 12U);
+  EXPECT_GT(file.attr.mtime, 1);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, AttachedPublisherCannotBypassImmutableAfterUnrelatedEofGrowth) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "typed-stale-eof-immutable", 0644, &file).ok());
+  const swordfs::metadata::ChunkID chunk_id(71);
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, chunk_id, 8, {.eof = 0}).ok());
+  swordfs::metadata::FileChunkSnapshot initial;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 0, &initial).ok());
+  const swordfs::metadata::FileSizePrecondition before{.eof = initial.inode.attr.size,
+                                                       .boundary = initial.eof_boundary};
+  ASSERT_TRUE(impl_->FinalizeAttachedWrite(file.ino, 0, chunk_id, 12, before).ok());
+  ASSERT_TRUE(impl_->SetInodeFlags(file.ino, InodeFlag::kImmutable, nullptr).ok());
+
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(file.ino, 0, chunk_id, 10, before).ToErrno(), EEXIST)
+      << "unrelated EOF growth cannot prove the new Slice record was already finalized";
+  swordfs::metadata::FileChunkSnapshot refreshed;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 0, &refreshed).ok());
+  const swordfs::metadata::FileSizePrecondition current{.eof = refreshed.inode.attr.size,
+                                                        .boundary = refreshed.eof_boundary};
+  EXPECT_EQ(impl_->FinalizeAttachedWrite(file.ino, 0, chunk_id, 10, current).ToErrno(), EPERM)
+      << "refreshing a stale snapshot must re-check the current inode mutation policy";
 }
 
 FIBER_TEST_F(RedisMetaImplTest, AttachedRewriteRequiresCurrentEofAndStableChunkID) {
