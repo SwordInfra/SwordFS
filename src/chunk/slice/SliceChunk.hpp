@@ -54,6 +54,8 @@ class SliceChunk final : public Chunk {
 
   void CaptureBoundary(size_t visible_prefix);
   void FreezeActiveLocked();
+  utils::Status PublishFrozen(const std::shared_ptr<FrozenSlice> &candidate);
+  void RebuildDirtyLocked();
 
   metadata::InodeID ino_;
   size_t chunk_size_;

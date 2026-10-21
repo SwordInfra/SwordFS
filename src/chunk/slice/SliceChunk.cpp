@@ -3,9 +3,11 @@
 
 #include "chunk/slice/SliceChunk.hpp"
 
+#include <folly/container/F14Set.h>
 #include <folly/io/IOBuf.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -25,9 +27,16 @@ struct SliceChunk::FrozenSlice {
   size_t pos;
   std::string payload;
   size_t visible_len;
-  // Physical preparation only. #271 owns the typed SliceRecord consumer,
-  // atomic publication and the final ownership transition.
   std::optional<SliceID> prepared_id;
+  // An existing-index append is a separate authority from FileMetadata
+  // finalization. Retain its identity across a definite metadata conflict
+  // so a normal retry does not blindly RPUSHX a duplicate.
+  std::optional<metadata::ChunkID> recorded_chunk_id;
+  // Initial attach prepares the nonempty private index before publishing
+  // its ChunkID; this unattached candidate may become orphan garbage.
+  std::optional<metadata::ChunkID> created_chunk_id;
+  // Unknown Redis replies must be read back, not blindly replayed.
+  std::optional<metadata::ChunkID> uncertain_record_chunk_id;
 };
 
 namespace {
@@ -366,6 +375,22 @@ utils::Status SliceChunk::Flush() {
   // One flight per Chunk retains local acceptance order independent of later
   // writes. An uncertain Put is retried only with a fresh physical identity;
   // already prepared objects are never overwritten or uploaded twice.
+  std::vector<std::shared_ptr<FrozenSlice>> committed;
+  // Retire in one batch rather than rebuilding all pending dirty ranges
+  // after every Slice append (quadratic work for a large fragmented Flush).
+  const auto retire_committed = [&] {
+    if (committed.empty()) {
+      return;
+    }
+    folly::F14FastSet<const FrozenSlice *> committed_addresses;
+    committed_addresses.reserve(committed.size());
+    for (const auto &candidate : committed) {
+      committed_addresses.insert(candidate.get());
+    }
+    std::lock_guard<utils::FiberRWMutex> lock(mutex_);
+    std::erase_if(frozen_, [&](const auto &candidate) { return committed_addresses.contains(candidate.get()); });
+    RebuildDirtyLocked();
+  };
   for (const auto &candidate : candidates) {
     {
       std::shared_lock<utils::FiberRWMutex> lock(mutex_);
@@ -395,9 +420,177 @@ utils::Status SliceChunk::Flush() {
       candidate->prepared_id = id;
     }
   }
-  // Physical preparation alone is never a successful durable Flush. #271
-  // must publish the ordered candidates, FileMetadata and EOF atomically.
-  return finish(utils::Status::NotSupported("Slice records require authoritative publication (#271)"));
+  for (const auto &candidate : candidates) {
+    {
+      std::shared_lock<utils::FiberRWMutex> lock(mutex_);
+      if (candidate->visible_len == 0) {
+        continue;
+      }
+    }
+    auto status = PublishFrozen(candidate);
+    if (!status.ok()) {
+      // A partially completed file Flush is allowed to leave previously
+      // confirmed Slice publications; never replay them on the next attempt.
+      retire_committed();
+      return finish(status);
+    }
+    committed.push_back(candidate);
+  }
+  // A newer overlapping Active Write may have arrived during immutable PUT
+  // or Redis publication. Only the confirmed earlier generation is retired;
+  // rebuilding from the remaining generations preserves the newest bytes.
+  retire_committed();
+  return finish(utils::Status::OK());
+}
+
+utils::Status SliceChunk::PublishFrozen(const std::shared_ptr<FrozenSlice> &candidate) {
+  // FileReadWriter holds a shared operation barrier during Flush; its
+  // exclusive Truncate path cannot invalidate this candidate. The local
+  // mutation lock still protects the direct Chunk test/runtime surface.
+  SliceRecord record;
+  {
+    std::shared_lock<utils::FiberRWMutex> lock(mutex_);
+    if (candidate->visible_len == 0) {
+      return utils::Status::OK();
+    }
+    if (!candidate->prepared_id.has_value()) {
+      return utils::Status::Internal("Slice physical object is not prepared");
+    }
+    record =
+        SliceRecord{static_cast<uint32_t>(candidate->pos), *candidate->prepared_id,
+                    static_cast<uint32_t>(candidate->payload.size()), 0, static_cast<uint32_t>(candidate->visible_len)};
+  }
+  auto status = ValidateRecord(record, static_cast<uint32_t>(chunk_size_));
+  if (!status.ok()) {
+    return status;
+  }
+  uint64_t start = 0;
+  status = metadata::CalculateChunkStartOffset(Index(), chunk_size_, &start);
+  if (!status.ok()) {
+    return status;
+  }
+  if (record.pos > metadata::kMaxSupportedFileSize - start ||
+      record.len > metadata::kMaxSupportedFileSize - (start + record.pos)) {
+    return utils::Status::InvalidArgument("Slice published record exceeds supported file size");
+  }
+  const uint64_t end = start + record.pos + record.len;
+
+  const auto matches = [&](metadata::ChunkID chunk_id, bool *present) -> utils::Status {
+    std::vector<SliceRecord> records;
+    auto status = slice_metadata_->ReadRecords(chunk_id, &records);
+    if (status.IsNotFound()) {
+      *present = false;
+      return utils::Status::OK();
+    }
+    if (!status.ok()) {
+      return status;
+    }
+    *present = std::any_of(records.begin(), records.end(), [&](const SliceRecord &current) {
+      return current.pos == record.pos && current.id == record.id && current.size == record.size &&
+             current.off == record.off && current.len == record.len;
+    });
+    return utils::Status::OK();
+  };
+
+  // This loop only retries definitely rejected FileMetadata preconditions.
+  // An ambiguous reply does not authorize a second non-idempotent append.
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    metadata::FileChunkSnapshot snapshot;
+    status = meta_->ReadFileChunkSnapshot(ino_, Index(), &snapshot);
+    if (!status.ok()) {
+      return status;
+    }
+    const metadata::FileSizePrecondition expected{.eof = snapshot.inode.attr.size, .boundary = snapshot.eof_boundary};
+    const bool already_attached = snapshot.chunk_id.has_value();
+    metadata::ChunkID chunk_id;
+    if (already_attached) {
+      chunk_id = *snapshot.chunk_id;
+    } else {
+      if (!candidate->created_chunk_id.has_value()) {
+        status = slice_metadata_->AllocateChunkID(&chunk_id);
+        if (!status.ok()) {
+          return status;
+        }
+        if (chunk_id == metadata::kInvalidChunkID || chunk_id.Value() > metadata::kMaxChunkIDValue) {
+          return utils::Status::Malformed("Slice allocator returned an invalid ChunkID");
+        }
+        candidate->created_chunk_id = chunk_id;
+      }
+      chunk_id = *candidate->created_chunk_id;
+    }
+
+    if (candidate->recorded_chunk_id != chunk_id) {
+      if (candidate->uncertain_record_chunk_id == chunk_id) {
+        bool present = false;
+        status = matches(chunk_id, &present);
+        if (!status.ok() || !present) {
+          return utils::Status::OutcomeUnknown("Slice record append outcome is still ambiguous");
+        }
+        candidate->recorded_chunk_id = chunk_id;
+        candidate->uncertain_record_chunk_id.reset();
+      } else {
+        status = already_attached ? slice_metadata_->AppendRecord(chunk_id, record)
+                                  : slice_metadata_->CreateIndex(chunk_id, record);
+        if (status.IsOutcomeUnknown()) {
+          candidate->uncertain_record_chunk_id = chunk_id;
+          bool present = false;
+          bool confirmed = false;
+          {
+            const auto status = matches(chunk_id, &present);
+            confirmed = status.ok() && present;
+          }
+          if (!confirmed) {
+            return status;
+          }
+          status = utils::Status::OK();
+        }
+        if (!status.ok()) {
+          return status;
+        }
+        candidate->recorded_chunk_id = chunk_id;
+        candidate->uncertain_record_chunk_id.reset();
+      }
+    }
+
+    status = already_attached ? meta_->FinalizeAttachedWrite(ino_, Index(), chunk_id, end, expected)
+                              : meta_->AttachPrepared(ino_, Index(), chunk_id, end, expected);
+    if (status.ok()) {
+      return status;
+    }
+    if (status.IsOutcomeUnknown()) {
+      // Initial attachment can be confirmed from a fresh authoritative
+      // mapping/EOF snapshot; a lost mtime-only finalization reply cannot
+      // be distinguished from a failed mutation, so remain conservative.
+      if (!already_attached) {
+        metadata::FileChunkSnapshot observed;
+        bool confirmed = false;
+        {
+          const auto status = meta_->ReadFileChunkSnapshot(ino_, Index(), &observed);
+          confirmed = status.ok() && observed.chunk_id == chunk_id && observed.inode.attr.size >= end;
+        }
+        if (confirmed) {
+          return utils::Status::OK();
+        }
+      }
+      return status;
+    }
+    if (status.ToErrno() != EEXIST) {
+      return status;
+    }
+  }
+  return utils::Status::AlreadyExists("Slice publication lost too many EOF/attachment races");
+}
+
+void SliceChunk::RebuildDirtyLocked() {
+  dirty_.clear();
+  for (const auto &candidate : frozen_) {
+    if (candidate->visible_len > 0) {
+      AcceptWrite(dirty_, candidate->pos, std::string_view(candidate->payload).substr(0, candidate->visible_len));
+    }
+  }
+  for (const auto &[pos, bytes] : active_) {
+    AcceptWrite(dirty_, pos, bytes);
+  }
 }
 
 void SliceChunk::TruncateLocal(size_t size) {

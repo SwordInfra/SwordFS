@@ -1093,19 +1093,17 @@ utils::Status RedisMetaTxn::FinalizeAttachedWrite(InodeID ino, ChunkIndex index,
       return utils::Status::AlreadyExists("FileMetadata EOF boundary changed before finalization");
     }
   }
-  // A replay of an already completed EOF extension needs no additional
-  // mutation. However a new same-EOF overwrite must still touch mtime/ctime:
-  // satisfying the file size is not proof that this content write finished.
-  // Validate the original EOF boundary above even for a growth replay.
-  if (expected.eof < end && inode.attr.size >= end) {
-    return utils::Status::OK();
+  // EOF alone is not a publication identity: another mount may have
+  // extended the file since this distinct SliceRecord was appended.
+  // Returning success merely because EOF >= end would skip this write's
+  // mtime/ctime update and potentially bypass a new immutable policy.
+  // Force the caller to refresh FileMetadata without reappending the record.
+  if (inode.attr.size != expected.eof) {
+    return utils::Status::AlreadyExists("FileMetadata EOF changed before finalization");
   }
   status = CheckContentMetadataMutationPolicy(inode.attr, "finalize chunk write");
   if (!status.ok()) {
     return status;
-  }
-  if (inode.attr.size != expected.eof) {
-    return utils::Status::AlreadyExists("FileMetadata EOF changed before finalization");
   }
   inode.attr.size = std::max(inode.attr.size, end);
   inode.Touch(SetAttrField::kMtime | SetAttrField::kCtime);

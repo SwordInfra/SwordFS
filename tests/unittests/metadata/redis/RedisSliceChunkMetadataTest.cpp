@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include <folly/ScopeGuard.h>
+#include <folly/fibers/FiberManagerInternal.h>
 #include <gtest/gtest.h>
 #include <sw/redis++/redis++.h>
 
@@ -14,15 +15,19 @@
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "chunk/ChunkTestSupport.hpp"
+#include "chunk/slice/SliceChunk.hpp"
 #include "chunk/slice/SliceRecord.hpp"
 #include "metadata/redis/RedisBackendContext.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
 #include "metadata/redis/RedisMetaClientFaultServer.hpp"
+#include "metadata/redis/RedisMetaImpl.hpp"
 #include "metadata/redis/RedisMetaOps.hpp"
 #include "metadata/redis/RedisMetaTestSupport.hpp"
 #include "metadata/redis/RedisSliceChunkMetadata.hpp"
 #include "metadata/redis/RedisTestUtils.hpp"
+#include "utils/Context.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -30,6 +35,73 @@ namespace {
 using chunk::slice::ResolvedSlice;
 using chunk::slice::SliceID;
 using chunk::slice::SliceRecord;
+
+// #271 integration: exercise production SliceChunk::Flush through two actual
+// RedisMetaImpl instances, not a hand-written FileMetadata mock. The object
+// engine is shared in-memory solely to isolate Redis metadata publication
+// from #275's later FUSE/S3 integration tests.
+TEST(RedisSliceChunkMetadataTest, SliceChunkPublisherRemountReadsAndOverwritesAcrossRedisClients) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  constexpr uint64_t kChunkSize = 4096;
+  const auto volume_name = swordfs::test::UniqueRedisTestNamespace("slice-real-publisher");
+  RedisMetaImpl writer(config, volume_name);
+  RedisMetaImpl reader(config, volume_name);
+  ASSERT_TRUE(writer.Initialize().ok());
+  ASSERT_TRUE(reader.Initialize().ok());
+  SwordFsVolume volume;
+  volume.name = volume_name;
+  volume.chunk_type = ChunkType::kChunkSlice;
+  volume.chunk_size = kChunkSize;
+  ASSERT_TRUE(writer.FormatVolume(volume).ok());
+  SwordFsVolume loaded;
+  loaded.name = volume_name;
+  ASSERT_TRUE(reader.LoadVolume(&loaded).ok());
+
+  ChunkMetadataPtr writer_root;
+  ChunkMetadataPtr reader_root;
+  ASSERT_TRUE(writer.OpenChunkMetadata(ChunkType::kChunkSlice, &writer_root).ok());
+  ASSERT_TRUE(reader.OpenChunkMetadata(ChunkType::kChunkSlice, &reader_root).ok());
+  auto writer_meta = std::dynamic_pointer_cast<slice::SliceChunkMetadata>(writer_root);
+  auto reader_meta = std::dynamic_pointer_cast<slice::SliceChunkMetadata>(reader_root);
+  ASSERT_NE(writer_meta, nullptr);
+  ASSERT_NE(reader_meta, nullptr);
+  swordfs::test::chunk_test::NullDataEngine objects;
+
+  swordfs::test::RunInTestFiber([&] {
+    folly::fibers::local<swordfs::utils::SwordFsContext>() = swordfs::utils::SwordFsContext{};
+    SwordFsInode file;
+    ASSERT_TRUE(writer.Create(kRootInodeId, "slice-publish-integration", 0644, &file).ok());
+    chunk::slice::SliceChunk a(file.ino, 0, kChunkSize, writer_meta, &writer, &objects);
+    ASSERT_TRUE(a.Write(5, swordfs::test::chunk_test::Buf("ABC")).ok());
+    ASSERT_TRUE(a.Flush().ok()) << "first metadata publication must succeed";
+    EXPECT_FALSE(a.HasPendingWrites());
+
+    chunk::slice::SliceChunk b(file.ino, 0, kChunkSize, reader_meta, &reader, &objects);
+    auto initial = folly::IOBuf::create(8);
+    ASSERT_TRUE(b.Read(0, 8, initial.get()).ok());
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(initial->data()), 8), std::string("\0\0\0\0\0ABC", 8));
+
+    ASSERT_TRUE(b.Write(2, swordfs::test::chunk_test::Buf("XY")).ok());
+    ASSERT_TRUE(b.Flush().ok()) << "second Redis client must append to existing ChunkID";
+    auto after = folly::IOBuf::create(8);
+    ASSERT_TRUE(a.Read(0, 8, after.get()).ok());
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(after->data()), 8), std::string("\0\0XY\0ABC", 8));
+
+    FileChunkSnapshot snapshot;
+    ASSERT_TRUE(writer.ReadFileChunkSnapshot(file.ino, 0, &snapshot).ok());
+    ASSERT_TRUE(snapshot.chunk_id.has_value());
+    EXPECT_EQ(snapshot.inode.attr.size, 8U);
+    std::vector<SliceRecord> records;
+    ASSERT_TRUE(reader_meta->ReadRecords(*snapshot.chunk_id, &records).ok());
+    ASSERT_EQ(records.size(), 2U);
+    EXPECT_EQ(records.front().pos, 5U);
+    EXPECT_EQ(records.back().pos, 2U);
+  });
+  EXPECT_EQ(objects.put_calls, 2);
+}
 
 TEST(RedisSliceChunkMetadataTest, SliceIdsHaveIndependentVolumeScopedMonotonicCounter) {
   RedisMetaConfig config;
