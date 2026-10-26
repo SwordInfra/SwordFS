@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "FiberTest.hpp"
+#include "chunk/ChunkFactory.hpp"
 #include "chunk/ChunkTestSupport.hpp"
 #include "chunk/slice/SliceChunk.hpp"
 #include "chunk/slice/SliceRecord.hpp"
@@ -101,6 +102,81 @@ TEST(RedisSliceChunkMetadataTest, SliceChunkPublisherRemountReadsAndOverwritesAc
     EXPECT_EQ(records.back().pos, 2U);
   });
   EXPECT_EQ(objects.put_calls, 2);
+}
+
+// #272: real Redis FileMetadata shrink/grow plus the mechanism-private
+// boundary record must give the same bytes to an independent cold client.
+TEST(RedisSliceChunkMetadataTest, RetainedBoundaryZeroCoverSurvivesRedisRemountAndSparseWrite) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  constexpr uint64_t kChunkSize = 4096;
+  const auto volume_name = swordfs::test::UniqueRedisTestNamespace("slice-truncate-integration");
+  RedisMetaImpl writer(config, volume_name);
+  RedisMetaImpl remount(config, volume_name);
+  ASSERT_TRUE(writer.Initialize().ok());
+  ASSERT_TRUE(remount.Initialize().ok());
+  SwordFsVolume volume;
+  volume.name = volume_name;
+  volume.chunk_type = ChunkType::kChunkSlice;
+  volume.chunk_size = kChunkSize;
+  ASSERT_TRUE(writer.FormatVolume(volume).ok());
+  SwordFsVolume loaded;
+  loaded.name = volume_name;
+  ASSERT_TRUE(remount.LoadVolume(&loaded).ok());
+  ChunkMetadataPtr root;
+  ASSERT_TRUE(writer.OpenChunkMetadata(ChunkType::kChunkSlice, &root).ok());
+  auto slice_metadata = std::dynamic_pointer_cast<slice::SliceChunkMetadata>(root);
+  ASSERT_NE(slice_metadata, nullptr);
+  ChunkMetadataPtr reader_root;
+  ASSERT_TRUE(remount.OpenChunkMetadata(ChunkType::kChunkSlice, &reader_root).ok());
+  auto reader_meta = std::dynamic_pointer_cast<slice::SliceChunkMetadata>(reader_root);
+  ASSERT_NE(reader_meta, nullptr);
+  swordfs::test::chunk_test::NullDataEngine objects;
+  chunk::ChunkFactory factory(ChunkType::kChunkSlice, root, &writer, &objects, kChunkSize);
+
+  swordfs::test::RunInTestFiber([&] {
+    folly::fibers::local<swordfs::utils::SwordFsContext>() = swordfs::utils::SwordFsContext{};
+    SwordFsInode file;
+    ASSERT_TRUE(writer.Create(kRootInodeId, "slice-truncate-integration", 0644, &file).ok());
+    chunk::slice::SliceChunk active(file.ino, 0, kChunkSize, slice_metadata, &writer, &objects);
+    ASSERT_TRUE(active.Write(0, swordfs::test::chunk_test::Buf("abcdefghij")).ok());
+    ASSERT_TRUE(active.Flush().ok());
+
+    FileMappingSnapshot original;
+    ASSERT_TRUE(writer.ReadFileMappingSnapshot(file.ino, &original).ok());
+    ChunkSizePlan shrink;
+    ASSERT_TRUE(PlanChunkSizeChange(10, 4, kChunkSize, original.mappings, &shrink).ok());
+    ASSERT_TRUE(shrink.boundary.has_value());
+    SwordFsAttr requested;
+    requested.size = 4;
+    ChunkSizeCommitResult committed;
+    ASSERT_TRUE(writer.CommitShrink(file.ino, shrink, requested, SetAttrField::kSize, &committed).ok());
+    ASSERT_TRUE(factory.SanitizeBoundary(file.ino, *shrink.boundary).ok());
+
+    FileMappingSnapshot shortened;
+    ASSERT_TRUE(remount.ReadFileMappingSnapshot(file.ino, &shortened).ok());
+    ASSERT_EQ(shortened.inode.attr.size, 4U);
+    ChunkSizePlan grow;
+    ASSERT_TRUE(PlanChunkSizeChange(4, 10, kChunkSize, shortened.mappings, &grow).ok());
+    ASSERT_TRUE(grow.boundary.has_value());
+    ASSERT_TRUE(factory.SanitizeBoundary(file.ino, *grow.boundary).ok());
+    requested.size = 10;
+    ASSERT_TRUE(writer.CommitGrow(file.ino, grow, requested, SetAttrField::kSize, &committed).ok());
+
+    chunk::slice::SliceChunk cold(file.ino, 0, kChunkSize, reader_meta, &remount, &objects);
+    auto restored = folly::IOBuf::create(10);
+    ASSERT_TRUE(cold.Read(0, 10, restored.get()).ok());
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(restored->data()), 10), std::string("abcd\0\0\0\0\0\0", 10));
+    ASSERT_TRUE(cold.Write(7, swordfs::test::chunk_test::Buf("XY")).ok());
+    ASSERT_TRUE(cold.Flush().ok());
+    chunk::slice::SliceChunk reopened(file.ino, 0, kChunkSize, slice_metadata, &writer, &objects);
+    auto updated = folly::IOBuf::create(10);
+    ASSERT_TRUE(reopened.Read(0, 10, updated.get()).ok());
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(updated->data()), 10), std::string("abcd\0\0\0XY\0", 10));
+  });
+  EXPECT_EQ(objects.put_calls, 2) << "sanitation must only append zero metadata, never upload a full chunk";
 }
 
 TEST(RedisSliceChunkMetadataTest, SliceIdsHaveIndependentVolumeScopedMonotonicCounter) {
