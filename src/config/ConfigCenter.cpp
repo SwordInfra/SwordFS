@@ -85,7 +85,8 @@ void ConfigCenter::RegisterFormatOptions(CLI::App &app) {
   cmd->add_option("--chunk-size", chunk_size_, "Chunk size in bytes (default: 64 MiB)")
       ->check(CLI::PositiveNumber)
       ->check(CLI::Range(4096ULL, 1024ULL * 1024 * 1024));
-  cmd->add_option("--chunk-type", chunk_type_, "Volume-wide chunk type (currently: cow)");
+  cmd->add_option("--chunk-type", chunk_type_,
+                  "Volume-wide chunk type (cow default; chunk_slice experimental, physical GC deferred)");
   cmd->add_flag("--enable-posix-acl", enable_posix_acl_, "Enable POSIX ACL semantics for this volume");
   cmd->callback([this] { selected_subcommand_ = "format"; });
 

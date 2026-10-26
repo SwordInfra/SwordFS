@@ -20,6 +20,7 @@
 #include "UnsupportedMetaEngine.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/cow/COWCleanup.hpp"
+#include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/redis/RedisTestUtils.hpp"
@@ -126,6 +127,25 @@ MountOptions PrepareInjectedMount(
   swordfs::test::pending_data_engine.reset();
   return swordfs::test::MakeTestMountOptions(swordfs::test::pending_volume.name);
 }
+
+// A real Slice runtime composition through the existing production registry,
+// without introducing a test-only setter into VolumeImpl.
+class SliceMountMetaEngine final : public swordfs::test::UnsupportedMetaEngine {
+ public:
+  Status LoadVolume(SwordFsVolume *out) override {
+    return swordfs::test::LoadConfiguredTestVolume(out);
+  }
+  Status OpenChunkMetadata(ChunkType type, swordfs::metadata::ChunkMetadataPtr *out) override {
+    if (type != ChunkType::kChunkSlice || out == nullptr) {
+      return Status::InvalidArgument("expected Slice chunk metadata");
+    }
+    *out = std::make_shared<swordfs::test::StubChunkMetadata>(type);
+    return Status::OK();
+  }
+  Status BindChunkCleanupWorkEncoder(swordfs::chunk::internal::ChunkCleanupWorkEncoder *encoder) override {
+    return encoder != nullptr ? Status::OK() : Status::InvalidArgument("missing Slice cleanup encoder");
+  }
+};
 
 // Models decoding an invalid volume record on LoadVolume without implementing
 // a second persistent metadata backend; the canonical decoder is production.
@@ -425,6 +445,95 @@ TEST_F(VolumeImplTest, CreateFromRejectsInvalidMetadataUrl) {
   const auto status = volume.CreateFrom(options);
 
   EXPECT_EQ(status.ToErrno(), EINVAL) << status.message();
+}
+
+// #508 TDD: a deliberately selected Slice volume must be usable by the
+// real Volume format/load path before we run the mounted Slice CI matrix.
+// COW remains the default mechanism; an unimplemented redis_cache is refused.
+TEST_F(VolumeImplRedisTest, ExplicitSliceFormatAndMountCanUseRealRedisMetadata) {
+  const auto format_options = makeFormatOptions(RedisUrl(), "slice-ci", "", "", ChunkType::kChunkSlice);
+  VolumeImpl formatted;
+  auto status = formatted.CreateFrom(format_options);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(formatted.config().chunk_type, ChunkType::kChunkSlice);
+
+  VolumeImpl mounted;
+  status = mounted.LoadFrom(makeMountOptions(RedisUrl(), "slice-ci"));
+  ASSERT_TRUE(status.ok()) << status.message();
+  ASSERT_NE(mounted.chunk_factory(), nullptr);
+  EXPECT_EQ(mounted.config().chunk_type, ChunkType::kChunkSlice);
+}
+
+// Keep the pre-existing COW format-time metadata validation. Adding an
+// experimental Slice format must not silently accept an unusable COW volume.
+TEST_F(VolumeImplTest, CowFormatRejectsMissingPrivateMetadataCapability) {
+  swordfs::test::RegisterTestVolumeEngines();
+  swordfs::test::pending_meta_engine =
+      std::make_unique<InvalidChunkMetadataEngine>(InvalidChunkMetadataEngine::Result::kNullCapability);
+
+  VolumeImpl volume;
+  const auto status = volume.CreateFrom(makeFormatOptions("swordfs-test-meta://local", "cow-format-guard"));
+  EXPECT_EQ(status.ToErrno(), EINVAL);
+  EXPECT_EQ(status.message(), "chunk metadata type mismatch");
+}
+
+TEST_F(VolumeImplTest, SliceDeferredCleanupPreservesDistinctOpaqueIdentities) {
+  std::unique_ptr<swordfs::chunk::internal::ChunkCleanupWorkEncoder> encoder;
+  ASSERT_TRUE(swordfs::chunk::internal::CreateChunkCleanupWorkEncoder(ChunkType::kChunkSlice, &encoder).ok());
+  ASSERT_NE(encoder, nullptr);
+
+  swordfs::metadata::PendingDelete first;
+  swordfs::metadata::PendingDelete second;
+  ASSERT_TRUE(encoder->EncodeDetachedDelete(42, {0, swordfs::metadata::ChunkID(7)}, &first).ok());
+  ASSERT_TRUE(encoder->EncodeDetachedDelete(42, {1, swordfs::metadata::ChunkID(8)}, &second).ok());
+  EXPECT_NE(first.id, second.id);
+  EXPECT_EQ(first.id.find("slice:"), 0U);
+  std::string serialized;
+  ASSERT_TRUE(first.SerializeTo(&serialized).ok());
+  swordfs::metadata::PendingDelete decoded;
+  ASSERT_TRUE(decoded.ParseFrom(serialized).ok());
+  EXPECT_EQ(decoded, first);
+
+  swordfs::metadata::ReclaimWork reclaim;
+  ASSERT_TRUE(encoder
+                  ->EncodeDetachedReclaim(42, {{0, swordfs::metadata::ChunkID(7)}, {1, swordfs::metadata::ChunkID(8)}},
+                                          &reclaim)
+                  .ok());
+  ASSERT_TRUE(reclaim.SerializeTo(&serialized).ok());
+  swordfs::metadata::ReclaimWork decoded_reclaim;
+  ASSERT_TRUE(decoded_reclaim.ParseFrom(serialized).ok());
+  EXPECT_EQ(decoded_reclaim, reclaim);
+  EXPECT_EQ(reclaim.ino, 42U);
+  EXPECT_EQ(encoder->EncodeDetachedDelete(0, {0, swordfs::metadata::ChunkID(7)}, &first).ToErrno(), EINVAL);
+  EXPECT_EQ(encoder->EncodeDetachedDelete(42, {0, swordfs::metadata::ChunkID()}, &first).ToErrno(), EINVAL);
+  EXPECT_EQ(encoder->EncodeDetachedDelete(42, {0, swordfs::metadata::ChunkID(7)}, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(encoder->EncodeDetachedReclaim(0, {}, &reclaim).ToErrno(), EINVAL);
+  EXPECT_EQ(encoder->EncodeDetachedReclaim(42, {{0, swordfs::metadata::ChunkID()}}, &reclaim).ToErrno(), EINVAL);
+  EXPECT_EQ(encoder->EncodeDetachedReclaim(42, {}, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(swordfs::chunk::internal::CreateChunkCleanupWorkEncoder(ChunkType::kChunkSlice, nullptr).ToErrno(), EINVAL);
+}
+
+TEST_F(VolumeImplTest, SliceRuntimeWithDataEngineStartsWithoutPhysicalGc) {
+  swordfs::test::RegisterTestVolumeEngines();
+  const auto volume_name = makeVolumeName("slice-deferred-physical-gc");
+  swordfs::test::pending_volume = SwordFsVolume{
+      .name = volume_name,
+      .storage = std::string(swordfs::test::kTestDataEngine),
+      .bucket = "opaque://endpoint/bucket",
+      .chunk_type = ChunkType::kChunkSlice,
+  };
+  swordfs::test::pending_meta_engine = std::make_unique<SliceMountMetaEngine>();
+  auto deletes = std::make_shared<std::atomic<int>>(0);
+  swordfs::test::pending_data_engine = std::make_unique<NoopDataEngine>(deletes);
+
+  VolumeImpl volume;
+  const auto status = volume.LoadFrom(swordfs::test::MakeTestMountOptions(volume_name));
+  ASSERT_TRUE(status.ok()) << status.message();
+  ASSERT_NE(volume.chunk_factory(), nullptr);
+  EXPECT_EQ(volume.config().chunk_type, ChunkType::kChunkSlice);
+  volume.StartRuntimeServices();
+  volume.StopRuntimeServices();
+  EXPECT_EQ(deletes->load(), 0);
 }
 
 TEST_F(VolumeImplRedisTest, FormatRejectsUnimplementedChunkType) {

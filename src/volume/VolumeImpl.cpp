@@ -93,7 +93,10 @@ Status VolumeImpl::ComposeChunkRuntime() {
   // succeeds; incomplete capabilities cannot reach this point.
   chunk_factory_ = std::make_unique<chunk::ChunkFactory>(config_.chunk_type, chunk_metadata_, meta_engine_.get(),
                                                          data_engine_.get(), config_.chunk_size);
-  if (data_engine_ != nullptr) {
+  // The experimental Slice volume retains opaque pending cleanup work in
+  // Redis but must never physically delete data until #273 establishes
+  // private-index reachability and remote reader-lifetime safety.
+  if (data_engine_ != nullptr && config_.chunk_type == metadata::ChunkType::kCow) {
     std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
     // A queued typed delete is only maintenance: revalidate the *current*
     // FileMetadata attachment before touching the immutable COW object.
@@ -155,7 +158,7 @@ Status VolumeImpl::CreateFrom(const FormatOptions &options) {
   config_.chunk_type = options.chunk_type;
   config_.enable_posix_acl = options.enable_posix_acl;
 
-  if (config_.chunk_type != metadata::ChunkType::kCow) {
+  if (config_.chunk_type != metadata::ChunkType::kCow && config_.chunk_type != metadata::ChunkType::kChunkSlice) {
     return Status::NotSupported("selected chunk type is not implemented");
   }
 
@@ -167,16 +170,16 @@ Status VolumeImpl::CreateFrom(const FormatOptions &options) {
   if (!status.ok()) {
     return status;
   }
-  status = ComposeChunkMetadata();
-  if (!status.ok()) {
-    return status;
+  // Preserve the existing COW format-time capability validation. Slice
+  // private metadata depends on the ChunkSize initialized by Redis during
+  // FormatVolume, so only Slice defers composition until LoadFrom.
+  if (config_.chunk_type == metadata::ChunkType::kCow) {
+    status = ComposeChunkMetadata();
+    if (!status.ok()) {
+      return status;
+    }
   }
-  status = meta_engine_->FormatVolume(config_);
-  if (!status.ok()) {
-    return status;
-  }
-
-  return Status::OK();
+  return meta_engine_->FormatVolume(config_);
 }
 
 Status VolumeImpl::LoadFrom(const config::ConfigCenter &config) {

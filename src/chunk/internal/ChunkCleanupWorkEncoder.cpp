@@ -4,6 +4,7 @@
 #include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
 
 #include "chunk/cow/COWCleanup.hpp"
+#include "chunk/slice/SliceDeferredCleanup.hpp"
 
 namespace swordfs::chunk::internal {
 namespace {
@@ -28,11 +29,14 @@ utils::Status CreateChunkCleanupWorkEncoder(metadata::ChunkType chunk_type,
   if (out == nullptr) {
     return utils::Status::InvalidArgument("cleanup work encoder output is null");
   }
-  if (chunk_type != metadata::ChunkType::kCow) {
-    return utils::Status::NotSupported("unsupported cleanup work mechanism");
+  if (chunk_type == metadata::ChunkType::kChunkSlice) {
+    return slice::CreateDeferredSliceCleanupEncoder(out);
   }
-  *out = std::make_unique<COWCleanupWorkEncoder>();
-  return utils::Status::OK();
+  if (chunk_type == metadata::ChunkType::kCow) {
+    *out = std::make_unique<COWCleanupWorkEncoder>();
+    return utils::Status::OK();
+  }
+  return utils::Status::NotSupported("unsupported cleanup work mechanism");
 }
 
 }  // namespace swordfs::chunk::internal
