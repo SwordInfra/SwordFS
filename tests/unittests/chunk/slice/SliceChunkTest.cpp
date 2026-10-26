@@ -204,6 +204,74 @@ class SliceChunkTest : public swordfs::test::chunk_test::ChunkRuntimeTest {
   std::unique_ptr<swordfs::chunk::ChunkFactory> factory_;
 };
 
+// #272 TDD: ordinary retained-boundary shrink/grow must persist its
+// zero-cover so a fresh session does not resurrect an old object suffix.
+TEST_F(SliceChunkTest, RetainedBoundarySanitationSurvivesColdReopenAndSubsequentWrites) {
+  RunInTestFiber([&] {
+    const swordfs::metadata::ChunkID id(720);
+    Attach(0, id, "abcdefghij", swordfs::chunk::slice::SliceID(721));
+    // FileMetadata has committed Shrink to 4. This factory path is the
+    // production mechanism-specific step called by FileReadWriter.
+    meta_->ReplaceAttachment(0, id, 4);
+    const swordfs::metadata::RetainedChunkBoundary boundary{.index = 0, .chunk_id = id, .visible_prefix = 4};
+    auto status = factory_->SanitizeBoundary(42, boundary);
+    ASSERT_TRUE(status.ok()) << status.message();
+
+    // Grow publishes a new EOF. The session opened here is independent
+    // of the earlier mount's in-memory CaptureBoundary clamp.
+    meta_->ReplaceAttachment(0, id, 10);
+    auto cold = Open();
+    auto restored = folly::IOBuf::create(10);
+    ASSERT_TRUE(cold->Read(0, 10, restored.get()).ok());
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(restored->data()), 10), std::string("abcd\0\0\0\0\0\0", 10));
+
+    ASSERT_TRUE(cold->Write(7, Buf("XY")).ok());
+    ASSERT_TRUE(cold->Flush().ok());
+    cold.reset();
+    auto reopened = Open();
+    auto after_write = folly::IOBuf::create(10);
+    ASSERT_TRUE(reopened->Read(0, 10, after_write.get()).ok());
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(after_write->data()), 10), std::string("abcd\0\0\0XY\0", 10));
+
+    meta_->ReplaceAttachment(0, id, 2);
+    ASSERT_TRUE(factory_->SanitizeBoundary(42, {.index = 0, .chunk_id = id, .visible_prefix = 2}).ok());
+    meta_->ReplaceAttachment(0, id, 10);
+    auto next = Open();
+    auto repeated = folly::IOBuf::create(10);
+    ASSERT_TRUE(next->Read(0, 10, repeated.get()).ok());
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(repeated->data()), 10), std::string("ab\0\0\0\0\0\0\0\0", 10));
+    EXPECT_EQ(data_->put_calls, 2) << "zero-cover must not upload a new object";
+  });
+}
+
+TEST_F(SliceChunkTest, BoundarySanitationRejectsMissingAttachedIndexAndPropagatesAppendError) {
+  RunInTestFiber([&] {
+    const swordfs::metadata::RetainedChunkBoundary missing{
+        .index = 0, .chunk_id = swordfs::metadata::ChunkID(888), .visible_prefix = 3};
+    EXPECT_EQ(factory_->SanitizeBoundary(42, {.index = 0, .chunk_id = missing.chunk_id, .visible_prefix = 0}).ToErrno(),
+              EINVAL);
+    EXPECT_EQ(
+        factory_->SanitizeBoundary(42, {.index = 0, .chunk_id = missing.chunk_id, .visible_prefix = kChunkTestSize})
+            .ToErrno(),
+        EINVAL);
+    // The factory must fail closed if the requested Slice capability is
+    // missing instead of silently falling back to COW sanitation.
+    swordfs::chunk::ChunkFactory missing_file_meta(swordfs::metadata::ChunkType::kChunkSlice, slice_metadata_, nullptr,
+                                                   data_, kChunkTestSize);
+    EXPECT_EQ(missing_file_meta.SanitizeBoundary(42, missing).ToErrno(), ENOSYS);
+    // An index that is detached is safely ignored.
+    ASSERT_TRUE(factory_->SanitizeBoundary(42, missing).ok());
+    const swordfs::metadata::ChunkID attached(722);
+    Attach(0, attached, "abcdefgh", swordfs::chunk::slice::SliceID(723));
+    meta_->ReplaceAttachment(0, missing.chunk_id, 3);
+    EXPECT_EQ(factory_->SanitizeBoundary(42, missing).ToErrno(), EIO);
+    meta_->ReplaceAttachment(0, attached, 3);
+    slice_metadata_->next_append_status = Status::IOError("injected zero-cover failure");
+    EXPECT_EQ(factory_->SanitizeBoundary(42, {.index = 0, .chunk_id = attached, .visible_prefix = 3}).ToErrno(), EIO);
+    EXPECT_TRUE(factory_->SanitizeBoundary(42, {.index = 0, .chunk_id = attached, .visible_prefix = 3}).ok());
+  });
+}
+
 // #271 RED: these tests exercise the actual Chunk::Flush consumer, not a
 // candidate exporter that exists only for unit-test inspection.
 TEST_F(SliceChunkTest, PublishesFirstFrozenSliceAsReadableAttachedIndex) {

@@ -4,11 +4,15 @@
 #include "chunk/ChunkFactory.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <memory>
+#include <optional>
 
 #include "chunk/cow/COWChunk.hpp"
 #include "chunk/cow/COWChunkBoundary.hpp"
 #include "chunk/slice/SliceChunk.hpp"
+#include "chunk/slice/SliceRecord.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/cow/COWChunkMetadata.hpp"
 #include "metadata/slice/SliceChunkMetadata.hpp"
@@ -28,6 +32,48 @@ ChunkFactory::ChunkFactory(metadata::ChunkType chunk_type, metadata::ChunkMetada
 
 utils::Status ChunkFactory::SanitizeBoundary(metadata::InodeID ino,
                                              const metadata::RetainedChunkBoundary &boundary) const {
+  if (chunk_type_ == metadata::ChunkType::kChunkSlice) {
+    if (slice_metadata_ == nullptr || meta_ == nullptr) {
+      return utils::Status::NotSupported("selected chunk type cannot sanitize a retained boundary");
+    }
+    if (boundary.chunk_id == metadata::kInvalidChunkID || boundary.chunk_id.Value() > metadata::kMaxChunkIDValue ||
+        boundary.visible_prefix == 0 || boundary.visible_prefix >= chunk_size_ ||
+        chunk_size_ > std::numeric_limits<uint32_t>::max()) {
+      return utils::Status::InvalidArgument("invalid retained Slice boundary");
+    }
+
+    std::optional<metadata::ChunkID> attached;
+    auto status = meta_->ProbeAttachment(ino, boundary.index, &attached);
+    if (!status.ok()) {
+      return status;
+    }
+    if (attached != boundary.chunk_id) {
+      // FileMetadata has already detached/replaced this identity. Never
+      // recreate a private index for an obsolete ChunkID.
+      return utils::Status::OK();
+    }
+    // Durable zero-cover, not a physical object: the ordered Slice reader
+    // treats SliceID{} as zeros and a later committed Write can overlay it.
+    // Cover the entire suffix to prevent old bytes returning after Grow.
+    const auto prefix = static_cast<uint32_t>(boundary.visible_prefix);
+    status = slice_metadata_->AppendRecord(
+        boundary.chunk_id,
+        slice::SliceRecord{prefix, slice::SliceID(), 0, 0, static_cast<uint32_t>(chunk_size_ - prefix)});
+    if (status.IsNotFound()) {
+      // RPUSHX requires a pre-existing index. A missing index still mapped
+      // by FileMetadata is corruption, not an implicit hole; a concurrent
+      // detach is harmless. Do not recreate a lost private index here.
+      status = meta_->ProbeAttachment(ino, boundary.index, &attached);
+      if (!status.ok()) {
+        return status;
+      }
+      return attached == boundary.chunk_id ? utils::Status::Malformed("mapped ChunkID is missing its Slice index")
+                                           : utils::Status::OK();
+    }
+    // In particular, OutcomeUnknown must not be interpreted as successful
+    // sanitation or followed by a blind duplicate retry.
+    return status;
+  }
   if (cow_metadata_ == nullptr || meta_ == nullptr) {
     return utils::Status::NotSupported("selected chunk type cannot sanitize a retained boundary");
   }

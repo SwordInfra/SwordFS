@@ -2988,6 +2988,43 @@ TEST_F(FileReadWriterTest, TypedGrowRefreshesCachedHeadAfterSanitizingHiddenTail
   });
 }
 
+// #272: retrying a previously failed retained-boundary sanitation with the
+// same EOF must repair the old private suffix before reporting success.
+TEST_F(FileReadWriterTest, UnchangedTruncateSanitizesAlreadyCommittedBoundaryAfterFailedAttempt) {
+  RunInTestFiber([&] {
+    // Model a previous shrink that committed EOF=64 but failed its private
+    // sanitation: the published head still retains 200 bytes.
+    ASSERT_TRUE(SeedPersistedChunk(0, Repeat('H', 200), 200).ok());
+    auto rw = Make(64);
+    swordfs::metadata::FileChunkSnapshot file;
+    ASSERT_TRUE(mock_meta_->ReadFileChunkSnapshot(kIno, 0, &file).ok());
+    ASSERT_TRUE(file.chunk_id.has_value());
+    swordfs::metadata::cow::COWChunkHead old_head;
+    ASSERT_TRUE(cow_metadata_->GetHead(*file.chunk_id, &old_head).ok());
+    ASSERT_EQ(old_head.size, 200U);
+
+    ASSERT_TRUE(rw.Truncate(64).ok());
+    swordfs::metadata::cow::COWChunkHead sanitized;
+    ASSERT_TRUE(cow_metadata_->GetHead(*file.chunk_id, &sanitized).ok());
+    EXPECT_EQ(sanitized.size, 64U) << "a successful retry to the existing EOF must not leave an old private suffix";
+  });
+}
+
+TEST_F(FileReadWriterTest, UnchangedTruncateDoesNotAcknowledgeMissingAttachedPrivateHead) {
+  RunInTestFiber([&] {
+    ASSERT_TRUE(SeedPersistedChunk(0, Repeat('R', 200), 200).ok());
+    swordfs::metadata::FileChunkSnapshot snapshot;
+    ASSERT_TRUE(mock_meta_->ReadFileChunkSnapshot(kIno, 0, &snapshot).ok());
+    ASSERT_TRUE(snapshot.chunk_id.has_value());
+    swordfs::metadata::cow::COWChunkHead head;
+    ASSERT_TRUE(cow_metadata_->GetHead(*snapshot.chunk_id, &head).ok());
+    ASSERT_TRUE(cow_metadata_->EraseHead(*snapshot.chunk_id, head).ok());
+
+    auto rw = Make(64);
+    EXPECT_EQ(rw.Truncate(64).ToErrno(), EIO) << "persisted EOF alone must not certify successful boundary sanitation";
+  });
+}
+
 TEST_F(FileReadWriterTest, TruncateBeyondSupportedFileSizeIsRejectedBeforeMetadataMutation) {
   RunInTestFiber([&] {
     auto rw = Make(64);

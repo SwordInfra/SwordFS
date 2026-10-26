@@ -631,6 +631,29 @@ utils::Status FileReadWriter::CommitSizeChangeLocked(const metadata::SwordFsAttr
     if (!status.ok()) {
       return status;
     }
+    // A prior Shrink may have committed EOF but failed its private boundary
+    // sanitation. Repeating truncate at the already committed EOF must not
+    // acknowledge success while retaining the old persisted suffix.
+    // The validated EOF and mounted nonzero chunk_size_ make this boundary
+    // arithmetic total; no speculative size transition is planned here.
+    const auto visible_prefix = requested.size % chunk_size_;
+    if (visible_prefix != 0) {
+      const metadata::ChunkIndex index = requested.size / chunk_size_;
+      const auto it = std::find_if(before.mappings.begin(), before.mappings.end(),
+                                   [&](const metadata::ChunkMapping &mapping) { return mapping.index == index; });
+      if (it != before.mappings.end()) {
+        const auto *factory = volume::VolumeImpl::Instance().chunk_factory();
+        if (factory == nullptr) {
+          return utils::Status::Internal("missing mounted ChunkFactory for unchanged size sanitation");
+        }
+        status = factory->SanitizeBoundary(
+            ino_, {.index = index, .chunk_id = it->chunk_id, .visible_prefix = visible_prefix});
+        if (!status.ok()) {
+          return status;
+        }
+        chunks_.ClampCachedPublishedPrefix(index, visible_prefix);
+      }
+    }
   } else {
     metadata::ChunkSizePlan plan;
     status = metadata::PlanChunkSizeChange(before.inode.attr.size, requested.size, chunk_size_, before.mappings, &plan);
