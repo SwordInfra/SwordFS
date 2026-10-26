@@ -402,6 +402,14 @@ jobs:
             --tracefile coverage.info \
             --line-threshold 90
 
+      # Reuse the existing Debug runner and compiled E2E target, which already
+      # passed the Redis/MinIO setup for the focused coverage scenarios.
+      # The test runner creates new backend instances for the Slice run. Keep
+      # the required COW Release E2E job untouched, including its test command.
+      - name: Test opt-in Slice through mounted FUSE (Debug)
+        if: needs.change-scope.outputs.run_full_ci == 'true' && matrix.build_type == 'Debug'
+        run: SWORDFS_E2E_CHUNK_TYPE=chunk_slice bash scripts/testing/run-e2e.sh --gtest_color=no
+
   e2e-test:
     name: e2e-test (Release)
     needs: [clang-format, minio-test-tools, change-scope]
