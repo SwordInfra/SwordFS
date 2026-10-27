@@ -103,6 +103,7 @@ def _aggregate_environment(environments: list[dict[str, object]], shard_count: i
         "kernel": common_value("kernel"),
         "libfuse": common_value("libfuse"),
         "runner": f"GitHub Actions ({shard_count} fstests shards)",
+        "chunk_type": common_value("chunk_type"),
         "backend": common_value("backend"),
         "fstests_repository": common_value("fstests_repository"),
         "fstests_selector": common_value("fstests_selector"),
@@ -120,6 +121,7 @@ def aggregate(
     *,
     artifact_prefix: str = "fstests-conformance-",
     matrix_result: str = "success",
+    expected_chunk_type: str | None = None,
 ) -> list[str]:
     errors: list[str] = []
     if matrix_result != "success":
@@ -171,9 +173,18 @@ def aggregate(
             try:
                 environment = json.loads(environment_path.read_text(encoding="utf-8"))
                 if isinstance(environment, dict):
+                    if expected_chunk_type is not None and environment.get("chunk_type") != expected_chunk_type:
+                        errors.append(
+                            f"{shard}: environment chunk_type {environment.get('chunk_type')!r} "
+                            f"does not match required {expected_chunk_type!r}"
+                        )
                     environments.append(environment)
+                else:
+                    errors.append(f"{shard}: environment.json must be an object")
             except (OSError, json.JSONDecodeError) as exc:
                 errors.append(f"{shard}: cannot parse environment.json: {exc}")
+        elif expected_chunk_type is not None:
+            errors.append(f"{shard}: missing required environment.json with chunk_type")
 
         result_xml = artifact / "raw/results/result.xml"
         try:
@@ -242,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=pathlib.Path, required=True)
     parser.add_argument("--artifact-prefix", default="fstests-conformance-")
     parser.add_argument("--matrix-result", default="success")
+    parser.add_argument("--expected-chunk-type", choices=("cow", "chunk_slice"))
     parser.add_argument("--selection", type=pathlib.Path, default=pathlib.Path("conformance/fstests/selected.txt"))
     parser.add_argument("--supported", type=pathlib.Path, default=pathlib.Path("conformance/fstests/supported.txt"))
     parser.add_argument("--deferred", type=pathlib.Path, default=pathlib.Path("conformance/fstests/deferred-ci.tsv"))
@@ -267,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
             deferred,
             artifact_prefix=args.artifact_prefix,
             matrix_result=args.matrix_result,
+            expected_chunk_type=args.expected_chunk_type,
         )
     except (OSError, fstests_plan.PlanError, AggregateError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
