@@ -688,6 +688,167 @@ jobs:
           path: build/pjdfstest-conformance
           if-no-files-found: warn
 
+  slice-346-regression:
+    name: slice-346-regression (Release)
+    # Test-first RED/compare for the pinned generic/346 mmap/write race.
+    # Not part of required CI until the Slice correctness defect is fixed.
+    needs: [change-scope, clang-format, minio-test-tools, build-release-core, build-fstests-tools]
+    if: >-
+      always() && github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'slice-346-regression-ci') &&
+      needs.change-scope.result == 'success' &&
+      needs.change-scope.outputs.run_full_ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Verify required artifact producers
+        env:
+          FORMAT_RESULT: ${{ needs.clang-format.result }}
+          TOOLS_RESULT: ${{ needs.minio-test-tools.result }}
+          RELEASE_RESULT: ${{ needs.build-release-core.result }}
+          RELEASE_SHA: ${{ needs.build-release-core.outputs.archive_sha }}
+          RELEASE_ATTEMPT: ${{ needs.build-release-core.outputs.archive_attempt }}
+          FSTESTS_RESULT: ${{ needs.build-fstests-tools.result }}
+          FSTESTS_SHA: ${{ needs.build-fstests-tools.outputs.archive_sha }}
+          FSTESTS_ATTEMPT: ${{ needs.build-fstests-tools.outputs.archive_attempt }}
+        run: |
+          test "${FORMAT_RESULT}" = success
+          test "${TOOLS_RESULT}" = success
+          test "${RELEASE_RESULT}" = success
+          test -n "${RELEASE_SHA}"
+          test -n "${RELEASE_ATTEMPT}"
+          test "${FSTESTS_RESULT}" = success
+          test -n "${FSTESTS_SHA}"
+          test -n "${FSTESTS_ATTEMPT}"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 0
+
+      - name: Download pinned MinIO tools
+        uses: actions/download-artifact@v4
+        with:
+          name: minio-test-tools
+          path: .deps/minio
+
+      - name: Download shared Release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: swordfs-release-core
+          path: ${{ runner.temp }}/release-core
+
+      - name: Verify immutable Release artifact
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          ARCHIVE_SHA: ${{ needs.build-release-core.outputs.archive_sha }}
+        run: |
+          python3 scripts/ci/release_artifact.py verify \
+            --archive "${RUNNER_TEMP}/release-core/swordfs-release.tar.gz" \
+            --artifact-sha "${ARCHIVE_SHA}" --destination "${GITHUB_WORKSPACE}" \
+            --sha "${SOURCE_SHA}" --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${{ needs.build-release-core.outputs.archive_attempt }}" --runner-image ubuntu-24.04
+
+      - name: Install shared conformance runtime
+        run: |
+          sudo bash scripts/ci/install-conformance-runtime.sh fstests
+          sudo modprobe fuse
+          sudo chmod 666 /dev/fuse
+          if ! grep -Eq '^[[:space:]]*user_allow_other([[:space:]]|$)' /etc/fuse.conf 2>/dev/null; then
+            echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+          fi
+
+      # If a verified Release prerequisite failed, do not download tools or
+      # run a misleading secondary step without a source checkout. The final
+      # gate still fails closed and keeps any available diagnostics.
+      - name: Download pinned fstests toolchain
+        uses: actions/download-artifact@v4
+        with:
+          name: fstests-tools
+          path: ${{ runner.temp }}/fstests-tools
+
+      - name: Verify and install fstests toolchain
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          TOOLS_SHA: ${{ needs.build-fstests-tools.outputs.archive_sha }}
+        run: |
+          source conformance/fstests/version.env
+          patch_sha="$(sha256sum conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch | cut -d ' ' -f1)"
+          sudo python3 scripts/ci/fstests_tools_artifact.py verify \
+            --archive "${RUNNER_TEMP}/fstests-tools/fstests-tools.tar.gz" \
+            --artifact-sha "${TOOLS_SHA}" \
+            --sha "${SOURCE_SHA}" --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${{ needs.build-fstests-tools.outputs.archive_attempt }}" \
+            --fstests-commit "${FSTESTS_COMMIT}" --liburing-commit "${LIBURING_COMMIT}" \
+            --patch-sha "${patch_sha}"
+
+      - name: Control pinned generic/346 on fresh COW volumes
+        id: cow-346
+        continue-on-error: true
+        run: |
+          set +e
+          sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
+            SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
+            SWORDFS_CONFORMANCE_CHUNK_TYPE=cow \
+            FSTESTS_PREBUILT_TOOLS=1 FSTESTS_TOOL_ROOT=/opt/swordfs-fstests-tools \
+            bash scripts/conformance/fstests/run.sh \
+              --tests-file "${{ github.workspace }}/conformance/slice/fstests-generic346.txt" \
+              --shard-name cow-346 \
+              --suite-timeout 15m --test-timeout 10m \
+              --output-dir "${{ github.workspace }}/build/fstests-346-cow"
+          status=$?
+          set -e
+          sudo chown -R "$(id -u):$(id -g)" build/fstests-346-cow
+          exit "${status}"
+
+      - name: Reproduce pinned generic/346 on fresh Slice volumes
+        id: slice-346
+        continue-on-error: true
+        run: |
+          set +e
+          sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
+            SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
+            SWORDFS_CONFORMANCE_CHUNK_TYPE=chunk_slice \
+            FSTESTS_PREBUILT_TOOLS=1 FSTESTS_TOOL_ROOT=/opt/swordfs-fstests-tools \
+            bash scripts/conformance/fstests/run.sh \
+              --tests-file "${{ github.workspace }}/conformance/slice/fstests-generic346.txt" \
+              --shard-name slice-346 \
+              --suite-timeout 15m --test-timeout 10m \
+              --output-dir "${{ github.workspace }}/build/fstests-346-slice"
+          status=$?
+          set -e
+          sudo chown -R "$(id -u):$(id -g)" build/fstests-346-slice
+          exit "${status}"
+
+      - name: Validate control and Slice case evidence
+        if: always()
+        run: |
+          python3 scripts/conformance/fstests/verify_case.py \
+            --output-dir build/fstests-346-cow --expected-chunk-type cow --expected-test generic/346
+          python3 scripts/conformance/fstests/verify_case.py \
+            --output-dir build/fstests-346-slice --expected-chunk-type chunk_slice --expected-test generic/346
+
+      - name: Upload targeted COW/Slice raw evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slice-346-regression
+          path: |
+            build/fstests-346-cow
+            build/fstests-346-slice
+          if-no-files-found: warn
+
+      - name: Enforce actual runner outcomes
+        if: always()
+        env:
+          COW_OUTCOME: ${{ steps.cow-346.outcome }}
+          SLICE_OUTCOME: ${{ steps.slice-346.outcome }}
+        run: |
+          test "${COW_OUTCOME}" = success
+          test "${SLICE_OUTCOME}" = success
+
   slice-posix-experiment:
     name: slice-posix-experiment (Release)
     # Experimental Slice conformance must not replace or relabel the required
