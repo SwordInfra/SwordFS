@@ -1,26 +1,29 @@
 # SwordFS fstests conformance
 
-Baseline gate: **BLOCKED**
+Baseline gate: **PASS**
 
 A passing baseline gate means the admitted supported/known-gap contract has no blocking regression; it does not mean every selected testcase passes.
 
 | Metric | Value |
 | --- | ---: |
 | Selected upstream testcases | 645 |
-| Executed testcases | 0 |
+| Executed testcases | 644 |
 | Deferred from CI | 1 |
 | Explicitly supported | 145 |
 | Known gaps | 499 |
-| Overall support | 0.00% |
-| Supported gate | 0.00% |
-| Executed population classified | 0.00% |
+| Overall support | 22.48% |
+| Supported gate | 100.00% |
+| Executed population classified | 100.00% |
 | Full selected population classified | 99.84% |
-| Blocking outcomes | 646 |
+| Blocking outcomes | 0 |
 
 ## Raw execution outcomes
 
 | Result | Count |
 | --- | ---: |
+| `PASS` | 145 |
+| `FAIL` | 17 |
+| `NOTRUN` | 482 |
 | `DEFERRED` | 1 |
 
 ## Outcome counts
@@ -28,7 +31,11 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | Classification | Count |
 | --- | ---: |
 | `DEFERRED_CI` | 1 |
-| `INFRASTRUCTURE` | 646 |
+| `ENVIRONMENT` | 8 |
+| `KNOWN_UNSUPPORTED` | 87 |
+| `PASS` | 145 |
+| `UPSTREAM_NOT_APPLICABLE` | 403 |
+| `UPSTREAM_TEST_DEFECT` | 1 |
 
 ## Deferred from CI
 
@@ -36,125 +43,23 @@ A passing baseline gate means the admitted supported/known-gap contract has no b
 | --- | --- |
 | `generic/478` | Explicitly unsupported OFD byte-range lock lifecycle test (#464 not planned): with FUSE remote POSIX enabled its mixed POSIX/OFD checks can hang on opaque OFD owner cleanup; no full OFD feature or conformance is claimed. Keep selected for provenance, defer costly unsupported execution from required PR-CI; never count as PASS. |
 
-## Blocking results
+## Known-gap Issues
 
-| Test | Classification | Detail |
-| --- | --- | --- |
-| `infrastructure/1` | `INFRASTRUCTURE` | result XUnit: build/fstests-conformance/raw/results/result.xml: XUnit contains no testcases |
-| `infrastructure/2` | `INFRASTRUCTURE` | fstests harness exited with status 2 |
-| `generic/001` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/002` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/003` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/004` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/005` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/006` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/007` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/008` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/009` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/011` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/012` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/013` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/014` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/015` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/016` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/018` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/020` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/021` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/022` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/023` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/024` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/025` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/026` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/028` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/029` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/030` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/031` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/032` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/033` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/034` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/035` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/037` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/039` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/040` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/041` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/042` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/050` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/052` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/053` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/056` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/057` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/058` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/059` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/060` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/061` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/062` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/063` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/064` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/065` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/066` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/067` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/069` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/070` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/071` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/073` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/075` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/076` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/078` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/079` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/080` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/081` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/082` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/084` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/086` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/087` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/088` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/090` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/091` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/092` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/094` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/095` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/096` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/097` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/098` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/099` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/101` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/103` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/104` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/105` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/106` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/107` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/108` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/110` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/111` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/112` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/113` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/114` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/115` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/116` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/117` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/118` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/119` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/120` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/121` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/122` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/123` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/124` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-| `generic/126` | `INFRASTRUCTURE` | selected testcase has no result; the fstests run is incomplete |
-
-Only the first 100 of 646 blockers are shown; see `result.json` for all results.
+- [#255](https://github.com/SwordInfra/SwordFS/issues/255): 86 testcase(s), KNOWN_UNSUPPORTED
+- [#406](https://github.com/SwordInfra/SwordFS/issues/406): 1 testcase(s), KNOWN_UNSUPPORTED
 
 ## Execution metadata
 
 - SwordFS commit: `c5ec23e8569b8b9bdc017edbdbba561b6b647051`
 - fstests commit: `a370dcbed43563f0462801e889e0eceb93c7cfad`
-- fstests patchset: `unknown`
+- fstests patchset: `conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19`
 - fstests selector: `generic/quick`
-- Kernel: `unknown`
-- libfuse: `unknown`
+- Kernel: `6.17.0-1022-azure`
+- libfuse: `fusermount3 version: 3.18.2`
 - Runner: `GitHub Actions (10 fstests shards)`
 
 Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/40432556177
-Recorded at: 2026-10-27T01:31:12+00:00
+Recorded at: 2026-10-27T03:24:42+00:00
 
 ## Historical main-branch progress
 
@@ -182,6 +87,5 @@ Recorded at: 2026-10-27T01:31:12+00:00
 | 2026-10-19T09:01:17+00:00 | `b1426cb86477` | PASS | 22.48% | 145 | 145 | 17 | 482 | 1 | 499 |
 | 2026-10-20T09:46:38+00:00 | `092dc272d50d` | BLOCKED | 18.45% | 145 | 119 | 17 | 482 | 1 | 499 |
 | 2026-10-20T12:02:38+00:00 | `67ad6ee6881b` | PASS | 22.48% | 145 | 145 | 17 | 482 | 1 | 499 |
-| 2026-10-27T01:31:12+00:00 | `c5ec23e8569b` | BLOCKED | 0.00% | 145 | 0 | 0 | 0 | 1 | 499 |
 
-Last fully healthy baseline: `9fce9cd353d7ad4b81aea66f35718d26b85c5b99`
+Last fully healthy baseline: `c5ec23e8569b8b9bdc017edbdbba561b6b647051`
