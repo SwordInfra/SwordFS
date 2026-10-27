@@ -2095,4 +2095,109 @@ TEST_F(SliceChunkTest, WindowCacheRejectsAmbiguousPutAndRetriesFresh) {
   });
 }
 
+// #515: RMW must never turn a metadata read failure into a zero-filled
+// committed image. The dirty interval remains pending and can retry.
+TEST_F(SliceChunkTest, WindowCacheSnapshotFailureRetainsDirtyForRetry) {
+  RunInTestFiber([&] {
+    const swordfs::metadata::ChunkID id(815);
+    Attach(0, id, "abcdefghij", swordfs::chunk::slice::SliceID(1815));
+    auto chunk = Open();
+    ASSERT_TRUE(chunk->Write(1, Buf("X")).ok());
+    ASSERT_TRUE(chunk->Write(8, Buf("Y")).ok());
+    const int puts = data_->put_calls;
+    meta_->file_snapshot_status = Status::IOError("injected RMW snapshot failure");
+    EXPECT_EQ(chunk->Flush().ToErrno(), EIO);
+    EXPECT_EQ(data_->put_calls, puts);
+    EXPECT_TRUE(chunk->HasPendingWrites());
+    meta_->file_snapshot_status = Status::OK();
+    ASSERT_TRUE(chunk->Flush().ok());
+    EXPECT_FALSE(chunk->HasPendingWrites());
+    auto out = folly::IOBuf::create(10);
+    ASSERT_TRUE(chunk->Read(0, 10, out.get()).ok());
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(out->data()), 10), "aXcdefghYj");
+  });
+}
+
+TEST_F(SliceChunkTest, WindowCacheMissingOrFailedIndexReadCannotPublish) {
+  RunInTestFiber([&] {
+    const swordfs::metadata::ChunkID id(816);
+    Attach(0, id, "abcdefghij", swordfs::chunk::slice::SliceID(1816));
+    auto chunk = Open();
+    ASSERT_TRUE(chunk->Write(1, Buf("X")).ok());
+    ASSERT_TRUE(chunk->Write(8, Buf("Y")).ok());
+    const int puts = data_->put_calls;
+    slice_metadata_->read_error = Status::NotFound("missing authoritative Slice index");
+    EXPECT_EQ(chunk->Flush().ToErrno(), EIO);
+    EXPECT_EQ(data_->put_calls, puts);
+    EXPECT_TRUE(chunk->HasPendingWrites());
+    slice_metadata_->read_error = Status::IOError("injected Redis read failure");
+    EXPECT_EQ(chunk->Flush().ToErrno(), EIO);
+    EXPECT_EQ(data_->put_calls, puts);
+    slice_metadata_->read_error.reset();
+    ASSERT_TRUE(chunk->Flush().ok());
+    EXPECT_FALSE(chunk->HasPendingWrites());
+  });
+}
+
+TEST_F(SliceChunkTest, WindowCachePhysicalReadFailureDoesNotPublishStaleZeros) {
+  RunInTestFiber([&] {
+    const swordfs::metadata::ChunkID id(817);
+    Attach(0, id, "abcdefghij", swordfs::chunk::slice::SliceID(1817));
+    auto chunk = Open();
+    ASSERT_TRUE(chunk->Write(1, Buf("X")).ok());
+    ASSERT_TRUE(chunk->Write(8, Buf("Y")).ok());
+    const int puts = data_->put_calls;
+    data_->fail_get_call = data_->get_calls + 1;
+    EXPECT_EQ(chunk->Flush().ToErrno(), EIO);
+    EXPECT_EQ(data_->put_calls, puts);
+    EXPECT_TRUE(chunk->HasPendingWrites());
+    data_->fail_get_call = -1;
+    ASSERT_TRUE(chunk->Flush().ok());
+    auto out = folly::IOBuf::create(10);
+    ASSERT_TRUE(chunk->Read(0, 10, out.get()).ok());
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(out->data()), 10), "aXcdefghYj");
+  });
+}
+
+TEST_F(SliceChunkTest, WindowCacheRejectsShortCommittedObjectWithoutPublication) {
+  RunInTestFiber([&] {
+    const swordfs::metadata::ChunkID id(818);
+    const swordfs::chunk::slice::SliceID physical(1818);
+    Attach(0, id, "abcdefghij", physical);
+    // Valid record layout referencing bytes beyond the existing object.
+    ASSERT_TRUE(slice_metadata_->AppendRecord(id, {0, physical, 20, 10, 10}).ok());
+    auto chunk = Open();
+    ASSERT_TRUE(chunk->Write(1, Buf("X")).ok());
+    ASSERT_TRUE(chunk->Write(8, Buf("Y")).ok());
+    const int puts = data_->put_calls;
+    EXPECT_EQ(chunk->Flush().ToErrno(), EIO);
+    EXPECT_EQ(data_->put_calls, puts);
+    EXPECT_TRUE(chunk->HasPendingWrites());
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(id, &records).ok());
+    EXPECT_EQ(records.size(), 2U);
+  });
+}
+
+TEST_F(SliceChunkTest, WindowCacheZeroCoverPreservesTruncatedHoles) {
+  RunInTestFiber([&] {
+    const swordfs::metadata::ChunkID id(819);
+    Attach(0, id, "abcdefghij", swordfs::chunk::slice::SliceID(1819));
+    ASSERT_TRUE(slice_metadata_->AppendRecord(id, {4, swordfs::chunk::slice::SliceID(), 0, 0, 6}).ok());
+    auto chunk = Open();
+    ASSERT_TRUE(chunk->Write(3, Buf("X")).ok());
+    ASSERT_TRUE(chunk->Write(9, Buf("Y")).ok());
+    ASSERT_TRUE(chunk->Flush().ok());
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(id, &records).ok());
+    ASSERT_EQ(records.size(), 3U);
+    const auto &merged = records.back();
+    EXPECT_EQ(merged.pos, 3U);
+    EXPECT_EQ(merged.len, 7U);
+    auto physical = folly::IOBuf::create(7);
+    ASSERT_TRUE(data_->Get(swordfs::chunk::slice::SliceObjectKey(merged.id), 0, 7, physical.get()).ok());
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(physical->data()), 7), std::string("X\0\0\0\0\0Y", 7));
+  });
+}
+
 }  // namespace
