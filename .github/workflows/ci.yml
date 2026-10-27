@@ -1141,6 +1141,193 @@ jobs:
           path: build/fstests-conformance
           if-no-files-found: warn
 
+  slice-fstests-full-shard:
+    name: slice-fstests-full (${{ matrix.shard }})
+    needs: [clang-format, minio-test-tools, change-scope, build-release-core, build-fstests-tools]
+    # Only opt in while the full Slice matrix is still being investigated.
+    if: >-
+      always() && github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'slice-full-matrix-ci') &&
+      needs.change-scope.result == 'success' &&
+      needs.change-scope.outputs.run_full_ci == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.job_timeout }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: supported-0
+            job_timeout: 90
+            suite_timeout: 75m
+            test_timeout: 10m
+          - shard: supported-1
+            job_timeout: 90
+            suite_timeout: 75m
+            test_timeout: 10m
+          - shard: supported-2
+            job_timeout: 90
+            suite_timeout: 75m
+            test_timeout: 10m
+          - shard: supported-3
+            job_timeout: 90
+            suite_timeout: 75m
+            test_timeout: 10m
+          - shard: supported-4
+            job_timeout: 90
+            suite_timeout: 75m
+            test_timeout: 10m
+          - shard: supported-5
+            job_timeout: 90
+            suite_timeout: 75m
+            test_timeout: 10m
+          - shard: baseline-rest-0
+            job_timeout: 90
+            suite_timeout: 75m
+            test_timeout: 10m
+          - shard: baseline-rest-1
+            job_timeout: 90
+            suite_timeout: 75m
+            test_timeout: 10m
+          - shard: bounded-069
+            job_timeout: 35
+            suite_timeout: 15m
+            test_timeout: 15m
+          - shard: bounded-471
+            job_timeout: 35
+            suite_timeout: 15m
+            test_timeout: 15m
+    steps:
+      - name: Fail closed when a prerequisite is missing
+        env:
+          FORMAT_RESULT: ${{ needs.clang-format.result }}
+          TOOLS_RESULT: ${{ needs.minio-test-tools.result }}
+          RELEASE_RESULT: ${{ needs.build-release-core.result }}
+          RELEASE_SHA: ${{ needs.build-release-core.outputs.archive_sha }}
+          RELEASE_ATTEMPT: ${{ needs.build-release-core.outputs.archive_attempt }}
+          FSTESTS_TOOLS_RESULT: ${{ needs.build-fstests-tools.result }}
+          FSTESTS_TOOLS_SHA: ${{ needs.build-fstests-tools.outputs.archive_sha }}
+          FSTESTS_TOOLS_ATTEMPT: ${{ needs.build-fstests-tools.outputs.archive_attempt }}
+        run: |
+          test "${FORMAT_RESULT}" = success
+          test "${TOOLS_RESULT}" = success
+          test "${RELEASE_RESULT}" = success
+          test -n "${RELEASE_SHA}"
+          test -n "${RELEASE_ATTEMPT}"
+          test "${FSTESTS_TOOLS_RESULT}" = success
+          test -n "${FSTESTS_TOOLS_SHA}"
+          test -n "${FSTESTS_TOOLS_ATTEMPT}"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Download pinned MinIO tools
+        uses: actions/download-artifact@v4
+        with:
+          name: minio-test-tools
+          path: .deps/minio
+
+      - name: Download shared Release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: swordfs-release-core
+          path: ${{ runner.temp }}/release-core
+
+      - name: Verify and smoke-test Release runtime
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          ARCHIVE_SHA: ${{ needs.build-release-core.outputs.archive_sha }}
+        run: |
+          python3 scripts/ci/release_artifact.py verify \
+            --archive "${RUNNER_TEMP}/release-core/swordfs-release.tar.gz" \
+            --artifact-sha "${ARCHIVE_SHA}" --destination "${GITHUB_WORKSPACE}" \
+            --sha "${SOURCE_SHA}" --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${{ needs.build-release-core.outputs.archive_attempt }}" --runner-image ubuntu-24.04
+
+      - name: Restore pinned conformance runtime
+        run: sudo bash scripts/ci/install-conformance-runtime.sh fstests
+
+      - name: Download pinned fstests toolchain
+        uses: actions/download-artifact@v4
+        with:
+          name: fstests-tools
+          path: ${{ runner.temp }}/fstests-tools
+
+      - name: Verify and install same-run fstests toolchain
+        env:
+          SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          TOOLS_SHA: ${{ needs.build-fstests-tools.outputs.archive_sha }}
+        run: |
+          source conformance/fstests/version.env
+          patch_sha="$(sha256sum conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch | cut -d ' ' -f1)"
+          sudo python3 scripts/ci/fstests_tools_artifact.py verify \
+            --archive "${RUNNER_TEMP}/fstests-tools/fstests-tools.tar.gz" \
+            --artifact-sha "${TOOLS_SHA}" \
+            --sha "${SOURCE_SHA}" --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${{ needs.build-fstests-tools.outputs.archive_attempt }}" \
+            --fstests-commit "${FSTESTS_COMMIT}" --liburing-commit "${LIBURING_COMMIT}" \
+            --patch-sha "${patch_sha}"
+
+      - name: Conformance test setup
+        run: |
+          sudo modprobe fuse
+          sudo chmod 666 /dev/fuse
+          if ! grep -Eq '^[[:space:]]*user_allow_other([[:space:]]|$)' /etc/fuse.conf 2>/dev/null; then
+            echo user_allow_other | sudo tee -a /etc/fuse.conf >/dev/null
+          fi
+
+      - name: Build deterministic fstests shard
+        run: |
+          python3 scripts/conformance/fstests/plan.py \
+            --shard "${{ matrix.shard }}" \
+            > "${RUNNER_TEMP}/fstests-tests.txt"
+          test -s "${RUNNER_TEMP}/fstests-tests.txt"
+
+      - name: Run pinned fstests shard
+        id: fstests-harness
+        env:
+          FSTESTS_SHARD: ${{ matrix.shard }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          mkdir -p build/fstests-slice-full
+          verify_args=()
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${FSTESTS_SHARD}" = "supported-0" ]; then
+            if ! git diff --quiet "${PR_BASE_SHA}" HEAD -- \
+              conformance/fstests/version.env conformance/fstests/selected.txt; then
+              verify_args+=(--verify-selection)
+            fi
+          fi
+
+          set +e
+          sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
+            SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
+            SWORDFS_CONFORMANCE_CHUNK_TYPE=chunk_slice \
+            FSTESTS_PREBUILT_TOOLS=1 FSTESTS_TOOL_ROOT=/opt/swordfs-fstests-tools \
+            bash scripts/conformance/fstests/run.sh \
+              --tests-file "${RUNNER_TEMP}/fstests-tests.txt" \
+              --shard-name "${FSTESTS_SHARD}" \
+              --suite-timeout "${{ matrix.suite_timeout }}" \
+              --test-timeout "${{ matrix.test_timeout }}" \
+              --output-dir "${{ github.workspace }}/build/fstests-slice-full" \
+              "${verify_args[@]}"
+          status=$?
+          set -e
+          echo "${status}" | sudo tee build/fstests-slice-full/harness-status.txt >/dev/null
+          sudo chown -R "$(id -u):$(id -g)" build/fstests-slice-full
+          exit "${status}"
+
+      - name: Upload fstests shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slice-fstests-full-${{ matrix.shard }}
+          path: build/fstests-slice-full
+          if-no-files-found: warn
+
   fstests-conformance:
     name: fstests-conformance (Release)
     needs: [change-scope, fstests-conformance-shard]
@@ -1234,6 +1421,88 @@ jobs:
         with:
           name: fstests-conformance
           path: build/fstests-conformance
+          if-no-files-found: warn
+
+  slice-fstests-full:
+    name: slice-fstests-full (Release)
+    needs: [change-scope, slice-fstests-full-shard]
+    # Full Slice parity is a separate experimental strict gate on opt-in PRs;
+    # baseline COW jobs and their required status are not renamed or relaxed.
+    if: >-
+      always() && github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'slice-full-matrix-ci') &&
+      needs.change-scope.result == 'success' &&
+      needs.change-scope.outputs.run_full_ci == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Download fstests shard evidence
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: slice-fstests-full-*
+          path: build/fstests-slice-shards
+          merge-multiple: false
+
+      - name: Aggregate fstests shard evidence
+        env:
+          FSTESTS_SHARD_MATRIX_RESULT: ${{ needs.slice-fstests-full-shard.result }}
+        run: |
+          python3 scripts/conformance/fstests/aggregate.py \
+            --shards-dir build/fstests-slice-shards \
+            --output-dir build/fstests-slice-full \
+            --matrix-result "${FSTESTS_SHARD_MATRIX_RESULT}" \
+            --artifact-prefix slice-fstests-full- \
+            --expected-chunk-type chunk_slice
+
+      - name: Classify full Slice fstests results independently
+        if: always()
+        run: |
+          source conformance/fstests/version.env
+          # No historical COW failure evidence can establish Slice behavior.
+          # Each untriaged Slice result remains blocking in this experiment.
+          mkdir -p build/fstests-slice-full/empty-fail-evidence
+          python3 scripts/conformance/fstests/classify.py \
+            --selected-file conformance/fstests/selected.txt \
+            --result-xml build/fstests-slice-full/raw/results/result.xml \
+            --result-dir build/fstests-slice-full/raw/results \
+            --supported-file conformance/fstests/supported.txt \
+            --known-gaps-file conformance/slice/empty-gaps.tsv \
+            --known-gap-evidence-dir build/fstests-slice-full/empty-fail-evidence \
+            --deferred-file conformance/fstests/deferred-ci.tsv \
+            --output-dir build/fstests-slice-full \
+            --swordfs-commit "$(git rev-parse HEAD)" \
+            --fstests-commit "${FSTESTS_COMMIT}" \
+            --fstests-group "${FSTESTS_GROUP}" \
+            --environment-json build/fstests-slice-full/environment.json \
+            --harness-status-file build/fstests-slice-full/harness-status.txt \
+            --strict
+
+      - name: Publish fstests summary to job
+        if: always()
+        run: |
+          if [ -f build/fstests-slice-full/report.md ]; then
+            cat build/fstests-slice-full/report.md >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo '## Slice fstests infrastructure failure' >> "${GITHUB_STEP_SUMMARY}"
+            echo '' >> "${GITHUB_STEP_SUMMARY}"
+            echo 'The aggregate job ended before a classified report was produced. Inspect the uploaded logs.' >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload fstests evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slice-fstests-full
+          path: build/fstests-slice-full
           if-no-files-found: warn
 
   ci-duration-report:
