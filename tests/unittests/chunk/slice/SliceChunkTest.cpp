@@ -817,10 +817,14 @@ TEST_F(SliceChunkTest, PartialFlushRetiresOnlyConfirmedRecordsAndKeepsFailedSuff
     ASSERT_TRUE(chunk->Write(0, Buf("X")).ok());
     ASSERT_TRUE(chunk->Write(5, Buf("Y")).ok());
     // The first candidate's metadata is acknowledged; the next candidate
-    // definitely fails. A failed file Flush may leave the confirmed prefix
+    // definitely fails. They share one physical identity but not one logical
+    // record or commit decision; a failed file Flush may leave the confirmed prefix
     // committed, but must retain the later candidate and never replay prefix.
     slice_metadata_->fail_append_on_attempt = slice_metadata_->append_attempts + 2;
+    const int puts_before_first_flush = data_->put_calls;
     EXPECT_EQ(chunk->Flush().ToErrno(), EIO);
+    EXPECT_EQ(data_->put_calls, puts_before_first_flush + 1)
+        << "both sparse generations share one prepared object across a partial metadata commit";
     EXPECT_TRUE(chunk->HasPendingWrites());
     std::vector<swordfs::chunk::slice::SliceRecord> records;
     ASSERT_TRUE(slice_metadata_->ReadRecords(id, &records).ok());
@@ -1220,6 +1224,47 @@ TEST_F(SliceChunkTest, FlushFreezesAdjacentWritesIntoOneImmutableUnpublishedObje
   });
 }
 
+// #515 RED: page-strided small writes must not allocate one S3 object per
+// independent interval. Shared physical objects retain distinct logical
+// subranges so earlier committed bytes in the gaps remain authoritative.
+TEST_F(SliceChunkTest, SparseSmallWritesSharePhysicalObjectWithoutShadowingGaps) {
+  RunInTestFiber([&] {
+    using swordfs::chunk::slice::SliceID;
+    const swordfs::metadata::ChunkID chunk_id(317);
+    Attach(0, chunk_id, std::string(100, 'X'), SliceID(917));
+    auto chunk = Open();
+    ASSERT_NE(chunk, nullptr);
+    const int old_puts = data_->put_calls;
+    for (size_t pos = 1; pos < 100; pos += 8) {
+      ASSERT_TRUE(chunk->Write(pos, Buf("ab")).ok());
+    }
+    ASSERT_TRUE(chunk->Flush().ok());
+    EXPECT_EQ(data_->put_calls, old_puts + 1)
+        << "sparse 2-byte fragments must share an immutable object rather than one PUT each";
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(chunk_id, &records).ok());
+    ASSERT_EQ(records.size(), 14U);
+    const auto physical = records[1].id;
+    EXPECT_NE(physical, SliceID());
+    for (size_t i = 1; i < records.size(); ++i) {
+      EXPECT_EQ(records[i].id, physical);
+      EXPECT_EQ(records[i].size, 26U);
+      EXPECT_EQ(records[i].off, static_cast<uint32_t>((i - 1) * 2));
+      EXPECT_EQ(records[i].len, 2U);
+    }
+    auto cold = Open();
+    ASSERT_NE(cold, nullptr);
+    auto out = folly::IOBuf::create(100);
+    ASSERT_TRUE(cold->Read(0, 100, out.get()).ok());
+    std::string expected(100, 'X');
+    for (size_t pos = 1; pos < 100; pos += 8) {
+      expected.replace(pos, 2, "ab");
+    }
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(out->data()), 100), expected)
+        << "packing sparse writes must not synthesize zero covers in untouched gaps";
+  });
+}
+
 TEST_F(SliceChunkTest, SparseFreezeDoesNotManufactureZeroCoversAcrossUnwrittenGaps) {
   RunInTestFiber([&] {
     Attach(0, swordfs::metadata::ChunkID(201), "abcdefgh", swordfs::chunk::slice::SliceID(901));
@@ -1229,13 +1274,12 @@ TEST_F(SliceChunkTest, SparseFreezeDoesNotManufactureZeroCoversAcrossUnwrittenGa
     ASSERT_TRUE(chunk->Write(1, Buf("X")).ok());
     ASSERT_TRUE(chunk->Write(5, Buf("Y")).ok());
     EXPECT_TRUE(chunk->Flush().ok());
-    ASSERT_EQ(data_->put_calls, previous_puts + 2);
-    EXPECT_EQ(data_->uploaded_keys[data_->uploaded_keys.size() - 2], "slice/1000");
-    EXPECT_EQ(data_->uploaded_keys.back(), "slice/1001");
+    ASSERT_EQ(data_->put_calls, previous_puts + 1);
+    EXPECT_EQ(data_->uploaded_keys.back(), "slice/1000");
     auto first = folly::IOBuf::create(1);
     auto second = folly::IOBuf::create(1);
     ASSERT_TRUE(data_->Get("slice/1000", 0, 1, first.get()).ok());
-    ASSERT_TRUE(data_->Get("slice/1001", 0, 1, second.get()).ok());
+    ASSERT_TRUE(data_->Get("slice/1000", 1, 1, second.get()).ok());
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(first->data()), 1), "X");
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(second->data()), 1), "Y");
     auto out = folly::IOBuf::create(8);
@@ -1545,7 +1589,7 @@ TEST_F(SliceChunkTest, FlushRejectsUnrepresentableChunkRangeBeforePhysicalSideEf
   });
 }
 
-TEST_F(SliceChunkTest, SparseRewritesPreserveGapsAndRemainTwoIndependentObjects) {
+TEST_F(SliceChunkTest, SparseRewritesPreserveGapsWithinOnePhysicalObject) {
   RunInTestFiber([&] {
     Attach(0, swordfs::metadata::ChunkID(309), "abcdefghij", swordfs::chunk::slice::SliceID(909));
     auto chunk = Open();
@@ -1561,11 +1605,11 @@ TEST_F(SliceChunkTest, SparseRewritesPreserveGapsAndRemainTwoIndependentObjects)
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(actual->data()), 10), "BXcdeQZhij");
     const int puts_before = data_->put_calls;
     EXPECT_TRUE(chunk->Flush().ok());
-    EXPECT_EQ(data_->put_calls, puts_before + 2);
+    EXPECT_EQ(data_->put_calls, puts_before + 1);
     auto left = folly::IOBuf::create(2);
     auto right = folly::IOBuf::create(2);
     ASSERT_TRUE(data_->Get("slice/1000", 0, 2, left.get()).ok());
-    ASSERT_TRUE(data_->Get("slice/1001", 0, 2, right.get()).ok());
+    ASSERT_TRUE(data_->Get("slice/1000", 2, 2, right.get()).ok());
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(left->data()), 2), "BX");
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(right->data()), 2), "QZ");
   });

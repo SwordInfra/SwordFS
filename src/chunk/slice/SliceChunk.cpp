@@ -28,6 +28,11 @@ struct SliceChunk::FrozenSlice {
   std::string payload;
   size_t visible_len;
   std::optional<SliceID> prepared_id;
+  // Multiple disjoint logical records may reference one compact immutable
+  // object. The logical gaps remain untouched; each record uses its own
+  // physical offset into this shared uploaded object.
+  uint32_t prepared_size = 0;
+  uint32_t prepared_off = 0;
   // An existing-index append is a separate authority from FileMetadata
   // finalization. Retain its identity across a definite metadata conflict
   // so a normal retry does not blindly RPUSHX a duplicate.
@@ -391,12 +396,32 @@ utils::Status SliceChunk::Flush() {
     std::erase_if(frozen_, [&](const auto &candidate) { return committed_addresses.contains(candidate.get()); });
     RebuildDirtyLocked();
   };
-  for (const auto &candidate : candidates) {
-    {
+  // Pack sparse, noncontiguous intervals into bounded immutable objects. A
+  // page-strided writer can otherwise create one S3 PUT for every 8-byte
+  // interval, which dominates real generic/346 mmap/pwrite stress. Keep
+  // separate SliceRecords for each logical interval: zero-filling the gaps
+  // would incorrectly overwrite already committed unrelated data.
+  struct PackedMember {
+    std::shared_ptr<FrozenSlice> candidate;
+    uint32_t offset;
+  };
+  for (size_t i = 0; i < candidates.size();) {
+    std::string packed;
+    std::vector<PackedMember> members;
+    for (; i < candidates.size(); ++i) {
+      const auto &candidate = candidates[i];
       std::shared_lock<utils::FiberRWMutex> lock(mutex_);
       if (candidate->visible_len == 0 || candidate->prepared_id.has_value()) {
         continue;
       }
+      if (!packed.empty() && candidate->payload.size() > kMaxActiveSliceBytes - packed.size()) {
+        break;
+      }
+      members.push_back({candidate, static_cast<uint32_t>(packed.size())});
+      packed.append(candidate->payload);
+    }
+    if (members.empty()) {
+      continue;
     }
     SliceID id;
     auto status = slice_metadata_->AllocateSliceID(&id);
@@ -406,18 +431,21 @@ utils::Status SliceChunk::Flush() {
     if (id == SliceID() || id.Value() > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
       return finish(utils::Status::Malformed("Slice allocator returned an invalid physical identity"));
     }
-    // Frozen payload storage is never mutated or removed during in-flight
-    // preparation, even if a concurrent local truncate clips its visibility.
-    status = data_->Put(SliceObjectKey(id), folly::IOBuf::copyBuffer(candidate->payload));
+    // A failed or uncertain Put never exposes an ID to the pending records.
+    // A subsequent Flush creates a fresh identity, not an unsafe overwrite.
+    status = data_->Put(SliceObjectKey(id), folly::IOBuf::copyBuffer(packed));
     if (!status.ok()) {
       return finish(status);
     }
     std::lock_guard<utils::FiberRWMutex> lock(mutex_);
-    // TruncateLocal may have retired this candidate while Put was in flight.
-    // Its shared_ptr snapshot keeps the payload alive through Put, but a
-    // completely invisible object must never become eligible for publication.
-    if (candidate->visible_len != 0) {
-      candidate->prepared_id = id;
+    for (const auto &member : members) {
+      // TruncateLocal can clip a candidate while its physical Put runs.
+      // Preserve only visible intervals for the later metadata publication.
+      if (member.candidate->visible_len != 0) {
+        member.candidate->prepared_id = id;
+        member.candidate->prepared_size = static_cast<uint32_t>(packed.size());
+        member.candidate->prepared_off = member.offset;
+      }
     }
   }
   for (const auto &candidate : candidates) {
@@ -456,9 +484,8 @@ utils::Status SliceChunk::PublishFrozen(const std::shared_ptr<FrozenSlice> &cand
     if (!candidate->prepared_id.has_value()) {
       return utils::Status::Internal("Slice physical object is not prepared");
     }
-    record =
-        SliceRecord{static_cast<uint32_t>(candidate->pos), *candidate->prepared_id,
-                    static_cast<uint32_t>(candidate->payload.size()), 0, static_cast<uint32_t>(candidate->visible_len)};
+    record = SliceRecord{static_cast<uint32_t>(candidate->pos), *candidate->prepared_id, candidate->prepared_size,
+                         candidate->prepared_off, static_cast<uint32_t>(candidate->visible_len)};
   }
   auto status = ValidateRecord(record, static_cast<uint32_t>(chunk_size_));
   if (!status.ok()) {
