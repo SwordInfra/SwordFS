@@ -2200,4 +2200,65 @@ TEST_F(SliceChunkTest, WindowCacheZeroCoverPreservesTruncatedHoles) {
   });
 }
 
+// #515: A retained-boundary shrink clips ONLY records committed before the
+// boundary was captured. Later records inside the same ChunkID may repopulate
+// the tail after grow; Window RMW must hydrate those bytes while keeping the
+// original truncated tail zero, not resurrecting an older object suffix.
+TEST_F(SliceChunkTest, WindowCacheHydratesHistoricalTruncateAndLaterGrowth) {
+  RunInTestFiber([&] {
+    using swordfs::chunk::slice::SliceID;
+    const swordfs::metadata::ChunkID id(821);
+    Attach(0, id, "abcdefghij", SliceID(1821));
+    auto chunk = Open();
+    ASSERT_NE(chunk, nullptr);
+
+    meta_->ReplaceAttachment(0, id, 4);
+    chunk->ClampPublishedPrefix(4);
+    meta_->ReplaceAttachment(0, id, 10);
+    ASSERT_TRUE(data_->Put("slice/1822", folly::IOBuf::copyBuffer("UV")).ok());
+    ASSERT_TRUE(slice_metadata_->AppendRecord(id, {6, SliceID(1822), 2, 0, 2}).ok());
+
+    ASSERT_TRUE(chunk->Write(2, Buf("X")).ok());
+    ASSERT_TRUE(chunk->Write(9, Buf("Y")).ok());
+    ASSERT_TRUE(chunk->Flush().ok());
+    EXPECT_FALSE(chunk->HasPendingWrites());
+
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(id, &records).ok());
+    ASSERT_EQ(records.size(), 3U);
+    const auto &merged = records.back();
+    EXPECT_EQ(merged.pos, 2U);
+    EXPECT_EQ(merged.len, 8U);
+    auto physical = folly::IOBuf::create(8);
+    ASSERT_TRUE(
+        data_->Get(swordfs::chunk::slice::SliceObjectKey(merged.id), merged.off, merged.len, physical.get()).ok());
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(physical->data()), 8), std::string("Xd\0\0UV\0Y", 8));
+
+    auto out = folly::IOBuf::create(10);
+    ASSERT_TRUE(chunk->Read(0, 10, out.get()).ok());
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(out->data()), 10), std::string("abXd\0\0UV\0Y", 10));
+  });
+}
+
+TEST_F(SliceChunkTest, WindowCacheRefusesHydrationAfterFailedBoundaryCapture) {
+  RunInTestFiber([&] {
+    const swordfs::metadata::ChunkID id(822);
+    Attach(0, id, "abcdefghij", swordfs::chunk::slice::SliceID(1823));
+    auto chunk = Open();
+    ASSERT_NE(chunk, nullptr);
+    meta_->file_snapshot_status = Status::IOError("truncate boundary capture failed");
+    chunk->ClampPublishedPrefix(4);
+    meta_->file_snapshot_status = Status::OK();
+    ASSERT_TRUE(chunk->Write(2, Buf("X")).ok());
+    ASSERT_TRUE(chunk->Write(8, Buf("Y")).ok());
+    const int puts = data_->put_calls;
+    EXPECT_EQ(chunk->Flush().ToErrno(), EIO);
+    EXPECT_EQ(data_->put_calls, puts);
+    EXPECT_TRUE(chunk->HasPendingWrites());
+    chunk->ClampPublishedPrefix(4);  // Successful recapture authorizes retry.
+    ASSERT_TRUE(chunk->Flush().ok());
+    EXPECT_FALSE(chunk->HasPendingWrites());
+  });
+}
+
 }  // namespace
