@@ -62,7 +62,8 @@ WORK_DIR_RE = re.compile(r"/tmp/swordfs-fstests[.-][^/\s)]+")
 # RPATH survives cross-runner distribution. Its location is harness noise,
 # just like the previous per-shard WORK_DIR/xfstests location.
 SHARED_TOOLS_ROOT = "/opt/swordfs-fstests-tools/"
-RESULT_DIR_RE = re.compile(r"/(?:[^/\s)]+/)*build/fstests-conformance/raw/results")
+# Both primary and opt-in Slice result roots need the same evidence identity.
+RESULT_DIR_RE = re.compile(r"/(?:[^/\s)]+/)*build/fstests-(?:conformance|slice-full)/raw/results")
 EVIDENCE_REF_RE = re.compile(
     r"<FSTESTS_RESULT_DIR>/(?P<path>[a-z0-9_-]+/[0-9]+\.(?:out\.bad|mountfail))"
 )

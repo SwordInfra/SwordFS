@@ -1467,16 +1467,16 @@ jobs:
         if: always()
         run: |
           source conformance/fstests/version.env
-          # No historical COW failure evidence can establish Slice behavior.
-          # Each untriaged Slice result remains blocking in this experiment.
-          mkdir -p build/fstests-slice-full/empty-fail-evidence
+          # Reviewed Slice baseline is derived from real Slice XUnit and raw
+          # outputs (CI #40442989636), not imported from COW runtime evidence.
+          # Missing supported tests, mismatches and harness errors still block.
           python3 scripts/conformance/fstests/classify.py \
             --selected-file conformance/fstests/selected.txt \
             --result-xml build/fstests-slice-full/raw/results/result.xml \
             --result-dir build/fstests-slice-full/raw/results \
             --supported-file conformance/fstests/supported.txt \
-            --known-gaps-file conformance/slice/empty-gaps.tsv \
-            --known-gap-evidence-dir build/fstests-slice-full/empty-fail-evidence \
+            --known-gaps-file conformance/slice/known-gaps.tsv \
+            --known-gap-evidence-dir conformance/slice/fail-evidence \
             --deferred-file conformance/fstests/deferred-ci.tsv \
             --output-dir build/fstests-slice-full \
             --swordfs-commit "$(git rev-parse HEAD)" \

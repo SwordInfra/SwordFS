@@ -72,3 +72,96 @@ reason to auto-promote COW's historical failure classifications to Slice.
 - Formal GitHub CI on an explicitly labeled Draft PR is the only real
   FUSE/Redis/MinIO/pinned-upstream execution authority.
 - Avoid adding native compile workloads to the local development server.
+
+## Stage A evidence review: Slice-only pinned compatibility baseline
+
+The exact first full Slice CI run **#40442989636**, commit
+`bb39c58f8c03f7dca8265b78320f6779195ab2a3`, on the pinned upstream
+`a370dcbed43563f0462801e889e0eceb93c7cfad` produced 615 actual XUnit
+results under `chunk_type=chunk_slice` from ten separately tagged shards.
+One shard aborted at `generic/346`, leaving 29 supported tests without XUnit.
+The 116 completed supported tests passed. Exactly one other selected test is
+pinned and deferred. None of these missing cases is converted into a gap.
+
+We **independently compared every one of the 499 Slice-observed FAIL/NOTRUN
+identities and normalized XUnit messages** against the prior FUSE test-model
+hypotheses before producing `conformance/slice/known-gaps.tsv`:
+
+| Root cause category | Actual Slice XUnit outcomes | Review basis |
+| --- | ---: | --- |
+| `upstream_not_applicable` | 403 | 42 grouped FUSE-protocol/hosted-block-test prerequisites and environment assumptions. Includes lack of local block device, local mkfs/quotas, reflink/dedupe probes, forced shutdown, physical extent layout, and nonlocal kernel facilities. These conditions are independent of volume Chunk implementation. |
+| `known_unsupported` | 87 | Reviewed 12 distinct common VFS/FUSE missing capabilities: fallocate modes, trusted xattrs, RENAME_WHITEOUT, inode flags, FUSE ACL kill-SGID, FUSE export handles, copy_file_range, labels, delegations, caching. Issue references (#255/#406) and implementation ownership remain independent of COW versus Slice. |
+| `environment` | 8 | Hosted test runner/core dump, logging device, scsi_debug and pinned toolchain prerequisites; not Slice data-plane failure evidence. |
+| `upstream_test_defect` | 1 | `generic/591` upstream splice accounting behavior: the independently observed Slice `.out.bad` is identical to the known upstream repro. |
+| **Total** | **499** | **482 NOTRUN, 17 FAIL** on the actual Slice data, no newly invented exclusions. |
+
+All **15 independently observed** `.out.bad`/`.mountfail` failures were
+canonicalized from the *Slice* raw shard artifacts, not copied from the COW
+checked-in files. Their canonical contents also independently matched the
+existing reference evidence byte-for-byte; two remaining FAIL cases are
+hosted SIGXFSZ core outcomes without a detailed XUnit evidence path. These
+are proposed documented baseline expectations for **the present FUSE model**,
+not evidence of Slice writeback correctness or a reason to excuse newly
+failing supported tests. Every entry, reason, issue and detailed output is
+checked by the same fail-closed strict classifier as primary COW CI.
+
+Once the Slice-specific manifest and FAIL evidence are used, **the original
+incomplete first run reclassifies from 529 blockers to exactly 30
+`INFRASTRUCTURE` blockers** (one aggregate harness status plus 29 missing
+supported cases). The number of passing supported tests stays **116/145**,
+not 145/145. There are no mismatched expected results, messages, or detailed
+evidence. This offline replay is an observation-classification test, **not**
+completion of the required full Slice fstests parity.
+
+**Provenance:** GitHub Actions run #40442989636; immutable `slice-fstests-full`
+classification and ten `slice-fstests-full-*` raw artifacts. For this
+snapshot `conformance/slice/known-gaps.tsv` canonical SHA-256 is
+`18fe2af3d485a65f1a6d453b98924702caa72b649cca2389e7865ab74ea8481a`.
+Future runs revalidate exact test outcomes and *detailed failure bytes*, rather
+than accepting a broad `FAIL`/`NOTRUN` category or a generic skip waiver.
+Reviewers should explicitly check the non-FUSE-specific gap rationale before
+promoting the proposed manifest to authoritative primary-CI status.
+
+## Stage B cutover design (prepared, not activated)
+
+A single cohesive final change should **replace the primary CI test mechanism**
+only after #515 has merged and its post-merge `main` CI is green, and a clean
+10-shard *Slice* run has proven all 145 existing COW-supported tests PASS,
+strict slice-specific known gaps matched, zero missing results, and no
+unexpected internal writeback, FUSE unmount, or artifact identity failure.
+
+1. **FUSE E2E:** in required Release `e2e-test`, explicitly set
+   `SWORDFS_E2E_CHUNK_TYPE=chunk_slice` (including the intentional-failure
+   diagnostic environment), and pin format evidence to Slice. Retain the
+   independent Slice Debug unit/E2E correctness runs where they add failure
+   coverage; replace, do not permanently double, the standard main E2E
+   matrix. Preserve dedicated `tests/unittests/chunk/cow/` and a bounded
+   mounted COW-format smoke job to detect mechanism-specific regressions.
+2. **pjdfstest:** on the required `pjdfstest-conformance` runner explicitly
+   set `SWORDFS_CONFORMANCE_CHUNK_TYPE=chunk_slice`; preserve complete pinned
+   upstream assertion population and all existing strict `supported.txt`
+   expectations. Qualify `result.json` environment and published metadata by
+   the actual Slice volume type. COW-specific tests remain separate.
+3. **fstests:** run the existing ten-shard deterministic complete pinned plan
+   as the required primary Slice CI instead of launching two full matrices;
+   use `conformance/slice/known-gaps.tsv` and checked-in Slice-only FAIL
+   evidence. Preserve all strict previous supported-count and pinned
+   selected-set checks. Retain a bounded COW regression, not a second
+   full COW matrix. It must be impossible for the aggregator to combine
+   different mechanism outputs or to treat missing TEST/SCRATCH logs as pass.
+4. **Status publishing:** keep old COW status/history artifacts distinguishable
+   from the new authoritative Slice results. Explicitly tag both
+   `latest.json`/`history.json` and Markdown with `chunk_type`, with
+   mechanism-qualified history grouping or a fresh Slice-specific status
+   branch; never render COW historical supported percentages as a continuous
+   Slice trend. Update README compatibility links and any status consumers
+   together in the cutover PR. A failed, incomplete or misidentified primary
+   Slice matrix must fail closed and publish failure evidence, not a success
+   status inferred from XUnit PASS alone.
+5. **Promotion gates:** Debug/Release, coverage, pin-identity checks, complete
+   genuine Slice full fstests CI, targeted COW regression, independent review,
+   squash merge, and post-merge main CI. `swordfs format` production default
+   **stays COW** until the distinct #275 activation criteria are met.
+
+No Stage B job defaults, publishers or README links should change on the
+Stage A discovery-only Draft PR before the strict parity gate is met.
