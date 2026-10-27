@@ -12,6 +12,8 @@ FSTESTS_PATCH="${PROJECT_DIR}/${FSTESTS_PATCH_RELATIVE}"
 FSTESTS_PATCH_SHA256="$(sha256sum "${FSTESTS_PATCH}" | awk '{print $1}')"
 # shellcheck source=scripts/testing/minio-test.sh
 source "${PROJECT_DIR}/scripts/testing/minio-test.sh"
+# shellcheck source=scripts/conformance/chunk-type.sh
+source "${PROJECT_DIR}/scripts/conformance/chunk-type.sh"
 MOUNT_HELPER_SOURCE="${SCRIPT_DIR}/mount-helper.sh"
 MOUNT_HELPER_TARGET="/sbin/mount.fuse.swordfs"
 XUNIT_MERGER="${SCRIPT_DIR}/xunit_merge.py"
@@ -324,6 +326,7 @@ pathlib.Path("${OUTPUT_DIR}/environment.json").write_text(
             "fstests_test_timeout": "${FSTESTS_TEST_TIMEOUT}",
             "liburing_commit": "${LIBURING_COMMIT}",
             "shard": "${SHARD_NAME}",
+            "chunk_type": "${CONFORMANCE_CHUNK_TYPE}",
         },
         indent=2,
         sort_keys=True,
@@ -512,7 +515,8 @@ format_volume() {
     --volume "${volume}" \
     --meta "${METADATA_URL}" \
     --bucket "${bucket_url}" \
-    --enable-posix-acl
+    --enable-posix-acl \
+    "${CONFORMANCE_FORMAT_CHUNK_ARGS[@]}"
 }
 
 echo "=== Formatting fresh SwordFS fstests volumes ==="

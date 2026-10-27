@@ -258,6 +258,15 @@ mount: semantic failure text
             normalized,
         )
 
+    def test_slice_smoke_with_no_known_gaps_requires_separate_empty_evidence(self) -> None:
+        # COW historical failures are not eligible Slice smoke evidence.
+        gaps = CLASSIFY.load_gaps(ROOT / "conformance/slice/empty-gaps.tsv")
+        self.assertEqual({}, gaps)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            self.assertEqual({}, CLASSIFY.load_expected_evidence(pathlib.Path(tmp_dir), gaps))
+        with self.assertRaisesRegex(CLASSIFY.BaselineError, "orphaned checked-in FAIL evidence"):
+            CLASSIFY.load_expected_evidence(ROOT / "conformance/fstests/fail-evidence", gaps)
+
     def test_checked_in_fail_evidence_inventory_matches_baseline(self) -> None:
         gaps = CLASSIFY.load_gaps(ROOT / "conformance/fstests/known-gaps.tsv")
 
