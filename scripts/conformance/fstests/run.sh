@@ -254,17 +254,6 @@ if [[ ! -x "${SWORDFS_BIN}" ]]; then
   echo "ERROR: SwordFS binary is not executable: ${SWORDFS_BIN}" >&2
   exit 2
 fi
-# Opt-in #515 Slice publication comparison. Explicitly transport the selected
-# mode through fstests' privileged mount helper, not through inherited env.
-SWORDFS_SLICE_RMW_STRATEGY="${SWORDFS_SLICE_RMW_STRATEGY:-sparse}"
-case "${SWORDFS_SLICE_RMW_STRATEGY}" in
-  sparse|legacy|fixed-1m|span-1m) ;;
-  *) echo "ERROR: invalid Slice RMW experiment strategy: ${SWORDFS_SLICE_RMW_STRATEGY}" >&2; exit 2 ;;
-esac
-if [[ "${SWORDFS_SLICE_RMW_STRATEGY}" != sparse && "${SWORDFS_CONFORMANCE_CHUNK_TYPE:-}" != chunk_slice ]]; then
-  echo "ERROR: Slice publication experiment requires chunk_slice" >&2
-  exit 2
-fi
 if docker compose version >/dev/null 2>&1; then
   DOCKER_COMPOSE=(docker compose)
 else
@@ -338,7 +327,6 @@ pathlib.Path("${OUTPUT_DIR}/environment.json").write_text(
             "liburing_commit": "${LIBURING_COMMIT}",
             "shard": "${SHARD_NAME}",
             "chunk_type": "${CONFORMANCE_CHUNK_TYPE}",
-            "slice_rmw_strategy": "${SWORDFS_SLICE_RMW_STRATEGY}",
         },
         indent=2,
         sort_keys=True,
@@ -550,8 +538,6 @@ write_mount_config() {
   printf 'FSTESTS_MINIO_ROOT_USER=%q\n' "${MINIO_ROOT_USER}" >>"${MOUNT_CONFIG}"
   printf 'FSTESTS_MINIO_ROOT_PASSWORD=%q\n' "${MINIO_ROOT_PASSWORD}" >>"${MOUNT_CONFIG}"
   printf 'FSTESTS_LOG_DIR=%q\n' "${OUTPUT_DIR}" >>"${MOUNT_CONFIG}"
-  printf 'FSTESTS_SLICE_RMW_STRATEGY=%q\n' "${SWORDFS_SLICE_RMW_STRATEGY}" >>"${MOUNT_CONFIG}"
-  printf 'FSTESTS_IO_TIMING=%q\n' "${FSTESTS_TRACE_GENERIC346:-0}" >>"${MOUNT_CONFIG}"
   chmod 600 "${MOUNT_CONFIG}"
 }
 write_mount_config

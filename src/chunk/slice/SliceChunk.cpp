@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -41,11 +40,6 @@ struct SliceChunk::FrozenSlice {
   // Prepared window candidates are never regrouped with newer dirty ranges.
   bool window_group = false;
   std::optional<SliceID> prepared_id;
-  // Multiple disjoint logical records may reference one compact immutable
-  // object. The logical gaps remain untouched; each record uses its own
-  // physical offset into this shared uploaded object.
-  uint32_t prepared_size = 0;
-  uint32_t prepared_off = 0;
   // An existing-index append is a separate authority from FileMetadata
   // finalization. Retain its identity across a definite metadata conflict
   // so a normal retry does not blindly RPUSHX a duplicate.
@@ -132,25 +126,6 @@ void ClipRanges(DirtyRanges &ranges, size_t size) {
 
 }  // namespace
 
-SliceChunk::RmwStrategy SliceChunk::RmwStrategyFromEnvironment() {
-  const char *strategy = std::getenv("SWORDFS_SLICE_RMW_STRATEGY");
-  if (strategy == nullptr || std::strcmp(strategy, "sparse") == 0) {
-    return RmwStrategy::kSparse;
-  }
-  if (std::strcmp(strategy, "legacy") == 0) {
-    return RmwStrategy::kLegacy;
-  }
-  if (std::strcmp(strategy, "fixed-1m") == 0) {
-    return RmwStrategy::kFixed1MiB;
-  }
-  if (std::strcmp(strategy, "span-1m") == 0) {
-    return RmwStrategy::kSpan1MiB;
-  }
-  // An unknown experiment name must not silently change the proven sparse
-  // publication path. Opting in requires one of the exact documented values.
-  return RmwStrategy::kSparse;
-}
-
 SliceChunk::SliceChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t chunk_size,
                        std::shared_ptr<metadata::slice::SliceChunkMetadata> slice_metadata, metadata::IMetaEngine *meta,
                        storage::IDataEngine *data)
@@ -159,8 +134,7 @@ SliceChunk::SliceChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t
       chunk_size_(chunk_size),
       slice_metadata_(std::move(slice_metadata)),
       meta_(meta),
-      data_(data),
-      rmw_strategy_(RmwStrategyFromEnvironment()) {
+      data_(data) {
 }
 
 utils::Status SliceChunk::Write(size_t offset, const folly::IOBuf &data) {
@@ -500,10 +474,6 @@ void SliceChunk::FreezeActiveLocked() {
 }
 
 utils::Status SliceChunk::PrepareWindowCandidates(std::vector<std::shared_ptr<FrozenSlice>> *candidates) {
-  if (rmw_strategy_ == RmwStrategy::kSparse || rmw_strategy_ == RmwStrategy::kLegacy) {
-    return utils::Status::OK();
-  }
-
   // Lengths can be clipped by TruncateLocal while committed reads are in
   // flight. Snapshot every mutable length under the lock; payload storage is
   // immutable after FreezeActiveLocked and remains owned by the candidate.
@@ -517,6 +487,7 @@ utils::Status SliceChunk::PrepareWindowCandidates(std::vector<std::shared_ptr<Fr
     size_t record_end = 0;
     size_t dirty_end = 0;
     size_t insert_after = 0;
+    size_t interval_count = 0;
     std::shared_ptr<FrozenSlice> candidate;
   };
 
@@ -545,27 +516,43 @@ utils::Status SliceChunk::PrepareWindowCandidates(std::vector<std::shared_ptr<Fr
         // its bytes, but the prepared candidate itself is never abandoned.
         continue;
       }
-      sources.insert(view.candidate.get());
-      size_t cursor = view.candidate->pos;
-      const size_t write_end = cursor + view.visible_len;
-      while (cursor < write_end) {
-        const size_t window_base = (cursor / kRmwWindowBytes) * kRmwWindowBytes;
-        const size_t portion_end = std::min(write_end, window_base + kRmwWindowBytes);
-        auto [it, inserted] = groups.try_emplace(window_base);
-        auto &group = it->second;
-        if (inserted) {
-          group.pos = rmw_strategy_ == RmwStrategy::kFixed1MiB ? window_base : cursor;
-          group.record_end = rmw_strategy_ == RmwStrategy::kFixed1MiB
-                                 ? std::min(chunk_size_, window_base + kRmwWindowBytes)
-                                 : portion_end;
-          group.insert_after = i;
-        } else if (rmw_strategy_ == RmwStrategy::kSpan1MiB) {
-          group.pos = std::min(group.pos, cursor);
-          group.record_end = std::max(group.record_end, portion_end);
-        }
-        group.dirty_end = std::max(group.dirty_end, portion_end);
-        group.insert_after = std::max(group.insert_after, i);
-        cursor = portion_end;
+      // Never split a dense contiguous Slice into artificial 1 MiB objects;
+      // only small dirty ranges entirely inside a window may be coalesced.
+      const size_t window_base = (view.candidate->pos / kRmwWindowBytes) * kRmwWindowBytes;
+      if (view.visible_len >= kRmwWindowBytes ||
+          view.visible_len > window_base + kRmwWindowBytes - view.candidate->pos) {
+        continue;
+      }
+      const size_t cursor = view.candidate->pos;
+      const size_t portion_end = cursor + view.visible_len;
+      auto [it, inserted] = groups.try_emplace(window_base);
+      auto &group = it->second;
+      if (inserted) {
+        group.pos = cursor;
+        group.record_end = portion_end;
+        group.insert_after = i;
+      } else {
+        group.pos = std::min(group.pos, cursor);
+        group.record_end = std::max(group.record_end, portion_end);
+      }
+      ++group.interval_count;
+      group.dirty_end = std::max(group.dirty_end, portion_end);
+      group.insert_after = std::max(group.insert_after, i);
+    }
+    // One contiguous interval is already a valid immutable Slice, with no
+    // existing gap to hydrate. Leave it untouched: avoid unnecessary S3 GET
+    // or data amplification for isolated small writes.
+    std::erase_if(groups, [](const auto &entry) { return entry.second.interval_count < 2; });
+    for (const auto &view : pending) {
+      if (view.visible_len == 0 || view.candidate->window_group || view.candidate->prepared_id.has_value() ||
+          view.candidate->created_chunk_id.has_value() || view.candidate->recorded_chunk_id.has_value() ||
+          view.candidate->uncertain_record_chunk_id.has_value()) {
+        continue;
+      }
+      const size_t window_base = (view.candidate->pos / kRmwWindowBytes) * kRmwWindowBytes;
+      if (view.visible_len < kRmwWindowBytes &&
+          view.visible_len <= window_base + kRmwWindowBytes - view.candidate->pos && groups.contains(window_base)) {
+        sources.insert(view.candidate.get());
       }
     }
     if (sources.empty()) {
@@ -580,9 +567,6 @@ utils::Status SliceChunk::PrepareWindowCandidates(std::vector<std::shared_ptr<Fr
     }
     for (const size_t base : group_order) {
       auto &group = groups.at(base);
-      if (rmw_strategy_ == RmwStrategy::kSpan1MiB) {
-        group.dirty_end = std::max(group.dirty_end, group.record_end);
-      }
       std::string payload;
       auto status = ReadCommittedRange(group.pos, group.record_end - group.pos, &payload);
       if (!status.ok()) {
@@ -684,9 +668,8 @@ utils::Status SliceChunk::Flush() {
     return status;
   };
 
-  // Opt-in 1MiB experiments materialize committed bytes before the normal
-  // physical-preparation/publication sequence. The default sparse path is
-  // left byte-for-byte unchanged.
+  // Consolidate fragmented dirty bytes inside a 1 MiB cache window before
+  // normal immutable Slice publication. This is not another Chunk format.
   auto status = PrepareWindowCandidates(&candidates);
   if (!status.ok()) {
     return finish(status);
@@ -711,38 +694,17 @@ utils::Status SliceChunk::Flush() {
     std::erase_if(frozen_, [&](const auto &candidate) { return committed_addresses.contains(candidate.get()); });
     RebuildDirtyLocked();
   };
-  // Pack sparse, noncontiguous intervals into bounded immutable objects. A
-  // page-strided writer can otherwise create one S3 PUT for every 8-byte
-  // interval, which dominates real generic/346 mmap/pwrite stress. Keep
-  // separate SliceRecords for each logical interval: zero-filling the gaps
-  // would incorrectly overwrite already committed unrelated data. The
-  // opt-in legacy experiment deliberately uploads one object per candidate,
-  // reproducing the original pre-packing Slice publication strategy while
-  // retaining the shared metadata read optimizations in this build.
-  struct PackedMember {
-    std::shared_ptr<FrozenSlice> candidate;
-    uint32_t offset;
-  };
-  for (size_t i = 0; i < candidates.size();) {
-    std::string packed;
-    std::vector<PackedMember> members;
-    for (; i < candidates.size(); ++i) {
-      if (rmw_strategy_ == RmwStrategy::kLegacy && !members.empty()) {
-        break;
-      }
-      const auto &candidate = candidates[i];
+  // One immutable object per prepared Slice. There is no alternative sparse
+  // packing format and no experimental publication strategy in production.
+  for (const auto &candidate : candidates) {
+    {
       std::shared_lock<utils::FiberRWMutex> lock(mutex_);
       if (candidate->visible_len == 0 || candidate->prepared_id.has_value()) {
         continue;
       }
-      if (!packed.empty() && candidate->payload.size() > kMaxActiveSliceBytes - packed.size()) {
-        break;
-      }
-      members.push_back({candidate, static_cast<uint32_t>(packed.size())});
-      packed.append(candidate->payload);
     }
-    if (members.empty()) {
-      continue;
+    if (candidate->payload.empty() || candidate->payload.size() > std::numeric_limits<uint32_t>::max()) {
+      return finish(utils::Status::InvalidArgument("invalid prepared Slice payload"));
     }
     SliceID id;
     auto status = slice_metadata_->AllocateSliceID(&id);
@@ -752,21 +714,13 @@ utils::Status SliceChunk::Flush() {
     if (id == SliceID() || id.Value() > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
       return finish(utils::Status::Malformed("Slice allocator returned an invalid physical identity"));
     }
-    // A failed or uncertain Put never exposes an ID to the pending records.
-    // A subsequent Flush creates a fresh identity, not an unsafe overwrite.
-    status = data_->Put(SliceObjectKey(id), folly::IOBuf::copyBuffer(packed));
+    status = data_->Put(SliceObjectKey(id), folly::IOBuf::copyBuffer(candidate->payload));
     if (!status.ok()) {
       return finish(status);
     }
     std::lock_guard<utils::FiberRWMutex> lock(mutex_);
-    for (const auto &member : members) {
-      // TruncateLocal can clip a candidate while its physical Put runs.
-      // Preserve only visible intervals for the later metadata publication.
-      if (member.candidate->visible_len != 0) {
-        member.candidate->prepared_id = id;
-        member.candidate->prepared_size = static_cast<uint32_t>(packed.size());
-        member.candidate->prepared_off = member.offset;
-      }
+    if (candidate->visible_len != 0) {
+      candidate->prepared_id = id;
     }
   }
   for (const auto &candidate : candidates) {
@@ -806,8 +760,9 @@ utils::Status SliceChunk::PublishFrozen(const std::shared_ptr<FrozenSlice> &cand
     if (!candidate->prepared_id.has_value()) {
       return utils::Status::Internal("Slice physical object is not prepared");
     }
-    record = SliceRecord{static_cast<uint32_t>(candidate->pos), *candidate->prepared_id, candidate->prepared_size,
-                         candidate->prepared_off, static_cast<uint32_t>(candidate->visible_len)};
+    record =
+        SliceRecord{static_cast<uint32_t>(candidate->pos), *candidate->prepared_id,
+                    static_cast<uint32_t>(candidate->payload.size()), 0, static_cast<uint32_t>(candidate->visible_len)};
     eof_len = std::min(candidate->eof_len, candidate->visible_len);
   }
   auto status = ValidateRecord(record, static_cast<uint32_t>(chunk_size_));

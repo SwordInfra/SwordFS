@@ -35,7 +35,6 @@
 #include "metadata/redis/RedisMetaImpl.hpp"
 #include "metadata/redis/RedisOwnerLease.hpp"
 #include "utils/BlockingExecutor.hpp"
-#include "utils/ExperimentTiming.hpp"
 #include "utils/Fuse.hpp"
 #include "utils/Logging.hpp"
 #include "vfs/InodeHandle.hpp"
@@ -319,9 +318,6 @@ int RunMount() {
   swordfs::vfs::OrphanReclaimer::Instance().Stop();
   swordfs::volume::VolumeImpl::Instance().StopRuntimeServices();
   swordfs::volume::VolumeImpl::Instance().Shutdown();
-  if (swordfs::utils::ExperimentTiming::Instance().Enabled()) {
-    SWORDFS_LOG_INFO << "SWORDFS_IO_TIMING " << swordfs::utils::ExperimentTiming::Instance().SnapshotJson();
-  }
   return ret;
 }
 

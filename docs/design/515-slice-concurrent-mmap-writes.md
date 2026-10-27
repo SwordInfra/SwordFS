@@ -48,42 +48,39 @@ and requires actual `chunk_type` metadata plus real XUnit identity and PASS
 for a successful run. Failure stays visible and blocks the opt-in job;
 regular required COW and other CI checks remain unchanged.
 
-## Status
+## Unified Slice with 1 MiB dirty-window cache
 
-First full-Slice RED evidence exists in #512 already. Focused independent RED
-and precise fix are pending; do not claim resolution.
+There is **one** Slice Chunk mechanism. Its 64 MiB logical Chunk, immutable
+S3 Slice objects, ordered Redis SliceRecord history, LWW publication, and
+EOF/truncate authority are unchanged. The 1 MiB Window is **only a client
+dirty-write cache coalescing boundary**: disjoint small writes accepted in
+the same window can form one contiguous Slice after published bytes in their
+gaps have been read and overlaid with the accepted dirty bytes. The
+contiguous Slice is published through the existing ordinary record path.
 
-## Four-arm 1 MiB Window RMW experiment (opt-in only)
+For one contiguous write, including a dense multi-MiB write, use an ordinary
+Slice without artificially splitting it at Window boundaries. A single
+small interval similarly does not need a 1 MiB S3 hydration. Do not extend
+EOF to the end of a cache window: only accepted dirty bytes can do so.
 
-The experiment runs **the unmodified pinned** `generic/346` four times with
-freshly formatted Redis/MinIO volumes on the same runner and verified Release
-binary. The arms are: (A) unchanged COW, (B) original per-interval Slice
-physical upload and SliceRecord publication (`legacy`), (C) fixed full 1 MiB window read-modify-write, and (D) 1 MiB window
-RMW from first to last dirty byte, preserving intermediate existing bytes.
-The `legacy` arm disables both the newer sparse physical packing and RMW,
-while sharing the improved Redis nontransactional read path in the exact same
-Release binary. The strategy is explicit and recorded in `environment.json`;
-`sparse` remains the production default and is not run as a comparison arm.
-All four real XUnit results and both mounted FUSE
-daemon logs remain under a strict fail-closed writeback-error validator.
+**No alternate implementation survives:** remove all opt-in Legacy, packed
+Sparse, fixed-window, and span-window strategy selection in the final source
+and CI. The earlier four-arm benchmark is historical research, not a runtime
+configuration or new metadata model. The single Slice mode is now the target
+of normal tests and the strict unchanged `generic/346` COW/Slice CI comparison.
 
-**Experiment-only semantics:** Window-level last successful publication wins;
-an earlier read-modify-write snapshot may overwrite disjoint writes published
-by another mount in the same window. The owner explicitly accepts this limited
-LWW model for the controlled experiment; the result must not be represented as
-multi-mount per-byte merge correctness. Never silently convert confirmed
-metadata failure or ambiguous Redis result into success. No production-default
-change, CI timeout increase per case, or waiver of COW supported tests.
+Multi-mount concurrent overlapping windows follow the agreed LWW publication
+model. Do not promise preservation of concurrent disjoint byte updates when
+a stale full/covering-window image is published by another mount. An
+uncertain Redis append or failed S3 PUT still must fail closed and retain
+dirty bytes for the supported retry protocol. Per-window size is not a new
+durable identifier, lock, or metadata schema.
 
-**Measurements:** Collect exact `generic/346` phase durations, Redis
-`INFO commandstats` deltas excluding setup, aggregate Redis metadata latency,
-S3 Get/Put latency and bytes, Redis WATCH conflicts/transaction attempts and
-retry/backoff time, FUSE daemon logs, and MinIO retained volume utilization.
-Operation latencies accumulate across concurrently executing operations and
-may exceed elapsed wall time. Compare metadata/data service-time shares, but
-**do not claim they sum to 100% of wall time**. Retained S3 bytes do not
-measure read/write traffic, so actual Get/Put counters are required. Crucially,
-an upstream XUnit PASS with internal Flush/RELEASE errors is a failed arm.
+The experiment-only S3/Redis timing counters were removed: their shutdown
+snapshots missed the busy daemon and incorrectly reported zero S3 time.
+CI retains Redis `INFO commandstats` deltas, authoritative testcase phase
+times, and raw FUSE daemon logs. Do not infer cumulative S3/Redis service
+time percentages from unavailable instrumentation.
 
 ### Read-only transaction amplification diagnosis and controlled change
 

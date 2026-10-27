@@ -40,16 +40,6 @@ class SliceChunk final : public Chunk {
   bool HasPendingWrites() const override;
 
  private:
-  // Default sparse publication keeps the existing small-interval behavior.
-  // The 1MiB modes are opt-in experiments that materialize committed bytes
-  // inside a dirty window and publish one contiguous logical record instead.
-  enum class RmwStrategy {
-    kSparse,
-    kLegacy,
-    kFixed1MiB,
-    kSpan1MiB,
-  };
-
   // An unpublished upload intent; keep its implementation private to the
   // translation unit while the Chunk retains stable shared ownership.
   struct FrozenSlice;
@@ -61,8 +51,6 @@ class SliceChunk final : public Chunk {
     std::optional<metadata::ChunkID> chunk_id;
     size_t record_count;
   };
-
-  static RmwStrategy RmwStrategyFromEnvironment();
 
   void CaptureBoundary(size_t visible_prefix);
   void FreezeActiveLocked();
@@ -81,7 +69,6 @@ class SliceChunk final : public Chunk {
   std::shared_ptr<metadata::slice::SliceChunkMetadata> slice_metadata_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
-  RmwStrategy rmw_strategy_;
   mutable utils::FiberRWMutex mutex_;
   // Non-overlapping sorted dirty intervals. Overwrites replace old portions;
   // segments outside the modified range preserve accepted local bytes.
