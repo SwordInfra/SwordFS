@@ -68,6 +68,8 @@ jobs:
 
       - name: Verify retry artifact provenance wiring
         run: python3 tests/tooling/test_ci_artifact_attempt.py
+      - name: Test opt-in exact generic/346 syscall phase tracing
+        run: python3 tests/tooling/test_fstests_trace_generic346.py
 
       - name: Test targeted FUSE writeback and XUnit gate
         run: python3 tests/tooling/test_fstests_verify_case.py
@@ -794,7 +796,7 @@ jobs:
           set +e
           sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
             SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
-            SWORDFS_CONFORMANCE_CHUNK_TYPE=cow \
+            SWORDFS_CONFORMANCE_CHUNK_TYPE=cow FSTESTS_TRACE_GENERIC346=1 \
             FSTESTS_PREBUILT_TOOLS=1 FSTESTS_TOOL_ROOT=/opt/swordfs-fstests-tools \
             bash scripts/conformance/fstests/run.sh \
               --tests-file "${{ github.workspace }}/conformance/slice/fstests-generic346.txt" \
@@ -813,7 +815,7 @@ jobs:
           set +e
           sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
             SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
-            SWORDFS_CONFORMANCE_CHUNK_TYPE=chunk_slice \
+            SWORDFS_CONFORMANCE_CHUNK_TYPE=chunk_slice FSTESTS_TRACE_GENERIC346=1 \
             FSTESTS_PREBUILT_TOOLS=1 FSTESTS_TOOL_ROOT=/opt/swordfs-fstests-tools \
             bash scripts/conformance/fstests/run.sh \
               --tests-file "${{ github.workspace }}/conformance/slice/fstests-generic346.txt" \

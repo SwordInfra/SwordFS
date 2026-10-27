@@ -1345,9 +1345,11 @@ TEST_F(SliceChunkTest, FailedOrAmbiguousPutKeepsDirtyBytesAndRetriesWithFreshSli
     ASSERT_TRUE(chunk->Read(0, 8, before_retry.get()).ok());
     EXPECT_EQ(std::string(reinterpret_cast<const char *>(before_retry->data()), 8), std::string("\0\0WX12\0\0", 8));
     EXPECT_TRUE(chunk->Flush().ok());
-    ASSERT_GE(data_->uploaded_keys.size(), 3U);
-    EXPECT_EQ(data_->uploaded_keys[data_->uploaded_keys.size() - 2], "slice/1001");
-    EXPECT_EQ(data_->uploaded_keys.back(), "slice/1002");
+    ASSERT_EQ(data_->uploaded_keys.size(), 2U)
+        << "retry uses one new immutable key for both retained pending generations";
+    EXPECT_EQ(data_->uploaded_keys[0], "slice/1000") << "ambiguous initial PUT must never be overwritten in place";
+    EXPECT_EQ(data_->uploaded_keys[1], "slice/1001")
+        << "the retry batches disjoint pending records into one fresh physical object";
     EXPECT_FALSE(chunk->HasPendingWrites());
   });
 }

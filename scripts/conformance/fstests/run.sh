@@ -415,6 +415,9 @@ capture_backend_diagnostics() {
 
 cleanup() {
   set +e
+  if [[ -n "${TRACE346_ORIGINAL:-}" && -f "${TRACE346_ORIGINAL}" ]]; then
+    cp "${TRACE346_ORIGINAL}" "${FSTESTS_DIR}/tests/generic/346"
+  fi
   capture_diagnostics
   capture_backend_diagnostics
   for mountpoint in "${TEST_DIR}" "${SCRATCH_MNT}"; do
@@ -638,6 +641,21 @@ fi
 
 echo "=== Running fstests shard ${SHARD_NAME} with per-test isolation ==="
 mkdir -p "${RUN_RESULTS}" "${XUNIT_PARTS}"
+if [[ "${FSTESTS_TRACE_GENERIC346:-0}" == 1 ]]; then
+  # Investigation only; do not modify any other pinned upstream tests or
+  # permanent artifact. The original is restored by the EXIT trap, even if
+  # generic/346 times out. The same unmodified holetest binary runs all 9
+  # subcases, while strace captures only low-volume lifecycle syscall times.
+  [[ "$(cat "${OUTPUT_DIR}/planned-tests.txt")" == generic/346 ]] || {
+    echo 'ERROR: generic/346 trace can only run the single exact pinned testcase' >&2
+    exit 2
+  }
+  command -v strace >/dev/null || { echo 'ERROR: generic/346 trace requires strace' >&2; exit 2; }
+  TRACE346_ORIGINAL="${RAW_DIR}/generic346.original"
+  python3 "${SCRIPT_DIR}/trace_generic346.py" \
+    --script "${FSTESTS_DIR}/tests/generic/346" \
+    --original "${TRACE346_ORIGINAL}" --trace-dir "${RAW_DIR}"
+fi
 
 mark_isolation_failure() {
   local test="$1"
