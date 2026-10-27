@@ -1,55 +1,13 @@
 # SwordFS POSIX conformance status
 
-Latest run: **PASS**
+Latest main conformance run: **INFRASTRUCTURE FAILED**
 
-| Metric | Value |
-| --- | ---: |
-| Overall conformance support | 100.00% |
-| Supported regression pass | 100.00% |
-| Classified rate | 100.00% |
-| Supported assertion count | 8770 |
-| Blocking result count | 0 |
+pjdfstest-conformance job result: failure
 
-## Classification counts
+CI run: https://github.com/SwordInfra/SwordFS/actions/runs/40432556177
 
-| Classification | Count |
-| --- | ---: |
-| PASS | 8770 |
-| UPSTREAM_NOT_APPLICABLE | 28 |
-
-## Per-category support
-
-| Category | PASS | Applicable | Support |
-| --- | ---: | ---: | ---: |
-| chflags | 14 | 14 | 100.00% |
-| chmod | 327 | 327 | 100.00% |
-| chown | 1470 | 1470 | 100.00% |
-| ftruncate | 89 | 89 | 100.00% |
-| granular | 7 | 7 | 100.00% |
-| link | 359 | 359 | 100.00% |
-| mkdir | 118 | 118 | 100.00% |
-| mkfifo | 120 | 120 | 100.00% |
-| mknod | 186 | 186 | 100.00% |
-| open | 337 | 337 | 100.00% |
-| posix_fallocate | 1 | 1 | 100.00% |
-| rename | 4857 | 4857 | 100.00% |
-| rmdir | 145 | 145 | 100.00% |
-| symlink | 95 | 95 | 100.00% |
-| truncate | 84 | 84 | 100.00% |
-| unlink | 439 | 439 | 100.00% |
-| utimensat | 122 | 122 | 100.00% |
-
-## Baseline metadata
-
-- SwordFS commit: `9fce9cd353d7ad4b81aea66f35718d26b85c5b99`
-- pjdfstest commit: `85a8aea9e685999ef0540392fd80535f873d7ff7`
-- kernel: `6.17.0-1022-azure`
-- libfuse: `fusermount3 version: 3.18.2`
-- os: `Linux-6.17.0-1022-azure-x86_64-with-glibc2.43`
-- runner: `Linux`
-
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/40345296356
-Recorded at: 2026-10-26T15:10:28+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/40432556177
+Recorded at: 2026-10-27T01:31:02+00:00
 
 ## Historical main-branch trend
 

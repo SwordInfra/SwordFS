@@ -12588,5 +12588,19 @@
     "supported_set_size": 8770,
     "swordfs_commit": "9fce9cd353d7ad4b81aea66f35718d26b85c5b99",
     "timestamp": "2026-10-26T15:10:28+00:00"
+  },
+  {
+    "blocking_count": null,
+    "by_category": {},
+    "classified_rate_percent": null,
+    "counts": {},
+    "overall_support_percent": null,
+    "pjdfstest_commit": "unknown",
+    "run_url": "https://github.com/SwordInfra/SwordFS/actions/runs/40432556177",
+    "status": "INFRASTRUCTURE_FAILED",
+    "supported_regression_pass_percent": null,
+    "supported_set_size": 0,
+    "swordfs_commit": "c5ec23e8569b8b9bdc017edbdbba561b6b647051",
+    "timestamp": "2026-10-27T01:31:02+00:00"
   }
 ]
