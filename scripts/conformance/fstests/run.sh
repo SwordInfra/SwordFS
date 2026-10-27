@@ -254,15 +254,15 @@ if [[ ! -x "${SWORDFS_BIN}" ]]; then
   echo "ERROR: SwordFS binary is not executable: ${SWORDFS_BIN}" >&2
   exit 2
 fi
-# Opt-in #515 Slice window-RMW comparison. Explicitly transport the selected
+# Opt-in #515 Slice publication comparison. Explicitly transport the selected
 # mode through fstests' privileged mount helper, not through inherited env.
 SWORDFS_SLICE_RMW_STRATEGY="${SWORDFS_SLICE_RMW_STRATEGY:-sparse}"
 case "${SWORDFS_SLICE_RMW_STRATEGY}" in
-  sparse|fixed-1m|span-1m) ;;
+  sparse|legacy|fixed-1m|span-1m) ;;
   *) echo "ERROR: invalid Slice RMW experiment strategy: ${SWORDFS_SLICE_RMW_STRATEGY}" >&2; exit 2 ;;
 esac
 if [[ "${SWORDFS_SLICE_RMW_STRATEGY}" != sparse && "${SWORDFS_CONFORMANCE_CHUNK_TYPE:-}" != chunk_slice ]]; then
-  echo "ERROR: Slice RMW experiment requires chunk_slice" >&2
+  echo "ERROR: Slice publication experiment requires chunk_slice" >&2
   exit 2
 fi
 if docker compose version >/dev/null 2>&1; then

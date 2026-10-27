@@ -137,6 +137,9 @@ SliceChunk::RmwStrategy SliceChunk::RmwStrategyFromEnvironment() {
   if (strategy == nullptr || std::strcmp(strategy, "sparse") == 0) {
     return RmwStrategy::kSparse;
   }
+  if (std::strcmp(strategy, "legacy") == 0) {
+    return RmwStrategy::kLegacy;
+  }
   if (std::strcmp(strategy, "fixed-1m") == 0) {
     return RmwStrategy::kFixed1MiB;
   }
@@ -497,7 +500,7 @@ void SliceChunk::FreezeActiveLocked() {
 }
 
 utils::Status SliceChunk::PrepareWindowCandidates(std::vector<std::shared_ptr<FrozenSlice>> *candidates) {
-  if (rmw_strategy_ == RmwStrategy::kSparse) {
+  if (rmw_strategy_ == RmwStrategy::kSparse || rmw_strategy_ == RmwStrategy::kLegacy) {
     return utils::Status::OK();
   }
 
@@ -712,7 +715,10 @@ utils::Status SliceChunk::Flush() {
   // page-strided writer can otherwise create one S3 PUT for every 8-byte
   // interval, which dominates real generic/346 mmap/pwrite stress. Keep
   // separate SliceRecords for each logical interval: zero-filling the gaps
-  // would incorrectly overwrite already committed unrelated data.
+  // would incorrectly overwrite already committed unrelated data. The
+  // opt-in legacy experiment deliberately uploads one object per candidate,
+  // reproducing the original pre-packing Slice publication strategy while
+  // retaining the shared metadata read optimizations in this build.
   struct PackedMember {
     std::shared_ptr<FrozenSlice> candidate;
     uint32_t offset;
@@ -721,6 +727,9 @@ utils::Status SliceChunk::Flush() {
     std::string packed;
     std::vector<PackedMember> members;
     for (; i < candidates.size(); ++i) {
+      if (rmw_strategy_ == RmwStrategy::kLegacy && !members.empty()) {
+        break;
+      }
       const auto &candidate = candidates[i];
       std::shared_lock<utils::FiberRWMutex> lock(mutex_);
       if (candidate->visible_len == 0 || candidate->prepared_id.has_value()) {

@@ -40,7 +40,7 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True, type=pathlib.Path)
     parser.add_argument("--expected-chunk-type", required=True, choices=("cow", "chunk_slice"))
     parser.add_argument("--expected-test", required=True)
-    parser.add_argument("--expected-strategy", choices=("sparse", "fixed-1m", "span-1m"))
+    parser.add_argument("--expected-strategy", choices=("sparse", "legacy", "fixed-1m", "span-1m"))
     args = parser.parse_args()
     verify(args.output_dir, args.expected_chunk_type, args.expected_test, args.expected_strategy)
 

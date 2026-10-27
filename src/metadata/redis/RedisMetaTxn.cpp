@@ -908,45 +908,6 @@ utils::Status RedisMetaTxn::LookupAttachment(InodeID ino, ChunkIndex index, std:
   return status;
 }
 
-utils::Status RedisMetaTxn::ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out) {
-  if (out == nullptr) {
-    return utils::Status::InvalidArgument("file chunk snapshot output is null");
-  }
-  FileChunkSnapshot result;
-  auto status = LookupInode(ino, &result.inode);
-  if (!status.ok()) {
-    return status;
-  }
-  if (!result.inode.IsRegular()) {
-    return utils::Status::InvalidArgument("not a regular file");
-  }
-  status = LookupAttachment(ino, index, &result.chunk_id);
-  if (!status.ok()) {
-    return status;
-  }
-  ChunkSizeLayout eof_layout;
-  status = PlanChunkSizeLayout(result.inode.attr.size, chunk_size_, &eof_layout);
-  if (!status.ok()) {
-    return status;
-  }
-  if (eof_layout.boundary.has_value()) {
-    const auto &boundary = *eof_layout.boundary;
-    std::optional<ChunkID> boundary_id;
-    if (boundary.index == index) {
-      boundary_id = result.chunk_id;
-    } else {
-      status = LookupAttachment(ino, boundary.index, &boundary_id);
-      if (!status.ok()) {
-        return status;
-      }
-    }
-    result.eof_boundary = ChunkBoundarySnapshot{
-        .index = boundary.index, .chunk_id = boundary_id, .visible_prefix = boundary.visible_prefix};
-  }
-  *out = std::move(result);
-  return utils::Status::OK();
-}
-
 utils::Status RedisMetaTxn::ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out) {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("file mapping snapshot output is null");

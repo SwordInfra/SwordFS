@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1294,6 +1295,46 @@ TEST_F(SliceChunkTest, SparseSmallWritesSharePhysicalObjectWithoutShadowingGaps)
     }
     EXPECT_EQ(std::string(reinterpret_cast<const char *>(out->data()), 100), expected)
         << "packing sparse writes must not synthesize zero covers in untouched gaps";
+  });
+}
+
+// #515 controlled baseline: reproduce the original Slice architecture in
+// which each disconnected dirty interval has its own immutable S3 object and
+// its own SliceRecord. This must NOT silently use the newer physical packing.
+TEST_F(SliceChunkTest, LegacySliceUploadsEachDisjointIntervalIndependently) {
+  ScopedEnvironmentVariable strategy(kRmwStrategyEnv, "legacy");
+  RunInTestFiber([&] {
+    using swordfs::chunk::slice::SliceID;
+    const swordfs::metadata::ChunkID chunk_id(318);
+    Attach(0, chunk_id, std::string(100, 'X'), SliceID(918));
+    auto chunk = Open();
+    ASSERT_NE(chunk, nullptr);
+    const int old_puts = data_->put_calls;
+    for (size_t pos = 1; pos < 100; pos += 8) {
+      ASSERT_TRUE(chunk->Write(pos, Buf("ab")).ok());
+    }
+    ASSERT_TRUE(chunk->Flush().ok());
+    EXPECT_EQ(data_->put_calls, old_puts + 13) << "original Slice uploads each disconnected interval separately";
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(chunk_id, &records).ok());
+    ASSERT_EQ(records.size(), 14U);
+    std::set<uint64_t> physical_ids;
+    for (size_t i = 1; i < records.size(); ++i) {
+      physical_ids.insert(records[i].id.Value());
+      EXPECT_EQ(records[i].size, 2U);
+      EXPECT_EQ(records[i].off, 0U);
+      EXPECT_EQ(records[i].len, 2U);
+    }
+    EXPECT_EQ(physical_ids.size(), 13U) << "Legacy may not share physical SliceIDs";
+    auto cold = Open();
+    ASSERT_NE(cold, nullptr);
+    auto out = folly::IOBuf::create(100);
+    ASSERT_TRUE(cold->Read(0, 100, out.get()).ok());
+    std::string expected(100, 'X');
+    for (size_t pos = 1; pos < 100; pos += 8) {
+      expected.replace(pos, 2, "ab");
+    }
+    EXPECT_EQ(std::string(reinterpret_cast<const char *>(out->data()), 100), expected);
   });
 }
 

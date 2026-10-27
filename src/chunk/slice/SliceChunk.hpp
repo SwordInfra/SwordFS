@@ -45,6 +45,7 @@ class SliceChunk final : public Chunk {
   // inside a dirty window and publish one contiguous logical record instead.
   enum class RmwStrategy {
     kSparse,
+    kLegacy,
     kFixed1MiB,
     kSpan1MiB,
   };

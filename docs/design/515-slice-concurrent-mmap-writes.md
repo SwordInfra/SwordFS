@@ -57,11 +57,14 @@ and precise fix are pending; do not claim resolution.
 
 The experiment runs **the unmodified pinned** `generic/346` four times with
 freshly formatted Redis/MinIO volumes on the same runner and verified Release
-binary. The arms are: (A) unchanged COW, (B) current Slice sparse physical
-packing, (C) fixed full 1 MiB window read-modify-write, and (D) 1 MiB window
+binary. The arms are: (A) unchanged COW, (B) original per-interval Slice
+physical upload and SliceRecord publication (`legacy`), (C) fixed full 1 MiB window read-modify-write, and (D) 1 MiB window
 RMW from first to last dirty byte, preserving intermediate existing bytes.
-The strategy is explicit and recorded in `environment.json`; only `sparse`
-is the production default. All four real XUnit results and both mounted FUSE
+The `legacy` arm disables both the newer sparse physical packing and RMW,
+while sharing the improved Redis nontransactional read path in the exact same
+Release binary. The strategy is explicit and recorded in `environment.json`;
+`sparse` remains the production default and is not run as a comparison arm.
+All four real XUnit results and both mounted FUSE
 daemon logs remain under a strict fail-closed writeback-error validator.
 
 **Experiment-only semantics:** Window-level last successful publication wins;

@@ -698,8 +698,8 @@ jobs:
 
   slice-346-regression:
     name: slice-346-regression (Release)
-    # Four independent opt-in arms: COW, current Slice sparse packing,
-    # fixed 1 MiB RMW, and bounded-span 1 MiB RMW. COW is unchanged.
+    # Four independent opt-in arms: COW, original Slice per-interval uploads,
+    # fixed 1 MiB RMW, and bounded-span 1 MiB RMW. Same read optimization.
     # Not part of required CI until the Slice correctness defect is fixed.
     needs: [change-scope, clang-format, minio-test-tools, build-release-core, build-fstests-tools]
     if: >-
@@ -812,23 +812,24 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" build/fstests-346-cow
           exit "${status}"
 
-      - name: Reproduce pinned generic/346 on fresh Slice volumes
-        id: slice-346
+      - name: Compare original per-Slice uploads on fresh Slice volumes
+        id: legacy-346
         continue-on-error: true
         run: |
           set +e
           sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
             SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
-            SWORDFS_CONFORMANCE_CHUNK_TYPE=chunk_slice FSTESTS_TRACE_GENERIC346=1 \
+            SWORDFS_CONFORMANCE_CHUNK_TYPE=chunk_slice \
+            SWORDFS_SLICE_RMW_STRATEGY=legacy FSTESTS_TRACE_GENERIC346=1 \
             FSTESTS_PREBUILT_TOOLS=1 FSTESTS_TOOL_ROOT=/opt/swordfs-fstests-tools \
             bash scripts/conformance/fstests/run.sh \
               --tests-file "${{ github.workspace }}/conformance/slice/fstests-generic346.txt" \
-              --shard-name slice-346 \
+              --shard-name slice-legacy-346 \
               --suite-timeout 15m --test-timeout 10m \
-              --output-dir "${{ github.workspace }}/build/fstests-346-slice"
+              --output-dir "${{ github.workspace }}/build/fstests-346-slice-legacy"
           status=$?
           set -e
-          sudo chown -R "$(id -u):$(id -g)" build/fstests-346-slice
+          sudo chown -R "$(id -u):$(id -g)" build/fstests-346-slice-legacy
           exit "${status}"
 
       - name: Compare full 1 MiB window RMW on fresh Slice volumes
@@ -878,8 +879,8 @@ jobs:
             --output-dir build/fstests-346-cow --expected-chunk-type cow --expected-test generic/346 \
             --expected-strategy sparse
           python3 scripts/conformance/fstests/verify_case.py \
-            --output-dir build/fstests-346-slice --expected-chunk-type chunk_slice --expected-test generic/346 \
-            --expected-strategy sparse
+            --output-dir build/fstests-346-slice-legacy --expected-chunk-type chunk_slice --expected-test generic/346 \
+            --expected-strategy legacy
           python3 scripts/conformance/fstests/verify_case.py \
             --output-dir build/fstests-346-slice-fixed --expected-chunk-type chunk_slice --expected-test generic/346 \
             --expected-strategy fixed-1m
@@ -892,7 +893,7 @@ jobs:
         run: |
           python3 scripts/conformance/fstests/summarize_346.py \
             --arm cow build/fstests-346-cow \
-            --arm sparse build/fstests-346-slice \
+            --arm legacy build/fstests-346-slice-legacy \
             --arm fixed-1m build/fstests-346-slice-fixed \
             --arm span-1m build/fstests-346-slice-span \
             --output build/fstests-346-comparison.json
@@ -904,7 +905,7 @@ jobs:
           name: slice-346-regression
           path: |
             build/fstests-346-cow
-            build/fstests-346-slice
+            build/fstests-346-slice-legacy
             build/fstests-346-slice-fixed
             build/fstests-346-slice-span
             build/fstests-346-comparison.json
@@ -914,12 +915,12 @@ jobs:
         if: always()
         env:
           COW_OUTCOME: ${{ steps.cow-346.outcome }}
-          SLICE_OUTCOME: ${{ steps.slice-346.outcome }}
+          LEGACY_OUTCOME: ${{ steps.legacy-346.outcome }}
           FIXED_OUTCOME: ${{ steps.slice-fixed-346.outcome }}
           SPAN_OUTCOME: ${{ steps.slice-span-346.outcome }}
         run: |
           test "${COW_OUTCOME}" = success
-          test "${SLICE_OUTCOME}" = success
+          test "${LEGACY_OUTCOME}" = success
           test "${FIXED_OUTCOME}" = success
           test "${SPAN_OUTCOME}" = success
           python3 - <<'PY'
@@ -927,7 +928,7 @@ jobs:
           from pathlib import Path
 
           report = json.loads(Path('build/fstests-346-comparison.json').read_text())
-          for arm in ('cow', 'sparse', 'fixed-1m', 'span-1m'):
+          for arm in ('cow', 'legacy', 'fixed-1m', 'span-1m'):
               assert report[arm]['timing_complete'], f'{arm}: incomplete backend operation timing'
           PY
 
