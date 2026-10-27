@@ -20,7 +20,17 @@ def verify(output: pathlib.Path, chunk_type: str, test: str) -> None:
     tests = list(ET.parse(output / "raw/results/result.xml").getroot().iter("testcase"))
     if len(tests) != 1 or tests[0].get("name") != test or list(tests[0]):
         raise ValueError(f"XUnit does not record a single successful case: {test}")
-    print(f"{test} PASS on {chunk_type}")
+    # A FUSE RELEASE writeback error cannot retroactively change a prior
+    # successful userspace pwrite/mmap or the upstream xfstests exit status.
+    # Treat recorded writeback failures as a correctness regression even when
+    # the pinned upstream checker reports PASS. Both daemon roles are audited;
+    # missing logs fail closed instead of silently passing the check.
+    writeback_errors = ("FileReadWriter::Flush chunk FAILED", "local RELEASE failed")
+    for role in ("test", "scratch"):
+        for line in (output / f"swordfs-{role}.log").read_text().splitlines():
+            if any(marker in line for marker in writeback_errors):
+                raise ValueError(f"{role} FUSE daemon reported writeback error: {line}")
+    print(f"{test} PASS with clean writeback logs on {chunk_type}")
 
 
 def main() -> None:

@@ -52,3 +52,31 @@ regular required COW and other CI checks remain unchanged.
 
 First full-Slice RED evidence exists in #512 already. Focused independent RED
 and precise fix are pending; do not claim resolution.
+
+## Current first targeted comparison — CI #40446185097
+
+The first formal opt-in COW/Slice control **both passed upstream XUnit**:
+`generic/346` took **25s on COW, 453s on Slice** (18.12x on the same runner)
+with a 600s per-case limit. The raw Slice `swordfs-scratch.log` nevertheless
+contained seven `FileReadWriter::Flush chunk FAILED` events and one
+`local RELEASE failed`, including Redis optimistic transaction retry
+exhaustion and `Slice publication lost too many EOF/attachment races`.
+The COW daemon logs were clean. Therefore the originally green job is **not
+sufficient evidence of correct Slice durability or reliable performance**.
+No blanket throughput threshold is set from a single comparison.
+
+### Stronger TDD gate
+
+The focused validator now independently requires **clean FUSE writeback
+logs** from both TEST and SCRATCH, in addition to authoritative XUnit,
+mechanism metadata, and upstream harness success. A new tooling test first
+**failed 3/5** against the old validator (accepting Flush errors,
+RELEASE errors and missing logs); after the change it must be GREEN. The
+same downloaded *real* artifact from green CI #40446185097 must fail the
+new semantic gate on Slice, proving the diagnostic is neither hypothetical
+nor a spurious performance benchmark. The real, still unmodified
+`generic/346` will run again in formal CI on the new head to capture
+consumer-visible PASS versus internal writeback RED.
+
+The correctness fix remains pending root-cause analysis; this new test gate
+must **not** be waived to merge or to reclassify internal failures as PASS.

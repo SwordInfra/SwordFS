@@ -69,6 +69,9 @@ jobs:
       - name: Verify retry artifact provenance wiring
         run: python3 tests/tooling/test_ci_artifact_attempt.py
 
+      - name: Test targeted FUSE writeback and XUnit gate
+        run: python3 tests/tooling/test_fstests_verify_case.py
+
       - name: Enforce Metadata backend dependency boundaries
         run: python3 scripts/static-analysis/check-metadata-boundaries.py
 
