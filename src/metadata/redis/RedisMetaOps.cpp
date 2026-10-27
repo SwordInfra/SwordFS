@@ -45,13 +45,28 @@ utils::Status ParseInodeField(const std::string &field, std::string_view what, I
   return utils::Status::OK();
 }
 
+utils::Status DecodeAttachedChunkID(const std::optional<std::string> &encoded, std::optional<ChunkID> *out) {
+  out->reset();
+  if (!encoded.has_value()) {
+    return utils::Status::OK();
+  }
+  uint64_t value = 0;
+  const auto [end, error] = std::from_chars(encoded->data(), encoded->data() + encoded->size(), value);
+  if (error != std::errc{} || end != encoded->data() + encoded->size() || value == 0 || value > kMaxChunkIDValue) {
+    return utils::Status::Malformed("FileMetadata contains an invalid ChunkID");
+  }
+  *out = ChunkID(value);
+  return utils::Status::OK();
+}
+
 }  // namespace
 
 RedisMetaOps::RedisMetaOps(const RedisMetaConfig &config, std::string_view volume_name)
     : backend_(std::make_shared<RedisBackendContext>(
           config, static_cast<size_t>(std::max(1, swordfs::config::ConfigCenter::Instance().meta_thread_count())))),
       key_(config.db, volume_name),
-      reclaim_reconcile_attempts_(std::max(1, config.retry_attempts)) {
+      reclaim_reconcile_attempts_(std::max(1, config.retry_attempts)),
+      snapshot_retry_attempts_(std::max(1, config.retry_attempts)) {
   utils::ExpectInThreadDomain();
 }
 
@@ -499,19 +514,64 @@ utils::Status RedisMetaOps::ReadFileChunkSnapshot(InodeID ino, ChunkIndex index,
   if (out == nullptr) {
     return utils::Status::InvalidArgument("file chunk snapshot output is null");
   }
-  FileChunkSnapshot result;
-  utils::Status read_status;
-  auto status = TransactFromFiber([&](RedisMetaTxn &txn) {
-    read_status = txn.ReadFileChunkSnapshot(ino, index, &result);
-    return utils::Status::OK();  // Read-only EXEC validates all WATCHed keys.
-  });
-  if (!status.ok()) {
-    return status;
-  }
-  if (read_status.ok()) {
+  const auto inode_key = key_.Inode(ino);
+  const auto refs_key = key_.ChunkRefs(ino);
+  for (int attempt = 0; attempt < snapshot_retry_attempts_; ++attempt) {
+    std::string encoded_inode;
+    auto status = backend_->executor().RunFromFiber([&] { return backend_->client().Get(inode_key, &encoded_inode); });
+    if (!status.ok()) {
+      return status;
+    }
+    FileChunkSnapshot result;
+    status = result.inode.ParseFrom(encoded_inode);
+    if (!status.ok()) {
+      return status;
+    }
+    if (result.inode.ino != ino) {
+      return utils::Status::Malformed("Redis inode record identity mismatch");
+    }
+    if (!result.inode.IsRegular()) {
+      return utils::Status::InvalidArgument("not a regular file");
+    }
+    ChunkSizeLayout eof_layout;
+    status = PlanChunkSizeLayout(result.inode.attr.size, chunk_size_, &eof_layout);
+    if (!status.ok()) {
+      return status;
+    }
+    // The boundary index derives from the decoded inode. EVAL_RO checks that
+    // exact (binary) inode image while reading both attachment fields in one
+    // atomic read. A changed inode forces a fresh derivation, not a stale EOF.
+    const ChunkIndex eof_index = eof_layout.boundary.has_value() ? eof_layout.boundary->index : index;
+    std::optional<std::string> attached_raw;
+    std::optional<std::string> eof_raw;
+    bool matched = false;
+    status = backend_->executor().RunFromFiber([&] {
+      return backend_->client().ReadChunkAttachmentsIfUnchanged(inode_key, refs_key, encoded_inode, index, eof_index,
+                                                                &attached_raw, &eof_raw, &matched);
+    });
+    if (!status.ok()) {
+      return status;
+    }
+    if (!matched) {
+      continue;
+    }
+    status = DecodeAttachedChunkID(attached_raw, &result.chunk_id);
+    if (!status.ok()) {
+      return status;
+    }
+    if (eof_layout.boundary.has_value()) {
+      std::optional<ChunkID> boundary_id;
+      status = DecodeAttachedChunkID(eof_raw, &boundary_id);
+      if (!status.ok()) {
+        return status;
+      }
+      result.eof_boundary = ChunkBoundarySnapshot{
+          .index = eof_index, .chunk_id = boundary_id, .visible_prefix = eof_layout.boundary->visible_prefix};
+    }
     *out = std::move(result);
+    return utils::Status::OK();
   }
-  return read_status;
+  return utils::Status::Unavailable("coherent Chunk snapshot changed too often");
 }
 
 utils::Status RedisMetaOps::ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out) {

@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include <cerrno>
+#include <charconv>
 #include <memory>
 #include <optional>
 #include <string>
@@ -16,6 +17,57 @@
 #include "utils/ExecutionDomain.hpp"
 
 namespace swordfs::metadata {
+
+// Verify read-only operation shape against Redis commandstats, rather than
+// only checking returned bytes. A logical hole must not open an optimistic
+// WATCH/MULTI/EXEC transaction for each read.
+TEST(RedisMetaOpsTest, ChunkHoleSnapshotDoesNotIssueRedisTransactions) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  const std::string volume_name = UniqueRedisName("read-snapshot-no-exec");
+  RedisMetaOps ops(config, volume_name);
+  SwordFsVolume volume;
+  volume.name = volume_name;
+  ASSERT_TRUE(ops.FormatVolume(volume).ok());
+  const redis::RedisKey key(config.db, volume_name);
+  sw::redis::Redis redis(ConnectionOptions(config));
+  const InodeID file_ino = 72;
+  SwordFsInode file(file_ino, SwordFsAttr(file_ino, S_IFREG | 0644), kRootInodeId);
+  ASSERT_TRUE(SeedInode(redis, key, file).ok());
+
+  const auto command_count = [&](std::string_view name) -> uint64_t {
+    const auto info = redis.command<std::string>("INFO", "commandstats");
+    const std::string prefix = "cmdstat_" + std::string(name) + ":calls=";
+    const auto start = info.find(prefix);
+    if (start == std::string::npos) {
+      return 0;
+    }
+    uint64_t count = 0;
+    const auto first = info.data() + start + prefix.size();
+    const auto [end, error] = std::from_chars(first, info.data() + info.size(), count);
+    EXPECT_EQ(error, std::errc{});
+    EXPECT_GT(end, first);
+    return count;
+  };
+
+  const auto before_exec = command_count("exec");
+  const auto before_watch = command_count("watch");
+  const auto before_eval_ro = command_count("eval_ro");
+  RunInFiber([&] {
+    for (int i = 0; i < 16; ++i) {
+      FileChunkSnapshot snapshot;
+      auto status = ops.ReadFileChunkSnapshot(file_ino, i, &snapshot);
+      ASSERT_TRUE(status.ok()) << status.message();
+      EXPECT_FALSE(snapshot.chunk_id.has_value());
+      EXPECT_EQ(snapshot.inode.ino, file_ino);
+    }
+  });
+  EXPECT_EQ(command_count("exec"), before_exec);
+  EXPECT_EQ(command_count("watch"), before_watch);
+  EXPECT_EQ(command_count("eval_ro") - before_eval_ro, 16U);
+}
 
 // Advisory lock probes must run on the same Redis worker pool as metadata
 // operations; both callers are required to preserve the thread domain.

@@ -125,6 +125,7 @@ class RedisMetaOps {
   ChunkMetadataPtr chunk_metadata_;
   redis::RedisKey key_;
   int reclaim_reconcile_attempts_ = 1;
+  int snapshot_retry_attempts_ = 1;
   uint64_t chunk_size_ = 0;
   utils::FiberMutex orphan_scan_mutex_;
   uint64_t orphan_scan_cursor_ = 0;

@@ -43,6 +43,58 @@ TEST(RedisMetaClientTest, BinaryValueRoundTrip) {
   cleanup.del(key);
 }
 
+// #515 RED: coherent read-only metadata snapshots must not perform optimistic
+// WATCH/MULTI/EXEC transactions merely to read inode + chunk attachments.
+TEST(RedisMetaClientTest, ReadChunkAttachmentsIfUnchangedIsAtomicAndReadOnly) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  RedisMetaClient store(config);
+  sw::redis::Redis redis(ConnectionOptions(config));
+  const auto inode_key = UniqueRedisName("atomic-inode");
+  const auto refs_key = UniqueRedisName("atomic-refs");
+  const std::string encoded_inode("in\0ode", 6);
+  redis.set(inode_key, encoded_inode);
+  redis.hset(refs_key, "0", "1001");
+  redis.hset(refs_key, "2", "1003");
+
+  std::optional<std::string> selected;
+  std::optional<std::string> boundary;
+  bool matched = false;
+  auto status =
+      store.ReadChunkAttachmentsIfUnchanged(inode_key, refs_key, encoded_inode, 0, 2, &selected, &boundary, &matched);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_TRUE(matched);
+  EXPECT_EQ(selected, "1001");
+  EXPECT_EQ(boundary, "1003");
+
+  redis.set(inode_key, "new-version");
+  selected = "stale";
+  boundary = "stale";
+  status =
+      store.ReadChunkAttachmentsIfUnchanged(inode_key, refs_key, encoded_inode, 0, 2, &selected, &boundary, &matched);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_FALSE(matched);
+  EXPECT_FALSE(selected.has_value());
+  EXPECT_FALSE(boundary.has_value());
+
+  status =
+      store.ReadChunkAttachmentsIfUnchanged(inode_key, refs_key, "new-version", 1, 2, &selected, &boundary, &matched);
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_TRUE(matched);
+  EXPECT_FALSE(selected.has_value());
+  EXPECT_EQ(boundary, "1003");
+
+  redis.set(refs_key, "not-a-hash");
+  EXPECT_EQ(
+      store.ReadChunkAttachmentsIfUnchanged(inode_key, refs_key, "new-version", 0, 2, &selected, &boundary, &matched)
+          .ToErrno(),
+      EIO);
+  redis.del(inode_key);
+  redis.del(refs_key);
+}
+
 TEST(RedisMetaClientTest, BinaryValueSurvivesWriteTransaction) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {

@@ -82,6 +82,26 @@ may exceed elapsed wall time. Compare metadata/data service-time shares, but
 measure read/write traffic, so actual Get/Put counters are required. Crucially,
 an upstream XUnit PASS with internal Flush/RELEASE errors is a failed arm.
 
+### Read-only transaction amplification diagnosis and controlled change
+
+CI #40474783429 recorded ~145k Redis EXEC calls but only 801 RPUSHX
+operations in the 1 MiB RMW arms. The bulk of WATCH/EXEC is associated with
+repeated `ReadFileChunkSnapshot` calls, even for absent/zero-filled Chunk
+positions. This is not evidence of 145k write transactions or WATCH failures.
+
+The #515 follow-up changes only `ReadFileChunkSnapshot` to a read-only
+server-atomic `EVAL_RO` path: a first plain GET obtains the opaque inode for
+local parsing/EOF-boundary derivation; a single atomic script compares that
+exact encoded inode and returns the requested ChunkRef plus the EOF boundary
+ChunkRef. If the inode changes between GET and script execution, retry with
+a fresh inode. This preserves the old coherent-snapshot contract **without
+WATCH/MULTI/EXEC**, including matching inode size and boundary identity.
+Malformed ChunkIDs, incorrect Redis types and Redis failures must fail closed.
+
+Do **not** permanently negative-cache absent Chunks without a cross-mount
+invalidation/version protocol: another Mount could attach new data. A cache
+experiment would be separate from the safe read-only protocol change.
+
 ## Current first targeted comparison — CI #40446185097
 
 The first formal opt-in COW/Slice control **both passed upstream XUnit**:
