@@ -74,6 +74,9 @@ jobs:
       - name: Test targeted FUSE writeback and XUnit gate
         run: python3 tests/tooling/test_fstests_verify_case.py
 
+      - name: Test targeted COW/Slice RMW comparison metrics
+        run: python3 tests/tooling/test_fstests_summarize_346.py
+
       - name: Enforce Metadata backend dependency boundaries
         run: python3 scripts/static-analysis/check-metadata-boundaries.py
 
@@ -695,7 +698,8 @@ jobs:
 
   slice-346-regression:
     name: slice-346-regression (Release)
-    # Test-first RED/compare for the pinned generic/346 mmap/write race.
+    # Four independent opt-in arms: COW, current Slice sparse packing,
+    # fixed 1 MiB RMW, and bounded-span 1 MiB RMW. COW is unchanged.
     # Not part of required CI until the Slice correctness defect is fixed.
     needs: [change-scope, clang-format, minio-test-tools, build-release-core, build-fstests-tools]
     if: >-
@@ -704,7 +708,7 @@ jobs:
       needs.change-scope.result == 'success' &&
       needs.change-scope.outputs.run_full_ci == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 65
     permissions:
       contents: read
     steps:
@@ -827,13 +831,71 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" build/fstests-346-slice
           exit "${status}"
 
+      - name: Compare full 1 MiB window RMW on fresh Slice volumes
+        id: slice-fixed-346
+        continue-on-error: true
+        run: |
+          set +e
+          sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
+            SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
+            SWORDFS_CONFORMANCE_CHUNK_TYPE=chunk_slice \
+            SWORDFS_SLICE_RMW_STRATEGY=fixed-1m FSTESTS_TRACE_GENERIC346=1 \
+            FSTESTS_PREBUILT_TOOLS=1 FSTESTS_TOOL_ROOT=/opt/swordfs-fstests-tools \
+            bash scripts/conformance/fstests/run.sh \
+              --tests-file "${{ github.workspace }}/conformance/slice/fstests-generic346.txt" \
+              --shard-name slice-fixed-346 \
+              --suite-timeout 15m --test-timeout 10m \
+              --output-dir "${{ github.workspace }}/build/fstests-346-slice-fixed"
+          status=$?
+          set -e
+          sudo chown -R "$(id -u):$(id -g)" build/fstests-346-slice-fixed
+          exit "${status}"
+
+      - name: Compare bounded-span 1 MiB window RMW on fresh Slice volumes
+        id: slice-span-346
+        continue-on-error: true
+        run: |
+          set +e
+          sudo --preserve-env=GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT,RUNNER_OS \
+            SWORDFS_BIN="${{ github.workspace }}/build/swordfs" \
+            SWORDFS_CONFORMANCE_CHUNK_TYPE=chunk_slice \
+            SWORDFS_SLICE_RMW_STRATEGY=span-1m FSTESTS_TRACE_GENERIC346=1 \
+            FSTESTS_PREBUILT_TOOLS=1 FSTESTS_TOOL_ROOT=/opt/swordfs-fstests-tools \
+            bash scripts/conformance/fstests/run.sh \
+              --tests-file "${{ github.workspace }}/conformance/slice/fstests-generic346.txt" \
+              --shard-name slice-span-346 \
+              --suite-timeout 15m --test-timeout 10m \
+              --output-dir "${{ github.workspace }}/build/fstests-346-slice-span"
+          status=$?
+          set -e
+          sudo chown -R "$(id -u):$(id -g)" build/fstests-346-slice-span
+          exit "${status}"
+
       - name: Validate control and Slice case evidence
         if: always()
         run: |
           python3 scripts/conformance/fstests/verify_case.py \
-            --output-dir build/fstests-346-cow --expected-chunk-type cow --expected-test generic/346
+            --output-dir build/fstests-346-cow --expected-chunk-type cow --expected-test generic/346 \
+            --expected-strategy sparse
           python3 scripts/conformance/fstests/verify_case.py \
-            --output-dir build/fstests-346-slice --expected-chunk-type chunk_slice --expected-test generic/346
+            --output-dir build/fstests-346-slice --expected-chunk-type chunk_slice --expected-test generic/346 \
+            --expected-strategy sparse
+          python3 scripts/conformance/fstests/verify_case.py \
+            --output-dir build/fstests-346-slice-fixed --expected-chunk-type chunk_slice --expected-test generic/346 \
+            --expected-strategy fixed-1m
+          python3 scripts/conformance/fstests/verify_case.py \
+            --output-dir build/fstests-346-slice-span --expected-chunk-type chunk_slice --expected-test generic/346 \
+            --expected-strategy span-1m
+
+      - name: Summarize measured four-arm comparisons without waiving failures
+        if: always()
+        run: |
+          python3 scripts/conformance/fstests/summarize_346.py \
+            --arm cow build/fstests-346-cow \
+            --arm sparse build/fstests-346-slice \
+            --arm fixed-1m build/fstests-346-slice-fixed \
+            --arm span-1m build/fstests-346-slice-span \
+            --output build/fstests-346-comparison.json
 
       - name: Upload targeted COW/Slice raw evidence
         if: always()
@@ -843,6 +905,9 @@ jobs:
           path: |
             build/fstests-346-cow
             build/fstests-346-slice
+            build/fstests-346-slice-fixed
+            build/fstests-346-slice-span
+            build/fstests-346-comparison.json
           if-no-files-found: warn
 
       - name: Enforce actual runner outcomes
@@ -850,9 +915,21 @@ jobs:
         env:
           COW_OUTCOME: ${{ steps.cow-346.outcome }}
           SLICE_OUTCOME: ${{ steps.slice-346.outcome }}
+          FIXED_OUTCOME: ${{ steps.slice-fixed-346.outcome }}
+          SPAN_OUTCOME: ${{ steps.slice-span-346.outcome }}
         run: |
           test "${COW_OUTCOME}" = success
           test "${SLICE_OUTCOME}" = success
+          test "${FIXED_OUTCOME}" = success
+          test "${SPAN_OUTCOME}" = success
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path('build/fstests-346-comparison.json').read_text())
+          for arm in ('cow', 'sparse', 'fixed-1m', 'span-1m'):
+              assert report[arm]['timing_complete'], f'{arm}: incomplete backend operation timing'
+          PY
 
   slice-posix-experiment:
     name: slice-posix-experiment (Release)

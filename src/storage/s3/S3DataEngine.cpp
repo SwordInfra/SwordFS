@@ -23,6 +23,7 @@
 #include "storage/s3/S3StreamBuf.hpp"
 #include "utils/BlockingExecutor.hpp"
 #include "utils/ExecutionDomain.hpp"
+#include "utils/ExperimentTiming.hpp"
 #include "utils/Logging.hpp"
 
 namespace swordfs::storage {
@@ -152,6 +153,8 @@ Status S3DataEngine::ParseBucketUrl() {
 }
 
 Status S3DataEngine::Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) {
+  utils::ExperimentTiming::Scope timing(utils::ExperimentTiming::Kind::kDataPut,
+                                        data ? data->computeChainDataLength() : 0);
   try {
     return executor_->RunFromFiber([this, key, d = std::move(data)] {
       utils::ExpectInThreadDomain();
@@ -184,6 +187,7 @@ Status S3DataEngine::Put(std::string_view key, std::unique_ptr<folly::IOBuf> dat
 }
 
 Status S3DataEngine::Get(std::string_view key, size_t offset, size_t size, folly::IOBuf *out) {
+  utils::ExperimentTiming::Scope timing(utils::ExperimentTiming::Kind::kDataGet, size);
   if (size > 0 && out->tailroom() < size) {
     return Status::InvalidArgument("Get: output buffer too small");
   }

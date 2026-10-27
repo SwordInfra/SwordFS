@@ -16,6 +16,7 @@
 
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "utils/ExecutionDomain.hpp"
+#include "utils/ExperimentTiming.hpp"
 
 namespace swordfs::metadata {
 namespace {
@@ -111,6 +112,7 @@ RedisMetaClient::~RedisMetaClient() {
 }
 
 utils::Status RedisMetaClient::Ping() {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   return RunReadOnlyCommand("PING", [&] {
     redis_->ping();
@@ -119,6 +121,7 @@ utils::Status RedisMetaClient::Ping() {
 }
 
 utils::Status RedisMetaClient::Get(std::string_view key, std::string *value) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis GET output is null");
@@ -135,6 +138,7 @@ utils::Status RedisMetaClient::Get(std::string_view key, std::string *value) {
 
 utils::Status RedisMetaClient::MGet(const std::vector<std::string> &keys,
                                     std::vector<std::optional<std::string>> *values) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   if (values == nullptr) {
     return utils::Status::InvalidArgument("Redis MGET output is null");
@@ -151,6 +155,7 @@ utils::Status RedisMetaClient::MGet(const std::vector<std::string> &keys,
 
 utils::Status RedisMetaClient::HScan(std::string_view key, uint64_t cursor, size_t count,
                                      std::vector<std::pair<std::string, std::string>> *values, uint64_t *next_cursor) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   if (values == nullptr || next_cursor == nullptr) {
     return utils::Status::InvalidArgument("Redis HSCAN output is null");
@@ -165,6 +170,7 @@ utils::Status RedisMetaClient::HScan(std::string_view key, uint64_t cursor, size
 }
 
 utils::Status RedisMetaClient::Incr(std::string_view key, uint64_t *value) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis INCR output is null");
@@ -184,6 +190,7 @@ utils::Status RedisMetaClient::Incr(std::string_view key, uint64_t *value) {
 }
 
 utils::Status RedisMetaClient::IncrNonNegative(std::string_view key, uint64_t *value) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis validated INCR output is null");
@@ -200,6 +207,7 @@ utils::Status RedisMetaClient::IncrNonNegative(std::string_view key, uint64_t *v
 }
 
 utils::Status RedisMetaClient::IncrExistingNonNegative(std::string_view key, uint64_t *value) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   if (value == nullptr) {
     return utils::Status::InvalidArgument("Redis validated INCR output is null");
@@ -227,6 +235,7 @@ utils::Status RedisMetaClient::IncrExistingNonNegative(std::string_view key, uin
 }
 
 utils::Status RedisMetaClient::LRange(std::string_view key, std::vector<std::string> *values) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   if (values == nullptr) {
     return utils::Status::InvalidArgument("Redis LRANGE output is null");
@@ -240,6 +249,7 @@ utils::Status RedisMetaClient::LRange(std::string_view key, std::vector<std::str
 }
 
 utils::Status RedisMetaClient::CreateListWithFirstRecord(std::string_view key, std::string_view value) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   return Transact([&](RedisKvTxn &txn) {
     std::vector<std::string> prefix;
@@ -255,6 +265,7 @@ utils::Status RedisMetaClient::CreateListWithFirstRecord(std::string_view key, s
 }
 
 utils::Status RedisMetaClient::RPushExisting(std::string_view key, std::string_view value) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   try {
     const auto count = redis_->command<long long>("RPUSHX", std::string(key), std::string(value));
@@ -272,6 +283,7 @@ utils::Status RedisMetaClient::RPushExisting(std::string_view key, std::string_v
 
 utils::Status RedisMetaClient::CreateOwnerLease(std::string_view key, std::string_view nonce,
                                                 std::chrono::milliseconds ttl) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   if (ttl <= std::chrono::milliseconds::zero()) {
     return utils::Status::InvalidArgument("owner lease TTL must be positive");
@@ -289,6 +301,7 @@ utils::Status RedisMetaClient::CreateOwnerLease(std::string_view key, std::strin
 }
 
 utils::Status RedisMetaClient::RenewOwnerLease(std::string_view key, std::chrono::milliseconds ttl) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   if (ttl <= std::chrono::milliseconds::zero()) {
     return utils::Status::InvalidArgument("owner lease TTL must be positive");
@@ -307,6 +320,7 @@ utils::Status RedisMetaClient::RenewOwnerLease(std::string_view key, std::chrono
 }
 
 utils::Status RedisMetaClient::RevokeOwnerLease(std::string_view key) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
   try {
     (void)redis_->del(std::string(key));
@@ -319,8 +333,11 @@ utils::Status RedisMetaClient::RevokeOwnerLease(std::string_view key) {
 }
 
 utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisKvTxn &)> &callback) {
+  utils::ExperimentTiming::Scope metadata_timing(utils::ExperimentTiming::Kind::kMetadata);
   utils::ExpectInThreadDomain();
+  utils::ExperimentTiming::Scope transaction_timing(utils::ExperimentTiming::Kind::kTransaction);
   for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
+    utils::ExperimentTiming::Instance().Attempt();
     bool retry = false;
     try {
       RedisKvTxn transaction(*redis_);
@@ -334,6 +351,7 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisK
         status = transaction.Commit();
         return status;
       } catch (const RedisKvTxn::WatchConflict &) {
+        utils::ExperimentTiming::Instance().WatchConflict();
         retry = true;
       } catch (const sw::redis::ReplyError &error) {
         return RedisError("transaction", error);
@@ -359,7 +377,11 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisK
     }
 
     if (retry && attempt + 1 < retry_attempts_) {
+      const auto backoff_start = std::chrono::steady_clock::now();
       Backoff(attempt, retry_backoff_);
+      utils::ExperimentTiming::Instance().Backoff(static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - backoff_start)
+              .count()));
     }
   }
 

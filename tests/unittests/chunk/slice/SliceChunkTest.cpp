@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -30,6 +31,7 @@
 #include "chunk/ChunkFactory.hpp"
 #include "chunk/ChunkTestSupport.hpp"
 #include "chunk/slice/SliceChunk.hpp"
+#include "chunk/slice/SliceObjectKey.hpp"
 #include "chunk/slice/SliceRecord.hpp"
 #include "metadata/slice/SliceChunkMetadata.hpp"
 #include "storage/IDataEngine.hpp"
@@ -43,6 +45,36 @@ using swordfs::test::chunk_test::kChunkTestSize;
 using swordfs::utils::Status;
 
 namespace {
+
+constexpr const char *kRmwStrategyEnv = "SWORDFS_SLICE_RMW_STRATEGY";
+constexpr size_t kMiB = 1024 * 1024;
+
+// #515 experiments are selected once per SliceChunk at construction. Keep the
+// surrounding process environment pristine even if an assertion returns early.
+class ScopedEnvironmentVariable final {
+ public:
+  ScopedEnvironmentVariable(const char *name, const char *value) : name_(name) {
+    if (const char *previous = std::getenv(name_.c_str()); previous != nullptr) {
+      previous_ = previous;
+    }
+    EXPECT_EQ(::setenv(name_.c_str(), value, 1), 0);
+  }
+
+  ~ScopedEnvironmentVariable() {
+    if (previous_.has_value()) {
+      ::setenv(name_.c_str(), previous_->c_str(), 1);
+    } else {
+      ::unsetenv(name_.c_str());
+    }
+  }
+
+  ScopedEnvironmentVariable(const ScopedEnvironmentVariable &) = delete;
+  ScopedEnvironmentVariable &operator=(const ScopedEnvironmentVariable &) = delete;
+
+ private:
+  std::string name_;
+  std::optional<std::string> previous_;
+};
 
 // Exercise the Slice implementation through the same mount-level factory API
 // used by FileChunkManager; never inject visible spans through production hooks.
@@ -1766,6 +1798,304 @@ TEST_F(SliceChunkTest, TruncateWhilePutInFlightRetiresOldCandidateWithoutLosingN
   });
   ASSERT_EQ(data_->put_calls, 2);
   EXPECT_EQ(data_->uploaded_keys.back(), "slice/1001");
+}
+
+// #515 opt-in RMW experiments. These are intentionally RED before the
+// strategy exists: the default sparse path would append the small dirty
+// intervals themselves instead of one contiguous 1MiB-window record.
+TEST_F(SliceChunkTest, FixedOneMiBRmwReadsCommittedWindowAndPreservesUntouchedBytes) {
+  RunInTestFiber([&] {
+    constexpr size_t kChunkSize = 2 * kMiB;
+    ScopedEnvironmentVariable strategy(kRmwStrategyEnv, "fixed-1m");
+    meta_->ConfigureChunkSize(kChunkSize);
+    const swordfs::metadata::ChunkID id(515);
+    Attach(0, id, "0123456789", swordfs::chunk::slice::SliceID(1515));
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+
+    ASSERT_TRUE(chunk->Write(2, Buf("XY")).ok());
+    ASSERT_TRUE(chunk->Flush().ok());
+
+    swordfs::metadata::FileChunkSnapshot snapshot;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(42, 0, &snapshot).ok());
+    EXPECT_EQ(snapshot.inode.attr.size, 10U) << "RMW must not advance EOF to the 1MiB window end";
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(id, &records).ok());
+    ASSERT_EQ(records.size(), 2U);
+    const auto window = records.back();
+    EXPECT_EQ(window.pos, 0U);
+    EXPECT_EQ(window.len, kMiB) << "fixed-1m publishes one contiguous full-window record";
+    auto physical = folly::IOBuf::create(window.size);
+    ASSERT_TRUE(
+        data_->Get(swordfs::chunk::slice::SliceObjectKey(window.id), window.off, window.len, physical.get()).ok());
+    const std::string_view bytes(reinterpret_cast<const char *>(physical->data()), physical->length());
+    EXPECT_EQ(bytes.substr(0, 10), "01XY456789");
+    EXPECT_EQ(std::string(bytes.substr(10, 16)), std::string(16, '\0'));
+
+    auto cold = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+    auto out = folly::IOBuf::create(10);
+    ASSERT_TRUE(cold->Read(0, 10, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "01XY456789");
+  });
+}
+
+TEST_F(SliceChunkTest, FixedOneMiBRmwUsesDirtyExtentForEofAndZeroFillsTheRestOfTheWindow) {
+  RunInTestFiber([&] {
+    constexpr size_t kChunkSize = 2 * kMiB;
+    ScopedEnvironmentVariable strategy(kRmwStrategyEnv, "fixed-1m");
+    meta_->ConfigureChunkSize(kChunkSize);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+
+    ASSERT_TRUE(chunk->Write(5, Buf("ABC")).ok());
+    ASSERT_TRUE(chunk->Flush().ok());
+
+    swordfs::metadata::FileChunkSnapshot snapshot;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(42, 0, &snapshot).ok());
+    ASSERT_TRUE(snapshot.chunk_id.has_value());
+    EXPECT_EQ(snapshot.inode.attr.size, 8U) << "a fixed-window publication must extend EOF only through dirty bytes";
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(*snapshot.chunk_id, &records).ok());
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_EQ(records.front().pos, 0U);
+    EXPECT_EQ(records.front().len, kMiB);
+    auto physical = folly::IOBuf::create(records.front().size);
+    ASSERT_TRUE(data_
+                    ->Get(swordfs::chunk::slice::SliceObjectKey(records.front().id), records.front().off,
+                          records.front().len, physical.get())
+                    .ok());
+    const std::string_view bytes(reinterpret_cast<const char *>(physical->data()), physical->length());
+    EXPECT_EQ(bytes.substr(5, 3), "ABC");
+    EXPECT_EQ(std::string(bytes.substr(8, 32)), std::string(32, '\0'));
+
+    auto out = folly::IOBuf::create(8);
+    ASSERT_TRUE(chunk->Read(0, 8, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()),
+              std::string("\0\0\0\0\0ABC", 8));
+  });
+}
+
+TEST_F(SliceChunkTest, FixedOneMiBGroupsDirtyBytesIntoOneContiguousRecordPerWindow) {
+  RunInTestFiber([&] {
+    constexpr size_t kChunkSize = 3 * kMiB;
+    ScopedEnvironmentVariable strategy(kRmwStrategyEnv, "fixed-1m");
+    meta_->ConfigureChunkSize(kChunkSize);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+
+    ASSERT_TRUE(chunk->Write(5, Buf("A")).ok());
+    ASSERT_TRUE(chunk->Write(kMiB + 5, Buf("B")).ok());
+    ASSERT_TRUE(chunk->Flush().ok());
+
+    swordfs::metadata::FileChunkSnapshot snapshot;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(42, 0, &snapshot).ok());
+    ASSERT_TRUE(snapshot.chunk_id.has_value());
+    EXPECT_EQ(snapshot.inode.attr.size, kMiB + 6);
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(*snapshot.chunk_id, &records).ok());
+    ASSERT_EQ(records.size(), 2U);
+    EXPECT_EQ(records[0].pos, 0U);
+    EXPECT_EQ(records[0].len, kMiB);
+    EXPECT_EQ(records[1].pos, kMiB);
+    EXPECT_EQ(records[1].len, kMiB);
+
+    auto first = folly::IOBuf::create(1);
+    auto second = folly::IOBuf::create(1);
+    ASSERT_TRUE(chunk->Read(5, 1, first.get()).ok());
+    ASSERT_TRUE(chunk->Read(kMiB + 5, 1, second.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(first->data()), first->length()), "A");
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(second->data()), second->length()), "B");
+  });
+}
+
+TEST_F(SliceChunkTest, SpanOneMiBRmwReadsCommittedBytesBetweenFirstAndLastDirty) {
+  RunInTestFiber([&] {
+    constexpr size_t kChunkSize = 2 * kMiB;
+    ScopedEnvironmentVariable strategy(kRmwStrategyEnv, "span-1m");
+    meta_->ConfigureChunkSize(kChunkSize);
+    const swordfs::metadata::ChunkID id(516);
+    Attach(0, id, "0123456789", swordfs::chunk::slice::SliceID(1516));
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+
+    ASSERT_TRUE(chunk->Write(2, Buf("AB")).ok());
+    ASSERT_TRUE(chunk->Write(8, Buf("CD")).ok());
+    ASSERT_TRUE(chunk->Flush().ok());
+
+    swordfs::metadata::FileChunkSnapshot snapshot;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(42, 0, &snapshot).ok());
+    EXPECT_EQ(snapshot.inode.attr.size, 10U);
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(id, &records).ok());
+    ASSERT_EQ(records.size(), 2U);
+    const auto span = records.back();
+    EXPECT_EQ(span.pos, 2U);
+    EXPECT_EQ(span.len, 8U) << "span-1m stops at the first and last dirty byte";
+    auto physical = folly::IOBuf::create(span.size);
+    ASSERT_TRUE(data_->Get(swordfs::chunk::slice::SliceObjectKey(span.id), span.off, span.len, physical.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(physical->data()), physical->length()), "AB4567CD");
+
+    auto out = folly::IOBuf::create(10);
+    ASSERT_TRUE(chunk->Read(0, 10, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "01AB4567CD");
+  });
+}
+
+TEST_F(SliceChunkTest, SpanOneMiBCreatesOneFirstToLastDirtySpanPerWindow) {
+  RunInTestFiber([&] {
+    constexpr size_t kChunkSize = 3 * kMiB;
+    ScopedEnvironmentVariable strategy(kRmwStrategyEnv, "span-1m");
+    meta_->ConfigureChunkSize(kChunkSize);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+
+    ASSERT_TRUE(chunk->Write(5, Buf("A")).ok());
+    ASSERT_TRUE(chunk->Write(100, Buf("B")).ok());
+    ASSERT_TRUE(chunk->Write(kMiB + 20, Buf("C")).ok());
+    ASSERT_TRUE(chunk->Write(kMiB + 40, Buf("D")).ok());
+    ASSERT_TRUE(chunk->Flush().ok());
+
+    swordfs::metadata::FileChunkSnapshot snapshot;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(42, 0, &snapshot).ok());
+    ASSERT_TRUE(snapshot.chunk_id.has_value());
+    EXPECT_EQ(snapshot.inode.attr.size, kMiB + 41);
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(*snapshot.chunk_id, &records).ok());
+    ASSERT_EQ(records.size(), 2U);
+    EXPECT_EQ(records[0].pos, 5U);
+    EXPECT_EQ(records[0].len, 96U);
+    EXPECT_EQ(records[1].pos, kMiB + 20);
+    EXPECT_EQ(records[1].len, 21U);
+  });
+}
+
+TEST_F(SliceChunkTest, FixedOneMiBRmwPreservesNewerActiveWritesAcceptedDuringPhysicalPut) {
+  constexpr size_t kChunkSize = 2 * kMiB;
+  ScopedEnvironmentVariable strategy(kRmwStrategyEnv, "fixed-1m");
+  meta_->ConfigureChunkSize(kChunkSize);
+  auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+  RunInTestFiber([&] { ASSERT_TRUE(chunk->Write(5, Buf("AAA")).ok()); });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton started;
+  folly::fibers::Baton release;
+  folly::fibers::Baton done;
+  Status flush_status;
+  data_->BlockNextPut(&started, &release);
+  fm.addTask([&] {
+    flush_status = chunk->Flush();
+    done.post();
+  });
+  ASSERT_TRUE(swordfs::test::DriveEventBaseUntil(evb, [&] { return started.try_wait(); }));
+  fm.addTask([&] {
+    EXPECT_TRUE(chunk->Write(4, Buf("BBBB")).ok());
+    release.post();
+  });
+  swordfs::test::DriveEventBaseUntilOrAbort(evb, [&] { return done.try_wait(); }, "fixed-1m in-flight active write");
+  EXPECT_TRUE(flush_status.ok());
+  RunInTestFiber([&] {
+    EXPECT_TRUE(chunk->HasPendingWrites()) << "the newer uncommitted generation must survive the older RMW publish";
+    auto out = folly::IOBuf::create(8);
+    ASSERT_TRUE(chunk->Read(0, 8, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()),
+              std::string("\0\0\0\0BBBB", 8));
+    ASSERT_TRUE(chunk->Flush().ok());
+    EXPECT_FALSE(chunk->HasPendingWrites());
+    auto reread = folly::IOBuf::create(8);
+    ASSERT_TRUE(chunk->Read(0, 8, reread.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(reread->data()), reread->length()),
+              std::string("\0\0\0\0BBBB", 8));
+  });
+  ASSERT_EQ(data_->put_calls, 2);
+}
+
+TEST_F(SliceChunkTest, FixedOneMiBRmwTruncateWhilePutInFlightClipsTheWindowRecord) {
+  constexpr size_t kChunkSize = 2 * kMiB;
+  ScopedEnvironmentVariable strategy(kRmwStrategyEnv, "fixed-1m");
+  meta_->ConfigureChunkSize(kChunkSize);
+  auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+  RunInTestFiber([&] { ASSERT_TRUE(chunk->Write(5, Buf("ABCDE")).ok()); });
+
+  folly::EventBase evb;
+  auto &fm = folly::fibers::getFiberManager(evb);
+  folly::fibers::Baton started;
+  folly::fibers::Baton release;
+  folly::fibers::Baton done;
+  Status flush_status;
+  data_->BlockNextPut(&started, &release);
+  fm.addTask([&] {
+    flush_status = chunk->Flush();
+    done.post();
+  });
+  ASSERT_TRUE(swordfs::test::DriveEventBaseUntil(evb, [&] { return started.try_wait(); }));
+  fm.addTask([&] {
+    chunk->TruncateLocal(7);
+    release.post();
+  });
+  swordfs::test::DriveEventBaseUntilOrAbort(evb, [&] { return done.try_wait(); }, "fixed-1m in-flight truncate");
+  EXPECT_TRUE(flush_status.ok());
+  RunInTestFiber([&] {
+    EXPECT_FALSE(chunk->HasPendingWrites());
+    auto out = folly::IOBuf::create(7);
+    ASSERT_TRUE(chunk->Read(0, 7, out.get()).ok());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()),
+              std::string("\0\0\0\0\0AB", 7));
+    swordfs::metadata::FileChunkSnapshot snapshot;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(42, 0, &snapshot).ok());
+    ASSERT_TRUE(snapshot.chunk_id.has_value());
+    EXPECT_EQ(snapshot.inode.attr.size, 7U);
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(*snapshot.chunk_id, &records).ok());
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_EQ(records.front().pos, 0U);
+    EXPECT_EQ(records.front().len, 7U);
+  });
+}
+
+TEST_F(SliceChunkTest, FixedOneMiBRmwRetriesDefinitePutFailureWithoutLosingDirty) {
+  RunInTestFiber([&] {
+    constexpr size_t kChunkSize = 2 * kMiB;
+    ScopedEnvironmentVariable strategy(kRmwStrategyEnv, "fixed-1m");
+    meta_->ConfigureChunkSize(kChunkSize);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+    ASSERT_TRUE(chunk->Write(5, Buf("ABC")).ok());
+    data_->next_put_status = Status::IOError("definite RMW PUT failure");
+    EXPECT_EQ(chunk->Flush().ToErrno(), EIO);
+    EXPECT_TRUE(chunk->HasPendingWrites());
+    ASSERT_TRUE(chunk->Flush().ok());
+    EXPECT_FALSE(chunk->HasPendingWrites());
+    swordfs::metadata::FileChunkSnapshot snapshot;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(42, 0, &snapshot).ok());
+    ASSERT_TRUE(snapshot.chunk_id.has_value());
+    EXPECT_EQ(snapshot.inode.attr.size, 8U);
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(*snapshot.chunk_id, &records).ok());
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_EQ(records.front().pos, 0U);
+    EXPECT_EQ(records.front().len, kMiB);
+    EXPECT_EQ(data_->put_calls, 2) << "a definite PUT failure is retried with a fresh object identity";
+  });
+}
+
+TEST_F(SliceChunkTest, FixedOneMiBRmwFailsClosedOnAmbiguousPutAndRetriesFresh) {
+  RunInTestFiber([&] {
+    constexpr size_t kChunkSize = 2 * kMiB;
+    ScopedEnvironmentVariable strategy(kRmwStrategyEnv, "fixed-1m");
+    meta_->ConfigureChunkSize(kChunkSize);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+    ASSERT_TRUE(chunk->Write(5, Buf("ABC")).ok());
+    data_->next_put_status = Status::OutcomeUnknown("lost RMW PUT reply");
+    EXPECT_EQ(chunk->Flush().ToErrno(), EIO);
+    EXPECT_TRUE(chunk->HasPendingWrites());
+    ASSERT_TRUE(chunk->Flush().ok());
+    EXPECT_FALSE(chunk->HasPendingWrites());
+    swordfs::metadata::FileChunkSnapshot snapshot;
+    ASSERT_TRUE(meta_->ReadFileChunkSnapshot(42, 0, &snapshot).ok());
+    ASSERT_TRUE(snapshot.chunk_id.has_value());
+    EXPECT_EQ(snapshot.inode.attr.size, 8U);
+    std::vector<swordfs::chunk::slice::SliceRecord> records;
+    ASSERT_TRUE(slice_metadata_->ReadRecords(*snapshot.chunk_id, &records).ok());
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_EQ(records.front().pos, 0U);
+    EXPECT_EQ(records.front().len, kMiB);
+    EXPECT_EQ(data_->put_calls, 2) << "an ambiguous PUT is retried with a fresh object identity";
+  });
 }
 
 }  // namespace

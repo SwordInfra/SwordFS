@@ -53,6 +53,35 @@ regular required COW and other CI checks remain unchanged.
 First full-Slice RED evidence exists in #512 already. Focused independent RED
 and precise fix are pending; do not claim resolution.
 
+## Four-arm 1 MiB Window RMW experiment (opt-in only)
+
+The experiment runs **the unmodified pinned** `generic/346` four times with
+freshly formatted Redis/MinIO volumes on the same runner and verified Release
+binary. The arms are: (A) unchanged COW, (B) current Slice sparse physical
+packing, (C) fixed full 1 MiB window read-modify-write, and (D) 1 MiB window
+RMW from first to last dirty byte, preserving intermediate existing bytes.
+The strategy is explicit and recorded in `environment.json`; only `sparse`
+is the production default. All four real XUnit results and both mounted FUSE
+daemon logs remain under a strict fail-closed writeback-error validator.
+
+**Experiment-only semantics:** Window-level last successful publication wins;
+an earlier read-modify-write snapshot may overwrite disjoint writes published
+by another mount in the same window. The owner explicitly accepts this limited
+LWW model for the controlled experiment; the result must not be represented as
+multi-mount per-byte merge correctness. Never silently convert confirmed
+metadata failure or ambiguous Redis result into success. No production-default
+change, CI timeout increase per case, or waiver of COW supported tests.
+
+**Measurements:** Collect exact `generic/346` phase durations, Redis
+`INFO commandstats` deltas excluding setup, aggregate Redis metadata latency,
+S3 Get/Put latency and bytes, Redis WATCH conflicts/transaction attempts and
+retry/backoff time, FUSE daemon logs, and MinIO retained volume utilization.
+Operation latencies accumulate across concurrently executing operations and
+may exceed elapsed wall time. Compare metadata/data service-time shares, but
+**do not claim they sum to 100% of wall time**. Retained S3 bytes do not
+measure read/write traffic, so actual Get/Put counters are required. Crucially,
+an upstream XUnit PASS with internal Flush/RELEASE errors is a failed arm.
+
 ## Current first targeted comparison — CI #40446185097
 
 The first formal opt-in COW/Slice control **both passed upstream XUnit**:

@@ -59,6 +59,16 @@ class VerifyCaseTest(unittest.TestCase):
         (self.output / "swordfs-scratch.log").write_text("W1027 unrelated informational warning\n")
         VERIFY.verify(self.output, "chunk_slice", "generic/346")
 
+    def test_strict_experiment_gate_rejects_wrong_rmw_strategy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "strategy"):
+            VERIFY.verify(self.output, "chunk_slice", "generic/346", "fixed-1m")
+
+    def test_strict_experiment_gate_accepts_matching_strategy(self) -> None:
+        (self.output / "environment.json").write_text(
+            json.dumps({"chunk_type": "chunk_slice", "slice_rmw_strategy": "span-1m"})
+        )
+        VERIFY.verify(self.output, "chunk_slice", "generic/346", "span-1m")
+
 
 if __name__ == "__main__":
     unittest.main()

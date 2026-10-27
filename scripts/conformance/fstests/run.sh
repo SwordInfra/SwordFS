@@ -254,6 +254,17 @@ if [[ ! -x "${SWORDFS_BIN}" ]]; then
   echo "ERROR: SwordFS binary is not executable: ${SWORDFS_BIN}" >&2
   exit 2
 fi
+# Opt-in #515 Slice window-RMW comparison. Explicitly transport the selected
+# mode through fstests' privileged mount helper, not through inherited env.
+SWORDFS_SLICE_RMW_STRATEGY="${SWORDFS_SLICE_RMW_STRATEGY:-sparse}"
+case "${SWORDFS_SLICE_RMW_STRATEGY}" in
+  sparse|fixed-1m|span-1m) ;;
+  *) echo "ERROR: invalid Slice RMW experiment strategy: ${SWORDFS_SLICE_RMW_STRATEGY}" >&2; exit 2 ;;
+esac
+if [[ "${SWORDFS_SLICE_RMW_STRATEGY}" != sparse && "${SWORDFS_CONFORMANCE_CHUNK_TYPE:-}" != chunk_slice ]]; then
+  echo "ERROR: Slice RMW experiment requires chunk_slice" >&2
+  exit 2
+fi
 if docker compose version >/dev/null 2>&1; then
   DOCKER_COMPOSE=(docker compose)
 else
@@ -327,6 +338,7 @@ pathlib.Path("${OUTPUT_DIR}/environment.json").write_text(
             "liburing_commit": "${LIBURING_COMMIT}",
             "shard": "${SHARD_NAME}",
             "chunk_type": "${CONFORMANCE_CHUNK_TYPE}",
+            "slice_rmw_strategy": "${SWORDFS_SLICE_RMW_STRATEGY}",
         },
         indent=2,
         sort_keys=True,
@@ -538,6 +550,8 @@ write_mount_config() {
   printf 'FSTESTS_MINIO_ROOT_USER=%q\n' "${MINIO_ROOT_USER}" >>"${MOUNT_CONFIG}"
   printf 'FSTESTS_MINIO_ROOT_PASSWORD=%q\n' "${MINIO_ROOT_PASSWORD}" >>"${MOUNT_CONFIG}"
   printf 'FSTESTS_LOG_DIR=%q\n' "${OUTPUT_DIR}" >>"${MOUNT_CONFIG}"
+  printf 'FSTESTS_SLICE_RMW_STRATEGY=%q\n' "${SWORDFS_SLICE_RMW_STRATEGY}" >>"${MOUNT_CONFIG}"
+  printf 'FSTESTS_IO_TIMING=%q\n' "${FSTESTS_TRACE_GENERIC346:-0}" >>"${MOUNT_CONFIG}"
   chmod 600 "${MOUNT_CONFIG}"
 }
 write_mount_config
@@ -655,6 +669,10 @@ if [[ "${FSTESTS_TRACE_GENERIC346:-0}" == 1 ]]; then
   python3 "${SCRIPT_DIR}/trace_generic346.py" \
     --script "${FSTESTS_DIR}/tests/generic/346" \
     --original "${TRACE346_ORIGINAL}" --trace-dir "${RAW_DIR}"
+  # Snapshot actual command counts AFTER setup so formatting, tool checks and
+  # Redis container initialization are excluded from per-strategy comparison.
+  compose exec -T redis redis-cli INFO commandstats >"${RAW_DIR}/redis-commandstats-before.txt"
+  compose exec -T redis redis-cli INFO stats >"${RAW_DIR}/redis-stats-before.txt"
 fi
 
 mark_isolation_failure() {
@@ -789,6 +807,17 @@ while IFS= read -r test <&3; do
     break
   fi
 done 3<"${OUTPUT_DIR}/planned-tests.txt"
+
+if [[ "${FSTESTS_TRACE_GENERIC346:-0}" == 1 ]]; then
+  # Capture raw data even when the real testcase times out or daemon writeback
+  # fails. No synthetic success based on these observational statistics.
+  compose exec -T redis redis-cli INFO commandstats >"${RAW_DIR}/redis-commandstats-after.txt" || true
+  compose exec -T redis redis-cli INFO stats >"${RAW_DIR}/redis-stats-after.txt" || true
+  "${MC_BIN}" --config-dir "${MINIO_TEST_MC_CONFIG}" du --json \
+    "local/${S3_BUCKET}/${TEST_VOLUME}" >"${RAW_DIR}/s3-test-volume-usage.json" 2>&1 || true
+  "${MC_BIN}" --config-dir "${MINIO_TEST_MC_CONFIG}" du --json \
+    "local/${S3_BUCKET}/${SCRATCH_VOLUME}" >"${RAW_DIR}/s3-scratch-volume-usage.json" 2>&1 || true
+fi
 
 expected_execute_count="$(wc -l <"${OUTPUT_DIR}/planned-tests.txt")"
 completed_execute_count="$(wc -l <"${RAW_DIR}/check-status.tsv")"
