@@ -1,13 +1,56 @@
 # SwordFS POSIX conformance status
 
-Latest main conformance run: **INFRASTRUCTURE FAILED**
+Latest run: **PASS**
 
-pjdfstest-conformance job result: failure
+| Metric | Value |
+| --- | ---: |
+| Overall conformance support | 100.00% |
+| Supported regression pass | 100.00% |
+| Classified rate | 100.00% |
+| Supported assertion count | 8770 |
+| Blocking result count | 0 |
 
-CI run: https://github.com/SwordInfra/SwordFS/actions/runs/40432556177
+## Classification counts
+
+| Classification | Count |
+| --- | ---: |
+| PASS | 8770 |
+| UPSTREAM_NOT_APPLICABLE | 28 |
+
+## Per-category support
+
+| Category | PASS | Applicable | Support |
+| --- | ---: | ---: | ---: |
+| chflags | 14 | 14 | 100.00% |
+| chmod | 327 | 327 | 100.00% |
+| chown | 1470 | 1470 | 100.00% |
+| ftruncate | 89 | 89 | 100.00% |
+| granular | 7 | 7 | 100.00% |
+| link | 359 | 359 | 100.00% |
+| mkdir | 118 | 118 | 100.00% |
+| mkfifo | 120 | 120 | 100.00% |
+| mknod | 186 | 186 | 100.00% |
+| open | 337 | 337 | 100.00% |
+| posix_fallocate | 1 | 1 | 100.00% |
+| rename | 4857 | 4857 | 100.00% |
+| rmdir | 145 | 145 | 100.00% |
+| symlink | 95 | 95 | 100.00% |
+| truncate | 84 | 84 | 100.00% |
+| unlink | 439 | 439 | 100.00% |
+| utimensat | 122 | 122 | 100.00% |
+
+## Baseline metadata
+
+- SwordFS commit: `c5ec23e8569b8b9bdc017edbdbba561b6b647051`
+- pjdfstest commit: `85a8aea9e685999ef0540392fd80535f873d7ff7`
+- chunk_type: `cow`
+- kernel: `6.17.0-1022-azure`
+- libfuse: `fusermount3 version: 3.18.2`
+- os: `Linux-6.17.0-1022-azure-x86_64-with-glibc2.43`
+- runner: `Linux`
 
 Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/40432556177
-Recorded at: 2026-10-27T01:31:02+00:00
+Recorded at: 2026-10-27T03:16:33+00:00
 
 ## Historical main-branch trend
 
@@ -19,4 +62,4 @@ Recorded at: 2026-10-27T01:31:02+00:00
 | 2026-09-21T08:03:26+00:00 | `a2eeba4b9d3c` | PASS | 59.05% | 100.00% | 100.00% |
 | 2026-09-21T09:39:49+00:00 | `7bc62e977b35` | PASS | 100.00% | 100.00% | 100.00% |
 
-Last fully healthy baseline: `9fce9cd353d7ad4b81aea66f35718d26b85c5b99`
+Last fully healthy baseline: `c5ec23e8569b8b9bdc017edbdbba561b6b647051`
