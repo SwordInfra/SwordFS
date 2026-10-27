@@ -8,6 +8,8 @@ VERSION_FILE="${PROJECT_DIR}/conformance/pjdfstest/version.env"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.e2e.yml"
 # shellcheck source=scripts/testing/minio-test.sh
 source "${PROJECT_DIR}/scripts/testing/minio-test.sh"
+# shellcheck source=scripts/conformance/chunk-type.sh
+source "${PROJECT_DIR}/scripts/conformance/chunk-type.sh"
 
 OUTPUT_DIR="${PROJECT_DIR}/build/pjdfstest-conformance"
 while [[ $# -gt 0 ]]; do
@@ -118,7 +120,8 @@ AWS_SECRET_ACCESS_KEY="${MINIO_ROOT_PASSWORD}" \
 "${SWORDFS_BIN}" --log-file "${OUTPUT_DIR}/swordfs.log" format \
   --volume "${VOLUME}" \
   --meta "${METADATA_URL}" \
-  --bucket "${BUCKET_URL}"
+  --bucket "${BUCKET_URL}" \
+  "${CONFORMANCE_FORMAT_CHUNK_ARGS[@]}"
 
 echo "=== Mounting SwordFS for pjdfstest ==="
 SWORDFS_S3_NO_SSL=1 \
@@ -169,6 +172,7 @@ path.write_text(
             "kernel": platform.release(),
             "libfuse": command("fusermount3", "--version"),
             "runner": os.environ.get("RUNNER_OS", "local"),
+            "chunk_type": os.environ.get("SWORDFS_CONFORMANCE_CHUNK_TYPE") or "cow",
         },
         indent=2,
         sort_keys=True,
