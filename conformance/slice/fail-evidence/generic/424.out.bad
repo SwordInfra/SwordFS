@@ -1,0 +1,12 @@
+QA output created by 424
+[!] Attribute append should be set
+[!] Attribute immutable should be set
+Failed
+stat_test failed
+[!] Attribute append should be set
+Failed
+stat_test failed
+[!] Attribute immutable should be set
+Failed
+stat_test failed
+Silence is golden

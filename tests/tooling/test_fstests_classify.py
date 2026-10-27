@@ -133,6 +133,23 @@ class FstestsFailureEvidenceTest(unittest.TestCase):
         actual = {test: CLASSIFY.RawResult(test, "PASS")}
         self.assertEqual("XPASS", CLASSIFY.classify({test}, actual, set(), {test: gap})[0].classification)
 
+    def test_slice_full_output_directory_preserves_detailed_failure_evidence_identity(self) -> None:
+        for name in ("fstests-conformance", "fstests-slice-full"):
+            with self.subTest(name=name):
+                message = (
+                    "- output mismatch (see "
+                    f"/home/runner/work/SwordFS/SwordFS/build/{name}/raw/results/generic/184.out.bad)"
+                )
+                normalized = CLASSIFY.normalize_message(message)
+                self.assertEqual(
+                    normalized,
+                    "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/184.out.bad)",
+                )
+                self.assertEqual(
+                    CLASSIFY.evidence_path_from_message("generic/184", normalized),
+                    "generic/184.out.bad",
+                )
+
     def test_shared_upstream_tool_root_normalizes_to_original_harness_evidence(self) -> None:
         # Reusing the exact pinned tools must not require changing the known
         # semantic baseline: only the upstream executable's location moved.
