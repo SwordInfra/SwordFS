@@ -42,7 +42,7 @@ TEST(SwordFsVolumeTest, SerializeToAndParseFromRoundTrip) {
   EXPECT_EQ(parsed.bucket, original.bucket);
   EXPECT_EQ(parsed.region, original.region);
   EXPECT_EQ(parsed.chunk_size, original.chunk_size);
-  EXPECT_EQ(parsed.chunk_type, ChunkType::kCow);
+  EXPECT_EQ(parsed.chunk_type, ChunkType::kChunkSlice);
   EXPECT_FALSE(parsed.enable_posix_acl);
 }
 

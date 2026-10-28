@@ -1,5 +1,13 @@
 # #512 — Promote Slice to the primary FUSE/POSIX test mechanism after parity
 
+> **Current default (superseding historical stages below):** #518 makes
+> newly formatted volumes and shared conformance scripts default to
+> `chunk_slice`; COW remains an explicit choice (`--chunk-type cow`) and
+> existing volumes mount using their persisted mechanism. The earlier COW
+> defaults and opt-in-only instructions below document their historical
+> stage and are not current configuration guidance. Activation safety gates
+> remain in [#275](https://github.com/SwordInfra/SwordFS/issues/275).
+
 ## Baseline and rationale
 
 SwordFS's production format default remains `cow`, but #508 proved a real

@@ -161,7 +161,7 @@ class ConfigCenter {
   std::string lock_lease_io_timeout_ = "5s";
   std::string pidfile_;                      // --pidfile (mount daemon PID file)
   size_t chunk_size_ = 64ULL * 1024 * 1024;  // --chunk-size
-  std::string chunk_type_ = "cow";
+  std::string chunk_type_ = "chunk_slice";
   bool enable_posix_acl_ = false;  // --enable-posix-acl (format-time volume feature)
 
   // Subcommands registered with the CLI::App.

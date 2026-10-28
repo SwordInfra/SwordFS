@@ -47,7 +47,7 @@ struct FormatOptions {
   std::string bucket;
   std::string region;
   uint64_t chunk_size = 64ULL * 1024 * 1024;
-  metadata::ChunkType chunk_type = metadata::ChunkType::kCow;
+  metadata::ChunkType chunk_type = metadata::ChunkType::kChunkSlice;
   bool enable_posix_acl = false;
 };
 
