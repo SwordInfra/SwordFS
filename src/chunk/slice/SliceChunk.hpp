@@ -30,7 +30,7 @@ class SliceChunk final : public Chunk {
  public:
   SliceChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t chunk_size,
              std::shared_ptr<metadata::slice::SliceChunkMetadata> slice_metadata, metadata::IMetaEngine *meta,
-             storage::IDataEngine *data);
+             storage::IDataEngine *data, std::shared_ptr<utils::FiberMutex> publication_mutex);
 
   utils::Status Read(size_t offset, size_t len, folly::IOBuf *out) const override;
   utils::Status Write(size_t offset, const folly::IOBuf &data) override;
@@ -69,6 +69,9 @@ class SliceChunk final : public Chunk {
   std::shared_ptr<metadata::slice::SliceChunkMetadata> slice_metadata_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
+  // Provided by the owning FileChunkManager so separate Chunk fibers do not
+  // invalidate each other's file-wide EOF/attachment preconditions.
+  std::shared_ptr<utils::FiberMutex> publication_mutex_;
   mutable utils::FiberRWMutex mutex_;
   // Non-overlapping sorted dirty intervals. Overwrites replace old portions;
   // segments outside the modified range preserve accepted local bytes.

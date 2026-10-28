@@ -84,7 +84,8 @@ utils::Status ChunkFactory::SanitizeBoundary(metadata::InodeID ino,
 }
 
 utils::Status ChunkFactory::Open(metadata::InodeID ino, metadata::ChunkIndex index, bool create_if_missing,
-                                 std::shared_ptr<Chunk> *out) const {
+                                 std::shared_ptr<Chunk> *out,
+                                 std::shared_ptr<utils::FiberMutex> publication_mutex) const {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("ChunkFactory::Open output is null");
   }
@@ -99,6 +100,9 @@ utils::Status ChunkFactory::Open(metadata::InodeID ino, metadata::ChunkIndex ind
     if (slice_metadata_ == nullptr) {
       return utils::Status::NotSupported("selected chunk type has no Slice metadata capability");
     }
+    if (publication_mutex == nullptr) {
+      return utils::Status::InvalidArgument("Slice ChunkFactory::Open requires a shared inode publication gate");
+    }
     metadata::FileChunkSnapshot file;
     auto status = meta_->ReadFileChunkSnapshot(ino, index, &file);
     if (!status.ok()) {
@@ -107,7 +111,8 @@ utils::Status ChunkFactory::Open(metadata::InodeID ino, metadata::ChunkIndex ind
     if (!file.chunk_id.has_value() && !create_if_missing) {
       return utils::Status::OK();
     }
-    *out = std::make_shared<slice::SliceChunk>(ino, index, chunk_size_, slice_metadata_, meta_, data_);
+    *out = std::make_shared<slice::SliceChunk>(ino, index, chunk_size_, slice_metadata_, meta_, data_,
+                                               std::move(publication_mutex));
     return utils::Status::OK();
   }
   if (chunk_type_ != metadata::ChunkType::kCow) {

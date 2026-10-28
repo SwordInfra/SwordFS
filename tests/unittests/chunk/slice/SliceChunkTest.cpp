@@ -177,7 +177,7 @@ class SliceChunkTest : public swordfs::test::chunk_test::ChunkRuntimeTest {
 
   std::shared_ptr<Chunk> Open(bool create = true, ChunkIndex index = 0) {
     std::shared_ptr<Chunk> result;
-    auto status = factory_->Open(42, index, create, &result);
+    auto status = factory_->Open(42, index, create, &result, publication_mutex_);
     EXPECT_TRUE(status.ok()) << status.message();
     return result;
   }
@@ -204,9 +204,18 @@ class SliceChunkTest : public swordfs::test::chunk_test::ChunkRuntimeTest {
         meta_->AttachPrepared(42, index, id, start + payload.size(), {.eof = start, .boundary = std::nullopt}).ok());
   }
 
+  std::shared_ptr<swordfs::utils::FiberMutex> publication_mutex_ = std::make_shared<swordfs::utils::FiberMutex>();
   std::shared_ptr<TestSliceChunkMetadata> slice_metadata_;
   std::unique_ptr<swordfs::chunk::ChunkFactory> factory_;
 };
+
+TEST_F(SliceChunkTest, FactoryRejectsMissingInodePublicationCoordinator) {
+  RunInTestFiber([&] {
+    std::shared_ptr<Chunk> chunk;
+    EXPECT_EQ(factory_->Open(42, 0, true, &chunk).ToErrno(), EINVAL);
+    EXPECT_EQ(chunk, nullptr);
+  });
+}
 
 // #272 TDD: ordinary retained-boundary shrink/grow must persist its
 // zero-cover so a fresh session does not resurrect an old object suffix.
@@ -819,7 +828,8 @@ TEST_F(SliceChunkTest, PartialFlushRetiresOnlyConfirmedRecordsAndKeepsFailedSuff
     const size_t chunk_size = 2 * kMiB;
     meta_->ConfigureChunkSize(chunk_size);
     Attach(0, id, "abcdefgh", swordfs::chunk::slice::SliceID(714));
-    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, chunk_size, slice_metadata_, meta_, data_);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, chunk_size, slice_metadata_, meta_, data_,
+                                                                     publication_mutex_);
     ASSERT_TRUE(chunk->Write(0, Buf("X")).ok());
     ASSERT_TRUE(chunk->Write(kMiB + 5, Buf("Y")).ok());
     // The first candidate's metadata is acknowledged; the next candidate
@@ -958,7 +968,7 @@ TEST_F(SliceChunkTest, FullyDirtyRangeReadsLocallyWithoutPhysicalGet) {
 TEST_F(SliceChunkTest, UnmappedRangeAndInvalidInputsAreHandledWithoutRemoteHydration) {
   RunInTestFiber([&] {
     std::shared_ptr<Chunk> not_opened;
-    ASSERT_TRUE(factory_->Open(42, 0, false, &not_opened).ok());
+    ASSERT_TRUE(factory_->Open(42, 0, false, &not_opened, publication_mutex_).ok());
     EXPECT_EQ(not_opened, nullptr);
     auto chunk = Open();
     ASSERT_NE(chunk, nullptr);
@@ -1479,7 +1489,7 @@ TEST_F(SliceChunkTest, LargeAcceptedWriteAutoFreezesIntoBoundedImmutableObjects)
     constexpr size_t kLargeChunkSize = 8 * 1024 * 1024;
     constexpr size_t kSliceSize = 4 * 1024 * 1024;
     meta_->ConfigureChunkSize(kLargeChunkSize);
-    swordfs::chunk::slice::SliceChunk chunk(42, 0, kLargeChunkSize, slice_metadata_, meta_, data_);
+    swordfs::chunk::slice::SliceChunk chunk(42, 0, kLargeChunkSize, slice_metadata_, meta_, data_, publication_mutex_);
     std::string payload(kLargeChunkSize, 'a');
     ASSERT_TRUE(chunk.Write(0, Buf(payload)).ok());
     // Auto-freeze is local preparation only, never premature data publication.
@@ -1521,7 +1531,7 @@ TEST_F(SliceChunkTest, OverlappingLargeWriteDoesNotGrowMutableSlicePastFreezeLim
   RunInTestFiber([&] {
     constexpr size_t kMiB = 1024 * 1024;
     meta_->ConfigureChunkSize(8 * kMiB);
-    swordfs::chunk::slice::SliceChunk chunk(42, 0, 8 * kMiB, slice_metadata_, meta_, data_);
+    swordfs::chunk::slice::SliceChunk chunk(42, 0, 8 * kMiB, slice_metadata_, meta_, data_, publication_mutex_);
     ASSERT_TRUE(chunk.Write(0, Buf(std::string(3 * kMiB, 'a'))).ok());
     ASSERT_TRUE(chunk.Write(2 * kMiB, Buf(std::string(4 * kMiB, 'b'))).ok());
     EXPECT_TRUE(chunk.Flush().ok());
@@ -1543,7 +1553,7 @@ TEST_F(SliceChunkTest, OverlappingLargeWriteDoesNotGrowMutableSlicePastFreezeLim
 TEST_F(SliceChunkTest, AutoFreezeDuringOlderInFlightPutKeepsCandidateLifetimeAndNewerDirtyVisible) {
   constexpr size_t kLargeChunkSize = 8 * 1024 * 1024;
   meta_->ConfigureChunkSize(kLargeChunkSize);
-  swordfs::chunk::slice::SliceChunk chunk(42, 0, kLargeChunkSize, slice_metadata_, meta_, data_);
+  swordfs::chunk::slice::SliceChunk chunk(42, 0, kLargeChunkSize, slice_metadata_, meta_, data_, publication_mutex_);
   RunInTestFiber([&] { ASSERT_TRUE(chunk.Write(0, Buf("abcd")).ok()); });
   folly::EventBase evb;
   auto &fm = folly::fibers::getFiberManager(evb);
@@ -1583,7 +1593,8 @@ TEST_F(SliceChunkTest, AutoFreezeDuringOlderInFlightPutKeepsCandidateLifetimeAnd
 TEST_F(SliceChunkTest, FlushRejectsUnrepresentableChunkRangeBeforePhysicalSideEffects) {
   RunInTestFiber([&] {
     const size_t beyond_record_range = static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1;
-    swordfs::chunk::slice::SliceChunk chunk(42, 0, beyond_record_range, slice_metadata_, meta_, data_);
+    swordfs::chunk::slice::SliceChunk chunk(42, 0, beyond_record_range, slice_metadata_, meta_, data_,
+                                            publication_mutex_);
     ASSERT_TRUE(chunk.Write(0, Buf("X")).ok());
     EXPECT_EQ(chunk.Flush().ToErrno(), EINVAL);
     EXPECT_EQ(data_->put_calls, 0);
@@ -1640,7 +1651,7 @@ TEST_F(SliceChunkTest, OverlappingWriteUpToFourMiBUsesOneFrozenObject) {
   RunInTestFiber([&] {
     constexpr size_t kMiB = 1024 * 1024;
     meta_->ConfigureChunkSize(8 * kMiB);
-    swordfs::chunk::slice::SliceChunk chunk(42, 0, 8 * kMiB, slice_metadata_, meta_, data_);
+    swordfs::chunk::slice::SliceChunk chunk(42, 0, 8 * kMiB, slice_metadata_, meta_, data_, publication_mutex_);
     ASSERT_TRUE(chunk.Write(0, Buf(std::string(3 * kMiB, 'a'))).ok());
     ASSERT_TRUE(chunk.Write(2 * kMiB, Buf(std::string(2 * kMiB, 'b'))).ok());
     EXPECT_TRUE(chunk.Flush().ok());
@@ -1702,7 +1713,7 @@ TEST_F(SliceChunkTest, RepeatedNonzeroEofTruncateRetiresAllInvisibleFrozenPayloa
   constexpr size_t kAllowedRssGrowth = 8 * kPayloadBytes;
   DiscardingSliceDataEngine sink;
   RunInTestFiber([&] {
-    swordfs::chunk::slice::SliceChunk chunk(42, 0, 8 * kMiB, slice_metadata_, meta_, &sink);
+    swordfs::chunk::slice::SliceChunk chunk(42, 0, 8 * kMiB, slice_metadata_, meta_, &sink, publication_mutex_);
     std::string payload(kPayloadBytes, 'x');
     const auto write_freeze_truncate = [&] {
       ASSERT_TRUE(chunk.Write(1, Buf(payload)).ok());
@@ -1773,7 +1784,8 @@ TEST_F(SliceChunkTest, WindowCacheSingleOverwriteKeepsOrdinarySliceRecord) {
     meta_->ConfigureChunkSize(kChunkSize);
     const swordfs::metadata::ChunkID id(515);
     Attach(0, id, "0123456789", swordfs::chunk::slice::SliceID(1515));
-    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_,
+                                                                     publication_mutex_);
 
     ASSERT_TRUE(chunk->Write(2, Buf("XY")).ok());
     ASSERT_TRUE(chunk->Flush().ok());
@@ -1793,7 +1805,8 @@ TEST_F(SliceChunkTest, WindowCacheSingleOverwriteKeepsOrdinarySliceRecord) {
     const std::string_view bytes(reinterpret_cast<const char *>(physical->data()), physical->length());
     EXPECT_EQ(bytes, "XY");
 
-    auto cold = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+    auto cold = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_,
+                                                                    publication_mutex_);
     auto out = folly::IOBuf::create(10);
     ASSERT_TRUE(cold->Read(0, 10, out.get()).ok());
     EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), "01XY456789");
@@ -1805,7 +1818,8 @@ TEST_F(SliceChunkTest, WindowCacheSingleSparseWriteDoesNotExtendEof) {
     constexpr size_t kChunkSize = 2 * kMiB;
 
     meta_->ConfigureChunkSize(kChunkSize);
-    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_,
+                                                                     publication_mutex_);
 
     ASSERT_TRUE(chunk->Write(5, Buf("ABC")).ok());
     ASSERT_TRUE(chunk->Flush().ok());
@@ -1839,7 +1853,8 @@ TEST_F(SliceChunkTest, WindowCacheSeparateSingletonWindowsPreserveSliceRange) {
     constexpr size_t kChunkSize = 3 * kMiB;
 
     meta_->ConfigureChunkSize(kChunkSize);
-    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_,
+                                                                     publication_mutex_);
 
     ASSERT_TRUE(chunk->Write(5, Buf("A")).ok());
     ASSERT_TRUE(chunk->Write(kMiB + 5, Buf("B")).ok());
@@ -1874,7 +1889,8 @@ TEST_F(SliceChunkTest, WindowCacheDoesNotSplitDenseSequentialSliceIntoOneMiBReco
     constexpr size_t kChunkSize = 8 * kMiB;
 
     meta_->ConfigureChunkSize(kChunkSize);
-    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_,
+                                                                     publication_mutex_);
 
     ASSERT_TRUE(chunk->Write(0, Buf(std::string(4 * kMiB, 'a'))).ok());
     ASSERT_TRUE(chunk->Flush().ok());
@@ -1909,7 +1925,8 @@ TEST_F(SliceChunkTest, WindowCacheHydratesCommittedBytesBetweenSmallWrites) {
     meta_->ConfigureChunkSize(kChunkSize);
     const swordfs::metadata::ChunkID id(516);
     Attach(0, id, "0123456789", swordfs::chunk::slice::SliceID(1516));
-    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_,
+                                                                     publication_mutex_);
 
     ASSERT_TRUE(chunk->Write(2, Buf("AB")).ok());
     ASSERT_TRUE(chunk->Write(8, Buf("CD")).ok());
@@ -1939,7 +1956,8 @@ TEST_F(SliceChunkTest, WindowCacheCoalescesFragmentsIndependentlyWithinOneMiB) {
     constexpr size_t kChunkSize = 3 * kMiB;
 
     meta_->ConfigureChunkSize(kChunkSize);
-    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_,
+                                                                     publication_mutex_);
 
     ASSERT_TRUE(chunk->Write(5, Buf("A")).ok());
     ASSERT_TRUE(chunk->Write(100, Buf("B")).ok());
@@ -1965,7 +1983,8 @@ TEST_F(SliceChunkTest, WindowCachePreservesNewerActiveWritesAcceptedDuringPut) {
   constexpr size_t kChunkSize = 2 * kMiB;
 
   meta_->ConfigureChunkSize(kChunkSize);
-  auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+  auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_,
+                                                                   publication_mutex_);
   RunInTestFiber([&] { ASSERT_TRUE(chunk->Write(5, Buf("AAA")).ok()); });
 
   folly::EventBase evb;
@@ -2006,7 +2025,8 @@ TEST_F(SliceChunkTest, WindowCacheTruncateWhilePutClipsPreparedSlice) {
   constexpr size_t kChunkSize = 2 * kMiB;
 
   meta_->ConfigureChunkSize(kChunkSize);
-  auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+  auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_,
+                                                                   publication_mutex_);
   RunInTestFiber([&] { ASSERT_TRUE(chunk->Write(5, Buf("ABCDE")).ok()); });
 
   folly::EventBase evb;
@@ -2050,7 +2070,8 @@ TEST_F(SliceChunkTest, WindowCacheRetriesDefinitePutFailureWithoutLosingDirty) {
     constexpr size_t kChunkSize = 2 * kMiB;
 
     meta_->ConfigureChunkSize(kChunkSize);
-    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_,
+                                                                     publication_mutex_);
     ASSERT_TRUE(chunk->Write(5, Buf("ABC")).ok());
     data_->next_put_status = Status::IOError("definite RMW PUT failure");
     EXPECT_EQ(chunk->Flush().ToErrno(), EIO);
@@ -2075,7 +2096,8 @@ TEST_F(SliceChunkTest, WindowCacheRejectsAmbiguousPutAndRetriesFresh) {
     constexpr size_t kChunkSize = 2 * kMiB;
 
     meta_->ConfigureChunkSize(kChunkSize);
-    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_);
+    auto chunk = std::make_shared<swordfs::chunk::slice::SliceChunk>(42, 0, kChunkSize, slice_metadata_, meta_, data_,
+                                                                     publication_mutex_);
     ASSERT_TRUE(chunk->Write(5, Buf("ABC")).ok());
     data_->next_put_status = Status::OutcomeUnknown("lost RMW PUT reply");
     EXPECT_EQ(chunk->Flush().ToErrno(), EIO);
