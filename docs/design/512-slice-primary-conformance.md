@@ -130,7 +130,51 @@ than accepting a broad `FAIL`/`NOTRUN` category or a generic skip waiver.
 Reviewers should explicitly check the non-FUSE-specific gap rationale before
 promoting the proposed manifest to authoritative primary-CI status.
 
-## Stage B cutover design (prepared, not activated)
+## Stage B cutover candidate (implemented in Draft #513; not merged)
+
+The new formal [full Slice run #40622067272](https://github.com/SwordInfra/SwordFS/actions/runs/40622067272)
+**SUCCESS** on head `8435612`, not just XUnit: all ten actual `chunk_slice`
+shards completed, **644/644 selected executed**, **145/145 supported PASS**,
+499 reviewed known gaps matched, and per-test strict TEST+SCRATCH log audit
+reported **no unexpected Flush/RELEASE failures**. Original `generic/346`
+completed in 53 seconds and both raw daemon logs had zero matching writeback
+errors. The full set of required COW checks and Codecov Patch also passed.
+
+This is sufficient to implement and verify the Stage B *candidate* in Draft
+PR #513. It does **not** prove that the previously observed intermittent
+inode EOF/attachment race has been eliminated; [#517](https://github.com/SwordInfra/SwordFS/issues/517)
+remains open with a separate owner. Before PR #513 becomes merge-ready, its
+new primary Slice matrix (now running without opt-in label) must pass all
+strong audit gates *after* #517's root-cause fix has merged and the exact main
+CI is green. No bug is waived or hidden by this CI topology change.
+
+The candidate implements:
+
+- Primary Release E2E and the intentional-failure diagnostics explicitly on
+  `SWORDFS_E2E_CHUNK_TYPE=chunk_slice`, with a short independent mounted COW
+  smoke of file creation, fsync/remount and cross-chunk writing. Debug primary
+  mounted E2E was already Slice.
+- Primary pjdfstest on explicit `SWORDFS_CONFORMANCE_CHUNK_TYPE=chunk_slice`;
+  all pinned suites, assertions and classification contracts are unchanged.
+- The original **required** ten-shard `fstests-conformance-*` runners now
+  format Slice and use `FSTESTS_STRICT_WRITEBACK=1` for each testcase. The
+  existing `fstests-conformance (Release)` aggregator verifies every shard's
+  exact `chunk_type=chunk_slice` and classifies against independently captured
+  `conformance/slice/known-gaps.tsv` and Slice-specific raw FAIL evidence.
+  The duplicate temporary opt-in ten-shard experimental matrix is removed.
+  Existing COW-specific unit and bounded E2E coverage continue running.
+- Main status publishers explicitly require `chunk_type=chunk_slice` in real
+  conformance outputs, record `chunk_type` on new history entries and preserve
+  pre-cutover (COW) history records. Old COW entries are **not rendered in the
+  new Slice trend**; the full separate-mechanism history remains available in
+  `history.json`. A missing/wrong mechanism cannot silently publish a green
+  Slice status. README reports supported and pinned selected population and
+  explicitly notes that the **production format default is still COW**.
+
+All changes are test/CI/tooling/documentation; no C++ production data-path or
+persistent volume format change in #512.
+
+### Original Stage B acceptance plan (for traceability)
 
 A single cohesive final change should **replace the primary CI test mechanism**
 only after #515 has merged and its post-merge `main` CI is green, and a clean
