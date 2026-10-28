@@ -32,6 +32,14 @@ class RedisMetaClient {
   utils::Status Ping();
   utils::Status Get(std::string_view key, std::string *value);
   utils::Status MGet(const std::vector<std::string> &keys, std::vector<std::optional<std::string>> *values);
+  // #515: server-atomic, read-only attachment snapshot. A caller reads and
+  // parses the inode first to derive the EOF boundary, then this EVAL_RO
+  // validates that exact inode image while reading both attachment fields.
+  // "matched = false" means retry from a fresh inode, never return stale data.
+  utils::Status ReadChunkAttachmentsIfUnchanged(std::string_view inode_key, std::string_view refs_key,
+                                                std::string_view expected_inode, uint64_t index, uint64_t eof_index,
+                                                std::optional<std::string> *attachment,
+                                                std::optional<std::string> *eof_attachment, bool *matched);
   utils::Status Incr(std::string_view key, uint64_t *value);
   // Atomically increment a missing/non-negative integer counter. Negative,
   // malformed, and overflowed state is a known failure and is not mutated.

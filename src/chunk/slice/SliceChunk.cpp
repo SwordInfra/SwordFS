@@ -10,8 +10,10 @@
 #include <cerrno>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <optional>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -26,7 +28,17 @@ namespace swordfs::chunk::slice {
 struct SliceChunk::FrozenSlice {
   size_t pos;
   std::string payload;
+  // Logical record length after local truncation. A coalesced Window RMW
+  // candidate can contain hydrated committed bytes beyond eof_len; they are
+  // published in the ordinary SliceRecord but never extend FileMetadata EOF.
   size_t visible_len;
+  // Accepted-write extent from pos, in bytes. For ungrouped candidates this
+  // equals visible_len; for a coalesced window it ends at the last accepted
+  // dirty byte, rather than at the end of hydrated clean bytes.
+  size_t eof_len;
+  // True once PrepareWindowCandidates has materialized this candidate.
+  // Prepared window candidates are never regrouped with newer dirty ranges.
+  bool window_group = false;
   std::optional<SliceID> prepared_id;
   // An existing-index append is a separate authority from FileMetadata
   // finalization. Retain its identity across a definite metadata conflict
@@ -43,6 +55,8 @@ namespace {
 
 using DirtyRanges = std::map<size_t, std::string>;
 constexpr size_t kMaxActiveSliceBytes = size_t{4} * 1024 * 1024;
+constexpr size_t kRmwWindowBytes = size_t{1} * 1024 * 1024;
+constexpr int kMaxRmwInstallAttempts = 4;
 
 // Merge only touching written intervals; do not turn a sparse gap into a
 // zero-padded object that would hide already published bytes on commit.
@@ -338,17 +352,299 @@ utils::Status SliceChunk::Read(size_t offset, size_t len, folly::IOBuf *out) con
   return utils::Status::OK();
 }
 
+utils::Status SliceChunk::ReadCommittedRange(size_t offset, size_t len, std::string *out) const {
+  if (out == nullptr || offset > chunk_size_ || len > chunk_size_ - offset) {
+    return utils::Status::InvalidArgument("SliceChunk::ReadCommittedRange invalid range");
+  }
+  if (chunk_size_ > std::numeric_limits<uint32_t>::max()) {
+    return utils::Status::InvalidArgument("Slice chunk exceeds 32-bit record range");
+  }
+  out->assign(len, '\0');
+  if (len == 0) {
+    return utils::Status::OK();
+  }
+
+  std::vector<BoundaryClamp> boundaries;
+  std::optional<utils::Status> boundary_error;
+  {
+    std::shared_lock<utils::FiberRWMutex> lock(mutex_);
+    boundaries = boundaries_;
+    boundary_error = boundary_error_;
+  }
+  if (boundary_error.has_value()) {
+    return *boundary_error;
+  }
+
+  metadata::FileChunkSnapshot snapshot;
+  auto status = meta_->ReadFileChunkSnapshot(ino_, Index(), &snapshot);
+  if (!status.ok()) {
+    return status;
+  }
+  if (!snapshot.chunk_id.has_value()) {
+    return utils::Status::OK();
+  }
+
+  std::vector<SliceRecord> records;
+  status = slice_metadata_->ReadRecords(*snapshot.chunk_id, &records);
+  if (status.IsNotFound() || (status.ok() && records.empty())) {
+    return utils::Status::Malformed("mapped ChunkID is missing authoritative Slice records");
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  uint64_t start = 0;
+  status = metadata::CalculateChunkStartOffset(Index(), chunk_size_, &start);
+  if (!status.ok()) {
+    return status;
+  }
+  const size_t size_at_eof =
+      snapshot.inode.attr.size > start
+          ? static_cast<size_t>(std::min<uint64_t>(chunk_size_, snapshot.inode.attr.size - start))
+          : 0;
+  if (offset >= size_at_eof) {
+    return utils::Status::OK();
+  }
+  const size_t committed_length = std::min(len, size_at_eof - offset);
+  std::vector<ResolvedSlice> spans;
+  if (!boundaries.empty() && boundaries.back().chunk_id == snapshot.chunk_id) {
+    if (records.size() < boundaries.back().record_count) {
+      return utils::Status::Malformed("Slice history shrank after retained boundary sanitation");
+    }
+    std::vector<SliceRecord> sanitized;
+    sanitized.reserve(records.size());
+    size_t boundary_index = boundaries.size();
+    size_t visible_prefix = chunk_size_;
+    for (size_t i = records.size(); i > 0; --i) {
+      while (boundary_index > 0 && boundaries[boundary_index - 1].record_count >= i) {
+        visible_prefix = std::min(visible_prefix, boundaries[--boundary_index].visible_prefix);
+      }
+      auto record = records[i - 1];
+      status = ValidateRecord(record, static_cast<uint32_t>(chunk_size_));
+      if (!status.ok()) {
+        return status;
+      }
+      if (record.pos >= visible_prefix) {
+        continue;
+      }
+      record.len = static_cast<uint32_t>(std::min<size_t>(record.len, visible_prefix - record.pos));
+      sanitized.push_back(record);
+    }
+    std::reverse(sanitized.begin(), sanitized.end());
+    status = ResolveRange(sanitized, static_cast<uint32_t>(chunk_size_), static_cast<uint32_t>(offset),
+                          static_cast<uint32_t>(committed_length), &spans);
+  } else {
+    status = ResolveRange(records, static_cast<uint32_t>(chunk_size_), static_cast<uint32_t>(offset),
+                          static_cast<uint32_t>(committed_length), &spans);
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  for (const auto &span : spans) {
+    if (span.id == SliceID()) {
+      continue;
+    }
+    auto physical = folly::IOBuf::create(span.len);
+    status = data_->Get(SliceObjectKey(span.id), span.off, span.len, physical.get());
+    if (!status.ok()) {
+      return status;
+    }
+    if (physical->length() != span.len) {
+      return utils::Status::IOError("SliceChunk::ReadCommittedRange: short object range");
+    }
+    std::memcpy(out->data() + span.pos - offset, physical->data(), span.len);
+  }
+  return utils::Status::OK();
+}
+
 void SliceChunk::FreezeActiveLocked() {
   if (active_.empty()) {
     return;
   }
   for (auto &[pos, bytes] : active_) {
     const size_t len = bytes.size();
-    frozen_.push_back(std::make_shared<FrozenSlice>(
-        FrozenSlice{.pos = pos, .payload = std::move(bytes), .visible_len = len, .prepared_id = std::nullopt}));
+    frozen_.push_back(std::make_shared<FrozenSlice>(FrozenSlice{.pos = pos,
+                                                                .payload = std::move(bytes),
+                                                                .visible_len = len,
+                                                                .eof_len = len,
+                                                                .window_group = false,
+                                                                .prepared_id = std::nullopt}));
   }
   active_.clear();
   active_bytes_ = 0;
+}
+
+utils::Status SliceChunk::PrepareWindowCandidates(std::vector<std::shared_ptr<FrozenSlice>> *candidates) {
+  // Lengths can be clipped by TruncateLocal while committed reads are in
+  // flight. Snapshot every mutable length under the lock; payload storage is
+  // immutable after FreezeActiveLocked and remains owned by the candidate.
+  struct PendingView {
+    std::shared_ptr<FrozenSlice> candidate;
+    size_t visible_len;
+    size_t eof_len;
+  };
+  struct GroupBuild {
+    size_t pos = 0;
+    size_t record_end = 0;
+    size_t dirty_end = 0;
+    size_t insert_after = 0;
+    size_t interval_count = 0;
+    std::shared_ptr<FrozenSlice> candidate;
+  };
+
+  for (int attempt = 0; attempt < kMaxRmwInstallAttempts; ++attempt) {
+    std::vector<PendingView> pending;
+    size_t epoch = 0;
+    {
+      std::shared_lock<utils::FiberRWMutex> lock(mutex_);
+      epoch = truncate_epoch_;
+      pending.reserve(frozen_.size());
+      for (const auto &candidate : frozen_) {
+        pending.push_back(
+            PendingView{.candidate = candidate, .visible_len = candidate->visible_len, .eof_len = candidate->eof_len});
+      }
+    }
+
+    std::unordered_set<const FrozenSlice *> sources;
+    std::map<size_t, GroupBuild> groups;
+    for (size_t i = 0; i < pending.size(); ++i) {
+      const auto &view = pending[i];
+      if (view.visible_len == 0 || view.candidate->window_group || view.candidate->prepared_id.has_value() ||
+          view.candidate->created_chunk_id.has_value() || view.candidate->recorded_chunk_id.has_value() ||
+          view.candidate->uncertain_record_chunk_id.has_value()) {
+        // A candidate whose physical or metadata preparation already began
+        // retains its own retry identity. A newer RMW group may still overlay
+        // its bytes, but the prepared candidate itself is never abandoned.
+        continue;
+      }
+      // Never split a dense contiguous Slice into artificial 1 MiB objects;
+      // only small dirty ranges entirely inside a window may be coalesced.
+      const size_t window_base = (view.candidate->pos / kRmwWindowBytes) * kRmwWindowBytes;
+      if (view.visible_len >= kRmwWindowBytes ||
+          view.visible_len > window_base + kRmwWindowBytes - view.candidate->pos) {
+        continue;
+      }
+      const size_t cursor = view.candidate->pos;
+      const size_t portion_end = cursor + view.visible_len;
+      auto [it, inserted] = groups.try_emplace(window_base);
+      auto &group = it->second;
+      if (inserted) {
+        group.pos = cursor;
+        group.record_end = portion_end;
+        group.insert_after = i;
+      } else {
+        group.pos = std::min(group.pos, cursor);
+        group.record_end = std::max(group.record_end, portion_end);
+      }
+      ++group.interval_count;
+      group.dirty_end = std::max(group.dirty_end, portion_end);
+      group.insert_after = std::max(group.insert_after, i);
+    }
+    // One contiguous interval is already a valid immutable Slice, with no
+    // existing gap to hydrate. Leave it untouched: avoid unnecessary S3 GET
+    // or data amplification for isolated small writes.
+    std::erase_if(groups, [](const auto &entry) { return entry.second.interval_count < 2; });
+    for (const auto &view : pending) {
+      if (view.visible_len == 0 || view.candidate->window_group || view.candidate->prepared_id.has_value() ||
+          view.candidate->created_chunk_id.has_value() || view.candidate->recorded_chunk_id.has_value() ||
+          view.candidate->uncertain_record_chunk_id.has_value()) {
+        continue;
+      }
+      const size_t window_base = (view.candidate->pos / kRmwWindowBytes) * kRmwWindowBytes;
+      if (view.visible_len < kRmwWindowBytes &&
+          view.visible_len <= window_base + kRmwWindowBytes - view.candidate->pos && groups.contains(window_base)) {
+        sources.insert(view.candidate.get());
+      }
+    }
+    if (sources.empty()) {
+      return utils::Status::OK();
+    }
+
+    std::vector<size_t> group_order;
+    group_order.reserve(groups.size());
+    for (const auto &[base, group] : groups) {
+      (void)group;
+      group_order.push_back(base);
+    }
+    for (const size_t base : group_order) {
+      auto &group = groups.at(base);
+      std::string payload;
+      auto status = ReadCommittedRange(group.pos, group.record_end - group.pos, &payload);
+      if (!status.ok()) {
+        return status;
+      }
+      // Overlay every pending generation in acceptance order. This includes
+      // older prepared groups whose records will publish before this one; the
+      // group is inserted after them below so later local bytes still win.
+      for (size_t i = 0; i < pending.size(); ++i) {
+        const auto &view = pending[i];
+        if (view.visible_len == 0) {
+          continue;
+        }
+        const size_t candidate_start = view.candidate->pos;
+        const size_t candidate_end = candidate_start + view.visible_len;
+        const size_t start = std::max(group.pos, candidate_start);
+        const size_t end = std::min(group.record_end, candidate_end);
+        if (start >= end) {
+          continue;
+        }
+        std::memcpy(payload.data() + start - group.pos, view.candidate->payload.data() + start - candidate_start,
+                    end - start);
+        const size_t dirty_end = candidate_start + std::min(view.eof_len, view.visible_len);
+        if (dirty_end > group.pos) {
+          group.dirty_end = std::max(group.dirty_end, std::min(dirty_end, group.record_end));
+        }
+        group.insert_after = std::max(group.insert_after, i);
+      }
+      group.dirty_end = std::clamp(group.dirty_end, group.pos, group.record_end);
+      const size_t record_len = payload.size();
+      const size_t eof_len = group.dirty_end - group.pos;
+      group.candidate = std::make_shared<FrozenSlice>(FrozenSlice{.pos = group.pos,
+                                                                  .payload = std::move(payload),
+                                                                  .visible_len = record_len,
+                                                                  .eof_len = eof_len,
+                                                                  .window_group = true,
+                                                                  .prepared_id = std::nullopt});
+    }
+
+    std::map<size_t, std::vector<std::shared_ptr<FrozenSlice>>> insert_after;
+    for (const size_t base : group_order) {
+      const auto &group = groups.at(base);
+      insert_after[group.insert_after].push_back(group.candidate);
+    }
+
+    std::lock_guard<utils::FiberRWMutex> lock(mutex_);
+    if (epoch != truncate_epoch_) {
+      // The local dirty view was clipped while committed bytes were read.
+      // Rebuild from the current, smaller source set rather than publishing
+      // a record past the truncate boundary.
+      continue;
+    }
+    std::vector<std::shared_ptr<FrozenSlice>> rebuilt;
+    rebuilt.reserve(frozen_.size());
+    for (size_t i = 0; i < frozen_.size(); ++i) {
+      if (!sources.contains(frozen_[i].get())) {
+        rebuilt.push_back(frozen_[i]);
+      }
+      if (auto it = insert_after.find(i); it != insert_after.end()) {
+        rebuilt.insert(rebuilt.end(), it->second.begin(), it->second.end());
+      }
+    }
+    frozen_ = std::move(rebuilt);
+
+    std::vector<std::shared_ptr<FrozenSlice>> ordered;
+    ordered.reserve(pending.size());
+    for (size_t i = 0; i < pending.size(); ++i) {
+      if (!sources.contains(pending[i].candidate.get())) {
+        ordered.push_back(pending[i].candidate);
+      }
+      if (auto it = insert_after.find(i); it != insert_after.end()) {
+        ordered.insert(ordered.end(), it->second.begin(), it->second.end());
+      }
+    }
+    *candidates = std::move(ordered);
+    return utils::Status::OK();
+  }
+  return utils::Status::Busy("Slice RMW preparation raced repeated local truncation");
 }
 
 utils::Status SliceChunk::Flush() {
@@ -372,6 +668,13 @@ utils::Status SliceChunk::Flush() {
     return status;
   };
 
+  // Consolidate fragmented dirty bytes inside a 1 MiB cache window before
+  // normal immutable Slice publication. This is not another Chunk format.
+  auto status = PrepareWindowCandidates(&candidates);
+  if (!status.ok()) {
+    return finish(status);
+  }
+
   // One flight per Chunk retains local acceptance order independent of later
   // writes. An uncertain Put is retried only with a fresh physical identity;
   // already prepared objects are never overwritten or uploaded twice.
@@ -391,12 +694,17 @@ utils::Status SliceChunk::Flush() {
     std::erase_if(frozen_, [&](const auto &candidate) { return committed_addresses.contains(candidate.get()); });
     RebuildDirtyLocked();
   };
+  // One immutable object per prepared Slice. There is no alternative sparse
+  // packing format and no experimental publication strategy in production.
   for (const auto &candidate : candidates) {
     {
       std::shared_lock<utils::FiberRWMutex> lock(mutex_);
       if (candidate->visible_len == 0 || candidate->prepared_id.has_value()) {
         continue;
       }
+    }
+    if (candidate->payload.empty() || candidate->payload.size() > std::numeric_limits<uint32_t>::max()) {
+      return finish(utils::Status::InvalidArgument("invalid prepared Slice payload"));
     }
     SliceID id;
     auto status = slice_metadata_->AllocateSliceID(&id);
@@ -406,16 +714,11 @@ utils::Status SliceChunk::Flush() {
     if (id == SliceID() || id.Value() > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
       return finish(utils::Status::Malformed("Slice allocator returned an invalid physical identity"));
     }
-    // Frozen payload storage is never mutated or removed during in-flight
-    // preparation, even if a concurrent local truncate clips its visibility.
     status = data_->Put(SliceObjectKey(id), folly::IOBuf::copyBuffer(candidate->payload));
     if (!status.ok()) {
       return finish(status);
     }
     std::lock_guard<utils::FiberRWMutex> lock(mutex_);
-    // TruncateLocal may have retired this candidate while Put was in flight.
-    // Its shared_ptr snapshot keeps the payload alive through Put, but a
-    // completely invisible object must never become eligible for publication.
     if (candidate->visible_len != 0) {
       candidate->prepared_id = id;
     }
@@ -448,6 +751,7 @@ utils::Status SliceChunk::PublishFrozen(const std::shared_ptr<FrozenSlice> &cand
   // exclusive Truncate path cannot invalidate this candidate. The local
   // mutation lock still protects the direct Chunk test/runtime surface.
   SliceRecord record;
+  size_t eof_len = 0;
   {
     std::shared_lock<utils::FiberRWMutex> lock(mutex_);
     if (candidate->visible_len == 0) {
@@ -459,6 +763,7 @@ utils::Status SliceChunk::PublishFrozen(const std::shared_ptr<FrozenSlice> &cand
     record =
         SliceRecord{static_cast<uint32_t>(candidate->pos), *candidate->prepared_id,
                     static_cast<uint32_t>(candidate->payload.size()), 0, static_cast<uint32_t>(candidate->visible_len)};
+    eof_len = std::min(candidate->eof_len, candidate->visible_len);
   }
   auto status = ValidateRecord(record, static_cast<uint32_t>(chunk_size_));
   if (!status.ok()) {
@@ -473,7 +778,9 @@ utils::Status SliceChunk::PublishFrozen(const std::shared_ptr<FrozenSlice> &cand
       record.len > metadata::kMaxSupportedFileSize - (start + record.pos)) {
     return utils::Status::InvalidArgument("Slice published record exceeds supported file size");
   }
-  const uint64_t end = start + record.pos + record.len;
+  // The physical record can cover clean/committed bytes for a full window.
+  // Only the accepted dirty extent is allowed to advance the file's EOF.
+  const uint64_t end = start + record.pos + eof_len;
 
   const auto matches = [&](metadata::ChunkID chunk_id, bool *present) -> utils::Status {
     std::vector<SliceRecord> records;
@@ -596,6 +903,7 @@ void SliceChunk::RebuildDirtyLocked() {
 void SliceChunk::TruncateLocal(size_t size) {
   CaptureBoundary(size);
   std::lock_guard<utils::FiberRWMutex> lock(mutex_);
+  ++truncate_epoch_;
   ClipRanges(dirty_, size);
   ClipRanges(active_, size);
   active_bytes_ = 0;
@@ -605,6 +913,7 @@ void SliceChunk::TruncateLocal(size_t size) {
   for (auto &candidate : frozen_) {
     const size_t remaining = size > candidate->pos ? size - candidate->pos : 0;
     candidate->visible_len = std::min(candidate->visible_len, remaining);
+    candidate->eof_len = std::min(candidate->eof_len, candidate->visible_len);
   }
   // Fully clipped generations have no publishable data. Release Chunk
   // ownership immediately; any in-flight Put still owns its local snapshot.
