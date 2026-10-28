@@ -147,7 +147,7 @@ utils::Status FileChunkManager::Get(metadata::ChunkIndex idx, bool create_if_mis
     return utils::Status::Internal("FileChunkManager requires a chunk factory");
   }
   std::shared_ptr<chunk::Chunk> session;
-  auto status = factory_->Open(ino_, idx, create_if_missing, &session, publication_mutex_);
+  auto status = factory_->Open(ino_, idx, create_if_missing, &session);
   if (!status.ok()) {
     return status;
   }

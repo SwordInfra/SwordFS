@@ -5,8 +5,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 
 #include "chunk/cow/COWChunk.hpp"
@@ -19,6 +22,32 @@
 
 namespace swordfs::chunk {
 
+struct ChunkFactory::SlicePublicationRegistry {
+  std::shared_ptr<utils::FiberMutex> ForInode(metadata::InodeID ino) {
+    std::lock_guard<utils::FiberMutex> lock(mutex_);
+    auto &weak = gates_[ino];
+    auto gate = weak.lock();
+    if (!gate) {
+      gate = std::make_shared<utils::FiberMutex>();
+      weak = gate;
+      // Expired entries must not accumulate indefinitely on a long-running
+      // mount as it opens and closes distinct inodes.
+      if (++created_since_cleanup_ >= 256) {
+        for (auto it = gates_.begin(); it != gates_.end();) {
+          it = it->second.expired() ? gates_.erase(it) : std::next(it);
+        }
+        created_since_cleanup_ = 0;
+      }
+    }
+    return gate;
+  }
+
+ private:
+  utils::FiberMutex mutex_;
+  std::map<metadata::InodeID, std::weak_ptr<utils::FiberMutex>> gates_;
+  size_t created_since_cleanup_ = 0;
+};
+
 ChunkFactory::ChunkFactory(metadata::ChunkType chunk_type, metadata::ChunkMetadataPtr chunk_metadata,
                            metadata::IMetaEngine *meta, storage::IDataEngine *data, size_t chunk_size)
     : chunk_type_(chunk_type),
@@ -27,8 +56,12 @@ ChunkFactory::ChunkFactory(metadata::ChunkType chunk_type, metadata::ChunkMetada
       slice_metadata_(std::dynamic_pointer_cast<metadata::slice::SliceChunkMetadata>(chunk_metadata_)),
       meta_(meta),
       data_(data),
-      chunk_size_(chunk_size) {
+      chunk_size_(chunk_size),
+      slice_publication_registry_(
+          chunk_type == metadata::ChunkType::kChunkSlice ? std::make_unique<SlicePublicationRegistry>() : nullptr) {
 }
+
+ChunkFactory::~ChunkFactory() = default;
 
 utils::Status ChunkFactory::SanitizeBoundary(metadata::InodeID ino,
                                              const metadata::RetainedChunkBoundary &boundary) const {
@@ -84,8 +117,7 @@ utils::Status ChunkFactory::SanitizeBoundary(metadata::InodeID ino,
 }
 
 utils::Status ChunkFactory::Open(metadata::InodeID ino, metadata::ChunkIndex index, bool create_if_missing,
-                                 std::shared_ptr<Chunk> *out,
-                                 std::shared_ptr<utils::FiberMutex> publication_mutex) const {
+                                 std::shared_ptr<Chunk> *out) const {
   if (out == nullptr) {
     return utils::Status::InvalidArgument("ChunkFactory::Open output is null");
   }
@@ -100,9 +132,6 @@ utils::Status ChunkFactory::Open(metadata::InodeID ino, metadata::ChunkIndex ind
     if (slice_metadata_ == nullptr) {
       return utils::Status::NotSupported("selected chunk type has no Slice metadata capability");
     }
-    if (publication_mutex == nullptr) {
-      return utils::Status::InvalidArgument("Slice ChunkFactory::Open requires a shared inode publication gate");
-    }
     metadata::FileChunkSnapshot file;
     auto status = meta_->ReadFileChunkSnapshot(ino, index, &file);
     if (!status.ok()) {
@@ -112,7 +141,7 @@ utils::Status ChunkFactory::Open(metadata::InodeID ino, metadata::ChunkIndex ind
       return utils::Status::OK();
     }
     *out = std::make_shared<slice::SliceChunk>(ino, index, chunk_size_, slice_metadata_, meta_, data_,
-                                               std::move(publication_mutex));
+                                               slice_publication_registry_->ForInode(ino));
     return utils::Status::OK();
   }
   if (chunk_type_ != metadata::ChunkType::kCow) {

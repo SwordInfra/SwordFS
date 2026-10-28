@@ -10,6 +10,7 @@
 
 - **Function names**: `PascalCase` (e.g., `DoSomething()`)
 - **Variable names**: `snake_case` (e.g., `table_name`)
+- **Class member variables**: `snake_case` **with a trailing underscore** (e.g., `peak_finalizations_`), regardless of whether the member is `public`, `protected`, or `private`. Static data members follow the same rule; methods, type aliases and enum values do not.
 - **Class/struct names**: `PascalCase` (e.g., `MyClass`)
 - **Type aliases**: Use a `Fn` suffix when the alias represents a function type (e.g., `EncodeEntryFn`), and a `Cb` suffix when it represents a callback type (e.g., `CompletionCb`).
 - **Enum values**: `kCamelCase` (e.g., `kMyEnumValue`) — not `MACRO_CASE`

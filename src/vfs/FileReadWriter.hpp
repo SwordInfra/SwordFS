@@ -82,9 +82,6 @@ class FileChunkManager {
   metadata::InodeID ino_;
   const chunk::ChunkFactory *factory_;
   mutable utils::FiberMutex mutex_;
-  // All cached Slice Chunks of this inode share one publication gate. Keep
-  // immutable object uploads parallel; only FileMetadata CAS is serialized.
-  std::shared_ptr<utils::FiberMutex> publication_mutex_ = std::make_shared<utils::FiberMutex>();
   Map chunks_;
 };
 
