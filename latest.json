@@ -13,7 +13,7 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "multiple (see shard-environments.json)",
     "runner": "GitHub Actions (10 fstests shards)",
-    "swordfs_commit": "493c1268a2e8024255ed709764bd35778e3dd873"
+    "swordfs_commit": "e7b28617edd4a562b72102e65d68aa62ee9f197a"
   },
   "status": "PASS",
   "summary": {
