@@ -49,6 +49,14 @@ minimum supported-pass expectation and **no preapproved Slice gaps**; any
 other failed/NOTRUN case is reported as unclassified and remains a blocker
 until observed, investigated and adjudicated with independent evidence.
 
+The CI workflow subscribes to the `pull_request.labeled` event explicitly
+as well as ordinary open/synchronize/reopen events. Otherwise applying the
+`slice-full-matrix-ci` opt-in label alone does not schedule a new CI run,
+and any already queued run remains anchored to its original event label
+snapshot. With that event type, reapplying the label starts a fresh,
+mechanism-qualified full matrix on the *current* exact PR head. The
+required COW matrix is never skipped by this opt-in event.
+
 This opt-in experiment is intentionally allowed to fail on real untriaged
 Slice POSIX cases. A failure is evidence for subsequent remediation, not a
 reason to auto-promote COW's historical failure classifications to Slice.
