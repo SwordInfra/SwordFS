@@ -33,17 +33,17 @@ class ConformanceChunkTypeTest(unittest.TestCase):
             check=False,
         )
 
-    def test_default_and_explicit_cow_do_not_append_format_flags(self) -> None:
-        for value in (None, "cow", ""):
+    def test_default_and_explicit_slice_have_no_format_override(self) -> None:
+        for value in (None, "chunk_slice", ""):
             with self.subTest(value=value):
                 result = self.inspect(value)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, "type=cow\narg=\n")
+                self.assertEqual(result.stdout, "type=chunk_slice\narg=\n")
 
-    def test_slice_adds_exactly_one_format_mechanism(self) -> None:
-        result = self.inspect("chunk_slice")
+    def test_explicit_cow_preserves_legacy_regression_format(self) -> None:
+        result = self.inspect("cow")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "type=chunk_slice\narg=--chunk-type\narg=chunk_slice\n")
+        self.assertEqual(result.stdout, "type=cow\narg=--chunk-type\narg=cow\n")
 
     def test_unknown_and_shell_metacharacters_fail_closed(self) -> None:
         for value in ("redis_cache", "slice", "chunk_slice; exit 0", "cow --bucket evil"):
