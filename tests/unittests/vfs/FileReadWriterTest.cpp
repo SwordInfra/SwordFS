@@ -897,6 +897,9 @@ class FileReadWriterTest : public ::testing::Test {
     mock_data_ = data.get();
     mock_meta_ = meta.get();
     SwordFsVolume config;
+    // This fixture exercises the COW-private head/revision contract; the
+    // product default for newly formatted volumes is now Slice.
+    config.chunk_type = swordfs::metadata::ChunkType::kCow;
     config.chunk_size = kChunkSize;
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();

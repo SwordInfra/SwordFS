@@ -606,6 +606,7 @@ FIBER_TEST_F(RedisMetaImplTest, VolumeAndBasicLookupOperations) {
   ASSERT_TRUE(swordfs::test::RunInTestThreadFromFiber([&] { return impl_->LoadVolume(&volume); }).ok());
   EXPECT_EQ(volume.name, volume_name_);
   EXPECT_EQ(volume.chunk_size, 4096U);
+  EXPECT_EQ(volume.chunk_type, swordfs::metadata::ChunkType::kCow);
   EXPECT_EQ(swordfs::test::RunInTestThreadFromFiber([&] { return impl_->LoadVolume(nullptr); }).ToErrno(), EINVAL);
   EXPECT_TRUE(swordfs::test::RunInTestThreadFromFiber([&] { return impl_->FormatVolume(volume); }).ToErrno() == EEXIST);
 

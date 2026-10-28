@@ -475,6 +475,9 @@ class ReclaimerTest : public ::testing::Test {
  protected:
   void SetUp() override {
     SwordFsVolume config;
+    // Keep the COW cleanup and reclaim fixtures independent of the new
+    // default for newly formatted user volumes.
+    config.chunk_type = metadata::ChunkType::kCow;
     auto meta = CreateMetaEngine(&config);
     ASSERT_NE(meta, nullptr);
     auto data = std::make_unique<RecordingDataEngine>();
@@ -872,6 +875,7 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsMalformedPendingDeleteWork) {
     auto data = std::make_unique<RecordingDataEngine>();
     data_ = data.get();
     SwordFsVolume config;
+    config.chunk_type = metadata::ChunkType::kCow;
     const auto status =
         swordfs::test::LoadTestVolumeRuntime(std::move(replacement), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
@@ -894,6 +898,7 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcDelegatesReclaimPolicyAndOwnsAcknowledgement)
     auto data = std::make_unique<RecordingDataEngine>();
     data_ = data.get();
     SwordFsVolume config;
+    config.chunk_type = metadata::ChunkType::kCow;
     const auto status =
         swordfs::test::LoadTestVolumeRuntime(std::move(replacement), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
@@ -918,6 +923,7 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcKeepsDeferredReclaimUnacknowledged) {
     auto data = std::make_unique<RecordingDataEngine>();
     data_ = data.get();
     SwordFsVolume config;
+    config.chunk_type = metadata::ChunkType::kCow;
     const auto status =
         swordfs::test::LoadTestVolumeRuntime(std::move(replacement), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
@@ -938,6 +944,7 @@ FIBER_TEST_F(ReclaimerTest, ChunkGcRejectsMalformedReclaimWork) {
     auto data = std::make_unique<RecordingDataEngine>();
     data_ = data.get();
     SwordFsVolume config;
+    config.chunk_type = metadata::ChunkType::kCow;
     const auto status =
         swordfs::test::LoadTestVolumeRuntime(std::move(replacement), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
@@ -1379,6 +1386,7 @@ FIBER_TEST_F(ReclaimerNoEngineTest, ReconcileWithoutEnginesIsANoOp) {
 FIBER_TEST_F(ReclaimerNoEngineTest, MissingDataEngineFailsClosedAndReconcileStaysHarmless) {
   swordfs::test::RunInTestThreadFromFiber([&] {
     SwordFsVolume config;
+    config.chunk_type = metadata::ChunkType::kCow;
     auto configured = std::make_unique<swordfs::test::ConfiguredMetaEngine<EmptyReclaimerMetaEngine>>();
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(configured), nullptr, std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
@@ -1455,6 +1463,7 @@ class ReclaimerScanFailureTest : public ::testing::Test {
     meta_ = meta.get();
     data_ = data.get();
     SwordFsVolume config;
+    config.chunk_type = metadata::ChunkType::kCow;
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
   }
@@ -1544,6 +1553,7 @@ class ReclaimerForcedMultiPassTest : public ::testing::Test {
     meta_ = meta.get();
     data_ = data.get();
     SwordFsVolume config;
+    config.chunk_type = metadata::ChunkType::kCow;
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
     swordfs::test::RunInTestFiber([&] { InodeHandleManager::Instance().Initialize(); });
@@ -1592,6 +1602,7 @@ class ReclaimerSlowScanTest : public ::testing::Test {
     auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<SlowOrphanScanMetaEngine>>();
     meta_ = meta.get();
     SwordFsVolume config;
+    config.chunk_type = metadata::ChunkType::kCow;
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::make_unique<RecordingDataEngine>(),
                                                              std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();

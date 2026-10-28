@@ -301,6 +301,7 @@ TEST(VolumeImplConfigAdapterTest, LoadFromUsesParsedMountRuntimeConfiguration) {
       .storage = std::string(swordfs::test::kTestDataEngine),
       .bucket = "opaque://endpoint/bucket",
       .region = "persisted-region",
+      .chunk_type = ChunkType::kCow,
   };
   swordfs::test::pending_meta_engine =
       std::make_unique<swordfs::test::ConfiguredMetaEngine<swordfs::test::UnsupportedMetaEngine>>();
@@ -788,6 +789,7 @@ TEST_F(VolumeImplTest, LoadFromRejectsMissingDataEngineLocation) {
 TEST_F(VolumeImplTest, LoadFromS3UrlMissingBucketName) {
   SwordFsVolume stored;
   stored.name = makeVolumeName("missing-bucket-name");
+  stored.chunk_type = ChunkType::kCow;  // The injected test backend only implements COW metadata.
   stored.storage = "s3";
   stored.bucket = "s3://endpoint.example.com";
   const auto options = PrepareInjectedMount(stored);

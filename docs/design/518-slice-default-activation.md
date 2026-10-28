@@ -21,14 +21,19 @@ A default change is **not** a statement that general production usage is safe.
 The roadmap's outstanding [#273 physical Slice GC](https://github.com/SwordInfra/SwordFS/issues/273),
 [#274 compaction/history bounds](https://github.com/SwordInfra/SwordFS/issues/274),
 [#202 dirty-memory/backpressure](https://github.com/SwordInfra/SwordFS/issues/202)
-and [#517 residual EOF/attachment race](https://github.com/SwordInfra/SwordFS/issues/517)
 require explicit resolution, or a separately recorded owner acceptance with
 beta release limitations and safe deployment constraints. In particular, until
 #273 is implemented, Slice detached objects cannot be reclaimed safely and
 storage usage can grow without physical GC. Until #274 is implemented, ordered
 Slice history can grow without a bounded compaction policy. These risks must
 not be erased by switching a CLI default. #424's two owner-accepted beta data
-integrity exceptions are **narrow** and do not waive #517's failed Flush.
+integrity exceptions are **narrow** and do not waive a failed Flush.
+
+The local EOF/attachment publication fix [#517](https://github.com/SwordInfra/SwordFS/issues/517)
+has merged. However, [#525](https://github.com/SwordInfra/SwordFS/issues/525)
+tracks a separate intermittent `generic/113` Flush failure from exhausted
+Redis transaction retries that a passing XUnit result can conceal. A green
+one-off strict conformance run does not close that independent safety gate.
 
 Keep this implementation in Draft and require a new exact-head and main CI
 validation before enabling the default for release. Reconcile with the #512
@@ -47,3 +52,14 @@ outputs.
    supported pjdfstest assertions, 10 pinned Slice fstests shards (145/145
    supported + 499 classified gaps), strict Flush/RELEASE log gate, review,
    static audit and Codecov. Production format default and CI must agree.
+
+## Final review regression contracts
+
+- Redis metadata tests that bind COW-private chunk metadata and cleanup must
+  format their test volume explicitly as COW; inspect the persisted identity
+  rather than allowing the newly changed constructor default to mislabel it.
+- The actual `swordfs format` subprocess without `--chunk-type` must persist
+  `kChunkSlice` to Redis. A separate CLI invocation with explicit
+  `--chunk-type cow` must persist `kCow`. The command-coverage E2E test loads
+  these canonical records through the Redis metadata implementation, rather
+  than relying on disconnected CLI parsing and programmatic-format assertions.
