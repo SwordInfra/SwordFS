@@ -130,17 +130,17 @@ class ContendedSliceMetaEngine : public swordfs::test::chunk_test::MissingMetaEn
         /*attached=*/true, [&] { return MissingMetaEngine::FinalizeAttachedWrite(ino, index, id, end, expected); });
   }
 
-  size_t peak_finalizations = 0;
-  size_t peak_attached_finalizations = 0;
+  size_t peak_finalizations_ = 0;
+  size_t peak_attached_finalizations_ = 0;
 
  private:
   template <typename Fn>
   Status SimulateMetadataTransaction(bool attached, Fn &&commit) {
     ++active_finalizations_;
-    peak_finalizations = std::max(peak_finalizations, active_finalizations_);
+    peak_finalizations_ = std::max(peak_finalizations_, active_finalizations_);
     if (attached) {
       ++active_attached_finalizations_;
-      peak_attached_finalizations = std::max(peak_attached_finalizations, active_attached_finalizations_);
+      peak_attached_finalizations_ = std::max(peak_attached_finalizations_, active_attached_finalizations_);
     }
     const auto retire = folly::makeGuard([&] {
       --active_finalizations_;
@@ -156,6 +156,7 @@ class ContendedSliceMetaEngine : public swordfs::test::chunk_test::MissingMetaEn
     return commit();
   }
 
+ private:
   size_t active_finalizations_ = 0;
   size_t active_attached_finalizations_ = 0;
   swordfs::metadata::ChunkMetadataPtr slice_metadata_ = std::make_shared<ContendedSliceMetadata>();
@@ -217,7 +218,7 @@ TEST(FileReadWriterSliceTest, ParallelChunkUploadMustNotStarveFileMetadataPublic
     // An independent owner must serialize file-wide metadata finalization;
     // concurrent uploads are allowed, but metadata transactions must not
     // invalidate one another's EOF preconditions within the same inode.
-    EXPECT_EQ(meta_probe->peak_finalizations, 1U);
+    EXPECT_EQ(meta_probe->peak_finalizations_, 1U);
 
     // Rewrite already-attached indices: FinalizeAttachedWrite, not the first
     // AttachPrepared, now owns every conditional inode metadata transaction.
@@ -233,7 +234,7 @@ TEST(FileReadWriterSliceTest, ParallelChunkUploadMustNotStarveFileMetadataPublic
     const std::string rewrite(kChunks * kTestChunkSize, 'R');
     ASSERT_TRUE(writer.Write(Buf(rewrite), 0).ok());
     ASSERT_TRUE(writer.Flush().ok());
-    EXPECT_EQ(meta_probe->peak_attached_finalizations, 1U);
+    EXPECT_EQ(meta_probe->peak_attached_finalizations_, 1U);
     swordfs::metadata::ChunkMetadataPtr chunk_metadata;
     ASSERT_TRUE(meta_probe->OpenChunkMetadata(swordfs::metadata::ChunkType::kChunkSlice, &chunk_metadata).ok());
     auto slice_metadata = std::dynamic_pointer_cast<swordfs::metadata::slice::SliceChunkMetadata>(chunk_metadata);
