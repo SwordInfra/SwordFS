@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Explicitly opt-in to expensive conformance probes using PR labels.
+    # The default PR event types do not include `labeled`.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 jobs:
