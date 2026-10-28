@@ -173,3 +173,53 @@ unexpected internal writeback, FUSE unmount, or artifact identity failure.
 
 No Stage B job defaults, publishers or README links should change on the
 Stage A discovery-only Draft PR before the strict parity gate is met.
+
+## Post-#515 full probe: why 145/145 XUnit PASS is not the cutover gate
+
+[Full CI #40616350589](https://github.com/SwordInfra/SwordFS/actions/runs/40616350589)
+reused the merged `#515` cache/metadata implementation, pinned test harness,
+verified Release and independent reviewed Slice expectations. It delivered
+**10/10 complete typed Slice shards, 644/644 executed cases, 145/145 supported
+XUnit PASS and 499 exact known gaps** (403 upstream FUSE-not-applicable, 87
+VFS-known-unsupported, 8 environment, 1 upstream defect), 1 deferred and
+**0 blocking XUnit/aggregate classifications**. `generic/346` completed in
+55 seconds, rather than timing out at 600 seconds as before #515. The
+supported population is now fully observed without truncation.
+
+However the raw `slice-fstests-full-supported-5` scratch daemon log reports
+`FileReadWriter::Flush chunk FAILED: ino=290 chunk=2 — Slice publication lost
+too many EOF/attachment races` at 2026-10-28 01:51:25 UTC **during the
+same 55-second generic/346** (scratch daemon generation 46, running from
+01:50:39 to 01:51:33 UTC). The upstream checker does not reliably propagate
+async pwrite/RELEASE writeback failures, so this definite error means the
+XUnit-based compatibility classification alone **cannot establish durability**.
+The child #515 owner received the artifact and must remediate/validate it;
+#512 does not modify #515's C++ code.
+
+### Fail-closed asynchronous writeback contract
+
+Stage A adds mechanism-qualified **per-test writeback audit** for Slice full
+fstests. Before each original upstream testcase, save the current byte offsets
+of both append-only FUSE daemon logs; after the harness has completed and its
+FUSE mounts have been isolated, scan only bytes produced by that testcase for
+`FileReadWriter::Flush chunk FAILED` and `local RELEASE failed`. Any unexpected
+line writes `raw/results/<suite>/<id>.writebackfail` with exact diagnostic
+context, and the aggregate classifier marks that exact testcase
+`WRITEBACK_FAILURE` (blocking) **even if upstream XUnit says PASS** or a known
+baseline gap otherwise matches. The new tool is tested against the real
+previous CI supported-5 artifact and correctly detects the single hidden
+failure. The audit fails closed on missing/truncated logs or invalid IDs.
+
+One pinned testcase, `generic/079`, deliberately checks immutable and
+append-only inode flags. Its FUSE log includes expected policy-denial
+`finalize chunk write rejected by inode policy`, with upstream PASS and
+corresponding intentional permission-denial operations in pinned
+`tests/generic/079`. Only this **exact reason in this exact testcase** is
+excluded; never suppress a retry-exhaustion, EOF/attachment, S3 or unrelated
+writeback failure, including those emitted by `generic/079` itself. The rest
+of the 145 supported tests remain subject to strict per-case checks.
+
+The initial 145/145 *XUnit* pass is valuable stage-A coverage evidence, but
+promotion to primary tests is blocked until a formal 10-shard run also passes
+this new asynchronous-writeback gate with **zero** unexpected errors, alongside
+all ordinary project gates. The production COW/Slice default is unchanged.

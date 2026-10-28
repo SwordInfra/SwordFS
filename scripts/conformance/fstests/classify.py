@@ -36,6 +36,7 @@ BLOCKING = {
     "BASELINE_EVIDENCE_MISMATCH",
     "INFRASTRUCTURE",
     "SWORD_FS_CRASH",
+    "WRITEBACK_FAILURE",
 }
 # The pinned generic/704 and generic/767 testcases require both a usable
 # physical block device and scsi_debug. On FUSE-hosted CI runners, fstests
@@ -504,6 +505,21 @@ def load_swordfs_crash_tests(result_dir: pathlib.Path) -> set[str]:
     return crash_tests
 
 
+def load_writeback_failure_tests(result_dir: pathlib.Path) -> dict[str, str]:
+    """Preserve per-case asynchronous FUSE writeback errors, even on XUnit PASS."""
+    result: dict[str, str] = {}
+    if not result_dir.exists():
+        return result
+    for path in sorted(result_dir.glob("*/*.writebackfail")):
+        test = f"{path.parent.name}/{path.name.removesuffix('.writebackfail')}"
+        _validate_test_id(test, str(path))
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        if not text:
+            raise BaselineError(f"{path}: empty writeback failure evidence")
+        result[test] = text
+    return result
+
+
 def _infrastructure(test: str, message: str) -> Observation:
     return Observation(test=test, result="INFRASTRUCTURE", classification="INFRASTRUCTURE", message=message)
 
@@ -519,6 +535,7 @@ def classify(
     actual_evidence: dict[str, str] | None = None,
     isolation_failure_tests: set[str] | None = None,
     crash_tests: set[str] | None = None,
+    writeback_failure_tests: dict[str, str] | None = None,
     infrastructure: Iterable[str] = (),
 ) -> list[Observation]:
     deferred = deferred or {}
@@ -526,6 +543,7 @@ def classify(
     actual_evidence = actual_evidence or {}
     isolation_failure_tests = isolation_failure_tests or set()
     crash_tests = crash_tests or set()
+    writeback_failure_tests = writeback_failure_tests or {}
     overlap = supported & gaps.keys()
     if overlap:
         raise BaselineError("supported.txt and known-gaps.tsv overlap: " + ", ".join(sorted(overlap)))
@@ -574,6 +592,9 @@ def classify(
                     "SwordFS runner had to intervene to restore testcase isolation (.isolationfail)",
                 )
             )
+            continue
+        if test in writeback_failure_tests:
+            observations.append(Observation(test, raw.result, "WRITEBACK_FAILURE", writeback_failure_tests[test]))
             continue
         gap = gaps.get(test)
         if raw.result == "PASS":
@@ -843,6 +864,7 @@ def main(argv: list[str] | None = None) -> int:
         deferred = load_deferred(args.deferred_file)
         isolation_failure_tests = load_isolation_failure_tests(args.result_dir)
         crash_tests = load_swordfs_crash_tests(args.result_dir)
+        writeback_failure_tests = load_writeback_failure_tests(args.result_dir)
         if args.previous_supported_file:
             previous = load_supported(args.previous_supported_file)
             validate_supported_monotonicity(supported, previous, args.allow_supported_removal)
@@ -873,6 +895,7 @@ def main(argv: list[str] | None = None) -> int:
         actual_evidence=actual_evidence,
         isolation_failure_tests=isolation_failure_tests,
         crash_tests=crash_tests,
+        writeback_failure_tests=writeback_failure_tests,
         infrastructure=infrastructure,
     )
     summary = summarize(observations, selected, supported, gaps, deferred)
