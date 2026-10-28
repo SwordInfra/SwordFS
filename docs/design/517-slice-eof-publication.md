@@ -1,6 +1,6 @@
 # #517 — Slice EOF/attachment finalization under concurrent Chunk Flush
 
-Status: mount-local per-inode coordination implemented; review findings under verification.
+Status: #517 merged in #519; post-merge factory encapsulation review tracked by #523.
 
 ## Observed incident
 
@@ -43,16 +43,23 @@ Flush. Truly competing external mounts or external truncation can still
 produce a real, bounded, retryable conflict; they must never be accepted as
 success without authoritative metadata confirmation.
 
-The `FileChunkManager` owns a shared, inode-local `utils::FiberMutex` and
-passes it through the mechanism-neutral `ChunkFactory::Open` publication-gate
-argument. The factory rejects a Slice creation without this gate; the
-`SliceChunk` constructor also requires non-null shared coordination rather
-than quietly substituting an independent per-Chunk mutex.
+The mount-owned `ChunkFactory` encapsulates a Slice-only publication registry
+that resolves a `utils::FiberMutex` by inode. Every Slice Chunk constructed
+from that factory receives the same shared gate for its inode, even when
+separate callers open it independently. The factory's **public** `Open` API
+has no mechanism-specific parameter: VFS `FileChunkManager` neither owns
+the gate nor knows about Slice internals. COW uses no publication gate.
+
+The private registry stores weak references so a gate remains alive as long
+as any Slice Chunk uses it, and reclaims stale inode entries periodically.
+Distinct inodes get distinct gates; the registry mutex protects only the
+short gate lookup/creation, not IO. The `SliceChunk` constructor still
+requires non-null shared coordination and refuses an independent fallback.
 Every Slice Chunk performs its RMW preparation and immutable object PUTs
 without taking this mutex, then takes the shared mutex only around each
 `PublishFrozen` operation (including private record creation/append and the
 conditional FileMetadata EOF/attachment transaction). Direct SliceChunk tests
-provide their own shared gate; COW does not use the gate. The mutex
+share one gate through a dedicated test constructor helper. The mutex
 is not a distributed lock and does not weaken Redis precondition checks.
 
 ## Verification
@@ -70,8 +77,24 @@ is not a distributed lock and does not weaken Redis precondition checks.
   attached ChunkIDs under simultaneous `FinalizeAttachedWrite` attempts,
   checks exclusive finalization, stable attachment identity and exact record
   counts, then verifies a fresh reader sees the complete overwrite. The
-  mechanism-level factory test requires fail-closed missing-gate rejection.
-  Preserve existing conflict and unknown-reply UT.
+  mechanism-neutral factory test checks that callers no longer need to inject
+  a Slice-specific gate. Preserve existing conflict and unknown-reply UT.
 - Formal: Debug and Release UT, pinned real COW/Slice `generic/346` with
   **zero** unexpected TEST/SCRATCH daemon writeback, affected supported-5
   shard, full 10/10 strict Slice fstests matrix, and required PR/main gates.
+
+## Verified acceptance evidence
+
+- Fix PR #519: original HEAD `cc65107`, merged main `491eb5f`. Full PR CI
+  [40631426458](https://github.com/SwordInfra/SwordFS/actions/runs/40631426458)
+  succeeded. Real COW `generic/346` PASS 52s, Slice PASS 82s, and original
+  TEST/SCRATCH daemon logs had zero unexpected Flush/writeback errors.
+- Combined Slice-primary (#513) plus #519 fix, exact integration HEAD
+  `c781d30`: [strict CI 40641558590](https://github.com/SwordInfra/SwordFS/actions/runs/40641558590)
+  succeeded. All 10 Slice shards PASS; 645 selected, 644 executed, one
+  explicitly deferred, 145/145 supported PASS, 499 classified known gaps,
+  zero aggregate blockers. The aggregator checked `chunk_type=chunk_slice`.
+- Post-merge main CI
+  [40642230374](https://github.com/SwordInfra/SwordFS/actions/runs/40642230374)
+  succeeded. The #523 structural review follow-up must independently pass
+  its current HEAD's GitHub CI; historic evidence does not replace that gate.

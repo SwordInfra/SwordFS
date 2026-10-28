@@ -11,7 +11,6 @@
 #include "metadata/ChunkMetadata.hpp"
 #include "metadata/ChunkSizePlan.hpp"
 #include "metadata/types/Volume.hpp"
-#include "utils/Synchronization.hpp"
 
 namespace swordfs::metadata {
 class IMetaEngine;
@@ -35,15 +34,20 @@ class ChunkFactory {
  public:
   ChunkFactory(metadata::ChunkType chunk_type, metadata::ChunkMetadataPtr chunk_metadata, metadata::IMetaEngine *meta,
                storage::IDataEngine *data, size_t chunk_size);
+  ~ChunkFactory();
 
-  // Slice requires the inode owner's shared publication gate. The optional
-  // argument is unused for COW; omitting it for Slice fails closed.
+  // Mounted Slice callers execute in the fiber domain; the mechanism-private
+  // per-inode publication registry follows that same execution contract.
   utils::Status Open(metadata::InodeID ino, metadata::ChunkIndex index, bool create_if_missing,
-                     std::shared_ptr<Chunk> *out, std::shared_ptr<utils::FiberMutex> publication_mutex = nullptr) const;
+                     std::shared_ptr<Chunk> *out) const;
 
   // The VFS owns size ordering but not the mechanism's private head CAS.
   // Keep boundary sanitation behind the mount-selected chunk factory.
   utils::Status SanitizeBoundary(metadata::InodeID ino, const metadata::RetainedChunkBoundary &boundary) const;
+
+ private:
+  // Mechanism-private mount-local coordination, never exposed to VFS callers.
+  struct SlicePublicationRegistry;
 
  private:
   metadata::ChunkType chunk_type_;
@@ -56,6 +60,7 @@ class ChunkFactory {
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;
   size_t chunk_size_;
+  std::unique_ptr<SlicePublicationRegistry> slice_publication_registry_;
 };
 
 }  // namespace swordfs::chunk
