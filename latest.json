@@ -1,6 +1,8 @@
 {
+  "conformance_job_result": "success",
   "metadata": {
     "backend": "redis+minio-s3",
+    "chunk_type": "chunk_slice",
     "fstests_commit": "a370dcbed43563f0462801e889e0eceb93c7cfad",
     "fstests_group": "generic/quick",
     "fstests_patchset": "conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19",
@@ -11,8 +13,9 @@
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
     "os": "multiple (see shard-environments.json)",
     "runner": "GitHub Actions (10 fstests shards)",
-    "swordfs_commit": "19fabb93b031b7c90a6b4609fd918a473d3df750"
+    "swordfs_commit": "493c1268a2e8024255ed709764bd35778e3dd873"
   },
+  "status": "PASS",
   "summary": {
     "blocking_count": 0,
     "classifications": {
