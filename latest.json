@@ -6,12 +6,12 @@
     "fstests_patchset": "conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19",
     "fstests_repository": "https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git",
     "fstests_selector": "generic/quick",
-    "kernel": "6.17.0-1022-azure",
+    "kernel": "multiple (see shard-environments.json)",
     "libfuse": "fusermount3 version: 3.18.2",
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
-    "os": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.43",
+    "os": "multiple (see shard-environments.json)",
     "runner": "GitHub Actions (10 fstests shards)",
-    "swordfs_commit": "c5ec23e8569b8b9bdc017edbdbba561b6b647051"
+    "swordfs_commit": "765045d212384159269b436ca50f159862c60945"
   },
   "summary": {
     "blocking_count": 0,
