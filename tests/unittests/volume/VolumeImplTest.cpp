@@ -417,6 +417,13 @@ TEST(VolumeImplDomainTest, LifecycleRejectsFiberCaller) {
 
 // ── CreateFrom ──────────────────────────────────────────────────────
 
+TEST(VolumeImplDefaultsTest, ProgrammaticFormatUsesSliceUnlessCowExplicitlySelected) {
+  EXPECT_EQ(FormatOptions{}.chunk_type, ChunkType::kChunkSlice);
+  FormatOptions explicit_cow;
+  explicit_cow.chunk_type = ChunkType::kCow;
+  EXPECT_EQ(explicit_cow.chunk_type, ChunkType::kCow);
+}
+
 TEST_F(VolumeImplTest, CreateFromSucceeds) {
   swordfs::test::RegisterTestVolumeEngines();
   swordfs::test::pending_meta_engine =

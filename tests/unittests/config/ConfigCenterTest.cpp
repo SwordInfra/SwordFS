@@ -62,6 +62,20 @@ TEST(FormatParamsTest, MinimalRedisFormat) {
   EXPECT_TRUE(ParseOptions(args).empty());
 }
 
+TEST(FormatParamsTest, DefaultsToSliceAndAllowsExplicitCow) {
+  const std::vector<std::string> minimal = {
+      "swordfs",  "format",
+      "--volume", "myvol",
+      "--meta",   "redis://localhost:6379",
+      "--bucket", "s3://mybucket.s3.amazonaws.com/chunks",
+  };
+  EXPECT_TRUE(ParseOptions(minimal, [](const auto &config) { EXPECT_EQ(config.chunk_type(), "chunk_slice"); }).empty());
+
+  auto legacy = minimal;
+  legacy.insert(legacy.end(), {"--chunk-type", "cow"});
+  EXPECT_TRUE(ParseOptions(legacy, [](const auto &config) { EXPECT_EQ(config.chunk_type(), "cow"); }).empty());
+}
+
 TEST(FormatParamsTest, RejectsUnregisteredMetadataEngine) {
   const auto error = ParseOptions({"swordfs", "format", "--volume", "myvol", "--meta", "unsupported://local",
                                    "--bucket", "s3://endpoint.example.com/chunks"});

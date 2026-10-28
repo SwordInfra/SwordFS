@@ -46,6 +46,18 @@ TEST(SwordFsVolumeTest, SerializeToAndParseFromRoundTrip) {
   EXPECT_FALSE(parsed.enable_posix_acl);
 }
 
+TEST(SwordFsVolumeTest, NewVolumeDefaultsToSliceWhileLegacyCowIsPersistedExplicitly) {
+  SwordFsVolume fresh = MakeVolume();
+  ASSERT_EQ(fresh.chunk_type, ChunkType::kChunkSlice);
+  SwordFsVolume reloaded;
+  ASSERT_TRUE(reloaded.ParseFrom(fresh.SerializeTo()).ok());
+  EXPECT_EQ(reloaded.chunk_type, ChunkType::kChunkSlice);
+
+  fresh.chunk_type = ChunkType::kCow;
+  ASSERT_TRUE(reloaded.ParseFrom(fresh.SerializeTo()).ok());
+  EXPECT_EQ(reloaded.chunk_type, ChunkType::kCow);
+}
+
 TEST(SwordFsVolumeTest, PersistsPosixAclFeatureInCanonicalVolumeRecord) {
   const SwordFsVolume volume = MakeVolume();
 
