@@ -28,13 +28,13 @@ namespace swordfs::chunk::slice {
 struct SliceChunk::FrozenSlice {
   size_t pos;
   std::string payload;
-  // Logical record length after local truncation. A fixed-window RMW
-  // candidate may carry committed bytes beyond eof_len; those bytes are read
-  // back only through the window record and never extend FileMetadata EOF.
+  // Logical record length after local truncation. A coalesced Window RMW
+  // candidate can contain hydrated committed bytes beyond eof_len; they are
+  // published in the ordinary SliceRecord but never extend FileMetadata EOF.
   size_t visible_len;
-  // Dirty extent from pos, in bytes. For sparse candidates this equals
-  // visible_len. For a full-window RMW candidate it ends at the last dirty
-  // byte, not at the 1MiB window boundary.
+  // Accepted-write extent from pos, in bytes. For ungrouped candidates this
+  // equals visible_len; for a coalesced window it ends at the last accepted
+  // dirty byte, rather than at the end of hydrated clean bytes.
   size_t eof_len;
   // True once PrepareWindowCandidates has materialized this candidate.
   // Prepared window candidates are never regrouped with newer dirty ranges.

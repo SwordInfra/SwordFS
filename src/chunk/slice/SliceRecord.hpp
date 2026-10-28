@@ -34,8 +34,8 @@ class SliceID {
 
 // One entry in the ordered history belonging to a single logical ChunkID.
 // Later entries overlay earlier entries. size is the immutable physical
-// object's byte length. Multiple logical records can share one ID and size
-// while off/len independently select each packed physical subrange.
+// object's byte length. off/len describe the selected range of that object;
+// normal Window RMW publication produces a single SliceRecord per object.
 struct SliceRecord {
   uint32_t pos = 0;
   SliceID id;

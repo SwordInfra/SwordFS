@@ -76,6 +76,18 @@ uncertain Redis append or failed S3 PUT still must fail closed and retain
 dirty bytes for the supported retry protocol. Per-window size is not a new
 durable identifier, lock, or metadata schema.
 
+**Accepted partial-Flush LWW boundary (2026-10-28):** A prepared Window RMW
+candidate contains both accepted local writes and committed bytes read to
+hydrate its gaps. If an earlier window publishes successfully but this
+candidate's publication fails, the retained local pending view may continue
+to expose that hydrated image over the entire coalesced interval. A later
+write by another mount into one of those gaps is not guaranteed to appear in
+this mount's local reads before retry, and an eventual successful publication
+may overwrite it under Window-level LWW. This behavior is intentional;
+there is **no per-byte cross-mount merge or immediate invalidation contract**.
+This acceptance does **not** permit silent I/O errors, acknowledging a failed
+or uncertain publication as successful, or violating EOF/truncate authority.
+
 The experiment-only S3/Redis timing counters were removed: their shutdown
 snapshots missed the busy daemon and incorrectly reported zero S3 time.
 CI retains Redis `INFO commandstats` deltas, authoritative testcase phase
@@ -102,7 +114,7 @@ Do **not** permanently negative-cache absent Chunks without a cross-mount
 invalidation/version protocol: another Mount could attach new data. A cache
 experiment would be separate from the safe read-only protocol change.
 
-## Current first targeted comparison — CI #40446185097
+## Historical baseline evidence — CI #40446185097
 
 The first formal opt-in COW/Slice control **both passed upstream XUnit**:
 `generic/346` took **25s on COW, 453s on Slice** (18.12x on the same runner)
@@ -127,41 +139,28 @@ nor a spurious performance benchmark. The real, still unmodified
 `generic/346` will run again in formal CI on the new head to capture
 consumer-visible PASS versus internal writeback RED.
 
-The correctness fix remains pending root-cause analysis; this new test gate
-must **not** be waived to merge or to reclassify internal failures as PASS.
+The later unified implementation passed the strengthened validator on
+[CI #40524918284](https://github.com/SwordInfra/SwordFS/actions/runs/40524918284).
+The gate must **not** be waived or treat internal writeback errors as PASS.
 
-## First focused production improvement: bounded packing of sparse intervals
+## Superseded experiment: packed sparse physical objects
 
-After establishing both forms of RED (full Slice timeout and the real
-hidden-writeback-error artifact rejected by the new verifier), the source
-path reveals that disjoint 8-byte page-strided writes were frozen into one
-physical Slice object **per distinct interval** even though they share one
-logical Chunk. At 256 MiB with 4 KiB stride, one holetest writer can issue
-roughly 65,536 separate pwrite calls. The existing `active_bytes_` cap (4 MiB)
-counts payload bytes, not interval count; this can explode S3 PUTs and Redis
-allocation/record pressure without any logical increase in user data.
+The initial investigation tried packing disjoint frozen intervals into a
+shared immutable physical object, recording separate logical SliceRecords
+with differing `off` values. It reduced physical PUT count, but did not
+eliminate the large Redis record and write-side transaction amplification.
+This was an **experiment only**, represented by the historical
+`caf811a` commit; its implementation, selection controls, and packing-specific
+TDD test were removed before the final PR revision. It is not a second
+production Slice format or a mechanism to preserve for beta compatibility.
 
-The first fix **packs multiple disjoint frozen candidates into one immutable
-physical object of at most 4 MiB**, retaining separate ordered SliceRecords
-with distinct `pos`, `off` and `len` but shared SliceID and the physical
-object's total `size`. It must not zero-fill unwritten gaps or accidentally
-hide previous revisions. The frozen candidates remain stable during PUT;
-truncation may clip visibility and never promotes an invisible candidate;
-failed/ambiguous PUT retries use a new physical identity. Successful
-publication still occurs per logical record and remains behind FileMetadata
-EOF preconditions. The change does not optimize all Redis record append
-round trips or automatically resolve inode WATCH contention, which must be
-verified with CI rather than assumed.
-
-**TDD:** new `SparseSmallWritesSharePhysicalObjectWithoutShadowingGaps`
-uses 13 distinct 2-byte writes over a previously committed 100-byte
-nonzero file. Old code creates 13 PUTs, new expectation is **one PUT**,
-14 ordered logical records including initial history, all 13 sharing one
-physical ID with compact offsets. A cold read checks every untouched
-gap remains the exact original byte, not fabricated zero. Existing sparse
-correctness assertions are updated to expect one *shared* immutable object
-instead of one per sparse range. Preserve tests for partial record commit,
-OutcomeUnknown, in-flight Put, 4-MiB limit and in-order logical records.
-
-Formal full CI must validate all C++ UT and Codecov patch, plus strict
-actual `generic/346` COW/Slice mounted logs and eventual full #512 fstests.
+The surviving implementation instead coalesces multiple dirty intervals
+within the same 1 MiB cache window into **one contiguous candidate and one
+ordinary immutable Slice object/record**. Existing committed bytes inside
+the covering interval are fetched before the dirty writes are overlaid;
+`eof_len` tracks only the extent of locally accepted writes. Single contiguous
+writes are left as regular Slice candidates. `WindowCacheCoalescesSparseDirtyIntervalsWithoutShadowingGaps`
+and the partial-failure, truncate-boundary, committed-hydration-error, and
+in-flight-PUT tests describe the final behavior. The targeted full CI must
+still validate strict `generic/346` COW/Slice mounted logs; the full #512
+Slice-primary rollout is a separate subsequent task.
