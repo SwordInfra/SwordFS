@@ -36,8 +36,12 @@ SwordFS uses established filesystem and system test suites to track POSIX and Li
 The primary mounted CI conformance suites use Slice Chunk. Mechanism-specific
 COW unit tests and a bounded mounted E2E smoke remain enabled. These results
 measure the currently supported test population, not full upstream fstests
-compatibility. The `swordfs format` production default remains COW until the
-separate [Slice activation milestone](https://github.com/SwordInfra/SwordFS/issues/275).
+compatibility. New volumes created without `--chunk-type` default to
+**Slice Chunk**. To create a COW volume for a dedicated regression, use
+`--chunk-type cow`; existing volumes retain their persisted mechanism at mount.
+Beta activation constraints, including safe Slice object reclamation,
+compaction and dirty-memory bounds, are tracked by the separate
+[Slice activation milestone](https://github.com/SwordInfra/SwordFS/issues/275).
 
 ## Build
 

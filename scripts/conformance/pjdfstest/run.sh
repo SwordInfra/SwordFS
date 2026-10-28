@@ -172,7 +172,7 @@ path.write_text(
             "kernel": platform.release(),
             "libfuse": command("fusermount3", "--version"),
             "runner": os.environ.get("RUNNER_OS", "local"),
-            "chunk_type": os.environ.get("SWORDFS_CONFORMANCE_CHUNK_TYPE") or "cow",
+            "chunk_type": os.environ.get("SWORDFS_CONFORMANCE_CHUNK_TYPE") or "chunk_slice",
         },
         indent=2,
         sort_keys=True,

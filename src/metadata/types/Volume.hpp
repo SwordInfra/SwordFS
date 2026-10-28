@@ -30,7 +30,7 @@ struct SwordFsVolume {
   std::string region;
   uint64_t chunk_size = 64ULL * 1024 * 1024;
   // Chosen once at format and used as the single runtime chunk-type identity.
-  ChunkType chunk_type = ChunkType::kCow;
+  ChunkType chunk_type = ChunkType::kChunkSlice;
   // Persistent filesystem semantic selected at format time, not per mount.
   bool enable_posix_acl = false;
 

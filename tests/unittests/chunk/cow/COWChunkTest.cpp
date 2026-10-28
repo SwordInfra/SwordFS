@@ -111,6 +111,9 @@ class FaultingCOWChunkMetadata final : public swordfs::metadata::cow::COWChunkMe
 
 NullDataEngine *InitializeCOWRuntime() {
   SwordFsVolume config;
+  // The COW fixture must explicitly choose its mechanism; newly created
+  // volumes default to Slice, and this test exercises COW-only metadata.
+  config.chunk_type = swordfs::metadata::ChunkType::kCow;
   config.chunk_size = kChunkTestSize;
   auto data = std::make_unique<NullDataEngine>();
   auto *raw = data.get();

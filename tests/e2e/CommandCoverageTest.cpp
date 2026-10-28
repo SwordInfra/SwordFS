@@ -18,7 +18,10 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
+
+#include "metadata/redis/RedisMetaImpl.hpp"
 
 namespace swordfs::e2e {
 namespace {
@@ -151,10 +154,13 @@ class CommandCoverageE2ETest : public ::testing::Test {
     std::filesystem::remove_all(work_dir_, ec);
   }
 
-  std::vector<std::string> FormatArgs() const {
+  std::vector<std::string> FormatArgs(std::string volume_name = {}) const {
+    if (volume_name.empty()) {
+      volume_name = volume_;
+    }
     return {
-        swordfs_bin_, "--log-file", log_path_,     "format",   "--volume",
-        volume_,      "--meta",     metadata_url_, "--bucket", bucket_url_,
+        swordfs_bin_,           "--log-file", log_path_,     "format",   "--volume",
+        std::move(volume_name), "--meta",     metadata_url_, "--bucket", bucket_url_,
     };
   }
 
@@ -220,6 +226,35 @@ TEST_F(CommandCoverageE2ETest, MainHandlesNoCommandParseErrorsAndCoredumpEnviron
 TEST_F(CommandCoverageE2ETest, FormatReportsExistingVolumeFailure) {
   ASSERT_EQ(RunProcess(FormatArgs()), 0);
   EXPECT_NE(RunProcess(FormatArgs()), 0);
+}
+
+TEST_F(CommandCoverageE2ETest, FormatPersistsImplicitSliceAndExplicitCow) {
+  const auto expect_persisted_type = [&](const std::string &volume_name, metadata::ChunkType expected) {
+    metadata::RedisMetaConfig redis_config;
+    auto status = metadata::ParseRedisMetaUrl(metadata_url_, &redis_config);
+    ASSERT_TRUE(status.ok()) << status.message();
+
+    metadata::RedisMetaImpl meta(redis_config, volume_name);
+    status = meta.Initialize();
+    ASSERT_TRUE(status.ok()) << status.message();
+
+    metadata::SwordFsVolume stored;
+    stored.name = volume_name;
+    status = meta.LoadVolume(&stored);
+    ASSERT_TRUE(status.ok()) << status.message();
+    EXPECT_EQ(stored.chunk_type, expected);
+  };
+
+  // Check the real CLI -> format -> Redis record, not just CLI parsing or
+  // programmatic FormatOptions defaults in separate unit tests.
+  ASSERT_EQ(RunProcess(FormatArgs()), 0);
+  expect_persisted_type(volume_, metadata::ChunkType::kChunkSlice);
+
+  const std::string cow_volume = volume_ + "cow";
+  auto cow_args = FormatArgs(cow_volume);
+  cow_args.insert(cow_args.end(), {"--chunk-type", "cow"});
+  ASSERT_EQ(RunProcess(std::move(cow_args)), 0);
+  expect_persisted_type(cow_volume, metadata::ChunkType::kCow);
 }
 
 TEST_F(CommandCoverageE2ETest, MountRejectsRootRegularFileAndUncreatableMountpoints) {

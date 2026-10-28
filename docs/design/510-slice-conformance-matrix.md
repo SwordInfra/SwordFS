@@ -1,5 +1,13 @@
 # #510 — Independent Slice POSIX conformance evidence
 
+> **Current default (superseding historical stages below):** #518 makes
+> newly formatted volumes and shared conformance scripts default to
+> `chunk_slice`; COW remains an explicit choice (`--chunk-type cow`) and
+> existing volumes mount using their persisted mechanism. The earlier COW
+> defaults and opt-in-only instructions below document their historical
+> stage and are not current configuration guidance. Activation safety gates
+> remain in [#275](https://github.com/SwordInfra/SwordFS/issues/275).
+
 ## Baseline and problem
 
 PR #509 allows explicitly formatted Slice volumes and passes the full 171-case

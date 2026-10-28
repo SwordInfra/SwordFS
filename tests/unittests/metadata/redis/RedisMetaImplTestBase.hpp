@@ -83,6 +83,9 @@ class RedisMetaImplTest : public ::testing::Test {
     SwordFsVolume volume;
     volume.name = volume_name_;
     volume.chunk_size = 4096;
+    // This shared fixture binds COW-private metadata and cleanup below.
+    // Its persisted volume identity must select that same mechanism.
+    volume.chunk_type = metadata::ChunkType::kCow;
     status = impl_->FormatVolume(volume);
     ASSERT_TRUE(status.ok()) << status.message();
     swordfs::metadata::ChunkMetadataPtr chunk_metadata;

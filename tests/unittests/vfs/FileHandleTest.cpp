@@ -457,6 +457,8 @@ class FileHandleTest : public ::testing::Test {
     auto data = std::make_unique<NoopDataEngine>();
     data_ = data.get();
     SwordFsVolume config;
+    // This mock implements only COW typed chunk metadata, not Slice.
+    config.chunk_type = metadata::ChunkType::kCow;
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
     swordfs::test::RunInTestFiber([&] {
@@ -1474,6 +1476,7 @@ Engines InstallEnginesForInode(InodeID ino, nlink_t nlink, off_t size = 0) {
   meta->SetAttr(ino, attr);
 
   SwordFsVolume config;
+  config.chunk_type = metadata::ChunkType::kCow;
   config.chunk_size = 4096;
   swordfs::test::RunInTestThreadFromFiber([&] {
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta_up), std::move(data_up), std::move(config));

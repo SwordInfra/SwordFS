@@ -301,6 +301,7 @@ TEST(VolumeImplConfigAdapterTest, LoadFromUsesParsedMountRuntimeConfiguration) {
       .storage = std::string(swordfs::test::kTestDataEngine),
       .bucket = "opaque://endpoint/bucket",
       .region = "persisted-region",
+      .chunk_type = ChunkType::kCow,
   };
   swordfs::test::pending_meta_engine =
       std::make_unique<swordfs::test::ConfiguredMetaEngine<swordfs::test::UnsupportedMetaEngine>>();
@@ -370,7 +371,7 @@ class VolumeImplTest : public ::testing::Test {
 
   FormatOptions makeFormatOptions(const std::string &meta_url, const std::string &vol_name = "testvol",
                                   const std::string &bucket_url = "", const std::string &storage_region = "",
-                                  ChunkType chunk_type = ChunkType::kCow) const {
+                                  ChunkType chunk_type = ChunkType::kChunkSlice) const {
     return FormatOptions{
         .name = makeVolumeName(vol_name),
         .meta_url = meta_url,
@@ -417,6 +418,13 @@ TEST(VolumeImplDomainTest, LifecycleRejectsFiberCaller) {
 
 // ── CreateFrom ──────────────────────────────────────────────────────
 
+TEST(VolumeImplDefaultsTest, ProgrammaticFormatUsesSliceUnlessCowExplicitlySelected) {
+  EXPECT_EQ(FormatOptions{}.chunk_type, ChunkType::kChunkSlice);
+  FormatOptions explicit_cow;
+  explicit_cow.chunk_type = ChunkType::kCow;
+  EXPECT_EQ(explicit_cow.chunk_type, ChunkType::kCow);
+}
+
 TEST_F(VolumeImplTest, CreateFromSucceeds) {
   swordfs::test::RegisterTestVolumeEngines();
   swordfs::test::pending_meta_engine =
@@ -426,7 +434,7 @@ TEST_F(VolumeImplTest, CreateFromSucceeds) {
   const auto status = volume.CreateFrom(options);
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(volume.config().name, options.name);
-  EXPECT_EQ(volume.config().chunk_type, ChunkType::kCow);
+  EXPECT_EQ(volume.config().chunk_type, ChunkType::kChunkSlice);
 }
 
 TEST_F(VolumeImplTest, CreateFromRejectsInvalidBucketUrl) {
@@ -449,7 +457,7 @@ TEST_F(VolumeImplTest, CreateFromRejectsInvalidMetadataUrl) {
 
 // #508 TDD: a deliberately selected Slice volume must be usable by the
 // real Volume format/load path before we run the mounted Slice CI matrix.
-// COW remains the default mechanism; an unimplemented redis_cache is refused.
+// Explicit COW is still supported; unimplemented redis_cache is refused.
 TEST_F(VolumeImplRedisTest, ExplicitSliceFormatAndMountCanUseRealRedisMetadata) {
   const auto format_options = makeFormatOptions(RedisUrl(), "slice-ci", "", "", ChunkType::kChunkSlice);
   VolumeImpl formatted;
@@ -472,7 +480,8 @@ TEST_F(VolumeImplTest, CowFormatRejectsMissingPrivateMetadataCapability) {
       std::make_unique<InvalidChunkMetadataEngine>(InvalidChunkMetadataEngine::Result::kNullCapability);
 
   VolumeImpl volume;
-  const auto status = volume.CreateFrom(makeFormatOptions("swordfs-test-meta://local", "cow-format-guard"));
+  const auto status =
+      volume.CreateFrom(makeFormatOptions("swordfs-test-meta://local", "cow-format-guard", "", "", ChunkType::kCow));
   EXPECT_EQ(status.ToErrno(), EINVAL);
   EXPECT_EQ(status.message(), "chunk metadata type mismatch");
 }
@@ -550,7 +559,7 @@ TEST_F(VolumeImplRedisTest, FormatRejectsUnimplementedChunkType) {
 }
 
 TEST_F(VolumeImplRedisTest, MountUsesPersistedChunkTypeAndRejectsUnimplementedType) {
-  auto format_options = makeFormatOptions(RedisUrl());
+  auto format_options = makeFormatOptions(RedisUrl(), "testvol", "", "", ChunkType::kCow);
   VolumeImpl formatted;
   auto status = formatted.CreateFrom(format_options);
   ASSERT_TRUE(status.ok()) << status.message();
@@ -709,7 +718,7 @@ TEST_F(VolumeImplRedisTest, CreateFromRedisEngine) {
   EXPECT_EQ(mounted.config().storage, "s3");
   EXPECT_EQ(mounted.config().bucket, format_options.bucket);
   EXPECT_EQ(mounted.config().region, "us-east-1");
-  EXPECT_EQ(mounted.config().chunk_type, ChunkType::kCow);
+  EXPECT_EQ(mounted.config().chunk_type, ChunkType::kChunkSlice);
 
   VolumeImpl duplicate;
   status = duplicate.CreateFrom(format_options);
@@ -780,6 +789,7 @@ TEST_F(VolumeImplTest, LoadFromRejectsMissingDataEngineLocation) {
 TEST_F(VolumeImplTest, LoadFromS3UrlMissingBucketName) {
   SwordFsVolume stored;
   stored.name = makeVolumeName("missing-bucket-name");
+  stored.chunk_type = ChunkType::kCow;  // The injected test backend only implements COW metadata.
   stored.storage = "s3";
   stored.bucket = "s3://endpoint.example.com";
   const auto options = PrepareInjectedMount(stored);
@@ -811,7 +821,7 @@ TEST_F(VolumeImplRedisTest, LoadFromSucceeds) {
   const auto status = loaded.LoadFrom(makeMountOptions(RedisUrl()));
   ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(loaded.config().name, options.name);
-  EXPECT_EQ(loaded.config().chunk_type, ChunkType::kCow);
+  EXPECT_EQ(loaded.config().chunk_type, ChunkType::kChunkSlice);
   EXPECT_NE(loaded.chunk_factory(), nullptr);
 }
 

@@ -1253,6 +1253,9 @@ class VfsImplIntegrationTest : public ::testing::Test {
     auto data = std::make_unique<NoopDataEngine>();
     data_engine_ = data.get();
     swordfs::metadata::SwordFsVolume config;
+    // This VFS fixture uses COW-only typed chunk metadata. New volumes
+    // default to Slice, so the legacy mock must explicitly select COW.
+    config.chunk_type = swordfs::metadata::ChunkType::kCow;
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(mock), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
     swordfs::test::RunInTestFiber([&] { swordfs::vfs::FuseInodeCache::Instance().Initialize(); });
@@ -1709,6 +1712,7 @@ namespace {
 void LoadVfsHookVolume(bool enable_posix_acl) {
   auto mock = std::make_unique<swordfs::test::ConfiguredMetaEngine<MockMetaEngine>>();
   SwordFsVolume config;
+  config.chunk_type = swordfs::metadata::ChunkType::kCow;
   config.enable_posix_acl = enable_posix_acl;
   const auto status =
       swordfs::test::LoadTestVolumeRuntime(std::move(mock), std::make_unique<NoopDataEngine>(), std::move(config));
@@ -4717,6 +4721,8 @@ class VfsLastLinkCleanupTest : public ::testing::Test {
       GTEST_SKIP() << "Redis metadata service is not configured";
     }
     swordfs::metadata::SwordFsVolume config;
+    // The last-link lifecycle regression explicitly inspects COW GC metadata.
+    config.chunk_type = swordfs::metadata::ChunkType::kCow;
     std::unique_ptr<swordfs::metadata::RedisMetaImpl> meta;
     auto status = swordfs::test::MakeFormattedRedisMetaEngine("fuse-last-link", &config, &meta);
     ASSERT_TRUE(status.ok()) << status.message();
