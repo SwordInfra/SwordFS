@@ -303,3 +303,26 @@ PR #513 before merge:
 This contract applies independently to both fstests and pjdfstest; CI remains
 the authoritative execution engine for full mounted tests. All these changes
 are CI/test/tooling only, not production Chunk mechanism implementations.
+
+## Final simplification: no opt-in CI or conformance approval labels
+
+As finalized by the project owner, the preexisting change-scope rules are
+preserved: **docs-only PRs skip heavy native, E2E and conformance work** while
+remaining subject to the required formatting/Codecov checks. All other PR
+changes, main pushes and manual CI dispatches run the normal **complete
+Slice-based CI**, including Debug/Release, mounted E2E, pinned pjdfstest and
+all ten fstests shards. No PR label enables additional experimental Slice
+jobs, relaxes supported-case monotonicity, or permits deferred-case growth.
+The two historical experimental jobs
+`slice-346-regression` and `slice-posix-experiment` have been removed; the
+main standard fstests matrix subsumes their required Slice POSIX coverage,
+while diagnostic tooling remains available outside a permanent extra CI job.
+Bounded COW E2E regression remains temporary until planned COW retirement.
+
+A later approved change to the baseline contract requires an explicit reviewed
+change to the policy or tooling, not an approval label. Because this touches
+code or baseline files, it runs all required tests. The requirement that
+status publishing fail closed on incomplete or wrong-mechanism artifacts still
+holds on failed, skipped and cancelled upstream jobs: their partial data must
+be preserved as a visible `INFRASTRUCTURE_FAILED` status rather than prevent
+new status publication and leave stale green history.

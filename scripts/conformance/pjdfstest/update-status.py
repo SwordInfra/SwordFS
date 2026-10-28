@@ -68,8 +68,33 @@ def main() -> int:
     timestamp = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
     result: dict[str, object] | None = None
+    invalid_evidence = ""
+    observed_chunk_type: object = None
     if args.result and args.result.exists():
-        result = json.loads(args.result.read_text(encoding="utf-8"))
+        try:
+            candidate = json.loads(args.result.read_text(encoding="utf-8"))
+            if not isinstance(candidate, dict):
+                raise ValueError("result.json must be an object")
+            metadata = candidate.get("metadata")
+            summary = candidate.get("summary")
+            if not isinstance(metadata, dict) or not isinstance(summary, dict):
+                raise ValueError("result.json requires metadata and summary objects")
+            environment = metadata.get("environment")
+            if not isinstance(environment, dict):
+                raise ValueError("metadata.environment must be an object")
+            observed_chunk_type = environment.get("chunk_type")
+            if args.expected_chunk_type and observed_chunk_type != args.expected_chunk_type:
+                raise ValueError(
+                    f"chunk_type {observed_chunk_type!r} does not match required {args.expected_chunk_type!r}"
+                )
+            result = candidate
+        except (OSError, ValueError, TypeError) as exc:
+            if args.conformance_job_result == "success":
+                # A job claiming success must not conceal corrupt or mislabeled evidence.
+                raise
+            # A failed job must still publish an explicit failure status,
+            # rather than leave the previous green status visible.
+            invalid_evidence = f"Invalid or mismatched partial result evidence: {exc}"
 
     if result:
         metadata = result.get("metadata", {})
@@ -127,12 +152,15 @@ def main() -> int:
             )
     else:
         status = "INFRASTRUCTURE_FAILED"
+        failure_reason = "; ".join(filter(None, (args.infra_failure, invalid_evidence)))
         entry = {
             "timestamp": timestamp,
             "swordfs_commit": args.swordfs_commit,
             "chunk_type": args.expected_chunk_type or "unknown",
             "pjdfstest_commit": "unknown",
             "status": status,
+            "observed_chunk_type": observed_chunk_type,
+            "reason": failure_reason,
             "overall_support_percent": None,
             "supported_regression_pass_percent": None,
             "classified_rate_percent": None,
@@ -146,7 +174,8 @@ def main() -> int:
             "metadata": {"swordfs_commit": args.swordfs_commit, "chunk_type": args.expected_chunk_type or "unknown"},
             "status": status,
             "conformance_job_result": args.conformance_job_result,
-            "reason": args.infra_failure or "Required CI result artifact is missing",
+            "observed_chunk_type": observed_chunk_type,
+            "reason": failure_reason or "Required CI result artifact is missing",
         }
         current_markdown = "\n".join(
             [
@@ -154,7 +183,7 @@ def main() -> int:
                 "",
                 "Latest main conformance run: **INFRASTRUCTURE FAILED**",
                 "",
-                args.infra_failure or "The conformance job ended before a classified report was produced.",
+                failure_reason or "The conformance job ended before a classified report was produced.",
                 "",
                 f"CI run: {args.run_url}",
             ]

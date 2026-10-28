@@ -31,7 +31,7 @@ class ArtifactProducerAttemptTest(unittest.TestCase):
 
     def test_consumers_verify_producer_attempt_not_consumer_retry(self) -> None:
         sections = job_sections(CI.read_text())
-        consumers = ("pjdfstest-conformance", "fstests-conformance-shard", "slice-posix-experiment")
+        consumers = ("pjdfstest-conformance", "fstests-conformance-shard")
         for name in consumers:
             job = sections[name]
             self.assertIn("--run-attempt \"${{ needs.build-release-core.outputs.archive_attempt }}\"", job)
