@@ -30,8 +30,14 @@ SwordFS uses established filesystem and system test suites to track POSIX and Li
 | Test suite | Status | Result | Details |
 | --- | --- | --- | --- |
 | [pjdfstest](https://github.com/pjd/pjdfstest) | Supported | **8770 / 8770 applicable assertions passing (100%)**, with **0 SwordFS known gaps** | [Compatibility report](https://github.com/SwordInfra/SwordFS/blob/pjdfstest-status/status.md) |
-| [fstests / xfstests](https://github.com/kdave/xfstests) | In progress | Continuously tracked on `main` | [Progress report](https://github.com/SwordInfra/SwordFS/blob/fstests-status/status.md) |
+| [fstests / xfstests](https://github.com/kdave/xfstests) | In progress | **145/145 supported cases passing**, 499 independently classified known gaps (645 selected; 1 deferred) | [Compatibility report](https://github.com/SwordInfra/SwordFS/blob/fstests-status/status.md) |
 | [stress-ng](https://github.com/ColinIanKing/stress-ng) | Planned | — | [#240](https://github.com/SwordInfra/SwordFS/issues/240) |
+
+The primary mounted CI conformance suites use Slice Chunk. Mechanism-specific
+COW unit tests and a bounded mounted E2E smoke remain enabled. These results
+measure the currently supported test population, not full upstream fstests
+compatibility. The `swordfs format` production default remains COW until the
+separate [Slice activation milestone](https://github.com/SwordInfra/SwordFS/issues/275).
 
 ## Build
 

@@ -21,6 +21,12 @@ def load_history(path: pathlib.Path) -> list[dict[str, object]]:
     return payload
 
 
+def history_chunk_type(item: dict[str, object]) -> str:
+    # Legacy primary status records predate mechanism selection; their
+    # conformance job formatted COW volumes until this test-default cutover.
+    return str(item.get("chunk_type") or "cow")
+
+
 def raw_result_count(item: dict[str, object], name: str) -> int:
     raw_results = item.get("raw_results", {})
     if not isinstance(raw_results, dict):
@@ -60,6 +66,7 @@ def main() -> int:
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--run-id", type=int, required=True)
     parser.add_argument("--infra-failure", default="")
+    parser.add_argument("--expected-chunk-type", choices=("cow", "chunk_slice"))
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -81,6 +88,12 @@ def main() -> int:
         metadata = result.get("metadata", {})
         summary = result.get("summary", {})
         assert isinstance(metadata, dict) and isinstance(summary, dict)
+        actual_chunk_type = metadata.get("chunk_type", "cow")
+        if args.expected_chunk_type and actual_chunk_type != args.expected_chunk_type:
+            raise ValueError(
+                f"fstests status cannot publish chunk_type {actual_chunk_type!r}; "
+                f"expected {args.expected_chunk_type!r}"
+            )
         raw_results = summary.get("raw_results", {})
         classifications = summary.get("classifications", {})
         assert isinstance(raw_results, dict) and isinstance(classifications, dict)
@@ -88,6 +101,7 @@ def main() -> int:
         entry = {
             "timestamp": timestamp,
             "swordfs_commit": metadata.get("swordfs_commit", args.swordfs_commit),
+            "chunk_type": actual_chunk_type,
             "fstests_commit": metadata.get("fstests_commit", "unknown"),
             "fstests_group": metadata.get("fstests_group", "unknown"),
             "status": status,
@@ -119,6 +133,7 @@ def main() -> int:
         entry = {
             "timestamp": timestamp,
             "swordfs_commit": args.swordfs_commit,
+            "chunk_type": args.expected_chunk_type or "unknown",
             "fstests_commit": "unknown",
             "fstests_group": "unknown",
             "status": status,
@@ -137,7 +152,7 @@ def main() -> int:
             "run_id": args.run_id,
         }
         latest = {
-            "metadata": {"swordfs_commit": args.swordfs_commit},
+            "metadata": {"swordfs_commit": args.swordfs_commit, "chunk_type": args.expected_chunk_type or "unknown"},
             "status": status,
             "reason": args.infra_failure,
         }
@@ -164,18 +179,22 @@ def main() -> int:
     history.append(entry)
     history = history[-200:]
 
-    healthy = next((item for item in reversed(history) if item.get("status") == "PASS"), None)
+    active_mechanism = history_chunk_type(entry)
+    mechanism_history = [item for item in history if history_chunk_type(item) == active_mechanism]
+    healthy = next((item for item in reversed(mechanism_history) if item.get("status") == "PASS"), None)
     trend_lines = [
         "",
         f"Authoritative CI run: {args.run_url}",
         f"Recorded at: {timestamp}",
         "",
-        "## Historical main-branch progress",
+        f"Mechanism: `{active_mechanism}` (previous COW history retained separately in `history.json`)",
+        "",
+        f"## Historical main-branch progress ({active_mechanism} only)",
         "",
         "| Time | SwordFS | Status | Overall support | Supported | PASS | FAIL | NOTRUN | Deferred | Known gaps |",
         "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
-    for item in trend_history(history)[-30:]:
+    for item in trend_history(mechanism_history)[-30:]:
         commit = str(item.get("swordfs_commit", "unknown"))
         trend_lines.append(
             "| {timestamp} | `{commit}` | {status} | {overall} | {supported} | {passed} | {failed} | {notrun} | {deferred} | {gaps} |".format(
