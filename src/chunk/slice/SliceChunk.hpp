@@ -54,6 +54,13 @@ class SliceChunk final : public Chunk {
 
   void CaptureBoundary(size_t visible_prefix);
   void FreezeActiveLocked();
+  // Consolidate ungrouped frozen intervals into one RMW candidate per touched
+  // 1MiB window. Committed bytes are read outside mutex_; truncate_epoch_
+  // prevents installing a candidate assembled against a since-clipped view.
+  utils::Status PrepareWindowCandidates(std::vector<std::shared_ptr<FrozenSlice>> *candidates);
+  // Read only committed Slice bytes; local dirty/frozen overlays are excluded.
+  // Missing bytes and ranges outside the current EOF remain zero.
+  utils::Status ReadCommittedRange(size_t offset, size_t len, std::string *out) const;
   utils::Status PublishFrozen(const std::shared_ptr<FrozenSlice> &candidate);
   void RebuildDirtyLocked();
 
@@ -78,6 +85,9 @@ class SliceChunk final : public Chunk {
   // Same-history events coalesce; a new attachment resets old provenance.
   std::vector<BoundaryClamp> boundaries_;
   std::optional<utils::Status> boundary_error_;
+  // Incremented by TruncateLocal so an RMW assembly can detect that its
+  // source snapshot was clipped before it is installed into frozen_.
+  size_t truncate_epoch_ = 0;
 };
 
 }  // namespace swordfs::chunk::slice

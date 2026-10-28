@@ -108,7 +108,6 @@ class RedisMetaTxn {
   // ────────────────────────────────────────────────────────────────
   // Chunk operations
   // ────────────────────────────────────────────────────────────────
-  utils::Status ReadFileChunkSnapshot(InodeID ino, ChunkIndex index, FileChunkSnapshot *out);
   utils::Status ReadFileMappingSnapshot(InodeID ino, FileMappingSnapshot *out);
   utils::Status ProbeAttachment(InodeID ino, ChunkIndex index, std::optional<ChunkID> *out);
   utils::Status AttachPrepared(InodeID ino, ChunkIndex index, ChunkID chunk_id, uint64_t end,

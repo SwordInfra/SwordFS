@@ -20,6 +20,8 @@ The current open-source implementation separates metadata from file data. Metada
 
 For architecture, core data structures, the thread model, and key workflow state machines, start with the **[design documentation](docs/README.md)**.
 
+The Slice Chunk data path uses a [1 MiB client dirty-window write cache](docs/design/515-slice-concurrent-mmap-writes.md) to consolidate fragmented writes into ordinary immutable Slice publications; this is a cache optimization, not a separate Chunk or metadata format.
+
 
 ## POSIX Compatibility
 

@@ -28,6 +28,16 @@ if current and string.sub(current, 1, 1) == '-' then
 end
 return redis.call('INCR', KEYS[1])
 )lua";
+// Redis 7 EVAL_RO is one server-side atomic read; it never starts MULTI,
+// WATCH, or EXEC. The inode image is a binary opaque CAS *read* precondition,
+// so EOF-boundary hints from the preceding GET can never be mixed with a
+// newer inode generation. The script performs no writes.
+constexpr std::string_view kReadChunkAttachmentsScript = R"lua(
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return {'changed'}
+end
+return {'matched', redis.call('HGET', KEYS[2], ARGV[2]), redis.call('HGET', KEYS[2], ARGV[3])}
+)lua";
 
 sw::redis::ConnectionOptions MakeConnectionOptions(const RedisMetaConfig &config) {
   sw::redis::ConnectionOptions options;
@@ -145,6 +155,43 @@ utils::Status RedisMetaClient::MGet(const std::vector<std::string> &keys,
   }
   return RunReadOnlyCommand("MGET", [&] {
     redis_->mget(keys.begin(), keys.end(), std::back_inserter(*values));
+    return utils::Status::OK();
+  });
+}
+
+utils::Status RedisMetaClient::ReadChunkAttachmentsIfUnchanged(std::string_view inode_key, std::string_view refs_key,
+                                                               std::string_view expected_inode, uint64_t index,
+                                                               uint64_t eof_index,
+                                                               std::optional<std::string> *attachment,
+                                                               std::optional<std::string> *eof_attachment,
+                                                               bool *matched) {
+  utils::ExpectInThreadDomain();
+  if (attachment == nullptr || eof_attachment == nullptr || matched == nullptr) {
+    return utils::Status::InvalidArgument("coherent Chunk attachment output is null");
+  }
+  *matched = false;
+  attachment->reset();
+  eof_attachment->reset();
+  return RunReadOnlyCommand("EVAL_RO coherent Chunk attachments", [&] {
+    const std::vector<std::string> command{"EVAL_RO",
+                                           std::string(kReadChunkAttachmentsScript),
+                                           "2",
+                                           std::string(inode_key),
+                                           std::string(refs_key),
+                                           std::string(expected_inode),
+                                           std::to_string(index),
+                                           std::to_string(eof_index)};
+    std::vector<std::optional<std::string>> replies;
+    redis_->command(command.begin(), command.end(), std::back_inserter(replies));
+    if (replies.size() == 1 && replies[0] == "changed") {
+      return utils::Status::OK();
+    }
+    if (replies.size() != 3 || replies[0] != "matched") {
+      return utils::Status::Malformed("invalid coherent Chunk attachment reply");
+    }
+    *attachment = std::move(replies[1]);
+    *eof_attachment = std::move(replies[2]);
+    *matched = true;
     return utils::Status::OK();
   });
 }
@@ -320,6 +367,7 @@ utils::Status RedisMetaClient::RevokeOwnerLease(std::string_view key) {
 
 utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisKvTxn &)> &callback) {
   utils::ExpectInThreadDomain();
+
   for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
     bool retry = false;
     try {

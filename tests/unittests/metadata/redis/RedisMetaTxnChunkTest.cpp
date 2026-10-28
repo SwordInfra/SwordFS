@@ -38,7 +38,6 @@ TEST(RedisMetaTxnTest, TypedFileContractRejectsInvalidTransactionInputs) {
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
-    FileChunkSnapshot chunk;
     FileMappingSnapshot mappings;
     std::optional<ChunkID> attached;
     ChunkSizePlan plan;
@@ -46,16 +45,13 @@ TEST(RedisMetaTxnTest, TypedFileContractRejectsInvalidTransactionInputs) {
     requested.size = 0;
     ChunkSizeCommitResult committed;
 
-    EXPECT_EQ(txn.ReadFileChunkSnapshot(kFileIno, 0, nullptr).ToErrno(), EINVAL);
     EXPECT_EQ(txn.ReadFileMappingSnapshot(kFileIno, nullptr).ToErrno(), EINVAL);
     EXPECT_EQ(txn.ProbeAttachment(kFileIno, 0, nullptr).ToErrno(), EINVAL);
     EXPECT_EQ(txn.CommitShrink(kFileIno, plan, requested, SetAttrField::kSize, nullptr).ToErrno(), EINVAL);
     EXPECT_EQ(txn.CommitGrow(kFileIno, plan, requested, SetAttrField::kMode, &committed).ToErrno(), EINVAL);
-    EXPECT_EQ(txn.ReadFileChunkSnapshot(kDirectoryIno, 0, &chunk).ToErrno(), EINVAL);
     EXPECT_EQ(txn.ReadFileMappingSnapshot(kDirectoryIno, &mappings).ToErrno(), EINVAL);
     EXPECT_EQ(txn.AttachPrepared(kDirectoryIno, 0, ChunkID(17), 8, {.eof = 0}).ToErrno(), EINVAL);
     EXPECT_EQ(txn.FinalizeAttachedWrite(kDirectoryIno, 0, ChunkID(17), 8, {.eof = 0}).ToErrno(), EINVAL);
-    EXPECT_TRUE(txn.ReadFileChunkSnapshot(kMissingIno, 0, &chunk).IsNotFound());
     EXPECT_TRUE(txn.ReadFileMappingSnapshot(kMissingIno, &mappings).IsNotFound());
     EXPECT_TRUE(txn.ProbeAttachment(kMissingIno, 0, &attached).IsNotFound());
     EXPECT_TRUE(txn.AttachPrepared(kMissingIno, 0, ChunkID(17), 8, {.eof = 0}).IsNotFound());
