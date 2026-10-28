@@ -27,11 +27,13 @@
 #include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/Chunk.hpp"
+#include "chunk/ChunkTestSupport.hpp"
 #include "chunk/cow/COWChunk.hpp"
 #include "chunk/cow/COWCleanup.hpp"
 #include "chunk/cow/COWObjectKey.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
+#include "metadata/slice/SliceChunkMetadata.hpp"
 #include "storage/IDataEngine.hpp"
 #include "utils/Status.hpp"
 #include "vfs/FileHandle.hpp"
@@ -59,6 +61,106 @@ using swordfs::vfs::InodeHandle;
 constexpr size_t kMaxParallelFlushes = 2;
 constexpr uint64_t kTestChunkSize = 1024;
 
+// Exercise the production file-wide Flush scheduler against the Slice private
+// index and the real conditional FileMetadata publication contract. The
+// injected fiber yield represents Redis I/O between snapshot and commit.
+class ContendedSliceMetadata final : public swordfs::metadata::slice::SliceChunkMetadata {
+ public:
+  Status AllocateChunkID(swordfs::metadata::ChunkID *out) override {
+    *out = swordfs::metadata::ChunkID(next_chunk_id_++);
+    return Status::OK();
+  }
+  Status AllocateSliceID(swordfs::chunk::slice::SliceID *out) override {
+    *out = swordfs::chunk::slice::SliceID(next_slice_id_++);
+    return Status::OK();
+  }
+  Status CreateIndex(swordfs::metadata::ChunkID id, const swordfs::chunk::slice::SliceRecord &record) override {
+    return records_.emplace(id.Value(), std::vector<swordfs::chunk::slice::SliceRecord>{record}).second
+               ? Status::OK()
+               : Status::AlreadyExists("private Slice index already exists");
+  }
+  Status ReadRecords(swordfs::metadata::ChunkID id, std::vector<swordfs::chunk::slice::SliceRecord> *out) override {
+    const auto it = records_.find(id.Value());
+    if (it == records_.end()) {
+      return Status::NotFound("private Slice index missing");
+    }
+    *out = it->second;
+    return Status::OK();
+  }
+  Status AppendRecord(swordfs::metadata::ChunkID id, const swordfs::chunk::slice::SliceRecord &record) override {
+    const auto it = records_.find(id.Value());
+    if (it == records_.end()) {
+      return Status::NotFound("private Slice index missing");
+    }
+    it->second.push_back(record);
+    return Status::OK();
+  }
+
+ private:
+  uint64_t next_chunk_id_ = 1000;
+  uint64_t next_slice_id_ = 1000;
+  std::map<uint64_t, std::vector<swordfs::chunk::slice::SliceRecord>> records_;
+};
+
+class ContendedSliceMetaEngine : public swordfs::test::chunk_test::MissingMetaEngine {
+ public:
+  Status OpenChunkMetadata(swordfs::metadata::ChunkType type, swordfs::metadata::ChunkMetadataPtr *out) override {
+    if (out == nullptr || type != swordfs::metadata::ChunkType::kChunkSlice) {
+      return Status::InvalidArgument("expected Slice metadata");
+    }
+    *out = slice_metadata_;
+    return Status::OK();
+  }
+  Status GetInode(InodeID ino, SwordFsInode *out) override {
+    swordfs::metadata::FileChunkSnapshot snapshot;
+    auto status = MissingMetaEngine::ReadFileChunkSnapshot(ino, 0, &snapshot);
+    if (status.ok()) {
+      *out = snapshot.inode;
+    }
+    return status;
+  }
+  Status AttachPrepared(InodeID ino, ChunkIndex index, swordfs::metadata::ChunkID id, uint64_t end,
+                        const swordfs::metadata::FileSizePrecondition &expected) override {
+    return SimulateMetadataTransaction(
+        /*attached=*/false, [&] { return MissingMetaEngine::AttachPrepared(ino, index, id, end, expected); });
+  }
+  Status FinalizeAttachedWrite(InodeID ino, ChunkIndex index, swordfs::metadata::ChunkID id, uint64_t end,
+                               const swordfs::metadata::FileSizePrecondition &expected) override {
+    return SimulateMetadataTransaction(
+        /*attached=*/true, [&] { return MissingMetaEngine::FinalizeAttachedWrite(ino, index, id, end, expected); });
+  }
+
+  size_t peak_finalizations = 0;
+  size_t peak_attached_finalizations = 0;
+
+ private:
+  template <typename Fn>
+  Status SimulateMetadataTransaction(bool attached, Fn &&commit) {
+    ++active_finalizations_;
+    peak_finalizations = std::max(peak_finalizations, active_finalizations_);
+    if (attached) {
+      ++active_attached_finalizations_;
+      peak_attached_finalizations = std::max(peak_attached_finalizations, active_attached_finalizations_);
+    }
+    const auto retire = folly::makeGuard([&] {
+      --active_finalizations_;
+      if (attached) {
+        --active_attached_finalizations_;
+      }
+    });
+    // Redis metadata transactions suspend fibers. Extend that window so a
+    // second Chunk's publisher can enter before the first transaction returns.
+    for (int i = 0; i < 12; ++i) {
+      folly::fibers::yield();
+    }
+    return commit();
+  }
+
+  size_t active_finalizations_ = 0;
+  size_t active_attached_finalizations_ = 0;
+  swordfs::metadata::ChunkMetadataPtr slice_metadata_ = std::make_shared<ContendedSliceMetadata>();
+};
+
 // ────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────
@@ -69,6 +171,88 @@ static std::string Repeat(char c, size_t n) {
 
 static auto Buf(const std::string &s) {
   return *folly::IOBuf::copyBuffer(s.data(), s.size());
+}
+
+TEST(FileReadWriterSliceTest, ParallelChunkUploadMustNotStarveFileMetadataPublication) {
+  // Twenty chunks share one inode. With uncontrolled concurrent finalization,
+  // each snapshot is invalidated by a different Chunk's legitimate EOF grow,
+  // exhausting Slice's finite publication attempts despite no external writer.
+  auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<ContendedSliceMetaEngine>>();
+  auto *meta_probe = meta.get();
+  auto data = std::make_unique<swordfs::test::chunk_test::NullDataEngine>();
+  auto *data_probe = data.get();
+  SwordFsVolume config;
+  config.chunk_size = kTestChunkSize;
+  config.chunk_type = swordfs::metadata::ChunkType::kChunkSlice;
+  const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  RunInTestFiber([&] {
+    constexpr size_t kChunks = 20;
+    const std::string payload(kChunks * kTestChunkSize, 'S');
+    FileReadWriter writer(42, kChunks);
+    ASSERT_TRUE(writer.Write(Buf(payload), 0).ok());
+
+    // Suspend the first physical PUT. Other Chunks must still upload before
+    // that PUT completes: the file-wide publication lock must not cover S3.
+    folly::fibers::Baton put_started;
+    folly::fibers::Baton release_put;
+    folly::fibers::Baton flush_done;
+    data_probe->BlockNextPut(&put_started, &release_put);
+    Status flush_status;
+    auto &fm = folly::fibers::FiberManager::getFiberManager();
+    fm.addTask([&] {
+      flush_status = writer.Flush();
+      flush_done.post();
+    });
+    put_started.wait();
+    for (int i = 0; i < 8 && data_probe->put_calls < 2; ++i) {
+      folly::fibers::yield();
+    }
+    const int uploads_while_first_put_blocked = data_probe->put_calls;
+    release_put.post();
+    flush_done.wait();
+    ASSERT_TRUE(flush_status.ok()) << flush_status.message();
+    EXPECT_GT(uploads_while_first_put_blocked, 1);
+    // An independent owner must serialize file-wide metadata finalization;
+    // concurrent uploads are allowed, but metadata transactions must not
+    // invalidate one another's EOF preconditions within the same inode.
+    EXPECT_EQ(meta_probe->peak_finalizations, 1U);
+
+    // Rewrite already-attached indices: FinalizeAttachedWrite, not the first
+    // AttachPrepared, now owns every conditional inode metadata transaction.
+    std::vector<swordfs::metadata::ChunkID> attached_ids;
+    attached_ids.reserve(kChunks);
+    for (size_t index = 0; index < kChunks; ++index) {
+      swordfs::metadata::FileChunkSnapshot snapshot;
+      ASSERT_TRUE(meta_probe->ReadFileChunkSnapshot(42, index, &snapshot).ok());
+      ASSERT_TRUE(snapshot.chunk_id.has_value());
+      attached_ids.push_back(*snapshot.chunk_id);
+    }
+
+    const std::string rewrite(kChunks * kTestChunkSize, 'R');
+    ASSERT_TRUE(writer.Write(Buf(rewrite), 0).ok());
+    ASSERT_TRUE(writer.Flush().ok());
+    EXPECT_EQ(meta_probe->peak_attached_finalizations, 1U);
+    swordfs::metadata::ChunkMetadataPtr chunk_metadata;
+    ASSERT_TRUE(meta_probe->OpenChunkMetadata(swordfs::metadata::ChunkType::kChunkSlice, &chunk_metadata).ok());
+    auto slice_metadata = std::dynamic_pointer_cast<swordfs::metadata::slice::SliceChunkMetadata>(chunk_metadata);
+    ASSERT_NE(slice_metadata, nullptr);
+    for (size_t index = 0; index < kChunks; ++index) {
+      swordfs::metadata::FileChunkSnapshot snapshot;
+      ASSERT_TRUE(meta_probe->ReadFileChunkSnapshot(42, index, &snapshot).ok());
+      ASSERT_EQ(snapshot.chunk_id, attached_ids[index]);
+      std::vector<swordfs::chunk::slice::SliceRecord> records;
+      ASSERT_TRUE(slice_metadata->ReadRecords(attached_ids[index], &records).ok());
+      EXPECT_EQ(records.size(), 2U) << "retry must not append duplicate Slice records";
+    }
+
+    FileReadWriter cold_reader(42, kChunks);
+    auto out = folly::IOBuf::create(rewrite.size());
+    ASSERT_TRUE(cold_reader.Read(rewrite.size(), 0, out.get()).ok());
+    EXPECT_EQ(out->length(), rewrite.size());
+    EXPECT_EQ(std::string_view(reinterpret_cast<const char *>(out->data()), out->length()), rewrite);
+  });
 }
 
 // Keep failure injection at the actual typed mechanism boundary; the retired

@@ -70,17 +70,19 @@ TEST(RedisSliceChunkMetadataTest, SliceChunkPublisherRemountReadsAndOverwritesAc
   ASSERT_NE(writer_meta, nullptr);
   ASSERT_NE(reader_meta, nullptr);
   swordfs::test::chunk_test::NullDataEngine objects;
+  auto writer_gate = std::make_shared<swordfs::utils::FiberMutex>();
+  auto reader_gate = std::make_shared<swordfs::utils::FiberMutex>();
 
   swordfs::test::RunInTestFiber([&] {
     folly::fibers::local<swordfs::utils::SwordFsContext>() = swordfs::utils::SwordFsContext{};
     SwordFsInode file;
     ASSERT_TRUE(writer.Create(kRootInodeId, "slice-publish-integration", 0644, &file).ok());
-    chunk::slice::SliceChunk a(file.ino, 0, kChunkSize, writer_meta, &writer, &objects);
+    chunk::slice::SliceChunk a(file.ino, 0, kChunkSize, writer_meta, &writer, &objects, writer_gate);
     ASSERT_TRUE(a.Write(5, swordfs::test::chunk_test::Buf("ABC")).ok());
     ASSERT_TRUE(a.Flush().ok()) << "first metadata publication must succeed";
     EXPECT_FALSE(a.HasPendingWrites());
 
-    chunk::slice::SliceChunk b(file.ino, 0, kChunkSize, reader_meta, &reader, &objects);
+    chunk::slice::SliceChunk b(file.ino, 0, kChunkSize, reader_meta, &reader, &objects, reader_gate);
     auto initial = folly::IOBuf::create(8);
     ASSERT_TRUE(b.Read(0, 8, initial.get()).ok());
     EXPECT_EQ(std::string(reinterpret_cast<const char *>(initial->data()), 8), std::string("\0\0\0\0\0ABC", 8));
@@ -134,13 +136,15 @@ TEST(RedisSliceChunkMetadataTest, RetainedBoundaryZeroCoverSurvivesRedisRemountA
   auto reader_meta = std::dynamic_pointer_cast<slice::SliceChunkMetadata>(reader_root);
   ASSERT_NE(reader_meta, nullptr);
   swordfs::test::chunk_test::NullDataEngine objects;
+  auto writer_gate = std::make_shared<swordfs::utils::FiberMutex>();
+  auto remount_gate = std::make_shared<swordfs::utils::FiberMutex>();
   chunk::ChunkFactory factory(ChunkType::kChunkSlice, root, &writer, &objects, kChunkSize);
 
   swordfs::test::RunInTestFiber([&] {
     folly::fibers::local<swordfs::utils::SwordFsContext>() = swordfs::utils::SwordFsContext{};
     SwordFsInode file;
     ASSERT_TRUE(writer.Create(kRootInodeId, "slice-truncate-integration", 0644, &file).ok());
-    chunk::slice::SliceChunk active(file.ino, 0, kChunkSize, slice_metadata, &writer, &objects);
+    chunk::slice::SliceChunk active(file.ino, 0, kChunkSize, slice_metadata, &writer, &objects, writer_gate);
     ASSERT_TRUE(active.Write(0, swordfs::test::chunk_test::Buf("abcdefghij")).ok());
     ASSERT_TRUE(active.Flush().ok());
 
@@ -165,13 +169,13 @@ TEST(RedisSliceChunkMetadataTest, RetainedBoundaryZeroCoverSurvivesRedisRemountA
     requested.size = 10;
     ASSERT_TRUE(writer.CommitGrow(file.ino, grow, requested, SetAttrField::kSize, &committed).ok());
 
-    chunk::slice::SliceChunk cold(file.ino, 0, kChunkSize, reader_meta, &remount, &objects);
+    chunk::slice::SliceChunk cold(file.ino, 0, kChunkSize, reader_meta, &remount, &objects, remount_gate);
     auto restored = folly::IOBuf::create(10);
     ASSERT_TRUE(cold.Read(0, 10, restored.get()).ok());
     EXPECT_EQ(std::string(reinterpret_cast<const char *>(restored->data()), 10), std::string("abcd\0\0\0\0\0\0", 10));
     ASSERT_TRUE(cold.Write(7, swordfs::test::chunk_test::Buf("XY")).ok());
     ASSERT_TRUE(cold.Flush().ok());
-    chunk::slice::SliceChunk reopened(file.ino, 0, kChunkSize, slice_metadata, &writer, &objects);
+    chunk::slice::SliceChunk reopened(file.ino, 0, kChunkSize, slice_metadata, &writer, &objects, writer_gate);
     auto updated = folly::IOBuf::create(10);
     ASSERT_TRUE(reopened.Read(0, 10, updated.get()).ok());
     EXPECT_EQ(std::string(reinterpret_cast<const char *>(updated->data()), 10), std::string("abcd\0\0\0XY\0", 10));

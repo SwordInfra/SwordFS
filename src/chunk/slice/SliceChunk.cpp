@@ -128,13 +128,15 @@ void ClipRanges(DirtyRanges &ranges, size_t size) {
 
 SliceChunk::SliceChunk(metadata::InodeID ino, metadata::ChunkIndex index, size_t chunk_size,
                        std::shared_ptr<metadata::slice::SliceChunkMetadata> slice_metadata, metadata::IMetaEngine *meta,
-                       storage::IDataEngine *data)
+                       storage::IDataEngine *data, std::shared_ptr<utils::FiberMutex> publication_mutex)
     : Chunk(index),
       ino_(ino),
       chunk_size_(chunk_size),
       slice_metadata_(std::move(slice_metadata)),
       meta_(meta),
-      data_(data) {
+      data_(data),
+      publication_mutex_(std::move(publication_mutex)) {
+  CHECK(publication_mutex_ != nullptr) << "SliceChunk requires a shared inode publication gate";
 }
 
 utils::Status SliceChunk::Write(size_t offset, const folly::IOBuf &data) {
@@ -730,7 +732,14 @@ utils::Status SliceChunk::Flush() {
         continue;
       }
     }
-    auto status = PublishFrozen(candidate);
+    // Physical PUTs have already completed in parallel across Chunk fibers.
+    // Only the conditional, inode-wide metadata transaction needs a local
+    // gate; cross-mount conflicts still go through the authoritative CAS.
+    utils::Status status;
+    {
+      std::lock_guard<utils::FiberMutex> publication_lock(*publication_mutex_);
+      status = PublishFrozen(candidate);
+    }
     if (!status.ok()) {
       // A partially completed file Flush is allowed to leave previously
       // confirmed Slice publications; never replay them on the next attempt.
