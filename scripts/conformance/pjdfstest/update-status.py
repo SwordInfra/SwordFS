@@ -57,6 +57,9 @@ def main() -> int:
     parser.add_argument("--swordfs-commit", required=True)
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--infra-failure", default="")
+    parser.add_argument(
+        "--conformance-job-result", choices=("success", "failure", "cancelled", "skipped"), required=True
+    )
     parser.add_argument("--expected-chunk-type", choices=("cow", "chunk_slice"))
     args = parser.parse_args()
 
@@ -82,6 +85,10 @@ def main() -> int:
                 f"expected {args.expected_chunk_type!r}"
             )
         status = "PASS" if int(summary.get("blocking_count", 0)) == 0 else "FAILED"
+        # A clean classified artifact cannot overrule a failed/cancelled/skipped
+        # upstream job (e.g. a post-classification upload or harness failure).
+        if args.conformance_job_result != "success" and status == "PASS":
+            status = "INFRASTRUCTURE_FAILED"
         entry = {
             "timestamp": timestamp,
             "swordfs_commit": metadata.get("swordfs_commit", args.swordfs_commit),
@@ -98,6 +105,8 @@ def main() -> int:
             "run_url": args.run_url,
         }
         latest = result
+        latest["status"] = status
+        latest["conformance_job_result"] = args.conformance_job_result
         # Expose the mechanism directly as well as in environment for status
         # consumers, preserving the original authoritative environment.
         latest["metadata"]["chunk_type"] = actual_chunk_type
@@ -105,6 +114,17 @@ def main() -> int:
             current_markdown = args.report.read_text(encoding="utf-8").rstrip()
         else:
             current_markdown = f"# SwordFS POSIX conformance status\n\nLatest run: **{status}**"
+        if args.conformance_job_result != "success":
+            # A partial generated report can still claim PASS. Never publish
+            # that green headline when the authoritative job failed.
+            current_markdown = (
+                "# SwordFS conformance: CI NOT SUCCESSFUL\n\n"
+                f"Conformance job result: `{args.conformance_job_result}`. "
+                f"Recorded classification status: **{status}**.\n\n"
+                "Partial XUnit evidence remains in the run artifact but is not "
+                "an authoritative PASS.\n\n"
+                f"CI run: {args.run_url}"
+            )
     else:
         status = "INFRASTRUCTURE_FAILED"
         entry = {
@@ -122,7 +142,12 @@ def main() -> int:
             "by_category": {},
             "run_url": args.run_url,
         }
-        latest = {"metadata": {"swordfs_commit": args.swordfs_commit, "chunk_type": args.expected_chunk_type or "unknown"}, "status": status, "reason": args.infra_failure}
+        latest = {
+            "metadata": {"swordfs_commit": args.swordfs_commit, "chunk_type": args.expected_chunk_type or "unknown"},
+            "status": status,
+            "conformance_job_result": args.conformance_job_result,
+            "reason": args.infra_failure or "Required CI result artifact is missing",
+        }
         current_markdown = "\n".join(
             [
                 "# SwordFS POSIX conformance status",

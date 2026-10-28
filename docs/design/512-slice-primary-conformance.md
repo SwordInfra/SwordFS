@@ -49,13 +49,20 @@ minimum supported-pass expectation and **no preapproved Slice gaps**; any
 other failed/NOTRUN case is reported as unclassified and remains a blocker
 until observed, investigated and adjudicated with independent evidence.
 
-The CI workflow subscribes to the `pull_request.labeled` event explicitly
-as well as ordinary open/synchronize/reopen events. Otherwise applying the
+**Historical Stage A behavior (removed in Stage B):** The experimental CI
+workflow subscribed to `pull_request.labeled` as well as the ordinary PR
+events while a separate opt-in Slice full matrix was in use. Since Stage B
+makes the same full Slice ten-shard matrix required by default, generic label
+changes no longer launch expensive duplicate full CI runs. The earlier
+opt-in trigger worked as follows: applying the
 `slice-full-matrix-ci` opt-in label alone does not schedule a new CI run,
 and any already queued run remains anchored to its original event label
 snapshot. With that event type, reapplying the label starts a fresh,
 mechanism-qualified full matrix on the *current* exact PR head. The
 required COW matrix is never skipped by this opt-in event.
+
+The opt-in experiment and its `labeled` workflow event are now retired;
+this paragraph describes how the earlier Stage A evidence was produced.
 
 This opt-in experiment is intentionally allowed to fail on real untriaged
 Slice POSIX cases. A failure is evidence for subsequent remediation, not a
@@ -267,3 +274,32 @@ The initial 145/145 *XUnit* pass is valuable stage-A coverage evidence, but
 promotion to primary tests is blocked until a formal 10-shard run also passes
 this new asynchronous-writeback gate with **zero** unexpected errors, alongside
 all ordinary project gates. The production COW/Slice default is unchanged.
+
+## Final review remediation: authoritative status and CI-cost contract
+
+Review #5679264534 identified three Stage B test/CI contract gaps, fixed in
+PR #513 before merge:
+
+1. The retired `slice-full-matrix-ci` label trigger no longer causes new full
+   CI work on arbitrary PR label changes. The required full Slice test matrix
+   runs on PR open/synchronize/reopen, manual dispatch, and main pushes.
+2. The required tooling checks execute
+   `tests/tooling/test_fstests_aggregate_mechanism.py` against the **primary**
+   `fstests-conformance-` artifact prefix; missing or wrong typed evidence
+   fails even if all shard XUnit results otherwise match. The existing
+   `audit_writeback.py` tests remain required.
+3. The main status publishers receive `--conformance-job-result` from the
+   actual GitHub Actions dependency result. **PASS requires both an actual
+   successful conformance job and a clean typed classifier result.** A failed,
+   cancelled, or skipped job cannot be rescued by a partial `result.json`
+   with zero reported blockers. A pre-existing real classified regression
+   remains `BLOCKED`/`FAILED`; a clean or partial classifier result coupled
+   with a non-successful job is published as `INFRASTRUCTURE_FAILED`. The
+   published `latest.json` records status and the real job result separately,
+   and the status page cannot reproduce a stale green classifier report as
+   its latest headline. Focused Python tests include red-before-green cases
+   for clean partial artifacts from failed/cancelled/skipped jobs.
+
+This contract applies independently to both fstests and pjdfstest; CI remains
+the authoritative execution engine for full mounted tests. All these changes
+are CI/test/tooling only, not production Chunk mechanism implementations.

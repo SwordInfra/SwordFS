@@ -23,7 +23,7 @@ class FstestsAggregateMechanismTest(unittest.TestCase):
     def test_expected_slice_requires_slice_metadata_from_every_shard(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)
-            shard = root / "shards" / "slice-fstests-full-supported-0"
+            shard = root / "shards" / "fstests-conformance-supported-0"
             (shard / "raw/results").mkdir(parents=True)
             (shard / "shard.json").write_text(
                 json.dumps({"shard": "supported-0", "planned_tests": ["generic/001"]})
@@ -42,7 +42,7 @@ class FstestsAggregateMechanismTest(unittest.TestCase):
                     output = root / "out"
                     errors = MODULE.aggregate(
                         root / "shards", output, {"supported-0": ["generic/001"]}, ["generic/001"],
-                        set(), artifact_prefix="slice-fstests-full-", expected_chunk_type="chunk_slice"
+                        set(), expected_chunk_type="chunk_slice"
                     )
                     self.assertEqual(errors == [], should_pass, errors)
                     self.assertEqual((output / "harness-status.txt").read_text(), "0\n" if should_pass else "2\n")

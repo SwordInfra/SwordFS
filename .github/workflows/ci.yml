@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 jobs:
@@ -77,6 +77,12 @@ jobs:
 
       - name: Test per-case asynchronous writeback gate
         run: python3 tests/tooling/test_fstests_audit_writeback.py
+
+      - name: Verify every fstests shard reports the required Chunk mechanism
+        run: python3 tests/tooling/test_fstests_aggregate_mechanism.py
+
+      - name: Verify conformance status reflects authoritative job outcome
+        run: python3 tests/tooling/test_conformance_status_publisher.py
 
       - name: Test targeted COW/Slice RMW comparison metrics
         run: python3 tests/tooling/test_fstests_summarize_346.py
@@ -1512,6 +1518,7 @@ jobs:
             --swordfs-commit "${GITHUB_SHA}" \
             --run-url "${RUN_URL}" \
             --infra-failure "pjdfstest-conformance job result: ${CONFORMANCE_JOB_RESULT}" \
+            --conformance-job-result "${CONFORMANCE_JOB_RESULT}" \
             --expected-chunk-type chunk_slice
 
           git -C "${status_dir}" config user.name github-actions[bot]
@@ -1574,6 +1581,7 @@ jobs:
               --run-url "${RUN_URL}" \
               --run-id "${GITHUB_RUN_ID}" \
               --infra-failure "fstests-conformance job result: ${CONFORMANCE_JOB_RESULT}" \
+              --conformance-job-result "${CONFORMANCE_JOB_RESULT}" \
               --expected-chunk-type chunk_slice || return $?
 
             git -C "${status_dir}" add status.md latest.json history.json || return $?
