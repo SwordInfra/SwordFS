@@ -28,6 +28,7 @@
 #include "VolumeRuntimeTestUtils.hpp"
 #include "chunk/Chunk.hpp"
 #include "chunk/ChunkTestSupport.hpp"
+#include "chunk/SliceChunkMetadataTestSupport.hpp"
 #include "chunk/cow/COWChunk.hpp"
 #include "chunk/cow/COWCleanup.hpp"
 #include "chunk/cow/COWObjectKey.hpp"
@@ -64,44 +65,6 @@ constexpr uint64_t kTestChunkSize = 1024;
 // Exercise the production file-wide Flush scheduler against the Slice private
 // index and the real conditional FileMetadata publication contract. The
 // injected fiber yield represents Redis I/O between snapshot and commit.
-class ContendedSliceMetadata final : public swordfs::metadata::slice::SliceChunkMetadata {
- public:
-  Status AllocateChunkID(swordfs::metadata::ChunkID *out) override {
-    *out = swordfs::metadata::ChunkID(next_chunk_id_++);
-    return Status::OK();
-  }
-  Status AllocateSliceID(swordfs::chunk::slice::SliceID *out) override {
-    *out = swordfs::chunk::slice::SliceID(next_slice_id_++);
-    return Status::OK();
-  }
-  Status CreateIndex(swordfs::metadata::ChunkID id, const swordfs::chunk::slice::SliceRecord &record) override {
-    return records_.emplace(id.Value(), std::vector<swordfs::chunk::slice::SliceRecord>{record}).second
-               ? Status::OK()
-               : Status::AlreadyExists("private Slice index already exists");
-  }
-  Status ReadRecords(swordfs::metadata::ChunkID id, std::vector<swordfs::chunk::slice::SliceRecord> *out) override {
-    const auto it = records_.find(id.Value());
-    if (it == records_.end()) {
-      return Status::NotFound("private Slice index missing");
-    }
-    *out = it->second;
-    return Status::OK();
-  }
-  Status AppendRecord(swordfs::metadata::ChunkID id, const swordfs::chunk::slice::SliceRecord &record) override {
-    const auto it = records_.find(id.Value());
-    if (it == records_.end()) {
-      return Status::NotFound("private Slice index missing");
-    }
-    it->second.push_back(record);
-    return Status::OK();
-  }
-
- private:
-  uint64_t next_chunk_id_ = 1000;
-  uint64_t next_slice_id_ = 1000;
-  std::map<uint64_t, std::vector<swordfs::chunk::slice::SliceRecord>> records_;
-};
-
 class ContendedSliceMetaEngine : public swordfs::test::chunk_test::MissingMetaEngine {
  public:
   Status OpenChunkMetadata(swordfs::metadata::ChunkType type, swordfs::metadata::ChunkMetadataPtr *out) override {
@@ -130,17 +93,17 @@ class ContendedSliceMetaEngine : public swordfs::test::chunk_test::MissingMetaEn
         /*attached=*/true, [&] { return MissingMetaEngine::FinalizeAttachedWrite(ino, index, id, end, expected); });
   }
 
-  size_t peak_finalizations = 0;
-  size_t peak_attached_finalizations = 0;
+  size_t peak_finalizations_ = 0;
+  size_t peak_attached_finalizations_ = 0;
 
  private:
   template <typename Fn>
   Status SimulateMetadataTransaction(bool attached, Fn &&commit) {
     ++active_finalizations_;
-    peak_finalizations = std::max(peak_finalizations, active_finalizations_);
+    peak_finalizations_ = std::max(peak_finalizations_, active_finalizations_);
     if (attached) {
       ++active_attached_finalizations_;
-      peak_attached_finalizations = std::max(peak_attached_finalizations, active_attached_finalizations_);
+      peak_attached_finalizations_ = std::max(peak_attached_finalizations_, active_attached_finalizations_);
     }
     const auto retire = folly::makeGuard([&] {
       --active_finalizations_;
@@ -156,9 +119,11 @@ class ContendedSliceMetaEngine : public swordfs::test::chunk_test::MissingMetaEn
     return commit();
   }
 
+ private:
   size_t active_finalizations_ = 0;
   size_t active_attached_finalizations_ = 0;
-  swordfs::metadata::ChunkMetadataPtr slice_metadata_ = std::make_shared<ContendedSliceMetadata>();
+  swordfs::metadata::ChunkMetadataPtr slice_metadata_ =
+      std::make_shared<swordfs::test::chunk_test::TestSliceChunkMetadata>();
 };
 
 // ────────────────────────────────────────────────────────────────
@@ -217,7 +182,7 @@ TEST(FileReadWriterSliceTest, ParallelChunkUploadMustNotStarveFileMetadataPublic
     // An independent owner must serialize file-wide metadata finalization;
     // concurrent uploads are allowed, but metadata transactions must not
     // invalidate one another's EOF preconditions within the same inode.
-    EXPECT_EQ(meta_probe->peak_finalizations, 1U);
+    EXPECT_EQ(meta_probe->peak_finalizations_, 1U);
 
     // Rewrite already-attached indices: FinalizeAttachedWrite, not the first
     // AttachPrepared, now owns every conditional inode metadata transaction.
@@ -233,7 +198,7 @@ TEST(FileReadWriterSliceTest, ParallelChunkUploadMustNotStarveFileMetadataPublic
     const std::string rewrite(kChunks * kTestChunkSize, 'R');
     ASSERT_TRUE(writer.Write(Buf(rewrite), 0).ok());
     ASSERT_TRUE(writer.Flush().ok());
-    EXPECT_EQ(meta_probe->peak_attached_finalizations, 1U);
+    EXPECT_EQ(meta_probe->peak_attached_finalizations_, 1U);
     swordfs::metadata::ChunkMetadataPtr chunk_metadata;
     ASSERT_TRUE(meta_probe->OpenChunkMetadata(swordfs::metadata::ChunkType::kChunkSlice, &chunk_metadata).ok());
     auto slice_metadata = std::dynamic_pointer_cast<swordfs::metadata::slice::SliceChunkMetadata>(chunk_metadata);
