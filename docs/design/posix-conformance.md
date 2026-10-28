@@ -1041,9 +1041,9 @@ that root cause; incomplete TAP is not silently converted into semantic debt.
 After the baseline exists, the supported set is monotonic. Removing an entry
 because it regressed is prohibited unless SwordFS intentionally changes the
 current semantic contract. PR CI compares `supported.txt` with the PR base and
-rejects removals by default. An intentional contract change must be made
-explicit with the `conformance-semantic-change` PR label so the exceptional
-removal is visible in review. A known gap that starts passing is XPASS and must
+rejects removals without label-based exceptions. Any intentional semantic
+contract revision requires a separately reviewed explicit gate-policy change;
+it cannot be authorized by adding a PR label. A known gap that starts passing is XPASS and must
 be moved into the supported set in the same change.
 
 When a root-cause Issue is resolved, re-evaluate **every selector linked to that

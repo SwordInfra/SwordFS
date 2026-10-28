@@ -484,9 +484,9 @@ the candidate TSV so review can admit result, message, and detail together.
 Once the baseline is established:
 
 - every supported testcase must remain selected and pass;
-- supported coverage is monotonic by default;
-- removing supported coverage requires the explicitly reviewed
-  `conformance-semantic-change` PR label;
+- supported coverage is monotonic in required CI: supported-test removals
+  cannot be authorized by labels and must instead be treated as a reviewed
+  change to the gate's explicit policy;
 - a FAIL/NOTRUN known gap that starts passing is XPASS and blocks until its
   authoritative contract is reviewed. A demonstrated kernel-local-only PASS
   may instead be recorded with its exact test ID, issue and evidence, while

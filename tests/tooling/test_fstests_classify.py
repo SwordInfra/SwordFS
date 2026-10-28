@@ -133,6 +133,54 @@ class FstestsFailureEvidenceTest(unittest.TestCase):
         actual = {test: CLASSIFY.RawResult(test, "PASS")}
         self.assertEqual("XPASS", CLASSIFY.classify({test}, actual, set(), {test: gap})[0].classification)
 
+    def test_internal_writeback_evidence_overrides_upstream_pass_and_known_gap(self) -> None:
+        test = "generic/346"
+        message = "scratch: FileReadWriter::Flush chunk FAILED: Slice publication lost too many EOF/attachment races"
+        result = CLASSIFY.classify(
+            {test}, {test: CLASSIFY.RawResult(test, "PASS")}, {test}, {},
+            writeback_failure_tests={test: message},
+        )[0]
+        self.assertEqual("WRITEBACK_FAILURE", result.classification)
+        self.assertIn("WRITEBACK_FAILURE", CLASSIFY.BLOCKING)
+        self.assertIn("EOF/attachment races", result.message)
+
+        test = "generic/184"
+        gap = CLASSIFY.Gap("upstream_not_applicable", "-", "NOTRUN", "expected", "-", "not applicable")
+        result = CLASSIFY.classify(
+            {test}, {test: CLASSIFY.RawResult(test, "NOTRUN", "expected")}, set(), {test: gap},
+            writeback_failure_tests={test: message},
+        )[0]
+        self.assertEqual("WRITEBACK_FAILURE", result.classification)
+
+    def test_writeback_evidence_loader_requires_nonempty_per_test_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            results = pathlib.Path(temp) / "results"
+            file = results / "generic/346.writebackfail"
+            file.parent.mkdir(parents=True)
+            file.write_text("scratch: FileReadWriter::Flush chunk FAILED: broken metadata\n")
+            observed = CLASSIFY.load_writeback_failure_tests(results)
+            self.assertIn("generic/346", observed)
+            file.write_text("")
+            with self.assertRaisesRegex(CLASSIFY.BaselineError, "empty writeback"):
+                CLASSIFY.load_writeback_failure_tests(results)
+
+    def test_slice_full_output_directory_preserves_detailed_failure_evidence_identity(self) -> None:
+        for name in ("fstests-conformance", "fstests-slice-full"):
+            with self.subTest(name=name):
+                message = (
+                    "- output mismatch (see "
+                    f"/home/runner/work/SwordFS/SwordFS/build/{name}/raw/results/generic/184.out.bad)"
+                )
+                normalized = CLASSIFY.normalize_message(message)
+                self.assertEqual(
+                    normalized,
+                    "- output mismatch (see <FSTESTS_RESULT_DIR>/generic/184.out.bad)",
+                )
+                self.assertEqual(
+                    CLASSIFY.evidence_path_from_message("generic/184", normalized),
+                    "generic/184.out.bad",
+                )
+
     def test_shared_upstream_tool_root_normalizes_to_original_harness_evidence(self) -> None:
         # Reusing the exact pinned tools must not require changing the known
         # semantic baseline: only the upstream executable's location moved.

@@ -715,6 +715,16 @@ isolate_after_test() {
   return 0
 }
 
+audit_case_writeback() {
+  local test="$1"
+  [[ "${FSTESTS_STRICT_WRITEBACK:-0}" == 1 ]] || return 0
+  python3 "${SCRIPT_DIR}/audit_writeback.py" \
+    --test "${test}" \
+    --test-log "${OUTPUT_DIR}/swordfs-test.log" --test-start "${test_log_start}" \
+    --scratch-log "${OUTPUT_DIR}/swordfs-scratch.log" --scratch-start "${scratch_log_start}" \
+    --evidence "${RUN_RESULTS}/${test}.writebackfail"
+}
+
 backend_healthy() {
   timeout 5s "${DOCKER_COMPOSE[@]}" -f "${COMPOSE_FILE}" exec -T redis redis-cli ping >/dev/null 2>&1 && \
     curl --max-time 5 -fsS "http://127.0.0.1:${MINIO_PORT}/minio/health/live" >/dev/null 2>&1
@@ -747,6 +757,10 @@ while IFS= read -r test <&3; do
   fi
 
   echo "=== ${test} ===" >>"${RAW_DIR}/check.log"
+  # Distinguish this test's daemon writeback errors from earlier runs in the
+  # same shard; fstests reuses the append-only FUSE daemon log destinations.
+  test_log_start="$(stat -c '%s' "${OUTPUT_DIR}/swordfs-test.log" 2>/dev/null || echo 0)"
+  scratch_log_start="$(stat -c '%s' "${OUTPUT_DIR}/swordfs-scratch.log" 2>/dev/null || echo 0)"
   rm -f "${RUN_RESULTS}/result.xml"
   set +e
   (
@@ -776,6 +790,7 @@ while IFS= read -r test <&3; do
     capture_daemon_timeout_diagnostics "${test}"
     terminate_test_scope "${test}"
     isolate_after_test "${test}" || true
+    audit_case_writeback "${test}" || true
     cleanup_test_scope "${test}"
     break
   fi
@@ -789,8 +804,15 @@ while IFS= read -r test <&3; do
     fi
   fi
   if ! isolate_after_test "${test}"; then
+    audit_case_writeback "${test}" || true
     check_status=2
     break
+  fi
+  if ! audit_case_writeback "${test}"; then
+    # A userspace checker may ignore an asynchronous FUSE writeback failure.
+    # Keep processing the pinned shard but let the aggregate classifier fail
+    # this specific case via its .writebackfail evidence, not a generic skip.
+    check_status=1
   fi
 done 3<"${OUTPUT_DIR}/planned-tests.txt"
 

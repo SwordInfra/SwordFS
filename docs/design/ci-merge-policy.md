@@ -99,13 +99,14 @@ validated missing capabilities visible, but unexpected regressions,
 infrastructure failures, stale XPASS entries, and disappearing supported
 coverage fail the corresponding required check.
 
-Baseline changes are themselves gated. Removing an already-supported testcase
-requires the explicitly reviewed `conformance-semantic-change` label. The
-fstests PR-CI deferred set is non-growing by default; adding a new deferred
-testcase requires `conformance-deferred-change`. These labels do not bypass the
-conformance job: they only authorize the classifier to evaluate the explicitly
-reviewed baseline transition. Restoring deferred coverage to normal execution
-requires no override.
+The existing change-scope classifier preserves the documentation-only
+exception: eligible docs-only PRs skip native build, E2E and POSIX conformance,
+while retaining the normal formatting, required-check and Codecov paths.
+Changes touching source, tests, CI, scripts or baselines receive the full
+required gates. No label starts extra experimental jobs or bypasses classifiers.
+Supported coverage remains non-decreasing and the fstests deferred selection
+non-growing: a deliberate policy change requires a reviewed code/policy change,
+not an approval label.
 
 Each conformance gate remains separate from its status-publication job for
 least-privilege isolation. `pjdfstest-conformance` and `fstests-conformance`

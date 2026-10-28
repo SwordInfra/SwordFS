@@ -18,6 +18,12 @@ def load_history(path: pathlib.Path) -> list[dict[str, object]]:
     return payload
 
 
+def history_chunk_type(item: dict[str, object]) -> str:
+    # Old primary conformance runs always formatted COW; do not interpret
+    # their support series as earlier Slice observations.
+    return str(item.get("chunk_type") or "cow")
+
+
 def percent(value: object) -> str:
     if value is None:
         return "n/a"
@@ -51,6 +57,10 @@ def main() -> int:
     parser.add_argument("--swordfs-commit", required=True)
     parser.add_argument("--run-url", required=True)
     parser.add_argument("--infra-failure", default="")
+    parser.add_argument(
+        "--conformance-job-result", choices=("success", "failure", "cancelled", "skipped"), required=True
+    )
+    parser.add_argument("--expected-chunk-type", choices=("cow", "chunk_slice"))
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -58,17 +68,56 @@ def main() -> int:
     timestamp = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
     result: dict[str, object] | None = None
+    invalid_evidence = ""
+    observed_chunk_type: object = None
     if args.result and args.result.exists():
-        result = json.loads(args.result.read_text(encoding="utf-8"))
+        try:
+            candidate = json.loads(args.result.read_text(encoding="utf-8"))
+            if not isinstance(candidate, dict):
+                raise ValueError("result.json must be an object")
+            metadata = candidate.get("metadata")
+            summary = candidate.get("summary")
+            if not isinstance(metadata, dict) or not isinstance(summary, dict):
+                raise ValueError("result.json requires metadata and summary objects")
+            environment = metadata.get("environment")
+            if not isinstance(environment, dict):
+                raise ValueError("metadata.environment must be an object")
+            observed_chunk_type = environment.get("chunk_type")
+            if args.expected_chunk_type and observed_chunk_type != args.expected_chunk_type:
+                raise ValueError(
+                    f"chunk_type {observed_chunk_type!r} does not match required {args.expected_chunk_type!r}"
+                )
+            result = candidate
+        except (OSError, ValueError, TypeError) as exc:
+            if args.conformance_job_result == "success":
+                # A job claiming success must not conceal corrupt or mislabeled evidence.
+                raise
+            # A failed job must still publish an explicit failure status,
+            # rather than leave the previous green status visible.
+            invalid_evidence = f"Invalid or mismatched partial result evidence: {exc}"
 
     if result:
         metadata = result.get("metadata", {})
         summary = result.get("summary", {})
         assert isinstance(metadata, dict) and isinstance(summary, dict)
+        environment = metadata.get("environment", {})
+        if not isinstance(environment, dict):
+            raise ValueError("pjdfstest status requires an object environment")
+        actual_chunk_type = environment.get("chunk_type", "cow")
+        if args.expected_chunk_type and actual_chunk_type != args.expected_chunk_type:
+            raise ValueError(
+                f"pjdfstest status cannot publish chunk_type {actual_chunk_type!r}; "
+                f"expected {args.expected_chunk_type!r}"
+            )
         status = "PASS" if int(summary.get("blocking_count", 0)) == 0 else "FAILED"
+        # A clean classified artifact cannot overrule a failed/cancelled/skipped
+        # upstream job (e.g. a post-classification upload or harness failure).
+        if args.conformance_job_result != "success" and status == "PASS":
+            status = "INFRASTRUCTURE_FAILED"
         entry = {
             "timestamp": timestamp,
             "swordfs_commit": metadata.get("swordfs_commit", args.swordfs_commit),
+            "chunk_type": actual_chunk_type,
             "pjdfstest_commit": metadata.get("pjdfstest_commit", "unknown"),
             "status": status,
             "overall_support_percent": summary.get("overall_support_percent"),
@@ -81,17 +130,37 @@ def main() -> int:
             "run_url": args.run_url,
         }
         latest = result
+        latest["status"] = status
+        latest["conformance_job_result"] = args.conformance_job_result
+        # Expose the mechanism directly as well as in environment for status
+        # consumers, preserving the original authoritative environment.
+        latest["metadata"]["chunk_type"] = actual_chunk_type
         if args.report and args.report.exists():
             current_markdown = args.report.read_text(encoding="utf-8").rstrip()
         else:
             current_markdown = f"# SwordFS POSIX conformance status\n\nLatest run: **{status}**"
+        if args.conformance_job_result != "success":
+            # A partial generated report can still claim PASS. Never publish
+            # that green headline when the authoritative job failed.
+            current_markdown = (
+                "# SwordFS conformance: CI NOT SUCCESSFUL\n\n"
+                f"Conformance job result: `{args.conformance_job_result}`. "
+                f"Recorded classification status: **{status}**.\n\n"
+                "Partial XUnit evidence remains in the run artifact but is not "
+                "an authoritative PASS.\n\n"
+                f"CI run: {args.run_url}"
+            )
     else:
         status = "INFRASTRUCTURE_FAILED"
+        failure_reason = "; ".join(filter(None, (args.infra_failure, invalid_evidence)))
         entry = {
             "timestamp": timestamp,
             "swordfs_commit": args.swordfs_commit,
+            "chunk_type": args.expected_chunk_type or "unknown",
             "pjdfstest_commit": "unknown",
             "status": status,
+            "observed_chunk_type": observed_chunk_type,
+            "reason": failure_reason,
             "overall_support_percent": None,
             "supported_regression_pass_percent": None,
             "classified_rate_percent": None,
@@ -101,14 +170,20 @@ def main() -> int:
             "by_category": {},
             "run_url": args.run_url,
         }
-        latest = {"metadata": {"swordfs_commit": args.swordfs_commit}, "status": status, "reason": args.infra_failure}
+        latest = {
+            "metadata": {"swordfs_commit": args.swordfs_commit, "chunk_type": args.expected_chunk_type or "unknown"},
+            "status": status,
+            "conformance_job_result": args.conformance_job_result,
+            "observed_chunk_type": observed_chunk_type,
+            "reason": failure_reason or "Required CI result artifact is missing",
+        }
         current_markdown = "\n".join(
             [
                 "# SwordFS POSIX conformance status",
                 "",
                 "Latest main conformance run: **INFRASTRUCTURE FAILED**",
                 "",
-                args.infra_failure or "The conformance job ended before a classified report was produced.",
+                failure_reason or "The conformance job ended before a classified report was produced.",
                 "",
                 f"CI run: {args.run_url}",
             ]
@@ -127,18 +202,22 @@ def main() -> int:
     history.append(entry)
     history = history[-200:]
 
-    healthy = next((item for item in reversed(history) if item.get("status") == "PASS"), None)
+    active_mechanism = history_chunk_type(entry)
+    mechanism_history = [item for item in history if history_chunk_type(item) == active_mechanism]
+    healthy = next((item for item in reversed(mechanism_history) if item.get("status") == "PASS"), None)
     trend_lines = [
         "",
         f"Authoritative CI run: {args.run_url}",
         f"Recorded at: {timestamp}",
         "",
-        "## Historical main-branch trend",
+        f"Mechanism: `{active_mechanism}` (previous COW history retained separately in `history.json`)",
+        "",
+        f"## Historical main-branch trend ({active_mechanism} only)",
         "",
         "| Time | SwordFS | Status | Overall support | Supported gate | Classified |",
         "| --- | --- | --- | ---: | ---: | ---: |",
     ]
-    for item in trend_history(history)[-30:]:
+    for item in trend_history(mechanism_history)[-30:]:
         commit = str(item.get("swordfs_commit", "unknown"))
         trend_lines.append(
             "| {timestamp} | `{commit}` | {status} | {overall} | {supported} | {classified} |".format(
