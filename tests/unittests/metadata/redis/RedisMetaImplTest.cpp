@@ -48,7 +48,7 @@ FIBER_TEST_F(RedisMetaImplTest, AdvisoryLocksShareUsableMetadataExecutor) {
 }
 
 // Redis must publish the typed FileMetadata contract using its own
-// atomic inode + mapping transaction, independent of typed COW head CAS.
+// atomic inode + mapping transaction, independent of private Chunk metadata.
 FIBER_TEST_F(RedisMetaImplTest, PreparedChunkAttachmentIsAtomicAndCannotBeStolen) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "typed-attach", 0644, &file).ok());
@@ -109,7 +109,7 @@ FIBER_TEST_F(RedisMetaImplTest, SizePreservingTypedRewriteUpdatesMtimeAndCtime) 
   ASSERT_TRUE(impl_->FinalizeAttachedWrite(file.ino, 0, id, 8, before).ok());
   ASSERT_TRUE(impl_->GetInode(file.ino, &file).ok());
   EXPECT_EQ(file.attr.size, 8U);
-  EXPECT_GT(file.attr.mtime, 1) << "a same-EOF COW rewrite is still a content modification";
+  EXPECT_GT(file.attr.mtime, 1) << "a same-EOF rewrite is still a content modification";
   EXPECT_GE(file.attr.ctime, previous_ctime);
   std::optional<swordfs::metadata::ChunkID> attached;
   ASSERT_TRUE(impl_->ProbeAttachment(file.ino, 0, &attached).ok());
@@ -375,7 +375,7 @@ FIBER_TEST_F(RedisMetaImplTest, TypedShrinkAndGrowCommitEofAndAttachmentsAtomica
   EXPECT_EQ(committed.detached[0].chunk_id, tail_id);
   const swordfs::metadata::redis::RedisKey cleanup_key(config_.db, volume_name_);
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
-    EXPECT_TRUE(redis.hexists(cleanup_key.PendingDeletes(), "cow:chunk:31"))
+    EXPECT_TRUE(redis.hexists(cleanup_key.PendingDeletes(), "slice:chunk:31"))
         << "a typed shrink must persist a detached-ID cleanup candidate";
   });
   ASSERT_TRUE(committed.boundary.has_value());
@@ -606,7 +606,7 @@ FIBER_TEST_F(RedisMetaImplTest, VolumeAndBasicLookupOperations) {
   ASSERT_TRUE(swordfs::test::RunInTestThreadFromFiber([&] { return impl_->LoadVolume(&volume); }).ok());
   EXPECT_EQ(volume.name, volume_name_);
   EXPECT_EQ(volume.chunk_size, 4096U);
-  EXPECT_EQ(volume.chunk_type, swordfs::metadata::ChunkType::kCow);
+  EXPECT_EQ(volume.chunk_type, swordfs::metadata::ChunkType::kChunkSlice);
   EXPECT_EQ(swordfs::test::RunInTestThreadFromFiber([&] { return impl_->LoadVolume(nullptr); }).ToErrno(), EINVAL);
   EXPECT_TRUE(swordfs::test::RunInTestThreadFromFiber([&] { return impl_->FormatVolume(volume); }).ToErrno() == EEXIST);
 
@@ -1082,7 +1082,7 @@ FIBER_TEST_F(RedisMetaImplTest, MknodSpecialNodesUseOrdinaryNamespaceLifecycle) 
   auto work = PendingReclaim(fifo.ino);
   ASSERT_TRUE(work.has_value());
   ReclaimWork expected;
-  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedReclaim(work->ino, {}, &expected).ok());
+  ASSERT_TRUE(bridge_->EncodeDetachedReclaim(work->ino, {}, &expected).ok());
   EXPECT_EQ(work->payload, expected.payload);
   SwordFsInode reclaimed;
   EXPECT_TRUE(impl_->GetInode(fifo.ino, &reclaimed).IsNotFound());
@@ -1128,7 +1128,7 @@ FIBER_TEST_F(RedisMetaImplTest, UnlinkAndRmdirCoverSuccessAndTypeChecks) {
   ASSERT_TRUE(work.has_value());
   EXPECT_EQ(work->ino, file.ino);
   ReclaimWork expected;
-  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedReclaim(work->ino, {}, &expected).ok());
+  ASSERT_TRUE(bridge_->EncodeDetachedReclaim(work->ino, {}, &expected).ok());
   EXPECT_EQ(work->payload, expected.payload);
   ASSERT_TRUE(impl_->CompleteReclaim(file.ino).ok());
   EXPECT_TRUE(impl_->GetInode(file.ino, &file).IsNotFound());

@@ -49,6 +49,25 @@ namespace {
 
 constexpr size_t kMiB = 1024 * 1024;
 
+// A future Chunk mechanism only needs the mechanism-neutral metadata contract
+// to reach factory dispatch. It must not be silently treated as Slice or COW.
+class StubMechanismMetadata final : public swordfs::metadata::ChunkMetadata {
+ public:
+  explicit StubMechanismMetadata(swordfs::metadata::ChunkType type) : type_(type) {
+  }
+
+  swordfs::metadata::ChunkType Type() const override {
+    return type_;
+  }
+
+  Status AllocateChunkID(swordfs::metadata::ChunkID *) override {
+    return Status::NotSupported("unimplemented synthetic mechanism");
+  }
+
+ private:
+  swordfs::metadata::ChunkType type_;
+};
+
 // Exercise the Slice implementation through the same mount-level factory API
 // used by FileChunkManager; never inject visible spans through production hooks.
 using swordfs::test::chunk_test::TestSliceChunkMetadata;
@@ -116,6 +135,44 @@ TEST_F(SliceChunkTest, FactoryOpensSliceWithMechanismNeutralArguments) {
     ASSERT_TRUE(factory_->Open(42, 1, true, &second).ok());
     EXPECT_NE(first, nullptr);
     EXPECT_NE(second, nullptr);
+  });
+}
+
+TEST_F(SliceChunkTest, FactoryRejectsInvalidCompositionWithoutRelyingOnCOWFixtures) {
+  using swordfs::chunk::ChunkFactory;
+  using swordfs::metadata::ChunkType;
+  RunInTestFiber([&] {
+    std::shared_ptr<Chunk> result;
+    const auto expect_uninitialized = [&](const ChunkFactory &factory) {
+      const auto status = factory.Open(42, 0, true, &result);
+      EXPECT_EQ(status.message(), "ChunkFactory is not fully initialized");
+      EXPECT_EQ(result, nullptr);
+    };
+
+    expect_uninitialized(ChunkFactory(ChunkType::kChunkSlice, slice_metadata_, nullptr, data_, kChunkTestSize));
+    expect_uninitialized(ChunkFactory(ChunkType::kChunkSlice, slice_metadata_, meta_, nullptr, kChunkTestSize));
+    expect_uninitialized(ChunkFactory(ChunkType::kChunkSlice, nullptr, meta_, data_, kChunkTestSize));
+    expect_uninitialized(ChunkFactory(ChunkType::kChunkSlice, slice_metadata_, meta_, data_, 0));
+
+    ChunkFactory mismatched(ChunkType::kChunkSlice, std::make_shared<StubMechanismMetadata>(ChunkType::kRedisCache),
+                            meta_, data_, kChunkTestSize);
+    EXPECT_EQ(mismatched.Open(42, 0, true, &result).message(), "ChunkFactory chunk metadata type mismatch");
+
+    ChunkFactory missing_slice_capability(ChunkType::kChunkSlice,
+                                          std::make_shared<StubMechanismMetadata>(ChunkType::kChunkSlice), meta_, data_,
+                                          kChunkTestSize);
+    EXPECT_EQ(missing_slice_capability.Open(42, 0, true, &result).ToErrno(), ENOSYS);
+
+    ChunkFactory future_mechanism(ChunkType::kRedisCache,
+                                  std::make_shared<StubMechanismMetadata>(ChunkType::kRedisCache), meta_, data_,
+                                  kChunkTestSize);
+    EXPECT_EQ(future_mechanism.Open(42, 0, true, &result).ToErrno(), ENOSYS);
+
+    const auto unknown_type = static_cast<ChunkType>(99);
+    ChunkFactory unknown_mechanism(unknown_type, std::make_shared<StubMechanismMetadata>(unknown_type), meta_, data_,
+                                   kChunkTestSize);
+    EXPECT_EQ(unknown_mechanism.Open(42, 0, true, &result).ToErrno(), ENOSYS);
+    EXPECT_EQ(factory_->Open(42, 0, true, nullptr).ToErrno(), EINVAL);
   });
 }
 

@@ -471,6 +471,20 @@ class EmptyReclaimerMetaEngine : public UnsupportedMetaEngine {
   }
 };
 
+// A mechanism-neutral reclaimer test only needs a typed mount capability;
+// it must not get one implicitly from ConfiguredMetaEngine's legacy COW
+// fallback, nor claim Slice implements physical GC.
+class SliceReclaimerMetaEngine : public EmptyReclaimerMetaEngine {
+ public:
+  Status OpenChunkMetadata(metadata::ChunkType type, metadata::ChunkMetadataPtr *out) override {
+    if (out == nullptr || type != metadata::ChunkType::kChunkSlice) {
+      return Status::InvalidArgument("expected Slice test metadata capability");
+    }
+    *out = std::make_shared<swordfs::test::StubChunkMetadata>(type);
+    return Status::OK();
+  }
+};
+
 class ReclaimerTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -1380,19 +1394,23 @@ class ReclaimerNoEngineTest : public ::testing::Test {
 };
 
 FIBER_TEST_F(ReclaimerNoEngineTest, ReconcileWithoutEnginesIsANoOp) {
-  EXPECT_TRUE(ReconcileAll(nullptr).ok());
+  EXPECT_TRUE(OrphanReclaimer::Instance().Reconcile().ok());
+  chunk::internal::ChunkGcWorker worker(nullptr, nullptr);
+  EXPECT_TRUE(worker.Reconcile().ok());
 }
 
 FIBER_TEST_F(ReclaimerNoEngineTest, MissingDataEngineFailsClosedAndReconcileStaysHarmless) {
   swordfs::test::RunInTestThreadFromFiber([&] {
     SwordFsVolume config;
-    config.chunk_type = metadata::ChunkType::kCow;
-    auto configured = std::make_unique<swordfs::test::ConfiguredMetaEngine<EmptyReclaimerMetaEngine>>();
+    config.chunk_type = metadata::ChunkType::kChunkSlice;
+    auto configured = std::make_unique<swordfs::test::ConfiguredMetaEngine<SliceReclaimerMetaEngine>>();
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(configured), nullptr, std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
   });
   ASSERT_NE(volume::VolumeImpl::Instance().meta_engine(), nullptr);
-  EXPECT_TRUE(ReconcileAll(nullptr).ok());
+  EXPECT_TRUE(OrphanReclaimer::Instance().Reconcile().ok());
+  chunk::internal::ChunkGcWorker worker(volume::VolumeImpl::Instance().meta_engine(), nullptr);
+  EXPECT_TRUE(worker.Reconcile().ok()) << "Slice must not gain physical cleanup without a participant";
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1405,7 +1423,7 @@ FIBER_TEST_F(ReclaimerNoEngineTest, MissingDataEngineFailsClosedAndReconcileStay
 // Reconcile() walks two durable sets; a backend failure on either scan must
 // reach the caller instead of being read as an empty set.
 
-class FailingScanMetaEngine : public UnsupportedMetaEngine {
+class FailingScanMetaEngine : public SliceReclaimerMetaEngine {
  public:
   Status VisitPendingDeletesBatch(size_t, const swordfs::metadata::PendingDeleteVisitorFn &, bool *has_more) override {
     if (!pending_delete_scan_status.ok()) {
@@ -1461,9 +1479,8 @@ class ReclaimerScanFailureTest : public ::testing::Test {
     auto meta = std::make_unique<swordfs::test::ConfiguredMetaEngine<FailingScanMetaEngine>>();
     auto data = std::make_unique<RecordingDataEngine>();
     meta_ = meta.get();
-    data_ = data.get();
     SwordFsVolume config;
-    config.chunk_type = metadata::ChunkType::kCow;
+    config.chunk_type = metadata::ChunkType::kChunkSlice;
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
   }
@@ -1474,13 +1491,24 @@ class ReclaimerScanFailureTest : public ::testing::Test {
   }
 
   FailingScanMetaEngine *meta_ = nullptr;
-  RecordingDataEngine *data_ = nullptr;
 };
+
+// Exercise the mechanism-neutral scanning/acknowledgement worker with an
+// in-memory participant. Slice physical GC remains deliberately disabled.
+utils::Status ReconcileGenericWorkerScans() {
+  auto status = OrphanReclaimer::Instance().Reconcile();
+  if (!status.ok()) {
+    return status;
+  }
+  chunk::internal::ChunkGcWorker worker(volume::VolumeImpl::Instance().meta_engine(),
+                                        std::make_unique<CompletingCleanupParticipant>());
+  return worker.Reconcile();
+}
 
 FIBER_TEST_F(ReclaimerScanFailureTest, ReconcileSurfacesOrphanScanFailure) {
   meta_->orphan_scan_status = Status::IOError("orphan scan unavailable");
 
-  const auto status = ReconcileAll(data_);
+  const auto status = ReconcileGenericWorkerScans();
   EXPECT_EQ(status.ToErrno(), EIO) << status.message();
   EXPECT_EQ(status.message(), "orphan scan unavailable");
 }
@@ -1499,7 +1527,7 @@ FIBER_TEST_F(ReclaimerScanFailureTest, ReconcileAggregatesPrepareReclaimFailure)
 FIBER_TEST_F(ReclaimerScanFailureTest, ReconcileSurfacesPendingDeleteScanFailure) {
   meta_->pending_delete_scan_status = Status::IOError("pending delete scan unavailable");
 
-  const auto status = ReconcileAll(data_);
+  const auto status = ReconcileGenericWorkerScans();
   EXPECT_EQ(status.ToErrno(), EIO) << status.message();
   EXPECT_EQ(status.message(), "pending delete scan unavailable");
 }
@@ -1509,7 +1537,7 @@ FIBER_TEST_F(ReclaimerScanFailureTest, ReconcileSurfacesPendingScanFailure) {
   // caller just the same.
   meta_->pending_scan_status = Status::IOError("pending scan unavailable");
 
-  const auto status = ReconcileAll(data_);
+  const auto status = ReconcileGenericWorkerScans();
   EXPECT_EQ(status.ToErrno(), EIO) << status.message();
   EXPECT_EQ(status.message(), "pending scan unavailable");
 }

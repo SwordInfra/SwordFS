@@ -11,7 +11,7 @@
 #include <string>
 #include <utility>
 
-#include "chunk/cow/COWObjectKey.hpp"
+#include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaTestSupport.hpp"
 
@@ -36,14 +36,14 @@ TEST(RedisMetaTxnTest, PrepareReclaimScansAuthoritativeChunksInsideTransaction) 
 
   std::optional<ReclaimWork> work;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &SliceEncoderForTest());
     return txn.PrepareReclaim(file.ino, work);
   });
 
   ASSERT_TRUE(status.ok()) << status.message();
   ASSERT_TRUE(work.has_value());
   ReclaimWork expected;
-  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedReclaim(file.ino, {{0, ChunkID(73)}}, &expected).ok());
+  ASSERT_TRUE(SliceEncoderForTest().EncodeDetachedReclaim(file.ino, {{0, ChunkID(73)}}, &expected).ok());
   EXPECT_EQ(work->payload, expected.payload);
   EXPECT_FALSE(redis.exists(key.Inode(file.ino)));
   EXPECT_FALSE(redis.exists(key.ChunkRefs(file.ino)));
@@ -73,7 +73,7 @@ TEST(RedisMetaTxnTest, LinkIgnoresUnrelatedFrozenWorkChanges) {
   int attempts = 0;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &SliceEncoderForTest());
     SwordFsInode parent;
     auto status = txn.LookupInode(kRootInodeId, &parent);
     if (!status.ok()) {
@@ -124,7 +124,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimIgnoresUnrelatedFrozenWorkChanges) {
   std::optional<ReclaimWork> work;
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &SliceEncoderForTest());
     auto status = txn.PrepareReclaim(kIno, work);
     if (!status.ok()) {
       return status;
@@ -167,7 +167,7 @@ TEST(RedisMetaTxnTest, LinkCommitInvalidatesConcurrentReclaimSnapshot) {
   std::optional<ReclaimWork> work;
   const auto status = reclaim_store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &SliceEncoderForTest());
     auto status = txn.PrepareReclaim(kIno, work);
     if (!status.ok()) {
       return status;
@@ -177,7 +177,7 @@ TEST(RedisMetaTxnTest, LinkCommitInvalidatesConcurrentReclaimSnapshot) {
     }
 
     return link_store.Transact([&](RedisKvTxn &link_kv_txn) {
-      RedisMetaTxn link_txn(link_kv_txn, key, 4096, &COWEncoderForTest());
+      RedisMetaTxn link_txn(link_kv_txn, key, 4096, &SliceEncoderForTest());
       SwordFsInode parent;
       auto status = link_txn.LookupInode(kRootInodeId, &parent);
       if (!status.ok()) {
@@ -228,7 +228,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimFreshRetryUsesAbsentInodeRatherThanFrozenWo
   std::optional<ReclaimWork> first_work;
   const auto first_status = first_store.Transact([&](RedisKvTxn &kv_txn) {
     ++attempts;
-    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &SliceEncoderForTest());
     auto status = txn.PrepareReclaim(kIno, first_work);
     if (!status.ok()) {
       return status;
@@ -247,7 +247,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimFreshRetryUsesAbsentInodeRatherThanFrozenWo
   RedisMetaClient retry_store(retry_config);
   std::optional<ReclaimWork> replay;
   const auto retry_status = retry_store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &SliceEncoderForTest());
     return txn.PrepareReclaim(kIno, replay);
   });
 
@@ -262,7 +262,7 @@ TEST(RedisMetaTxnTest, PrepareReclaimFreshRetryUsesAbsentInodeRatherThanFrozenWo
   ReclaimWork retained;
   ASSERT_TRUE(retained.ParseFrom(*persisted).ok());
   ReclaimWork expected;
-  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedReclaim(kIno, {{0, ChunkID(73)}}, &expected).ok());
+  ASSERT_TRUE(SliceEncoderForTest().EncodeDetachedReclaim(kIno, {{0, ChunkID(73)}}, &expected).ok());
   EXPECT_EQ(retained.payload, expected.payload);
   EXPECT_FALSE(control.exists(key.Inode(kIno)));
   EXPECT_FALSE(control.exists(key.ChunkRefs(kIno)));
