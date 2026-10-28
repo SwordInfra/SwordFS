@@ -41,7 +41,7 @@ Latest run: **PASS**
 
 ## Baseline metadata
 
-- SwordFS commit: `493c1268a2e8024255ed709764bd35778e3dd873`
+- SwordFS commit: `e7b28617edd4a562b72102e65d68aa62ee9f197a`
 - pjdfstest commit: `85a8aea9e685999ef0540392fd80535f873d7ff7`
 - chunk_type: `chunk_slice`
 - kernel: `6.17.0-1022-azure`
@@ -49,8 +49,8 @@ Latest run: **PASS**
 - os: `Linux-6.17.0-1022-azure-x86_64-with-glibc2.43`
 - runner: `Linux`
 
-Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/40658085805
-Recorded at: 2026-10-28T08:45:42+00:00
+Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/40663157666
+Recorded at: 2026-10-28T09:25:20+00:00
 
 Mechanism: `chunk_slice` (previous COW history retained separately in `history.json`)
 
@@ -60,4 +60,4 @@ Mechanism: `chunk_slice` (previous COW history retained separately in `history.j
 | --- | --- | --- | ---: | ---: | ---: |
 | 2026-10-28T08:45:42+00:00 | `493c1268a2e8` | PASS | 100.00% | 100.00% | 100.00% |
 
-Last fully healthy baseline: `493c1268a2e8024255ed709764bd35778e3dd873`
+Last fully healthy baseline: `e7b28617edd4a562b72102e65d68aa62ee9f197a`
