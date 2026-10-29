@@ -225,7 +225,7 @@ FIBER_TEST_F(RedisMetaImplTest, ReclaimFreezesAttachedChunkIDIndependentOfPrivat
   const auto work = PendingReclaim(file.ino);
   ASSERT_TRUE(work.has_value());
   swordfs::metadata::ReclaimWork expected;
-  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedReclaim(file.ino, {{0, id}}, &expected).ok());
+  ASSERT_TRUE(bridge_->EncodeDetachedReclaim(file.ino, {{0, id}}, &expected).ok());
   EXPECT_EQ(work->payload, expected.payload);
   ASSERT_TRUE(impl_->CompleteReclaim(file.ino).ok());
 }

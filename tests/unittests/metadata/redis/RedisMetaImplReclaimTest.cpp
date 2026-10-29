@@ -24,6 +24,7 @@ using swordfs::test::redis_meta::MakePendingDelete;
 using swordfs::test::redis_meta::PendingDeleteObjectKey;
 using swordfs::test::redis_meta::ReclaimWork;
 using swordfs::test::redis_meta::RedisMetaImpl;
+using swordfs::test::redis_meta::RedisMetaImplCOWTest;
 using swordfs::test::redis_meta::RedisMetaImplTest;
 using swordfs::test::redis_meta::SetAttrField;
 using swordfs::test::redis_meta::Status;
@@ -96,9 +97,8 @@ FIBER_TEST_F(RedisMetaImplTest, PendingDeleteScanRejectsMalformedEnvelopeButLeav
                       1, [](const swordfs::metadata::PendingDelete &) { return Status::OK(); }, &has_more)
                   .ToErrno() == EIO);
 
-  swordfs::metadata::PendingDelete pending;
-  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedDelete(42, {1, swordfs::metadata::ChunkID(9)}, &pending).ok());
-  pending.payload = "invalid COW private payload";
+  auto pending = MakePendingDelete(42, 1, 9);
+  pending.payload = "invalid mechanism-private payload";
   std::string encoded;
   ASSERT_TRUE(pending.SerializeTo(&encoded).ok());
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
@@ -111,7 +111,7 @@ FIBER_TEST_F(RedisMetaImplTest, PendingDeleteScanRejectsMalformedEnvelopeButLeav
                       1,
                       [&](const swordfs::metadata::PendingDelete &work) {
                         ++visits;
-                        EXPECT_EQ(work.payload, "invalid COW private payload");
+                        EXPECT_EQ(work.payload, "invalid mechanism-private payload");
                         return Status::OK();
                       },
                       &has_more)
@@ -148,7 +148,8 @@ FIBER_TEST_F(RedisMetaImplTest, UnlinkPublishesDurableOrphanCandidate) {
   EXPECT_EQ(stored.attr.nlink, 0U);
 }
 
-FIBER_TEST_F(RedisMetaImplTest, TypedReclaimFreezesChunkIDAttachmentsInsteadOfLegacyDescriptors) {
+// The binary record layout is COW-private. Common reclaim tests use Slice.
+FIBER_TEST_F(RedisMetaImplCOWTest, TypedReclaimFreezesChunkIDAttachmentsInsteadOfLegacyDescriptors) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "typed-reclaim", 0644, &file).ok());
   const swordfs::metadata::ChunkID attached_id(807);
@@ -194,8 +195,7 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimFreezesRecordAndRemovesLiveMetadat
   auto work = PendingReclaim(file.ino);
   ASSERT_TRUE(work.has_value());
   ReclaimWork expected;
-  ASSERT_TRUE(
-      swordfs::chunk::cow::FreezeCOWDetachedReclaim(file.ino, {{0, swordfs::metadata::ChunkID(1)}}, &expected).ok());
+  ASSERT_TRUE(bridge_->EncodeDetachedReclaim(file.ino, {{0, swordfs::metadata::ChunkID(1)}}, &expected).ok());
   EXPECT_EQ(work->payload, expected.payload);
 
   // The live metadata is gone and only the frozen record remains: the point
@@ -334,8 +334,7 @@ FIBER_TEST_F(RedisMetaImplTest, CrashLeftPendingReclaimIsRetriedFromPersistedSta
   EXPECT_EQ(retried, prepared);
   ASSERT_TRUE(retried.has_value());
   ReclaimWork expected;
-  ASSERT_TRUE(
-      swordfs::chunk::cow::FreezeCOWDetachedReclaim(file.ino, {{0, swordfs::metadata::ChunkID(3)}}, &expected).ok());
+  ASSERT_TRUE(bridge_->EncodeDetachedReclaim(file.ino, {{0, swordfs::metadata::ChunkID(3)}}, &expected).ok());
   EXPECT_EQ(retried->payload, expected.payload);
 
   ASSERT_TRUE(impl_->CompleteReclaim(file.ino).ok());
@@ -349,8 +348,7 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimTreatsFrozenRecordAsMaintenanceAnd
   ASSERT_TRUE(impl_->Unlink(kRootInodeId, "inconsistent-reclaim").ok());
 
   ReclaimWork frozen;
-  ASSERT_TRUE(
-      swordfs::chunk::cow::FreezeCOWDetachedReclaim(file.ino, {{0, swordfs::metadata::ChunkID(7)}}, &frozen).ok());
+  ASSERT_TRUE(bridge_->EncodeDetachedReclaim(file.ino, {{0, swordfs::metadata::ChunkID(7)}}, &frozen).ok());
   std::string encoded;
   ASSERT_TRUE(frozen.SerializeTo(&encoded).ok());
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
@@ -386,7 +384,7 @@ FIBER_TEST_F(RedisMetaImplTest, LinkRevivesOrphanCandidateAndClearsMarker) {
       [&](sw::redis::Redis &redis) { EXPECT_FALSE(redis.hexists(key.Orphans(), std::to_string(file.ino))); });
 
   ReclaimWork stale;
-  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedReclaim(file.ino, {}, &stale).ok());
+  ASSERT_TRUE(bridge_->EncodeDetachedReclaim(file.ino, {}, &stale).ok());
   std::string encoded;
   ASSERT_TRUE(stale.SerializeTo(&encoded).ok());
   RunWithRawRedisFromFiber(
@@ -422,7 +420,7 @@ FIBER_TEST_F(RedisMetaImplTest, MalformedPendingReclaimRecordIsRejected) {
   // A decodable record whose serialized inode disagrees with its hash field
   // is corrupt too: acting on it could delete another inode's objects.
   ReclaimWork record;
-  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedReclaim(7777, {}, &record).ok());
+  ASSERT_TRUE(bridge_->EncodeDetachedReclaim(7777, {}, &record).ok());
   std::string serialized;
   ASSERT_TRUE(record.SerializeTo(&serialized).ok());
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.hset(key.Reclaims(), "4242", serialized); });
@@ -455,7 +453,7 @@ FIBER_TEST_F(RedisMetaImplTest, PrepareReclaimOverwritesStalePendingRecordFromLi
   ASSERT_TRUE(impl_->Unlink(kRootInodeId, "file").ok());
 
   ReclaimWork wrong;
-  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedReclaim(file.ino + 1, {}, &wrong).ok());
+  ASSERT_TRUE(bridge_->EncodeDetachedReclaim(file.ino + 1, {}, &wrong).ok());
   std::string serialized;
   ASSERT_TRUE(wrong.SerializeTo(&serialized).ok());
 

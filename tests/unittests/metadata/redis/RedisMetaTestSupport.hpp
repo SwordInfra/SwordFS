@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -17,7 +18,6 @@
 #include <vector>
 
 #include "FiberTest.hpp"
-#include "chunk/cow/COWCleanup.hpp"
 #include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
@@ -101,20 +101,18 @@ inline utils::Status SeedEntry(sw::redis::Redis &redis, const redis::RedisKey &k
   return utils::Status::OK();
 }
 
-class COWTestEncoder final : public chunk::internal::ChunkCleanupWorkEncoder {
- public:
-  utils::Status EncodeDetachedDelete(InodeID ino, const ChunkMapping &mapping, PendingDelete *out) const override {
-    return chunk::cow::FreezeCOWDetachedDelete(ino, mapping, out);
-  }
-  utils::Status EncodeDetachedReclaim(InodeID ino, const std::vector<ChunkMapping> &mappings,
-                                      ReclaimWork *out) const override {
-    return chunk::cow::FreezeCOWDetachedReclaim(ino, mappings, out);
-  }
-};
-
-inline const chunk::internal::ChunkCleanupWorkEncoder &COWEncoderForTest() {
-  static const COWTestEncoder encoder;
-  return encoder;
+// Use the real Slice mechanism's encoder for shared Redis namespace and
+// attribute contracts. These tests must not need a COW private fixture.
+inline const chunk::internal::ChunkCleanupWorkEncoder &SliceEncoderForTest() {
+  static const auto encoder = [] {
+    std::unique_ptr<chunk::internal::ChunkCleanupWorkEncoder> result;
+    auto status = chunk::internal::CreateChunkCleanupWorkEncoder(ChunkType::kChunkSlice, &result);
+    if (!status.ok()) {
+      throw std::runtime_error(status.message());
+    }
+    return result;
+  }();
+  return *encoder;
 }
 
 }  // namespace swordfs::metadata

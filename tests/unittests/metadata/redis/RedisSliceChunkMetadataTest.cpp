@@ -216,6 +216,106 @@ TEST(RedisSliceChunkMetadataTest, SliceIdsHaveIndependentVolumeScopedMonotonicCo
   EXPECT_EQ(*redis.get(key.NextChunkID()), "1");
 }
 
+// ChunkID ownership is shared by every mechanism. These witnesses must not
+// disappear when the COW-private Redis index is retired.
+TEST(RedisSliceChunkMetadataTest, ChunkIdsRemainVolumeScopedAcrossIndependentMetadataViews) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  const redis::RedisKey key(config.db, swordfs::test::UniqueRedisTestNamespace("slice-chunk-ids"));
+  const redis::RedisKey other_key(config.db, swordfs::test::UniqueRedisTestNamespace("slice-other-chunk-ids"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+  redis.set(key.NextChunkID(), "0");
+  redis.set(other_key.NextChunkID(), "0");
+  auto backend = std::make_shared<RedisBackendContext>(config, 1);
+  auto shutdown = folly::makeGuard([&] { backend->Shutdown(); });
+  RedisSliceChunkMetadata first(backend, key, 64);
+  RedisSliceChunkMetadata second(backend, key, 64);
+  RedisSliceChunkMetadata other(backend, other_key, 64);
+
+  swordfs::test::RunInTestFiber([&] {
+    ChunkID first_id, second_id, other_id;
+    ASSERT_TRUE(first.AllocateChunkID(&first_id).ok());
+    ASSERT_TRUE(second.AllocateChunkID(&second_id).ok());
+    ASSERT_TRUE(other.AllocateChunkID(&other_id).ok());
+    EXPECT_EQ(first_id, ChunkID(1));
+    EXPECT_EQ(second_id, ChunkID(2));
+    EXPECT_EQ(other_id, ChunkID(1));
+    EXPECT_EQ(first.AllocateChunkID(nullptr).ToErrno(), EINVAL);
+  });
+  EXPECT_EQ(*redis.get(key.NextChunkID()), "2");
+  EXPECT_EQ(*redis.get(other_key.NextChunkID()), "1");
+}
+
+TEST(RedisSliceChunkMetadataTest, InvalidChunkIdCounterFailsWithoutMutation) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  const redis::RedisKey key(config.db, swordfs::test::UniqueRedisTestNamespace("slice-invalid-chunk-id"));
+  sw::redis::Redis redis(ConnectionOptions(config));
+  auto backend = std::make_shared<RedisBackendContext>(config, 1);
+  auto shutdown = folly::makeGuard([&] { backend->Shutdown(); });
+  RedisSliceChunkMetadata metadata(backend, key, 64);
+  for (const auto &raw : {std::string(), std::string("-1"), std::string("invalid"),
+                          std::to_string(std::numeric_limits<int64_t>::max())}) {
+    if (raw.empty()) {
+      redis.del(key.NextChunkID());
+    } else {
+      redis.set(key.NextChunkID(), raw);
+    }
+    ChunkID id;
+    swordfs::test::RunInTestFiber([&] { EXPECT_FALSE(metadata.AllocateChunkID(&id).ok()); });
+    EXPECT_EQ(id, kInvalidChunkID);
+    const auto persisted = redis.get(key.NextChunkID());
+    if (raw.empty()) {
+      EXPECT_FALSE(persisted.has_value());
+    } else {
+      ASSERT_TRUE(persisted.has_value());
+      EXPECT_EQ(*persisted, raw);
+    }
+  }
+}
+
+TEST(RedisSliceChunkMetadataTest, AmbiguousChunkIdAllocationNeverReplaysAndRetryUsesFreshIdentity) {
+  for (const auto scenario : {RedisFaultScenario::kSliceCounterExecProtocolFailureApplied,
+                              RedisFaultScenario::kSliceCounterExecDisconnectNotApplied}) {
+    ScriptedRedisServer server(scenario);
+    auto backend = std::make_shared<RedisBackendContext>(ScriptedConfig(server), 1);
+    auto shutdown = folly::makeGuard([&] { backend->Shutdown(); });
+    RedisSliceChunkMetadata metadata(backend, redis::RedisKey(0, "slice-ambiguous-chunk-id"), 64);
+    ChunkID id;
+    utils::Status status;
+    swordfs::test::RunInTestFiber([&] { status = metadata.AllocateChunkID(&id); });
+    server.Wait();
+    EXPECT_TRUE(status.IsOutcomeUnknown()) << status.message();
+    EXPECT_EQ(id, kInvalidChunkID);
+    EXPECT_EQ(server.connection_count(), 1);
+    EXPECT_TRUE(server.exec_received());
+    EXPECT_EQ(server.mutation_applied(), scenario == RedisFaultScenario::kSliceCounterExecProtocolFailureApplied);
+    EXPECT_TRUE(server.error().empty()) << server.error();
+  }
+
+  ScriptedRedisServer server(RedisFaultScenario::kSliceCounterExecAppliedThenFreshValue);
+  auto backend = std::make_shared<RedisBackendContext>(ScriptedConfig(server), 1);
+  auto shutdown = folly::makeGuard([&] { backend->Shutdown(); });
+  RedisSliceChunkMetadata metadata(backend, redis::RedisKey(0, "slice-fresh-chunk-id"), 64);
+  ChunkID lost, fresh;
+  utils::Status first_status, second_status;
+  swordfs::test::RunInTestFiber([&] {
+    first_status = metadata.AllocateChunkID(&lost);
+    second_status = metadata.AllocateChunkID(&fresh);
+  });
+  server.Wait();
+  EXPECT_TRUE(first_status.IsOutcomeUnknown()) << first_status.message();
+  ASSERT_TRUE(second_status.ok()) << second_status.message();
+  EXPECT_EQ(lost, kInvalidChunkID);
+  EXPECT_EQ(fresh, ChunkID(2));
+  EXPECT_EQ(server.connection_count(), 2);
+  EXPECT_TRUE(server.error().empty()) << server.error();
+}
+
 TEST(RedisSliceChunkMetadataTest, MissingNegativeAndExhaustedAllocationStateCannotBeReset) {
   RedisMetaConfig config;
   if (!ParseTestConfig(&config)) {

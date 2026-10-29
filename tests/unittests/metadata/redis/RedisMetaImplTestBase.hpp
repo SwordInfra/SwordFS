@@ -17,9 +17,8 @@
 #include <vector>
 
 #include "FiberTest.hpp"
-#include "chunk/cow/COWCleanup.hpp"
-#include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
+#include "chunk/slice/SliceDeferredCleanup.hpp"
 #include "metadata/ChunkMetadata.hpp"
 #include "metadata/redis/RedisKey.hpp"
 #include "metadata/redis/RedisMetaConfig.hpp"
@@ -49,9 +48,13 @@ using utils::SwordFsContext;
 
 inline constexpr uint64_t kTestChunkSize = 4096;
 
-inline metadata::PendingDelete MakePendingDelete(InodeID ino, metadata::ChunkIndex index, uint64_t revision) {
+inline metadata::PendingDelete MakePendingDelete(InodeID ino, metadata::ChunkIndex index, uint64_t chunk_id) {
   metadata::PendingDelete pending;
-  const auto status = chunk::cow::FreezeCOWDetachedDelete(ino, {index, metadata::ChunkID(revision)}, &pending);
+  std::unique_ptr<chunk::internal::ChunkCleanupWorkEncoder> encoder;
+  auto status = chunk::slice::CreateDeferredSliceCleanupEncoder(&encoder);
+  if (status.ok()) {
+    status = encoder->EncodeDetachedDelete(ino, {index, metadata::ChunkID(chunk_id)}, &pending);
+  }
   EXPECT_TRUE(status.ok()) << status.message();
   return pending;
 }
@@ -72,6 +75,10 @@ inline bool LoadConfig(RedisMetaConfig *config) {
 
 class RedisMetaImplTest : public ::testing::Test {
  protected:
+  virtual metadata::ChunkType TestChunkType() const {
+    return metadata::ChunkType::kChunkSlice;
+  }
+
   void SetUp() override {
     if (!LoadConfig(&config_)) {
       GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
@@ -83,15 +90,15 @@ class RedisMetaImplTest : public ::testing::Test {
     SwordFsVolume volume;
     volume.name = volume_name_;
     volume.chunk_size = 4096;
-    // This shared fixture binds COW-private metadata and cleanup below.
-    // Its persisted volume identity must select that same mechanism.
-    volume.chunk_type = metadata::ChunkType::kCow;
+    // Generic Redis contracts run on Slice. Only the explicitly COW-private
+    // fixture below retains the retiring mechanism until Stage B.
+    volume.chunk_type = TestChunkType();
     status = impl_->FormatVolume(volume);
     ASSERT_TRUE(status.ok()) << status.message();
     swordfs::metadata::ChunkMetadataPtr chunk_metadata;
-    status = impl_->OpenChunkMetadata(swordfs::metadata::ChunkType::kCow, &chunk_metadata);
+    status = impl_->OpenChunkMetadata(volume.chunk_type, &chunk_metadata);
     ASSERT_TRUE(status.ok()) << status.message();
-    status = swordfs::chunk::internal::CreateChunkCleanupWorkEncoder(swordfs::metadata::ChunkType::kCow, &bridge_);
+    status = swordfs::chunk::internal::CreateChunkCleanupWorkEncoder(volume.chunk_type, &bridge_);
     ASSERT_TRUE(status.ok()) << status.message();
     status = impl_->BindChunkCleanupWorkEncoder(bridge_.get());
     ASSERT_TRUE(status.ok()) << status.message();
@@ -166,6 +173,13 @@ class RedisMetaImplTest : public ::testing::Test {
   std::unique_ptr<RedisMetaImpl> impl_;
   RedisMetaConfig config_;
   std::string volume_name_;
+};
+
+class RedisMetaImplCOWTest : public RedisMetaImplTest {
+ protected:
+  metadata::ChunkType TestChunkType() const override {
+    return metadata::ChunkType::kCow;
+  }
 };
 
 }  // namespace swordfs::test::redis_meta

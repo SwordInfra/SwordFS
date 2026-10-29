@@ -37,7 +37,7 @@ TEST(RedisMetaTxnTest, TypedFileContractRejectsInvalidTransactionInputs) {
           .ok());
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &SliceEncoderForTest());
     FileMappingSnapshot mappings;
     std::optional<ChunkID> attached;
     ChunkSizePlan plan;
@@ -75,7 +75,7 @@ TEST(RedisMetaTxnTest, RegisterPendingDeletesRejectsInvalidEnvelope) {
   const std::vector<PendingDelete> work{{.id = "", .payload = "opaque"}};
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, 4096, &COWEncoderForTest());
+    RedisMetaTxn txn(kv_txn, key, 4096, &SliceEncoderForTest());
     return txn.RegisterPendingDeletes(work);
   });
   EXPECT_EQ(status.ToErrno(), EINVAL);
@@ -164,7 +164,7 @@ TEST(RedisMetaTxnTest, TypedShrinkKnownPartialExecStillCommitsEofAndDetach) {
   redis.set(key.PendingDeletes(), "wrong-type");
 
   const auto status = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, kChunkSize, &COWEncoderForTest());
+    RedisMetaTxn txn(kv_txn, key, kChunkSize, &SliceEncoderForTest());
     FileMappingSnapshot before;
     auto step = txn.ReadFileMappingSnapshot(kFileIno, &before);
     if (!step.ok()) {
@@ -186,7 +186,7 @@ TEST(RedisMetaTxnTest, TypedShrinkKnownPartialExecStillCommitsEofAndDetach) {
 
   FileMappingSnapshot after;
   const auto readback = store.Transact([&](RedisKvTxn &kv_txn) {
-    RedisMetaTxn txn(kv_txn, key, kChunkSize, &COWEncoderForTest());
+    RedisMetaTxn txn(kv_txn, key, kChunkSize, &SliceEncoderForTest());
     return txn.ReadFileMappingSnapshot(kFileIno, &after);
   });
   ASSERT_TRUE(readback.ok()) << readback.message();

@@ -19,11 +19,9 @@
 #include <vector>
 
 #include "FiberTest.hpp"
-#include "TestCOWChunkMetadata.hpp"
 #include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
-#include "chunk/cow/COWCleanup.hpp"
-#include "chunk/cow/COWObjectKey.hpp"
+#include "chunk/SliceChunkMetadataTestSupport.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Types.hpp"
 #include "storage/IDataEngine.hpp"
@@ -75,10 +73,10 @@ class NoopDataEngine : public swordfs::storage::IDataEngine {
 class MockMetaEngine : public IMetaEngine {
  public:
   Status OpenChunkMetadata(metadata::ChunkType type, metadata::ChunkMetadataPtr *out) override {
-    if (out == nullptr || type != metadata::ChunkType::kCow) {
+    if (out == nullptr || type != metadata::ChunkType::kChunkSlice) {
       return Status::InvalidArgument("invalid typed chunk metadata request");
     }
-    *out = cow_metadata_;
+    *out = slice_metadata_;
     return Status::OK();
   }
 
@@ -442,8 +440,8 @@ class MockMetaEngine : public IMetaEngine {
  private:
   std::unordered_map<InodeID, uint64_t> eof_;
   std::unordered_map<InodeID, std::map<ChunkIndex, metadata::ChunkID>> attachments_;
-  std::shared_ptr<swordfs::test::TestCOWChunkMetadata> cow_metadata_ =
-      std::make_shared<swordfs::test::TestCOWChunkMetadata>();
+  std::shared_ptr<swordfs::test::chunk_test::TestSliceChunkMetadata> slice_metadata_ =
+      std::make_shared<swordfs::test::chunk_test::TestSliceChunkMetadata>();
   InodeID next_ino_ = 1000;
   folly::fibers::Baton *open_entered_{nullptr};
   folly::fibers::Baton *open_release_{nullptr};
@@ -457,8 +455,8 @@ class FileHandleTest : public ::testing::Test {
     auto data = std::make_unique<NoopDataEngine>();
     data_ = data.get();
     SwordFsVolume config;
-    // This mock implements only COW typed chunk metadata, not Slice.
-    config.chunk_type = metadata::ChunkType::kCow;
+    // Generic handle and inode lifecycle contracts must survive COW retirement.
+    config.chunk_type = metadata::ChunkType::kChunkSlice;
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
     swordfs::test::RunInTestFiber([&] {
@@ -1077,10 +1075,10 @@ class FakeDataEngine : public swordfs::storage::IDataEngine {
 class TrackingMetaEngine : public swordfs::metadata::IMetaEngine {
  public:
   Status OpenChunkMetadata(metadata::ChunkType type, metadata::ChunkMetadataPtr *out) override {
-    if (out == nullptr || type != metadata::ChunkType::kCow) {
+    if (out == nullptr || type != metadata::ChunkType::kChunkSlice) {
       return Status::InvalidArgument("invalid tracked chunk metadata request");
     }
-    *out = cow_metadata_;
+    *out = slice_metadata_;
     return Status::OK();
   }
 
@@ -1438,8 +1436,8 @@ class TrackingMetaEngine : public swordfs::metadata::IMetaEngine {
 
  private:
   std::unordered_map<InodeID, std::map<ChunkIndex, metadata::ChunkID>> attachments_;
-  std::shared_ptr<swordfs::test::TestCOWChunkMetadata> cow_metadata_ =
-      std::make_shared<swordfs::test::TestCOWChunkMetadata>();
+  std::shared_ptr<swordfs::test::chunk_test::TestSliceChunkMetadata> slice_metadata_ =
+      std::make_shared<swordfs::test::chunk_test::TestSliceChunkMetadata>();
   folly::fibers::Baton *open_entered_{nullptr};
   folly::fibers::Baton *open_release_{nullptr};
 };
@@ -1476,7 +1474,7 @@ Engines InstallEnginesForInode(InodeID ino, nlink_t nlink, off_t size = 0) {
   meta->SetAttr(ino, attr);
 
   SwordFsVolume config;
-  config.chunk_type = metadata::ChunkType::kCow;
+  config.chunk_type = metadata::ChunkType::kChunkSlice;
   config.chunk_size = 4096;
   swordfs::test::RunInTestThreadFromFiber([&] {
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(meta_up), std::move(data_up), std::move(config));

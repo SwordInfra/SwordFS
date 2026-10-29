@@ -45,6 +45,7 @@
 #include "TestCOWChunkMetadata.hpp"
 #include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
+#include "chunk/SliceChunkMetadataTestSupport.hpp"
 #include "chunk/cow/COWObjectKey.hpp"
 #include "chunk/internal/ChunkCleanupParticipant.hpp"
 #include "chunk/internal/ChunkGcWorker.hpp"
@@ -603,10 +604,10 @@ class BatchProbeDirIterator final : public swordfs::metadata::DirIterator {
 class MockMetaEngine : public swordfs::metadata::IMetaEngine {
  public:
   Status OpenChunkMetadata(swordfs::metadata::ChunkType type, swordfs::metadata::ChunkMetadataPtr *out) override {
-    if (out == nullptr || type != swordfs::metadata::ChunkType::kCow) {
+    if (out == nullptr || type != swordfs::metadata::ChunkType::kChunkSlice) {
       return Status::InvalidArgument("invalid typed chunk metadata request");
     }
-    *out = cow_metadata_;
+    *out = slice_metadata_;
     return Status::OK();
   }
 
@@ -1199,8 +1200,8 @@ class MockMetaEngine : public swordfs::metadata::IMetaEngine {
 
  private:
   std::unordered_map<InodeID, std::map<ChunkIndex, swordfs::metadata::ChunkID>> attachments_;
-  std::shared_ptr<swordfs::test::TestCOWChunkMetadata> cow_metadata_ =
-      std::make_shared<swordfs::test::TestCOWChunkMetadata>();
+  std::shared_ptr<swordfs::test::chunk_test::TestSliceChunkMetadata> slice_metadata_ =
+      std::make_shared<swordfs::test::chunk_test::TestSliceChunkMetadata>();
   Status call_status_{Status::OK()};
   int replace_tmpfile_name_on_unlink_call_ = 0;
   bool unrelated_entry_deleted_ = false;
@@ -1253,9 +1254,8 @@ class VfsImplIntegrationTest : public ::testing::Test {
     auto data = std::make_unique<NoopDataEngine>();
     data_engine_ = data.get();
     swordfs::metadata::SwordFsVolume config;
-    // This VFS fixture uses COW-only typed chunk metadata. New volumes
-    // default to Slice, so the legacy mock must explicitly select COW.
-    config.chunk_type = swordfs::metadata::ChunkType::kCow;
+    // Shared FUSE/VFS lifecycle and error paths must survive COW retirement.
+    config.chunk_type = swordfs::metadata::ChunkType::kChunkSlice;
     const auto status = swordfs::test::LoadTestVolumeRuntime(std::move(mock), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
     swordfs::test::RunInTestFiber([&] { swordfs::vfs::FuseInodeCache::Instance().Initialize(); });
@@ -1712,7 +1712,7 @@ namespace {
 void LoadVfsHookVolume(bool enable_posix_acl) {
   auto mock = std::make_unique<swordfs::test::ConfiguredMetaEngine<MockMetaEngine>>();
   SwordFsVolume config;
-  config.chunk_type = swordfs::metadata::ChunkType::kCow;
+  config.chunk_type = swordfs::metadata::ChunkType::kChunkSlice;
   config.enable_posix_acl = enable_posix_acl;
   const auto status =
       swordfs::test::LoadTestVolumeRuntime(std::move(mock), std::make_unique<NoopDataEngine>(), std::move(config));

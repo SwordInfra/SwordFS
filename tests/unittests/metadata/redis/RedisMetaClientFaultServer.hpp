@@ -34,6 +34,7 @@ enum class RedisFaultScenario {
   kSliceAppendDisconnectNotApplied,
   kSliceCounterExecProtocolFailureApplied,
   kSliceCounterExecDisconnectNotApplied,
+  kSliceCounterExecAppliedThenFreshValue,
   kWriteExecReplyError,
   kWriteExecProtocolFailureApplied,
   kWriteExecDisconnectNotApplied,
@@ -515,6 +516,77 @@ class ScriptedRedisServer {
     ::close(client);
   }
 
+  void ServeSliceCounterExecAppliedThenFreshValue() {
+    // Both allocations use the Slice WATCH/GET/MULTI/SET/EXEC contract. The
+    // first commit is durable but its acknowledgement is lost. A later caller
+    // must see the advanced counter and allocate ID 2, never replay ID 1.
+    uint64_t counter = 0;
+    std::string counter_key;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      const int client = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
+      if (client < 0) {
+        error_ = "accept failed";
+        return;
+      }
+      connection_count_.fetch_add(1, std::memory_order_relaxed);
+      RespReader reader(client);
+      std::vector<std::string> command;
+      bool completed = false;
+      bool queued = false;
+      uint64_t next_value = 0;
+      while (reader.ReadCommand(&command) && !command.empty()) {
+        if (command.front() == "WATCH" || command.front() == "MULTI") {
+          if (!Reply(client, "+OK\r\n")) {
+            break;
+          }
+        } else if (command.front() == "GET") {
+          if (command.size() != 2 || (!counter_key.empty() && command[1] != counter_key)) {
+            error_ = "Slice counter read used a different key";
+            break;
+          }
+          counter_key = command[1];
+          const auto raw = std::to_string(counter);
+          if (!Reply(client, "$" + std::to_string(raw.size()) + "\r\n" + raw + "\r\n")) {
+            break;
+          }
+        } else if (command.front() == "SET") {
+          if (command.size() != 3 || command[1] != counter_key || queued) {
+            error_ = "invalid Slice counter update";
+            break;
+          }
+          const auto [end, parse_error] =
+              std::from_chars(command[2].data(), command[2].data() + command[2].size(), next_value);
+          if (parse_error != std::errc{} || end != command[2].data() + command[2].size() || next_value != counter + 1) {
+            error_ = "Slice counter update did not advance the committed value";
+            break;
+          }
+          queued = true;
+          if (!Reply(client, "+QUEUED\r\n")) {
+            break;
+          }
+        } else if (command.front() == "EXEC") {
+          if (!queued) {
+            error_ = "Slice counter transaction did not queue an update";
+            break;
+          }
+          exec_received_.store(true, std::memory_order_relaxed);
+          counter = next_value;
+          mutation_applied_.store(true, std::memory_order_relaxed);
+          (void)Reply(client, attempt == 0 ? "x\r\n" : "*1\r\n+OK\r\n");
+          completed = true;
+          break;
+        } else {
+          error_ = "unexpected Slice ChunkID allocation command " + command.front();
+          break;
+        }
+      }
+      ::close(client);
+      if (!completed) {
+        return;
+      }
+    }
+  }
+
   void ServeIncrProtocolFailureAppliedThenFreshValue() {
     const int first_client = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
     if (first_client < 0) {
@@ -574,6 +646,9 @@ class ScriptedRedisServer {
         break;
       case RedisFaultScenario::kSliceCounterExecDisconnectNotApplied:
         ServeSliceCounterExec(false, false);
+        break;
+      case RedisFaultScenario::kSliceCounterExecAppliedThenFreshValue:
+        ServeSliceCounterExecAppliedThenFreshValue();
         break;
       case RedisFaultScenario::kWriteExecReplyError:
         ServeWriteExecReplyError();
