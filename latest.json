@@ -1,5 +1,5 @@
 {
-  "conformance_job_result": "success",
+  "conformance_job_result": "failure",
   "metadata": {
     "backend": "redis+minio-s3",
     "chunk_type": "chunk_slice",
@@ -8,23 +8,24 @@
     "fstests_patchset": "conformance/fstests/patches/generic-615-graceful-stat-loop-exit.patch@sha256:863335954392d7a6343c8dd4f1a2decb9bab59c8bb65ac83a2f748d930f8ae19",
     "fstests_repository": "https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git",
     "fstests_selector": "generic/quick",
-    "kernel": "multiple (see shard-environments.json)",
+    "kernel": "7.0.0-1017-azure",
     "libfuse": "fusermount3 version: 3.18.2",
     "liburing_commit": "e3d35ea59d3ba09075ed4d7751e4bb9049cce64a",
-    "os": "multiple (see shard-environments.json)",
+    "os": "Linux-7.0.0-1017-azure-x86_64-with-glibc2.43",
     "runner": "GitHub Actions (10 fstests shards)",
-    "swordfs_commit": "e7b28617edd4a562b72102e65d68aa62ee9f197a"
+    "swordfs_commit": "87b878100fe3130b7af4019520f04e5b35e58442"
   },
-  "status": "PASS",
+  "status": "BLOCKED",
   "summary": {
-    "blocking_count": 0,
+    "blocking_count": 1,
     "classifications": {
       "DEFERRED_CI": 1,
       "ENVIRONMENT": 8,
       "KNOWN_UNSUPPORTED": 87,
-      "PASS": 145,
+      "PASS": 144,
       "UPSTREAM_NOT_APPLICABLE": 403,
-      "UPSTREAM_TEST_DEFECT": 1
+      "UPSTREAM_TEST_DEFECT": 1,
+      "WRITEBACK_FAILURE": 1
     },
     "classified_count": 644,
     "classified_percent": 99.84,
@@ -32,7 +33,7 @@
     "executed_classified_percent": 100.0,
     "executed_count": 644,
     "known_gap_count": 499,
-    "overall_support_percent": 22.48,
+    "overall_support_percent": 22.33,
     "raw_results": {
       "DEFERRED": 1,
       "FAIL": 17,
@@ -41,8 +42,8 @@
     },
     "selected_count": 645,
     "supported_count": 145,
-    "supported_gate_percent": 100.0,
-    "supported_pass_count": 145
+    "supported_gate_percent": 99.31,
+    "supported_pass_count": 144
   },
   "tests": [
     {
@@ -734,9 +735,9 @@
       "test": "generic/112"
     },
     {
-      "classification": "PASS",
+      "classification": "WRITEBACK_FAILURE",
       "issue": "",
-      "message": "",
+      "message": "test: E1029 02:18:32.381735 22141 FileReadWriter.cpp:106] FileReadWriter::Flush chunk FAILED: ino=3852 chunk=0 \u2014 Redis transaction retry limit exceeded",
       "reason": "",
       "result": "PASS",
       "test": "generic/113"
@@ -4568,7 +4569,7 @@
     {
       "classification": "ENVIRONMENT",
       "issue": "-",
-      "message": "scsi_debug module not found",
+      "message": "require <FSTESTS_WORK_DIR>/test to be valid block disk",
       "reason": "The hosted CI kernel does not provide the scsi_debug module required by this testcase.",
       "result": "NOTRUN",
       "test": "generic/704"
@@ -4976,7 +4977,7 @@
     {
       "classification": "ENVIRONMENT",
       "issue": "-",
-      "message": "scsi_debug module not found",
+      "message": "require <FSTESTS_WORK_DIR>/scratch to be valid block disk",
       "reason": "The hosted CI kernel does not provide the scsi_debug module required by this testcase.",
       "result": "NOTRUN",
       "test": "generic/767"
