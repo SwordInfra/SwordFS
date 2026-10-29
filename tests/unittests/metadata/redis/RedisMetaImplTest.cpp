@@ -506,6 +506,29 @@ FIBER_TEST_F(RedisMetaImplTest, ConcurrentOpenDoesNotFailOnAtimeContention) {
   }
 }
 
+// #525: POSIX open(2) is not an access-time event. Updating the Redis inode
+// during every open is an independent WATCH/EXEC writer racing with Slice
+// publication, even when all Slice writers share their per-inode gate.
+FIBER_TEST_F(RedisMetaImplTest, OpenDoesNotUpdateAtimeOrInvalidateInodeSnapshot) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "open-without-atime-write", 0644, &file).ok());
+
+  SwordFsAttr requested = file.attr;
+  requested.atime = 11;
+  requested.atime_nsec = 123;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kAtime, nullptr).ok());
+
+  uint64_t size = std::numeric_limits<uint64_t>::max();
+  InodeFlag inode_flags = InodeFlag::kNone;
+  ASSERT_TRUE(impl_->Open(file.ino, &size, &inode_flags).ok());
+  EXPECT_EQ(size, 0U);
+
+  SwordFsInode actual;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_EQ(actual.attr.atime, requested.atime);
+  EXPECT_EQ(actual.attr.atime_nsec, requested.atime_nsec);
+}
+
 TEST_F(RedisMetaImplTest, NoAtimeRuntimeBehaviorSuppressesImplicitOpenUpdates) {
   swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kDisabled,
                                                                 /*ioctl_enabled=*/false);
