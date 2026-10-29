@@ -12,6 +12,7 @@
 #include <iterator>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 #include "metadata/redis/RedisKvTxn.hpp"
@@ -368,6 +369,12 @@ utils::Status RedisMetaClient::RevokeOwnerLease(std::string_view key) {
 utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisKvTxn &)> &callback) {
   utils::ExpectInThreadDomain();
 
+  // Distinguish repeated optimistic contention from transport failures when
+  // the bounded retry budget is exhausted. All three cases are known to be
+  // pre-commit; an uncertain EXEC reply remains terminal OutcomeUnknown.
+  int watch_conflicts = 0;
+  int pre_exec_failures = 0;
+  int connection_failures = 0;
   for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
     bool retry = false;
     try {
@@ -383,6 +390,7 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisK
         return status;
       } catch (const RedisKvTxn::WatchConflict &) {
         retry = true;
+        ++watch_conflicts;
       } catch (const sw::redis::ReplyError &error) {
         return RedisError("transaction", error);
       } catch (const sw::redis::Error &error) {
@@ -393,6 +401,7 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisK
           return RedisError("transaction", error);
         }
         retry = true;
+        ++pre_exec_failures;
       }
     } catch (const sw::redis::ReplyError &error) {
       // Construction may acquire/connect a pooled connection but cannot have
@@ -404,6 +413,7 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisK
       // or protocol failures here are safe to retry within the same budget.
       (void)error;
       retry = true;
+      ++connection_failures;
     }
 
     if (retry && attempt + 1 < retry_attempts_) {
@@ -411,7 +421,10 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisK
     }
   }
 
-  return utils::Status::Unavailable("Redis transaction retry limit exceeded");
+  return utils::Status::Unavailable(
+      "Redis transaction retry limit exceeded (watch_conflicts=" + std::to_string(watch_conflicts) +
+      ", pre_exec_failures=" + std::to_string(pre_exec_failures) +
+      ", connection_failures=" + std::to_string(connection_failures) + ")");
 }
 
 }  // namespace swordfs::metadata
