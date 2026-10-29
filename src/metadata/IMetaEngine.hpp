@@ -209,7 +209,7 @@ class IMetaEngine {
   virtual Status Readlink(InodeID ino, std::string *target) = 0;
 
   /// Open a regular file after kernel DAC authorization. Validates the inode
-  /// type and performs metadata-side open effects such as the atime update.
+  /// type without mutating timestamps merely for opening the file.
   /// When |size| is non-null, returns the authoritative file size from the
   /// inode already read for validation so the VFS need not issue a duplicate
   /// metadata lookup merely to establish its local logical-EOF boundary.

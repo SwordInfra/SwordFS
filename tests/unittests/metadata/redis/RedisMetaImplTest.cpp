@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <future>
 #include <limits>
 #include <thread>
 
@@ -483,9 +484,14 @@ FIBER_TEST_F(RedisMetaImplTest, GetInodesReturnsAlignedPresentAndMissingResults)
   EXPECT_FALSE(results[1].has_value());
 }
 
-FIBER_TEST_F(RedisMetaImplTest, ConcurrentOpenDoesNotFailOnAtimeContention) {
+FIBER_TEST_F(RedisMetaImplTest, ConcurrentOpenPreservesAtime) {
   SwordFsInode file;
   ASSERT_TRUE(impl_->Create(kRootInodeId, "file", 0644, &file).ok());
+
+  SwordFsAttr requested = file.attr;
+  requested.atime = 11;
+  requested.atime_nsec = 123;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kAtime, nullptr).ok());
 
   constexpr size_t kThreadCount = 8;
   const InodeID file_ino = file.ino;
@@ -504,6 +510,91 @@ FIBER_TEST_F(RedisMetaImplTest, ConcurrentOpenDoesNotFailOnAtimeContention) {
   for (const auto &status : statuses) {
     EXPECT_TRUE(status.ok()) << status.message();
   }
+  SwordFsInode actual;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_EQ(actual.attr.atime, requested.atime);
+  EXPECT_EQ(actual.attr.atime_nsec, requested.atime_nsec);
+}
+
+// #525: POSIX open(2) is not an access-time event. Updating the Redis inode
+// during every open is an independent WATCH/EXEC writer racing with Slice
+// publication, even when all Slice writers share their per-inode gate.
+FIBER_TEST_F(RedisMetaImplTest, OpenDoesNotUpdateAtimeOrInvalidateInodeSnapshot) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "open-without-atime-write", 0644, &file).ok());
+
+  SwordFsAttr requested = file.attr;
+  requested.atime = 11;
+  requested.atime_nsec = 123;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kAtime, nullptr).ok());
+
+  uint64_t size = std::numeric_limits<uint64_t>::max();
+  InodeFlag inode_flags = InodeFlag::kNone;
+  ASSERT_TRUE(impl_->Open(file.ino, &size, &inode_flags).ok());
+  EXPECT_EQ(size, 0U);
+
+  SwordFsInode actual;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_EQ(actual.attr.atime, requested.atime);
+  EXPECT_EQ(actual.attr.atime_nsec, requested.atime_nsec);
+}
+
+// A Slice publication WATCHes the inode before a conditional metadata update.
+// An unrelated Open must not invalidate that watch between its read and EXEC.
+FIBER_TEST_F(RedisMetaImplTest, OpenDoesNotAbortConcurrentWatchedInodeTransaction) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "open-watch", 0644, &file).ok());
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  const std::string inode_key = key.Inode(file.ino);
+
+  std::promise<void> watched;
+  auto watched_ready = watched.get_future();
+  std::promise<void> allow_commit;
+  auto commit_ready = allow_commit.get_future();
+  bool committed = false;
+  std::string watcher_error;
+  std::thread observer([&] {
+    bool announced = false;
+    try {
+      auto config = config_;
+      config.retry_attempts = 1;  // The first watched transaction must succeed without conflict.
+      swordfs::metadata::RedisMetaClient client(config);
+      const auto status = client.Transact([&](swordfs::metadata::RedisKvTxn &txn) {
+        std::string encoded;
+        auto status = txn.Get(inode_key, &encoded);
+        watched.set_value();
+        announced = true;
+        if (!status.ok()) {
+          return status;
+        }
+        commit_ready.wait();
+        return txn.Set(inode_key, encoded);
+      });
+      if (!announced) {
+        // Connection acquisition can fail before the callback runs. Unblock
+        // the test fiber so it can report the real Redis failure, not hang.
+        watched.set_value();
+      }
+      committed = status.ok();
+      if (!status.ok()) {
+        watcher_error = status.message();
+      }
+    } catch (const std::exception &error) {
+      watcher_error = error.what();
+      if (!announced) {
+        watched.set_value();
+      }
+    }
+  });
+
+  watched_ready.wait();
+  const auto status = impl_->Open(file.ino);
+  allow_commit.set_value();
+  observer.join();
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  ASSERT_TRUE(watcher_error.empty()) << watcher_error;
+  EXPECT_TRUE(committed) << "The unrelated inode transaction must still be able to commit";
 }
 
 TEST_F(RedisMetaImplTest, NoAtimeRuntimeBehaviorSuppressesImplicitOpenUpdates) {

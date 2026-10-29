@@ -85,7 +85,7 @@ determines who is responsible for releasing the handle:
 
 | Hook | Reply delivered | Reply delivery failed | Lookup / metadata |
 | --- | --- | --- | --- |
-| `OPEN` | The kernel owns `fh` until `RELEASE` | The request fiber calls `VfsImpl::Release` to unregister the unpublished `FileHandle` and drop its inode open reference | No additional `nlookup`; existing open-time effects (including atime or `O_TRUNC`) remain committed |
+| `OPEN` | The kernel owns `fh` until `RELEASE` | The request fiber calls `VfsImpl::Release` to unregister the unpublished `FileHandle` and drop its inode open reference | No additional `nlookup`; an explicit `O_TRUNC` remains committed, but ordinary `open` does not mutate atime |
 | `OPENDIR` | The kernel owns `fh` until `RELEASEDIR` | The request fiber calls `VfsImpl::ReleaseDir` to unregister the unpublished `DirHandle`, allowing its iterator to be destroyed | No additional `nlookup` or namespace mutation |
 
 The failed-reply cleanup happens synchronously in the original request fiber.
