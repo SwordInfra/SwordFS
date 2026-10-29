@@ -10,12 +10,14 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <shared_mutex>
 #include <vector>
 
 #include "chunk/ChunkFactory.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/Utils.hpp"
+#include "runtime/MountRuntimeBehavior.hpp"
 #include "utils/Logging.hpp"
 #include "volume/VolumeImpl.hpp"
 
@@ -283,7 +285,7 @@ utils::Status FileReadWriter::Write(const folly::IOBuf &buf, off_t off, int open
 // Read
 // ────────────────────────────────────────────────────────────────
 
-utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
+utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out, bool record_access) {
   std::shared_lock<utils::FiberRWMutex> operation_lock(operation_mutex_);
   auto safety = CheckSizeCommitSafety();
   if (!safety.ok()) {
@@ -358,6 +360,22 @@ utils::Status FileReadWriter::Read(size_t size, off_t off, folly::IOBuf *out) {
   }
 
   out->append(read_size - remaining);
+  // Data is already complete. Advisory metadata must not hold the shared
+  // operation lock while it waits for a POSIX Redis worker: a concurrent
+  // truncate or publication must not wait for an atime side effect.
+  operation_lock.unlock();
+  if (record_access && runtime::MountRuntimeBehavior::Instance().ImplicitAtimeUpdatesEnabled()) {
+    const int64_t now =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    int64_t previous = last_access_attempt_seconds_.load(std::memory_order_relaxed);
+    if ((previous == 0 || now - previous >= 60) &&
+        last_access_attempt_seconds_.compare_exchange_strong(previous, now, std::memory_order_relaxed)) {
+      const auto access_status = meta_->RecordReadAccess(ino_);
+      if (!access_status.ok()) {
+        SWORDFS_LOG_WARN << "advisory read atime update failed: ino=" << ino_ << ": " << access_status.message();
+      }
+    }
+  }
   return Status::OK();
 }
 

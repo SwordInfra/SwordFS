@@ -532,6 +532,14 @@ Status RedisMetaImpl::Open(InodeID ino, uint64_t *size, InodeFlag *inode_flags) 
   return Status::OK();
 }
 
+Status RedisMetaImpl::RecordReadAccess(InodeID ino) {
+  utils::ExpectInFiberDomain();
+  if (!runtime::MountRuntimeBehavior::Instance().ImplicitAtimeUpdatesEnabled()) {
+    return Status::OK();
+  }
+  return ops_.RecordReadAccess(ino);
+}
+
 Status RedisMetaImpl::PrepareReclaim(InodeID ino) {
   utils::ExpectInFiberDomain();
   return ops_.PrepareReclaim(ino);

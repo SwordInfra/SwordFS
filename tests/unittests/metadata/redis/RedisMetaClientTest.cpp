@@ -43,6 +43,43 @@ TEST(RedisMetaClientTest, BinaryValueRoundTrip) {
   cleanup.del(key);
 }
 
+// Advisory atime is allowed to fail without affecting file-data reads, but
+// Redis error replies and lost acknowledgements must remain distinguishable.
+TEST(RedisMetaClientTest, AdvisoryAtimeReportsKnownRedisReplyError) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  RedisMetaClient client(config);
+  sw::redis::Redis redis(ConnectionOptions(config));
+  const auto inode_key = UniqueRedisName("atime-inode-error");
+  const auto atime_key = UniqueRedisName("atime-sidecar-error");
+  const auto epoch_key = UniqueRedisName("atime-epoch-error");
+  redis.set(inode_key, "valid-inode-snapshot");
+  redis.hset(epoch_key, "not-an-integer", "value");
+
+  const auto status =
+      client.AdvanceAccessTimeIfInodeUnchanged(inode_key, atime_key, epoch_key, "valid-inode-snapshot", "0", 123);
+  EXPECT_EQ(status.ToErrno(), EIO);
+  EXPECT_FALSE(status.IsOutcomeUnknown());
+  EXPECT_FALSE(redis.get(atime_key).has_value());
+  redis.del(inode_key);
+  redis.del(atime_key);
+  redis.del(epoch_key);
+}
+
+TEST(RedisMetaClientTest, AdvisoryAtimeLostReplyMustNotClaimKnownOutcome) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.port = 1;  // No Redis listener is expected at the reserved test port.
+  config.connect_timeout = std::chrono::milliseconds(100);
+  config.socket_timeout = std::chrono::milliseconds(100);
+  RedisMetaClient client(config);
+
+  const auto status = client.AdvanceAccessTimeIfInodeUnchanged("inode", "atime", "epoch", "snapshot", "0", 123);
+  EXPECT_TRUE(status.IsOutcomeUnknown()) << status.message();
+}
+
 // #515 RED: coherent read-only metadata snapshots must not perform optimistic
 // WATCH/MULTI/EXEC transactions merely to read inode + chunk attachments.
 TEST(RedisMetaClientTest, ReadChunkAttachmentsIfUnchangedIsAtomicAndReadOnly) {

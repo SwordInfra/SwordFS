@@ -24,16 +24,22 @@ through a separately persisted Redis access-time overlay.
   WATCH monitors the entire key. This key is never watched by Slice publication.
 * `RecordReadAccess(ino)` is an advisory operation from the data read path.
   Its best-effort Redis Lua update checks that `inode:<ino>` still equals the
-  authoritative record observed by that access, then updates only `atime:<ino>`.
+  authoritative record observed by that access **and** that the dedicated
+  `atime_epoch:<ino>` matches the generation observed before the operation,
+  then updates only `atime:<ino>`.
   Concurrent inode metadata changes can safely discard an access update. The
   overlay advances monotonically for implicit reads, but explicit timestamp
   setting may move the value backwards.
-* Explicit `SetAttr(kAtime / kAtimeNow)` deletes the overlay in the **same**
-  authoritative inode mutation transaction. The main inode contains the
-  requested value. In-flight read updates based on older inode snapshots are
-  rejected by the Lua compare; later reads may legitimately advance atime.
-* At reclaim's point of no return, delete `atime:<ino>` atomically alongside
-  the main inode. Inode IDs are nonreused. The Lua update cannot create a
+* Explicit `SetAttr(kAtime / kAtimeNow)` deletes the overlay and increments
+  `atime_epoch:<ino>` in the **same** authoritative inode mutation transaction.
+  Both operations are queued **before the new inode SET** so an ambiguous
+  partial EXEC cannot expose a new explicit timestamp with the old overlay.
+  In-flight reads are rejected by the Lua comparison even if the explicit
+  operation leaves the inode image byte-identical (ABA); later reads may
+  legitimately advance atime. The epoch does not participate in Slice WATCH.
+* At reclaim's point of no return, delete `atime:<ino>` and
+  `atime_epoch:<ino>` atomically alongside the main inode. Inode IDs are
+  nonreused. The Lua update cannot create a
   sidecar after an inode was removed because it checks inode existence.
 * Metadata GetInode/GetInodes/Lookup return the overlay's atime when present;
   a missing overlay falls back to the atime in the main inode. The overlay is

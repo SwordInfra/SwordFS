@@ -31,6 +31,11 @@ class RedisKey {
   // Dedicated volume-scoped identity stream; initialized once at format time.
   std::string NextSliceID() const;
   std::string Inode(uint64_t ino) const;
+  // Advisory access-time sidecar. Never WATCH this key from Slice publishing.
+  std::string AccessTime(uint64_t ino) const;
+  // Explicit-atime epoch fences an in-flight read update even if an explicit
+  // operation leaves the authoritative serialized inode byte-identical.
+  std::string AccessTimeEpoch(uint64_t ino) const;
   std::string Directory(uint64_t parent_ino) const;
   // #317 FileMetadata authority: index -> typed ChunkID, no COW state.
   std::string ChunkRefs(uint64_t ino) const;

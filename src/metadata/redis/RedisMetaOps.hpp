@@ -71,6 +71,7 @@ class RedisMetaOps {
   // Standalone metadata operations. Each method owns any Redis transaction
   // needed to preserve its own consistency semantics.
   utils::Status GetInode(InodeID ino, SwordFsInode *out);
+  utils::Status RecordReadAccess(InodeID ino);
   utils::Status GetInodes(const std::vector<InodeID> &inode_ids, std::vector<std::optional<SwordFsInode>> *out);
   utils::Status LookupEntry(InodeID parent_ino, std::string_view name, SwordFsInode *out);
   utils::Status SetAttr(InodeID ino, const SwordFsAttr &requested, SetAttrField fields, SwordFsInode *out = nullptr);
@@ -118,6 +119,10 @@ class RedisMetaOps {
   utils::Status CollectPendingReclaims(std::vector<ReclaimWork> &out);
 
   utils::Status ParsePendingDelete(std::string_view object_key, std::string_view encoded, PendingDelete &out) const;
+
+  // Overlay only the advisory timestamp. Never feed sidecars into watched
+  // authoritative inode/mapping transactions.
+  static void ApplyAccessTime(const std::optional<std::string> &encoded, SwordFsInode *inode);
 
  private:
   std::shared_ptr<RedisBackendContext> backend_;

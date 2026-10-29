@@ -120,6 +120,10 @@ class RedisMetaTxn {
                            ChunkSizeCommitResult *out);
 
  private:
+  enum class AccessTimeChange { kExplicitSetAttr, kRetireInode };
+  // Queue the advisory sidecar transition ahead of the authoritative inode
+  // mutation; the caller's watched transaction owns the operation order.
+  utils::Status QueueAccessTimeChange(InodeID ino, AccessTimeChange change);
   utils::Status CommitSizeChange(InodeID ino, const ChunkSizePlan &plan, const SwordFsAttr &requested,
                                  SetAttrField fields, bool is_shrink, ChunkSizeCommitResult *out);
   utils::Status SetInode(const SwordFsInode &inode);
