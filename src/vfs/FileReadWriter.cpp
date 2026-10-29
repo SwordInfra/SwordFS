@@ -609,7 +609,7 @@ utils::Status FileReadWriter::CommitSizeChangeLocked(const metadata::SwordFsAttr
     return status;
   }
   // Validate the complete SetAttr policy, mode and ACL effects against the
-  // observed inode before any private COW head is modified. The subsequent
+  // observed inode before any mechanism-private boundary is modified. The subsequent
   // FileMetadata transaction repeats validation under its watched snapshot.
   metadata::SwordFsInode validated;
   status = metadata::PrepareSetAttrMutation(before.inode, requested, fields, &validated);

@@ -432,8 +432,7 @@ jobs:
 
       # Reuse the existing Debug runner and compiled E2E target, which already
       # passed the Redis/MinIO setup for the focused coverage scenarios.
-      # The Debug fixture also runs the primary Slice mechanism. Release E2E
-      # independently runs a bounded mounted COW-format smoke afterwards.
+      # All mounted tests use the sole implemented Slice mechanism.
       - name: Test primary Slice through mounted FUSE (Debug)
         if: needs.change-scope.outputs.run_full_ci == 'true' && matrix.build_type == 'Debug'
         run: SWORDFS_E2E_CHUNK_TYPE=chunk_slice bash scripts/testing/run-e2e.sh --gtest_color=no
@@ -527,12 +526,6 @@ jobs:
 
       - name: Test primary Slice (E2E)
         run: sg fuse -c "SWORDFS_E2E_CHUNK_TYPE=chunk_slice bash scripts/testing/run-e2e.sh --gtest_color=no"
-
-      - name: Test bounded COW mounted smoke (E2E)
-        run: |
-          sg fuse -c "SWORDFS_E2E_CHUNK_TYPE=cow bash scripts/testing/run-e2e.sh \
-            --gtest_filter=FileOpsTest.CreateRegularFile:PersistenceTest.FsyncPersistsDataAndSizeAcrossRemount:LargeFileTest.WriteCrossingChunkBoundary \
-            --gtest_color=no"
 
       - name: Capture E2E runner crash and OOM evidence
         if: failure()

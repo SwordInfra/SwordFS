@@ -42,13 +42,10 @@
 
 #include "FiberTest.hpp"
 #include "RedisTestVolumeUtils.hpp"
-#include "TestCOWChunkMetadata.hpp"
 #include "TestWatchdog.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
+#include "chunk/ChunkTestSupport.hpp"
 #include "chunk/SliceChunkMetadataTestSupport.hpp"
-#include "chunk/cow/COWObjectKey.hpp"
-#include "chunk/internal/ChunkCleanupParticipant.hpp"
-#include "chunk/internal/ChunkGcWorker.hpp"
 #include "fuse/FuseAdvisoryLocks.hpp"
 #include "fuse/Vfs.hpp"
 #include "metadata/IMetaEngine.hpp"
@@ -137,42 +134,10 @@ FuseReplyCapture *CaptureFor(fuse_req_t req) {
   return reinterpret_cast<FuseReplyCapture *>(req);
 }
 
-swordfs::utils::Status ReconcileBackgroundCleanup(swordfs::storage::IDataEngine *data) {
-  auto status = swordfs::vfs::OrphanReclaimer::Instance().Reconcile();
-  if (!status.ok()) {
-    return status;
-  }
-  auto &volume = swordfs::volume::VolumeImpl::Instance();
-  swordfs::metadata::ChunkMetadataPtr chunk_metadata;
-  swordfs::utils::Status open_status;
-  // Use the mounted mechanism capability, not a fresh independent COW
-  // metadata instance. Its head identities must match live file mappings.
-  swordfs::test::RunInTestThreadFromFiber(
-      [&] { open_status = volume.meta_engine()->OpenChunkMetadata(volume.config().chunk_type, &chunk_metadata); });
-  if (!open_status.ok()) {
-    return open_status;
-  }
-  std::unique_ptr<swordfs::chunk::internal::ChunkCleanupParticipant> cleanup;
-  // Match production's live FileMetadata reachability contract: reclaim has
-  // already made an orphan inode non-revivable, so ENOENT is an absent map.
-  // All other probe failures must fail closed rather than delete live data.
-  const auto reachability = [meta = volume.meta_engine()](InodeID ino, ChunkIndex index,
-                                                          std::optional<swordfs::metadata::ChunkID> *attached) {
-    auto probe = meta->ProbeAttachment(ino, index, attached);
-    if (probe.IsNotFound()) {
-      attached->reset();
-      return swordfs::utils::Status::OK();
-    }
-    return probe;
-  };
-  status = swordfs::chunk::internal::CreateChunkCleanupParticipant(volume.config().chunk_type, volume.chunk_size(),
-                                                                   chunk_metadata, volume.meta_engine(), data,
-                                                                   reachability, &cleanup);
-  if (!status.ok()) {
-    return status;
-  }
-  swordfs::chunk::internal::ChunkGcWorker worker(volume.meta_engine(), std::move(cleanup));
-  return worker.Reconcile();
+// Reclaim persists deferred Slice cleanup work. Physical deletion is not
+// implemented until the independent Slice GC safety work in #273.
+swordfs::utils::Status ReconcileOrphans() {
+  return swordfs::vfs::OrphanReclaimer::Instance().Reconcile();
 }
 
 }  // namespace
@@ -4662,52 +4627,26 @@ FIBER_TEST_F(VfsImplIntegrationTest, LinkSuccessIsNotReversedByAttributeRefreshF
 // ────────────────────────────────────────────────────────────────
 // #143: last-link cleanup at the VFS entry point
 // ────────────────────────────────────────────────────────────────
-// Unlink and rename-overwrite both end with the same decision: is this the
-// inode's last name (nlink == 0), is a descriptor still holding it open, and
-// did the cleanup that follows the committed metadata actually finish? The
-// decision only exists against authoritative nlink bookkeeping, so this
-// fixture uses an isolated Redis metadata volume and a controllable data
-// engine that can fail deletes. Pure VFS failure-injection tests above remain
-// offline and use their existing IMetaEngine doubles.
+// Verify durable orphan handoff and open-handle protection under real Redis
+// metadata. Physical Slice deletion is deliberately disabled until #273.
 
 namespace {
 
-// Data engine that records every Delete and can fail selected keys.
-class RecordingDataEngine : public swordfs::storage::IDataEngine {
+// Reuse the ordinary test object store while making any accidental physical
+// deletion immediately observable during Slice orphan/size transitions.
+class NoPhysicalSliceGcDataEngine final : public NoopDataEngine {
  public:
-  swordfs::utils::Status Initialize() override {
-    return swordfs::utils::Status::OK();
-  }
-  swordfs::utils::Status Put(std::string_view key, std::unique_ptr<folly::IOBuf> data) override {
-    objects_[std::string(key)] = std::string(reinterpret_cast<const char *>(data->data()), data->length());
-    return swordfs::utils::Status::OK();
-  }
-  swordfs::utils::Status Get(std::string_view, size_t, size_t, folly::IOBuf *) override {
-    return swordfs::utils::Status::OK();
-  }
-  swordfs::utils::Status Delete(std::string_view key) override {
-    const std::string owned(key);
-    delete_calls.push_back(owned);
-    auto it = fail_keys.find(owned);
-    if (it != fail_keys.end()) {
-      return it->second;
-    }
-    objects_.erase(owned);
-    return swordfs::utils::Status::OK();
+  swordfs::utils::Status Delete(std::string_view) override {
+    ++delete_calls_;
+    return swordfs::utils::Status::IOError("Slice physical deletion is not supported");
   }
 
-  void Seed(std::string key) {
-    objects_[std::move(key)] = "seeded";
+  int delete_calls() const {
+    return delete_calls_;
   }
-  bool Contains(std::string_view key) const {
-    return objects_.find(std::string(key)) != objects_.end();
-  }
-
-  std::vector<std::string> delete_calls;
-  std::unordered_map<std::string, swordfs::utils::Status> fail_keys;
 
  private:
-  std::unordered_map<std::string, std::string> objects_;
+  int delete_calls_ = 0;
 };
 
 class VfsLastLinkCleanupTest : public ::testing::Test {
@@ -4721,21 +4660,15 @@ class VfsLastLinkCleanupTest : public ::testing::Test {
       GTEST_SKIP() << "Redis metadata service is not configured";
     }
     swordfs::metadata::SwordFsVolume config;
-    // The last-link lifecycle regression explicitly inspects COW GC metadata.
-    config.chunk_type = swordfs::metadata::ChunkType::kCow;
+    config.chunk_type = swordfs::metadata::ChunkType::kChunkSlice;
     std::unique_ptr<swordfs::metadata::RedisMetaImpl> meta;
     auto status = swordfs::test::MakeFormattedRedisMetaEngine("fuse-last-link", &config, &meta);
     ASSERT_TRUE(status.ok()) << status.message();
-    auto data = std::make_unique<RecordingDataEngine>();
+    auto data = std::make_unique<NoPhysicalSliceGcDataEngine>();
     meta_ = meta.get();
     data_ = data.get();
     status = swordfs::test::LoadTestVolumeRuntime(std::move(meta), std::move(data), std::move(config));
     ASSERT_TRUE(status.ok()) << status.message();
-    swordfs::metadata::ChunkMetadataPtr capability;
-    status = meta_->OpenChunkMetadata(swordfs::metadata::ChunkType::kCow, &capability);
-    ASSERT_TRUE(status.ok()) << status.message();
-    cow_ = std::dynamic_pointer_cast<swordfs::metadata::cow::COWChunkMetadata>(capability);
-    ASSERT_NE(cow_, nullptr);
     swordfs::test::RunInTestFiber([&] {
       swordfs::vfs::InodeHandleManager::Instance().Initialize();
       swordfs::vfs::FuseInodeCache::Instance().Initialize();
@@ -4757,45 +4690,12 @@ class VfsLastLinkCleanupTest : public ::testing::Test {
       swordfs::vfs::InodeHandleManager::Instance().Initialize();
       swordfs::vfs::FuseInodeCache::Instance().Initialize();
     });
-    cow_.reset();
     swordfs::volume::VolumeImpl::Initialize();
   }
 
   swordfs::utils::Status ReadInodeStatus(InodeID ino) {
     swordfs::metadata::SwordFsInode inode;
     return meta_->GetInode(ino, &inode);
-  }
-
-  // Create a regular file with one published chunk and seed its object.
-  InodeID CreateChunkedFile(std::string_view name) {
-    swordfs::metadata::SwordFsInode file;
-    const auto created = meta_->Create(swordfs::metadata::kRootInodeId, name, 0644, &file);
-    EXPECT_TRUE(created.ok()) << created.message();
-    swordfs::metadata::ChunkID chunk_id;
-    swordfs::metadata::cow::COWChunkRevision revision;
-    if (cow_ != nullptr) {
-      EXPECT_TRUE(cow_->AllocateChunkID(&chunk_id).ok());
-      EXPECT_TRUE(cow_->AllocateRevision(chunk_id, &revision).ok());
-      EXPECT_TRUE(cow_->CompareExchangeHead(chunk_id, std::nullopt, {.revision = revision, .size = 64}).ok());
-      EXPECT_TRUE(meta_->AttachPrepared(file.ino, 0, chunk_id, 64, {.eof = 0}).ok());
-    }
-    const swordfs::chunk::cow::COWObjectKey key(chunk_id, revision);
-    object_keys_[file.ino] = std::string(static_cast<std::string_view>(key));
-    data_->Seed(object_keys_[file.ino]);
-    return file.ino;
-  }
-
-  const std::string &ObjectKey(InodeID ino) const {
-    return object_keys_.at(ino);
-  }
-
-  // Open a descriptor and remember it, so TearDown can release a leaked one.
-  bool OpenDescriptor(InodeID ino, std::shared_ptr<swordfs::vfs::FileHandle> *out) {
-    const auto status = swordfs::vfs::FileHandle::Open(ino, O_RDONLY, out);
-    if (status.ok()) {
-      fhs_.push_back((*out)->fh());
-    }
-    return status.ok();
   }
 
   std::vector<InodeID> OrphanCandidates() {
@@ -4844,9 +4744,7 @@ class VfsLastLinkCleanupTest : public ::testing::Test {
   }
 
   swordfs::metadata::IMetaEngine *meta_ = nullptr;
-  std::shared_ptr<swordfs::metadata::cow::COWChunkMetadata> cow_;
-  RecordingDataEngine *data_ = nullptr;
-  std::unordered_map<InodeID, std::string> object_keys_;
+  NoPhysicalSliceGcDataEngine *data_ = nullptr;
   std::vector<uint64_t> fhs_;
 };
 
@@ -4886,7 +4784,7 @@ TEST_F(VfsLastLinkCleanupTest, TmpfileIsAnonymousUsableAndReclaimedAfterFinalClo
     EXPECT_EQ(read_data->computeChainDataLength(), kPayload.size());
 
     ASSERT_TRUE(VfsImpl::Release(capture.entry->ino, *capture.fh).ok());
-    ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
+    ASSERT_TRUE(ReconcileOrphans().ok());
     EXPECT_TRUE(ReadInodeStatus(capture.entry->ino).IsNotFound());
     EXPECT_TRUE(OrphanCandidates().empty());
   });
@@ -4915,13 +4813,111 @@ TEST_F(VfsLastLinkCleanupTest, TmpfileLinkRevivesOrphanAndSurvivesOriginalClose)
     EXPECT_TRUE(OrphanCandidates().empty());
 
     ASSERT_TRUE(VfsImpl::Release(capture.entry->ino, *capture.fh).ok());
-    ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
+    ASSERT_TRUE(ReconcileOrphans().ok());
 
     SwordFsInode inode;
     ASSERT_TRUE(meta_->Lookup(kRoot, "linked-tmpfile", &inode).ok());
     EXPECT_EQ(inode.ino, capture.entry->ino);
     EXPECT_EQ(inode.attr.nlink, 1U);
   });
+}
+
+FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkDefersOrphanPreparationWhileDescriptorIsOpen) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  SwordFsInode file;
+  ASSERT_TRUE(meta_->Create(kRoot, "open-victim", 0644, &file).ok());
+  std::shared_ptr<swordfs::vfs::FileHandle> handle;
+  ASSERT_TRUE(swordfs::vfs::FileHandle::Open(file.ino, O_RDWR, &handle).ok());
+  fhs_.push_back(handle->fh());
+  ASSERT_TRUE(handle->Write(*folly::IOBuf::copyBuffer("saved bytes"), 0).ok());
+  ASSERT_TRUE(handle->Flush().ok());
+  ASSERT_GT(data_->put_calls(), 0);
+
+  ASSERT_TRUE(VfsImpl::Unlink(kRoot, "open-victim").ok());
+  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{file.ino}));
+  ASSERT_TRUE(ReconcileOrphans().ok());
+  EXPECT_TRUE(ReadInodeStatus(file.ino).ok()) << "open descriptor must prevent reclaim preparation";
+  EXPECT_TRUE(PendingReclaims().empty());
+
+  ASSERT_TRUE(handle->Release().ok());
+  ASSERT_TRUE(ReconcileOrphans().ok());
+  EXPECT_TRUE(ReadInodeStatus(file.ino).IsNotFound());
+  EXPECT_TRUE(OrphanCandidates().empty());
+  EXPECT_EQ(PendingReclaims(), (std::vector<InodeID>{file.ino}))
+      << "Slice remains deferred: metadata is durable without physical deletion";
+  EXPECT_EQ(data_->delete_calls(), 0) << "orphan reclamation must not physically delete Slice data";
+}
+
+FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwriteDefersVictimReclaimUntilLastClose) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  SwordFsInode source;
+  SwordFsInode victim;
+  ASSERT_TRUE(meta_->Create(kRoot, "source", 0644, &source).ok());
+  ASSERT_TRUE(meta_->Create(kRoot, "victim", 0644, &victim).ok());
+  std::shared_ptr<swordfs::vfs::FileHandle> handle;
+  ASSERT_TRUE(swordfs::vfs::FileHandle::Open(victim.ino, O_RDWR, &handle).ok());
+  fhs_.push_back(handle->fh());
+  ASSERT_TRUE(handle->Write(*folly::IOBuf::copyBuffer("replace me"), 0).ok());
+  ASSERT_TRUE(handle->Flush().ok());
+
+  ASSERT_TRUE(VfsImpl::Rename(kRoot, "source", kRoot, "victim", 0).ok());
+  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{victim.ino}));
+  ASSERT_TRUE(ReconcileOrphans().ok());
+  EXPECT_TRUE(ReadInodeStatus(victim.ino).ok());
+  EXPECT_TRUE(PendingReclaims().empty());
+
+  ASSERT_TRUE(handle->Release().ok());
+  ASSERT_TRUE(ReconcileOrphans().ok());
+  EXPECT_TRUE(ReadInodeStatus(victim.ino).IsNotFound());
+  EXPECT_EQ(PendingReclaims(), (std::vector<InodeID>{victim.ino}));
+  SwordFsInode replacement;
+  ASSERT_TRUE(meta_->Lookup(kRoot, "victim", &replacement).ok());
+  EXPECT_EQ(replacement.ino, source.ino);
+  EXPECT_EQ(data_->delete_calls(), 0) << "rename victim cleanup must remain deferred";
+}
+
+FIBER_TEST_F(VfsLastLinkCleanupTest, TruncateDetachesMappedSlicesWithoutPhysicalDeletion) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  SwordFsInode inode;
+  ASSERT_TRUE(meta_->Create(kRoot, "truncated-slice", 0644, &inode).ok());
+  std::shared_ptr<swordfs::vfs::FileHandle> handle;
+  ASSERT_TRUE(swordfs::vfs::FileHandle::Open(inode.ino, O_RDWR, &handle).ok());
+  fhs_.push_back(handle->fh());
+  ASSERT_TRUE(handle->Write(*folly::IOBuf::copyBuffer("persisted slice content"), 0).ok());
+  ASSERT_TRUE(handle->Flush().ok());
+  ASSERT_GT(data_->put_calls(), 0);
+
+  swordfs::metadata::FileMappingSnapshot before;
+  ASSERT_TRUE(meta_->ReadFileMappingSnapshot(inode.ino, &before).ok());
+  ASSERT_FALSE(before.mappings.empty());
+  SwordFsAttr requested;
+  requested.size = 0;
+  ASSERT_TRUE(handle->SetAttr(requested, swordfs::metadata::SetAttrField::kSize, nullptr).ok());
+  swordfs::metadata::FileMappingSnapshot after;
+  ASSERT_TRUE(meta_->ReadFileMappingSnapshot(inode.ino, &after).ok());
+  EXPECT_EQ(after.inode.attr.size, 0U);
+  EXPECT_TRUE(after.mappings.empty());
+  EXPECT_EQ(data_->delete_calls(), 0) << "Slice cleanup remains durable but never performs a physical Delete";
+  ASSERT_TRUE(handle->Release().ok());
+}
+
+FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkOfNonfinalHardlinkDoesNotPublishOrphanWork) {
+  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
+  SwordFsInode file;
+  ASSERT_TRUE(meta_->Create(kRoot, "first", 0644, &file).ok());
+  SwordFsInode linked;
+  ASSERT_TRUE(meta_->Link(file.ino, kRoot, "second", &linked).ok());
+
+  ASSERT_TRUE(VfsImpl::Unlink(kRoot, "first").ok());
+  EXPECT_TRUE(OrphanCandidates().empty());
+  ASSERT_TRUE(ReconcileOrphans().ok());
+  EXPECT_TRUE(ReadInodeStatus(file.ino).ok());
+
+  ASSERT_TRUE(VfsImpl::Unlink(kRoot, "second").ok());
+  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{file.ino}));
+  ASSERT_TRUE(ReconcileOrphans().ok());
+  EXPECT_TRUE(ReadInodeStatus(file.ino).IsNotFound());
+  EXPECT_EQ(PendingReclaims(), (std::vector<InodeID>{file.ino}));
 }
 
 FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwriteKeepsLookedUpDirectoryVictimVisibleByInode) {
@@ -5176,216 +5172,4 @@ FIBER_TEST_F(VfsLastLinkCleanupTest, ReadDirPlusRetainsEmittedInodeUntilForget) 
   EXPECT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(attr.st_nlink, 0U);
   ASSERT_TRUE(VfsImpl::ReleaseDir(kRoot, dir_fh).ok());
-}
-
-FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkPublishesBackgroundCleanupAndOpenDescriptorDefersWorker) {
-  const InodeID ino = CreateChunkedFile("f");
-  const auto key = ObjectKey(ino);
-
-  std::shared_ptr<swordfs::vfs::FileHandle> handle;
-  ASSERT_TRUE(OpenDescriptor(ino, &handle));
-
-  ASSERT_TRUE(VfsImpl::Unlink(swordfs::metadata::kRootInodeId, "f").ok());
-
-  // The last name is gone, but the descriptor defers the cleanup: the object
-  // and the inode must both survive while it can still be read.
-  EXPECT_TRUE(data_->delete_calls.empty()) << "an open descriptor must defer the cleanup";
-  EXPECT_TRUE(data_->Contains(key));
-  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{ino}));
-  EXPECT_TRUE(PendingReclaims().empty());
-  auto inode_handle = swordfs::vfs::InodeHandleManager::Instance().Get(ino, false);
-  ASSERT_NE(inode_handle, nullptr);
-  EXPECT_FALSE(inode_handle->TryStartReclaim()) << "the live descriptor must hold the local reclaim fence open";
-
-  // A worker pass while the descriptor is live must leave the durable orphan
-  // untouched rather than crossing the metadata point of no return.
-  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
-  EXPECT_TRUE(data_->delete_calls.empty());
-  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{ino}));
-
-  // Last close only releases the local reference. GC remains background-owned.
-  ASSERT_TRUE(handle->Release().ok());
-  EXPECT_TRUE(data_->delete_calls.empty());
-  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{ino}));
-
-  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
-  EXPECT_EQ(data_->delete_calls, (std::vector<std::string>{key}));
-  EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(ReadInodeStatus(ino).IsNotFound());
-  EXPECT_TRUE(OrphanCandidates().empty());
-  EXPECT_TRUE(PendingReclaims().empty());
-}
-
-FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkReturnsBeforeBackgroundCleanupAndRetrySurvivesFailure) {
-  const InodeID ino = CreateChunkedFile("f");
-  const auto key = ObjectKey(ino);
-  data_->fail_keys[key] = swordfs::utils::Status::IOError("injected delete failure");
-
-  // The unlink committed: the failed cleanup must not fail the syscall.
-  const auto status = VfsImpl::Unlink(swordfs::metadata::kRootInodeId, "f");
-  EXPECT_TRUE(status.ok()) << status.message();
-
-  // Foreground unlink does not touch the object store or cross the metadata
-  // point of no return. It only publishes durable orphan work and wakes the
-  // worker.
-  EXPECT_TRUE(data_->delete_calls.empty());
-  EXPECT_TRUE(data_->Contains(key));
-  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{ino}));
-  EXPECT_TRUE(PendingReclaims().empty());
-
-  // The worker prepares the inode, then the injected object-delete failure
-  // leaves the frozen record durable for retry.
-  EXPECT_EQ(ReconcileBackgroundCleanup(data_).ToErrno(), EIO);
-  EXPECT_TRUE(ReadInodeStatus(ino).IsNotFound());
-  EXPECT_EQ(PendingReclaims(), (std::vector<InodeID>{ino}));
-  EXPECT_TRUE(OrphanCandidates().empty());
-
-  // Reconciliation retries the idempotent delete and completes the reclaim.
-  data_->fail_keys.clear();
-  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
-  EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(PendingReclaims().empty());
-}
-
-FIBER_TEST_F(VfsLastLinkCleanupTest, UnlinkOfAHardlinkedNameDeletesNothing) {
-  const InodeID ino = CreateChunkedFile("f");
-  const auto key = ObjectKey(ino);
-
-  swordfs::metadata::SwordFsInode linked;
-  ASSERT_TRUE(meta_->Link(ino, swordfs::metadata::kRootInodeId, "g", &linked).ok());
-  ASSERT_EQ(linked.attr.nlink, 2U);
-
-  ASSERT_TRUE(VfsImpl::Unlink(swordfs::metadata::kRootInodeId, "f").ok());
-
-  // Another name still references the inode: nothing may be reclaimed.
-  EXPECT_TRUE(data_->delete_calls.empty());
-  EXPECT_TRUE(data_->Contains(key));
-  EXPECT_TRUE(OrphanCandidates().empty());
-  EXPECT_TRUE(PendingReclaims().empty());
-  swordfs::metadata::SwordFsInode remaining;
-  ASSERT_TRUE(meta_->GetInode(ino, &remaining).ok());
-  EXPECT_EQ(remaining.attr.nlink, 1U);
-
-  // Removing the last name only publishes durable work; foreground unlink
-  // must still issue zero object deletes.
-  ASSERT_TRUE(VfsImpl::Unlink(swordfs::metadata::kRootInodeId, "g").ok());
-  EXPECT_TRUE(data_->delete_calls.empty());
-  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{ino}));
-
-  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
-  EXPECT_FALSE(data_->Contains(key));
-  EXPECT_TRUE(ReadInodeStatus(ino).IsNotFound());
-}
-
-FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwritePublishesBackgroundCleanupForReplacedInode) {
-  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
-  const InodeID victim = CreateChunkedFile("victim");
-  const InodeID moved = CreateChunkedFile("source");
-  const auto victim_key = ObjectKey(victim);
-  const auto moved_key = ObjectKey(moved);
-
-  ASSERT_TRUE(VfsImpl::Rename(kRoot, "source", kRoot, "victim", 0).ok());
-
-  // The rename commits immediately and only publishes durable orphan work for
-  // the replaced inode; no object-store deletion belongs to the foreground
-  // rename path.
-  EXPECT_TRUE(data_->delete_calls.empty());
-  EXPECT_TRUE(data_->Contains(victim_key));
-  EXPECT_TRUE(data_->Contains(moved_key));
-  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{victim}));
-
-  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
-  EXPECT_EQ(data_->delete_calls, (std::vector<std::string>{victim_key}));
-  EXPECT_FALSE(data_->Contains(victim_key));
-  EXPECT_TRUE(data_->Contains(moved_key));
-  EXPECT_TRUE(ReadInodeStatus(victim).IsNotFound());
-  EXPECT_TRUE(OrphanCandidates().empty());
-  EXPECT_TRUE(PendingReclaims().empty());
-
-  swordfs::metadata::SwordFsInode renamed;
-  ASSERT_TRUE(meta_->Lookup(swordfs::metadata::kRootInodeId, "victim", &renamed).ok());
-  EXPECT_EQ(renamed.ino, moved);
-}
-
-FIBER_TEST_F(VfsLastLinkCleanupTest, RenameOverwritePublishesBackgroundCleanupAndOpenDescriptorDefersWorker) {
-  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
-  const InodeID victim = CreateChunkedFile("victim");
-  const InodeID moved = CreateChunkedFile("source");
-  const auto victim_key = ObjectKey(victim);
-
-  std::shared_ptr<swordfs::vfs::FileHandle> handle;
-  ASSERT_TRUE(OpenDescriptor(victim, &handle));
-
-  ASSERT_TRUE(VfsImpl::Rename(kRoot, "source", kRoot, "victim", 0).ok());
-
-  // The renamed file is visible immediately; the replaced inode is only
-  // orphaned, because its descriptor can still read it.
-  swordfs::metadata::SwordFsInode renamed;
-  ASSERT_TRUE(meta_->Lookup(swordfs::metadata::kRootInodeId, "victim", &renamed).ok());
-  EXPECT_EQ(renamed.ino, moved);
-  EXPECT_TRUE(data_->delete_calls.empty()) << "an open descriptor must defer the cleanup";
-  EXPECT_TRUE(data_->Contains(victim_key));
-  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{victim}));
-
-  // A worker pass while the victim descriptor is live must defer cleanup.
-  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
-  EXPECT_TRUE(data_->delete_calls.empty());
-  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{victim}));
-
-  // Last close releases the local reference only; the next worker pass owns
-  // the actual reclaim.
-  ASSERT_TRUE(handle->Release().ok());
-  EXPECT_TRUE(data_->delete_calls.empty());
-  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
-  EXPECT_EQ(data_->delete_calls, (std::vector<std::string>{victim_key}));
-  EXPECT_FALSE(data_->Contains(victim_key));
-  EXPECT_TRUE(ReadInodeStatus(victim).IsNotFound());
-  EXPECT_TRUE(OrphanCandidates().empty());
-}
-
-FIBER_TEST_F(VfsLastLinkCleanupTest, RenameReturnsBeforeBackgroundCleanupAndRetrySurvivesFailure) {
-  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
-  const InodeID victim = CreateChunkedFile("victim");
-  const InodeID moved = CreateChunkedFile("source");
-  const auto victim_key = ObjectKey(victim);
-  data_->fail_keys[victim_key] = swordfs::utils::Status::IOError("injected delete failure");
-
-  // The rename committed: the failed cleanup must not fail it.
-  const auto status = VfsImpl::Rename(kRoot, "source", kRoot, "victim", 0);
-  EXPECT_TRUE(status.ok()) << status.message();
-
-  // The rename is visible and no foreground object delete was attempted.
-  swordfs::metadata::SwordFsInode renamed;
-  ASSERT_TRUE(meta_->Lookup(swordfs::metadata::kRootInodeId, "victim", &renamed).ok());
-  EXPECT_EQ(renamed.ino, moved);
-  EXPECT_TRUE(data_->delete_calls.empty());
-  EXPECT_TRUE(data_->Contains(victim_key));
-  EXPECT_EQ(OrphanCandidates(), (std::vector<InodeID>{victim}));
-  EXPECT_TRUE(PendingReclaims().empty());
-
-  EXPECT_EQ(ReconcileBackgroundCleanup(data_).ToErrno(), EIO);
-  EXPECT_EQ(PendingReclaims(), (std::vector<InodeID>{victim}));
-
-  data_->fail_keys.clear();
-  ASSERT_TRUE(ReconcileBackgroundCleanup(data_).ok());
-  EXPECT_FALSE(data_->Contains(victim_key));
-  EXPECT_TRUE(PendingReclaims().empty());
-}
-
-FIBER_TEST_F(VfsLastLinkCleanupTest, RenameWithoutAnOverwrittenInodeCleansUpNothing) {
-  constexpr InodeID kRoot = swordfs::metadata::kRootInodeId;
-  const InodeID source = CreateChunkedFile("source");
-  const auto key = ObjectKey(source);
-
-  ASSERT_TRUE(VfsImpl::Rename(kRoot, "source", kRoot, "target", 0).ok());
-
-  // A plain rename replaces nothing: no inode is orphaned and no data may be
-  // deleted.
-  EXPECT_TRUE(data_->delete_calls.empty());
-  EXPECT_TRUE(data_->Contains(key));
-  EXPECT_TRUE(OrphanCandidates().empty());
-  EXPECT_TRUE(PendingReclaims().empty());
-  swordfs::metadata::SwordFsInode renamed;
-  ASSERT_TRUE(meta_->Lookup(swordfs::metadata::kRootInodeId, "target", &renamed).ok());
-  EXPECT_EQ(renamed.ino, source);
 }

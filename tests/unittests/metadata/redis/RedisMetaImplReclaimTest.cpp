@@ -11,7 +11,6 @@
 #include <limits>
 #include <thread>
 
-#include "chunk/cow/COWCleanup.hpp"
 #include "metadata/redis/RedisMetaImplTestBase.hpp"
 #include "metadata/types/BufCodec.hpp"
 
@@ -24,7 +23,6 @@ using swordfs::test::redis_meta::MakePendingDelete;
 using swordfs::test::redis_meta::PendingDeleteObjectKey;
 using swordfs::test::redis_meta::ReclaimWork;
 using swordfs::test::redis_meta::RedisMetaImpl;
-using swordfs::test::redis_meta::RedisMetaImplCOWTest;
 using swordfs::test::redis_meta::RedisMetaImplTest;
 using swordfs::test::redis_meta::SetAttrField;
 using swordfs::test::redis_meta::Status;
@@ -148,36 +146,18 @@ FIBER_TEST_F(RedisMetaImplTest, UnlinkPublishesDurableOrphanCandidate) {
   EXPECT_EQ(stored.attr.nlink, 0U);
 }
 
-// The binary record layout is COW-private. Common reclaim tests use Slice.
-FIBER_TEST_F(RedisMetaImplCOWTest, TypedReclaimFreezesChunkIDAttachmentsInsteadOfLegacyDescriptors) {
+// Detached Slice metadata remains opaque maintenance work; the mapping identity
+// is frozen for a later mechanism-specific cleanup, without physical deletion.
+FIBER_TEST_F(RedisMetaImplTest, SliceReclaimFreezesTypedAttachmentsAsDeferredWork) {
   SwordFsInode file;
-  ASSERT_TRUE(impl_->Create(kRootInodeId, "typed-reclaim", 0644, &file).ok());
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "slice-reclaim", 0644, &file).ok());
   const swordfs::metadata::ChunkID attached_id(807);
   ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, attached_id, 24, {.eof = 0}).ok());
-  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "typed-reclaim").ok());
-
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "slice-reclaim").ok());
   ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
   const auto work = PendingReclaim(file.ino);
   ASSERT_TRUE(work.has_value());
-  swordfs::metadata::BufDecoder decoded(work->payload);
-  ASSERT_TRUE(decoded.Header(swordfs::metadata::RecordType::kCowTypedCleanup))
-      << "reclaim must freeze typed mappings instead of the empty legacy chunk table";
-  uint32_t kind = 0;
-  uint64_t ino = 0;
-  uint32_t count = 0;
-  uint64_t index = 0;
-  uint64_t chunk_id = 0;
-  ASSERT_TRUE(decoded.U32(&kind));
-  ASSERT_TRUE(decoded.U64(&ino));
-  ASSERT_TRUE(decoded.U32(&count));
-  ASSERT_TRUE(decoded.U64(&index));
-  ASSERT_TRUE(decoded.U64(&chunk_id));
-  EXPECT_TRUE(decoded.Done());
-  EXPECT_EQ(kind, static_cast<uint32_t>(swordfs::chunk::cow::COWCleanupKind::kDetachedReclaim));
-  EXPECT_EQ(ino, file.ino);
-  EXPECT_EQ(count, 1U);
-  EXPECT_EQ(index, 0U);
-  EXPECT_EQ(chunk_id, attached_id.Value());
+  EXPECT_EQ(work->payload, "slice:reclaim:" + std::to_string(file.ino) + ":0,807");
   const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
   RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
     EXPECT_FALSE(redis.exists(key.Inode(file.ino)));

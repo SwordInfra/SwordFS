@@ -90,8 +90,7 @@ class RedisMetaImplTest : public ::testing::Test {
     SwordFsVolume volume;
     volume.name = volume_name_;
     volume.chunk_size = 4096;
-    // Generic Redis contracts run on Slice. Only the explicitly COW-private
-    // fixture below retains the retiring mechanism until Stage B.
+    // All mounted Redis contract tests run on Slice.
     volume.chunk_type = TestChunkType();
     status = impl_->FormatVolume(volume);
     ASSERT_TRUE(status.ok()) << status.message();
@@ -173,13 +172,6 @@ class RedisMetaImplTest : public ::testing::Test {
   std::unique_ptr<RedisMetaImpl> impl_;
   RedisMetaConfig config_;
   std::string volume_name_;
-};
-
-class RedisMetaImplCOWTest : public RedisMetaImplTest {
- protected:
-  metadata::ChunkType TestChunkType() const override {
-    return metadata::ChunkType::kCow;
-  }
 };
 
 }  // namespace swordfs::test::redis_meta

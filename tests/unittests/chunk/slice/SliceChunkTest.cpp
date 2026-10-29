@@ -167,6 +167,10 @@ TEST_F(SliceChunkTest, FactoryRejectsInvalidCompositionWithoutRelyingOnCOWFixtur
                                   std::make_shared<StubMechanismMetadata>(ChunkType::kRedisCache), meta_, data_,
                                   kChunkTestSize);
     EXPECT_EQ(future_mechanism.Open(42, 0, true, &result).ToErrno(), ENOSYS);
+    EXPECT_EQ(future_mechanism
+                  .SanitizeBoundary(42, {.index = 0, .chunk_id = swordfs::metadata::ChunkID(7), .visible_prefix = 4})
+                  .ToErrno(),
+              ENOSYS);
 
     const auto unknown_type = static_cast<ChunkType>(99);
     ChunkFactory unknown_mechanism(unknown_type, std::make_shared<StubMechanismMetadata>(unknown_type), meta_, data_,

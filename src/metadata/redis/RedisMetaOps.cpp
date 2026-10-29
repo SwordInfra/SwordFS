@@ -18,7 +18,6 @@
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/redis/RedisBackendContext.hpp"
-#include "metadata/redis/RedisCOWChunkMetadata.hpp"
 #include "metadata/redis/RedisDirIterator.hpp"
 #include "metadata/redis/RedisKvTxn.hpp"
 #include "metadata/redis/RedisMetaClient.hpp"
@@ -80,7 +79,7 @@ utils::Status RedisMetaOps::OpenChunkMetadata(ChunkType chunk_type, ChunkMetadat
   if (out == nullptr) {
     return utils::Status::InvalidArgument("chunk metadata output is null");
   }
-  if (chunk_type != ChunkType::kCow && chunk_type != ChunkType::kChunkSlice) {
+  if (chunk_type != ChunkType::kChunkSlice) {
     return utils::Status::NotSupported("chunk metadata type is not implemented: " +
                                        std::string(ChunkTypeName(chunk_type)));
   }
@@ -91,14 +90,10 @@ utils::Status RedisMetaOps::OpenChunkMetadata(ChunkType chunk_type, ChunkMetadat
     *out = chunk_metadata_;
     return utils::Status::OK();
   }
-  if (chunk_type == ChunkType::kChunkSlice) {
-    if (chunk_size_ == 0 || chunk_size_ > std::numeric_limits<uint32_t>::max()) {
-      return utils::Status::InvalidArgument("Slice ChunkSize exceeds supported 32-bit range");
-    }
-    chunk_metadata_ = std::make_shared<RedisSliceChunkMetadata>(backend_, key_, static_cast<uint32_t>(chunk_size_));
-  } else {
-    chunk_metadata_ = std::make_shared<RedisCOWChunkMetadata>(backend_, key_);
+  if (chunk_size_ == 0 || chunk_size_ > std::numeric_limits<uint32_t>::max()) {
+    return utils::Status::InvalidArgument("Slice ChunkSize exceeds supported 32-bit range");
   }
+  chunk_metadata_ = std::make_shared<RedisSliceChunkMetadata>(backend_, key_, static_cast<uint32_t>(chunk_size_));
   *out = chunk_metadata_;
   return utils::Status::OK();
 }

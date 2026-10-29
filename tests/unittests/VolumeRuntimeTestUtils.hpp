@@ -8,7 +8,7 @@
 #include <string>
 #include <utility>
 
-#include "TestCOWChunkMetadata.hpp"
+#include "chunk/SliceChunkMetadataTestSupport.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
 #include "metadata/types/Volume.hpp"
@@ -105,10 +105,10 @@ class ConfiguredMetaEngine final : public Base {
     if (out == nullptr) {
       return utils::Status::InvalidArgument("chunk metadata output is null");
     }
-    if (chunk_type != metadata::ChunkType::kCow) {
+    if (chunk_type != metadata::ChunkType::kChunkSlice) {
       return utils::Status::NotSupported("test chunk metadata type is not implemented");
     }
-    *out = std::make_shared<TestCOWChunkMetadata>();
+    *out = std::make_shared<chunk_test::TestSliceChunkMetadata>();
     return utils::Status::OK();
   }
 

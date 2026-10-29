@@ -16,10 +16,8 @@
 #include <vector>
 
 #include "FiberTest.hpp"
-#include "TestCOWChunkMetadata.hpp"
 #include "UnsupportedMetaEngine.hpp"
 #include "VolumeRuntimeTestUtils.hpp"
-#include "chunk/cow/COWCleanup.hpp"
 #include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
@@ -50,10 +48,6 @@ void ParseConfig(std::vector<std::string> args) {
 
 class NoopDataEngine final : public swordfs::storage::IDataEngine {
  public:
-  explicit NoopDataEngine(std::shared_ptr<std::atomic<int>> delete_count = nullptr)
-      : delete_count_(std::move(delete_count)) {
-  }
-
   Status Initialize() override {
     return Status::OK();
   }
@@ -64,14 +58,8 @@ class NoopDataEngine final : public swordfs::storage::IDataEngine {
     return Status::OK();
   }
   Status Delete(std::string_view) override {
-    if (delete_count_) {
-      delete_count_->fetch_add(1, std::memory_order_relaxed);
-    }
     return Status::OK();
   }
-
- private:
-  std::shared_ptr<std::atomic<int>> delete_count_;
 };
 
 class InvalidChunkMetadataEngine final : public swordfs::test::UnsupportedMetaEngine {
@@ -79,7 +67,6 @@ class InvalidChunkMetadataEngine final : public swordfs::test::UnsupportedMetaEn
   enum class Result {
     kNullCapability,
     kMismatchedChunkType,
-    kCowTypeButWrongClass,
     kCleanupBindingRejected,
   };
 
@@ -97,9 +84,9 @@ class InvalidChunkMetadataEngine final : public swordfs::test::UnsupportedMetaEn
     if (result_ == Result::kNullCapability) {
       out->reset();
     } else if (result_ == Result::kMismatchedChunkType) {
-      *out = std::make_shared<swordfs::test::StubChunkMetadata>(ChunkType::kChunkSlice);
-    } else {
       *out = std::make_shared<swordfs::test::StubChunkMetadata>(ChunkType::kCow);
+    } else {
+      *out = std::make_shared<swordfs::test::StubChunkMetadata>(ChunkType::kChunkSlice);
     }
     return Status::OK();
   }
@@ -160,66 +147,6 @@ class EncodedVolumeMetaEngine final : public swordfs::test::UnsupportedMetaEngin
 
  private:
   std::string encoded_;
-};
-
-struct DetachedCleanupObserver {
-  std::promise<void> acknowledged;
-  std::atomic<int> attachment_probes{0};
-};
-
-// Models only the metadata API involved in a durable, already-detached COW
-// cleanup. The production mount owns and runs the actual GC participant.
-class DetachedCleanupMetaEngine final : public swordfs::test::UnsupportedMetaEngine {
- public:
-  DetachedCleanupMetaEngine(swordfs::metadata::PendingDelete candidate,
-                            std::shared_ptr<DetachedCleanupObserver> observer, bool still_attached = false)
-      : candidate_(std::move(candidate)), observer_(std::move(observer)), still_attached_(still_attached) {
-  }
-
-  Status LoadVolume(SwordFsVolume *out) override {
-    return swordfs::test::LoadConfiguredTestVolume(out);
-  }
-  Status OpenChunkMetadata(ChunkType type, swordfs::metadata::ChunkMetadataPtr *out) override {
-    if (type != ChunkType::kCow || out == nullptr) {
-      return Status::InvalidArgument("invalid cleanup mechanism request");
-    }
-    *out = std::make_shared<swordfs::test::TestCOWChunkMetadata>();
-    return Status::OK();
-  }
-  Status BindChunkCleanupWorkEncoder(swordfs::chunk::internal::ChunkCleanupWorkEncoder *) override {
-    return Status::OK();
-  }
-  Status VisitPendingDeletesBatch(size_t, const swordfs::metadata::PendingDeleteVisitorFn &visitor,
-                                  bool *has_more) override {
-    *has_more = false;
-    if (served_) {
-      return Status::OK();
-    }
-    served_ = true;
-    return visitor(candidate_);
-  }
-  Status VisitPendingReclaims(const swordfs::metadata::ReclaimVisitorFn &) override {
-    return Status::OK();
-  }
-  Status ProbeAttachment(swordfs::metadata::InodeID, swordfs::metadata::ChunkIndex,
-                         std::optional<swordfs::metadata::ChunkID> *attached) override {
-    observer_->attachment_probes.fetch_add(1, std::memory_order_relaxed);
-    if (still_attached_) {
-      *attached = swordfs::metadata::ChunkID(123);
-      return Status::OK();
-    }
-    return Status::NotFound("inode reclaimed before physical cleanup");
-  }
-  Status CompletePendingDelete(std::string_view) override {
-    observer_->acknowledged.set_value();
-    return Status::OK();
-  }
-
- private:
-  swordfs::metadata::PendingDelete candidate_;
-  std::shared_ptr<DetachedCleanupObserver> observer_;
-  bool served_ = false;
-  bool still_attached_ = false;
 };
 
 }  // namespace
@@ -301,7 +228,7 @@ TEST(VolumeImplConfigAdapterTest, LoadFromUsesParsedMountRuntimeConfiguration) {
       .storage = std::string(swordfs::test::kTestDataEngine),
       .bucket = "opaque://endpoint/bucket",
       .region = "persisted-region",
-      .chunk_type = ChunkType::kCow,
+      .chunk_type = ChunkType::kChunkSlice,
   };
   swordfs::test::pending_meta_engine =
       std::make_unique<swordfs::test::ConfiguredMetaEngine<swordfs::test::UnsupportedMetaEngine>>();
@@ -418,7 +345,7 @@ TEST(VolumeImplDomainTest, LifecycleRejectsFiberCaller) {
 
 // ── CreateFrom ──────────────────────────────────────────────────────
 
-TEST(VolumeImplDefaultsTest, ProgrammaticFormatUsesSliceUnlessCowExplicitlySelected) {
+TEST(VolumeImplDefaultsTest, ProgrammaticFormatDefaultsToSliceAndRetainsRetiredTypeIdentity) {
   EXPECT_EQ(FormatOptions{}.chunk_type, ChunkType::kChunkSlice);
   FormatOptions explicit_cow;
   explicit_cow.chunk_type = ChunkType::kCow;
@@ -457,7 +384,7 @@ TEST_F(VolumeImplTest, CreateFromRejectsInvalidMetadataUrl) {
 
 // #508 TDD: a deliberately selected Slice volume must be usable by the
 // real Volume format/load path before we run the mounted Slice CI matrix.
-// Explicit COW is still supported; unimplemented redis_cache is refused.
+// The mounted Slice mechanism is implemented; redis_cache remains unsupported.
 TEST_F(VolumeImplRedisTest, ExplicitSliceFormatAndMountCanUseRealRedisMetadata) {
   const auto format_options = makeFormatOptions(RedisUrl(), "slice-ci", "", "", ChunkType::kChunkSlice);
   VolumeImpl formatted;
@@ -472,20 +399,7 @@ TEST_F(VolumeImplRedisTest, ExplicitSliceFormatAndMountCanUseRealRedisMetadata) 
   EXPECT_EQ(mounted.config().chunk_type, ChunkType::kChunkSlice);
 }
 
-// Keep the pre-existing COW format-time metadata validation. Adding an
-// experimental Slice format must not silently accept an unusable COW volume.
-TEST_F(VolumeImplTest, CowFormatRejectsMissingPrivateMetadataCapability) {
-  swordfs::test::RegisterTestVolumeEngines();
-  swordfs::test::pending_meta_engine =
-      std::make_unique<InvalidChunkMetadataEngine>(InvalidChunkMetadataEngine::Result::kNullCapability);
-
-  VolumeImpl volume;
-  const auto status =
-      volume.CreateFrom(makeFormatOptions("swordfs-test-meta://local", "cow-format-guard", "", "", ChunkType::kCow));
-  EXPECT_EQ(status.ToErrno(), EINVAL);
-  EXPECT_EQ(status.message(), "chunk metadata type mismatch");
-}
-
+// The surviving deferred Slice cleanup serializer preserves distinct mapping identities.
 TEST_F(VolumeImplTest, SliceDeferredCleanupPreservesDistinctOpaqueIdentities) {
   std::unique_ptr<swordfs::chunk::internal::ChunkCleanupWorkEncoder> encoder;
   ASSERT_TRUE(swordfs::chunk::internal::CreateChunkCleanupWorkEncoder(ChunkType::kChunkSlice, &encoder).ok());
@@ -522,7 +436,7 @@ TEST_F(VolumeImplTest, SliceDeferredCleanupPreservesDistinctOpaqueIdentities) {
   EXPECT_EQ(swordfs::chunk::internal::CreateChunkCleanupWorkEncoder(ChunkType::kChunkSlice, nullptr).ToErrno(), EINVAL);
 }
 
-TEST_F(VolumeImplTest, SliceRuntimeWithDataEngineStartsWithoutPhysicalGc) {
+TEST_F(VolumeImplTest, SliceRuntimeMountsWithTypedChunkFactory) {
   swordfs::test::RegisterTestVolumeEngines();
   const auto volume_name = makeVolumeName("slice-deferred-physical-gc");
   swordfs::test::pending_volume = SwordFsVolume{
@@ -532,17 +446,38 @@ TEST_F(VolumeImplTest, SliceRuntimeWithDataEngineStartsWithoutPhysicalGc) {
       .chunk_type = ChunkType::kChunkSlice,
   };
   swordfs::test::pending_meta_engine = std::make_unique<SliceMountMetaEngine>();
-  auto deletes = std::make_shared<std::atomic<int>>(0);
-  swordfs::test::pending_data_engine = std::make_unique<NoopDataEngine>(deletes);
+  swordfs::test::pending_data_engine = std::make_unique<NoopDataEngine>();
 
   VolumeImpl volume;
   const auto status = volume.LoadFrom(swordfs::test::MakeTestMountOptions(volume_name));
   ASSERT_TRUE(status.ok()) << status.message();
   ASSERT_NE(volume.chunk_factory(), nullptr);
   EXPECT_EQ(volume.config().chunk_type, ChunkType::kChunkSlice);
-  volume.StartRuntimeServices();
-  volume.StopRuntimeServices();
-  EXPECT_EQ(deletes->load(), 0);
+}
+
+// #527 RED: keep historical enum 1 recognizable while retiring its runtime.
+TEST_F(VolumeImplTest, MountRejectsPersistedRetiredCowInsteadOfTreatingItAsSlice) {
+  SwordFsVolume persisted;
+  persisted.name = makeVolumeName("retired-cow");
+  persisted.chunk_type = ChunkType::kCow;
+
+  VolumeImpl mounted;
+  const auto status = mounted.LoadFrom(PrepareInjectedMount(persisted));
+  EXPECT_EQ(status.ToErrno(), ENOSYS) << status.message();
+  EXPECT_NE(status.message().find("cow"), std::string::npos) << status.message();
+  EXPECT_EQ(mounted.chunk_factory(), nullptr);
+}
+
+TEST_F(VolumeImplRedisTest, FormatRejectsRetiredCowBeforePersistingVolume) {
+  auto options = makeFormatOptions(RedisUrl(), makeVolumeName("retired-cow-format"), "", "", ChunkType::kCow);
+  VolumeImpl formatted;
+  const auto status = formatted.CreateFrom(options);
+  EXPECT_EQ(status.ToErrno(), ENOSYS) << status.message();
+  EXPECT_NE(status.message().find("cow"), std::string::npos) << status.message();
+
+  VolumeImpl reader;
+  EXPECT_EQ(reader.LoadFrom(makeMountOptions(RedisUrl(), options.name)).ToErrno(), ENOENT)
+      << "failed COW format must not persist a volume";
 }
 
 TEST_F(VolumeImplRedisTest, FormatRejectsUnimplementedChunkType) {
@@ -559,7 +494,7 @@ TEST_F(VolumeImplRedisTest, FormatRejectsUnimplementedChunkType) {
 }
 
 TEST_F(VolumeImplRedisTest, MountUsesPersistedChunkTypeAndRejectsUnimplementedType) {
-  auto format_options = makeFormatOptions(RedisUrl(), "testvol", "", "", ChunkType::kCow);
+  auto format_options = makeFormatOptions(RedisUrl(), "testvol", "", "", ChunkType::kChunkSlice);
   VolumeImpl formatted;
   auto status = formatted.CreateFrom(format_options);
   ASSERT_TRUE(status.ok()) << status.message();
@@ -568,11 +503,11 @@ TEST_F(VolumeImplRedisTest, MountUsesPersistedChunkTypeAndRejectsUnimplementedTy
   status = mounted.LoadFrom(makeMountOptions(RedisUrl()));
   ASSERT_TRUE(status.ok()) << status.message();
   ASSERT_NE(mounted.chunk_factory(), nullptr);
-  EXPECT_EQ(mounted.config().chunk_type, ChunkType::kCow);
+  EXPECT_EQ(mounted.config().chunk_type, ChunkType::kChunkSlice);
   EXPECT_EQ(mounted.config().name, format_options.name);
 
   // Check unsupported persisted chunk selection in isolation: the real
-  // Redis round trip above proves the canonical persisted COW selection.
+  // Redis round trip above proves the canonical persisted Slice selection.
   SwordFsVolume unsupported = mounted.config();
   unsupported.chunk_type = ChunkType::kRedisCache;
   const auto mount_options = PrepareInjectedMount(unsupported);
@@ -589,7 +524,7 @@ TEST_F(VolumeImplTest, MountRejectsInvalidChunkMetadataCapability) {
     const auto volume_name = makeVolumeName("invalid-chunk-metadata");
     swordfs::test::pending_volume = SwordFsVolume{
         .name = volume_name,
-        .chunk_type = ChunkType::kCow,
+        .chunk_type = ChunkType::kChunkSlice,
     };
     swordfs::test::pending_meta_engine = std::make_unique<InvalidChunkMetadataEngine>(result);
     swordfs::test::pending_data_engine.reset();
@@ -606,7 +541,7 @@ TEST_F(VolumeImplTest, MountRejectsCleanupEncoderBindingFailure) {
   const auto volume_name = makeVolumeName("encoder-binding-failure");
   swordfs::test::pending_volume = SwordFsVolume{
       .name = volume_name,
-      .chunk_type = ChunkType::kCow,
+      .chunk_type = ChunkType::kChunkSlice,
   };
   swordfs::test::pending_meta_engine =
       std::make_unique<InvalidChunkMetadataEngine>(InvalidChunkMetadataEngine::Result::kCleanupBindingRejected);
@@ -617,81 +552,6 @@ TEST_F(VolumeImplTest, MountRejectsCleanupEncoderBindingFailure) {
   EXPECT_EQ(status.ToErrno(), EIO);
   EXPECT_EQ(status.message(), "cleanup encoder binding rejected");
   EXPECT_EQ(volume.chunk_factory(), nullptr);
-}
-
-TEST_F(VolumeImplTest, MountRejectsCleanupMetadataClassMismatch) {
-  swordfs::test::RegisterTestVolumeEngines();
-  const auto volume_name = makeVolumeName("invalid-cleanup-metadata");
-  swordfs::test::pending_volume = SwordFsVolume{
-      .name = volume_name,
-      .storage = std::string(swordfs::test::kTestDataEngine),
-      .bucket = "opaque://endpoint/bucket",
-      .chunk_type = ChunkType::kCow,
-  };
-  swordfs::test::pending_meta_engine =
-      std::make_unique<InvalidChunkMetadataEngine>(InvalidChunkMetadataEngine::Result::kCowTypeButWrongClass);
-  swordfs::test::pending_data_engine = std::make_unique<NoopDataEngine>();
-
-  VolumeImpl volume;
-  const auto status = volume.LoadFrom(swordfs::test::MakeTestMountOptions(volume_name));
-  EXPECT_EQ(status.ToErrno(), EINVAL);
-  EXPECT_EQ(status.message(), "COW cleanup metadata type mismatch");
-}
-
-TEST_F(VolumeImplTest, RuntimeGcTreatsMissingInodeAsDetachedForTypedCleanup) {
-  swordfs::metadata::PendingDelete candidate;
-  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedDelete(
-                  105, {.index = 0, .chunk_id = swordfs::metadata::ChunkID(123)}, &candidate)
-                  .ok());
-  auto observer = std::make_shared<DetachedCleanupObserver>();
-  auto completed = observer->acknowledged.get_future();
-
-  SwordFsVolume config;
-  config.name = makeVolumeName("detached-cleanup");
-  config.storage = std::string(swordfs::test::kTestDataEngine);
-  config.bucket = "opaque://endpoint/bucket";
-  config.chunk_type = ChunkType::kCow;
-  config.chunk_size = 4096;
-  auto options =
-      PrepareInjectedMount(config, std::make_unique<DetachedCleanupMetaEngine>(std::move(candidate), observer));
-  swordfs::test::pending_data_engine = std::make_unique<NoopDataEngine>();
-
-  VolumeImpl volume;
-  ASSERT_TRUE(volume.LoadFrom(options).ok());
-  volume.StartRuntimeServices();
-  const auto result = completed.wait_for(std::chrono::seconds(5));
-  volume.StopRuntimeServices();
-  EXPECT_EQ(result, std::future_status::ready);
-  EXPECT_EQ(observer->attachment_probes.load(std::memory_order_relaxed), 1);
-}
-
-TEST_F(VolumeImplTest, RuntimeGcPreservesStillAttachedTypedChunk) {
-  swordfs::metadata::PendingDelete candidate;
-  ASSERT_TRUE(swordfs::chunk::cow::FreezeCOWDetachedDelete(
-                  105, {.index = 0, .chunk_id = swordfs::metadata::ChunkID(123)}, &candidate)
-                  .ok());
-  auto observer = std::make_shared<DetachedCleanupObserver>();
-  auto completed = observer->acknowledged.get_future();
-  auto delete_count = std::make_shared<std::atomic<int>>(0);
-
-  SwordFsVolume config;
-  config.name = makeVolumeName("attached-cleanup");
-  config.storage = std::string(swordfs::test::kTestDataEngine);
-  config.bucket = "opaque://endpoint/bucket";
-  config.chunk_type = ChunkType::kCow;
-  config.chunk_size = 4096;
-  auto options =
-      PrepareInjectedMount(config, std::make_unique<DetachedCleanupMetaEngine>(std::move(candidate), observer, true));
-  swordfs::test::pending_data_engine = std::make_unique<NoopDataEngine>(delete_count);
-
-  VolumeImpl volume;
-  ASSERT_TRUE(volume.LoadFrom(options).ok());
-  volume.StartRuntimeServices();
-  const auto result = completed.wait_for(std::chrono::seconds(5));
-  volume.StopRuntimeServices();
-  EXPECT_EQ(result, std::future_status::ready);
-  EXPECT_EQ(observer->attachment_probes.load(std::memory_order_relaxed), 1);
-  EXPECT_EQ(delete_count->load(std::memory_order_relaxed), 0);
 }
 
 TEST_F(VolumeImplTest, CreateFromNormalizesDataEngineIdentity) {
@@ -789,7 +649,7 @@ TEST_F(VolumeImplTest, LoadFromRejectsMissingDataEngineLocation) {
 TEST_F(VolumeImplTest, LoadFromS3UrlMissingBucketName) {
   SwordFsVolume stored;
   stored.name = makeVolumeName("missing-bucket-name");
-  stored.chunk_type = ChunkType::kCow;  // The injected test backend only implements COW metadata.
+  stored.chunk_type = ChunkType::kChunkSlice;
   stored.storage = "s3";
   stored.bucket = "s3://endpoint.example.com";
   const auto options = PrepareInjectedMount(stored);

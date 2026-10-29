@@ -1,3 +1,9 @@
+> **Historical COW design (retired by #527).** This document describes a
+> removed runtime and must not be used as current operational guidance. The
+> active mechanism is Slice Chunk; see [architecture](architecture.md),
+> [Slice publication](512-slice-primary-conformance.md), and [COW retirement](527-cow-retirement.md).
+> Persisted COW volumes fail closed at mount rather than being converted.
+
 # Chunk publication and cleanup — authoritative typed contract
 
 This document describes the SwordFS beta COW data path after the #317 authority

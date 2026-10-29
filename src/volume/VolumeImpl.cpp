@@ -9,9 +9,7 @@
 #include <optional>
 
 #include "chunk/ChunkFactory.hpp"
-#include "chunk/internal/ChunkCleanupParticipant.hpp"
 #include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
-#include "chunk/internal/ChunkGcWorker.hpp"
 #include "config/ConfigCenter.hpp"
 #include "metadata/IMetaEngine.hpp"
 #include "metadata/MetaEngineRegistry.hpp"
@@ -74,8 +72,8 @@ Status VolumeImpl::ComposeChunkMetadata() {
   if (!status.ok()) {
     return status;
   }
-  // FileMetadata only receives pure detached-work serialization. The COW
-  // metadata authority remains independent and is not accessed by the encoder.
+  // FileMetadata receives only opaque detached-work serialization. The
+  // selected mechanism's private Slice index is not accessed by this encoder.
   if (chunk_metadata_ == nullptr || chunk_metadata_->Type() != config_.chunk_type) {
     return Status::InvalidArgument("chunk metadata type mismatch");
   }
@@ -88,37 +86,12 @@ Status VolumeImpl::ComposeChunkMetadata() {
 
 Status VolumeImpl::ComposeChunkRuntime() {
   chunk_factory_.reset();
-  chunk_gc_worker_.reset();
   // LoadFrom reaches runtime composition only after ComposeChunkMetadata
   // succeeds; incomplete capabilities cannot reach this point.
   chunk_factory_ = std::make_unique<chunk::ChunkFactory>(config_.chunk_type, chunk_metadata_, meta_engine_.get(),
                                                          data_engine_.get(), config_.chunk_size);
-  // The experimental Slice volume retains opaque pending cleanup work in
-  // Redis but must never physically delete data until #273 establishes
-  // private-index reachability and remote reader-lifetime safety.
-  if (data_engine_ != nullptr && config_.chunk_type == metadata::ChunkType::kCow) {
-    std::unique_ptr<chunk::internal::ChunkCleanupParticipant> cleanup;
-    // A queued typed delete is only maintenance: revalidate the *current*
-    // FileMetadata attachment before touching the immutable COW object.
-    // The inode can already be absent after an atomic reclaim, which is
-    // equivalent to an unattached logical chunk for reachability purposes.
-    const auto reachability = [meta = meta_engine_.get()](metadata::InodeID ino, metadata::ChunkIndex index,
-                                                          std::optional<metadata::ChunkID> *attached) {
-      auto status = meta->ProbeAttachment(ino, index, attached);
-      if (status.IsNotFound()) {
-        attached->reset();
-        return Status::OK();
-      }
-      return status;
-    };
-    auto status =
-        chunk::internal::CreateChunkCleanupParticipant(config_.chunk_type, config_.chunk_size, chunk_metadata_,
-                                                       meta_engine_.get(), data_engine_.get(), reachability, &cleanup);
-    if (!status.ok()) {
-      return status;
-    }
-    chunk_gc_worker_ = std::make_unique<chunk::internal::ChunkGcWorker>(meta_engine_.get(), std::move(cleanup));
-  }
+  // Slice retains opaque deferred cleanup records, but cannot physically
+  // delete objects until #273 proves private-index reachability safety.
   return Status::OK();
 }
 
@@ -158,7 +131,10 @@ Status VolumeImpl::CreateFrom(const FormatOptions &options) {
   config_.chunk_type = options.chunk_type;
   config_.enable_posix_acl = options.enable_posix_acl;
 
-  if (config_.chunk_type != metadata::ChunkType::kCow && config_.chunk_type != metadata::ChunkType::kChunkSlice) {
+  if (config_.chunk_type == metadata::ChunkType::kCow) {
+    return Status::NotSupported("cow Chunk mechanism is retired; format a new chunk_slice volume instead");
+  }
+  if (config_.chunk_type != metadata::ChunkType::kChunkSlice) {
     return Status::NotSupported("selected chunk type is not implemented");
   }
 
@@ -169,15 +145,6 @@ Status VolumeImpl::CreateFrom(const FormatOptions &options) {
   status = meta_engine_->Initialize();
   if (!status.ok()) {
     return status;
-  }
-  // Preserve the existing COW format-time capability validation. Slice
-  // private metadata depends on the ChunkSize initialized by Redis during
-  // FormatVolume, so only Slice defers composition until LoadFrom.
-  if (config_.chunk_type == metadata::ChunkType::kCow) {
-    status = ComposeChunkMetadata();
-    if (!status.ok()) {
-      return status;
-    }
   }
   return meta_engine_->FormatVolume(config_);
 }
@@ -205,6 +172,11 @@ Status VolumeImpl::LoadFrom(const MountOptions &options) {
   status = meta_engine_->LoadVolume(&config_);
   if (!status.ok()) {
     return status;
+  }
+  if (config_.chunk_type == metadata::ChunkType::kCow) {
+    return Status::NotSupported(
+        "persisted cow Chunk mechanism is retired; explicit offline migration or "
+        "reprovisioning as chunk_slice is required");
   }
 
   status = ComposeChunkMetadata();
@@ -234,27 +206,11 @@ Status VolumeImpl::LoadFrom(const MountOptions &options) {
 
 void VolumeImpl::Shutdown() {
   utils::ExpectInThreadDomain();
-  StopRuntimeServices();
   chunk_factory_.reset();
-  chunk_gc_worker_.reset();
   data_engine_.reset();
   meta_engine_.reset();
   cleanup_work_encoder_.reset();
   chunk_metadata_.reset();
-}
-
-void VolumeImpl::StartRuntimeServices() {
-  utils::ExpectInThreadDomain();
-  if (chunk_gc_worker_ != nullptr) {
-    chunk_gc_worker_->Start();
-  }
-}
-
-void VolumeImpl::StopRuntimeServices() {
-  utils::ExpectInThreadDomain();
-  if (chunk_gc_worker_ != nullptr) {
-    chunk_gc_worker_->Stop();
-  }
 }
 
 }  // namespace swordfs::volume

@@ -14,9 +14,6 @@
 
 namespace swordfs::metadata {
 class IMetaEngine;
-namespace cow {
-class COWChunkMetadata;
-}
 namespace slice {
 class SliceChunkMetadata;
 }
@@ -51,11 +48,8 @@ class ChunkFactory {
 
  private:
   metadata::ChunkType chunk_type_;
-  // #316 consumes this through the typed COW metadata interface. Retain the
-  // mount-lifetime capability here so VFS never needs mechanism metadata
-  // plumbing.
+  // Retain a typed, mount-lifetime metadata capability for mechanism dispatch.
   metadata::ChunkMetadataPtr chunk_metadata_;
-  std::shared_ptr<metadata::cow::COWChunkMetadata> cow_metadata_;
   std::shared_ptr<metadata::slice::SliceChunkMetadata> slice_metadata_;
   metadata::IMetaEngine *meta_;
   storage::IDataEngine *data_;

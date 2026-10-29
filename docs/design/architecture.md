@@ -10,7 +10,7 @@ When implementation changes an architectural contract described here, the same P
 
 Use the [documentation reading path](../README.md) to navigate the design.
 Companion documents explain [data structures and ownership](data-structures.md),
-the [thread model](thread-model.md), [chunk publication](chunk-publication.md),
+the [thread model](thread-model.md), [historical COW publication](chunk-publication.md),
 and the [Redis storage model](redis-metadata-schema.md). This overview connects
 those mechanisms through the main filesystem workflows.
 
@@ -22,7 +22,7 @@ The architecture is guided by a few recurring principles:
 
 - **Keep filesystem semantics in the client, storage primitives below it.** FUSE/VFS code owns filesystem behavior; metadata and data engines expose storage-oriented contracts.
 - **Separate metadata authority from object data.** Namespace/inode/chunk descriptors live in the metadata engine; file bytes live in the data engine.
-- **Publish logical chunk heads through metadata.** The selected chunk type implementation prepares data first, then metadata atomically makes its new logical generation authoritative. The current `COWChunk` implementation uses immutable revisioned objects.
+- **Publish logical chunk heads through metadata.** The selected chunk type implementation prepares data first, then metadata atomically makes its new logical generation authoritative. The implemented `SliceChunk` publishes immutable Slice objects through typed private indexes.
 - **Treat persistent metadata as the source of truth for lifecycle/recovery.** Local runtime state may fence or cache work, but must not become the only record of persistent work.
 - **Make blocking external IO explicit.** Runtime filesystem logic executes as fibers; Redis/S3 calls run on POSIX worker threads through blocking executors.
 - **Prefer clear state ownership over cross-layer reconstruction.** Each lifecycle transition should have one authoritative owner and a small set of explicit invariants.
@@ -42,7 +42,6 @@ flowchart TB
     M[Metadata Engine]
     D[Data Engine]
     OR[Orphan Reclaimer]
-    GC[Private Chunk GC]
     REDIS[(Redis)]
     S3[(S3-compatible object storage)]
 
@@ -53,8 +52,6 @@ flowchart TB
     V --> D
     V --> OR
     OR --> M
-    GC --> M
-    GC --> D
     M --> REDIS
     D --> S3
 ```
@@ -68,14 +65,13 @@ The major responsibilities are:
 | Metadata engine | Authoritative inode, directory, typed chunk mapping, transaction, orphan/reclaim metadata | File object bytes |
 | Data engine | Put/Get/Delete immutable file objects | Namespace/link/inode semantics |
 | Orphan reclaimer | Apply the mount-local open-handle fence and hand durable orphan candidates to metadata preparation | Physical object deletion or mechanism-specific cleanup payloads |
-| Private chunk GC | Replay durable pending-delete/reclaim work, revalidate reachability, delete physical data, and acknowledge success | Namespace/open-handle policy |
 
 `VolumeImpl` is the mount composition root. It binds one mounted volume to one
 metadata engine and, when configured, one data engine. After loading the
 persisted `ChunkType`, it opens the chunk-type-selected typed `ChunkMetadata`
 capability, binds the pure `ChunkCleanupWorkEncoder` for detached ChunkID
-maintenance, and then constructs the mount-owned `ChunkFactory` and private
-chunk-GC worker. VFS sees
+maintenance, and then constructs the mount-owned `ChunkFactory`. No physical
+Slice GC worker is instantiated. VFS sees
 only the stable `ChunkFactory`/`Chunk` data-path facade and never receives the
 typed mechanism metadata capability or a chunk-type implementation object.
 Backends are selected by URL scheme through registries rather than hard-coded
@@ -322,9 +318,8 @@ Lifecycle/control operations such as engine construction, initialization, format
 The common logical records are `SwordFsInode`, directory entries, and the
 FileMetadata-owned mapping `ChunkIndex -> ChunkID`. `ChunkIndex` is a checked
 unsigned 64-bit logical coordinate; `ChunkID` is a monotonic volume-scoped
-identity that is never reused after detach. COW revision, valid-prefix size
-and immutable object identity belong only to the private typed ChunkMetadata
-domain. A missing mapping inside EOF represents a sparse hole.
+identity that is never reused after detach. The ordered Slice records and their immutable object identities belong
+to private typed ChunkMetadata, outside FileMetadata. A missing mapping inside EOF represents a sparse hole.
 
 For relationships between these records, handles, and write buffers, see
 [Data structures and ownership](data-structures.md).
@@ -334,11 +329,10 @@ For relationships between these records, handles, and write buffers, see
 The Redis implementation owns durable FileMetadata state and makes composite
 namespace/chunk transitions visible atomically through its transaction layer.
 `AttachPrepared`, `FinalizeAttachedWrite`, `CommitShrink` and `CommitGrow`
-atomically validate and mutate FileMetadata mappings and inode EOF. COW-private
-head CAS remains a separate domain and is never part of the same Redis
-transaction. The pure `ChunkCleanupWorkEncoder` only serializes detached
+atomically validate and mutate FileMetadata mappings and inode EOF. Private Slice record publication remains a separate domain and is never
+part of the same FileMetadata Redis transaction. The pure `ChunkCleanupWorkEncoder` only serializes detached
 ChunkID identities for safe maintenance; it does not consult or mutate private
-COW metadata.
+Slice metadata.
 
 No pointers to mutable transaction-owned inode state escape as authoritative
 state; callers observe value snapshots and commit mutations transactionally.
@@ -489,216 +483,108 @@ provisional implementation detail rather than a coherence guarantee.
 
 ## 8. Chunk and data model
 
-Files are divided into fixed-size logical chunks. The default configured chunk size is 64 MiB, but the value is part of the volume configuration.
+Files are divided into fixed-size logical chunks (default 64 MiB). Each
+persistent volume records one numeric `ChunkType`: COW=1 is a **retired**
+identity, Slice=2 is the only implemented mechanism, and RedisCache=3 is
+reserved. The numeric values must never be reinterpreted. New COW formats and
+mounts of stored COW records fail closed; they are not silently converted.
 
-The logical `ChunkIndex` is an unsigned 64-bit coordinate. SwordFS's supported
-regular-file address space follows the current Linux/FUSE `off_t` contract:
-valid file byte positions and sizes are non-negative and no greater than
-`2^63 - 1`. Unsigned metadata fields do not imply support above that boundary.
-At the minimum supported 4 KiB chunk size, a 64-bit index still covers every
-reachable logical chunk without narrowing.
+The common FileMetadata domain owns inode EOF and the mapping
+`ChunkIndex -> ChunkID`. ChunkIndex is 64-bit, checked against Linux
+non-negative `off_t` limits; ChunkID is a stable volume-scoped identity.
+Mechanism-private state belongs to the typed `ChunkMetadata` capability:
+Slice maintains ordered `SliceRecord` entries per ChunkID, with separate
+immutable Slice object IDs. The mapping never contains private record lists.
 
-The volume format persists one stable `ChunkType` value.
-Human-readable names are parsed only at the format/configuration boundary;
-mechanism selection and private-index namespacing use the typed value.
-`cow` is the only selectable implementation today; `chunk_slice` and
-`redis_cache` are reserved values and are rejected until their implementations
-are available.
+`src/chunk/Chunk.hpp` is the mechanism-neutral VFS boundary. The concrete
+`ChunkFactory` dispatches only to `src/chunk/slice/SliceChunk.*` today.
+`FileReadWriter` owns cross-chunk splitting, EOF visibility and local
+flush/truncate coordination. The factory and typed metadata capability retain
+extension points for future independently implemented mechanisms.
 
-All implementations share directory, inode, and file-to-logical-chunk
-metadata. The VFS-facing runtime boundary is the abstract `chunk::Chunk`:
-reads and writes use **chunk-relative offsets**, `Flush()` publishes pending
-data, `TruncateLocal()` changes only mount-local state, and
-`HasPendingWrites()` is the only dirty-state query exposed to VFS. The current
-implementation is `COWChunk`. A `Chunk` read returns exactly the
-requested in-chunk range; uncovered bytes inside an existing logical chunk are
-zero-filled by the chunk implementation rather than inferred from physical
-layout by `FileReadWriter`.
-
-Mechanism ownership is explicit in the source tree. Mechanism-neutral runtime
-contracts and orchestration remain under `src/chunk/` and
-`src/chunk/internal/`, while COW-only runtime, object-key, cleanup, buffering,
-and bridge implementation live under `src/chunk/cow/` in the
-`swordfs::chunk::cow` namespace. Future mechanisms such as chunk-slice use peer
-mechanism directories/namespaces rather than adding mechanism-specific helpers
-back into the chunk root.
-
-`ChunkFactory::Open(ino, index, create_if_missing, out)` is the sole VFS
-construction path. An existing logical chunk returns an initialized `Chunk`;
-a lookup-only miss returns `OK` with `nullptr`; and a create-on-miss returns an
-empty usable chunk. The factory is concrete and mount-owned so mechanism
-selection does not become another public polymorphic API.
-
-Metadata transactions own only FileMetadata reachability: the inode EOF
-and typed `chunk_refs:<ino>` logical index to ChunkID map. The COW selected
-`ChunkMetadata` owns per-ChunkID `COWChunkHead{revision,size}` and private
-revision allocation. `VolumeImpl` opens this capability and passes it through
-`ChunkFactory`; a pure `ChunkCleanupWorkEncoder` serializes detached work
-without sharing mutable metadata or participating in Redis transactions.
-
-Immutable object keys are determined by `(ChunkID,COWChunkRevision)`, not by
-inode number or logical index. The generic metadata layer must not interpret
-private COW revisions or object-key encodings. Direct `SetAttr(kSize)` is
-rejected so `FileReadWriter` can coordinate EOF and retained-boundary COW
-sanitation under the inode operation lock.
-
-S3 requests that can block a foreground filesystem operation also require a
-finite terminal-completion policy owned by SwordFS. Transport low-speed
-detection is not sufficient by itself: a pathological connection may continue
-to transfer a small amount of data and therefore remain above the low-speed
-threshold while retaining a FUSE request indefinitely. Runtime data-engine
-options therefore carry an absolute request deadline and a finite retry budget;
-the S3 client must apply both at the actual HTTP request boundary rather than
-detaching work behind a FUSE- or executor-level timer. A timeout bounds how
-long SwordFS waits for the backend result; for mutations it does not by itself
-prove that the remote operation was not applied.
-
-Within one inode, `FileReadWriter` uses a fiber read/write lock around file operations. Reads take the shared side, while write/flush/truncate-style state changes take the exclusive side. This allows concurrent reads without allowing local chunk publication/truncation state to race incompatible mutations on the same inode runtime object.
+Blocking data-engine operations have a finite request deadline and retry
+budget; a network timeout does not prove a remote mutation was not applied.
 
 ## 9. Write and publication path
 
-For COW, immutable object bytes are uploaded before publishing their private
-head. A dirty local buffer is never authoritative shared metadata.
+A successful buffered write only updates the local dirty view. The Slice
+implementation freezes dirty ranges, including optional 1 MiB window-RMW
+coalescing, into immutable objects. Coalescing is a cache optimization, not
+another persistent Chunk type. A `SliceRecord` associates a logical range
+with an immutable Slice object and its object offset.
 
 ### 9.1 First attachment
 
-The writer allocates a fresh ChunkID and its first private revision, uploads
-immutable bytes, then publishes the private COW head with compare-and-swap.
-`AttachPrepared(ino,index,id,end,expected)` atomically attaches the identity
-in FileMetadata only if EOF, boundary and existing mapping still match.
-Conflicting attachments are resolved from the latest authoritative state.
+A new logical chunk allocates a fresh ChunkID and creates its nonempty private
+Slice record index before the FileMetadata `AttachPrepared` transaction
+conditionally attaches that ChunkID and publishes the authoritative EOF.
+Objects are written before the referencing private record becomes visible.
+A failed attachment may leave an orphan object/index, never an attachment to
+unwritten data.
 
 ### 9.2 Rewrite and flush
 
-A rewrite keeps the same attached ChunkID, uploads a new per-ID revision, and
-CAS-publishes a new COW head. `FinalizeAttachedWrite` then checks the attached
-identity and the FileMetadata EOF/boundary precondition. New head revisions
-supersede old ones for **all** reads, with no snapshot semantics. After known
-success the old private revision is merely a best-effort cleanup candidate.
+An attached ChunkID appends new immutable Slice records; overlapping records
+resolve in publication order. The FileMetadata finalization validates the
+attached identity and EOF preconditions. Later readback overlays the latest
+committed record data onto earlier ranges, with local dirty bytes taking
+precedence while pending.
 
 ### 9.3 Failure boundary
 
-The private COW head and FileMetadata are separate transactional domains.
-Object upload does not prove publication; CAS alone does not prove the entire
-write completed. On ambiguous Redis outcomes, reread authority before retry.
-A failed cleanup enqueue may leak storage, but cannot invalidate a known
-successful write. No common descriptor or dual-write path remains.
+A successful object Put is not proof of publication. Ambiguous Redis responses
+must reconcile authoritative private index and FileMetadata state before
+retry. The writer must not blindly append a duplicate record or publish an
+old dirty generation over a newer one. Physical Slice cleanup is **not
+enabled**: opaque detach/reclaim work is retained until #273 proves safe
+reachability and reader-lifetime constraints.
 
 ## 10. Read path
 
-`FileReadWriter` maps a byte range onto logical chunk indexes.
+`FileReadWriter` maps a requested byte range onto bounded logical chunk
+indexes. Every offset and length is checked before lookup; invalid requests
+cannot partially mutate cached state. A missing mapping within EOF represents
+a sparse hole. `SliceChunk::Read` resolves persisted Slice records, overlays
+pending local dirty ranges in acceptance order, and zero-fills uncovered
+regions; a read spanning multiple chunks can submit independent read fibers.
 
-The mapping has one checked coordinate contract shared by reads, writes, and
-cached truncate bookkeeping. It never narrows through a 32-bit intermediate;
-write range validation happens before the first chunk lookup so an invalid
-range cannot leave a partially dirtied cache or live-size update.
-
-For each range:
-
-- if a logical chunk exists, `Chunk::Read` serves the exact requested in-chunk range and zero-fills any uncovered bytes;
-- a dirty/writing chunk reads from its local `WriteBuf`;
-- a flushed chunk reads the authoritative revision from the data engine;
-- if no logical chunk exists, `FileReadWriter` fills the hole with zeroes up to the next chunk boundary.
-
-Reads spanning multiple chunks may submit individual chunk reads as concurrent fibers, then wait for all of them before returning the assembled range.
-
-S3 ranged reads write response data directly into the caller-provided buffer through a preallocated response stream, avoiding an intermediate string copy in the SwordFS data path.
+S3 ranged reads fill caller-provided buffers directly rather than requiring
+an additional string copy.
 
 ## 11. Flush, fsync, close, and visibility
 
-`FileReadWriter::Flush` walks locally cached flushable chunks and flushes each one. A successfully published chunk remains cached in `kClean` state so later reads use the authoritative published object identity.
-
-The maximum number of concurrently submitted chunk flushes is an explicit
-`FileReadWriter` construction dependency. `InodeHandle` snapshots the configured
-storage-thread count when it creates the inode-shared writer, so the data path
-does not repeatedly consult mutable process-wide configuration while flushing.
-
-An ordinary successful `write(2)` only means the bytes were accepted into this
-mount's userspace `WriteBuf`; it is **not** a persistence acknowledgement. The
-current VFS maps FUSE flush/fsync-style file operations to the userspace flush
-path. A successful implemented flush/fsync means each flushed dirty chunk has
-completed its object `Put` and received a known-success metadata publication.
-The final descriptor close performs the same flush before releasing its last
-open reference. `O_SYNC` / `O_DSYNC` write-through semantics are not currently
-implemented.
-
-SwordFS does not add an independent disk/replica barrier after the external
-data/metadata engines acknowledge their operations. End-to-end power-loss
-durability is therefore bounded by the durability configuration and completion
-contract of those services (for example, Redis persistence/HA policy and the
-object store's `Put` contract).
-
-Cleanup of superseded or rejected immutable objects is deliberately outside
-this persistence acknowledgement. Failure to register or execute cleanup may
-leave garbage, but does not turn a known-success publication into failure.
-Because writeback cache is disabled, SwordFS keeps direct control over dirty
-chunk publication rather than depending on kernel writeback behavior to define
-visibility.
-
-On the final descriptor close, the `InodeHandle` keeps the reference alive until flush finishes, then releases the reference. The close path itself does not perform inode garbage collection; it wakes `OrphanReclaimer` so any durable logical orphan can be reconsidered promptly.
+`Flush` publishes dirty immutable Slice objects and their metadata, subject
+to the configured per-file chunk concurrency bound. A successful buffered
+`write(2)` is **not** a persistence acknowledgement; flush/fsync-style
+operations wait for recognized publication success. The final close flushes
+before releasing the final local open reference. `O_SYNC` / `O_DSYNC`
+write-through is not yet implemented. Persistence after backend acknowledgements
+is bounded by Redis and object-store durability policies, not a separate
+SwordFS disk barrier. Unreachable objects may leak while safe physical
+cleanup is disabled.
 
 ### 11.1 Open/close ordering against reclaim
 
-The critical ordering is reference acquisition **before** metadata validation:
-
-1. `Open` checks the local fence and increments the open count under the same
-   lock. If reclaim already owns the fence, open fails.
-2. It validates authoritative metadata after kernel authorization. `O_TRUNC`
-   then truncates through the shared `FileReadWriter`. Failure releases the
-   acquired reference.
-3. Unlink may remove the last name while this reference exists. The inode
-   remains an orphan candidate; reclaim cannot claim the local fence yet.
-4. A non-final close drops its reference. The final close retains its reference
-   during flush, then drops it even if flush returns an error. A close error
-   must not be interpreted as successful persistence.
-5. Once the count is zero, reclaim can claim the fence and attempt preparation.
-   A concurrent open either acquired its reference first or sees the fence;
-   it cannot pass between the fence check and count increment.
-
-This fence covers one mount; it is not a distributed open-file lease. Flush
-publishes chunks individually: if one fails, others may already be published.
-It is not an atomic whole-file commit.
+An open must acquire its local reference before authoritative metadata
+validation. The reclaim fence and open counter cannot race: if a final
+unlink occurs while a descriptor remains open, it becomes an orphan rather
+than deleting its reachable inode. Final close releases the reference after
+flush and wakes the orphan worker. The fence is mount-local, not a
+distributed open lease.
 
 ## 12. Truncate behavior
 
-Truncate changes authoritative file metadata before it updates the local chunk
-map. Cleanup completeness is not a precondition for the metadata mutation.
+The per-inode operation lock serializes truncate against writes and flushes.
+FileMetadata commits EOF and detached chunk mappings under checked,
+optimistic transaction preconditions; `SliceChunk` sanitizes retained
+boundary state so a later grow does not reveal discarded bytes. Local cached
+chunks beyond the new EOF are invalidated. Detached identities generate
+opaque Slice cleanup work, **not physical object deletions**. Pending work
+can remain indefinitely until a future safe Slice GC implementation.
 
-The per-inode exclusive operation lock covers this sequence:
-
-1. Commit the new inode size and prune or clamp authoritative logical chunk
-   heads. The private metadata bridge updates mechanism-private metadata in the same metadata
-   transaction and freezes opaque cleanup candidates for detached data.
-2. Best-effort register those candidates in `pending_deletes` after a
-   **known-success** metadata outcome. Registration failure is logged and may
-   leak garbage, but does not invalidate the already-known truncate result.
-3. Drop cached chunks wholly beyond the new end and shorten the boundary
-   chunk. For a dirty rewrite, also clamp its saved CAS expectation.
-4. Return without coupling the VFS data path to physical cleanup. Durable
-   pending-delete work is discovered by chunk GC at startup/periodic scan.
-
-Serializing size changes with writes and flushes prevents a local pending
-write from racing truncate and republishing the removed range.
-
-Pending-delete state uses an opaque mechanism-defined queue identity rather
-than a mutable inode-level batch. Repeated truncates therefore cannot
-overwrite earlier cleanup generations. Replay validates the common envelope
-and persisted Hash field; private chunk GC validates the private payload
-and checks current authoritative metadata before deleting data. For
-`cow`, this includes matching the frozen object key, derived key,
-canonical chunk layout, and live head. Queue membership is never itself
-permission to delete: cleanup candidates can become stale relative to
-authoritative metadata.
-
-Whole chunks at or beyond the new EOF are detached and queued. A partial
-boundary chunk is not queued for deletion because its immutable object remains
-the backing object for the surviving prefix; only its authoritative descriptor
-size is clamped.
-
-Persistent backends drive truncate from **materialized chunk metadata**, not
-from logical file length. Redis scans the actual `chunk:<ino>` Hash under the
-optimistic transaction, so a huge sparse file costs O(materialized chunks)
-rather than O(logical chunk positions).
+Sparse truncate planning scans materialized mappings, not every possible
+logical chunk index. Partial/ambiguous Redis outcomes must be reconciled from
+authoritative state before acknowledging a size change.
 
 ## 13. Runtime and concurrency model
 
@@ -764,9 +650,7 @@ stateDiagram-v2
     Live --> OrphanCandidate: atomic unlink/rename-overwrite reaches nlink=0
     OrphanCandidate --> Live: concurrent Link revives inode before prepare
     OrphanCandidate --> PendingReclaim: PrepareReclaim succeeds
-    PendingReclaim --> PendingReclaim: delete fails / process restarts
-    PendingReclaim --> Reclaimed: all frozen objects deleted + CompleteReclaim
-    Reclaimed --> [*]
+    PendingReclaim --> PendingReclaim: deferred Slice cleanup / process restarts
 ```
 
 The **metadata point of no return** is `PrepareReclaim`.
@@ -780,11 +664,11 @@ In one atomic metadata transition it must:
    transaction, so a later hard link cannot revive an inode whose data is
    being deleted.
 
-After this point, the frozen `ReclaimWork` is private input to chunk GC. Before
-physical deletion, chunk GC still checks that the live inode is absent. This
-fails closed if a Redis `EXEC` applied a pending record without completing
-live-inode removal. `IMetaEngine::PrepareReclaim` intentionally returns no
-physical identities to VFS.
+After this point, `ReclaimWork` remains a durable, opaque deferred cleanup
+record; there is no active physical Slice GC worker. The future #273 cleanup
+implementation must revalidate authority and fail closed if a Redis `EXEC`
+published pending work without completing live-inode removal.
+`IMetaEngine::PrepareReclaim` never returns physical identities to VFS.
 
 ### 14.2 Open-file fence
 
@@ -799,58 +683,19 @@ If a file has been unlinked while still open, the durable orphan remains in meta
 
 Once metadata preparation removes the live inode, the local fence can be released even while object deletion continues: new opens can no longer find the inode through authoritative metadata.
 
-### 14.3 Split orphan handoff and private chunk GC
+### 14.3 Orphan handoff and deferred Slice maintenance
 
-Cleanup is intentionally split across two ownership domains.
+`vfs::OrphanReclaimer` scans durable orphan candidates, acquires the local
+reclaim fence, calls `PrepareReclaim`, and releases the fence after a safe
+metadata outcome. It never deletes Slice objects or decodes private object
+identities. Redis retains opaque `ReclaimWork` and `PendingDelete` records;
+the Slice encoder serializes detached ChunkID references but authorizes no
+physical deletion.
 
-`vfs::OrphanReclaimer` owns only namespace/runtime handoff:
-
-1. scan durable orphan candidates;
-2. acquire the local `InodeHandle` reclaim fence;
-3. call `PrepareReclaim(ino)`;
-4. release the local fence once metadata has either prepared the reclaim or
-   reported a safe no-op.
-
-It never scans `PendingDelete`/`ReclaimWork`, never decodes physical identities,
-and never calls the data engine.
-
-`chunk::internal::ChunkGcWorker` owns physical cleanup:
-
-1. replay a bounded batch of pending-delete records from truncate/publication;
-2. revalidate that each pending-delete target is no longer authoritative;
-3. replay pending inode `ReclaimWork` records;
-4. fail closed while a supposedly reclaimed inode is still live;
-5. delete physical objects idempotently;
-6. acknowledge pending-delete records or call `CompleteReclaim` only after all
-   required deletes succeed.
-
-Both workers run once immediately at mount startup and periodically as a safety
-scan. The orphan worker also receives namespace/final-close wakeups. Chunk GC
-may self-wake when a bounded pending-delete scan reports more work; its
-correctness does not depend on foreground VFS wake coupling. Failed object
-deletion leaves the durable record intact, so a later pass or mount retries it.
-
-Pending-delete replay is deliberately bounded so a large object-cleanup
-backlog cannot monopolize one reconciliation pass. The bound applies to visitor
-work, while buffering is backend-specific: Redis pages through the durable set
-with `HSCAN`. The metadata backend reports whether its current scan cycle has
-more work; the chunk-GC worker still
-processes pending inode reclaims in the current pass, then self-wakes for
-another pending-delete batch. A still-authoritative stale
-candidate therefore consumes only its current scan position and cannot
-permanently pin later obsolete candidates behind it.
-
-The Redis continuation cursor is process-local scheduling state, not durable
-metadata. Restart begins a new scan at cursor zero; successfully registered
-pending-delete records remain in Redis, and idempotent deletion/acknowledgement
-makes revisiting an item safe. Registration itself is best effort: a missing
-record may leak an obsolete object but cannot authorize deletion of live data.
-
-One completed Redis cursor cycle is not a claim that no new cleanup record
-exists: SCAN does not promise to return entries added during the iteration.
-Concurrent producers still wake the worker, and the periodic safety scan
-provides a bounded fallback when that wake is coalesced with continuation of
-the current cycle.
+The retired COW-only `ChunkGcWorker` and participant scaffolding were removed
+because they no longer had any production caller. #273 must design and test
+private-index reachability and reader-lifetime checks before introducing a
+new physical Slice cleanup worker.
 
 ## 15. Crash, retry, and ambiguous-result principles
 
@@ -858,28 +703,12 @@ Several architecture rules exist specifically because external systems can fail 
 
 ### 15.1 Chunk publication
 
-Writing the object before metadata publication means a failure can leave an **unreferenced object**, but it must not expose metadata that points at data which was never successfully uploaded.
-
-Retry logic first checks authoritative metadata:
-
-- if the same replacement descriptor was already published, the operation can complete idempotently;
-- if another revision won and publication returns a known logical rejection,
-  the losing uploaded revision is terminal locally and is best-effort
-  registered for background cleanup;
-- if publication outcome is ambiguous, retry retains the same uploaded
-  candidate and resolves authoritative metadata before deciding whether the
-  object is live or obsolete;
-- once a revision receives a definite rejection, the local writer relinquishes
-  it and any later retry allocates a fresh revision, because background cleanup
-  may already have been registered for the rejected immutable key.
-
-For rewrites, a known successful publication makes the superseded old revision
-a cleanup candidate; registration happens afterward and is best effort. A crash
-or cleanup-registration failure may therefore leave an unreachable object. The
-same is true for a successful object `Put` whose later publication outcome is
-never resolved. These are accepted garbage/space leaks, not reader-visible
-corruption: no physical delete occurs without authoritative metadata proving
-the exact immutable key is no longer live.
+An object upload may succeed while its private record append or FileMetadata
+attachment is unconfirmed. A failed commit can leave unreachable data; an
+ambiguous commit must be reconciled by reading the authoritative Slice index
+and FileMetadata. Retrying blindly risks duplicate records or stale logical
+attachment. No failed outcome may authorize physical deletion of a potentially
+live Slice object.
 
 ### 15.2 Redis transaction ambiguity
 
@@ -887,20 +716,12 @@ After Redis EXEC, a timeout or connection close does not prove whether the serve
 
 ### 15.3 Reclaim
 
-After `PrepareReclaim`, failure is recoverable because the durable pending
-record contains mechanism-private frozen deletion targets. `CompleteReclaim` is
-delayed until deletion succeeds. Chunk GC first verifies that a live
-inode is absent, which also protects against a partially applied Redis
-transaction.
-
-Rewrite/truncate cleanup deliberately uses a weaker contract than last-link
-reclaim. After a known metadata outcome, obsolete immutable identities are
-best-effort registered in `pending_deletes`; registration or later deletion
-failure may leave garbage. The safety rule is stronger and simpler: every
-physical pending-delete operation re-reads authoritative metadata through the
-mechanism-specific chunk-GC logic and must not delete data that is still live.
-
-The architecture generally prefers **leaking unreachable data over deleting reachable data** when a failure leaves uncertainty.
+`PrepareReclaim` makes the inode non-revivable in persistent FileMetadata and
+freezes detached ChunkID identities into an opaque maintenance envelope.
+Ambiguous Redis outcomes require fresh reads. Slice physical GC is deliberately
+disabled, so unreferenced objects may leak but remain unavailable through the
+authoritative file mapping. The design prefers leaking unreachable objects over
+risking deletion of live data.
 
 ## 16. Performance-sensitive design choices
 
@@ -967,19 +788,17 @@ Future changes should preserve or explicitly revise the following contracts:
 
 1. **Authoritative metadata operations are atomic.** Namespace observers must not see intermediate composite-operation state.
 2. **Runtime filesystem metadata operations execute in the fiber domain; blocking backend IO executes in POSIX worker threads.**
-3. **Unpublished chunk data is not authoritative shared metadata.** An object upload precedes COW head CAS and typed FileMetadata attachment/EOF publication.
-4. **Published object identities are immutable and revisioned.** Revisions are volume-scoped, non-zero, monotonic, and not reused.
-5. **Rewrite publication is conditional.** A stale writer must not overwrite a newer authoritative chunk descriptor.
+3. **Unpublished chunk data is not authoritative shared metadata.** Immutable Slice data is written before its referencing private records and FileMetadata attachment are published.
+4. **Published object identities are immutable.** ChunkID and SliceID are nonzero volume-scoped identities not reused after detach.
+5. **Rewrite publication is conditional and ordered.** A stale writer must not erase a newer committed logical record or EOF.
+
 6. **Open-handle runtime state does not replace durable metadata.** Local fences protect transitions; they are not persistent lifecycle records.
 7. **Last-link deletion is recoverable.** The metadata mutation that removes the last name must durably publish cleanup work before the foreground request can forget the inode.
 8. **Deletion after reclaim uses mechanism-frozen targets.** The common
    metadata and VFS orphan layer do not reconstruct physical references from
    the logical chunk head after the point of no return.
-9. **Cleanup is best effort, but deletion safety is strict.** Rewrite/truncate
-   may leave unreachable data if cleanup registration or execution fails. A
-   pending-delete record is only a candidate; private chunk GC must
-   revalidate authoritative reachability before deleting physical data.
-10. **Data-engine deletion is idempotent.** Registered cleanup may replay the same immutable key after restart, timeout, or acknowledgement failure.
+9. **Slice physical deletion is disabled.** Cleanup work is deferred; no pending-delete entry authorizes removal without a future mechanism-specific reachability proof.
+10. **A future data-engine delete must be idempotent.** Queued cleanup may be retried after restart or an ambiguous response.
 11. **Ambiguous external commits are not assumed to have rolled back.** Retry/reconciliation semantics must be safe under either outcome.
 12. **Shutdown ordering respects borrowed lifetimes.** Background work stops before the fiber runtime and engines it uses are destroyed.
 
@@ -989,9 +808,9 @@ Any PR that changes one of these invariants should update this document as part 
 
 The following areas are intentionally not presented as solved architecture:
 
-- whole-chunk object-store rewrite amplification remains until a different data representation is introduced;
-- `chunk_slice` and `redis_cache` require their own `Chunk` implementations and
-  typed private chunk metadata before they can be selected in a volume format;
+- Slice record growth and compaction remain future work (#274);
+- safe Slice physical reclamation is blocked on private-index and reader-lifetime proofs (#273);
+- `redis_cache` has no implemented Chunk mechanism;
 - multi-mount/session ownership semantics are not represented by a distributed lease/session layer in the current architecture;
 - reclaim pending-work representation and progress tracking can be made more storage-native/compact over time;
 - GC backlog/age/throughput observability is still limited;
@@ -1009,7 +828,7 @@ The most useful source entry points are:
 | FUSE admission/replies | `src/fuse/Vfs.*` |
 | VFS semantics | `src/vfs/VfsImpl.*` |
 | open handles/runtime state | `src/vfs/FileHandle.*`, `src/vfs/InodeHandle.*`, `src/vfs/DirHandle.*` |
-| file/chunk IO | `src/vfs/FileReadWriter.*`, `src/chunk/Chunk.*`, `src/chunk/ChunkFactory.*`, `src/chunk/cow/COWChunk.*`, `src/chunk/cow/WriteBuf.*` |
+| file/chunk IO | `src/vfs/FileReadWriter.*`, `src/chunk/Chunk.*`, `src/chunk/ChunkFactory.*`, `src/chunk/slice/SliceChunk.*`, `src/chunk/slice/SliceRecord.*` |
 | FileMetadata authority and typed size transitions | `src/metadata/IMetaEngine.hpp`, `src/metadata/ChunkSizePlan.hpp` |
 | mechanism-private ChunkMetadata and cleanup encoding | `src/metadata/ChunkMetadata.hpp`, `src/chunk/internal/ChunkCleanupWorkEncoder.hpp` |
 | Redis metadata | `src/metadata/redis/` |
@@ -1017,6 +836,6 @@ The most useful source entry points are:
 | S3 data engine | `src/storage/s3/` |
 | runtime/concurrency | `src/utils/FiberRuntime.*`, `src/utils/BlockingExecutor.*`, `src/utils/Synchronization.hpp` |
 | orphan reclaim handoff | `src/vfs/OrphanReclaimer.*`, `src/vfs/InodeHandle.*` |
-| physical chunk GC/recovery | `src/chunk/internal/ChunkGcWorker.*`, `src/metadata/types/Reclaim.*` |
+| deferred cleanup records (no Slice physical GC) | `src/chunk/slice/SliceDeferredCleanup.*`, `src/metadata/types/Reclaim.*` |
 
 For Redis persistence details, see [Redis metadata: storage and transactions](redis-metadata-schema.md).

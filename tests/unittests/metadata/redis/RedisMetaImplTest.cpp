@@ -12,7 +12,6 @@
 #include <thread>
 
 #include "metadata/PosixAclTestSupport.hpp"
-#include "metadata/cow/COWChunkMetadata.hpp"
 #include "metadata/redis/RedisMetaImplTestBase.hpp"
 #include "metadata/redis/RedisMetaTestSupport.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"

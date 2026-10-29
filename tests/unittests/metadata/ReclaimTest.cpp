@@ -5,11 +5,10 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
-#include <vector>
 
-#include "chunk/cow/COWCleanup.hpp"
 #include "chunk/internal/ChunkCleanupWorkEncoder.hpp"
 #include "metadata/types/BufCodec.hpp"
 #include "metadata/types/Chunk.hpp"
@@ -18,15 +17,23 @@
 namespace swordfs::metadata {
 namespace {
 
+std::unique_ptr<chunk::internal::ChunkCleanupWorkEncoder> MakeEncoder() {
+  std::unique_ptr<chunk::internal::ChunkCleanupWorkEncoder> encoder;
+  EXPECT_TRUE(chunk::internal::CreateChunkCleanupWorkEncoder(ChunkType::kChunkSlice, &encoder).ok());
+  return encoder;
+}
+
 ReclaimWork MakeWork(InodeID ino = 42) {
   ReclaimWork work;
-  EXPECT_TRUE(chunk::cow::FreezeCOWDetachedReclaim(ino, {{0, ChunkID(1)}, {1, ChunkID(2)}}, &work).ok());
+  auto encoder = MakeEncoder();
+  EXPECT_TRUE(encoder->EncodeDetachedReclaim(ino, {{0, ChunkID(1)}, {1, ChunkID(2)}}, &work).ok());
   return work;
 }
 
 PendingDelete MakePendingDelete(InodeID ino = 42) {
   PendingDelete pending;
-  EXPECT_TRUE(chunk::cow::FreezeCOWDetachedDelete(ino, {3, ChunkID(7)}, &pending).ok());
+  auto encoder = MakeEncoder();
+  EXPECT_TRUE(encoder->EncodeDetachedDelete(ino, {3, ChunkID(7)}, &pending).ok());
   return pending;
 }
 
@@ -58,65 +65,29 @@ std::string EncodePendingDeleteEnvelope(std::string_view id, std::string_view pa
   return encoded;
 }
 
-TEST(ReclaimWorkTest, RoundTripsOpaqueEnvelopeAndTypedChunkIDMappings) {
+TEST(ReclaimWorkTest, RoundTripsOpaqueEnvelopeWithDeferredSliceMappings) {
   const ReclaimWork original = MakeWork();
   ReclaimWork parsed;
   ASSERT_TRUE(parsed.ParseFrom(SerializeOrDie(original)).ok());
   EXPECT_EQ(parsed, original);
   EXPECT_EQ(parsed.ino, 42U);
-
-  BufDecoder dec(parsed.payload);
-  uint32_t kind = 0;
-  uint64_t ino = 0;
-  uint32_t count = 0;
-  uint64_t index = 0;
-  uint64_t id = 0;
-  ASSERT_TRUE(dec.Header(RecordType::kCowTypedCleanup));
-  ASSERT_TRUE(dec.U32(&kind));
-  ASSERT_TRUE(dec.U64(&ino));
-  ASSERT_TRUE(dec.U32(&count));
-  EXPECT_EQ(kind, static_cast<uint32_t>(chunk::cow::COWCleanupKind::kDetachedReclaim));
-  EXPECT_EQ(ino, 42U);
-  EXPECT_EQ(count, 2U);
-  ASSERT_TRUE(dec.U64(&index));
-  ASSERT_TRUE(dec.U64(&id));
-  EXPECT_EQ(index, 0U);
-  EXPECT_EQ(id, 1U);
-  ASSERT_TRUE(dec.U64(&index));
-  ASSERT_TRUE(dec.U64(&id));
-  EXPECT_EQ(index, 1U);
-  EXPECT_EQ(id, 2U);
-  EXPECT_TRUE(dec.Done());
+  EXPECT_EQ(parsed.payload, "slice:reclaim:42:0,1:1,2");
 }
 
-TEST(ReclaimWorkTest, TypedChunkIndexPreserves64BitIdentity) {
+TEST(ReclaimWorkTest, DeferredSliceChunkIndexPreserves64BitIdentity) {
   constexpr ChunkIndex kHighIndex = (uint64_t{1} << 32) + 9;
   ReclaimWork work;
-  ASSERT_TRUE(chunk::cow::FreezeCOWDetachedReclaim(42, {{kHighIndex, ChunkID(17)}}, &work).ok());
-  BufDecoder dec(work.payload);
-  uint32_t kind = 0;
-  uint32_t count = 0;
-  uint64_t ino = 0;
-  uint64_t index = 0;
-  uint64_t id = 0;
-  ASSERT_TRUE(dec.Header(RecordType::kCowTypedCleanup));
-  dec.U32(&kind);
-  dec.U64(&ino);
-  dec.U32(&count);
-  dec.U64(&index);
-  dec.U64(&id);
-  EXPECT_TRUE(dec.Done());
-  EXPECT_EQ(index, kHighIndex);
-  EXPECT_EQ(id, 17U);
+  ASSERT_TRUE(MakeEncoder()->EncodeDetachedReclaim(42, {{kHighIndex, ChunkID(17)}}, &work).ok());
+  EXPECT_EQ(work.payload, "slice:reclaim:42:" + std::to_string(kHighIndex) + ",17");
 }
 
-TEST(ReclaimWorkTest, EmptyInodeStillFreezesAValidTypedPayload) {
+TEST(ReclaimWorkTest, EmptyInodeStillFreezesAValidOpaquePayload) {
   ReclaimWork work;
-  ASSERT_TRUE(chunk::cow::FreezeCOWDetachedReclaim(7, {}, &work).ok());
+  ASSERT_TRUE(MakeEncoder()->EncodeDetachedReclaim(7, {}, &work).ok());
   ReclaimWork parsed;
   ASSERT_TRUE(parsed.ParseFrom(SerializeOrDie(work)).ok());
   EXPECT_EQ(parsed, work);
-  EXPECT_FALSE(parsed.payload.empty());
+  EXPECT_EQ(parsed.payload, "slice:reclaim:7");
 }
 
 TEST(ReclaimWorkTest, EqualityIncludesEnvelopeAndOpaquePayload) {
@@ -152,34 +123,13 @@ TEST(ReclaimWorkTest, RejectsInvalidEnvelopeOnWriteAndRead) {
   EXPECT_EQ(parsed.ParseFrom(EncodeReclaimEnvelope(42, "")).ToErrno(), EIO);
 }
 
-TEST(ReclaimWorkTest, TypedCleanupFreezeRejectsInvalidReferences) {
-  ReclaimWork work;
-  EXPECT_EQ(chunk::cow::FreezeCOWDetachedReclaim(0, {}, &work).ToErrno(), EINVAL);
-  EXPECT_EQ(chunk::cow::FreezeCOWDetachedReclaim(42, {}, nullptr).ToErrno(), EINVAL);
-  EXPECT_EQ(chunk::cow::FreezeCOWDetachedReclaim(42, {{0, ChunkID(0)}}, &work).ToErrno(), EINVAL);
-}
-
-TEST(PendingDeleteTest, RoundTripsOpaqueEnvelopeAndTypedChunkID) {
+TEST(PendingDeleteTest, RoundTripsOpaqueEnvelopeAndDeferredSliceIdentity) {
   const auto original = MakePendingDelete();
   PendingDelete parsed;
   ASSERT_TRUE(parsed.ParseFrom(SerializeOrDie(original)).ok());
   EXPECT_EQ(parsed, original);
-  EXPECT_EQ(parsed.id, "cow:chunk:7");
-  BufDecoder dec(parsed.payload);
-  uint32_t kind = 0;
-  uint64_t ino = 0;
-  uint64_t index = 0;
-  uint64_t id = 0;
-  ASSERT_TRUE(dec.Header(RecordType::kCowTypedCleanup));
-  dec.U32(&kind);
-  dec.U64(&ino);
-  dec.U64(&index);
-  dec.U64(&id);
-  EXPECT_TRUE(dec.Done());
-  EXPECT_EQ(kind, static_cast<uint32_t>(chunk::cow::COWCleanupKind::kDetachedChunk));
-  EXPECT_EQ(ino, 42U);
-  EXPECT_EQ(index, 3U);
-  EXPECT_EQ(id, 7U);
+  EXPECT_EQ(parsed.id, "slice:chunk:7");
+  EXPECT_EQ(parsed.payload, "slice:detached:42:3:7");
 }
 
 TEST(PendingDeleteTest, RejectsInvalidEnvelopeOnWriteAndRead) {
@@ -202,34 +152,12 @@ TEST(PendingDeleteTest, RejectsInvalidEnvelopeOnWriteAndRead) {
   EXPECT_EQ(parsed.ParseFrom(EncodePendingDeleteEnvelope("id", "")).ToErrno(), EIO);
 }
 
-TEST(PendingDeleteTest, TypedCleanupFreezeRejectsInvalidIdentity) {
-  PendingDelete pending;
-  EXPECT_EQ(chunk::cow::FreezeCOWDetachedDelete(0, {0, ChunkID(1)}, &pending).ToErrno(), EINVAL);
-  EXPECT_EQ(chunk::cow::FreezeCOWDetachedDelete(42, {0, ChunkID(0)}, &pending).ToErrno(), EINVAL);
-  EXPECT_EQ(chunk::cow::FreezeCOWDetachedDelete(42, {0, ChunkID(1)}, nullptr).ToErrno(), EINVAL);
-}
-
-TEST(ChunkCleanupWorkEncoderTest, SelectsCOWAndEncodesOnlyDetachedTypedIdentities) {
+TEST(ChunkCleanupWorkEncoderTest, RejectsRetiredAndUnknownMechanisms) {
   std::unique_ptr<chunk::internal::ChunkCleanupWorkEncoder> encoder;
-  ASSERT_TRUE(chunk::internal::CreateChunkCleanupWorkEncoder(ChunkType::kCow, &encoder).ok());
-  ASSERT_NE(encoder, nullptr);
-
-  PendingDelete pending;
-  ASSERT_TRUE(encoder->EncodeDetachedDelete(42, {3, ChunkID(7)}, &pending).ok());
-  EXPECT_EQ(pending, MakePendingDelete());
-
-  ReclaimWork reclaim;
-  ASSERT_TRUE(encoder->EncodeDetachedReclaim(42, {{0, ChunkID(1)}, {1, ChunkID(2)}}, &reclaim).ok());
-  EXPECT_EQ(reclaim, MakeWork());
-  EXPECT_EQ(encoder->EncodeDetachedDelete(42, {0, ChunkID(0)}, &pending).ToErrno(), EINVAL);
-  EXPECT_EQ(encoder->EncodeDetachedReclaim(42, {{0, ChunkID(0)}}, &reclaim).ToErrno(), EINVAL);
-}
-
-TEST(ChunkCleanupWorkEncoderTest, InvalidConstructionFailsWithoutChangingOutput) {
-  std::unique_ptr<chunk::internal::ChunkCleanupWorkEncoder> encoder;
-  EXPECT_EQ(chunk::internal::CreateChunkCleanupWorkEncoder(ChunkType::kCow, nullptr).ToErrno(), EINVAL);
+  EXPECT_EQ(chunk::internal::CreateChunkCleanupWorkEncoder(ChunkType::kCow, &encoder).ToErrno(), ENOSYS);
   EXPECT_EQ(chunk::internal::CreateChunkCleanupWorkEncoder(ChunkType::kRedisCache, &encoder).ToErrno(), ENOSYS);
   EXPECT_EQ(encoder, nullptr);
+  EXPECT_EQ(chunk::internal::CreateChunkCleanupWorkEncoder(ChunkType::kChunkSlice, nullptr).ToErrno(), EINVAL);
 }
 
 }  // namespace

@@ -316,7 +316,6 @@ int RunMount() {
   // as well so the thread can never outlive the engines it borrows, even if
   // the session never delivered the callback.
   swordfs::vfs::OrphanReclaimer::Instance().Stop();
-  swordfs::volume::VolumeImpl::Instance().StopRuntimeServices();
   swordfs::volume::VolumeImpl::Instance().Shutdown();
   return ret;
 }

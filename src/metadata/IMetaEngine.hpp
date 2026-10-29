@@ -97,7 +97,7 @@ class IMetaEngine {
   virtual ~IMetaEngine() = default;
 
   // #317's typed logical attachment contract. FileMetadata mutations are
-  // atomic only within this domain; callers prepare/update COWChunkMetadata
+  // atomic only within this domain; the mechanism owns its private metadata
   // independently and never persist a COW revision in these operations.
   virtual Status ReadFileChunkSnapshot(InodeID, ChunkIndex, FileChunkSnapshot *) = 0;
   virtual Status ReadFileMappingSnapshot(InodeID, FileMappingSnapshot *) = 0;

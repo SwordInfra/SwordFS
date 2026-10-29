@@ -40,10 +40,11 @@ class ConformanceChunkTypeTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, "type=chunk_slice\narg=\n")
 
-    def test_explicit_cow_preserves_legacy_regression_format(self) -> None:
+    def test_explicit_retired_cow_fails_closed(self) -> None:
         result = self.inspect("cow")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "type=cow\narg=--chunk-type\narg=cow\n")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("unsupported conformance chunk type: cow", result.stderr)
 
     def test_unknown_and_shell_metacharacters_fail_closed(self) -> None:
         for value in ("redis_cache", "slice", "chunk_slice; exit 0", "cow --bucket evil"):

@@ -19,10 +19,10 @@ SUFFIXES = {".cpp", ".hpp", ".cc", ".h"}
 # name rather than access to a Redis metadata backend.
 FORBIDDEN = (
     re.compile(r'#\s*include\s*[<"][^">]*(?:metadata/redis/|sw/redis\+\+/|hiredis/)'),
-    re.compile(r'\b(?:swordfs::)?metadata::(?:redis\b|Redis(?:Meta|Key|Kv|Codec|Backend|COWChunk))'),
+    re.compile(r'\b(?:swordfs::)?metadata::(?:redis\b|Redis(?:Meta|Key|Kv|Codec|Backend))'),
     re.compile(r'\busing\s+(?:namespace\s+)?(?:swordfs::)?metadata::redis\b'),
     re.compile(r'\bsw::redis\b'),
-    re.compile(r'\b(?:RedisMeta(?:Impl|Ops|Txn|Client|Config)|RedisBackendContext|RedisKvTxn|RedisCOWChunkMetadata)\b'),
+    re.compile(r'\b(?:RedisMeta(?:Impl|Ops|Txn|Client|Config)|RedisBackendContext|RedisKvTxn)\b'),
 )
 
 
