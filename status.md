@@ -50,7 +50,7 @@ Latest run: **PASS**
 - runner: `Linux`
 
 Authoritative CI run: https://github.com/SwordInfra/SwordFS/actions/runs/40804825940
-Recorded at: 2026-10-29T02:19:29+00:00
+Recorded at: 2026-10-29T02:44:03+00:00
 
 Mechanism: `chunk_slice` (previous COW history retained separately in `history.json`)
 
