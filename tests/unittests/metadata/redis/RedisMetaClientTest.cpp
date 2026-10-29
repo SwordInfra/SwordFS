@@ -851,16 +851,6 @@ TEST(RedisMetaClientTest, DirectIncrReplyErrorIsKnownFailure) {
   EXPECT_TRUE(server.error().empty()) << server.error();
 }
 
-TEST(RedisMetaClientTest, ValidatedIncrRejectsNullOutputBeforeRedisIo) {
-  RedisMetaConfig config;
-  config.host = "127.0.0.1";
-  config.port = 1;
-  config.retry_attempts = 1;
-  RedisMetaClient store(config);
-
-  EXPECT_EQ(store.IncrNonNegative("counter", nullptr).ToErrno(), EINVAL);
-}
-
 TEST(RedisMetaClientTest, DirectIncrLostAcknowledgementIsOutcomeUnknownForBothDurableOutcomes) {
   for (const auto scenario :
        {RedisFaultScenario::kIncrProtocolFailureApplied, RedisFaultScenario::kIncrDisconnectNotApplied}) {

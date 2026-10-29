@@ -280,10 +280,9 @@ bool Fixture::FormatVolume() {
   std::ostringstream cmd;
   cmd << FindSwordfsBin() << " --log-file " << FormatLogPath() << " format" << " --volume " << volume_name_
       << " --meta " << metadata_url << " --bucket " << bucket_url_;
-  // Dedicated integration jobs explicitly choose Slice without changing the
-  // normal COW fixture or letting a shell metacharacter enter this command.
+  // Explicit E2E configuration accepts only the supported Slice mechanism.
   if (const char *chunk_type = std::getenv("SWORDFS_E2E_CHUNK_TYPE"); chunk_type != nullptr && chunk_type[0] != '\0') {
-    if (std::strcmp(chunk_type, "cow") != 0 && std::strcmp(chunk_type, "chunk_slice") != 0) {
+    if (std::strcmp(chunk_type, "chunk_slice") != 0) {
       std::fprintf(stderr, "E2E: unsupported test chunk type %s\n", chunk_type);
       return false;
     }

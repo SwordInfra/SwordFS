@@ -7,9 +7,6 @@ CONFORMANCE_FORMAT_CHUNK_ARGS=()
 case "${CONFORMANCE_CHUNK_TYPE}" in
   chunk_slice)
     ;;
-  cow)
-    CONFORMANCE_FORMAT_CHUNK_ARGS=(--chunk-type cow)
-    ;;
   *)
     echo "ERROR: unsupported conformance chunk type: ${CONFORMANCE_CHUNK_TYPE}" >&2
     return 2

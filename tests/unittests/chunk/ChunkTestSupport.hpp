@@ -3,7 +3,7 @@
 
 #pragma once
 
-// Test-only logical Chunk runtime and backend doubles shared by COW and Slice.
+// Test-only logical Chunk runtime and backend doubles for Slice.
 // Keep mechanism-specific ChunkMetadata and factory selection in their own fixtures.
 
 #include <folly/fibers/Baton.h>
@@ -48,7 +48,7 @@ inline auto Buf(const std::string &value) {
   return *folly::IOBuf::copyBuffer(value.data(), value.size());
 }
 
-// Minimal FileMetadata test double shared by the COW and Slice chunk fixtures.
+// Minimal FileMetadata test double shared by Slice fixtures.
 class MissingMetaEngine : public IMetaEngine {
  public:
   void ConfigureChunkSize(uint64_t chunk_size) {
@@ -385,8 +385,8 @@ class NullDataEngine final : public IDataEngine {
   folly::fibers::Baton *put_release_{nullptr};
 };
 
-// Mechanism-neutral test doubles. Slice tests own them directly; COW tests
-// instead initialize VolumeImpl with its own instances for mount-level cases.
+// Minimal mechanism-neutral test doubles for the active Slice runtime.
+// Mount-level tests may independently inject VolumeImpl engines.
 class ChunkRuntimeTest : public ::testing::Test {
  protected:
   void InitializeLocalDoubles() {

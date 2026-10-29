@@ -592,7 +592,7 @@ TEST(RedisSliceChunkMetadataTest, FormatBootstrapsCounterAndOpensTypedSliceMetad
   auto typed = std::dynamic_pointer_cast<slice::SliceChunkMetadata>(base);
   ASSERT_NE(typed, nullptr);
   EXPECT_EQ(typed->Type(), ChunkType::kChunkSlice);
-  EXPECT_EQ(ops.OpenChunkMetadata(ChunkType::kCow, &base).ToErrno(), EINVAL);
+  EXPECT_EQ(ops.OpenChunkMetadata(ChunkType::kCow, &base).ToErrno(), ENOSYS);
   swordfs::test::RunInTestFiber([&] {
     SliceID first;
     ASSERT_TRUE(typed->AllocateSliceID(&first).ok());

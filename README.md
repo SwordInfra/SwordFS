@@ -33,13 +33,13 @@ SwordFS uses established filesystem and system test suites to track POSIX and Li
 | [fstests / xfstests](https://github.com/kdave/xfstests) | In progress | **145/145 supported cases passing**, 499 independently classified known gaps (645 selected; 1 deferred) | [Compatibility report](https://github.com/SwordInfra/SwordFS/blob/fstests-status/status.md) |
 | [stress-ng](https://github.com/ColinIanKing/stress-ng) | Planned | — | [#240](https://github.com/SwordInfra/SwordFS/issues/240) |
 
-The primary mounted CI conformance suites use Slice Chunk. Mechanism-specific
-COW unit tests and a bounded mounted E2E smoke remain enabled. These results
-measure the currently supported test population, not full upstream fstests
-compatibility. New volumes created without `--chunk-type` default to
-**Slice Chunk**. To create a COW volume for a dedicated regression, use
-`--chunk-type cow`; existing volumes retain their persisted mechanism at mount.
-Beta activation constraints, including safe Slice object reclamation,
+The primary mounted CI conformance suites and the sole implemented Chunk
+mechanism use **Slice Chunk**. New volumes default to Slice; the historical
+`cow` type remains decodable only to reject old volumes with a clear
+unsupported-mechanism error. `--chunk-type cow` cannot format a new volume,
+and old COW volumes are not silently migrated or mounted as Slice.
+These results measure the supported test population, not full upstream fstests
+compatibility. Beta activation constraints, including safe Slice object reclamation,
 compaction and dirty-memory bounds, are tracked by the separate
 [Slice activation milestone](https://github.com/SwordInfra/SwordFS/issues/275).
 

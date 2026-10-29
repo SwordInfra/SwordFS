@@ -228,7 +228,7 @@ TEST_F(CommandCoverageE2ETest, FormatReportsExistingVolumeFailure) {
   EXPECT_NE(RunProcess(FormatArgs()), 0);
 }
 
-TEST_F(CommandCoverageE2ETest, FormatPersistsImplicitSliceAndExplicitCow) {
+TEST_F(CommandCoverageE2ETest, FormatPersistsImplicitSliceAndRejectsRetiredCow) {
   const auto expect_persisted_type = [&](const std::string &volume_name, metadata::ChunkType expected) {
     metadata::RedisMetaConfig redis_config;
     auto status = metadata::ParseRedisMetaUrl(metadata_url_, &redis_config);
@@ -253,8 +253,14 @@ TEST_F(CommandCoverageE2ETest, FormatPersistsImplicitSliceAndExplicitCow) {
   const std::string cow_volume = volume_ + "cow";
   auto cow_args = FormatArgs(cow_volume);
   cow_args.insert(cow_args.end(), {"--chunk-type", "cow"});
-  ASSERT_EQ(RunProcess(std::move(cow_args)), 0);
-  expect_persisted_type(cow_volume, metadata::ChunkType::kCow);
+  EXPECT_NE(RunProcess(std::move(cow_args)), 0);
+  metadata::RedisMetaConfig config;
+  ASSERT_TRUE(metadata::ParseRedisMetaUrl(metadata_url_, &config).ok());
+  metadata::RedisMetaImpl rejected(config, cow_volume);
+  ASSERT_TRUE(rejected.Initialize().ok());
+  metadata::SwordFsVolume stored;
+  stored.name = cow_volume;
+  EXPECT_TRUE(rejected.LoadVolume(&stored).IsNotFound()) << "retired format cannot persist any partial volume record";
 }
 
 TEST_F(CommandCoverageE2ETest, MountRejectsRootRegularFileAndUncreatableMountpoints) {

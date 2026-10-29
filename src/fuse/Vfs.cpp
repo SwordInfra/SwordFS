@@ -283,7 +283,6 @@ void VfsHookFactory::SwordFsInit(void *userdata, struct fuse_conn_info *conn) {
   // and periodic safety scans. Durable metadata remains the restart authority;
   // there is no separate startup-reconciliation path racing the worker.
   ::swordfs::vfs::OrphanReclaimer::Instance().Start();
-  ::swordfs::volume::VolumeImpl::Instance().StartRuntimeServices();
 
   // Writeback cache is intentionally disabled: with it enabled the kernel
   // answers writes from its own page cache, which masks daemon-side
@@ -349,7 +348,6 @@ void VfsHookFactory::SwordFsDestroy(void *userdata) {
   // Stop the reclaim worker before the fiber runtime it borrows is torn
   // down (and before the engines go away in VolumeImpl::Shutdown).
   ::swordfs::vfs::OrphanReclaimer::Instance().Stop();
-  ::swordfs::volume::VolumeImpl::Instance().StopRuntimeServices();
   ::swordfs::utils::ShutdownFiberRuntime();
 }
 

@@ -78,16 +78,14 @@ deletion. Durable `ReclaimWork` owns deletion targets after that transition.
 
 ## Background reclaim scheduling
 
-`OrphanReclaimer` and private `ChunkGcWorker` each start a pass immediately and
-then run on coalesced wakeups or the five-second safety interval. Each control
-thread submits a pass as a fiber and waits on a completion baton. Both
-completion and submission rejection signal the baton.
+`OrphanReclaimer` starts a pass immediately and then runs on coalesced wakeups
+or a safety interval. Its control thread submits each pass as a fiber and waits
+on a completion baton; both completion and submission rejection signal it.
 
 The orphan worker only applies the mount-local open-handle fence and calls
-metadata `PrepareReclaim(ino)`. The chunk-GC worker independently replays
-durable pending-delete/reclaim queues and performs physical deletion. A bounded
-pending-delete scan may self-wake chunk GC for another batch. Orphan handoff is
-bounded in the same way: metadata visitors preserve a continuation point when
+metadata `PrepareReclaim(ino)`. No physical cleanup worker runs for Slice:
+pending-delete/reclaim queues are durable but deferred until #273. Orphan
+handoff is bounded: metadata visitors preserve a continuation point when
 the worker ends a batch, and the worker self-wakes for the next slice. A stop
 request aborts candidate visitation at that boundary instead of joining an
 entire durable orphan backlog, so unmount latency does not scale with the number
@@ -114,7 +112,7 @@ between an admission check and the shutdown drain. After admission closes,
 the last task signals the drain baton. Shutdown runs outside the driver fiber
 so it cannot wait for itself.
 
-Unmount stops and joins both background workers before draining runtimes, and
+Unmount stops and joins the orphan worker before draining runtimes, and
 destroys backend resources after their users finish. Global shutdown closes admission
 on all registered runtimes before joining them individually. Backend executor
 shutdown drains its workers.
@@ -125,4 +123,3 @@ shutdown drains its workers.
   and [`FiberRuntime.cpp`](../../src/utils/FiberRuntime.cpp).
 - Worker handoff: [`BlockingExecutor.hpp`](../../src/utils/BlockingExecutor.hpp).
 - Orphan scheduling: [`OrphanReclaimer.cpp`](../../src/vfs/OrphanReclaimer.cpp).
-- Physical chunk GC: [`ChunkGcWorker.cpp`](../../src/chunk/internal/ChunkGcWorker.cpp).

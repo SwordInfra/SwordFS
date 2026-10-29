@@ -41,11 +41,6 @@ class RedisMetaClient {
                                                 std::optional<std::string> *attachment,
                                                 std::optional<std::string> *eof_attachment, bool *matched);
   utils::Status Incr(std::string_view key, uint64_t *value);
-  // Atomically increment a missing/non-negative integer counter. Negative,
-  // malformed, and overflowed state is a known failure and is not mutated.
-  // Transport/protocol loss after the script may have executed is
-  // OutcomeUnknown, matching standalone INCR allocation semantics.
-  utils::Status IncrNonNegative(std::string_view key, uint64_t *value);
   // WATCH/GET/MULTI/SET/EXEC; missing/corrupt counters must not restart an
   // existing volume-scoped identity stream. No Lua or blind replay.
   utils::Status IncrExistingNonNegative(std::string_view key, uint64_t *value);

@@ -22,7 +22,6 @@ namespace swordfs {
 namespace chunk {
 class ChunkFactory;
 namespace internal {
-class ChunkGcWorker;
 class ChunkCleanupWorkEncoder;
 }  // namespace internal
 }  // namespace chunk
@@ -94,11 +93,6 @@ class VolumeImpl {
   /// Aws::ShutdownAPI() when AWS SDK resources are still alive.
   void Shutdown();
 
-  /// Start/stop mount-private services whose implementation must not leak to
-  /// VFS. These are lifecycle hooks, not cleanup work submission APIs.
-  void StartRuntimeServices();
-  void StopRuntimeServices();
-
   const swordfs::metadata::SwordFsVolume &config() const {
     return config_;
   }
@@ -128,10 +122,8 @@ class VolumeImpl {
   std::unique_ptr<swordfs::chunk::internal::ChunkCleanupWorkEncoder> cleanup_work_encoder_;
   std::unique_ptr<swordfs::metadata::IMetaEngine> meta_engine_;
   std::unique_ptr<swordfs::storage::IDataEngine> data_engine_;
-  // Runtime factory/GC borrow the engines and ChunkMetadata for the mounted
-  // volume lifetime, so they are destroyed first.
+  // The runtime factory borrows these engines and metadata for mount lifetime.
   std::unique_ptr<swordfs::chunk::ChunkFactory> chunk_factory_;
-  std::unique_ptr<swordfs::chunk::internal::ChunkGcWorker> chunk_gc_worker_;
 
   static std::unique_ptr<VolumeImpl> instance_;
 };
