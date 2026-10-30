@@ -31,7 +31,7 @@ utils::Status InodeHandle::Open(int flags) {
     return utils::Status::NotFound("inode is being reclaimed");
   }
 
-  // Performs existing-inode validation and the atime update.
+  // Validates an existing inode without mutating atime merely for opening.
   auto meta = volume::VolumeImpl::Instance().meta_engine();
   const uint64_t observed_flag_epoch = rw_->SnapshotInodeFlagEpoch();
   uint64_t authoritative_size = 0;
@@ -66,8 +66,8 @@ utils::Status InodeHandle::OpenCreated() {
   return utils::Status::OK();
 }
 
-utils::Status InodeHandle::Read(size_t size, off_t off, folly::IOBuf *out) {
-  return rw_->Read(size, off, out);
+utils::Status InodeHandle::Read(size_t size, off_t off, folly::IOBuf *out, bool record_access) {
+  return rw_->Read(size, off, out, record_access);
 }
 
 utils::Status InodeHandle::Write(const folly::IOBuf &buf, off_t off, int open_flags) {

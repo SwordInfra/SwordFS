@@ -525,10 +525,19 @@ Status RedisMetaImpl::Open(InodeID ino, uint64_t *size, InodeFlag *inode_flags) 
   if (inode_flags != nullptr) {
     *inode_flags = inode.attr.inode_flags;
   }
-  if (runtime::MountRuntimeBehavior::Instance().ImplicitAtimeUpdatesEnabled()) {
-    UpdateAtimeBestEffort(ino);
-  }
+  // POSIX open(2) is not a data-access event. Updating atime here also
+  // writes the entire Redis inode outside the per-inode Slice publication
+  // gate, invalidating an unrelated Flush's WATCH/EXEC transaction under
+  // concurrent aio-stress opens. Keep ordinary opens read-only.
   return Status::OK();
+}
+
+Status RedisMetaImpl::RecordReadAccess(InodeID ino) {
+  utils::ExpectInFiberDomain();
+  if (!runtime::MountRuntimeBehavior::Instance().ImplicitAtimeUpdatesEnabled()) {
+    return Status::OK();
+  }
+  return ops_.RecordReadAccess(ino);
 }
 
 Status RedisMetaImpl::PrepareReclaim(InodeID ino) {

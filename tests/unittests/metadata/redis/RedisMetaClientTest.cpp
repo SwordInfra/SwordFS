@@ -43,6 +43,43 @@ TEST(RedisMetaClientTest, BinaryValueRoundTrip) {
   cleanup.del(key);
 }
 
+// Advisory atime is allowed to fail without affecting file-data reads, but
+// Redis error replies and lost acknowledgements must remain distinguishable.
+TEST(RedisMetaClientTest, AdvisoryAtimeReportsKnownRedisReplyError) {
+  RedisMetaConfig config;
+  if (!ParseTestConfig(&config)) {
+    GTEST_SKIP() << "SWORDFS_REDIS_TEST_URL is not configured";
+  }
+  RedisMetaClient client(config);
+  sw::redis::Redis redis(ConnectionOptions(config));
+  const auto inode_key = UniqueRedisName("atime-inode-error");
+  const auto atime_key = UniqueRedisName("atime-sidecar-error");
+  const auto epoch_key = UniqueRedisName("atime-epoch-error");
+  redis.set(inode_key, "valid-inode-snapshot");
+  redis.hset(epoch_key, "not-an-integer", "value");
+
+  const auto status =
+      client.AdvanceAccessTimeIfInodeUnchanged(inode_key, atime_key, epoch_key, "valid-inode-snapshot", "0", 123);
+  EXPECT_EQ(status.ToErrno(), EIO);
+  EXPECT_FALSE(status.IsOutcomeUnknown());
+  EXPECT_FALSE(redis.get(atime_key).has_value());
+  redis.del(inode_key);
+  redis.del(atime_key);
+  redis.del(epoch_key);
+}
+
+TEST(RedisMetaClientTest, AdvisoryAtimeLostReplyMustNotClaimKnownOutcome) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.port = 1;  // No Redis listener is expected at the reserved test port.
+  config.connect_timeout = std::chrono::milliseconds(100);
+  config.socket_timeout = std::chrono::milliseconds(100);
+  RedisMetaClient client(config);
+
+  const auto status = client.AdvanceAccessTimeIfInodeUnchanged("inode", "atime", "epoch", "snapshot", "0", 123);
+  EXPECT_TRUE(status.IsOutcomeUnknown()) << status.message();
+}
+
 // #515 RED: coherent read-only metadata snapshots must not perform optimistic
 // WATCH/MULTI/EXEC transactions merely to read inode + chunk attachments.
 TEST(RedisMetaClientTest, ReadChunkAttachmentsIfUnchangedIsAtomicAndReadOnly) {
@@ -394,9 +431,34 @@ TEST(RedisMetaClientTest, WatchConflictRetryLimitReturnsUnavailable) {
 
   EXPECT_TRUE(status.IsUnavailable());
   EXPECT_EQ(status.ToErrno(), EIO);
-  EXPECT_EQ(status.message(), "Redis transaction retry limit exceeded");
+  EXPECT_NE(status.message().find("Redis transaction retry limit exceeded"), std::string::npos);
+  EXPECT_NE(status.message().find("watch_conflicts=3"), std::string::npos)
+      << "An exhausted WATCH conflict must be distinguishable from a transport failure";
+  EXPECT_NE(status.message().find("pre_exec_failures=0"), std::string::npos);
+  EXPECT_NE(status.message().find("connection_failures=0"), std::string::npos);
   EXPECT_EQ(attempts, 3);
   other.del(key);
+}
+
+TEST(RedisMetaClientTest, TransactionRetryExhaustionIdentifiesConnectionFailures) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.port = 1;  // No Redis server is expected to listen here.
+  config.retry_attempts = 2;
+  config.retry_backoff = std::chrono::milliseconds(0);
+  RedisMetaClient store(config);
+  int callbacks = 0;
+
+  const auto status = store.Transact([&](RedisKvTxn &) {
+    ++callbacks;
+    return utils::Status::OK();
+  });
+
+  EXPECT_TRUE(status.IsUnavailable());
+  EXPECT_EQ(callbacks, 0) << "A connection failure must never enter the transaction callback";
+  EXPECT_NE(status.message().find("watch_conflicts=0"), std::string::npos);
+  EXPECT_NE(status.message().find("pre_exec_failures=0"), std::string::npos);
+  EXPECT_NE(status.message().find("connection_failures=2"), std::string::npos);
 }
 
 TEST(RedisMetaClientTest, DoesNotRetryAmbiguousExecTimeout) {
@@ -696,6 +758,9 @@ TEST(RedisMetaClientTest, RetriesPreExecProtocolFailureAndReturnsUnavailable) {
   server.Wait();
 
   EXPECT_TRUE(status.IsUnavailable()) << status.message();
+  EXPECT_NE(status.message().find("watch_conflicts=0"), std::string::npos);
+  EXPECT_NE(status.message().find("pre_exec_failures=3"), std::string::npos);
+  EXPECT_NE(status.message().find("connection_failures=0"), std::string::npos);
   EXPECT_EQ(attempts, 3);
   EXPECT_EQ(server.connection_count(), 3);
   EXPECT_TRUE(server.error().empty()) << server.error();
@@ -711,6 +776,9 @@ TEST(RedisMetaClientTest, RetriesReadOnlyPreExecProtocolFailureAndReturnsUnavail
   server.Wait();
 
   EXPECT_TRUE(status.IsUnavailable()) << status.message();
+  EXPECT_NE(status.message().find("watch_conflicts=0"), std::string::npos);
+  EXPECT_NE(status.message().find("pre_exec_failures=3"), std::string::npos);
+  EXPECT_NE(status.message().find("connection_failures=0"), std::string::npos);
   EXPECT_EQ(server.connection_count(), 3);
   EXPECT_FALSE(server.exec_received());
   EXPECT_TRUE(server.error().empty()) << server.error();

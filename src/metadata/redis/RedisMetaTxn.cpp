@@ -135,12 +135,24 @@ utils::Status RedisMetaTxn::SetInode(const SwordFsInode &inode) {
   return txn_.Set(key_.Inode(inode.ino), value);
 }
 
+utils::Status RedisMetaTxn::QueueAccessTimeChange(InodeID ino, AccessTimeChange change) {
+  // A partial EXEC must never publish an explicit timestamp while retaining
+  // an older overlay. For retirement, remove both sidecar and generation.
+  auto status = txn_.Del(key_.AccessTime(ino));
+  if (!status.ok()) {
+    return status;
+  }
+  return change == AccessTimeChange::kExplicitSetAttr ? txn_.IncrBy(key_.AccessTimeEpoch(ino), 1)
+                                                      : txn_.Del(key_.AccessTimeEpoch(ino));
+}
+
 utils::Status RedisMetaTxn::DeleteInode(InodeID ino) {
   auto status = txn_.Del(key_.Inode(ino));
   if (!status.ok()) {
     return status;
   }
-  return AdjustInodeCount(-1);
+  status = QueueAccessTimeChange(ino, AccessTimeChange::kRetireInode);
+  return status.ok() ? AdjustInodeCount(-1) : status;
 }
 
 utils::Status RedisMetaTxn::AdjustNlink(SwordFsInode *inode, int delta, uint64_t *nlink) {
@@ -225,7 +237,12 @@ utils::Status RedisMetaTxn::SetAttr(InodeID ino, const SwordFsAttr &requested, S
       return status;
     }
   }
-  status = SetInode(inode);
+  if (HasSetAttrField(fields, SetAttrField::kAtime) || HasSetAttrField(fields, SetAttrField::kAtimeNow)) {
+    status = QueueAccessTimeChange(ino, AccessTimeChange::kExplicitSetAttr);
+  }
+  if (status.ok()) {
+    status = SetInode(inode);
+  }
   if (!status.ok()) {
     return status;
   }
@@ -368,6 +385,9 @@ utils::Status RedisMetaTxn::PrepareReclaim(InodeID ino, std::optional<ReclaimWor
     return status;
   }
   status = txn_.Del(key_.ChunkRefs(ino));
+  if (status.ok()) {
+    status = QueueAccessTimeChange(ino, AccessTimeChange::kRetireInode);
+  }
   if (!status.ok()) {
     return status;
   }
@@ -1151,12 +1171,17 @@ utils::Status RedisMetaTxn::CommitSizeChange(InodeID ino, const ChunkSizePlan &p
   // Queue shrink's new EOF first: a partial Redis EXEC cannot make the old
   // EOF expose missing mappings. For grow, remove any stale detached mappings
   // left outside the old EOF *before* publishing a larger EOF.
-  if (is_shrink) {
+  // The sidecar is cleared and stale readers fenced before the new inode
+  // is published, including a size-changing explicit atime SetAttr.
+  if (HasSetAttrField(fields, SetAttrField::kAtime) || HasSetAttrField(fields, SetAttrField::kAtimeNow)) {
+    status = QueueAccessTimeChange(ino, AccessTimeChange::kExplicitSetAttr);
+  }
+  if (status.ok() && is_shrink) {
     status = SetInode(updated);
     if (status.ok()) {
       status = detach();
     }
-  } else {
+  } else if (status.ok()) {
     status = detach();
     if (status.ok()) {
       status = SetInode(updated);

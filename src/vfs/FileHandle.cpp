@@ -22,9 +22,9 @@ utils::Status FileHandle::Open(metadata::InodeID ino, int flags, std::shared_ptr
   }
 
   auto inode_handle = InodeHandleManager::Instance().Get(ino, /*create_if_missing=*/true);
-  // Existing-inode validation and open-time metadata side effects live on
-  // the shared per-inode InodeHandle. Caller authorization has already been
-  // completed by Linux VFS/FUSE.
+  // Existing-inode validation and O_TRUNC processing live on the shared
+  // per-inode InodeHandle. Caller authorization has already been completed
+  // by Linux VFS/FUSE; an ordinary Open does not mutate metadata.
   auto status = inode_handle->Open(flags);
   if (!status.ok()) {
     return status;
@@ -60,7 +60,7 @@ utils::Status FileHandle::Release() {
 }
 
 utils::Status FileHandle::Read(size_t size, off_t off, folly::IOBuf *out) {
-  return handle_->Read(size, off, out);
+  return handle_->Read(size, off, out, (flags_ & O_NOATIME) == 0);
 }
 
 utils::Status FileHandle::Write(const folly::IOBuf &buf, off_t off) {

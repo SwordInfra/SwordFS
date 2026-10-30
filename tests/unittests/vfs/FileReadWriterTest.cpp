@@ -225,6 +225,14 @@ TEST(FileReadWriterSliceTest, ParallelChunkUploadMustNotStarveFileMetadataPublic
 // retiring that fixture cannot remove all VFS-level read/write witnesses.
 class SliceFileReadWriterMetaEngine : public swordfs::test::chunk_test::MissingMetaEngine {
  public:
+  Status RecordReadAccess(InodeID) override {
+    ++read_access_calls;
+    return read_access_status;
+  }
+
+  int read_access_calls = 0;
+  Status read_access_status = Status::OK();
+
   Status OpenChunkMetadata(swordfs::metadata::ChunkType type, swordfs::metadata::ChunkMetadataPtr *out) override {
     if (out == nullptr || type != swordfs::metadata::ChunkType::kChunkSlice) {
       return Status::InvalidArgument("expected Slice metadata");
@@ -286,6 +294,35 @@ TEST_F(FileReadWriterSliceContractTest, DirtyCrossChunkReadsRespectOffsetAndLogi
     ASSERT_TRUE(writer.Read(1, payload.size(), past_eof.get()).ok());
     EXPECT_EQ(past_eof->length(), 0U);
     EXPECT_EQ(data_->put_calls, 0);
+  });
+}
+
+TEST_F(FileReadWriterSliceContractTest, SuccessfulDataReadRecordsCoalescedAdvisoryAccess) {
+  RunInTestFiber([&] {
+    FileReadWriter writer(kIno, kMaxParallelFlushes);
+    ASSERT_TRUE(writer.Write(Buf("access"), 0).ok());
+    auto out = folly::IOBuf::create(6);
+    ASSERT_TRUE(writer.Read(6, 0, out.get()).ok());
+    EXPECT_EQ(meta_->read_access_calls, 1);
+    auto second = folly::IOBuf::create(6);
+    ASSERT_TRUE(writer.Read(6, 0, second.get()).ok());
+    EXPECT_EQ(meta_->read_access_calls, 1) << "repeat reads must not issue per-read Redis metadata I/O";
+    auto empty = folly::IOBuf::create(6);
+    ASSERT_TRUE(writer.Read(0, 0, empty.get()).ok());
+    ASSERT_TRUE(writer.Read(1, 6, empty.get()).ok());
+    EXPECT_EQ(meta_->read_access_calls, 1) << "empty and past-EOF reads are not accesses";
+  });
+}
+
+TEST_F(FileReadWriterSliceContractTest, FailedAdvisoryAtimeCannotFailSuccessfulRead) {
+  RunInTestFiber([&] {
+    FileReadWriter writer(kIno, kMaxParallelFlushes);
+    ASSERT_TRUE(writer.Write(Buf("access"), 0).ok());
+    meta_->read_access_status = Status::Unavailable("Redis advisory atime unavailable");
+    auto out = folly::IOBuf::create(6);
+    EXPECT_TRUE(writer.Read(6, 0, out.get()).ok());
+    EXPECT_EQ(out->length(), 6U);
+    EXPECT_EQ(meta_->read_access_calls, 1);
   });
 }
 

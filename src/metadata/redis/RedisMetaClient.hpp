@@ -32,6 +32,11 @@ class RedisMetaClient {
   utils::Status Ping();
   utils::Status Get(std::string_view key, std::string *value);
   utils::Status MGet(const std::vector<std::string> &keys, std::vector<std::optional<std::string>> *values);
+  // An advisory access-time sidecar update, atomically conditional on the
+  // unchanged, still-live main inode. Never WATCHes or rewrites the inode.
+  utils::Status AdvanceAccessTimeIfInodeUnchanged(std::string_view inode_key, std::string_view atime_key,
+                                                  std::string_view epoch_key, std::string_view expected_inode,
+                                                  std::string_view expected_epoch, int64_t atime_seconds);
   // #515: server-atomic, read-only attachment snapshot. A caller reads and
   // parses the inode first to derive the EOF boundary, then this EVAL_RO
   // validates that exact inode image while reading both attachment fields.

@@ -143,12 +143,14 @@ only the resulting effective state in `MountRuntimeBehavior`. It is therefore
 not reconstructed from a mount CLI flag or copied through metadata operation
 arguments.
 
-`noatime` currently controls only SwordFS's existing implicit access-time side
-effects on file `Open` and directory `OpenDir`. The normal `VfsImpl`, handle,
-and `IMetaEngine::Open`/`OpenDir` operation contracts do not carry mount-policy
-arguments because the policy is fixed for the lifetime of the mounted daemon.
-Explicit timestamp changes requested through `SETATTR` remain independent of
-this implicit-access policy.
+`noatime` currently controls SwordFS's implicit access-time side effect on
+directory `OpenDir`. Ordinary regular-file `Open` must not modify atime:
+POSIX opening is not a read, and an atime inode rewrite would invalidate an
+unrelated Slice publication's optimistic Redis WATCH. The normal `VfsImpl`,
+handle, and `IMetaEngine::Open`/`OpenDir` operation contracts do not carry
+mount-policy arguments because the policy is fixed for the lifetime of the
+mounted daemon. Explicit timestamp changes requested through `SETATTR`
+remain independent of this implicit-access policy.
 
 At unmount, the reclaimer stops before the fiber runtime and storage engines are destroyed. This ordering prevents a background worker from borrowing an engine or fiber runtime after its lifetime has ended.
 

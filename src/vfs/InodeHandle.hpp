@@ -41,7 +41,7 @@ class InodeHandle {
   /// CREATE request, without re-entering existing-inode metadata Open logic.
   utils::Status OpenCreated();
 
-  utils::Status Read(size_t size, off_t off, folly::IOBuf *out);
+  utils::Status Read(size_t size, off_t off, folly::IOBuf *out, bool record_access = true);
 
   utils::Status Write(const folly::IOBuf &buf, off_t off, int open_flags = 0);
 

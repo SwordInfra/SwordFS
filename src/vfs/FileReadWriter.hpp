@@ -97,7 +97,7 @@ class FileReadWriter {
   /// Read up to |size| bytes at |off| into |out|.
   /// |out| must be an empty IOBuf with capacity >= |size|.
   /// On success, out->length() reflects bytes actually read.
-  utils::Status Read(size_t size, off_t off, folly::IOBuf *out);
+  utils::Status Read(size_t size, off_t off, folly::IOBuf *out, bool record_access = true);
 
   /// Read authoritative inode metadata and compose the transient local file
   /// size while holding the inode operation lock.
@@ -137,6 +137,9 @@ class FileReadWriter {
 
  private:
   InodeID ino_;
+  // Monotonic, per-inode local throttle. Atime is best-effort metadata and
+  // must not generate a Redis operation on every successful data read.
+  std::atomic<int64_t> last_access_attempt_seconds_{0};
   size_t chunk_size_;
   size_t max_parallel_flushes_;
   metadata::IMetaEngine *meta_;

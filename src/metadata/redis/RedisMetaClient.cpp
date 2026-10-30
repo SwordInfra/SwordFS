@@ -12,6 +12,7 @@
 #include <iterator>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 #include "metadata/redis/RedisKvTxn.hpp"
@@ -37,6 +38,24 @@ if redis.call('GET', KEYS[1]) ~= ARGV[1] then
   return {'changed'}
 end
 return {'matched', redis.call('HGET', KEYS[2], ARGV[2]), redis.call('HGET', KEYS[2], ARGV[3])}
+)lua";
+
+// Atomically validate an unchanged live inode and advance only its independent
+// advisory sidecar. This key is never WATCHed by Slice; even under rapid
+// reads, it cannot abort a file-size/mapping publication transaction.
+constexpr std::string_view kAdvanceAccessTimeScript = R"lua(
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+if (redis.call('GET', KEYS[3]) or '0') ~= ARGV[2] then
+  return 0
+end
+local prior = redis.call('GET', KEYS[2])
+if prior and tonumber(prior) >= tonumber(ARGV[3]) then
+  return 0
+end
+redis.call('SET', KEYS[2], ARGV[3])
+return 1
 )lua";
 
 sw::redis::ConnectionOptions MakeConnectionOptions(const RedisMetaConfig &config) {
@@ -157,6 +176,25 @@ utils::Status RedisMetaClient::MGet(const std::vector<std::string> &keys,
     redis_->mget(keys.begin(), keys.end(), std::back_inserter(*values));
     return utils::Status::OK();
   });
+}
+
+utils::Status RedisMetaClient::AdvanceAccessTimeIfInodeUnchanged(std::string_view inode_key, std::string_view atime_key,
+                                                                 std::string_view epoch_key,
+                                                                 std::string_view expected_inode,
+                                                                 std::string_view expected_epoch,
+                                                                 int64_t atime_seconds) {
+  utils::ExpectInThreadDomain();
+  try {
+    (void)redis_->eval<long long>(kAdvanceAccessTimeScript, {inode_key, atime_key, epoch_key},
+                                  {expected_inode, expected_epoch, std::to_string(atime_seconds)});
+    return utils::Status::OK();
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError("advisory atime", error);
+  } catch (const sw::redis::Error &error) {
+    // The script may have executed. It is safe to drop an advisory access
+    // update but not to claim a known mutation outcome or blind-retry it.
+    return utils::Status::OutcomeUnknown("Redis advisory atime outcome ambiguous: " + std::string(error.what()));
+  }
 }
 
 utils::Status RedisMetaClient::ReadChunkAttachmentsIfUnchanged(std::string_view inode_key, std::string_view refs_key,
@@ -368,6 +406,12 @@ utils::Status RedisMetaClient::RevokeOwnerLease(std::string_view key) {
 utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisKvTxn &)> &callback) {
   utils::ExpectInThreadDomain();
 
+  // Distinguish repeated optimistic contention from transport failures when
+  // the bounded retry budget is exhausted. All three cases are known to be
+  // pre-commit; an uncertain EXEC reply remains terminal OutcomeUnknown.
+  int watch_conflicts = 0;
+  int pre_exec_failures = 0;
+  int connection_failures = 0;
   for (int attempt = 0; attempt < retry_attempts_; ++attempt) {
     bool retry = false;
     try {
@@ -383,6 +427,7 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisK
         return status;
       } catch (const RedisKvTxn::WatchConflict &) {
         retry = true;
+        ++watch_conflicts;
       } catch (const sw::redis::ReplyError &error) {
         return RedisError("transaction", error);
       } catch (const sw::redis::Error &error) {
@@ -393,6 +438,7 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisK
           return RedisError("transaction", error);
         }
         retry = true;
+        ++pre_exec_failures;
       }
     } catch (const sw::redis::ReplyError &error) {
       // Construction may acquire/connect a pooled connection but cannot have
@@ -404,6 +450,7 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisK
       // or protocol failures here are safe to retry within the same budget.
       (void)error;
       retry = true;
+      ++connection_failures;
     }
 
     if (retry && attempt + 1 < retry_attempts_) {
@@ -411,7 +458,10 @@ utils::Status RedisMetaClient::Transact(const std::function<utils::Status(RedisK
     }
   }
 
-  return utils::Status::Unavailable("Redis transaction retry limit exceeded");
+  return utils::Status::Unavailable(
+      "Redis transaction retry limit exceeded (watch_conflicts=" + std::to_string(watch_conflicts) +
+      ", pre_exec_failures=" + std::to_string(pre_exec_failures) +
+      ", connection_failures=" + std::to_string(connection_failures) + ")");
 }
 
 }  // namespace swordfs::metadata
