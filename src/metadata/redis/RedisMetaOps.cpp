@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <ctime>
 #include <limits>
 #include <string>
 #include <utility>
@@ -214,12 +215,81 @@ utils::Status RedisMetaOps::GetInode(InodeID ino, SwordFsInode *out) {
     return utils::Status::InvalidArgument("inode output is null");
   }
 
-  std::string value;
-  auto status = backend_->executor().RunFromFiber([&] { return backend_->client().Get(key_.Inode(ino), &value); });
+  const auto inode_key = key_.Inode(ino);
+  std::vector<std::optional<std::string>> values;
+  auto status = backend_->executor().RunFromFiber(
+      [&] { return backend_->client().MGet({inode_key, key_.AccessTime(ino)}, &values); });
   if (!status.ok()) {
-    return status;
+    // Advisory sidecar corruption or unavailability may not turn an ordinary
+    // inode read into a filesystem failure. Retry just the authoritative key.
+    std::string value;
+    status = backend_->executor().RunFromFiber([&] { return backend_->client().Get(inode_key, &value); });
+    if (!status.ok()) {
+      return status;
+    }
+    return out->ParseFrom(value);
   }
-  return out->ParseFrom(value);
+  if (values.size() != 2) {
+    return utils::Status::Malformed("Redis inode with atime MGET response size mismatch");
+  }
+  const auto &encoded_inode = values[0];
+  if (!encoded_inode.has_value()) {
+    return utils::Status::NotFound("Redis inode key not found");
+  }
+  status = out->ParseFrom(encoded_inode.value());
+  if (status.ok()) {
+    ApplyAccessTime(values[1], out);
+  }
+  return status;
+}
+
+void RedisMetaOps::ApplyAccessTime(const std::optional<std::string> &encoded, SwordFsInode *inode) {
+  if (!encoded.has_value() || !inode->IsRegular()) {
+    return;
+  }
+  const auto &s = *encoded;
+  int64_t atime = 0;
+  const auto [end, error] = std::from_chars(s.data(), s.data() + s.size(), atime);
+  if (error != std::errc{} || end != s.data() + s.size() || atime <= 0) {
+    SWORDFS_LOG_WARN << "ignoring corrupt advisory atime for inode " << inode->ino;
+    return;
+  }
+  if (atime > inode->attr.atime) {
+    inode->attr.atime = atime;
+    inode->attr.atime_nsec = 0;
+  }
+}
+
+utils::Status RedisMetaOps::RecordReadAccess(InodeID ino) {
+  utils::ExpectInFiberDomain();
+  const auto inode_key = key_.Inode(ino);
+  const auto atime_key = key_.AccessTime(ino);
+  const auto epoch_key = key_.AccessTimeEpoch(ino);
+  return backend_->executor().RunFromFiber([&] {
+    std::vector<std::optional<std::string>> snapshot;
+    auto status = backend_->client().MGet({inode_key, epoch_key}, &snapshot);
+    if (!status.ok()) {
+      return status;
+    }
+    if (snapshot.size() != 2) {
+      return utils::Status::Malformed("Redis access-time snapshot cardinality mismatch");
+    }
+    const auto &encoded_inode = snapshot[0];
+    if (!encoded_inode.has_value()) {
+      return utils::Status::NotFound("Redis access-time inode not found");
+    }
+    const auto &current = encoded_inode.value();
+    SwordFsInode inode;
+    status = inode.ParseFrom(current);
+    if (!status.ok()) {
+      return status;
+    }
+    if (!inode.IsRegular()) {
+      return utils::Status::InvalidArgument("read atime requires regular inode");
+    }
+    return backend_->client().AdvanceAccessTimeIfInodeUnchanged(
+        inode_key, atime_key, epoch_key, current, snapshot[1].value_or("0"), static_cast<int64_t>(std::time(nullptr)));
+  });
 }
 
 utils::Status RedisMetaOps::GetInodes(const std::vector<InodeID> &inode_ids,
@@ -234,21 +304,34 @@ utils::Status RedisMetaOps::GetInodes(const std::vector<InodeID> &inode_ids,
   }
 
   std::vector<std::string> keys;
-  keys.reserve(inode_ids.size());
+  keys.reserve(inode_ids.size() * 2);
   for (const InodeID requested_ino : inode_ids) {
     keys.push_back(key_.Inode(requested_ino));
+    keys.push_back(key_.AccessTime(requested_ino));
   }
 
   std::vector<std::optional<std::string>> values;
   auto status = backend_->executor().RunFromFiber([&] { return backend_->client().MGet(keys, &values); });
   if (!status.ok()) {
-    return status;
+    // Sidecar failure may not prevent the authoritative batch lookup.
+    keys.clear();
+    for (const InodeID requested_ino : inode_ids) {
+      keys.push_back(key_.Inode(requested_ino));
+    }
+    status = backend_->executor().RunFromFiber([&] { return backend_->client().MGet(keys, &values); });
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  const bool with_access_time = values.size() == inode_ids.size() * 2;
+  if (!with_access_time && values.size() != inode_ids.size()) {
+    return utils::Status::Malformed("Redis inode batch MGET response cardinality mismatch");
   }
 
   std::vector<std::optional<SwordFsInode>> result;
-  result.reserve(values.size());
-  for (size_t i = 0; i < values.size(); ++i) {
-    const auto &value = values[i];
+  result.reserve(inode_ids.size());
+  for (size_t i = 0; i < inode_ids.size(); ++i) {
+    const auto &value = values[with_access_time ? 2 * i : i];
     if (!value.has_value()) {
       result.emplace_back(std::nullopt);
       continue;
@@ -260,6 +343,9 @@ utils::Status RedisMetaOps::GetInodes(const std::vector<InodeID> &inode_ids,
     }
     if (inode.ino != inode_ids[i]) {
       return utils::Status::Malformed("Redis inode batch record identity mismatch");
+    }
+    if (with_access_time) {
+      ApplyAccessTime(values[2 * i + 1], &inode);
     }
     result.emplace_back(std::move(inode));
   }
@@ -276,6 +362,12 @@ utils::Status RedisMetaOps::LookupEntry(InodeID parent_ino, std::string_view nam
   SwordFsInode result;
   auto status = TransactFromFiber([&](RedisMetaTxn &txn) { return txn.LookupEntry(parent_ino, name, &result); });
   if (status.ok()) {
+    std::string sidecar;
+    const auto access_status = backend_->executor().RunFromFiber(
+        [&] { return backend_->client().Get(key_.AccessTime(result.ino), &sidecar); });
+    if (access_status.ok()) {
+      ApplyAccessTime(std::make_optional(std::move(sidecar)), &result);
+    }
     *out = result;
   }
   return status;

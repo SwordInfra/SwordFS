@@ -40,6 +40,24 @@ end
 return {'matched', redis.call('HGET', KEYS[2], ARGV[2]), redis.call('HGET', KEYS[2], ARGV[3])}
 )lua";
 
+// Atomically validate an unchanged live inode and advance only its independent
+// advisory sidecar. This key is never WATCHed by Slice; even under rapid
+// reads, it cannot abort a file-size/mapping publication transaction.
+constexpr std::string_view kAdvanceAccessTimeScript = R"lua(
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+if (redis.call('GET', KEYS[3]) or '0') ~= ARGV[2] then
+  return 0
+end
+local prior = redis.call('GET', KEYS[2])
+if prior and tonumber(prior) >= tonumber(ARGV[3]) then
+  return 0
+end
+redis.call('SET', KEYS[2], ARGV[3])
+return 1
+)lua";
+
 sw::redis::ConnectionOptions MakeConnectionOptions(const RedisMetaConfig &config) {
   sw::redis::ConnectionOptions options;
   options.host = config.host;
@@ -158,6 +176,25 @@ utils::Status RedisMetaClient::MGet(const std::vector<std::string> &keys,
     redis_->mget(keys.begin(), keys.end(), std::back_inserter(*values));
     return utils::Status::OK();
   });
+}
+
+utils::Status RedisMetaClient::AdvanceAccessTimeIfInodeUnchanged(std::string_view inode_key, std::string_view atime_key,
+                                                                 std::string_view epoch_key,
+                                                                 std::string_view expected_inode,
+                                                                 std::string_view expected_epoch,
+                                                                 int64_t atime_seconds) {
+  utils::ExpectInThreadDomain();
+  try {
+    (void)redis_->eval<long long>(kAdvanceAccessTimeScript, {inode_key, atime_key, epoch_key},
+                                  {expected_inode, expected_epoch, std::to_string(atime_seconds)});
+    return utils::Status::OK();
+  } catch (const sw::redis::ReplyError &error) {
+    return RedisError("advisory atime", error);
+  } catch (const sw::redis::Error &error) {
+    // The script may have executed. It is safe to drop an advisory access
+    // update but not to claim a known mutation outcome or blind-retry it.
+    return utils::Status::OutcomeUnknown("Redis advisory atime outcome ambiguous: " + std::string(error.what()));
+  }
 }
 
 utils::Status RedisMetaClient::ReadChunkAttachmentsIfUnchanged(std::string_view inode_key, std::string_view refs_key,

@@ -60,7 +60,7 @@ utils::Status FileHandle::Release() {
 }
 
 utils::Status FileHandle::Read(size_t size, off_t off, folly::IOBuf *out) {
-  return handle_->Read(size, off, out);
+  return handle_->Read(size, off, out, (flags_ & O_NOATIME) == 0);
 }
 
 utils::Status FileHandle::Write(const folly::IOBuf &buf, off_t off) {

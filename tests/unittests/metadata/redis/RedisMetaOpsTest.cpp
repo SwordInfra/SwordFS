@@ -6,6 +6,7 @@
 
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -305,6 +306,25 @@ TEST(RedisMetaOpsTest, GetInodesPropagatesConnectionFailure) {
   std::vector<std::optional<SwordFsInode>> results;
   const auto status = RunInFiber([&] { return ops.GetInodes({42}, &results); });
   EXPECT_EQ(status.ToErrno(), EIO) << status.message();
+}
+
+// Advisory sidecar failures may be ignored by successful data reads, but
+// metadata operations must not manufacture an inode (or a successful atime
+// write) when the authoritative Redis connection is unavailable.
+TEST(RedisMetaOpsTest, AdvisoryAtimeReadPathsPropagateAuthoritativeConnectionFailure) {
+  RedisMetaConfig config;
+  config.host = "127.0.0.1";
+  config.port = 1;
+  config.connect_timeout = std::chrono::milliseconds(100);
+  config.socket_timeout = std::chrono::milliseconds(100);
+  config.retry_attempts = 1;
+
+  RedisMetaOps ops(config, "unreachable-atime-read");
+  SwordFsInode inode;
+  const auto inode_status = RunInFiber([&] { return ops.GetInode(42, &inode); });
+  EXPECT_EQ(inode_status.ToErrno(), EIO) << inode_status.message();
+  const auto access_status = RunInFiber([&] { return ops.RecordReadAccess(42); });
+  EXPECT_EQ(access_status.ToErrno(), EIO) << access_status.message();
 }
 
 TEST(RedisMetaOpsTest, PrepareReclaimPropagatesConnectionFailure) {

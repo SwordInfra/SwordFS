@@ -47,6 +47,14 @@ std::string RedisKey::Inode(uint64_t ino) const {
   return folly::sformat("{}inode:{}", prefix_, ino);
 }
 
+std::string RedisKey::AccessTime(uint64_t ino) const {
+  return folly::sformat("{}atime:{}", prefix_, ino);
+}
+
+std::string RedisKey::AccessTimeEpoch(uint64_t ino) const {
+  return folly::sformat("{}atime_epoch:{}", prefix_, ino);
+}
+
 std::string RedisKey::Directory(uint64_t parent_ino) const {
   return folly::sformat("{}dir:{}", prefix_, parent_ino);
 }

@@ -2,18 +2,23 @@
 // Licensed under the Apache License, Version 2.0.
 
 #include <dirent.h>
+#include <folly/ScopeGuard.h>
 #include <folly/fibers/FiberManagerInternal.h>
 #include <gtest/gtest.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <ctime>
 #include <future>
 #include <limits>
 #include <thread>
+#include <utility>
 
 #include "metadata/PosixAclTestSupport.hpp"
 #include "metadata/cow/COWChunkMetadata.hpp"
+#include "metadata/redis/RedisKvTxn.hpp"
+#include "metadata/redis/RedisMetaClient.hpp"
 #include "metadata/redis/RedisMetaImplTestBase.hpp"
 #include "metadata/redis/RedisMetaTestSupport.hpp"
 #include "runtime/MountRuntimeBehavior.hpp"
@@ -595,6 +600,273 @@ FIBER_TEST_F(RedisMetaImplTest, OpenDoesNotAbortConcurrentWatchedInodeTransactio
   ASSERT_TRUE(status.ok()) << status.message();
   ASSERT_TRUE(watcher_error.empty()) << watcher_error;
   EXPECT_TRUE(committed) << "The unrelated inode transaction must still be able to commit";
+}
+
+// #531: atime is an advisory overlay. A successful data read can record
+// access without changing the authoritative inode key WATCHed by Slice.
+FIBER_TEST_F(RedisMetaImplTest, ReadAccessUpdatesSeparateAtimeWithoutRewritingInode) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "read-access", 0644, &file).ok());
+  SwordFsAttr requested = file.attr;
+  requested.atime = 11;
+  requested.atime_nsec = 0;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kAtime, nullptr).ok());
+
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  const auto original =
+      RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { return redis.get(key.Inode(file.ino)); });
+  ASSERT_TRUE(original.has_value());
+
+  ASSERT_TRUE(impl_->RecordReadAccess(file.ino).ok());
+  SwordFsInode actual;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_GT(actual.attr.atime, 11);
+  EXPECT_EQ(actual.attr.mtime, file.attr.mtime);
+  std::vector<std::optional<SwordFsInode>> batch;
+  ASSERT_TRUE(impl_->GetInodes({file.ino}, &batch).ok());
+  ASSERT_EQ(batch.size(), 1U);
+  ASSERT_TRUE(batch[0].has_value());
+  EXPECT_EQ(batch[0]->attr.atime, actual.attr.atime);
+  SwordFsInode looked_up;
+  ASSERT_TRUE(impl_->Lookup(kRootInodeId, "read-access", &looked_up).ok());
+  EXPECT_EQ(looked_up.attr.atime, actual.attr.atime);
+  const auto unchanged =
+      RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { return redis.get(key.Inode(file.ino)); });
+  EXPECT_EQ(unchanged, original) << "Read atime must never invalidate Slice's inode WATCH";
+
+  ASSERT_TRUE(impl_->AttachPrepared(file.ino, 0, swordfs::metadata::ChunkID(771), 8, {.eof = 0}).ok());
+  swordfs::metadata::FileChunkSnapshot snapshot;
+  ASSERT_TRUE(impl_->ReadFileChunkSnapshot(file.ino, 0, &snapshot).ok());
+  EXPECT_EQ(snapshot.inode.attr.size, 8U);
+  EXPECT_EQ(snapshot.chunk_id, swordfs::metadata::ChunkID(771));
+}
+
+// A byte-identical inode after an advisory update alone is not sufficient
+// evidence of WATCH isolation: Redis WATCH observes key writes, not values.
+// Hold a real publication-style inode WATCH across the independent atime
+// update and assert that its first EXEC succeeds without retrying.
+FIBER_TEST_F(RedisMetaImplTest, AdvisoryAtimeDoesNotAbortInFlightInodeWatch) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "atime-watch-isolation", 0644, &file).ok());
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  const auto inode_key = key.Inode(file.ino);
+  const auto atime_key = key.AccessTime(file.ino);
+  const auto epoch_key = key.AccessTimeEpoch(file.ino);
+  constexpr int64_t kAccessTime = 2'000'000'000;
+  int attempts = 0;
+
+  const auto status = swordfs::test::RunInTestThreadFromFiber([&] {
+    swordfs::metadata::RedisMetaClient publisher(config_);
+    swordfs::metadata::RedisMetaClient reader(config_);
+    return publisher.Transact([&](swordfs::metadata::RedisKvTxn &txn) {
+      ++attempts;
+      std::string snapshot;
+      auto status = txn.Get(inode_key, &snapshot);
+      if (!status.ok()) {
+        return status;
+      }
+      status = reader.AdvanceAccessTimeIfInodeUnchanged(inode_key, atime_key, epoch_key, snapshot, "0", kAccessTime);
+      if (!status.ok()) {
+        return status;
+      }
+      return txn.Set(inode_key, snapshot);
+    });
+  });
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(attempts, 1) << "an atime-only update must not invalidate an existing inode WATCH";
+  SwordFsInode actual;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_EQ(actual.attr.atime, kAccessTime);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, ExplicitAtimeBackdatingWinsOverEarlierReadAccess) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "explicit-access", 0644, &file).ok());
+  ASSERT_TRUE(impl_->RecordReadAccess(file.ino).ok());
+
+  SwordFsAttr requested = file.attr;
+  requested.atime = 7;
+  requested.atime_nsec = 123;
+  ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kAtime, nullptr).ok());
+  SwordFsInode actual;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_EQ(actual.attr.atime, 7);
+  EXPECT_EQ(actual.attr.atime_nsec, 123);
+
+  ASSERT_TRUE(impl_->RecordReadAccess(file.ino).ok());
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_GT(actual.attr.atime, 7);
+}
+
+// Size-changing SetAttr uses the typed EOF transaction rather than the
+// ordinary SetAttr path. Both grow and shrink must retire an older access
+// overlay before publishing the user's explicit timestamp.
+FIBER_TEST_F(RedisMetaImplTest, ExplicitAtimeDuringSizeChangesClearsOlderOverlay) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "size-change-atime", 0644, &file).ok());
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  const auto atime_key = key.AccessTime(file.ino);
+  const auto epoch_key = key.AccessTimeEpoch(file.ino);
+
+  const auto change_size_and_atime = [&](uint64_t target_size, int64_t atime) {
+    swordfs::metadata::FileMappingSnapshot before;
+    auto status = impl_->ReadFileMappingSnapshot(file.ino, &before);
+    EXPECT_TRUE(status.ok()) << status.message();
+    if (!status.ok()) {
+      return;
+    }
+    swordfs::metadata::ChunkSizePlan plan;
+    status = swordfs::metadata::PlanChunkSizeChange(before.inode.attr.size, target_size, kTestChunkSize,
+                                                    before.mappings, &plan);
+    EXPECT_TRUE(status.ok()) << status.message();
+    if (!status.ok()) {
+      return;
+    }
+    SwordFsAttr requested = before.inode.attr;
+    requested.size = target_size;
+    requested.atime = atime;
+    requested.atime_nsec = 123;
+    swordfs::metadata::ChunkSizeCommitResult committed;
+    const auto fields = SetAttrField::kSize | SetAttrField::kAtime;
+    status = target_size < before.inode.attr.size ? impl_->CommitShrink(file.ino, plan, requested, fields, &committed)
+                                                  : impl_->CommitGrow(file.ino, plan, requested, fields, &committed);
+    ASSERT_TRUE(status.ok()) << status.message();
+    SwordFsInode actual;
+    ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+    EXPECT_EQ(actual.attr.size, target_size);
+    EXPECT_EQ(actual.attr.atime, atime);
+    EXPECT_EQ(actual.attr.atime_nsec, 123);
+    const auto sidecar = RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { return redis.get(atime_key); });
+    EXPECT_FALSE(sidecar.has_value()) << "explicit atime must replace an earlier advisory overlay";
+  };
+
+  ASSERT_TRUE(impl_->RecordReadAccess(file.ino).ok());
+  change_size_and_atime(64, 17);
+  ASSERT_TRUE(impl_->RecordReadAccess(file.ino).ok());
+  change_size_and_atime(16, 23);
+  const auto epoch = RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { return redis.get(epoch_key); });
+  ASSERT_TRUE(epoch.has_value());
+  EXPECT_EQ(*epoch, "2") << "both explicit timestamps must fence earlier reads";
+}
+
+// A same-value explicit atime/ctime SetAttr can serialize to exactly the same
+// inode bytes. An old in-flight read still must not recreate an overlay after
+// that explicit user operation; the sidecar epoch fences this ABA case.
+FIBER_TEST_F(RedisMetaImplTest, ExplicitAtimeFencesStaleReadEvenForIdenticalInodeImage) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "read-access-epoch", 0644, &file).ok());
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  const auto inode_key = key.Inode(file.ino);
+  const auto atime_key = key.AccessTime(file.ino);
+  const auto epoch_key = key.AccessTimeEpoch(file.ino);
+
+  const auto before = RunWithRawRedisFromFiber(
+      [&](sw::redis::Redis &redis) { return std::pair{redis.get(inode_key), redis.get(epoch_key)}; });
+  ASSERT_TRUE(before.first.has_value());
+  EXPECT_FALSE(before.second.has_value());
+
+  // The explicit SETATTR changes neither atime nor ctime bytes. Its ordering
+  // nevertheless has authority over a read that started before SETATTR.
+  ASSERT_TRUE(impl_->SetAttr(file.ino, file.attr, SetAttrField::kAtime | SetAttrField::kCtime, nullptr).ok());
+  const auto same_bytes = RunWithRawRedisFromFiber(
+      [&](sw::redis::Redis &redis) { return std::pair{redis.get(inode_key), redis.get(epoch_key)}; });
+  ASSERT_EQ(same_bytes.first, before.first);
+  ASSERT_TRUE(same_bytes.second.has_value());
+
+  const auto stale_status = swordfs::test::RunInTestThreadFromFiber([&] {
+    swordfs::metadata::RedisMetaClient client(config_);
+    return client.AdvanceAccessTimeIfInodeUnchanged(inode_key, atime_key, epoch_key, *before.first, "0",
+                                                    static_cast<int64_t>(std::time(nullptr)));
+  });
+  EXPECT_TRUE(stale_status.ok()) << stale_status.message();
+  const auto stale_sidecar = RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { return redis.get(atime_key); });
+  EXPECT_FALSE(stale_sidecar.has_value()) << "stale read must not overwrite explicit atime, even on an inode ABA";
+
+  ASSERT_TRUE(impl_->RecordReadAccess(file.ino).ok());
+  const auto fresh_sidecar = RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { return redis.get(atime_key); });
+  EXPECT_TRUE(fresh_sidecar.has_value()) << "fresh post-SetAttr reads may update advisory atime";
+}
+
+TEST_F(RedisMetaImplTest, ReadAccessRespectsNoatimeWithoutDisablingExplicitSetAttr) {
+  swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kDisabled,
+                                                                /*ioctl_enabled=*/false);
+  auto restore = folly::makeGuard([] {
+    swordfs::runtime::MountRuntimeBehavior::Instance().Initialize(swordfs::runtime::ImplicitAtimePolicy::kEnabled,
+                                                                  /*ioctl_enabled=*/false);
+  });
+  swordfs::test::RunInTestFiber([&] {
+    SwordFsInode file;
+    ASSERT_TRUE(impl_->Create(kRootInodeId, "noatime-read-access", 0644, &file).ok());
+    SwordFsAttr requested = file.attr;
+    requested.atime = 19;
+    requested.atime_nsec = 12;
+    ASSERT_TRUE(impl_->SetAttr(file.ino, requested, SetAttrField::kAtime, nullptr).ok());
+    ASSERT_TRUE(impl_->RecordReadAccess(file.ino).ok());
+    SwordFsInode actual;
+    ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+    EXPECT_EQ(actual.attr.atime, 19);
+    EXPECT_EQ(actual.attr.atime_nsec, 12);
+  });
+}
+
+FIBER_TEST_F(RedisMetaImplTest, ReclaimRemovesAdvisoryAtimeAndRejectsLateReadAccess) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "reclaim-atime", 0644, &file).ok());
+  ASSERT_TRUE(impl_->RecordReadAccess(file.ino).ok());
+
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  const auto before =
+      RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { return redis.get(key.AccessTime(file.ino)); });
+  ASSERT_TRUE(before.has_value());
+
+  ASSERT_TRUE(impl_->Unlink(kRootInodeId, "reclaim-atime").ok());
+  ASSERT_TRUE(impl_->PrepareReclaim(file.ino).ok());
+  EXPECT_TRUE(impl_->RecordReadAccess(file.ino).IsNotFound());
+  const auto after =
+      RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { return redis.get(key.AccessTime(file.ino)); });
+  EXPECT_FALSE(after.has_value()) << "reclaim must atomically clear advisory timestamp state";
+}
+
+// A damaged advisory key must not make authoritative inode metadata or the
+// file's data path unreadable. Corruption is local to atime, never the inode.
+FIBER_TEST_F(RedisMetaImplTest, AdvisoryAtimeCorruptionCannotMaskAuthoritativeInode) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "corrupt-access-overlay", 0644, &file).ok());
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+
+  // A malformed scalar overlays nothing: the old atime is still readable.
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.AccessTime(file.ino), "malformed"); });
+  SwordFsInode actual;
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_EQ(actual.attr.atime, file.attr.atime);
+
+  // A wrong-type sidecar makes MGET fail entirely. Read-only metadata paths
+  // should fall back to the main inode key rather than fail the filesystem.
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) {
+    redis.del(key.AccessTime(file.ino));
+    redis.hset(key.AccessTime(file.ino), "bad", "type");
+  });
+  ASSERT_TRUE(impl_->GetInode(file.ino, &actual).ok());
+  EXPECT_EQ(actual.ino, file.ino);
+  EXPECT_EQ(actual.attr.atime, file.attr.atime);
+  std::vector<std::optional<SwordFsInode>> batch;
+  ASSERT_TRUE(impl_->GetInodes({file.ino}, &batch).ok());
+  ASSERT_EQ(batch.size(), 1U);
+  ASSERT_TRUE(batch[0].has_value());
+  EXPECT_EQ(batch[0]->attr.atime, file.attr.atime);
+
+  // The read-driven advisory mutation must also never mistake a directory
+  // for a regular file, even when the directory's inode is otherwise healthy.
+  EXPECT_EQ(impl_->RecordReadAccess(kRootInodeId).ToErrno(), EINVAL);
+}
+
+FIBER_TEST_F(RedisMetaImplTest, CorruptAuthoritativeInodeCannotBeAcceptedAsAdvisoryAccess) {
+  SwordFsInode file;
+  ASSERT_TRUE(impl_->Create(kRootInodeId, "corrupt-access-inode", 0644, &file).ok());
+  const swordfs::metadata::redis::RedisKey key(config_.db, volume_name_);
+  RunWithRawRedisFromFiber([&](sw::redis::Redis &redis) { redis.set(key.Inode(file.ino), "broken-inode"); });
+  EXPECT_FALSE(impl_->RecordReadAccess(file.ino).ok());
 }
 
 TEST_F(RedisMetaImplTest, NoAtimeRuntimeBehaviorSuppressesImplicitOpenUpdates) {

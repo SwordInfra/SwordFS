@@ -215,6 +215,15 @@ class IMetaEngine {
   /// metadata lookup merely to establish its local logical-EOF boundary.
   virtual Status Open(InodeID ino, uint64_t *size = nullptr, InodeFlag *inode_flags = nullptr) = 0;
 
+  // Advisory data-read access time. Implementations may coalesce, defer or
+  // discard implicit updates, but must not change authoritative file-data
+  // transaction outcomes. A default no-op is appropriate for metadata test
+  // doubles and implementations without an access-time storage policy.
+  virtual Status RecordReadAccess(InodeID ino) {
+    (void)ino;
+    return Status::OK();
+  }
+
   /// Prepare reclaim of |ino| without exposing physical cleanup work.
   ///
   /// This is the inode's reclaim point of no return. In one atomic metadata
